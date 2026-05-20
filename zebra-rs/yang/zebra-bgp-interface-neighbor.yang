@@ -1,0 +1,148 @@
+module zebra-bgp-interface-neighbor {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-interface-neighbor";
+  prefix "zbin";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP interface-keyed neighbor (IPv6 unnumbered). Modelled on the
+     FRR `neighbor IFNAME interface remote-as …` workflow but
+     surfaced as a separate top-level `interface-neighbor` list under
+     `router bgp` — cleaner schema than a polymorphic `neighbor` keyed
+     by either IP or interface, and matches the IOS-XR shape.
+
+     Resulting config:
+
+       interface eth0 {
+         ipv6 {
+           router-advertisements { send-advertisements true; }
+         }
+       }
+       router bgp {
+         interface-neighbor eth0 {
+           remote-as external;
+         }
+       }
+
+     Operation:
+       1. The ND subsystem ingests inbound RAs (already running from
+          daemon startup) and emits NeighborDiscovered { ifindex,
+          src=link-local } events.
+       2. BGP listens for these and, when `interface-neighbor` matches
+          the ifindex, materializes a Peer keyed by
+          PeerKey::Interface(ifindex) with origin Interface and the
+          discovered link-local as `address`.
+       3. The session establishes over fe80::%ifindex; ENHE (RFC 8950)
+          carries IPv4 routes with an IPv6 link-local next-hop — that
+          codec is already in tree (#618); wiring it on for
+          interface peers is a follow-up.";
+
+  typedef remote-as-type {
+    type union {
+      type inet:as-number;
+      type enumeration {
+        enum external {
+          description
+            "FRR-style shorthand — the remote AS is anything other
+             than the local one. Resolved at session-establishment
+             time; the session is eBGP if the OPEN's AS matches the
+             local ASN this is treated as a config error.";
+        }
+        enum internal {
+          description
+            "FRR-style shorthand — the remote AS equals the local
+             ASN. iBGP session.";
+        }
+      }
+    }
+    description
+      "Remote AS specification. Accepts either a numeric AS (matching
+       the regular `neighbor X remote-as N` form) or the FRR shorthand
+       `external` / `internal`. Unnumbered configs are noisier without
+       the shorthand.";
+  }
+
+  grouping bgp-interface-neighbor-extension {
+    description
+      "Container hung off `router bgp`.";
+    list interface-neighbor {
+      key "interface";
+      ext:help "BGP interface-keyed neighbor (IPv6 unnumbered)";
+      description
+        "One entry per outbound interface participating in unnumbered
+         BGP. Peer state is materialized only when the ND subsystem
+         observes a Router Advertisement on the interface (so the
+         operator must also enable
+         `interface X ipv6 router-advertisements send-advertisements
+         true`).";
+      leaf interface {
+        type string;
+        description
+          "Outbound interface name. Resolved to ifindex via the RIB
+           link table; the per-leaf callback silently defers
+           materialization until the kernel surfaces the link.";
+      }
+      leaf neighbor-group {
+        type string;
+        description
+          "Optional reference to a `neighbor-group` whose attributes
+           the materialized peer inherits. Plain string (not a
+           leafref) so the interface-neighbor can be staged before
+           the group definition lands — same convention as other
+           zebra-bgp-* augments.";
+      }
+      leaf remote-as {
+        type remote-as-type;
+        description
+          "Remote AS. May be omitted if the referenced
+           `neighbor-group` carries one; otherwise mandatory at
+           session-establishment time (an unset value silently
+           prevents materialization).";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the interface-neighbor list in the candidate-set
+       subtree.";
+    uses bgp-interface-neighbor-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp interface-neighbor X` is path-valid.";
+    uses bgp-interface-neighbor-extension;
+  }
+}

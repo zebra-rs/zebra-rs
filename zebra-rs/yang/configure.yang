@@ -38,6 +38,10 @@ module configure {
     prefix zird;
   }
 
+  import zebra-bgp-interface-neighbor {
+    prefix zbin;
+  }
+
   import zebra-bgp-dynamic-neighbors {
     prefix zbdn;
   }

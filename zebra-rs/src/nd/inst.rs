@@ -27,11 +27,22 @@ use super::socket::{SocketError, nd_socket};
 use super::{NdRecv, NdSend};
 
 /// Control requests from external clients (the YANG callback layer
-/// in RA-5, and tests).
+/// in RA-5, BGP unnumbered for the `SetNotifier` variant, and tests).
 #[derive(Debug)]
 pub enum NdClientReq {
-    EnableInterface { ifindex: u32, cfg: RaSendConfig },
-    DisableInterface { ifindex: u32 },
+    EnableInterface {
+        ifindex: u32,
+        cfg: RaSendConfig,
+    },
+    DisableInterface {
+        ifindex: u32,
+    },
+    /// Attach a downstream subscriber for [`NdEvent`]. Replaces any
+    /// previously-attached notifier; consumers needing fan-out should
+    /// layer a broadcast outside.
+    SetNotifier {
+        tx: UnboundedSender<NdEvent>,
+    },
 }
 
 /// Top-level ND instance.
@@ -171,6 +182,9 @@ impl Nd {
             }
             NdClientReq::DisableInterface { ifindex } => {
                 self.engine.disable_interface(ifindex);
+            }
+            NdClientReq::SetNotifier { tx } => {
+                self.engine.set_notifier(tx);
             }
         }
     }

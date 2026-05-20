@@ -79,6 +79,13 @@ pub struct ConfigManager {
     /// configured — clients with a `None` handle silently skip their
     /// BFD attach logic.
     pub bfd_client_tx: RefCell<Option<UnboundedSender<crate::bfd::inst::ClientReq>>>,
+    /// Sender side of the ND client-request channel. Populated by
+    /// [`super::nd::spawn_nd`] at daemon startup; clones distributed
+    /// to BGP (via [`super::bgp::spawn_bgp`]) so the BGP unnumbered
+    /// runtime can submit `NdClientReq::SetNotifier` and observe
+    /// `NeighborDiscovered` events. `None` while ND failed to start
+    /// (missing `CAP_NET_RAW`); consumers silently skip in that case.
+    pub nd_client_tx: RefCell<Option<UnboundedSender<crate::nd::inst::NdClientReq>>>,
     pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
     /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
     /// `commit_config` when `vty service-account uid N` changes; read by
@@ -116,6 +123,7 @@ impl ConfigManager {
             rib_tx,
             policy_tx,
             bfd_client_tx: RefCell::new(None),
+            nd_client_tx: RefCell::new(None),
             protocol_tasks: RefCell::new(HashMap::new()),
             #[cfg(target_os = "linux")]
             yang_service_accounts,

@@ -168,6 +168,19 @@ pub struct Bgp {
     /// follow-up so this PR stays focused on the accept path.
     pub dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors,
     pub dynamic_peer_count: u32,
+    /// `interface-neighbor` config — operator types
+    /// `set router bgp interface-neighbor <name>`. Lookup key is the
+    /// interface name; the runtime resolves to ifindex via
+    /// [`Self::link_index_by_name`] when an RA arrives and triggers
+    /// peer materialization. Materialization itself happens in
+    /// [`super::interface_neighbor::materialize_peer`].
+    pub interface_neighbors: BTreeMap<String, super::interface_neighbor::InterfaceNeighborCfg>,
+    /// `if-name` → `ifindex` mirror fed by `RibRx::LinkAdd`. Needed
+    /// because the YANG callback receives a name but
+    /// `PeerKey::Interface` keys on ifindex. Lookups that miss
+    /// (config staged before the link surfaces) defer materialization
+    /// until the next link-add event.
+    pub link_index_by_name: BTreeMap<String, u32>,
     /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
     /// Phase-1: signature + membership tracking only — the advertise
     /// pipeline does not yet share work across members. See
@@ -194,6 +207,12 @@ pub struct Bgp {
     /// [`Self::event_loop`]. PR 5d logs the events; PR 5e replaces
     /// the log with neighbor teardown on `BfdEvent::Down`.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
+    /// Receive half of the ND `NeighborDiscovered` subscription. ND's
+    /// engine sends here whenever a Router Advertisement arrives on
+    /// an interface; the BGP event loop drains it and materializes
+    /// an interface-keyed Peer for any matching `interface-neighbor`
+    /// config.
+    pub nd_event_rx: UnboundedReceiver<crate::nd::engine::NdEvent>,
     // BgpAttr shared storage.
     pub attr_store: BgpAttrStore,
 
@@ -227,6 +246,7 @@ impl Bgp {
         rib_tx: UnboundedSender<rib::Message>,
         policy_tx: UnboundedSender<policy::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        nd_client_tx: Option<UnboundedSender<crate::nd::inst::NdClientReq>>,
     ) -> Self {
         let chan = RibRxChannel::new();
         let msg = rib::Message::Subscribe {
@@ -244,6 +264,17 @@ impl Bgp {
 
         let (tx, rx) = mpsc::channel(8192);
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+
+        // Subscribe to ND `NeighborDiscovered` events so the BGP
+        // unnumbered runtime can materialize an interface-keyed Peer
+        // when an RA reveals the remote's link-local. If ND failed
+        // to start (no `CAP_NET_RAW`), the channel pair is created
+        // but no events ever arrive — the BGP event loop just sits
+        // on a dead arm.
+        let (nd_event_tx, nd_event_rx) = mpsc::unbounded_channel();
+        if let Some(ref tx) = nd_client_tx {
+            let _ = tx.send(crate::nd::inst::NdClientReq::SetNotifier { tx: nd_event_tx });
+        }
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
@@ -271,6 +302,8 @@ impl Bgp {
             neighbor_groups: super::neighbor_group::empty_map(),
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
+            interface_neighbors: super::interface_neighbor::empty_map(),
+            link_index_by_name: BTreeMap::new(),
             update_groups: super::update_group::empty_map(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
@@ -278,6 +311,7 @@ impl Bgp {
             bfd_client_tx,
             bfd_event_tx,
             bfd_event_rx,
+            nd_event_rx,
             attr_store: BgpAttrStore::new(),
             redistribute: BTreeMap::new(),
             redist_v4: BTreeMap::new(),
@@ -592,8 +626,13 @@ impl Bgp {
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
-            RibRx::LinkAdd(_link) => {
-                //self.link_add(link);
+            RibRx::LinkAdd(link) => {
+                // Maintain the name↔ifindex mirror used by
+                // interface-neighbor materialization. Keeps the most
+                // recent name for an ifindex; renames are rare but
+                // covered by simple insert-replaces-on-collision.
+                self.link_index_by_name
+                    .insert(link.name.clone(), link.index);
             }
             RibRx::AddrAdd(_addr) => {
                 // isis_info!("Isis::AddrAdd {}", addr.addr);
@@ -809,8 +848,34 @@ impl Bgp {
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
                 }
+                Some(event) = self.nd_event_rx.recv() => {
+                    self.process_nd_event(event);
+                }
             }
         }
+    }
+
+    /// Handle an ND `NeighborDiscovered` notification by checking for
+    /// a configured `interface-neighbor` on the matching ifindex and,
+    /// if found, materializing the peer. The lookup is a linear scan
+    /// of `link_index_by_name` since the operator-typed leaf is keyed
+    /// by name; for typical (single-digit) interface-neighbor counts
+    /// this is fine, and it lets the config use the friendly name in
+    /// `show bgp summary`.
+    fn process_nd_event(&mut self, event: crate::nd::engine::NdEvent) {
+        let crate::nd::engine::NdEvent::NeighborDiscovered { ifindex, src } = event;
+        let name = self
+            .link_index_by_name
+            .iter()
+            .find(|(_, idx)| **idx == ifindex)
+            .map(|(name, _)| name.clone());
+        let Some(name) = name else {
+            // RA arrived on an interface RIB hasn't told us about yet
+            // — possible during early startup. Drop; the next RA will
+            // re-trigger this path.
+            return;
+        };
+        super::interface_neighbor::materialize_peer(self, &name, ifindex, src);
     }
 
     /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD
