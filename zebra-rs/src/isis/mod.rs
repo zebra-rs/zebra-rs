@@ -55,4 +55,6 @@ pub mod graph;
 
 pub mod rib;
 
+pub mod srlg;
+
 pub mod throttle;

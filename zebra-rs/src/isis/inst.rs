@@ -9,8 +9,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::isis_event_trace;
 use crate::rib::{
-    Block, Locator, LocatorBehavior, RibSrRx, RibSrlgRx, Sid, SidAllocationType, SidBehavior,
-    SidContext, SidOwner, SrlgGroup,
+    Block, Locator, LocatorBehavior, RibSrRx, Sid, SidAllocationType, SidBehavior, SidContext,
+    SidOwner,
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
@@ -38,6 +38,7 @@ use super::lsp::{
 };
 use super::nfsm::nbr_hold_timer_expire;
 use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, perform_spf_calculation};
+use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
 use super::throttle::Throttle;
 use super::{
@@ -187,15 +188,14 @@ pub struct Isis {
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
 
-    /// SRLG-update return channel from the RIB. Carries the full
-    /// SRLG table snapshot on subscribe and after every commit that
-    /// changes any group.
-    pub srlg_rx: UnboundedReceiver<RibSrlgRx>,
+    /// In-flight `/router/isis/srlg/group/*` config staged by libyang
+    /// callbacks and folded into `srlg_groups` on `ConfigOp::CommitEnd`.
+    pub srlg_config: SrlgGroupBuilder,
 
-    /// Cached SRLG table — last snapshot received via `srlg_rx`. Keyed
-    /// by group name (matches the per-link `srlg_groups` entries in
-    /// `LinkConfig`); the value carries the 32-bit on-wire SRLG
-    /// identifier that `lsp_generate` emits into sub-TLV 138 (RFC 5307).
+    /// Applied SRLG group table. Keyed by group name (matches the
+    /// per-link `srlg_groups` entries in `LinkConfig`); the value
+    /// carries the 32-bit on-wire SRLG identifier that `lsp_generate`
+    /// emits into sub-TLV 138 (RFC 5307).
     pub srlg_groups: BTreeMap<String, SrlgGroup>,
 
     /// Handle into the BFD instance's client-request channel — used
@@ -292,20 +292,6 @@ impl Isis {
             tx: sr_tx,
         });
 
-        // SRLG config subscription. Single-channel, full-table push:
-        // every commit that touches a /srlg/group entry sends a
-        // `RibSrlgRx::Table` with the entire current SRLG namespace,
-        // and the RIB also pushes the current snapshot immediately on
-        // registration so we start with present state, not "next change
-        // wins". No per-name watch table — the SRLG namespace is small
-        // enough that broadcasting the whole map is cheaper than
-        // tracking interest sets.
-        let (srlg_tx, srlg_rx) = mpsc::unbounded_channel::<RibSrlgRx>();
-        let _ = rib_tx.send(rib::Message::SrlgSubscribe {
-            proto: "isis".into(),
-            tx: srlg_tx,
-        });
-
         let (tx, rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         let mut isis = Self {
@@ -359,7 +345,7 @@ impl Isis {
             lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
-            srlg_rx,
+            srlg_config: SrlgGroupBuilder::new(),
             srlg_groups: BTreeMap::new(),
             bfd_client_tx,
             bfd_event_tx,
@@ -375,6 +361,17 @@ impl Isis {
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        // CommitEnd is the only signal IS-IS reacts to outside the
+        // YANG callback table — fold the staged SRLG cache into the
+        // applied snapshot and re-originate if it moved.
+        if msg.op == ConfigOp::CommitEnd {
+            self.commit_srlg();
+            return;
+        }
+        if msg.op == ConfigOp::CommitStart {
+            return;
+        }
+
         let (path, args) = path_from_command(&msg.paths);
 
         // Clear ops don't go through the YANG callback table — they
@@ -391,6 +388,15 @@ impl Isis {
                     //
                 }
             }
+            return;
+        }
+
+        // `/router/isis/srlg/group/...` is dispatched through the
+        // SRLG builder's own path → handler table (the same shape the
+        // RIB uses for `/segment-routing/block`); the applied
+        // snapshot lands in `srlg_groups` at CommitEnd.
+        if path.starts_with("/router/isis/srlg/group") {
+            let _ = self.srlg_config.exec(path, args, msg.op);
             return;
         }
 
@@ -970,9 +976,6 @@ impl Isis {
                 Some(msg) = self.sr_rx.recv() => {
                     self.process_sr_rx(msg);
                 }
-                Some(msg) = self.srlg_rx.recv() => {
-                    self.process_srlg_rx(msg);
-                }
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
                 }
@@ -1235,20 +1238,20 @@ impl Isis {
         }
     }
 
-    /// Apply a full-snapshot SRLG update from the RIB. Replaces the
-    /// cached table wholesale (matching the broadcast contract on the
-    /// RIB side) and re-originates both LSP levels so the next emission
-    /// reflects the new name→value mapping; the LSP-content hash short-
-    /// circuits if nothing actually changed for our self-LSP.
-    fn process_srlg_rx(&mut self, msg: RibSrlgRx) {
-        match msg {
-            RibSrlgRx::Table(groups) => {
-                if self.srlg_groups == groups {
-                    return;
-                }
-                self.srlg_groups = groups;
-            }
+    /// Fold the staged `/router/isis/srlg/group/*` cache into the
+    /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
+    /// actually moved, re-originate both LSP levels so the new
+    /// name→value mapping reaches peers without waiting for the
+    /// refresh timer; the LSP-content hash short-circuits if nothing
+    /// changed for our self-LSP.
+    fn commit_srlg(&mut self) {
+        let Some(groups) = self.srlg_config.commit() else {
+            return;
+        };
+        if self.srlg_groups == groups {
+            return;
         }
+        self.srlg_groups = groups;
         let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
         let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
