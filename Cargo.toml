@@ -13,6 +13,7 @@ members = [
   "crates/ospf-packet",
   "crates/ospf-macros",
   "crates/bfd-packet",
+  "crates/nd-packet",
   "crates/fixedbuf",
   "bdd",
 ]
