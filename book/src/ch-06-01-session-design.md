@@ -106,10 +106,13 @@ fn resolve_session_key(peer_uid: u32, peer_pid: u32)
         ));
     }
 
-    // Guard 2: parent uid must match peer uid (PID-reuse race).
+    // Guard 2: parent uid must match peer uid (PID-reuse race), except
+    // for root peers — D26 short-circuits the match so that `sudo <cmd>`
+    // (whose outer process retains the invoking user's ruid) works.
     let parent = procfs::process::Process::new(ppid as i32)
         .map_err(|_| Status::unauthenticated("parent shell vanished"))?;
-    if parent.status().map(|s| s.ruid).unwrap_or(u32::MAX) != peer_uid {
+    let parent_ruid = parent.status().map(|s| s.ruid).unwrap_or(u32::MAX);
+    if peer_uid != 0 && parent_ruid != peer_uid {
         return Err(Status::unauthenticated("parent uid mismatch"));
     }
 
@@ -360,6 +363,7 @@ Each phase is intended to ship as an independent PR.
 | D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
 | D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, the vty bash shell function optimistically tries first (admins succeed silently). On `PermissionDenied` it prompts for `Password:` (echo off) and sends an `Enable` RPC against the caller's own account (sudo-style) — so the same password that works for `enable` works here. On success it retries `configure` and flips `CLI_PRIVILEGE`. `EnableRequest` carries an optional `auth_user` field that the daemon honors when non-empty (kept for future su-style flows); the configure auto-elevate path leaves it empty. |
 | D25 | **YANG-driven service-accounts** (Phase 4-d-ii). New `vty.yang` module with `list service-account { key uid; leaf description; }` under `container vty` in the global `grouping config`. `ConfigManager` maintains an `Arc<RwLock<HashSet<u32>>>` updated by `commit_config` on `vty service-account uid N` Set/Delete diffs; `SessionTable` reads the union of this set and the env-var set in `is_service_account`. The env var (D21) remains as a startup-only seed for environments where YANG config is unavailable; YANG is the runtime-mutable path. |
+| D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 
 ## Deferred work
 

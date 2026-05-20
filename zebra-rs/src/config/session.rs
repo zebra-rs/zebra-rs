@@ -148,7 +148,8 @@ pub enum SessionError {
     /// `/proc` lookup.
     ParentVanished,
     /// Parent process uid does not match the peer uid (PID reuse race or
-    /// privilege boundary violation).
+    /// privilege boundary violation). Only raised for non-root peers; uid 0
+    /// is exempt from the parent-uid match by D26 to allow `sudo <cmd>`.
     ParentUidMismatch,
 }
 
@@ -209,6 +210,13 @@ impl SessionTable {
     /// for the peer's parent pid, verify the parent uid matches, then create
     /// the session.
     ///
+    /// Root short-circuit (D26): when `peer_uid == 0`, the parent-uid check
+    /// is skipped. This lets `sudo <cmd>` invocations work (the outer `sudo`
+    /// process retains the invoking user's ruid, which would otherwise fail
+    /// the match) without weakening the check for non-root peers. The
+    /// `ParentVanished` guard still runs so an orphaned uid-0 client is
+    /// rejected.
+    ///
     /// Returns `(key, is_new)` so callers can choose log verbosity.
     pub fn resolve<P: ProcStatusReader>(
         &self,
@@ -238,11 +246,14 @@ impl SessionTable {
             return Ok((key, false));
         }
 
-        // Slow path: validate parent uid matches.
+        // Slow path: validate parent exists, and (for non-root peers) that
+        // its uid matches. Root (D26) is exempt from the uid match so that
+        // `sudo <cmd>` works — the outer sudo retains the invoking user's
+        // ruid, which would otherwise trip ParentUidMismatch.
         let parent_uid = reader
             .read_ruid(ppid)
             .map_err(|_| SessionError::ParentVanished)?;
-        if parent_uid != peer_uid {
+        if peer_uid != 0 && parent_uid != peer_uid {
             return Err(SessionError::ParentUidMismatch);
         }
 
@@ -698,6 +709,36 @@ mod tests {
         reader.set_ruid(1000, 999); // parent is uid 999, peer claims 1000
         let err = table.resolve(&reader, 1000, 1234).unwrap_err();
         assert_eq!(err, SessionError::ParentUidMismatch);
+    }
+
+    #[test]
+    fn root_peer_bypasses_parent_uid_check() {
+        // D26: `sudo <cmd>` leaves the outer sudo (ruid = invoking user)
+        // as the client's parent. Root peers must accept this — the check
+        // is only meaningful for non-root uids.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 1000);
+        reader.set_ruid(1000, 1000); // parent shell is uid 1000 (the sudo user)
+        let (key, is_new) = table.resolve(&reader, 0, 1234).unwrap();
+        assert_eq!(key, (0, 1000));
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        // Root is still implicit Admin (D20) even when arriving via sudo.
+        assert_eq!(sess.role, Role::Admin);
+        assert!(sess.enabled);
+    }
+
+    #[test]
+    fn root_peer_still_rejects_vanished_parent() {
+        // The D26 bypass only skips the uid match; the ParentVanished
+        // guard still fires so an orphaned uid-0 client is refused.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 1000);
+        reader.set_missing(1000);
+        let err = table.resolve(&reader, 0, 1234).unwrap_err();
+        assert_eq!(err, SessionError::ParentVanished);
     }
 
     #[test]
