@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
+use super::peer_key::PeerOrigin;
 use super::peer_map::PeerMap;
 
 use caps::CapAs4;
@@ -314,6 +315,12 @@ impl PeerStat {
 pub struct Peer {
     pub ident: usize,
     pub address: IpAddr,
+    /// Provenance of this peer — set to [`PeerOrigin::Static`] for
+    /// peers configured by remote address; future commits will set
+    /// `Interface { ifindex }` for unnumbered neighbors and
+    /// `Dynamic { range_prefix }` for peers materialized on inbound
+    /// accept by a configured listen-range.
+    pub origin: PeerOrigin,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
     pub remote_id: Ipv4Addr,
@@ -390,6 +397,7 @@ impl Peer {
             remote_as,
             local_hostname,
             address,
+            origin: PeerOrigin::Static,
             active: false,
             peer_type: PeerType::IBGP,
             state: State::Idle,
