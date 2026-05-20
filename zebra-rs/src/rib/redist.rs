@@ -1,22 +1,27 @@
 //! Redistribute filter registry and walk-and-replay.
 //!
-//! Owns the per-(proto, AFI, rtype) subtype filter sets and the
-//! one-shot FIB walker that pushes matching routes to a subscriber.
-//! Self-route filtering is enforced here unconditionally — a
+//! Owns the per-(proto, AFI, rtype) subtype filter sets, the one-shot
+//! FIB walker that pushes the current matching set at subscription
+//! time, and the steady-state delta hook that fires from
+//! `ipv{4,6}_route_{add,del}` after a mutation flips the selected
+//! entry. Self-route filtering is enforced unconditionally — a
 //! subscription whose `proto` maps to its own `rtype` is silently
 //! dropped at registration time.
 //!
-//! Sender side only; the steady-state delta hook that fires on
-//! FIB churn is a follow-up.
+//! Known gap: nexthop-resolution-driven selection changes that don't
+//! flow through `ipv{4,6}_route_{add,del}` (e.g. the debounced
+//! `ipv4_route_resolve` path) are not yet hooked. The initial walk
+//! at subscription time still covers those, but they won't update
+//! in steady state until a follow-up generalizes the hook.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::api::RibRx;
-use super::entry::RibEntries;
+use super::entry::{RibEntries, RibEntry};
 use super::nexthop::Nexthop;
 use super::types::{
     BulkPhase, REDIST_BATCH_MAX, RedistAfi, RibSubType, RibType, RouteBatch, RouteEntryV4,
@@ -249,6 +254,213 @@ fn flush_v6(
             rtype,
             routes,
             bulk,
+        },
+    };
+    let _ = tx.send(msg);
+}
+
+// ---- steady-state delta notification --------------------------------
+//
+// Called from the route_{add,del} entry points after a FIB mutation
+// has updated the selected entry. Compares the before/after selected
+// entries per subscriber and emits single-entry RouteAdd / RouteDel
+// messages for each filter row that's affected.
+//
+// Known gap: nexthop-resolution-driven selection changes that don't
+// flow through `ipv{4,6}_route_{add,del}` (e.g. the debounced
+// `ipv4_route_resolve` path) are not yet hooked. The initial walk
+// at subscription time still covers those, but they won't update
+// in steady state until step 4 generalizes the hook.
+
+fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
+    let nh = first_v4_nexthop(&e.nexthop)?;
+    Some(RouteEntryV4 {
+        prefix: *prefix,
+        nexthop: nh,
+        subtype: e.rsubtype.clone(),
+        metric: e.metric,
+        tag: 0,
+        ifindex: e.ifindex,
+    })
+}
+
+fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
+    let nh = first_v6_nexthop(&e.nexthop)?;
+    Some(RouteEntryV6 {
+        prefix: *prefix,
+        nexthop: nh,
+        subtype: e.rsubtype.clone(),
+        metric: e.metric,
+        tag: 0,
+        ifindex: e.ifindex,
+    })
+}
+
+/// Notify every subscriber whose filter matches the before/after
+/// transition of the selected entry at `prefix`. Single-entry batches,
+/// `bulk: More`. EoR is reserved for initial walk / Redist{Add,Update,
+/// Del} replays — steady-state never emits Eor.
+pub fn notify_v4_delta(
+    filters: &HashMap<String, FilterMap>,
+    redists: &HashMap<String, UnboundedSender<RibRx>>,
+    prefix: &Ipv4Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+) {
+    if before.is_none() && after.is_none() {
+        return;
+    }
+    for (proto, filter_map) in filters {
+        let Some(tx) = redists.get(proto) else {
+            continue;
+        };
+        // For each (afi, rtype) row this proto has — only IPv4 rows
+        // apply here, and only those whose rtype matches at least one
+        // side of the transition.
+        for ((afi, rtype), subtypes) in filter_map {
+            if *afi != RedistAfi::Ipv4 {
+                continue;
+            }
+            let old = entry_for_subscriber_v4(prefix, before, *rtype, subtypes, proto);
+            let new = entry_for_subscriber_v4(prefix, after, *rtype, subtypes, proto);
+            emit_v4_diff(tx, *rtype, old, new);
+        }
+    }
+}
+
+pub fn notify_v6_delta(
+    filters: &HashMap<String, FilterMap>,
+    redists: &HashMap<String, UnboundedSender<RibRx>>,
+    prefix: &Ipv6Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+) {
+    if before.is_none() && after.is_none() {
+        return;
+    }
+    for (proto, filter_map) in filters {
+        let Some(tx) = redists.get(proto) else {
+            continue;
+        };
+        for ((afi, rtype), subtypes) in filter_map {
+            if *afi != RedistAfi::Ipv6 {
+                continue;
+            }
+            let old = entry_for_subscriber_v6(prefix, before, *rtype, subtypes, proto);
+            let new = entry_for_subscriber_v6(prefix, after, *rtype, subtypes, proto);
+            emit_v6_diff(tx, *rtype, old, new);
+        }
+    }
+}
+
+/// Build the delivered `RouteEntryV4` only when the source entry
+/// matches the subscriber's filter row (rtype, subtype, deliverable).
+/// Returns `None` when no entry should be delivered.
+fn entry_for_subscriber_v4(
+    prefix: &Ipv4Net,
+    entry: Option<&RibEntry>,
+    rtype: RibType,
+    subtypes: &BTreeSet<RibSubType>,
+    proto: &str,
+) -> Option<RouteEntryV4> {
+    let e = entry?;
+    if e.rtype != rtype {
+        return None;
+    }
+    if !deliverable(proto, e.rtype) {
+        return None;
+    }
+    if !subtype_matches(subtypes, &e.rsubtype) {
+        return None;
+    }
+    build_v4_entry(prefix, e)
+}
+
+fn entry_for_subscriber_v6(
+    prefix: &Ipv6Net,
+    entry: Option<&RibEntry>,
+    rtype: RibType,
+    subtypes: &BTreeSet<RibSubType>,
+    proto: &str,
+) -> Option<RouteEntryV6> {
+    let e = entry?;
+    if e.rtype != rtype {
+        return None;
+    }
+    if !deliverable(proto, e.rtype) {
+        return None;
+    }
+    if !subtype_matches(subtypes, &e.rsubtype) {
+        return None;
+    }
+    build_v6_entry(prefix, e)
+}
+
+fn emit_v4_diff(
+    tx: &UnboundedSender<RibRx>,
+    rtype: RibType,
+    old: Option<RouteEntryV4>,
+    new: Option<RouteEntryV4>,
+) {
+    match (old, new) {
+        (None, None) => {}
+        (Some(o), None) => send_v4_one(tx, rtype, WalkOp::Del, o),
+        (None, Some(n)) => send_v4_one(tx, rtype, WalkOp::Add, n),
+        (Some(o), Some(n)) if o == n => {}
+        (Some(o), Some(n)) => {
+            send_v4_one(tx, rtype, WalkOp::Del, o);
+            send_v4_one(tx, rtype, WalkOp::Add, n);
+        }
+    }
+}
+
+fn emit_v6_diff(
+    tx: &UnboundedSender<RibRx>,
+    rtype: RibType,
+    old: Option<RouteEntryV6>,
+    new: Option<RouteEntryV6>,
+) {
+    match (old, new) {
+        (None, None) => {}
+        (Some(o), None) => send_v6_one(tx, rtype, WalkOp::Del, o),
+        (None, Some(n)) => send_v6_one(tx, rtype, WalkOp::Add, n),
+        (Some(o), Some(n)) if o == n => {}
+        (Some(o), Some(n)) => {
+            send_v6_one(tx, rtype, WalkOp::Del, o);
+            send_v6_one(tx, rtype, WalkOp::Add, n);
+        }
+    }
+}
+
+fn send_v4_one(tx: &UnboundedSender<RibRx>, rtype: RibType, op: WalkOp, entry: RouteEntryV4) {
+    let routes = RouteBatch::V4(vec![entry]);
+    let msg = match op {
+        WalkOp::Add => RibRx::RouteAdd {
+            rtype,
+            routes,
+            bulk: BulkPhase::More,
+        },
+        WalkOp::Del => RibRx::RouteDel {
+            rtype,
+            routes,
+            bulk: BulkPhase::More,
+        },
+    };
+    let _ = tx.send(msg);
+}
+
+fn send_v6_one(tx: &UnboundedSender<RibRx>, rtype: RibType, op: WalkOp, entry: RouteEntryV6) {
+    let routes = RouteBatch::V6(vec![entry]);
+    let msg = match op {
+        WalkOp::Add => RibRx::RouteAdd {
+            rtype,
+            routes,
+            bulk: BulkPhase::More,
+        },
+        WalkOp::Del => RibRx::RouteDel {
+            rtype,
+            routes,
+            bulk: BulkPhase::More,
         },
     };
     let _ = tx.send(msg);

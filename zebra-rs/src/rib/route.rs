@@ -513,6 +513,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry) {
+        let before = selected_v4(&self.table, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
@@ -522,6 +523,14 @@ impl Rib {
             rib_add_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, None).await;
         }
+        let after = selected_v4(&self.table, prefix).cloned();
+        super::redist::notify_v4_delta(
+            &self.redist_filters,
+            &self.redists,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+        );
 
         // Any RIB add can shift the FIB — debounced resolve catches static /
         // SRv6 nexthops that were unreachable before and are now covered by
@@ -530,6 +539,7 @@ impl Rib {
     }
 
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry) {
+        let before = selected_v4(&self.table, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             self.rib_selection(prefix, replace.pop()).await;
@@ -538,6 +548,14 @@ impl Rib {
             let mut replace = rib_replace_system(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop()).await;
         }
+        let after = selected_v4(&self.table, prefix).cloned();
+        super::redist::notify_v4_delta(
+            &self.redist_filters,
+            &self.redists,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+        );
 
         self.schedule_rib_sync();
     }
@@ -587,6 +605,7 @@ impl Rib {
             uni.ifindex_origin = Some(ifindex);
         }
 
+        let before = selected_v6(&self.table_v6, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap);
@@ -603,6 +622,14 @@ impl Rib {
             rib_add_system_v6(&mut self.table_v6, prefix, entry);
             self.rib_selection_v6(prefix, None).await;
         }
+        let after = selected_v6(&self.table_v6, prefix).cloned();
+        super::redist::notify_v6_delta(
+            &self.redist_filters,
+            &self.redists,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+        );
 
         // Any RIB add can shift the FIB — debounced resolve catches static /
         // SRv6 nexthops that were unreachable before and are now covered by
@@ -611,6 +638,7 @@ impl Rib {
     }
 
     pub async fn ipv6_route_del(&mut self, prefix: &Ipv6Net, entry: RibEntry) {
+        let before = selected_v6(&self.table_v6, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             self.rib_selection_v6(prefix, replace.pop()).await;
@@ -619,6 +647,14 @@ impl Rib {
             let mut replace = rib_replace_system_v6(&mut self.table_v6, prefix, entry);
             self.rib_selection_v6(prefix, replace.pop()).await;
         }
+        let after = selected_v6(&self.table_v6, prefix).cloned();
+        super::redist::notify_v6_delta(
+            &self.redist_filters,
+            &self.redists,
+            prefix,
+            before.as_ref(),
+            after.as_ref(),
+        );
 
         self.schedule_rib_sync();
     }
@@ -1157,6 +1193,23 @@ fn rib_replace(
 
 fn rib_prev(ribs: &RibEntries) -> Option<usize> {
     ribs.iter().position(|e| e.is_selected())
+}
+
+/// Snapshot of the currently-selected entry at `prefix`. Used by the
+/// redistribute steady-state delta hook to compare before/after a
+/// mutation in `ipv{4,6}_route_{add,del}`.
+fn selected_v4<'a>(
+    table: &'a PrefixMap<Ipv4Net, RibEntries>,
+    prefix: &Ipv4Net,
+) -> Option<&'a RibEntry> {
+    table.get(prefix)?.iter().find(|e| e.is_selected())
+}
+
+fn selected_v6<'a>(
+    table: &'a PrefixMap<Ipv6Net, RibEntries>,
+    prefix: &Ipv6Net,
+) -> Option<&'a RibEntry> {
+    table.get(prefix)?.iter().find(|e| e.is_selected())
 }
 
 fn rib_next(ribs: &RibEntries) -> Option<usize> {
