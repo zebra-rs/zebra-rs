@@ -25,7 +25,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bgp_packet::{Afi, AfiSafi, BgpAttr, Ipv4Nlri, Safi, UpdatePacket};
+use bgp_packet::{Afi, AfiSafi, BgpAttr, CapExtendedNextHop, Ipv4Nlri, Safi, UpdatePacket};
 use tokio::sync::mpsc;
 
 use super::BgpAttrStore;
@@ -197,13 +197,44 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         as4_negotiated: peer.as4,
         extended_message: peer.opt.extended_message,
         addpath_send: peer.opt.is_add_path_send(afi, safi),
-        // RFC 8950 / RFC 8277 are not yet negotiated by zebra-rs;
-        // hardcoded false until those capabilities land. The fields
-        // exist so the signature is forward-compatible.
-        extended_next_hop: false,
+        // RFC 8950 Extended Next Hop Encoding for IPv4 unicast over
+        // IPv6 next-hop is negotiated when both directions advertise
+        // the matching tuple. Only meaningful for the IPv4-unicast
+        // update-group; other AFI/SAFI groups stay at false until
+        // the codec / wire format extends.
+        extended_next_hop: enhe_negotiated(peer, afi, safi),
+        // RFC 8277 multiple-labels is still not negotiated by zebra-rs;
+        // the field is forward-compatible for the day it lands.
         multiple_labels: false,
         signature_version: SIGNATURE_VERSION,
     })
+}
+
+/// True iff both sides advertised the ENHE capability with an entry
+/// for (IPv4-Unicast, IPv6 next-hop), and the local update-group's
+/// AFI/SAFI is IPv4 unicast. The check is symmetric — a one-sided
+/// advertisement is treated as "not negotiated" per RFC 8950 §3.
+fn enhe_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
+    enhe_negotiated_for(
+        peer.cap_send.extended_nexthop.as_ref(),
+        peer.cap_recv.extended_nexthop.as_ref(),
+        afi,
+        safi,
+    )
+}
+
+fn enhe_negotiated_for(
+    send: Option<&CapExtendedNextHop>,
+    recv: Option<&CapExtendedNextHop>,
+    afi: Afi,
+    safi: Safi,
+) -> bool {
+    if afi != Afi::Ip || safi != Safi::Unicast {
+        return false;
+    }
+    let sent = send.is_some_and(|c| c.supports_v6_nexthop_for_ipv4_unicast());
+    let received = recv.is_some_and(|c| c.supports_v6_nexthop_for_ipv4_unicast());
+    sent && received
 }
 
 /// Add `peer_idx` to its update-group for every tracked AFI/SAFI it
@@ -680,5 +711,79 @@ mod tests {
         // Lookup miss: unknown id returns None.
         let missing = UpdateGroupId::new(Afi::Ip, Safi::Unicast, 99);
         assert!(af.group_by_id_mut(&missing).is_none());
+    }
+
+    fn enhe_v4_over_v6() -> CapExtendedNextHop {
+        use bgp_packet::ExtendedNextHopValue;
+        CapExtendedNextHop::new(vec![ExtendedNextHopValue::new(
+            Afi::Ip,
+            Safi::Unicast,
+            Afi::Ip6,
+        )])
+    }
+
+    #[test]
+    fn enhe_negotiated_requires_both_sides() {
+        let cap = enhe_v4_over_v6();
+
+        // Both sides advertised → true.
+        assert!(enhe_negotiated_for(
+            Some(&cap),
+            Some(&cap),
+            Afi::Ip,
+            Safi::Unicast
+        ));
+
+        // One side missing → false (no agreement).
+        assert!(!enhe_negotiated_for(
+            Some(&cap),
+            None,
+            Afi::Ip,
+            Safi::Unicast
+        ));
+        assert!(!enhe_negotiated_for(
+            None,
+            Some(&cap),
+            Afi::Ip,
+            Safi::Unicast
+        ));
+        assert!(!enhe_negotiated_for(None, None, Afi::Ip, Safi::Unicast));
+    }
+
+    #[test]
+    fn enhe_negotiated_only_for_ipv4_unicast() {
+        let cap = enhe_v4_over_v6();
+
+        // Wrong AFI / SAFI — the cap is irrelevant.
+        assert!(!enhe_negotiated_for(
+            Some(&cap),
+            Some(&cap),
+            Afi::Ip6,
+            Safi::Unicast
+        ));
+        assert!(!enhe_negotiated_for(
+            Some(&cap),
+            Some(&cap),
+            Afi::Ip,
+            Safi::Multicast
+        ));
+    }
+
+    #[test]
+    fn enhe_negotiated_ignores_unrelated_tuples() {
+        use bgp_packet::ExtendedNextHopValue;
+        // An ENHE cap that advertises only (IPv4-MplsVpn, IPv6) does
+        // NOT satisfy IPv4-unicast.
+        let cap = CapExtendedNextHop::new(vec![ExtendedNextHopValue::new(
+            Afi::Ip,
+            Safi::MplsVpn,
+            Afi::Ip6,
+        )]);
+        assert!(!enhe_negotiated_for(
+            Some(&cap),
+            Some(&cap),
+            Afi::Ip,
+            Safi::Unicast
+        ));
     }
 }

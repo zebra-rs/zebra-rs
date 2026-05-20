@@ -1004,6 +1004,19 @@ pub fn peer_send_open(peer: &mut Peer) {
     if peer.config.extended_message {
         bgp_cap.extended = Some(CapExtended::default());
     }
+    // Auto-advertise RFC 8950 Extended Next Hop Encoding for IPv4
+    // unicast over IPv6 next-hop on interface-keyed (unnumbered)
+    // peers. Without this the peer can't carry IPv4 routes over a
+    // session that has no IPv4 source address. Other AFIs / SAFIs
+    // can be added once the operator has a knob, but the
+    // single-tuple case covers every interface-neighbor deployment.
+    if matches!(peer.origin, PeerOrigin::Interface { .. }) {
+        bgp_cap.extended_nexthop = Some(CapExtendedNextHop::new(vec![ExtendedNextHopValue::new(
+            Afi::Ip,
+            Safi::Unicast,
+            Afi::Ip6,
+        )]));
+    }
     if let Some(name) = &peer.local_hostname {
         // FQDN capability (draft-walton, code 73). Domain name is left
         // empty for now — operators have only asked for hostname.
