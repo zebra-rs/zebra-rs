@@ -2,10 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
+use isis_packet::{
+    ExtAdminGroup, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg, IsisSubFadFlags,
+    IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef,
+};
 
 use crate::config::{Args, ConfigOp};
 
 use super::Isis;
+use super::affinity_map::AffinityMap;
+use super::srlg::SrlgGroup;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FadMetricType {
@@ -16,9 +22,8 @@ pub enum FadMetricType {
 
 impl FadMetricType {
     /// FAD Sub-TLV Metric-Type code (RFC 9350 §5.1, IANA registry).
-    /// Held here so the LSP-emit follow-up has a single source of
-    /// truth for the on-the-wire byte.
-    #[allow(dead_code)]
+    /// Single source of truth for the on-the-wire byte, consumed by
+    /// `build_fad_subs` at LSP-build time.
     pub fn wire(self) -> u8 {
         match self {
             Self::Igp => 0,
@@ -96,10 +101,12 @@ impl FlexAlgoConfig {
     }
 
     /// Drain the pending cache into the committed map. Apply / drop
-    /// semantics match `StaticConfig::commit`. Side-effects driven by
-    /// definition changes (LSP re-origination, SPF schedule, dataplane
-    /// install) will be wired in follow-up PRs — for now this is a pure
-    /// in-memory commit.
+    /// semantics match `StaticConfig::commit`. SPF gating and
+    /// per-algo RIB install will be wired in follow-up PRs; LSP
+    /// re-origination is triggered by the per-leaf shim callbacks
+    /// (so a single config change that hits multiple leaves
+    /// originates the LSP once per leaf — acceptable churn given the
+    /// LSP-gen throttle).
     pub fn commit(&mut self) {
         while let Some((algo, entry)) = self.cache.pop_first() {
             if entry.delete {
@@ -109,6 +116,93 @@ impl FlexAlgoConfig {
             }
         }
     }
+}
+
+/// Build the FAD sub-TLVs (RFC 9350 §5.1) this router will originate
+/// inside Router Capability TLV 242. One FAD per
+/// `FlexAlgoConfig.config` entry with `advertise_definition == true`;
+/// entries with the flag absent or false stay purely local.
+///
+/// Affinity names are resolved against `affinity_map` to 256-bit
+/// Extended Admin Group bit positions (RFC 7308) — names with no
+/// matching entry are silently dropped (LSP-gen is best-effort, the
+/// operator's mistake doesn't deserve a build failure). SRLG names
+/// are resolved against the global SRLG map (`Isis::srlg_groups`)
+/// to 32-bit identifiers the same way.
+pub fn build_fad_subs(
+    fa: &FlexAlgoConfig,
+    am: &AffinityMap,
+    srlg_groups: &BTreeMap<String, SrlgGroup>,
+) -> Vec<IsisSubFlexAlgoDef> {
+    fn group_from_names<I: IntoIterator<Item = S>, S: AsRef<str>>(
+        am: &AffinityMap,
+        names: I,
+    ) -> ExtAdminGroup {
+        let mut g = ExtAdminGroup::default();
+        for n in names {
+            if let Some(bit) = am.bit(n.as_ref()) {
+                g.set(bit);
+            }
+        }
+        g
+    }
+
+    let mut out = Vec::new();
+    for (&algo, entry) in &fa.config {
+        if entry.advertise_definition != Some(true) {
+            continue;
+        }
+        let metric_type = entry.metric_type.unwrap_or(FadMetricType::Igp).wire();
+        let priority = entry.priority.unwrap_or(128);
+
+        let mut subs = Vec::new();
+
+        if !entry.exclude_any.is_empty() {
+            let group = group_from_names(am, entry.exclude_any.iter());
+            if !group.words.is_empty() {
+                subs.push(FadSubTlv::ExcludeAg(IsisSubFadExcludeAg { group }));
+            }
+        }
+        if !entry.include_any.is_empty() {
+            let group = group_from_names(am, entry.include_any.iter());
+            if !group.words.is_empty() {
+                subs.push(FadSubTlv::IncludeAnyAg(IsisSubFadIncludeAnyAg { group }));
+            }
+        }
+        if !entry.include_all.is_empty() {
+            let group = group_from_names(am, entry.include_all.iter());
+            if !group.words.is_empty() {
+                subs.push(FadSubTlv::IncludeAllAg(IsisSubFadIncludeAllAg { group }));
+            }
+        }
+        if entry.prefix_metric == Some(true) {
+            subs.push(FadSubTlv::Flags(IsisSubFadFlags {
+                m_flag: true,
+                trailing: Vec::new(),
+            }));
+        }
+        if !entry.srlg_exclude.is_empty() {
+            let mut ids: Vec<u32> = entry
+                .srlg_exclude
+                .iter()
+                .filter_map(|n| srlg_groups.get(n).map(|g| g.value))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            if !ids.is_empty() {
+                subs.push(FadSubTlv::ExcludeSrlg(IsisSubFadExcludeSrlg { srlgs: ids }));
+            }
+        }
+
+        out.push(IsisSubFlexAlgoDef {
+            flex_algorithm: algo,
+            metric_type,
+            calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
+            priority,
+            subs,
+        });
+    }
+    out
 }
 
 #[derive(Default)]
@@ -350,6 +444,16 @@ macro_rules! flex_algo_cb {
         fn $name(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
             isis.flex_algo.exec($path.to_string(), args, op).ok()?;
             isis.flex_algo.commit();
+            // Re-originate both levels so FAD changes propagate to
+            // peers without waiting for the refresh timer. The
+            // process_lsp_originate path filters by `has_level` for
+            // single-level instances, so unconditional send is safe.
+            let _ = isis
+                .tx
+                .send(super::Message::LspOriginate(super::Level::L1, None));
+            let _ = isis
+                .tx
+                .send(super::Message::LspOriginate(super::Level::L2, None));
             Some(())
         }
     };
@@ -492,6 +596,129 @@ mod tests {
         .unwrap();
         fa.commit();
         assert!(!fa.config.contains_key(&128));
+    }
+
+    #[test]
+    fn build_fad_subs_skips_entries_without_advertise_flag() {
+        let mut fa = FlexAlgoConfig::new();
+        // Algo 128 — advertise-definition NOT set, so should be skipped.
+        fa.exec(
+            "/router/isis/flex-algo/priority".into(),
+            args(&["128", "200"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+        // Algo 129 — advertise-definition set, should be emitted.
+        fa.exec(
+            "/router/isis/flex-algo/advertise-definition".into(),
+            args(&["129", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+
+        let am = AffinityMap::new();
+        let srlg = BTreeMap::new();
+        let subs = build_fad_subs(&fa, &am, &srlg);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].flex_algorithm, 129);
+        // Defaults: igp metric type, priority 128, no nested subs.
+        assert_eq!(subs[0].metric_type, FadMetricType::Igp.wire());
+        assert_eq!(subs[0].priority, 128);
+        assert!(subs[0].subs.is_empty());
+    }
+
+    #[test]
+    fn build_fad_subs_emits_exclude_ag_and_srlg() {
+        let mut fa = FlexAlgoConfig::new();
+        for (path, args_) in [
+            (
+                "/router/isis/flex-algo/advertise-definition",
+                &["128", "true"][..],
+            ),
+            (
+                "/router/isis/flex-algo/affinity/exclude-any",
+                &["128", "blue"],
+            ),
+            ("/router/isis/flex-algo/srlg-exclude", &["128", "risk-A"]),
+            ("/router/isis/flex-algo/prefix-metric", &["128", "true"]),
+        ] {
+            fa.exec(path.into(), args(args_), ConfigOp::Set).unwrap();
+            fa.commit();
+        }
+
+        let mut am = AffinityMap::new();
+        am.exec(
+            "/router/isis/affinity-map/affinity/bit-position".into(),
+            args(&["blue", "4"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        am.commit();
+
+        let mut srlg = BTreeMap::new();
+        srlg.insert(
+            "risk-A".to_string(),
+            SrlgGroup {
+                name: "risk-A".into(),
+                value: 100,
+            },
+        );
+
+        let subs = build_fad_subs(&fa, &am, &srlg);
+        assert_eq!(subs.len(), 1);
+        let fad = &subs[0];
+        assert_eq!(fad.flex_algorithm, 128);
+        // Exactly three nested sub-TLVs: ExcludeAg, Flags (M=1), ExcludeSrlg.
+        assert_eq!(fad.subs.len(), 3);
+        let mut has_excl = false;
+        let mut has_flags = false;
+        let mut has_srlg = false;
+        for sub in &fad.subs {
+            match sub {
+                FadSubTlv::ExcludeAg(v) => {
+                    has_excl = true;
+                    assert!(v.group.get(4));
+                }
+                FadSubTlv::Flags(v) => {
+                    has_flags = true;
+                    assert!(v.m_flag);
+                }
+                FadSubTlv::ExcludeSrlg(v) => {
+                    has_srlg = true;
+                    assert_eq!(v.srlgs, vec![100]);
+                }
+                _ => panic!("unexpected sub: {sub:?}"),
+            }
+        }
+        assert!(has_excl && has_flags && has_srlg);
+    }
+
+    #[test]
+    fn build_fad_subs_drops_unresolved_affinity_names() {
+        let mut fa = FlexAlgoConfig::new();
+        fa.exec(
+            "/router/isis/flex-algo/advertise-definition".into(),
+            args(&["128", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.exec(
+            "/router/isis/flex-algo/affinity/exclude-any".into(),
+            args(&["128", "ghost"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+
+        // Empty affinity map — `ghost` is referenced but not defined.
+        let am = AffinityMap::new();
+        let subs = build_fad_subs(&fa, &am, &BTreeMap::new());
+        assert_eq!(subs.len(), 1);
+        // No ExcludeAg sub-TLV emitted because the bitmap would be
+        // empty — a 0-byte sub-TLV is meaningless on the wire.
+        assert!(subs[0].subs.is_empty(), "got subs: {:?}", subs[0].subs);
     }
 
     #[test]

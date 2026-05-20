@@ -123,6 +123,11 @@ pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
             cap::IsisSubTlv::Srv6(srv6) => {
                 view.srv6 = Some(srv6);
             }
+            cap::IsisSubTlv::FlexAlgoDef(_) => {
+                // FAD consumers (peer FAD store, SPF gating) land in
+                // a follow-up PR; for now we round-trip the sub-TLV
+                // but don't surface it through the cap view.
+            }
             cap::IsisSubTlv::Unknown(_) => {
                 // Simpply ignore unknown sub tlv.
             }
