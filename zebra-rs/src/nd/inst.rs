@@ -4,8 +4,8 @@
 //!
 //! `Nd::new()` constructs the instance and immediately spawns the
 //! read and write tasks. [`serve`] takes ownership and drives the
-//! event loop on a third spawned task. Nothing calls `serve` from
-//! `main.rs` yet — the YANG-config PR (RA-5) wires it in.
+//! event loop on a third spawned task. The daemon's
+//! [`crate::config::ConfigManager`] calls both at startup.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep_until;
 
 use crate::context::Task;
+use crate::rib::api::{RibRx, RibRxChannel};
 
 use super::engine::{NdEngine, NdEvent};
 use super::network::{read_packet, write_packet};
@@ -37,20 +38,28 @@ pub struct Nd {
     send_tx: UnboundedSender<NdSend>,
     client_rx: UnboundedReceiver<NdClientReq>,
     client_tx: UnboundedSender<NdClientReq>,
+    rib_rx: UnboundedReceiver<RibRx>,
     // Hold the spawned read / write tasks so dropping `Nd` aborts them.
     _read_task: Task<()>,
     _write_task: Task<()>,
 }
 
 impl Nd {
-    /// Build a new instance. Opens the raw socket and spawns the
-    /// read / write tasks immediately. The event loop is *not* spawned
-    /// here — call [`serve`] for that.
-    pub fn new() -> Result<Self, SocketError> {
+    /// Build a new instance. Opens the raw socket, spawns the read /
+    /// write tasks, and subscribes to RIB so the engine learns about
+    /// links as the kernel exposes them. The event loop is *not*
+    /// spawned here — call [`serve`] for that.
+    pub fn new(rib_tx: UnboundedSender<crate::rib::Message>) -> Result<Self, SocketError> {
         let socket = Arc::new(nd_socket()?);
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::unbounded_channel();
+
+        let rib_chan = RibRxChannel::new();
+        let _ = rib_tx.send(crate::rib::Message::Subscribe {
+            proto: "nd".to_string(),
+            tx: rib_chan.tx.clone(),
+        });
 
         let read_socket = socket.clone();
         let read_task = Task::spawn(async move {
@@ -67,6 +76,7 @@ impl Nd {
             send_tx,
             client_rx,
             client_tx,
+            rib_rx: rib_chan.rx,
             _read_task: read_task,
             _write_task: write_task,
         })
@@ -94,6 +104,9 @@ impl Nd {
                 Some(req) = self.client_rx.recv() => {
                     self.process_client_req(req);
                 }
+                Some(rmsg) = self.rib_rx.recv() => {
+                    self.process_rib_msg(rmsg);
+                }
                 _ = sleep_until_opt(wakeup) => {
                     let now = Instant::now();
                     for frame in self.engine.tick(now) {
@@ -104,6 +117,16 @@ impl Nd {
                     }
                 }
             }
+        }
+    }
+
+    fn process_rib_msg(&mut self, msg: RibRx) {
+        // Only LinkAdd is interesting at this stage; the engine doesn't
+        // need address or route notifications yet (those land when the
+        // BGP unnumbered hand-off needs to derive the local source
+        // link-local in a follow-up PR).
+        if let RibRx::LinkAdd(link) = msg {
+            self.engine.process_link_add(&link);
         }
     }
 

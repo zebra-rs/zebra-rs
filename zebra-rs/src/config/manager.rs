@@ -9,6 +9,7 @@ use super::configs::{carbon_copy, delete, set};
 use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::json_read;
+use super::nd::spawn_nd;
 use super::ospf::{despawn_ospf, spawn_ospf};
 use super::parse::State;
 use super::parse::parse;
@@ -120,6 +121,13 @@ impl ConfigManager {
             yang_service_accounts,
         };
         cm.init()?;
+
+        // ND is the receive substrate for IPv6 unnumbered BGP, so it
+        // runs from daemon startup. Sending RAs still requires an
+        // explicit operator opt-in via YANG (the leaf wiring lands
+        // in a follow-up PR); the spawn is safe to do unconditionally
+        // because the engine sits idle with no enabled interfaces.
+        spawn_nd(&cm);
 
         Ok(cm)
     }
