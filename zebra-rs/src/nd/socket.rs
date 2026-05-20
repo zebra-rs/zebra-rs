@@ -120,7 +120,19 @@ fn set_recv_pkt_info(s: &Socket) -> io::Result<()> {
 }
 
 fn set_checksum_offset(s: &Socket, offset: c_int) -> io::Result<()> {
-    unsafe { setsockopt_int(s.as_raw_fd(), IPPROTO_ICMPV6, libc::IPV6_CHECKSUM, offset) }
+    // `IPV6_CHECKSUM` lives at the `IPPROTO_IPV6` level (RFC 3542 §3.1),
+    // not at `IPPROTO_ICMPV6`. Passing the ICMPv6 level here caused
+    // Linux to return `ENOPROTOOPT` ("Protocol not available"), which
+    // surfaced as the `nd: not started (set IPV6_CHECKSUM failed: …)`
+    // warn at every BGP / RA-related commit.
+    unsafe {
+        setsockopt_int(
+            s.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_CHECKSUM,
+            offset,
+        )
+    }
 }
 
 fn apply_icmp6_filter(s: &Socket, filter: &Icmp6Filter) -> io::Result<()> {
