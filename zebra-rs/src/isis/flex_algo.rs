@@ -111,18 +111,10 @@ impl FlexAlgoConfig {
     }
 }
 
+#[derive(Default)]
 struct ConfigBuilder {
     path: String,
     pub map: BTreeMap<(String, ConfigOp), Handler>,
-}
-
-impl Default for ConfigBuilder {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            map: BTreeMap::new(),
-        }
-    }
 }
 
 type Handler = fn(
