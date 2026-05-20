@@ -519,8 +519,15 @@ pub struct LinkStats {
 }
 
 impl IsisLink {
-    pub fn from(link: Link, tx: UnboundedSender<Message>) -> Self {
-        let sock = Arc::new(AsyncFd::new(isis_socket(link.index).unwrap()).unwrap());
+    /// Build a per-interface IS-IS link record. The raw `AF_PACKET`
+    /// socket is bound to `link.index` and the BPF filter applied here;
+    /// both require `CAP_NET_RAW`. On failure we return `Err` so the
+    /// caller can warn and skip the link — historically this was a
+    /// double `.unwrap()` that took down the IS-IS task whenever the
+    /// daemon ran without the right caps.
+    pub fn from(link: Link, tx: UnboundedSender<Message>) -> std::io::Result<Self> {
+        let raw = isis_socket(link.index)?;
+        let sock = Arc::new(AsyncFd::new(raw)?);
         let (ptx, prx) = mpsc::unbounded_channel();
         let mut is_link = Self {
             ifindex: link.index,
@@ -545,18 +552,27 @@ impl IsisLink {
             write_packet(sock, prx).await;
         });
 
-        is_link
+        Ok(is_link)
     }
 }
 
 impl Isis {
     pub fn link_add(&mut self, link: Link) {
         // println!("ISIS: LinkAdd {} {}", link.name, link.index);
-        if let Some(_link) = self.links.get_mut(&link.index) {
-            //
-        } else {
-            let link = IsisLink::from(link, self.tx.clone());
-            self.links.insert(link.ifindex, link);
+        if self.links.get(&link.index).is_some() {
+            return;
+        }
+        let ifindex = link.index;
+        let name = link.name.clone();
+        match IsisLink::from(link, self.tx.clone()) {
+            Ok(is_link) => {
+                self.links.insert(is_link.ifindex, is_link);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "isis: skip link {name} (ifindex={ifindex}); raw socket open failed: {e}"
+                );
+            }
         }
     }
 
