@@ -460,6 +460,11 @@ impl Bgp {
                         // tracing::info!("Other Event: {:?} for {}", event, peer);
                     }
                 }
+                // Capture peer state before the FSM mutates it so we
+                // can detect the "session just ended" transition for
+                // dynamic-peer GC below.
+                let prev_state = self.peers.get_by_idx(ident).map(|p| p.state);
+
                 let mut bgp_ref = BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
@@ -470,6 +475,8 @@ impl Bgp {
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
+
+                self.gc_dynamic_peer_if_session_ended(ident, prev_state);
             }
             Message::Accept(socket, sockaddr) => {
                 // println!("Accept: {:?}", sockaddr);
@@ -487,6 +494,47 @@ impl Bgp {
                 );
             }
         }
+    }
+
+    /// GC a `PeerOrigin::Dynamic` peer whose session just ended.
+    ///
+    /// Triggered after every FSM call in [`Self::process_msg`]. The
+    /// condition is `prev_state ∈ {OpenSent, OpenConfirm, Established}`
+    /// AND `current_state ∈ {Idle, Active}` — i.e. the peer had a real
+    /// TCP session in flight that is now gone. Removing the peer
+    /// frees its `listen-limit` slot; the next inbound SYN from the
+    /// same source re-materializes via the accept path.
+    ///
+    /// Static peers are untouched — they stay in `PeerMap` so a config
+    /// change or reconnect attempt can revive them.
+    fn gc_dynamic_peer_if_session_ended(
+        &mut self,
+        ident: usize,
+        prev_state: Option<super::peer::State>,
+    ) {
+        use super::peer::State;
+        use super::peer_key::PeerOrigin;
+
+        let Some(prev) = prev_state else { return };
+        let session_was_alive = matches!(
+            prev,
+            State::OpenSent | State::OpenConfirm | State::Established
+        );
+        if !session_was_alive {
+            return;
+        }
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        if !matches!(peer.origin, PeerOrigin::Dynamic { .. }) {
+            return;
+        }
+        if !matches!(peer.state, State::Idle | State::Active) {
+            return;
+        }
+        let addr = peer.address;
+        self.peers.remove(&addr);
+        self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
     }
 
     pub fn peer_comps(&self) -> Vec<String> {
