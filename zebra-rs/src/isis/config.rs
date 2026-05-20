@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
@@ -103,6 +103,95 @@ impl Isis {
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
         self.callback_add("/router/isis/multi-topology", config_mt);
         self.callback_add("/router/isis/afi-safi/network", config_network);
+
+        // Per-AFI redistribution. One presence-container callback per
+        // source plus one callback per modifier leaf — each is a thin
+        // wrapper around `redist_set_presence` / `redist_with` carrying
+        // the source enum as a const argument.
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/connected",
+            config_redistribute_connected,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/connected/policy",
+            config_redistribute_connected_policy,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/connected/metric",
+            config_redistribute_connected_metric,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/connected/level",
+            config_redistribute_connected_level,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/connected/metric-type",
+            config_redistribute_connected_metric_type,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/static",
+            config_redistribute_static,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/static/policy",
+            config_redistribute_static_policy,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/static/metric",
+            config_redistribute_static_metric,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/static/level",
+            config_redistribute_static_level,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/static/metric-type",
+            config_redistribute_static_metric_type,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/bgp",
+            config_redistribute_bgp,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/bgp/policy",
+            config_redistribute_bgp_policy,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/bgp/metric",
+            config_redistribute_bgp_metric,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/bgp/level",
+            config_redistribute_bgp_level,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/bgp/metric-type",
+            config_redistribute_bgp_metric_type,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf",
+            config_redistribute_ospf,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf/policy",
+            config_redistribute_ospf_policy,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf/metric",
+            config_redistribute_ospf_metric,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf/level",
+            config_redistribute_ospf_level,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf/metric-type",
+            config_redistribute_ospf_metric_type,
+        );
+        self.callback_add(
+            "/router/isis/afi-safi/redistribute/ospf/match/type",
+            config_redistribute_ospf_match_type,
+        );
         self.callback_add(
             "/router/isis/interface/multi-topology/metric",
             link::config_mt_metric,
@@ -249,6 +338,64 @@ pub struct IsisConfig {
     /// IPv6 sibling of `networks_v4`. Emitted as TLV 236 in legacy
     /// mode, TLV 237 when MT 2 is enabled — see `lsp_generate`.
     pub networks_v6: BTreeSet<Ipv6Net>,
+
+    /// Per-AFI redistribution configuration. Populated by the
+    /// `/router/isis/afi-safi/redistribute/<source>...` callbacks; one
+    /// entry per (AFI, source) pair, holding the modifiers (policy,
+    /// metric, level, metric-type, optional OSPF source-match).
+    /// Storage-only today — the LSP emitter and RIB-source plumbing
+    /// will read from it in a follow-up.
+    pub redistribute: BTreeMap<(IsisRedistAfi, IsisRedistSource), IsisRedistribute>,
+}
+
+/// AFI key for the redistribute map. Mirrors the
+/// `enum { ipv4; ipv6; }` in YANG. Kept local to `config.rs` so the
+/// existing `link::Afi` (which lacks the trait derives we need for
+/// `BTreeMap` keys) stays untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IsisRedistAfi {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IsisRedistSource {
+    Connected,
+    Static,
+    Bgp,
+    Ospf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsisRedistLevel {
+    L1,
+    L2,
+    L1L2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsisRedistMetricType {
+    Internal,
+    External,
+    RibAsInternal,
+    RibAsExternal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IsisRedistOspfMatch {
+    Internal,
+    External,
+    NssaExternal,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct IsisRedistribute {
+    pub policy: Option<String>,
+    pub metric: Option<u32>,
+    pub level: Option<IsisRedistLevel>,
+    pub metric_type: Option<IsisRedistMetricType>,
+    /// Populated only when source == Ospf. Empty set means "no filter".
+    pub ospf_match: BTreeSet<IsisRedistOspfMatch>,
 }
 
 impl IsisConfig {
@@ -620,6 +767,183 @@ fn config_network(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     Some(())
+}
+
+// ---- redistribute -----------------------------------------------------
+//
+// One presence-container callback per source (creates/removes the
+// (AFI, source) entry) plus one callback per modifier leaf (mutates
+// the entry's field). The two helpers below carry the dispatch.
+
+fn parse_redist_afi(s: &str) -> Option<IsisRedistAfi> {
+    match s {
+        "ipv4" => Some(IsisRedistAfi::Ipv4),
+        "ipv6" => Some(IsisRedistAfi::Ipv6),
+        _ => None,
+    }
+}
+
+fn notify_lsp_reorigination(isis: &Isis) {
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
+}
+
+fn redist_set_presence(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+    src: IsisRedistSource,
+) -> Option<()> {
+    let afi = parse_redist_afi(&args.string()?)?;
+    if op.is_set() {
+        isis.config.redistribute.entry((afi, src)).or_default();
+    } else {
+        isis.config.redistribute.remove(&(afi, src));
+    }
+    notify_lsp_reorigination(isis);
+    Some(())
+}
+
+/// Mutate a single field on the (AFI, source) entry. The leaf's value
+/// is read inside the closure so the per-leaf callbacks stay one-liners.
+fn redist_with<F>(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+    src: IsisRedistSource,
+    f: F,
+) -> Option<()>
+where
+    F: FnOnce(&mut IsisRedistribute, &mut Args, ConfigOp) -> Option<()>,
+{
+    let afi = parse_redist_afi(&args.string()?)?;
+    let entry = isis.config.redistribute.entry((afi, src)).or_default();
+    f(entry, &mut args, op)?;
+    notify_lsp_reorigination(isis);
+    Some(())
+}
+
+fn set_policy(e: &mut IsisRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    e.policy = if op.is_set() { Some(a.string()?) } else { None };
+    Some(())
+}
+fn set_metric(e: &mut IsisRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    e.metric = if op.is_set() { Some(a.u32()?) } else { None };
+    Some(())
+}
+fn set_level(e: &mut IsisRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        e.level = Some(match a.string()?.as_str() {
+            "level-1" => IsisRedistLevel::L1,
+            "level-2" => IsisRedistLevel::L2,
+            "level-1-2" => IsisRedistLevel::L1L2,
+            _ => return None,
+        });
+    } else {
+        e.level = None;
+    }
+    Some(())
+}
+fn set_metric_type(e: &mut IsisRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        e.metric_type = Some(match a.string()?.as_str() {
+            "internal" => IsisRedistMetricType::Internal,
+            "external" => IsisRedistMetricType::External,
+            "rib-metric-as-internal" => IsisRedistMetricType::RibAsInternal,
+            "rib-metric-as-external" => IsisRedistMetricType::RibAsExternal,
+            _ => return None,
+        });
+    } else {
+        e.metric_type = None;
+    }
+    Some(())
+}
+fn set_ospf_match(e: &mut IsisRedistribute, a: &mut Args, op: ConfigOp) -> Option<()> {
+    let v = match a.string()?.as_str() {
+        "internal" => IsisRedistOspfMatch::Internal,
+        "external" => IsisRedistOspfMatch::External,
+        "nssa-external" => IsisRedistOspfMatch::NssaExternal,
+        _ => return None,
+    };
+    if op.is_set() {
+        e.ospf_match.insert(v);
+    } else {
+        e.ospf_match.remove(&v);
+    }
+    Some(())
+}
+
+// Per-source presence + modifier wrappers. Each is a one-liner that
+// pins the IsisRedistSource for the path libyang dispatches on.
+fn config_redistribute_connected(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_set_presence(isis, args, op, IsisRedistSource::Connected)
+}
+fn config_redistribute_connected_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Connected, set_policy)
+}
+fn config_redistribute_connected_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Connected, set_metric)
+}
+fn config_redistribute_connected_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Connected, set_level)
+}
+fn config_redistribute_connected_metric_type(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Connected, set_metric_type)
+}
+
+fn config_redistribute_static(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_set_presence(isis, args, op, IsisRedistSource::Static)
+}
+fn config_redistribute_static_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Static, set_policy)
+}
+fn config_redistribute_static_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Static, set_metric)
+}
+fn config_redistribute_static_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Static, set_level)
+}
+fn config_redistribute_static_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Static, set_metric_type)
+}
+
+fn config_redistribute_bgp(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_set_presence(isis, args, op, IsisRedistSource::Bgp)
+}
+fn config_redistribute_bgp_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Bgp, set_policy)
+}
+fn config_redistribute_bgp_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Bgp, set_metric)
+}
+fn config_redistribute_bgp_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Bgp, set_level)
+}
+fn config_redistribute_bgp_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Bgp, set_metric_type)
+}
+
+fn config_redistribute_ospf(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_set_presence(isis, args, op, IsisRedistSource::Ospf)
+}
+fn config_redistribute_ospf_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Ospf, set_policy)
+}
+fn config_redistribute_ospf_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Ospf, set_metric)
+}
+fn config_redistribute_ospf_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Ospf, set_level)
+}
+fn config_redistribute_ospf_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Ospf, set_metric_type)
+}
+fn config_redistribute_ospf_match_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    redist_with(isis, args, op, IsisRedistSource::Ospf, set_ospf_match)
 }
 
 fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
