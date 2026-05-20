@@ -1,0 +1,172 @@
+module zebra-bgp-redistribute {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-redistribute";
+  prefix "zbr";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-AFI redistribution into BGP. Augments the global afi-safi
+     list on the BGP candidate-config tree with a `redistribute`
+     container; each source is a presence container with a small set
+     of modifier leaves. No instance keying — zebra-rs has a single
+     instance per protocol.
+
+     Resulting CLI / config shape:
+
+       router bgp {
+         afi-safi ipv4 {
+           redistribute {
+             connected { policy HOGE; }
+             static    { policy STATIC-OUT; metric 100; }
+             isis      { policy ISIS-LEAK; level level-2; multipath; }
+             ospf      { policy OSPF-LEAK; match { type external-1; type external-2; } }
+           }
+         }
+       }
+
+     Modeling notes:
+       - `policy` is a plain string (not a leafref to /policy/name)
+         so the redistribute config can be staged before the policy
+         is committed — same convention as the existing IS-IS
+         redistribute and `srv6 / locator` references.
+       - BGP-from-IS-IS uses repeatable `level <N>` tokens per
+         IOS-XR (`level 1 level 2 level 1-inter-area`); modeled
+         as a leaf-list.
+       - BGP-from-OSPF allows the full E1/E2/NSSA-1/NSSA-2 matrix
+         in one entry (combinable, unlike OSPF-into-IS-IS); modeled
+         as a leaf-list.
+       - `multipath` (BGP-only) installs all RIB-resolved paths,
+         not just the best one. Per-source.
+
+     Config plane only in the PR that introduces this module —
+     the BGP RIB-source and policy-evaluation hooks that consume
+     these entries land in a follow-up.";
+
+  reference
+    "Cisco IOS-XR UM YANG (`Cisco-IOS-XR-um-router-bgp-cfg.yang`),
+     `redistribute` container under `address-family ipv4|ipv6
+     unicast|multicast`.";
+
+  grouping bgp-redist-common {
+    description
+      "Common per-source knobs for BGP redistribution.";
+    leaf policy {
+      type string;
+      description
+        "Name of a top-level `policy`. Plain string (not a leafref)
+         so the redistribute config can be staged before the policy
+         is committed.";
+    }
+    leaf metric {
+      type uint32;
+      description
+        "Static MED override for redistributed routes. When omitted,
+         MED follows the source RIB cost / protocol default.";
+    }
+    leaf multipath {
+      type empty;
+      description
+        "Install all RIB-resolved paths from this source, not just
+         the best one. BGP-only knob (IOS-XR `redistribute … multipath`).";
+    }
+  }
+
+  grouping bgp-redist-isis-level {
+    description
+      "BGP-from-IS-IS level filter. IOS-XR uses repeatable
+       `level <N>` tokens (`level 1 level 2 level 1-inter-area`),
+       so modeled as a leaf-list — order is insignificant.";
+    leaf-list level {
+      type enumeration {
+        enum level-1;
+        enum level-2;
+        enum level-1-inter-area;
+      }
+    }
+  }
+
+  grouping bgp-redist-ospf-match {
+    description
+      "BGP-from-OSPF source filter. IOS-XR allows any combination of
+       internal / external-1 / external-2 / nssa-external-1 /
+       nssa-external-2 in a single redistribute entry (unlike
+       OSPF-into-IS-IS, which is single-value).";
+    container match {
+      leaf-list type {
+        type enumeration {
+          enum internal;
+          enum external-1;
+          enum external-2;
+          enum nssa-external-1;
+          enum nssa-external-2;
+        }
+      }
+    }
+  }
+
+  grouping bgp-afi-safi-redistribute {
+    description
+      "Attached to every global afi-safi list entry. Meaningful for
+       the AFs BGP actually originates from (ipv4|ipv6 / unicast,
+       multicast); harmless on other AFI/SAFIs — the Rust callback
+       filters at commit time.";
+    container redistribute {
+      presence "Enable route redistribution into BGP for this AFI";
+      container connected {
+        presence "Redistribute connected routes";
+        uses bgp-redist-common;
+      }
+      container static {
+        presence "Redistribute static routes";
+        uses bgp-redist-common;
+      }
+      container isis {
+        presence "Redistribute IS-IS routes";
+        uses bgp-redist-common;
+        uses bgp-redist-isis-level;
+      }
+      container ospf {
+        presence "Redistribute OSPF routes";
+        uses bgp-redist-common;
+        uses bgp-redist-ospf-match;
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Attach the redistribute container to the global afi-safi
+       list in the candidate-set subtree.";
+    uses bgp-afi-safi-redistribute;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp afi-safi ipv4 redistribute connected`
+       is path-valid.";
+    uses bgp-afi-safi-redistribute;
+  }
+}

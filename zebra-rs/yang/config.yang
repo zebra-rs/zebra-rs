@@ -40,6 +40,10 @@ module config {
     prefix zbe;
   }
 
+  import zebra-bgp-redistribute {
+    prefix zbr;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }
