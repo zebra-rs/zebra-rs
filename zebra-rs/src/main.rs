@@ -149,17 +149,17 @@ fn main() {
 
     // Daemonize before building the tokio runtime.
     if arg.daemon {
-        if let Err(e) = daemonize() {
+        daemonize().unwrap_or_else(|e| {
             eprintln!("zebra-rs: {e:#}");
             std::process::exit(1);
-        }
+        });
     }
 
     if let Some(ref path) = arg.pid_file {
-        if let Err(e) = write_pid_file(path) {
+        write_pid_file(path).unwrap_or_else(|e| {
             eprintln!("zebra-rs: {e:#}");
             std::process::exit(1);
-        }
+        });
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -180,7 +180,7 @@ fn main() {
 
 async fn run(arg: Arg) -> anyhow::Result<()> {
     let Some(yang_path) = yang_path(&arg) else {
-        println!("Can't find YANG load path");
+        eprintln!("zebra-rs: Can't find YANG load path");
         std::process::exit(1);
     };
 
@@ -223,6 +223,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     policy::serve(policy);
 
     rib::serve(rib);
+
     // rib::nanomsg::serve();
 
     tracing::info!("zebra-rs started");
