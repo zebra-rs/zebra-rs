@@ -160,6 +160,14 @@ pub struct Bgp {
     /// `PeerConfig::neighbor_group` is not wired in the runtime
     /// yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
+    /// `dynamic-neighbors` runtime (zebra-bgp-dynamic-neighbors.yang).
+    /// Holds the configured listen-ranges and the soft cap on
+    /// materialized passive peers. `dynamic_peer_count` is bumped on
+    /// successful accept-time materialization in `peer::accept`; it
+    /// is never decremented yet — session-close GC is deferred to a
+    /// follow-up so this PR stays focused on the accept path.
+    pub dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors,
+    pub dynamic_peer_count: u32,
     /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
     /// Phase-1: signature + membership tracking only — the advertise
     /// pipeline does not yet share work across members. See
@@ -261,6 +269,8 @@ impl Bgp {
             listen_fd_v6: None,
             key_chains: HashMap::new(),
             neighbor_groups: super::neighbor_group::empty_map(),
+            dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
+            dynamic_peer_count: 0,
             update_groups: super::update_group::empty_map(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,

@@ -1500,6 +1500,19 @@ impl Bgp {
             "/router/bgp/neighbor-groups/neighbor-group/remote-as",
             super::neighbor_group::config_neighbor_group_remote_as,
         );
+        // `set router bgp dynamic-neighbors …`.
+        self.callback_add(
+            "/router/bgp/dynamic-neighbors/listen-limit",
+            super::dynamic_neighbors::config_listen_limit,
+        );
+        self.callback_add(
+            "/router/bgp/dynamic-neighbors/listen-range",
+            super::dynamic_neighbors::config_listen_range,
+        );
+        self.callback_add(
+            "/router/bgp/dynamic-neighbors/listen-range/neighbor-group",
+            super::dynamic_neighbors::config_listen_range_neighbor_group,
+        );
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);

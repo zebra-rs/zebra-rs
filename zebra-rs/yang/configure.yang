@@ -38,6 +38,10 @@ module configure {
     prefix zird;
   }
 
+  import zebra-bgp-dynamic-neighbors {
+    prefix zbdn;
+  }
+
   container set {
     ext:help "Set configuration";
     uses "config:config";

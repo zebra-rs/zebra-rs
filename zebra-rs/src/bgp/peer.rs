@@ -1122,22 +1122,60 @@ fn handle_peer_connection(
 }
 
 pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
-    let remaining_stream = match sockaddr {
-        SocketAddr::V4(addr) => {
-            let peer_addr = IpAddr::V4(*addr.ip());
-            handle_peer_connection(bgp, peer_addr, stream)
-        }
-        SocketAddr::V6(addr) => {
-            let peer_addr = IpAddr::V6(*addr.ip());
-            handle_peer_connection(bgp, peer_addr, stream)
-        }
+    let peer_addr = match sockaddr {
+        SocketAddr::V4(addr) => IpAddr::V4(*addr.ip()),
+        SocketAddr::V6(addr) => IpAddr::V6(*addr.ip()),
     };
+    let mut remaining_stream = handle_peer_connection(bgp, peer_addr, stream);
 
-    // Next, lookup peer-group for dynamic peer.
+    // Static lookup missed — try a configured listen-range. If LPM
+    // hits and the per-range neighbor-group resolves to a usable
+    // `remote-as`, synthesize a passive Peer and re-run the connection
+    // handler so the new entry picks up the same FSM path as a
+    // statically-configured one.
+    if let Some(stream) = remaining_stream.take() {
+        remaining_stream = try_dynamic_accept(bgp, peer_addr, stream);
+    }
+
     if let Some(stream) = remaining_stream {
         // No configured peer found - just drop (sends TCP RST/FIN)
         drop(stream);
     }
+}
+
+/// Materialize a dynamic peer when `peer_addr` matches a configured
+/// `listen-range`. Returns `Some(stream)` (i.e. caller should drop)
+/// on any failure path so the listen-range never holds the socket
+/// open while we sort out a config gap.
+fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Option<TcpStream> {
+    // Soft cap. The listen-limit guards against an attacker spamming
+    // SYNs from many sources in a wide listen-range — once we hit
+    // the limit, additional matches drop silently until existing
+    // dynamic peers are GC'd (session-close GC lands in a follow-up).
+    if bgp.dynamic_peer_count >= bgp.dynamic_neighbors.listen_limit {
+        return Some(stream);
+    }
+    let (range_prefix, range) = bgp.dynamic_neighbors.lpm_match(&peer_addr)?;
+    let group_name = range.neighbor_group.as_ref()?;
+    let remote_as = bgp.neighbor_groups.get(group_name)?.remote_as?;
+
+    let mut peer = Peer::new(
+        0,
+        bgp.asn,
+        bgp.router_id,
+        remote_as,
+        peer_addr,
+        bgp.hostname(),
+        bgp.tx.clone(),
+    );
+    peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
+    // Dynamic peers are passive-only — they never initiate a connect.
+    peer.config.transport.passive = true;
+
+    bgp.peers.insert(peer_addr, peer);
+    bgp.dynamic_peer_count += 1;
+
+    handle_peer_connection(bgp, peer_addr, stream)
 }
 
 /// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,
