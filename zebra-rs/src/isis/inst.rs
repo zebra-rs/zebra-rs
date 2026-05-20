@@ -261,6 +261,13 @@ pub struct IsisTop<'a> {
     /// Stable-placement memory for the self-LSP packer; see
     /// `Isis::lsp_placement_memory`.
     pub lsp_placement_memory: &'a mut Levels<BTreeMap<TlvKey, u8>>,
+
+    /// Redistribute snapshots (see `Isis::redist_v{4,6}`). Read by
+    /// `lsp_generate` to emit TLV 135 / 236 / MT 237 entries for
+    /// every (rtype, prefix) covered by an active redistribute
+    /// config row.
+    pub redist_v4: &'a BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
+    pub redist_v6: &'a BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
 }
 
 impl Isis {
@@ -1071,6 +1078,8 @@ impl Isis {
             srlg_groups: &self.srlg_groups,
             lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
             lsp_placement_memory: &mut self.lsp_placement_memory,
+            redist_v4: &self.redist_v4,
+            redist_v6: &self.redist_v6,
         }
     }
 

@@ -7,6 +7,7 @@ use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 
 use crate::context::Timer;
+use crate::isis::config::{IsisRedistAfi, IsisRedistLevel, IsisRedistMetricType, IsisRedistSource};
 use crate::isis_event_trace;
 use crate::rib::util::IpNetExt;
 use crate::rib::{DEFAULT_BLOCK_NAME, LocatorBehavior, MacAddr};
@@ -1055,6 +1056,36 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             subs: vec![],
         });
     }
+    // Redistributed IPv4 prefixes (`router isis / afi-safi ipv4 /
+    // redistribute / <source>`). For each route delivered by RIB into
+    // `top.redist_v4`, look up the per-(afi, source) override in
+    // `top.config.redistribute`; respect `level` (target-side
+    // filter), `metric` (static override), and `metric-type`
+    // (rib-metric-as-* uses the RIB cost; internal/external set is
+    // for the IPv6 X-bit / legacy TLV split — TLV 135 has no I/E bit
+    // so the type only affects metric source for IPv4).
+    for ((rtype, prefix), route) in top.redist_v4.iter() {
+        let Some(source) = redist_source_from_rtype(*rtype) else {
+            continue;
+        };
+        let Some(cfg) = top.config.redistribute.get(&(IsisRedistAfi::Ipv4, source)) else {
+            continue;
+        };
+        if !redist_level_matches(cfg.level, level) {
+            continue;
+        }
+        let metric = redist_metric(cfg.metric, cfg.metric_type, route.metric);
+        let flags = Ipv4ControlInfo::new()
+            .with_prefixlen(prefix.prefix_len() as usize)
+            .with_sub_tlv(false)
+            .with_distribution(false);
+        ext_ip_reach.entries.push(IsisTlvExtIpReachEntry {
+            metric,
+            flags,
+            prefix: *prefix,
+            subs: vec![],
+        });
+    }
     if !ext_ip_reach.entries.is_empty() {
         distributable.push(ext_ip_reach.into());
     }
@@ -1101,6 +1132,31 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         let flags = Ipv6ControlInfo::new().with_sub_tlv(false);
         ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
             metric: 10,
+            flags,
+            prefix: *prefix,
+            subs: Vec::new(),
+        });
+    }
+    // Redistributed IPv6 prefixes — sibling of the IPv4 path above.
+    // `metric-type external | rib-metric-as-external` sets the X bit
+    // (RFC 5308 §2) so receivers can tell the prefix originated from
+    // a different routing protocol.
+    for ((rtype, prefix), route) in top.redist_v6.iter() {
+        let Some(source) = redist_source_from_rtype(*rtype) else {
+            continue;
+        };
+        let Some(cfg) = top.config.redistribute.get(&(IsisRedistAfi::Ipv6, source)) else {
+            continue;
+        };
+        if !redist_level_matches(cfg.level, level) {
+            continue;
+        }
+        let metric = redist_metric(cfg.metric, cfg.metric_type, route.metric);
+        let flags = Ipv6ControlInfo::new()
+            .with_sub_tlv(false)
+            .with_dist_internal(redist_external_bit(cfg.metric_type));
+        ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
+            metric,
             flags,
             prefix: *prefix,
             subs: Vec::new(),
@@ -1354,6 +1410,67 @@ pub enum Packet {
 
 pub fn lsp_flood(top: &mut IsisTop, level: Level, lsp_id: &IsisLspId) {
     top.lsdb.get_mut(&level).srm_set_all(top.tx, level, lsp_id);
+}
+
+// ---- redistribute emission helpers ---------------------------------
+//
+// Used by `lsp_generate` to convert a route delivered into
+// `top.redist_v{4,6}` by RIB into a TLV 135 / 236 / MT 237 entry,
+// applying the per-(afi, source) override knobs from
+// `top.config.redistribute`.
+
+fn redist_source_from_rtype(rtype: crate::rib::RibType) -> Option<IsisRedistSource> {
+    match rtype {
+        crate::rib::RibType::Connected => Some(IsisRedistSource::Connected),
+        crate::rib::RibType::Static => Some(IsisRedistSource::Static),
+        crate::rib::RibType::Bgp => Some(IsisRedistSource::Bgp),
+        crate::rib::RibType::Ospf => Some(IsisRedistSource::Ospf),
+        _ => None,
+    }
+}
+
+/// Whether the redistribute row's `level` filter (defaults to
+/// `level-2` per IOS-XR) includes the level being generated.
+fn redist_level_matches(cfg_level: Option<IsisRedistLevel>, gen_level: Level) -> bool {
+    let lvl = cfg_level.unwrap_or(IsisRedistLevel::L2);
+    matches!(
+        (lvl, gen_level),
+        (IsisRedistLevel::L1, Level::L1)
+            | (IsisRedistLevel::L2, Level::L2)
+            | (IsisRedistLevel::L1L2, _)
+    )
+}
+
+/// Metric placed on the originated reachability entry:
+///   - `rib-metric-as-internal | rib-metric-as-external` always uses
+///     the RIB cost (override ignored when present).
+///   - `internal | external` uses the static override if set, falling
+///     back to the RIB metric. No implicit default — IOS-XR also
+///     says "no implicit metric without rib-metric-as-* or override",
+///     but falling back to the RIB cost is the most useful behavior
+///     in practice.
+fn redist_metric(
+    cfg_metric: Option<u32>,
+    metric_type: Option<IsisRedistMetricType>,
+    rib_metric: u32,
+) -> u32 {
+    match metric_type {
+        Some(IsisRedistMetricType::RibAsInternal) | Some(IsisRedistMetricType::RibAsExternal) => {
+            rib_metric
+        }
+        _ => cfg_metric.unwrap_or(rib_metric),
+    }
+}
+
+/// X-bit value for IPv6 TLV 236 / MT 237 (RFC 5308 §2). Set when the
+/// prefix is being advertised as external — either `external` or
+/// `rib-metric-as-external`. IPv4 TLV 135 has no equivalent bit;
+/// callers ignore the result for v4.
+fn redist_external_bit(metric_type: Option<IsisRedistMetricType>) -> bool {
+    matches!(
+        metric_type,
+        Some(IsisRedistMetricType::External) | Some(IsisRedistMetricType::RibAsExternal)
+    )
 }
 
 #[cfg(test)]
