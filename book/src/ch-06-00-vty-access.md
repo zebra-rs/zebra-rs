@@ -161,6 +161,34 @@ forge them). The server logs the peer for each call at INFO:
 INFO vty rpc uid=1000 gid=1000 pid=109579
 ```
 
+### Parent-shell check and `sudo`
+
+In addition to the peer's own uid, the daemon walks `/proc` to find
+the client's parent process and — for non-root peers — verifies the
+parent's real uid matches the peer uid. This binds a session to the
+shell that spawned the client and rejects mismatched-uid ancestry
+(PID-reuse races, unexpected setuid chains).
+
+There is one exception: **when the peer uid is 0, the parent-uid
+match is skipped.** Without this short-circuit, `sudo <cmd>` from a
+non-root login fails with `parent uid mismatch` because the outer
+`sudo` process retains the invoking user's real uid even though the
+client itself is running as root. With the short-circuit, the
+following all work:
+
+```bash
+sudo vtyctl apply -f cfg.yaml
+sudo ip netns exec vrf-red vtyctl show 'show ip route'
+```
+
+The remaining guards still apply to root peers: cross-PID-namespace
+clients and orphaned clients (parent reparented to init, or the
+parent process disappeared between the credential snapshot and the
+`/proc` lookup) are rejected regardless of uid.
+
+Non-root peers must connect from a same-uid shell — a setuid
+escalation to a non-root effective uid is still refused.
+
 ### `ZEBRA_VTY_ALLOW_UIDS` — peer UID allow-list
 
 Set this environment variable on the `zebra-rs` process to restrict
