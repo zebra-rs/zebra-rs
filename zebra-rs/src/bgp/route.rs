@@ -3481,6 +3481,110 @@ impl Bgp {
         }
     }
 
+    // ---- redistribute injection -----------------------------------
+    //
+    // `route_redist_inject` / `route_redist_withdraw` are siblings of
+    // `route_add` / `route_del`, but
+    //   - carry a `metric` (lowered to MED on the originated route),
+    //   - tag the originator with a per-rtype `remote_id` discriminator
+    //     so a redistributed Connected route and a `network`
+    //     statement for the same prefix do NOT collide in the
+    //     LocalRibTable — both look like `ORIGINATED_PEER` to the
+    //     update path, and same-prefix-same-(ident,remote_id) keys
+    //     replace one another.
+    //
+    // IPv6 redistribution stays storage-only on `Bgp.redist_v6` until
+    // a follow-up adds the LocalRib v6 path; today `LocalRib` only
+    // holds v4 / VPNv4 / EVPN.
+
+    /// Per-rtype remote_id discriminator, so distinct redistribute
+    /// sources (and the `network` statement at id=0) coexist for the
+    /// same prefix without overwriting one another. Values are local
+    /// and never appear on the wire.
+    pub(super) fn redist_remote_id(rtype: crate::rib::RibType) -> u32 {
+        match rtype {
+            crate::rib::RibType::Connected => 1,
+            crate::rib::RibType::Static => 2,
+            crate::rib::RibType::Ospf => 3,
+            crate::rib::RibType::Isis => 4,
+            crate::rib::RibType::Kernel => 5,
+            crate::rib::RibType::Bgp => 0, // self-loop prevented upstream
+            _ => 0,
+        }
+    }
+
+    pub fn route_redist_inject(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: Ipv4Net,
+        metric: u32,
+    ) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let mut attr = BgpAttr::new();
+        attr.med = Some(bgp_packet::Med::new(metric));
+        let mut rib = BgpRib::new(
+            ident,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            remote_id,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
+        }
+    }
+
+    pub fn route_redist_withdraw(&mut self, rtype: crate::rib::RibType, prefix: Ipv4Net) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let removed = self.local_rib.remove(None, prefix, remote_id, ident);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_tx: &self.rib_tx,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path(prefix);
+        if !selected.is_empty() || !removed.is_empty() {
+            route_advertise_to_peers(
+                None,
+                prefix,
+                &selected,
+                ident,
+                &mut bgp_ref,
+                &mut self.peers,
+            );
+        }
+    }
+
     /// Originate an EVPN Type-2 (MAC/IP Advertisement) route from a
     /// kernel-learned bridge FDB entry.
     ///
