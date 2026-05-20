@@ -869,17 +869,36 @@ impl Rib {
     /// broadcast paths and by `proto_cleanup`). The initial-state
     /// dump and the trailing `EoR` are unchanged.
     pub fn subscribe(&mut self, proto_id: ProtoId, tx: UnboundedSender<RibRx>, proto: String) {
+        // A subscriber may have dropped its receiver before this
+        // handler ran (e.g. its constructor failed after the
+        // `Message::Subscribe` was already queued). Every dump send
+        // below is therefore best-effort: on the first `SendError` we
+        // bail out without registering the subscriber, so we don't
+        // panic and don't leave a dead entry in `client_registry` /
+        // `redists`.
+        if tx.is_closed() {
+            tracing::warn!(
+                "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
+            );
+            return;
+        }
         // Link dump.
         for (_, link) in self.links.iter() {
             let msg = RibRx::LinkAdd(link.clone());
-            tx.send(msg).unwrap();
+            if tx.send(msg).is_err() {
+                return;
+            }
             for addr in link.addr4.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
-                tx.send(msg).unwrap();
+                if tx.send(msg).is_err() {
+                    return;
+                }
             }
             for addr in link.addr6.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
-                tx.send(msg).unwrap();
+                if tx.send(msg).is_err() {
+                    return;
+                }
             }
         }
         // VXLAN dump. Replay every observed VXLAN device with a
@@ -911,14 +930,18 @@ impl Rib {
                 let _ = tx.send(RibRx::FdbAdd(entry));
             }
         }
-        self.client_registry
-            .register_with_id(proto_id, &proto, tx.clone());
-        self.redists.insert(proto, tx.clone());
         if !self.router_id.is_unspecified() {
             let msg = RibRx::RouterIdUpdate(self.router_id);
-            tx.send(msg).unwrap();
+            if tx.send(msg).is_err() {
+                return;
+            }
         }
-        tx.send(RibRx::EoR).unwrap();
+        if tx.send(RibRx::EoR).is_err() {
+            return;
+        }
+        self.client_registry
+            .register_with_id(proto_id, &proto, tx.clone());
+        self.redists.insert(proto, tx);
     }
 
     async fn proto_cleanup(&mut self, proto: String) {
@@ -1885,10 +1908,15 @@ pub fn serve(mut rib: Rib) {
         rib.event_loop().await;
     });
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
         let (tx, rx) = oneshot::channel::<()>();
         let _ = rib_tx.send(Message::Shutdown { tx });
-        rx.await.unwrap();
+        // If the event loop is already gone (e.g. panicked earlier),
+        // `rx` resolves to `Err(RecvError)`. Exit anyway — there's
+        // nothing left to wait for.
+        let _ = rx.await;
         std::process::exit(0);
     });
 }
