@@ -140,6 +140,12 @@ pub struct LinkTop<'a> {
             std::collections::BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>,
         >,
     >,
+    pub peer_link_affinity: &'a mut Levels<
+        std::collections::BTreeMap<
+            IsisSysId,
+            std::collections::BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
+        >,
+    >,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<super::throttle::Throttle>,
 

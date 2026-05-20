@@ -120,6 +120,29 @@ impl FlexAlgoConfig {
     }
 }
 
+/// Extract the Extended Admin Group bitmap from a peer-advertised
+/// ASLA sub-TLV iff the ASLA's SABM marks it as applying to the
+/// Flex-Algorithm application (RFC 9479 §4.2 X-bit). Returns the
+/// nested IsisSubAdminGrp's bitmap as an ExtAdminGroup; returns
+/// `None` when the SABM byte 0 is missing, the X-bit is clear, or
+/// no AdminGrp sub-sub-TLV is present. Mirrors the producer-side
+/// `build_link_asla` so SPF gating sees the same bits a sender
+/// sets.
+pub fn parse_asla_flex_algo_bitmap(asla: &IsisSubAsla) -> Option<ExtAdminGroup> {
+    let first = asla.sabm.first()?;
+    if first & SABM_FLEX_ALGO == 0 {
+        return None;
+    }
+    for sub in &asla.subs {
+        if let NeighSubTlv::AdminGrp(g) = sub {
+            return Some(ExtAdminGroup {
+                words: g.groups.clone(),
+            });
+        }
+    }
+    None
+}
+
 /// SABM byte (RFC 9479 §4.2) with the Flex-Algorithm (X-bit) set.
 /// Bit layout in the first SABM byte, MSB-first: R(7) S(6) F(5) X(4)
 /// reserved(3..0). Used as the Selective Application-specific
@@ -713,6 +736,83 @@ mod tests {
 
     fn affinity_set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_asla_flex_algo_bitmap_returns_none_without_x_bit() {
+        // SABM = [0x80] sets R-bit (RSVP-TE) but not X-bit.
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![0x80],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
+                groups: vec![0xFF],
+            })],
+        };
+        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
+    }
+
+    #[test]
+    fn parse_asla_flex_algo_bitmap_returns_none_with_empty_sabm() {
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
+                groups: vec![0xFF],
+            })],
+        };
+        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
+    }
+
+    #[test]
+    fn parse_asla_flex_algo_bitmap_returns_none_when_no_admin_grp_nested() {
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![SABM_FLEX_ALGO],
+            udabm: vec![],
+            subs: vec![],
+        };
+        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
+    }
+
+    #[test]
+    fn parse_asla_flex_algo_bitmap_extracts_admin_grp_when_x_bit_set() {
+        // SABM = [0x90] sets R-bit AND X-bit — both are honored; X
+        // alone is enough to surface the bitmap.
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![0x90],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
+                groups: vec![0x11, 0x80000000],
+            })],
+        };
+        let bitmap = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
+        assert_eq!(bitmap.words, vec![0x11, 0x80000000]);
+    }
+
+    #[test]
+    fn parse_asla_flex_algo_bitmap_round_trips_through_build_link_asla() {
+        // Build an ASLA on the producer side, parse it on the
+        // consumer side — the bitmap must round-trip bit-for-bit.
+        let mut am = AffinityMap::new();
+        for (name, bit) in [("blue", "0"), ("red", "200")] {
+            am.exec(
+                "/router/isis/affinity-map/affinity/bit-position".into(),
+                args(&[name, bit]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            am.commit();
+        }
+        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let parsed = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
+        // bit 0 in word 0, bit (200 - 6*32 = 8) in word 6.
+        assert_eq!(parsed.words.len(), 7);
+        assert!(parsed.get(0));
+        assert!(parsed.get(200));
+        assert!(!parsed.get(1));
     }
 
     #[test]
