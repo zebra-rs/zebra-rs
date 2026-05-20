@@ -199,6 +199,50 @@ pub enum Message {
         proto: String,
         tx: UnboundedSender<RibRx>,
     },
+
+    // ---- redistribute subscription messages ----------------------
+    //
+    // Per-(proto, AFI, rtype) subscriptions. Subtype is a wildcard
+    // set (empty = match every subtype under `rtype`). Self-route
+    // filtering (route's rtype belonging to the subscriber's proto)
+    // is enforced unconditionally by RIB before any other check.
+    // No consumer wired yet — the walker / steady-state hook and the
+    // per-protocol senders land in follow-ups.
+    /// Walk the FIB for the current matching set, then keep delivering
+    /// future deltas for `(proto, afi, rtype)` with subtype filtered
+    /// by `subtypes`. Empty `subtypes` is wildcard. Triggers a bulk
+    /// replay followed by a `BulkPhase::Eor` marker.
+    #[allow(dead_code)]
+    RedistAdd {
+        proto: String,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: BTreeSet<super::RibSubType>,
+    },
+    /// Replace the previous `subtypes` set for the same
+    /// `(proto, afi, rtype)` row. RIB diffs old vs new:
+    ///   - removed subtypes → RouteDel of their matching prefixes;
+    ///   - added subtypes → walk-and-replay of those prefixes.
+    ///
+    /// No-op on identical sets. Issuing RedistUpdate for a row that
+    /// was never RedistAdd'd is treated as RedistAdd.
+    #[allow(dead_code)]
+    RedistUpdate {
+        proto: String,
+        afi: super::RedistAfi,
+        rtype: RibType,
+        subtypes: BTreeSet<super::RibSubType>,
+    },
+    /// Tear down a redistribute subscription. RIB sends RouteDel for
+    /// every currently-matched prefix (in chunks ending in
+    /// `BulkPhase::Eor`) so the consumer can withdraw without having
+    /// to remember its own per-filter state.
+    #[allow(dead_code)]
+    RedistDel {
+        proto: String,
+        afi: super::RedistAfi,
+        rtype: RibType,
+    },
     /// Tear down all RIB state owned by a protocol whose task is
     /// being despawned (`no router bgp` / `no router isis` / `no
     /// router ospf`). Withdraws every route / ILM whose `rtype`
@@ -1250,6 +1294,13 @@ impl Rib {
             } => {
                 self.mdb_del(vni, group, source, ifindex).await;
             }
+            // Redistribute subscription messages — types-only PR.
+            // The walk-and-replay + steady-state dispatch lands in a
+            // follow-up; drain silently for now so the dispatcher
+            // stays exhaustive.
+            Message::RedistAdd { .. }
+            | Message::RedistUpdate { .. }
+            | Message::RedistDel { .. } => {}
         }
     }
 
