@@ -612,6 +612,43 @@ module config {
              peer is required to accept.";
         }
 
+        container srlg {
+          ext:help "Shared Risk Link Group configuration";
+          description
+            "IS-IS Shared Risk Link Group (SRLG) table. Each named group
+             binds an operator-friendly identifier to the 32-bit SRLG
+             value advertised in the IS-IS top-level Shared Risk Link
+             Group TLVs (TLV 138 for IPv4, RFC 5307; TLV 139 for IPv6,
+             RFC 6119). IS-IS resolves the per-interface SRLG name
+             references against this table when building LSPs.";
+
+          list group {
+            key "name";
+            description
+              "Named SRLG group. The name is the handle used by the
+               per-interface `srlg` leaf-list under
+               `router isis / interface`; the value is the 32-bit
+               identifier emitted on the wire.";
+            leaf name {
+              type string;
+              description
+                "Operator-assigned SRLG group identifier.";
+            }
+            leaf value {
+              type uint32;
+              mandatory true;
+              description
+                "32-bit SRLG value advertised in IS-IS TE extensions
+                 (TLVs 138/139 per RFC 5307 / RFC 6119). Two links
+                 share fate (are in the same shared risk group) iff
+                 they carry a common value here. The numeric space is
+                 operator-defined; uniqueness is not enforced —
+                 different group names may intentionally share a
+                 value (e.g. as aliases) or accidentally collide.";
+            }
+          }
+        }
+
         list interface {
           // Last item in "router isis" node.
           ext:sort "-10";
@@ -741,14 +778,15 @@ module config {
 
           leaf-list srlg {
             // Names of SRLG groups this link is a member of. Each name
-            // references a /srlg/group entry; the name->value mapping
-            // (uint32s advertised in the IS-IS top-level Shared Risk
-            // Link Group TLVs — TLV 138 for IPv4, RFC 5307; TLV 139
-            // for IPv6, RFC 6119) is resolved against the global SRLG
-            // table at LSP-build time. Held as a plain string (not a
-            // leafref) so the per-interface config can be staged
-            // before the global /srlg/group entry is committed —
-            // matches the pattern used by segment-routing `block` and
+            // references a /router/isis/srlg/group entry; the
+            // name->value mapping (uint32s advertised in the IS-IS
+            // top-level Shared Risk Link Group TLVs — TLV 138 for
+            // IPv4, RFC 5307; TLV 139 for IPv6, RFC 6119) is resolved
+            // against the IS-IS SRLG table at LSP-build time. Held as
+            // a plain string (not a leafref) so the per-interface
+            // config can be staged before the matching
+            // /router/isis/srlg/group entry is committed — matches
+            // the pattern used by segment-routing `block` and
             // `locator` references above.
             type string;
           }
@@ -1108,48 +1146,6 @@ module config {
             "Locator-wide endpoint behavior. 'usid' selects the
              RFC 9800 NEXT-C-SID (micro-SID) format; absent means
              the classic RFC 8986 full-SID layout.";
-        }
-      }
-    }
-
-    container srlg {
-      ext:help "Shared Risk Link Group configuration";
-      description
-        "Global Shared Risk Link Group (SRLG) table shared across
-         routing protocols. Each named group binds an operator-
-         friendly identifier to the 32-bit SRLG value advertised in
-         the link-state protocols (IS-IS TE Shared Risk Link Group
-         sub-TLV, RFC 5307; OSPF-TE SRLG sub-TLV, RFC 4203).
-         Managed by the RIB — the natural owner of the global SRLG
-         namespace — and pushed to subscribing protocol modules
-         (IS-IS, OSPF) as the full table whenever it changes. Each
-         protocol resolves the per-interface SRLG name references
-         against this table when building LSAs / LSPs.";
-
-      list group {
-        key "name";
-        description
-          "Named SRLG group. The name is the handle used everywhere
-           else in config (per-interface `srlg` leaf-lists under
-           routing protocols); the value is the 32-bit identifier
-           emitted on the wire.";
-        leaf name {
-          type string;
-          description
-            "Operator-assigned SRLG group identifier.";
-        }
-        leaf value {
-          type uint32;
-          mandatory true;
-          description
-            "32-bit SRLG value advertised in IS-IS / OSPF TE
-             extensions (IS-IS TLVs 138/139 per RFC 5307 / RFC 6119;
-             OSPF-TE SRLG sub-TLV per RFC 4203). Two links share fate
-             (are in the same shared risk group) iff they carry a
-             common value here. The numeric space is operator-defined;
-             uniqueness is not enforced — different group names may
-             intentionally share a value (e.g. as aliases) or
-             accidentally collide.";
         }
       }
     }

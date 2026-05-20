@@ -1,20 +1,18 @@
-//! Shared Risk Link Group (SRLG) configuration. Per-protocol modules
-//! (IS-IS, OSPF) read this table by name from their per-interface
-//! `srlg` leaf-list and emit the resolved 32-bit value in their TE
-//! extensions (IS-IS top-level TLV 138 for IPv4 / TLV 139 for IPv6,
-//! RFC 5307 / RFC 6119; OSPF-TE SRLG sub-TLV, RFC 4203).
+//! IS-IS Shared Risk Link Group (SRLG) configuration. Each named
+//! group binds an operator-friendly identifier to the 32-bit SRLG
+//! value advertised in the IS-IS top-level Shared Risk Link Group
+//! TLVs (TLV 138 for IPv4, RFC 5307; TLV 139 for IPv6, RFC 6119).
+//! `lsp_generate` resolves the per-interface `srlg` leaf-list names
+//! against the applied snapshot kept in `Isis::srlg_groups`.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{Args, ConfigOp};
-use crate::rib::Message;
 
-/// Applied snapshot of a named SRLG group, exported via the RIB's
-/// `srlg_groups` table. `value` is the 32-bit identifier advertised on
-/// the wire.
+/// Applied snapshot of a named SRLG group, kept in `Isis::srlg_groups`.
+/// `value` is the 32-bit identifier advertised on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrlgGroup {
     pub name: String,
@@ -33,8 +31,8 @@ pub struct SrlgGroup {
 ///
 /// `value` is `Option<u32>` because the leaf can be set/cleared
 /// independently during a commit cycle. The applied snapshot only
-/// reaches `Rib::srlg_groups` once a value is present — a group with
-/// no value is dropped from the table.
+/// includes groups whose value is present — a group with no value is
+/// dropped on commit.
 #[derive(Debug, Default, Clone)]
 pub struct SrlgGroupConfig {
     pub delete: bool,
@@ -71,11 +69,11 @@ impl SrlgGroupBuilder {
         func(&mut self.config, &mut self.cache, &name, &mut args)
     }
 
-    /// Fold the staging `cache` into `config`, then push a single full
-    /// snapshot via `Message::SrlgUpdate`. The full-snapshot push
-    /// matches the design contract: subscribers always receive the
-    /// entire SRLG table on every change, not deltas.
-    pub fn commit(&mut self, tx: UnboundedSender<Message>) {
+    /// Fold the staging `cache` into `config`, then return the full
+    /// SRLG group snapshot when any change actually landed (or `None`
+    /// when nothing changed). The caller installs the snapshot into
+    /// `Isis::srlg_groups` and re-originates LSPs if needed.
+    pub fn commit(&mut self) -> Option<BTreeMap<String, SrlgGroup>> {
         let mut changed = false;
         while let Some((name, config)) = self.cache.pop_first() {
             changed = true;
@@ -86,7 +84,7 @@ impl SrlgGroupBuilder {
             }
         }
         if !changed {
-            return;
+            return None;
         }
         let groups: BTreeMap<String, SrlgGroup> = self
             .config
@@ -103,7 +101,7 @@ impl SrlgGroupBuilder {
                 })
             })
             .collect();
-        let _ = tx.send(Message::SrlgUpdate { groups });
+        Some(groups)
     }
 }
 
@@ -194,7 +192,7 @@ impl ConfigBuilder {
     }
 
     pub fn path(mut self, path: &str) -> Self {
-        let prefix = "/srlg/group";
+        let prefix = "/router/isis/srlg/group";
         self.path = format!("{prefix}{path}");
         self
     }
@@ -238,26 +236,18 @@ mod tests {
             },
         );
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        b.commit(tx);
-
-        match rx.try_recv().expect("SrlgUpdate emitted") {
-            Message::SrlgUpdate { groups } => {
-                assert!(groups.contains_key("real"));
-                assert!(!groups.contains_key("ghost"));
-                assert_eq!(groups["real"].value, 42);
-            }
-            _ => panic!("expected SrlgUpdate"),
-        }
+        let groups = b.commit().expect("snapshot emitted");
+        assert!(groups.contains_key("real"));
+        assert!(!groups.contains_key("ghost"));
+        assert_eq!(groups["real"].value, 42);
     }
 
     #[test]
-    fn no_message_when_nothing_changed() {
-        // commit() with empty cache should be a no-op — protocols
-        // shouldn't see a spurious push when an unrelated commit fires.
+    fn no_snapshot_when_nothing_changed() {
+        // commit() with empty cache should be a no-op — IS-IS
+        // shouldn't see a spurious snapshot when an unrelated commit
+        // fires.
         let mut b = SrlgGroupBuilder::new();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        b.commit(tx);
-        assert!(rx.try_recv().is_err());
+        assert!(b.commit().is_none());
     }
 }

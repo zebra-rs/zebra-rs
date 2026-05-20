@@ -8,32 +8,31 @@ upstream computations (TI-LFA, RSVP-TE path placement, controller-driven
 path computation) can use that information to choose paths that don't
 fate-share with the protected primary.
 
-zebra-rs models SRLG as a small global table managed by the RIB and
-consumed by IS-IS (and OSPF, in a follow-up) per-interface.
+zebra-rs models SRLG as a small per-protocol table owned by the
+IS-IS instance and consumed per-interface.
 
 ## Configuration
 
-SRLG configuration has two parts:
+SRLG configuration has two parts, both under `router isis`:
 
-- A **global** `srlg` table mapping operator-friendly names to the
+- An IS-IS-owned `srlg` table mapping operator-friendly names to the
   32-bit value carried on the wire.
-- A **per-interface** `srlg` leaf-list under each routing protocol's
-  interface block, naming the groups the link belongs to.
+- A per-interface `srlg` leaf-list under each IS-IS interface, naming
+  the groups the link belongs to.
 
 ```text
-srlg {
-  group transit-fiber-a {
-    value 100;
-  }
-  group transit-fiber-b {
-    value 200;
-  }
-  group ducted-trunk {
-    value 300;
-  }
-}
-
 router isis {
+  srlg {
+    group transit-fiber-a {
+      value 100;
+    }
+    group transit-fiber-b {
+      value 200;
+    }
+    group ducted-trunk {
+      value 300;
+    }
+  }
   interface eth1 {
     srlg {
       transit-fiber-a;
@@ -66,8 +65,8 @@ risk group iff they carry at least one common SRLG value.
 ## Staging
 
 The per-interface `srlg` leaf-list holds plain strings, not
-`leafref`s. This is intentional: a protocol's per-interface SRLG
-configuration can be staged before the matching `/srlg/group` entry is
+`leafref`s. This is intentional: a per-interface SRLG configuration
+can be staged before the matching `/router/isis/srlg/group` entry is
 committed (and vice versa), matching the pattern already used by
 `segment-routing` `block` and `locator` references. Names that don't
 resolve at LSP-build time are silently skipped — the LSP carries
@@ -92,18 +91,11 @@ have IPv6 addresses. Values past the per-TLV cap (59 for v4 / 53 for
 v6, derived from the on-wire one-byte length) are split across
 additional TLVs of the same code.
 
-## Architecture: RIB-owned, protocol-subscribed
+## Architecture
 
-The SRLG table lives in the RIB because it's a global TE-namespace
-asset, not a per-protocol one: today only IS-IS consumes it, but OSPF
-(RFC 4203 SRLG sub-TLV) and any future TE-aware module will read the
-same source of truth.
-
-Routing protocols subscribe to the SRLG table at startup via a
-single-channel registration. On subscribe, the RIB immediately pushes
-the current snapshot — there's no "missed first update" race for
-late-starting protocols. After that, every commit that touches any
-`/srlg/group` entry pushes the **full** updated table (not deltas) to
-all subscribers; the subscriber replaces its local cache wholesale and
-re-originates its LSP/LSA so the new name→value mapping reaches peers
-without waiting for the refresh timer.
+The SRLG table lives inside the IS-IS instance and is staged through
+the same libyang commit cycle as the rest of `router isis`. Updates
+to any `/router/isis/srlg/group/*` leaf are absorbed by an in-memory
+builder and applied at `CommitEnd`; if the applied snapshot actually
+moved, both LSP levels are re-originated so the new name→value
+mapping reaches peers without waiting for the refresh timer.
