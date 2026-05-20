@@ -5,11 +5,12 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_isis(config: &ConfigManager) {
-    // Capture BFD's client handle (if BFD is already spawned) so per-
-    // interface `bfd { enable }` can later submit Subscribe /
-    // Unsubscribe. If `bfd { ... }` is configured *after* IS-IS, the
-    // handle stays None and the BFD attach is a no-op — late-binding
-    // refresh is a follow-up.
+    // Capture BFD's client handle so per-interface `bfd { enable }`
+    // can later submit Subscribe / Unsubscribe. `commit_config`
+    // guarantees BFD is already spawned when this commit will also
+    // set `bfd { … }`, even if `router isis` came first in the diff
+    // (the IS-IS arm there pre-spawns BFD on the will-set flag).
+    // Callers that bypass `commit_config` may still see `None`.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("isis");
     let ctx = ProtoContext::default_table(rib_client);

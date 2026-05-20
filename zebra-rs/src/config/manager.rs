@@ -288,6 +288,27 @@ impl ConfigManager {
                 nd = true;
             }
         }
+        // Pre-scan the diff so we know whether this commit will
+        // introduce a `bfd { … }` block *before* we process lines in
+        // order. Needed because BGP / IS-IS capture `bfd_client_tx`
+        // by value at spawn time; if the operator wrote `router bgp`
+        // (or `router isis`) above `bfd` in the same commit, the
+        // naive line-order spawn would hand them a `None` BFD handle.
+        let mut will_set_bfd = false;
+        for line in diff.lines() {
+            let Some(first_char) = line.chars().next() else {
+                continue;
+            };
+            if first_char != '+' {
+                continue;
+            }
+            let line = remove_first_char(line);
+            if line.starts_with("bfd") {
+                will_set_bfd = true;
+                break;
+            }
+        }
+
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
             let op = match first_char {
@@ -306,18 +327,29 @@ impl ConfigManager {
             }
             if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
                 isis = true;
+                // Spawn BFD first if this commit will set BFD too —
+                // `spawn_isis` captures `bfd_client_tx` by value, so
+                // IS-IS gets no handle if `bfd { … }` lands later in
+                // the same commit.
+                if !bfd && will_set_bfd {
+                    bfd = true;
+                    spawn_bfd(self);
+                }
                 spawn_isis(self);
             }
             if !bgp && op == ConfigOp::Set && line.starts_with("router bgp") {
                 bgp = true;
-                // Spawn ND first if it hasn't started yet — `spawn_bgp`
-                // captures `nd_client_tx` by value, so BGP unnumbered
-                // gets no handle if ND lands afterwards. The reverse
-                // order (RA config before `router bgp`) already works
-                // via the per-line trigger below.
+                // `spawn_bgp` captures `bfd_client_tx` *and*
+                // `nd_client_tx` by value. ND is always eager (BGP
+                // unnumbered may want it regardless of explicit RA
+                // config). BFD only if this commit will set it.
                 if !nd {
                     nd = true;
                     spawn_nd(self);
+                }
+                if !bfd && will_set_bfd {
+                    bfd = true;
+                    spawn_bfd(self);
                 }
                 spawn_bgp(self);
             }
