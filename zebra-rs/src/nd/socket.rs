@@ -8,12 +8,16 @@
 //!     same check on inbound packets.
 //!   * `IPV6_RECVPKTINFO` on so the receive side learns the
 //!     destination address and arriving ifindex.
-//!   * `IPV6_CHECKSUM` set to the 2-byte offset of the ICMPv6
-//!     checksum field, letting the kernel compute and write it for us
-//!     — saves the userland round-trip.
 //!   * `ICMP6_FILTER` scoped to RS (133) + RA (134) so neighbor
 //!     solicitation / advertisement (135 / 136) and the kernel's NDP
 //!     cache are left alone.
+//!
+//! Note: there is no `IPV6_CHECKSUM` setsockopt here on purpose. Linux
+//! returns `EINVAL` for `IPV6_CHECKSUM` on raw `IPPROTO_ICMPV6`
+//! sockets (see `net/ipv6/raw.c::do_rawv6_setsockopt`) because
+//! RFC 3542 §3.1 reserves checksum handling on ICMPv6 sockets to the
+//! kernel — and the kernel always computes it for us. Setting the
+//! offset is therefore a no-op at best and a hard failure on Linux.
 //!
 //! Errors from each setsockopt are surfaced via the [`SocketError`]
 //! enum so callers can distinguish "no CAP_NET_RAW" from a knob the
@@ -47,8 +51,6 @@ pub enum SocketError {
     RecvHopLimit(io::Error),
     #[error("set IPV6_RECVPKTINFO failed: {0}")]
     RecvPktInfo(io::Error),
-    #[error("set IPV6_CHECKSUM failed: {0}")]
-    Checksum(io::Error),
     #[error("set ICMP6_FILTER failed: {0}")]
     Filter(io::Error),
     #[error("wrap socket in AsyncFd failed: {0}")]
@@ -69,9 +71,9 @@ pub fn nd_socket() -> Result<AsyncFd<Socket>, SocketError> {
     set_unicast_hops_255(&socket).map_err(SocketError::UnicastHops)?;
     set_recv_hop_limit(&socket).map_err(SocketError::RecvHopLimit)?;
     set_recv_pkt_info(&socket).map_err(SocketError::RecvPktInfo)?;
-    // Kernel-computed checksum: the field is at byte offset 2 of any
-    // ICMPv6 message.
-    set_checksum_offset(&socket, 2).map_err(SocketError::Checksum)?;
+    // Note: no `IPV6_CHECKSUM` here — Linux returns EINVAL for that
+    // option on raw ICMPv6 sockets; the kernel does the checksum for
+    // us. See module-level docs.
     let filter = Icmp6Filter::pass_only(&[133, 134]);
     apply_icmp6_filter(&socket, &filter).map_err(SocketError::Filter)?;
 
@@ -117,22 +119,6 @@ fn set_recv_hop_limit(s: &Socket) -> io::Result<()> {
 fn set_recv_pkt_info(s: &Socket) -> io::Result<()> {
     let v: c_int = 1;
     unsafe { setsockopt_int(s.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO, v) }
-}
-
-fn set_checksum_offset(s: &Socket, offset: c_int) -> io::Result<()> {
-    // `IPV6_CHECKSUM` lives at the `IPPROTO_IPV6` level (RFC 3542 §3.1),
-    // not at `IPPROTO_ICMPV6`. Passing the ICMPv6 level here caused
-    // Linux to return `ENOPROTOOPT` ("Protocol not available"), which
-    // surfaced as the `nd: not started (set IPV6_CHECKSUM failed: …)`
-    // warn at every BGP / RA-related commit.
-    unsafe {
-        setsockopt_int(
-            s.as_raw_fd(),
-            libc::IPPROTO_IPV6,
-            libc::IPV6_CHECKSUM,
-            offset,
-        )
-    }
 }
 
 fn apply_icmp6_filter(s: &Socket, filter: &Icmp6Filter) -> io::Result<()> {
