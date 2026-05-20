@@ -8,8 +8,10 @@ pub struct IsisCodeLen {
 
 pub mod cap;
 pub use cap::{
+    ExtAdminGroup, FadSubCode, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg,
+    IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef,
     IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
-    IsisSubSegmentRoutingLB, IsisSubSrv6, IsisTlvRouterCap, SegmentRoutingCapFlags,
+    IsisSubSegmentRoutingLB, IsisSubSrv6, IsisSubTlv, IsisTlvRouterCap, SegmentRoutingCapFlags,
 };
 pub use packet_utils::SidLabelTlv;
 pub mod cap_code;

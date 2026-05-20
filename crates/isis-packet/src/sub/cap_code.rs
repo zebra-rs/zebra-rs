@@ -11,6 +11,7 @@ pub enum IsisCapCode {
     SegmentRoutingLb = 22,
     NodeMaxSidDepth = 23,
     Srv6 = 25,
+    FlexAlgoDef = 26,
     Unknown(u8),
 }
 
@@ -23,6 +24,7 @@ impl From<IsisCapCode> for u8 {
             SegmentRoutingLb => 22,
             NodeMaxSidDepth => 23,
             Srv6 => 25,
+            FlexAlgoDef => 26,
             Unknown(v) => v,
         }
     }
@@ -37,6 +39,7 @@ impl From<u8> for IsisCapCode {
             22 => SegmentRoutingLb,
             23 => NodeMaxSidDepth,
             25 => Srv6,
+            26 => FlexAlgoDef,
             v => Unknown(v),
         }
     }

@@ -675,6 +675,18 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         }
 
+        // Flex-Algorithm Definitions (RFC 9350 §5.1). One sub-TLV per
+        // entry the operator marked `advertise-definition true`;
+        // entries without the flag stay purely local (the router
+        // computes for them using a FAD learned from another node).
+        // Per-algo SR Algorithm sub-TLV participation extension and
+        // per-link ASLA admin-group emit land in follow-up PRs.
+        for fad in
+            super::flex_algo::build_fad_subs(top.flex_algo, top.affinity_map, top.srlg_groups)
+        {
+            cap.subs.push(fad.into());
+        }
+
         anchors.push(cap.into());
     }
 

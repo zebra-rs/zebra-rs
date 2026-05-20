@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::cap::{IsisSubSrv6, IsisSubTlv, RouterCapFlags};
+use super::cap::{FadSubTlv, IsisSubFlexAlgoDef, IsisSubSrv6, IsisSubTlv, RouterCapFlags};
 use super::{
     IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
     IsisSubSegmentRoutingLB, IsisTlvRouterCap, SegmentRoutingCapFlags,
@@ -35,7 +35,50 @@ impl Display for IsisSubTlv {
             SegmentRoutingLB(v) => write!(f, "{}", v),
             NodeMaxSidDepth(v) => write!(f, "{}", v),
             Srv6(v) => write!(f, "{}", v),
+            FlexAlgoDef(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "   Unknown Code: {} Len: {}", v.code, v.len),
+        }
+    }
+}
+
+impl Display for IsisSubFlexAlgoDef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "   Flex-Algorithm Definition: Algo {}, Metric-Type {}, Calc-Type {}, Priority {}",
+            self.flex_algorithm, self.metric_type, self.calc_type, self.priority
+        )?;
+        for sub in &self.subs {
+            write!(f, "\n{}", sub)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for FadSubTlv {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        use FadSubTlv::*;
+        match self {
+            ExcludeAg(v) => write!(
+                f,
+                "     FAD Exclude Admin-Group ({} words)",
+                v.group.words.len()
+            ),
+            IncludeAnyAg(v) => write!(
+                f,
+                "     FAD Include-Any Admin-Group ({} words)",
+                v.group.words.len()
+            ),
+            IncludeAllAg(v) => write!(
+                f,
+                "     FAD Include-All Admin-Group ({} words)",
+                v.group.words.len()
+            ),
+            Flags(v) => write!(f, "     FAD Flags M:{}", v.m_flag as u8),
+            ExcludeSrlg(v) => {
+                write!(f, "     FAD Exclude SRLG: {} ids", v.srlgs.len())
+            }
+            Unknown(v) => write!(f, "     FAD Unknown Code: {} Len: {}", v.code, v.len),
         }
     }
 }

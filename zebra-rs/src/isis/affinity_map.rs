@@ -168,6 +168,16 @@ macro_rules! affinity_cb {
         fn $name(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
             isis.affinity_map.exec($path.to_string(), args, op).ok()?;
             isis.affinity_map.commit();
+            // Affinity-name → bit changes feed straight into the
+            // Extended Admin Group bitmaps inside originated FADs;
+            // re-originate both levels so peers see the new bits
+            // without waiting for the refresh timer.
+            let _ = isis
+                .tx
+                .send(super::Message::LspOriginate(super::Level::L1, None));
+            let _ = isis
+                .tx
+                .send(super::Message::LspOriginate(super::Level::L2, None));
             Some(())
         }
     };

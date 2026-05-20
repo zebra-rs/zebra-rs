@@ -263,6 +263,17 @@ pub struct IsisTop<'a> {
     /// names through this map when emitting TLVs 138 / 139.
     pub srlg_groups: &'a BTreeMap<String, SrlgGroup>,
 
+    /// Read-only access to the Flex-Algorithm definition store. The
+    /// LSP emitter walks the entries with `advertise_definition=true`
+    /// and emits one FAD sub-TLV (RFC 9350 §5.1) per entry inside
+    /// Router Capability TLV 242.
+    pub flex_algo: &'a super::flex_algo::FlexAlgoConfig,
+
+    /// Read-only access to the affinity-map. Used to resolve admin-
+    /// group names referenced by FAD constraint sub-TLVs into the
+    /// 256-bit Extended Admin Group bitmap (RFC 7308).
+    pub affinity_map: &'a super::affinity_map::AffinityMap,
+
     /// Seq-wrap wait timers (see `Isis::lsp_seq_wrap_wait`). Threaded
     /// through so `lsp_generate` can short-circuit per fragment and
     /// arm the timer without round-tripping through the event loop.
@@ -1091,6 +1102,8 @@ impl Isis {
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
             srlg_groups: &self.srlg_groups,
+            flex_algo: &self.flex_algo,
+            affinity_map: &self.affinity_map,
             lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
             lsp_placement_memory: &mut self.lsp_placement_memory,
             redist_v4: &self.redist_v4,
