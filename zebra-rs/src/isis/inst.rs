@@ -177,6 +177,16 @@ pub struct Isis {
     /// is low.
     pub lsp_placement_memory: Levels<BTreeMap<TlvKey, u8>>,
 
+    /// Redistribute snapshot — routes the RIB delivered via
+    /// `RouteAdd`/`RouteDel` for our `RedistAdd` subscriptions.
+    /// Keyed by `(RibType, prefix)` so different source protocols
+    /// advertising the same prefix stay distinct (each row carries
+    /// its own policy / metric override at LSP-emit time).
+    /// Populated by `process_rib_msg`; consumed by the LSP emitter
+    /// in a follow-up (step 5).
+    pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
+    pub redist_v6: BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
+
     /// SRLG-update return channel from the RIB. Carries the full
     /// SRLG table snapshot on subscribe and after every commit that
     /// changes any group.
@@ -340,6 +350,8 @@ impl Isis {
             elib: super::srv6::ElibPool::new(),
             lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
             lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
+            redist_v4: BTreeMap::new(),
+            redist_v6: BTreeMap::new(),
             srlg_rx,
             srlg_groups: BTreeMap::new(),
             bfd_client_tx,
@@ -413,8 +425,49 @@ impl Isis {
             RibRx::RouterIdUpdate(router_id) => {
                 self.rib_router_id_update(router_id);
             }
+            // Redistribute deliveries from RIB — initial walk (chunks
+            // ending in `bulk: Eor`) plus steady-state deltas
+            // (single-entry `bulk: More`). Stored in `redist_v{4,6}`
+            // keyed by `(rtype, prefix)`; consumed at LSP-emit time
+            // in a follow-up.
+            RibRx::RouteAdd { rtype, routes, .. } => {
+                self.route_redist_add(rtype, routes);
+            }
+            RibRx::RouteDel { rtype, routes, .. } => {
+                self.route_redist_del(rtype, routes);
+            }
             _ => {
                 //
+            }
+        }
+    }
+
+    fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        match batch {
+            crate::rib::RouteBatch::V4(entries) => {
+                for e in entries {
+                    self.redist_v4.insert((rtype, e.prefix), e);
+                }
+            }
+            crate::rib::RouteBatch::V6(entries) => {
+                for e in entries {
+                    self.redist_v6.insert((rtype, e.prefix), e);
+                }
+            }
+        }
+    }
+
+    fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        match batch {
+            crate::rib::RouteBatch::V4(entries) => {
+                for e in entries {
+                    self.redist_v4.remove(&(rtype, e.prefix));
+                }
+            }
+            crate::rib::RouteBatch::V6(entries) => {
+                for e in entries {
+                    self.redist_v6.remove(&(rtype, e.prefix));
+                }
             }
         }
     }
