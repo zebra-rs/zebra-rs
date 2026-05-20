@@ -134,6 +134,12 @@ pub struct LinkTop<'a> {
         &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::collections::BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
     pub srv6_end_map: &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::net::Ipv6Addr>>,
+    pub peer_fad: &'a mut Levels<
+        std::collections::BTreeMap<
+            IsisSysId,
+            std::collections::BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>,
+        >,
+    >,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<super::throttle::Throttle>,
 

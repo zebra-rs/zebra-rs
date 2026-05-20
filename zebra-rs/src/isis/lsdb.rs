@@ -123,10 +123,8 @@ pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
             cap::IsisSubTlv::Srv6(srv6) => {
                 view.srv6 = Some(srv6);
             }
-            cap::IsisSubTlv::FlexAlgoDef(_) => {
-                // FAD consumers (peer FAD store, SPF gating) land in
-                // a follow-up PR; for now we round-trip the sub-TLV
-                // but don't surface it through the cap view.
+            cap::IsisSubTlv::FlexAlgoDef(fad) => {
+                view.fads.push(fad);
             }
             cap::IsisSubTlv::Unknown(_) => {
                 // Simpply ignore unknown sub tlv.
@@ -143,6 +141,10 @@ pub struct LspCapView<'a> {
     pub lb: Option<&'a IsisSubSegmentRoutingLB>,
     pub sid_depth: Option<&'a IsisSubNodeMaxSidDepth>,
     pub srv6: Option<&'a IsisSubSrv6>,
+    /// Flex-Algorithm Definitions (RFC 9350 §5.1) advertised by this
+    /// peer. One entry per FAD sub-TLV; multiple FADs for distinct
+    /// algorithms are allowed in a single Router Capability TLV.
+    pub fads: Vec<&'a IsisSubFlexAlgoDef>,
 }
 
 /// References to every per-sys-id map that depends on TLV content
@@ -157,6 +159,12 @@ pub(super) struct SysStateRefs<'a> {
     pub mt_membership: &'a mut BTreeMap<IsisSysId, BTreeSet<MtId>>,
     pub mt2_reach_v6: &'a mut ReachMapV6,
     pub srv6_end_map: &'a mut BTreeMap<IsisSysId, Ipv6Addr>,
+    /// Per-peer Flex-Algorithm Definition store. Outer key is peer
+    /// sys-id, inner key is the FAD's `flex_algorithm` field
+    /// (128..=255). RFC 9350 §5.1 places FADs inside Router
+    /// Capability TLV 242, which is a fragment-0-only TLV, so the
+    /// rebuild only inspects fragment 0 for FAD content.
+    pub peer_fad: &'a mut BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>>,
 }
 
 /// Recompute the per-sys-id consumer maps from the union of every
@@ -213,6 +221,7 @@ pub(super) fn rebuild_sys_state(
         s.mt_membership.remove(sys_id);
         s.mt2_reach_v6.remove(sys_id);
         s.srv6_end_map.remove(sys_id);
+        s.peer_fad.remove(sys_id);
         return;
     }
 
@@ -279,6 +288,24 @@ pub(super) fn rebuild_sys_state(
         s.mt_membership.remove(sys_id);
     } else {
         s.mt_membership.insert(*sys_id, mt_set);
+    }
+
+    // Flex-Algorithm Definitions (RFC 9350 §5.1). Live inside Router
+    // Capability TLV 242, which is fragment-0-only — so the existing
+    // `frag0_cap` lookup above is the right source. Multiple FADs
+    // for distinct algorithms can appear in a single Router
+    // Capability; if a peer (incorrectly) emits two FADs for the
+    // same algo, last-wins via BTreeMap::insert.
+    let mut fad_map: BTreeMap<u8, IsisSubFlexAlgoDef> = BTreeMap::new();
+    if let Some(cap_tlv) = frag0_cap {
+        for fad in lsp_cap_view(cap_tlv).fads {
+            fad_map.insert(fad.flex_algorithm, fad.clone());
+        }
+    }
+    if fad_map.is_empty() {
+        s.peer_fad.remove(sys_id);
+    } else {
+        s.peer_fad.insert(*sys_id, fad_map);
     }
 
     // --- Distributable (union across fragments) ---------------------
@@ -411,6 +438,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
                 mt_membership: top.mt_membership.get_mut(&level),
                 mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
                 srv6_end_map: top.srv6_end_map.get_mut(&level),
+                peer_fad: top.peer_fad.get_mut(&level),
             },
         );
     }
@@ -495,6 +523,7 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
             mt_membership: top.mt_membership.get_mut(&level),
             mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
             srv6_end_map: top.srv6_end_map.get_mut(&level),
+            peer_fad: top.peer_fad.get_mut(&level),
         },
     );
 }
@@ -594,6 +623,7 @@ mod tests {
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
         let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -607,6 +637,7 @@ mod tests {
                 mt_membership: &mut mt_membership,
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
             },
         );
 
@@ -634,6 +665,7 @@ mod tests {
                 mt_membership: &mut mt_membership,
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
             },
         );
         assert!(
@@ -658,6 +690,7 @@ mod tests {
                 mt_membership: &mut mt_membership,
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
             },
         );
         assert!(reach_v4.get(&peer).is_none());
@@ -690,6 +723,7 @@ mod tests {
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
         let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -703,11 +737,103 @@ mod tests {
                 mt_membership: &mut mt_membership,
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
             },
         );
 
         let (host, originate) = hostname.get(&me).expect("self entry must survive");
         assert_eq!(host, "real");
         assert!(originate, "originate flag must not be cleared by rebuild");
+    }
+
+    /// A peer LSP fragment 0 carrying a Router Capability TLV with
+    /// two FADs must populate `peer_fad[sys_id]` with one entry per
+    /// FAD, keyed by the algorithm id. Dropping the fragment must
+    /// clear the entry. Mirrors the hostname / SR capability rebuild
+    /// pattern.
+    #[test]
+    fn rebuild_populates_and_clears_peer_fad() {
+        let mut lsdb = Lsdb::default();
+        let peer = sys(42);
+
+        let fad_128 = IsisSubFlexAlgoDef {
+            flex_algorithm: 128,
+            metric_type: 1, // min-unidir-link-delay
+            calc_type: 0,
+            priority: 200,
+            subs: vec![],
+        };
+        let fad_129 = IsisSubFlexAlgoDef {
+            flex_algorithm: 129,
+            metric_type: 0,
+            calc_type: 0,
+            priority: 128,
+            subs: vec![],
+        };
+        let cap = IsisTlvRouterCap {
+            router_id: Ipv4Addr::new(2, 2, 2, 2),
+            flags: 0u8.into(),
+            subs: vec![
+                cap::IsisSubTlv::FlexAlgoDef(fad_128.clone()),
+                cap::IsisSubTlv::FlexAlgoDef(fad_129.clone()),
+            ],
+        };
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(IsisTlv::RouterCap(cap));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+
+        let mut hostname = Hostname::default();
+        let mut label_map = IsisLabelMap::default();
+        let mut reach_v4 = ReachMap::default();
+        let mut reach_v6 = ReachMapV6::default();
+        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
+        let mut mt2_reach_v6 = ReachMapV6::default();
+        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+            },
+        );
+
+        let entries = peer_fad
+            .get(&peer)
+            .expect("FADs must populate after fragment 0 ingest");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.get(&128), Some(&fad_128));
+        assert_eq!(entries.get(&129), Some(&fad_129));
+
+        // Drop fragment 0 — peer_fad must clear the peer entry.
+        lsdb.map.remove(&IsisLspId::new(peer, 0, 0));
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+            },
+        );
+        assert!(
+            !peer_fad.contains_key(&peer),
+            "FADs must clear when the fragment 0 / Router Capability TLV disappears"
+        );
     }
 }
