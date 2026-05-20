@@ -67,6 +67,11 @@ pub struct Isis {
     /// pending-cache → commit pipeline mirroring the static-route
     /// config builder in rib/static/config.rs.
     pub flex_algo: super::flex_algo::FlexAlgoConfig,
+    /// Affinity (admin-group) name table local to this IS-IS instance,
+    /// from /router/isis/affinity-map. Resolves the per-link `affinity`
+    /// leaf-list names into 256-bit Extended Admin Group bit positions
+    /// (RFC 7308) at LSP-build time.
+    pub affinity_map: super::affinity_map::AffinityMap,
     pub tracing: IsisTracing,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
@@ -311,6 +316,7 @@ impl Isis {
             show_cb: HashMap::new(),
             config: IsisConfig::default(),
             flex_algo: super::flex_algo::FlexAlgoConfig::new(),
+            affinity_map: super::affinity_map::AffinityMap::new(),
             tracing: IsisTracing::default(),
             lsdb: Levels::<Lsdb>::default(),
             lsp_map: Levels::<LspMap>::default(),
