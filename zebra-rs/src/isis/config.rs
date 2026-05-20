@@ -788,6 +788,95 @@ fn notify_lsp_reorigination(isis: &Isis) {
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
 }
 
+/// Translate the YANG-side `IsisRedistAfi` into the wire-side
+/// `rib::RedistAfi`. Two enums with identical variants — separate
+/// types because the YANG one is config-tree-local while the wire
+/// one lives in the rib crate.
+fn wire_afi(afi: IsisRedistAfi) -> crate::rib::RedistAfi {
+    match afi {
+        IsisRedistAfi::Ipv4 => crate::rib::RedistAfi::Ipv4,
+        IsisRedistAfi::Ipv6 => crate::rib::RedistAfi::Ipv6,
+    }
+}
+
+/// Map the YANG redistribute source to the RIB-side rtype identifier
+/// for the filter on RedistAdd / RedistUpdate.
+fn wire_rtype(src: IsisRedistSource) -> crate::rib::RibType {
+    match src {
+        IsisRedistSource::Connected => crate::rib::RibType::Connected,
+        IsisRedistSource::Static => crate::rib::RibType::Static,
+        IsisRedistSource::Bgp => crate::rib::RibType::Bgp,
+        IsisRedistSource::Ospf => crate::rib::RibType::Ospf,
+    }
+}
+
+/// Compute the wire-level subtype filter from the IS-IS `IsisRedistribute`
+/// entry. OSPF source carries an `ospf_match` set with the coarse-grained
+/// `{internal, external, nssa-external}` flags from the YANG; expand each
+/// to the matching `RibSubType` variants. Non-OSPF sources have no
+/// subtype dimension, so always wildcard (empty).
+fn wire_subtypes(
+    src: IsisRedistSource,
+    entry: &IsisRedistribute,
+) -> std::collections::BTreeSet<crate::rib::RibSubType> {
+    use crate::rib::RibSubType;
+    let mut out = std::collections::BTreeSet::new();
+    if src != IsisRedistSource::Ospf || entry.ospf_match.is_empty() {
+        return out; // wildcard
+    }
+    for m in &entry.ospf_match {
+        match m {
+            // OSPF "internal" = intra-area + inter-area routes
+            // (the non-external bucket the RIB sees).
+            IsisRedistOspfMatch::Internal => {
+                out.insert(RibSubType::Default);
+                out.insert(RibSubType::OspfIa);
+            }
+            IsisRedistOspfMatch::External => {
+                out.insert(RibSubType::OspfExternal1);
+                out.insert(RibSubType::OspfExternal2);
+            }
+            IsisRedistOspfMatch::NssaExternal => {
+                out.insert(RibSubType::OspfNssa1);
+                out.insert(RibSubType::OspfNssa2);
+            }
+        }
+    }
+    out
+}
+
+/// Send the RIB the appropriate Redist message for the current state
+/// of `(afi, src)`:
+///   - presence container removed (no entry) → RedistDel
+///   - entry present, first time the filter shows up → caller passes
+///     `first_time = true` and we send RedistAdd
+///   - entry present, subsequent subtype change → RedistUpdate
+fn send_redist(isis: &Isis, afi: IsisRedistAfi, src: IsisRedistSource, first_time: bool) {
+    let wire_afi = wire_afi(afi);
+    let rtype = wire_rtype(src);
+    let proto = "isis".to_string();
+    let msg = match isis.config.redistribute.get(&(afi, src)) {
+        None => crate::rib::Message::RedistDel {
+            proto,
+            afi: wire_afi,
+            rtype,
+        },
+        Some(entry) if first_time => crate::rib::Message::RedistAdd {
+            proto,
+            afi: wire_afi,
+            rtype,
+            subtypes: wire_subtypes(src, entry),
+        },
+        Some(entry) => crate::rib::Message::RedistUpdate {
+            proto,
+            afi: wire_afi,
+            rtype,
+            subtypes: wire_subtypes(src, entry),
+        },
+    };
+    let _ = isis.rib_tx.send(msg);
+}
+
 fn redist_set_presence(
     isis: &mut Isis,
     mut args: Args,
@@ -795,22 +884,29 @@ fn redist_set_presence(
     src: IsisRedistSource,
 ) -> Option<()> {
     let afi = parse_redist_afi(&args.string()?)?;
+    let first_time = !isis.config.redistribute.contains_key(&(afi, src));
     if op.is_set() {
         isis.config.redistribute.entry((afi, src)).or_default();
     } else {
         isis.config.redistribute.remove(&(afi, src));
     }
+    send_redist(isis, afi, src, first_time && op.is_set());
     notify_lsp_reorigination(isis);
     Some(())
 }
 
 /// Mutate a single field on the (AFI, source) entry. The leaf's value
 /// is read inside the closure so the per-leaf callbacks stay one-liners.
+/// `subtype_relevant = true` means the mutation may have changed the
+/// wire-level subtype set (only the `ospf_match` callback today),
+/// triggering a RedistUpdate to RIB; other modifier leaves stay
+/// consumer-side and don't need to flip the RIB filter.
 fn redist_with<F>(
     isis: &mut Isis,
     mut args: Args,
     op: ConfigOp,
     src: IsisRedistSource,
+    subtype_relevant: bool,
     f: F,
 ) -> Option<()>
 where
@@ -819,6 +915,9 @@ where
     let afi = parse_redist_afi(&args.string()?)?;
     let entry = isis.config.redistribute.entry((afi, src)).or_default();
     f(entry, &mut args, op)?;
+    if subtype_relevant {
+        send_redist(isis, afi, src, /* first_time = */ false);
+    }
     notify_lsp_reorigination(isis);
     Some(())
 }
@@ -879,71 +978,123 @@ fn config_redistribute_connected(isis: &mut Isis, args: Args, op: ConfigOp) -> O
     redist_set_presence(isis, args, op, IsisRedistSource::Connected)
 }
 fn config_redistribute_connected_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Connected, set_policy)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Connected,
+        false,
+        set_policy,
+    )
 }
 fn config_redistribute_connected_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Connected, set_metric)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Connected,
+        false,
+        set_metric,
+    )
 }
 fn config_redistribute_connected_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Connected, set_level)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Connected,
+        false,
+        set_level,
+    )
 }
 fn config_redistribute_connected_metric_type(
     isis: &mut Isis,
     args: Args,
     op: ConfigOp,
 ) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Connected, set_metric_type)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Connected,
+        false,
+        set_metric_type,
+    )
 }
 
 fn config_redistribute_static(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     redist_set_presence(isis, args, op, IsisRedistSource::Static)
 }
 fn config_redistribute_static_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Static, set_policy)
+    redist_with(isis, args, op, IsisRedistSource::Static, false, set_policy)
 }
 fn config_redistribute_static_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Static, set_metric)
+    redist_with(isis, args, op, IsisRedistSource::Static, false, set_metric)
 }
 fn config_redistribute_static_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Static, set_level)
+    redist_with(isis, args, op, IsisRedistSource::Static, false, set_level)
 }
 fn config_redistribute_static_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Static, set_metric_type)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Static,
+        false,
+        set_metric_type,
+    )
 }
 
 fn config_redistribute_bgp(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     redist_set_presence(isis, args, op, IsisRedistSource::Bgp)
 }
 fn config_redistribute_bgp_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Bgp, set_policy)
+    redist_with(isis, args, op, IsisRedistSource::Bgp, false, set_policy)
 }
 fn config_redistribute_bgp_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Bgp, set_metric)
+    redist_with(isis, args, op, IsisRedistSource::Bgp, false, set_metric)
 }
 fn config_redistribute_bgp_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Bgp, set_level)
+    redist_with(isis, args, op, IsisRedistSource::Bgp, false, set_level)
 }
 fn config_redistribute_bgp_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Bgp, set_metric_type)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Bgp,
+        false,
+        set_metric_type,
+    )
 }
 
 fn config_redistribute_ospf(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     redist_set_presence(isis, args, op, IsisRedistSource::Ospf)
 }
 fn config_redistribute_ospf_policy(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Ospf, set_policy)
+    redist_with(isis, args, op, IsisRedistSource::Ospf, false, set_policy)
 }
 fn config_redistribute_ospf_metric(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Ospf, set_metric)
+    redist_with(isis, args, op, IsisRedistSource::Ospf, false, set_metric)
 }
 fn config_redistribute_ospf_level(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Ospf, set_level)
+    redist_with(isis, args, op, IsisRedistSource::Ospf, false, set_level)
 }
 fn config_redistribute_ospf_metric_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Ospf, set_metric_type)
+    redist_with(
+        isis,
+        args,
+        op,
+        IsisRedistSource::Ospf,
+        false,
+        set_metric_type,
+    )
 }
+// `match { type … }` is the one leaf whose change actually flips the
+// wire-level subtype filter — pass `subtype_relevant: true` so the
+// callback emits a `RedistUpdate` to RIB.
 fn config_redistribute_ospf_match_type(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
-    redist_with(isis, args, op, IsisRedistSource::Ospf, set_ospf_match)
+    redist_with(isis, args, op, IsisRedistSource::Ospf, true, set_ospf_match)
 }
 
 fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {

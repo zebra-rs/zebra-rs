@@ -23,10 +23,11 @@ pub mod show;
 pub mod srv6;
 
 pub mod types;
-pub use types::{BulkPhase, RedistAfi, RibSubType, RibType, RouteBatch};
-// `RouteEntryV4`, `RouteEntryV6`, and `REDIST_BATCH_MAX` are re-exported
-// once the per-protocol consumers that construct
-// `RouteBatch::V4(vec![RouteEntryV4 { … }])` land in follow-up PRs.
+pub use types::{
+    BulkPhase, RedistAfi, RibSubType, RibType, RouteBatch, RouteEntryV4, RouteEntryV6,
+};
+// `REDIST_BATCH_MAX` stays unexported — only the RIB walker constructs
+// pre-sized batches; consumers receive them already chunked.
 
 pub mod redist;
 
