@@ -1038,16 +1038,18 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         }
     }
-    // Operator-configured `network` prefixes — BGP-style. Metric 0 so
-    // receivers add only their own IS-reach metric to us, matching the
-    // SRv6-locator advertise pattern below.
+    // Operator-configured `network` prefixes — BGP-style. Default
+    // metric 10, matching the per-interface metric we advertise for
+    // local connected prefixes above (`metric: 10` in the link loop),
+    // so a `network` entry looks like an interface route in receivers'
+    // RIBs rather than a zero-cost shortcut.
     for prefix in top.config.networks_v4.iter() {
         let flags = Ipv4ControlInfo::new()
             .with_prefixlen(prefix.prefix_len() as usize)
             .with_sub_tlv(false)
             .with_distribution(false);
         ext_ip_reach.entries.push(IsisTlvExtIpReachEntry {
-            metric: 0,
+            metric: 10,
             flags,
             prefix: *prefix,
             subs: vec![],
@@ -1094,11 +1096,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         });
     }
     // Operator-configured IPv6 `network` prefixes — sibling of the
-    // IPv4 path above. Same metric-0 rationale.
+    // IPv4 path above. Same metric-10 default for the same reason.
     for prefix in top.config.networks_v6.iter() {
         let flags = Ipv6ControlInfo::new().with_sub_tlv(false);
         ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
-            metric: 0,
+            metric: 10,
             flags,
             prefix: *prefix,
             subs: Vec::new(),
