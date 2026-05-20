@@ -146,6 +146,12 @@ pub struct LinkTop<'a> {
             std::collections::BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
         >,
     >,
+    pub peer_algo_sid: &'a mut Levels<
+        std::collections::BTreeMap<
+            IsisSysId,
+            std::collections::BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>,
+        >,
+    >,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<super::throttle::Throttle>,
 

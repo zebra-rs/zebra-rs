@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv6Addr;
 use std::time::{Duration, Instant};
 
+use ipnet::Ipv4Net;
 use isis_packet::*;
 
 use crate::isis_database_trace;
@@ -174,6 +175,12 @@ pub(super) struct SysStateRefs<'a> {
     /// fragments — later fragments' entries overwrite earlier ones
     /// for the same neighbor_id.
     pub peer_link_affinity: &'a mut BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>>,
+
+    /// Per-peer per-algorithm Prefix-SIDs keyed by (algo, prefix).
+    /// Populated from Ext IP-Reach (TLV 135) sub-TLVs with
+    /// Algorithm in 128..=255 (RFC 9350 §7). Union across
+    /// fragments.
+    pub peer_algo_sid: &'a mut BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>>,
 }
 
 /// Recompute the per-sys-id consumer maps from the union of every
@@ -232,6 +239,7 @@ pub(super) fn rebuild_sys_state(
         s.srv6_end_map.remove(sys_id);
         s.peer_fad.remove(sys_id);
         s.peer_link_affinity.remove(sys_id);
+        s.peer_algo_sid.remove(sys_id);
         return;
     }
 
@@ -351,6 +359,28 @@ pub(super) fn rebuild_sys_state(
         s.peer_link_affinity.remove(sys_id);
     } else {
         s.peer_link_affinity.insert(*sys_id, link_affinity);
+    }
+
+    // Per-algorithm Prefix-SIDs from peer Ext IP-Reach (TLV 135)
+    // entries (RFC 8667 §2.1 + RFC 9350 §7). One entry per
+    // (peer, algo, prefix); for the same key across fragments,
+    // last-wins via BTreeMap::insert.
+    let mut algo_sids: BTreeMap<(u8, ipnet::Ipv4Net), SidLabelValue> = BTreeMap::new();
+    for f in &frags {
+        for tlv in &f.tlvs {
+            if let IsisTlv::ExtIpReach(t) = tlv {
+                for entry in &t.entries {
+                    for (algo, sid) in super::flex_algo::parse_per_algo_prefix_sids(entry) {
+                        algo_sids.insert((algo, entry.prefix), sid);
+                    }
+                }
+            }
+        }
+    }
+    if algo_sids.is_empty() {
+        s.peer_algo_sid.remove(sys_id);
+    } else {
+        s.peer_algo_sid.insert(*sys_id, algo_sids);
     }
 
     // --- Distributable (union across fragments) ---------------------
@@ -485,6 +515,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
                 srv6_end_map: top.srv6_end_map.get_mut(&level),
                 peer_fad: top.peer_fad.get_mut(&level),
                 peer_link_affinity: top.peer_link_affinity.get_mut(&level),
+                peer_algo_sid: top.peer_algo_sid.get_mut(&level),
             },
         );
     }
@@ -571,6 +602,7 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
             srv6_end_map: top.srv6_end_map.get_mut(&level),
             peer_fad: top.peer_fad.get_mut(&level),
             peer_link_affinity: top.peer_link_affinity.get_mut(&level),
+            peer_algo_sid: top.peer_algo_sid.get_mut(&level),
         },
     );
 }
@@ -673,6 +705,8 @@ mod tests {
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -688,6 +722,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
 
@@ -717,6 +752,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
         assert!(
@@ -743,6 +779,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
         assert!(reach_v4.get(&peer).is_none());
@@ -778,6 +815,8 @@ mod tests {
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -793,6 +832,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
 
@@ -847,6 +887,8 @@ mod tests {
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -862,6 +904,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
 
@@ -888,6 +931,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
         assert!(
@@ -957,6 +1001,8 @@ mod tests {
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -972,6 +1018,7 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
 
@@ -999,8 +1046,106 @@ mod tests {
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
             },
         );
         assert!(!peer_link_affinity.contains_key(&peer));
+    }
+
+    /// A peer Ext IP-Reach entry with mixed algo-0 + flex-algo
+    /// Prefix-SID sub-TLVs must populate
+    /// `peer_algo_sid[sys_id][(algo, prefix)]` with only the
+    /// flex-algo entries. Dropping the fragment clears the peer.
+    #[test]
+    fn rebuild_populates_and_clears_peer_algo_sid() {
+        use isis_packet::PrefixSidFlags;
+        use isis_packet::prefix::{Ipv4ControlInfo, IsisSubTlv as PrefixSubTlv};
+
+        let mut lsdb = Lsdb::default();
+        let peer = sys(11);
+        let prefix: Ipv4Net = "10.0.0.1/32".parse().unwrap();
+        let entry = IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags: Ipv4ControlInfo::new(),
+            prefix,
+            subs: vec![
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::Spf,
+                    sid: SidLabelValue::Index(1),
+                }),
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::FlexAlgo(128),
+                    sid: SidLabelValue::Index(1128),
+                }),
+            ],
+        };
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(IsisTlv::ExtIpReach(IsisTlvExtIpReach {
+            entries: vec![entry],
+        }));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+
+        let mut hostname = Hostname::default();
+        let mut label_map = IsisLabelMap::default();
+        let mut reach_v4 = ReachMap::default();
+        let mut reach_v6 = ReachMapV6::default();
+        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
+        let mut mt2_reach_v6 = ReachMapV6::default();
+        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
+            BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
+
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+                peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
+            },
+        );
+
+        let entries = peer_algo_sid
+            .get(&peer)
+            .expect("peer_algo_sid must populate");
+        // Algo-0 entry must be skipped; only flex-algo 128 cached.
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries.get(&(128, prefix)),
+            Some(&SidLabelValue::Index(1128))
+        );
+
+        lsdb.map.remove(&IsisLspId::new(peer, 0, 0));
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+                peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
+            },
+        );
+        assert!(!peer_algo_sid.contains_key(&peer));
     }
 }

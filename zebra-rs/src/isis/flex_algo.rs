@@ -120,6 +120,24 @@ impl FlexAlgoConfig {
     }
 }
 
+/// Extract per-algorithm Prefix-SIDs from a peer-advertised Ext IP-
+/// Reach entry. Yields one (algo, sid) pair for each Prefix-SID
+/// sub-TLV (RFC 8667 §2.1) whose Algorithm field is in the
+/// flex-algo range (128..=255); algo-0 / algo-1 / unknown algos
+/// are skipped. Mirrors the producer-side `build_per_algo_prefix_sids`
+/// so the bytes a sender packs are the bytes a receiver unpacks.
+pub fn parse_per_algo_prefix_sids(
+    entry: &isis_packet::IsisTlvExtIpReachEntry,
+) -> impl Iterator<Item = (u8, isis_packet::SidLabelValue)> + '_ {
+    entry.subs.iter().filter_map(|sub| match sub {
+        isis_packet::prefix::IsisSubTlv::PrefixSid(s) => match s.algo {
+            Algo::FlexAlgo(n) => Some((n, s.sid.clone())),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// Extract the Extended Admin Group bitmap from a peer-advertised
 /// ASLA sub-TLV iff the ASLA's SABM marks it as applying to the
 /// Flex-Algorithm application (RFC 9479 §4.2 X-bit). Returns the
@@ -736,6 +754,70 @@ mod tests {
 
     fn affinity_set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_per_algo_prefix_sids_filters_to_flex_algo_range() {
+        use ipnet::Ipv4Net;
+        use isis_packet::PrefixSidFlags;
+        use isis_packet::prefix::{Ipv4ControlInfo, IsisSubTlv as PrefixSubTlv};
+        let entry = isis_packet::IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags: Ipv4ControlInfo::new(),
+            prefix: "10.0.0.1/32".parse::<Ipv4Net>().unwrap(),
+            subs: vec![
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::Spf,
+                    sid: SidLabelValue::Index(1),
+                }),
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::FlexAlgo(128),
+                    sid: SidLabelValue::Index(1128),
+                }),
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::FlexAlgo(129),
+                    sid: SidLabelValue::Label(20129),
+                }),
+                PrefixSubTlv::PrefixSid(isis_packet::IsisSubPrefixSid {
+                    flags: PrefixSidFlags::from(0u8),
+                    algo: Algo::StrictSpf,
+                    sid: SidLabelValue::Index(2),
+                }),
+            ],
+        };
+        let out: Vec<_> = parse_per_algo_prefix_sids(&entry).collect();
+        // Algo::Spf and Algo::StrictSpf must be skipped.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (128, SidLabelValue::Index(1128)));
+        assert_eq!(out[1], (129, SidLabelValue::Label(20129)));
+    }
+
+    #[test]
+    fn parse_per_algo_prefix_sids_round_trips_through_build_per_algo_prefix_sids() {
+        use ipnet::Ipv4Net;
+        use isis_packet::prefix::{Ipv4ControlInfo, IsisSubTlv as PrefixSubTlv};
+        let mut map: BTreeMap<u8, SidLabelValue> = BTreeMap::new();
+        map.insert(128, SidLabelValue::Index(1128));
+        map.insert(129, SidLabelValue::Label(20129));
+        let sids = build_per_algo_prefix_sids(&map);
+        // Wrap each into the entry, then pull back via the parser.
+        let entry = isis_packet::IsisTlvExtIpReachEntry {
+            metric: 10,
+            flags: Ipv4ControlInfo::new(),
+            prefix: "10.0.0.1/32".parse::<Ipv4Net>().unwrap(),
+            subs: sids.into_iter().map(PrefixSubTlv::PrefixSid).collect(),
+        };
+        let out: Vec<_> = parse_per_algo_prefix_sids(&entry).collect();
+        assert_eq!(
+            out,
+            vec![
+                (128, SidLabelValue::Index(1128)),
+                (129, SidLabelValue::Label(20129)),
+            ]
+        );
     }
 
     #[test]

@@ -115,6 +115,14 @@ pub struct Isis {
     pub peer_link_affinity: Levels<
         BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
     >,
+
+    /// Per-peer per-algorithm Prefix-SIDs. Outer key is peer sys-id;
+    /// inner key is `(algo, prefix)` so SPF can pick the SID for a
+    /// resolved (algo, destination prefix) pair in one lookup.
+    /// Populated from Ext IP-Reach (TLV 135) sub-TLVs whose Algorithm
+    /// field is in 128..=255 (RFC 9350 §7). Cleared on peer purge.
+    pub peer_algo_sid:
+        Levels<BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -270,6 +278,12 @@ pub struct IsisTop<'a> {
     pub peer_link_affinity: &'a mut Levels<
         BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
     >,
+
+    /// Per-peer per-algorithm Prefix-SIDs (see `Isis::peer_algo_sid`).
+    /// Threaded through IsisTop so the LSDB rebuild path can populate
+    /// it from peer Ext IP-Reach TLVs.
+    pub peer_algo_sid:
+        &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -378,6 +392,9 @@ impl Isis {
                         IsisSysId,
                         BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
                     >,
+                >::default(),
+                peer_algo_sid: Levels::<
+                    BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
                 >::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
@@ -1130,6 +1147,7 @@ impl Isis {
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
             peer_link_affinity: &mut self.peer_link_affinity,
+            peer_algo_sid: &mut self.peer_algo_sid,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -1177,6 +1195,7 @@ impl Isis {
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
             peer_link_affinity: &mut self.peer_link_affinity,
+            peer_algo_sid: &mut self.peer_algo_sid,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
             rib_tx: &self.rib_tx,
