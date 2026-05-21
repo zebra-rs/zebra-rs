@@ -4,6 +4,10 @@ module zebra-bgp-vrf {
   namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-vrf";
   prefix "zbv";
 
+  import ietf-inet-types {
+    prefix inet;
+  }
+
   import ietf-bgp {
     prefix bgp;
   }
@@ -35,13 +39,32 @@ module zebra-bgp-vrf {
        router bgp {
          vrf vrf1 {
            rd 65000:10;
+           router-id 10.0.0.1;
+           label-mode per-vrf;
+           neighbor 192.0.2.1 {
+             remote-as 65001;
+             description \"CE1\";
+           }
+           afi-safi {
+             ipv4-unicast {
+               network 10.10.0.0/16;
+             }
+             ipv6-unicast { /* same shape */ }
+           }
          }
        }
 
      `vrf` is keyed by a plain string (not a leafref to /vrf), so a
      `router bgp vrf X` block can be parsed before `vrf X` is
      declared at the top level — same staging-friendly pattern used
-     by IS-IS for `block` and `locator` references.";
+     by IS-IS for `block` and `locator` references.
+
+     This schema lands in step 11 of the BGP MPLS/VPN refactor;
+     the config callbacks that consume it arrive with `BgpVrfConfig`
+     in step 12, and the per-VRF task spawn lands in step 13. Until
+     then the leaves are parse-only — committing a `router bgp vrf X`
+     block records the intent but doesn't yet alter daemon
+     behaviour.";
 
   reference "RFC 4364: BGP/MPLS IP VPNs §4.2 (Route Distinguishers)";
 
@@ -98,6 +121,98 @@ module zebra-bgp-vrf {
        RFC 5668: 4-Octet AS Specific BGP Extended Community";
   }
 
+  grouping bgp-vrf-neighbor {
+    description
+      "Minimal per-peer attribute set for a CE peer configured under
+       a `router bgp { vrf X }` block. Deliberately a small subset
+       of `ietf-bgp:neighbor` — the per-VRF runtime that consumes
+       these in step 13+ only needs the CE-attaching attributes, and
+       the full attribute matrix continues to live on the top-level
+       (global) neighbor list. The `peer-group` reference is a plain
+       string so the block is parse-valid before its referenced
+       neighbor-group has committed.";
+    list neighbor {
+      key "remote-address";
+      description
+        "List of BGP CE peers attached to this VRF.";
+      leaf remote-address {
+        type inet:ip-address;
+        description
+          "Remote peer IP address. Same address MUST NOT appear in
+           more than one VRF — `commit` rejects the conflict, and
+           the passive-accept dispatcher in step 16 relies on this
+           uniqueness to route inbound :179 connections to the right
+           VRF task.";
+      }
+      leaf remote-as {
+        type inet:as-number;
+        description
+          "AS number of the remote peer. When unset, the value
+           inherited from the referenced `peer-group` applies.";
+      }
+      leaf peer-group {
+        type string;
+        description
+          "Name of a `peer-group` whose attributes this neighbor
+           inherits. Plain string (not leafref) for staging.";
+      }
+      leaf description {
+        type string;
+        description
+          "Free-form description string echoed in `show bgp vrf X
+           neighbors` output.";
+      }
+      leaf enabled {
+        type boolean;
+        default "true";
+        description
+          "Whether the BGP peer is enabled. `false` keeps the
+           configured peer in the runtime state but holds the FSM
+           in `Idle` (the local system neither initiates connects
+           nor responds to inbound).";
+      }
+    }
+  }
+
+  grouping bgp-vrf-afi-safi {
+    description
+      "Per-VRF address-family configuration. Only IPv4-unicast and
+       IPv6-unicast SAFIs are exposed here — VPNv4 / VPNv6 / EVPN
+       advertisements remain anchored on the top-level `router bgp`
+       block and are driven by the cross-VRF import/export pipeline
+       in step 17 / 18.
+
+       Modeled as a container of two presence containers (one per
+       SAFI) rather than a list keyed by SAFI name: the surface is
+       fixed and small, and the container shape makes path-based
+       config more ergonomic (`set ... afi-safi ipv4-unicast ...`).";
+    container afi-safi {
+      container ipv4-unicast {
+        presence "Enables IPv4-unicast for this VRF";
+        list network {
+          key "prefix";
+          description
+            "Configured network the VRF should originate as a BGP
+             route into the global VPNv4 RIB (after best-path inside
+             the VRF). Same semantics as the IS-IS network leaf and
+             the top-level BGP network knob.";
+          leaf prefix {
+            type inet:ipv4-prefix;
+          }
+        }
+      }
+      container ipv6-unicast {
+        presence "Enables IPv6-unicast for this VRF";
+        list network {
+          key "prefix";
+          leaf prefix {
+            type inet:ipv6-prefix;
+          }
+        }
+      }
+    }
+  }
+
   grouping bgp-vrf-extension {
     description
       "Per-VRF BGP block hung off the top-level `router bgp` tree.";
@@ -119,6 +234,45 @@ module zebra-bgp-vrf {
           "Route Distinguisher prepended to VPNv4 / VPNv6 NLRIs
            originating from this VRF. See RFC 4364 §4.2.";
       }
+      leaf router-id {
+        type inet:ipv4-address;
+        description
+          "Per-VRF BGP router-id. Overrides the global router-id
+           for VPNv4 / VPNv6 NLRIs sourced from this VRF and for
+           the OPEN exchange with CE peers attached here. When
+           unset, the top-level `router bgp global identifier`
+           value applies — same fallback Cisco IOS-XR uses.";
+      }
+      leaf label-mode {
+        type enumeration {
+          enum per-vrf {
+            description
+              "One MPLS label per VRF (default). All VPN routes
+               leaving this VRF carry the same label; the PE pops
+               and forwards via the VRF master device. Lowest label
+               churn and the safest default for a first per-VRF
+               BGP deployment.";
+          }
+          enum per-route {
+            description
+              "One MPLS label per advertised prefix. Decoupled from
+               next-hop changes, but produces O(prefix) labels per
+               VRF — only enable when downstream policy needs it.";
+          }
+          enum per-nexthop {
+            description
+              "One MPLS label per (VRF, BGP next-hop) tuple.
+               Common middle ground between per-vrf and per-route
+               for VRFs with multiple distinct exit points.";
+          }
+        }
+        default "per-vrf";
+        description
+          "Label allocation strategy for VPN routes originated from
+           this VRF. Consulted by the label allocator in step 19.";
+      }
+      uses bgp-vrf-neighbor;
+      uses bgp-vrf-afi-safi;
     }
   }
 
