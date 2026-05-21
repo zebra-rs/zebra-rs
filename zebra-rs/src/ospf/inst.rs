@@ -56,9 +56,9 @@ pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>
 /// `OspfVersion` trait grows accessor methods, in a future round
 /// of trait expansion.
 pub struct Ospf<V: OspfVersion = Ospfv2> {
-    pub tx: UnboundedSender<Message>,
-    pub rx: UnboundedReceiver<Message>,
-    pub ptx: UnboundedSender<Message>,
+    pub tx: UnboundedSender<Message<V>>,
+    pub rx: UnboundedReceiver<Message<V>>,
+    pub ptx: UnboundedSender<Message<V>>,
     pub cm: ConfigChannel,
     pub callbacks: HashMap<String, Callback>,
     pub ctx: crate::context::ProtoContext,
@@ -86,7 +86,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
 // into v3-shaped state (Identity<V>, Lsdb<V>, Vec<OspfAddr<V>>).
 // Default V = Ospfv2 keeps function signatures unchanged at callsites.
 pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
-    pub tx: &'a UnboundedSender<Message>,
+    pub tx: &'a UnboundedSender<Message<V>>,
     pub router_id: &'a Ipv4Addr,
     pub ident: &'a Identity<V>,
     pub addr: &'a Vec<OspfAddr<V>>,
@@ -1371,21 +1371,42 @@ pub fn serve(mut ospf: Ospf) -> Task<()> {
     })
 }
 
-pub enum Message {
+/// Internal control / data messages threaded through the OSPF
+/// instance's main mpsc channel.
+///
+/// Parameterized over `V: OspfVersion` (default `Ospfv2`) so the
+/// variants carrying wire-shaped data (`Recv` / `Send` /
+/// `Flood` / `FloodAs` / `DelayedAckQueue`) specialize on the
+/// per-version packet, LSA, and address types. The remaining 13
+/// variants don't carry version-specific data — they're agnostic
+/// in shape even though they live on a `Message<V>` enum.
+///
+/// Default `V = Ospfv2` keeps every existing v2 callsite — both
+/// pattern matches and `Message::Foo(...)` constructions —
+/// resolving transparently to `Message<Ospfv2>`.
+pub enum Message<V: OspfVersion = Ospfv2> {
     Enable(u32, Ipv4Addr),
     Disable(u32, Ipv4Addr),
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
     HelloTimer(u32),
-    Recv(Ospfv2Packet, Ipv4Addr, Ipv4Addr, u32, Ipv4Addr),
-    Send(Ospfv2Packet, u32, Option<Ipv4Addr>),
+    /// Packet received off the wire. v2 carries
+    /// `(Ospfv2Packet, src_addr, dst_group, ifindex, ifaddr)` where
+    /// every address is `Ipv4Addr`; v3 will use `Ipv6Addr` for
+    /// src/dst/ifaddr per its raw IPv6 socket layer.
+    Recv(V::Packet, V::Addr, V::Addr, u32, V::Addr),
+    /// Packet to send. v2 carries
+    /// `(Ospfv2Packet, ifindex, Option<Ipv4Addr>)` — the optional
+    /// destination is the multicast group or unicast nbr address.
+    /// v3 uses `V::Addr = Ipv6Addr` accordingly.
+    Send(V::Packet, u32, Option<V::Addr>),
     Lsdb(LsdbEvent, Option<Ipv4Addr>, OspfLsaKey),
     /// Flood LSA through area, excluding source neighbor.
     /// (area_id, lsa, source_ifindex, source_nbr_addr)
-    Flood(Ipv4Addr, OspfLsa, u32, Ipv4Addr),
+    Flood(Ipv4Addr, V::Lsa, u32, V::Addr),
     /// Flood AS-scoped LSA through all normal areas, excluding source neighbor.
     /// (lsa, source_ifindex, source_nbr_addr)
-    FloodAs(OspfLsa, u32, Ipv4Addr),
+    FloodAs(V::Lsa, u32, V::Addr),
     /// Retransmit LSAs to a specific neighbor.
     /// (ifindex, nbr_addr)
     Retransmit(u32, Ipv4Addr),
@@ -1400,7 +1421,7 @@ pub enum Message {
     DelayedAck(u32),
     /// Queue delayed ack headers on an interface.
     /// (ifindex, headers)
-    DelayedAckQueue(u32, Vec<OspfLsaHeader>),
+    DelayedAckQueue(u32, Vec<V::LsaHeader>),
     /// Request SPF scheduling for an area.
     SpfSchedule(Option<Ipv4Addr>),
     /// Timer-fired: perform SPF calculation for an area.

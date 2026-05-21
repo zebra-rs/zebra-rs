@@ -103,7 +103,7 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
     pub ident: Identity<V>,
-    pub tx: UnboundedSender<Message>,
+    pub tx: UnboundedSender<Message<V>>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor<V>>,
     pub flags: OspfLinkFlags,
     pub link_flags: LinkFlags,
@@ -114,7 +114,7 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub state_change: usize,
     pub db_desc_in: usize,
     pub full_nbr_count: usize,
-    pub ptx: UnboundedSender<Message>,
+    pub ptx: UnboundedSender<Message<V>>,
     pub config: LinkConfig,
     pub ls_ack_delayed: Vec<V::LsaHeader>,
 }
@@ -132,11 +132,11 @@ where
     V::Prefix: Default,
 {
     pub fn from(
-        tx: UnboundedSender<Message>,
+        tx: UnboundedSender<Message<V>>,
         link: Link,
         sock: Arc<AsyncFd<Socket>>,
         router_id: Ipv4Addr,
-        ptx: UnboundedSender<Message>,
+        ptx: UnboundedSender<Message<V>>,
     ) -> Self {
         Self {
             index: link.index,

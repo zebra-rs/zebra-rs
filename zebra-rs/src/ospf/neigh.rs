@@ -44,10 +44,10 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub timer: NeighborTimer,
     pub options: OspfOptions,
     pub flags: NeighborFlags,
-    pub tx: UnboundedSender<Message>,
+    pub tx: UnboundedSender<Message<V>>,
     pub state_change: usize,
     pub dd: NeighborDbDesc<V>,
-    pub ptx: UnboundedSender<Message>,
+    pub ptx: UnboundedSender<Message<V>>,
     pub db_sum: Vec<V::LsaHeader>,
     pub ls_req: Vec<OspfLsRequestEntry>,
     pub ls_req_last: Option<OspfLsRequest>,
@@ -117,12 +117,12 @@ where
     V::DbDesc: Default,
 {
     pub fn new(
-        tx: UnboundedSender<Message>,
+        tx: UnboundedSender<Message<V>>,
         ifindex: u32,
         prefix: V::Prefix,
         router_id: &Ipv4Addr,
         _dead_interval: u64,
-        ptx: UnboundedSender<Message>,
+        ptx: UnboundedSender<Message<V>>,
     ) -> Self {
         let mut nbr = Self {
             ifindex,
@@ -160,7 +160,7 @@ impl<V: OspfVersion> Neighbor<V> {
         false
     }
 
-    pub fn event(&self, ev: Message) {
+    pub fn event(&self, ev: Message<V>) {
         self.tx.send(ev).unwrap();
     }
 }

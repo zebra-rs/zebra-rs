@@ -37,7 +37,11 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// `Ipv4Addr` for v2, `Ipv6Addr` for v3. Router-id and area-id
     /// stay 32-bit in both versions and live separately as `Ipv4Addr`
     /// even on v3 (RFC 5340 §A.3.1).
-    type Addr: Copy + Eq + Ord + Hash + Display + Debug + 'static;
+    //
+    // `Send + Sync` because `Message<V>` carries `V::Addr` and is
+    // sent across tokio's mpsc channels; both `Ipv4Addr` and
+    // `Ipv6Addr` are trivially Send + Sync.
+    type Addr: Copy + Eq + Ord + Hash + Display + Debug + Send + Sync + 'static;
 
     /// Prefix (network + length) type. `Ipv4Net` for v2, `Ipv6Net`
     /// for v3. Both are `ipnet::*Net` types so they share `Copy`,
