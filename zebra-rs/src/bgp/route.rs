@@ -3001,6 +3001,7 @@ pub fn policy_list_apply(
                 if let Some(origin) = entry.set_origin {
                     decision.attr.origin = Some(origin);
                 }
+                apply_color_and_prefix_sid(&mut decision.attr, entry);
                 if entry.action == PolicyAction::Permit {
                     return Some(decision);
                 }
@@ -3102,7 +3103,45 @@ fn entry_matches(
             return false;
         }
     }
+    if !matches_color(entry, bgp_attr) {
+        return false;
+    }
     true
+}
+
+/// Color (RFC 9012 §4.3) match shared between the IPv4 and EVPN
+/// apply paths. Returns true when the entry has no `match color`
+/// predicate, or when at least one Color extcomm on the route
+/// matches the configured value. CO bits are not compared in v1.
+fn matches_color(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -> bool {
+    let Some(want) = entry.match_color else {
+        return true;
+    };
+    let Some(ecom) = bgp_attr.ecom.as_ref() else {
+        return false;
+    };
+    ecom.0
+        .iter()
+        .filter_map(|v| v.as_color())
+        .any(|c| c.color == want)
+}
+
+/// Apply `set color N` and `set prefix-sid label-index N` to a
+/// working route attribute. Shared between the IPv4 and EVPN apply
+/// loops so a future `set color` semantic change lands once.
+fn apply_color_and_prefix_sid(attr: &mut BgpAttr, entry: &crate::policy::PolicyEntry) {
+    if let Some(color) = entry.set_color {
+        let ecom = attr.ecom.get_or_insert_with(ExtCommunity::default);
+        ecom.0.push(ExtCommunityValue::from_color(0, color));
+    }
+    if let Some(idx) = entry.set_prefix_sid_label_index {
+        attr.prefix_sid = Some(PrefixSid {
+            tlvs: vec![PrefixSidTlv::LabelIndex {
+                flags: 0,
+                label_index: idx,
+            }],
+        });
+    }
 }
 
 /// EVPN counterpart of `policy_list_apply`. Same Permit/Deny/Next
@@ -3171,6 +3210,7 @@ pub fn policy_list_apply_evpn(
                 if let Some(origin) = entry.set_origin {
                     decision.attr.origin = Some(origin);
                 }
+                apply_color_and_prefix_sid(&mut decision.attr, entry);
                 if entry.action == PolicyAction::Permit {
                     return Some(decision);
                 }
@@ -3271,6 +3311,9 @@ fn entry_matches_evpn(
         if have != want {
             return false;
         }
+    }
+    if !matches_color(entry, bgp_attr) {
+        return false;
     }
     true
 }
@@ -4509,6 +4552,123 @@ mod policy_apply_tests {
         )
         .expect("permit");
         assert_eq!(d.weight, 999);
+    }
+
+    #[test]
+    fn match_color_present_in_ext_communities_permits() {
+        let mut list = PolicyList::default();
+        list.entry(10).match_color = Some(100);
+
+        let mut attr = attr_with("1", None, None);
+        attr.ecom = Some(ExtCommunity(vec![ExtCommunityValue::from_color(0, 100)]));
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_some());
+    }
+
+    #[test]
+    fn match_color_wrong_value_denies() {
+        let mut list = PolicyList::default();
+        list.entry(10).match_color = Some(100);
+
+        let mut attr = attr_with("1", None, None);
+        attr.ecom = Some(ExtCommunity(vec![ExtCommunityValue::from_color(0, 200)]));
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_none());
+    }
+
+    #[test]
+    fn match_color_absent_ext_communities_denies() {
+        // Predicate is set but the route has no EXT_COMMUNITIES at
+        // all — must not match.
+        let mut list = PolicyList::default();
+        list.entry(10).match_color = Some(100);
+        let attr = attr_with("1", None, None);
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_none());
+    }
+
+    #[test]
+    fn match_color_picks_one_from_many() {
+        // Route carries two color extcomms (100 and 200); the
+        // predicate for 200 must succeed.
+        let mut list = PolicyList::default();
+        list.entry(10).match_color = Some(200);
+        let mut attr = attr_with("1", None, None);
+        attr.ecom = Some(ExtCommunity(vec![
+            ExtCommunityValue::from_color(0, 100),
+            ExtCommunityValue::from_color(0, 200),
+        ]));
+        assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_some());
+    }
+
+    #[test]
+    fn set_color_appends_color_ext_community() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_color = Some(128);
+
+        let attr = attr_with("1", None, None);
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        let ecom = out.ecom.expect("ecom appended");
+        assert_eq!(ecom.0.len(), 1);
+        let c = ecom.0[0].as_color().expect("Color extcomm");
+        assert_eq!(c.color, 128);
+        assert_eq!(c.co_bits(), 0);
+    }
+
+    #[test]
+    fn set_color_merges_with_existing_ext_communities() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_color = Some(128);
+
+        let mut attr = attr_with("1", None, None);
+        attr.ecom = Some(ExtCommunity::from_str("rt:65001:100").unwrap());
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        let ecom = out.ecom.expect("ecom retained");
+        assert_eq!(ecom.0.len(), 2, "RT + Color");
+        assert!(ecom.0.iter().any(|v| v.as_color().is_some()));
+    }
+
+    #[test]
+    fn set_prefix_sid_label_index_installs_attr_40() {
+        let mut list = PolicyList::default();
+        list.entry(10).set_prefix_sid_label_index = Some(128);
+        let attr = attr_with("1", None, None);
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        let sid = out.prefix_sid.expect("prefix_sid set");
+        assert_eq!(sid.tlvs.len(), 1);
+        match &sid.tlvs[0] {
+            bgp_packet::PrefixSidTlv::LabelIndex { flags, label_index } => {
+                assert_eq!(*flags, 0);
+                assert_eq!(*label_index, 128);
+            }
+            other => panic!("expected LabelIndex TLV, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_prefix_sid_label_index_overwrites_existing_attr() {
+        // Operator-set label-index is authoritative — any existing
+        // Originator-SRGB or SRv6 service TLVs are dropped to match
+        // the documented "route-map is authoritative" semantics.
+        let mut list = PolicyList::default();
+        list.entry(10).set_prefix_sid_label_index = Some(42);
+        let mut attr = attr_with("1", None, None);
+        attr.prefix_sid = Some(bgp_packet::PrefixSid {
+            tlvs: vec![bgp_packet::PrefixSidTlv::OriginatorSrgb {
+                flags: 0,
+                srgbs: vec![bgp_packet::SrgbRange {
+                    base: 16000,
+                    range: 8000,
+                }],
+            }],
+        });
+        let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
+        let sid = out.prefix_sid.expect("prefix_sid set");
+        assert_eq!(sid.tlvs.len(), 1, "SRGB dropped, only LabelIndex remains");
+        assert!(matches!(
+            sid.tlvs[0],
+            bgp_packet::PrefixSidTlv::LabelIndex {
+                label_index: 42,
+                ..
+            }
+        ));
     }
 
     #[test]
