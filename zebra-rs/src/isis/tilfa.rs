@@ -319,6 +319,7 @@ fn repair_segments_to_mpls_labels(
 /// repair list. The returned map is keyed by destination vertex id.
 pub(super) fn tilfa_repair_path(
     graph: &spf::Graph,
+    lsp_map: &LspMap,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
 ) -> BTreeMap<usize, Vec<spf::RepairPath>> {
@@ -331,6 +332,10 @@ pub(super) fn tilfa_repair_path(
         }
         // ECMP is skipped.
         if path.paths.len() > 1 {
+            continue;
+        }
+        // Pseudonode is skipped — no destination prefix to install.
+        if lsp_map.is_pseudo(*d) {
             continue;
         }
 
