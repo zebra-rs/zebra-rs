@@ -21,6 +21,7 @@ use bgp_packet::RouteDistinguisher;
 use crate::config::{ConfigChannel, ShowChannel};
 use crate::context::{ProtoContext, Task};
 
+use super::super::Message;
 use super::super::peer_map::PeerMap;
 use super::super::route::LocalRib;
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
@@ -79,6 +80,21 @@ pub struct BgpVrf {
     /// here. `Shutdown` from `despawn_bgp_vrf` (step 14) also
     /// arrives on this channel.
     pub global_rx: UnboundedReceiver<BgpVrfMsg>,
+    /// FSM event channel. Per-VRF peers send `Event(ident, ...)`
+    /// here when their timers expire or their TCP state changes;
+    /// the per-VRF event loop drives the FSM from these. Bounded
+    /// (8192) to match the global `Bgp::tx/rx`. Step 15c lands the
+    /// channel so peers can be materialized at spawn time; the
+    /// loop drains it as a no-op until step 15d wires the FSM
+    /// driver.
+    pub tx: tokio::sync::mpsc::Sender<Message>,
+    pub rx: tokio::sync::mpsc::Receiver<Message>,
+    /// Local AS number. Threaded in from the global `Bgp::asn` at
+    /// spawn time so per-VRF peers `Peer::new` can fill
+    /// `local_as`. The per-VRF runtime does not maintain a
+    /// separate ASN today; if a future spec requires one this is
+    /// where it lives.
+    pub asn: u32,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -98,9 +114,11 @@ impl BgpVrf {
         ctx: ProtoContext,
         rd: Option<RouteDistinguisher>,
         router_id: Ipv4Addr,
+        asn: u32,
         global_tx: UnboundedSender<BgpGlobalMsg>,
     ) -> (Self, BgpVrfInbox) {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(8192);
         let vrf = Self {
             name,
             ctx,
@@ -112,6 +130,9 @@ impl BgpVrf {
             show: ShowChannel::new(),
             global_tx,
             global_rx,
+            tx,
+            rx,
+            asn,
         };
         (vrf, inbox_tx)
     }
@@ -152,6 +173,21 @@ impl BgpVrf {
                 _msg = self.show.rx.recv() => {
                     // `show bgp vrf <name> ...` dispatch lands in
                     // step 20. Same drain rationale as above.
+                }
+                Some(msg) = self.rx.recv() => {
+                    // Per-VRF FSM event channel. Step 15c lands the
+                    // channel so peers materialised at spawn time
+                    // (also step 15c) have somewhere to send their
+                    // timer events; step 15d wires the actual FSM
+                    // driver. Until then, drain at debug — without
+                    // this arm the materialised peer's `start()`
+                    // timer would fill the bounded queue and stall
+                    // the per-VRF runtime.
+                    tracing::debug!(
+                        vrf = %self.name,
+                        msg = ?msg,
+                        "bgp vrf: drained FSM event (step 15d wires the handler)",
+                    );
                 }
             }
         }
@@ -219,6 +255,7 @@ mod tests {
             ctx,
             None,
             Ipv4Addr::UNSPECIFIED,
+            65000,
             global_tx,
         );
 
@@ -245,6 +282,7 @@ mod tests {
             ctx,
             None,
             Ipv4Addr::UNSPECIFIED,
+            65000,
             global_tx,
         );
 

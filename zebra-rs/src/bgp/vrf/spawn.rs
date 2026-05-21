@@ -92,6 +92,7 @@ pub fn spawn_bgp_vrf(
     name: String,
     cfg: &BgpVrfConfig,
     router_id: std::net::Ipv4Addr,
+    asn: u32,
     kernel: Option<RibKnownVrf>,
     rib_subscriber: &RibSubscriber,
     global_tx: UnboundedSender<BgpGlobalMsg>,
@@ -102,9 +103,8 @@ pub fn spawn_bgp_vrf(
             // subscription's `vrf_id` tells RIB to route the
             // task's route installs into `vrf_tables[table_id]`
             // (step 9's inbound dispatcher). The `RibRx` half is
-            // leaked here — per-VRF subscribers don't yet consume
-            // RIB outbound notifications; that's a step-15c
-            // follow-up.
+            // leaked — per-VRF subscribers don't yet consume RIB
+            // outbound notifications; that's a future step.
             let proto = format!("bgp:vrf:{name}");
             let (rib_client, rib_rx) = rib_subscriber.subscribe_for_vrf(&proto, k.table_id);
             Box::leak(Box::new(rib_rx));
@@ -122,16 +122,78 @@ pub fn spawn_bgp_vrf(
     // operator edit to router-id post-spawn doesn't bubble through
     // yet — a follow-up adds the respawn-on-edit detection.
     let effective_router_id = cfg.router_id.unwrap_or(router_id);
-    let (vrf, inbox) = BgpVrf::new(name.clone(), ctx, cfg.rd, effective_router_id, global_tx);
+    let (mut vrf, inbox) = BgpVrf::new(
+        name.clone(),
+        ctx,
+        cfg.rd,
+        effective_router_id,
+        asn,
+        global_tx,
+    );
+
+    // Materialise per-VRF peers from the BgpVrfConfig snapshot.
+    // Step 15c is scaffolding — the per-VRF FSM driver lands in
+    // step 15d, and until then `peer.start()`'s timer events get
+    // logged at debug and dropped by `BgpVrf::event_loop`. Peers
+    // without a `remote_as` are skipped: `Peer::start` gates on
+    // `remote_as != 0`, so inserting them would only litter the
+    // map with permanently-Idle entries.
+    let peer_count = materialize_peers(&mut vrf, cfg);
+
     let task = serve_vrf(vrf);
     tracing::info!(
         vrf = %name,
         rd = ?cfg.rd,
         router_id = %effective_router_id,
         table_id = ?kernel.map(|k| k.table_id),
+        peers = peer_count,
         "bgp: spawned per-VRF task",
     );
     BgpVrfHandle { inbox, task }
+}
+
+/// Build `Peer` objects from `cfg.neighbors` and insert them into
+/// `vrf.peers`. Calls `peer.start()` on each — that arms the
+/// idle-hold timer; once it fires the FSM event lands on
+/// `vrf.tx`, which step 15c only drains at debug.
+fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
+    use super::super::peer::Peer;
+    use super::super::peer_key::PeerKey;
+
+    let mut count = 0usize;
+    for (addr, nbr_cfg) in &cfg.neighbors {
+        // `Peer::start()` gates on `remote_as != 0` already, but
+        // skipping the insert entirely keeps the per-VRF peer map
+        // free of dormant rows the show path would have to render
+        // as "remote-as: unset". When the operator later types
+        // the missing leaf the follow-up commit re-runs
+        // `materialize_peers` (step 15d hooks the per-VRF CM
+        // dispatch) and the peer arrives.
+        let Some(remote_as) = nbr_cfg.remote_as else {
+            tracing::debug!(
+                vrf = %vrf.name,
+                peer = %addr,
+                "bgp vrf: skip peer without remote-as",
+            );
+            continue;
+        };
+        let mut peer = Peer::new(
+            0,
+            vrf.asn,
+            vrf.router_id,
+            remote_as,
+            *addr,
+            // Per-VRF hostnames aren't a thing today; the global
+            // hostname / OS hostname applies to every session.
+            None,
+            vrf.tx.clone(),
+            vrf.ctx.clone(),
+        );
+        peer.start();
+        vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
+        count += 1;
+    }
+    count
 }
 
 /// Send `Shutdown` to the per-VRF task. Caller drops the handle
@@ -178,6 +240,7 @@ mod tests {
             name.to_string(),
             &cfg,
             Ipv4Addr::UNSPECIFIED,
+            65000,
             None,
             &subscriber,
             global_tx,
@@ -194,6 +257,79 @@ mod tests {
             rib_inbound_tx,
             std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
         )
+    }
+
+    #[tokio::test]
+    async fn materialize_peers_inserts_neighbors_with_remote_as() {
+        use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        // Construct a BgpVrf directly (no spawn) so we can inspect
+        // `vrf.peers` after `materialize_peers` runs. Per-VRF FSM
+        // events go through `vrf.tx`, which we drain via the rx in
+        // step 15c's event loop — but the loop isn't running in
+        // this test, so the timer events `peer.start()` arms stay
+        // queued until the rx is dropped at end of scope.
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v1".to_string(),
+            ctx,
+            None,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            global_tx,
+        );
+
+        let mut cfg = BgpVrfConfig::default();
+        let with_as: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let no_as: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        cfg.neighbors.insert(
+            with_as,
+            BgpVrfNeighborConfig {
+                remote_as: Some(65001),
+                ..Default::default()
+            },
+        );
+        cfg.neighbors.insert(no_as, BgpVrfNeighborConfig::default());
+
+        let count = materialize_peers(&mut vrf, &cfg);
+
+        // Only the neighbor with `remote-as` set is materialised —
+        // `Peer::start()` gates on `remote_as != 0`, and inserting
+        // a dormant entry would clutter `show bgp vrf v1 summary`
+        // output until the operator filled the leaf in.
+        assert_eq!(count, 1);
+        assert!(
+            vrf.peers.get(&with_as).is_some(),
+            "peer with remote-as inserted"
+        );
+        assert!(
+            vrf.peers.get(&no_as).is_none(),
+            "neighbor without remote-as skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_peers_with_no_neighbors_returns_zero() {
+        use super::super::super::vrf_config::BgpVrfConfig;
+        use super::super::inst::BgpVrf;
+        use crate::context::ProtoContext;
+
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = ProtoContext::default_table_no_rib();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "v0".to_string(),
+            ctx,
+            None,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            global_tx,
+        );
+
+        let cfg = BgpVrfConfig::default();
+        assert_eq!(materialize_peers(&mut vrf, &cfg), 0);
     }
 
     #[tokio::test]
