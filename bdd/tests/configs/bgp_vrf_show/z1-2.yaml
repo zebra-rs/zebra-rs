@@ -1,0 +1,16 @@
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    vrf:
+    - name: vrf-blue
+      rd: 65001:100
