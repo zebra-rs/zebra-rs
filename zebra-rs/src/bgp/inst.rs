@@ -162,6 +162,12 @@ pub struct Bgp {
     /// peer materialization. Materialization itself happens in
     /// [`super::interface_neighbor::materialize_peer`].
     pub interface_neighbors: BTreeMap<String, super::interface_neighbor::InterfaceNeighborCfg>,
+    /// Staged per-VRF BGP intent — populated by the callbacks for
+    /// `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang). Step 13
+    /// reads this map at `CommitEnd` to spawn / despawn per-VRF
+    /// tasks; until then `bgp::vrf_config::log_commit_diff` is the
+    /// only consumer, emitting a debug log line per entry.
+    pub vrfs: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
     /// `if-name` → `ifindex` mirror fed by `RibRx::LinkAdd`. Needed
     /// because the YANG callback receives a name but
     /// `PeerKey::Interface` keys on ifindex. Lookups that miss
@@ -289,6 +295,7 @@ impl Bgp {
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
+            vrfs: BTreeMap::new(),
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
@@ -545,7 +552,10 @@ impl Bgp {
                 }
             }
             ConfigOp::CommitEnd => {
-                //
+                // Step 12: observe the per-VRF intent that just
+                // committed. Step 13 replaces this with spawn /
+                // despawn against a `running` map.
+                super::vrf_config::log_commit_diff(self);
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.peer_comps()).unwrap();
