@@ -101,6 +101,14 @@ pub fn ospfv3_verify_checksum(src: &Ipv6Addr, dst: &Ipv6Addr, packet_bytes: &[u8
     ospfv3_compute_checksum(src, dst, packet_bytes) == [0, 0]
 }
 
+/// Parse a v3 OSPF packet from raw socket bytes. Convenience entry
+/// point for callers (the network rx loop) that don't want to bring
+/// the `nom_derive` / `ParseBe` traits into scope explicitly —
+/// mirrors v2's `ospf_packet::parse`.
+pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
+    Ospfv3Packet::parse_be(input)
+}
+
 /// OSPFv3 packet header (RFC 5340 §A.3.1).
 #[derive(Debug, Clone, NomBE)]
 pub struct Ospfv3Packet {
