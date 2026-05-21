@@ -1,5 +1,5 @@
 @serial
-@bgp_community_no_export_advertise
+@bgp_community
 Feature: BGP well-known community handling (no-export, no-advertise)
   As a network operator
   I want to verify that the well-known communities NO_EXPORT and
