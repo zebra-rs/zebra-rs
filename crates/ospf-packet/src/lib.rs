@@ -21,7 +21,8 @@ pub use v3::{
     Ospfv3IntraAreaPrefixLsa, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsAck, Ospfv3LsBody,
     Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader,
     Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet, Ospfv3Payload, Ospfv3PrefixOptions,
-    Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink, ospfv3_prefix_wire_len,
+    Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink, ospfv3_compute_checksum,
+    ospfv3_prefix_wire_len, ospfv3_verify_checksum,
 };
 
 pub use packet_utils::many0_complete;
