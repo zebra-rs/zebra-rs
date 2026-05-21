@@ -5,9 +5,9 @@
 //! 16-octet header (Instance ID + Reserved), and the per-packet-type
 //! payloads (Hello, DBD, LSR/LSU/LSAck) differ in field layout.
 //!
-//! This PR adds the header + the Hello payload. DBD / LSR / LSU /
-//! LSAck and the v3 LSA bodies land in subsequent PRs as the v3
-//! protocol code comes online.
+//! Hello / DBD / LS Request are typed today; LSU / LSAck and the v3
+//! LSA bodies land in subsequent PRs as the v3 protocol code comes
+//! online.
 //!
 //! Header wire layout per RFC 5340 §A.3.1:
 //! ```text
@@ -101,14 +101,15 @@ impl Ospfv3Packet {
     }
 }
 
-/// v3 packet payload. Hello and DBD are typed; the remaining types
-/// parse into `Unknown` so the codec roundtrips opaque captures
-/// without dropping the body. Typed variants for LSR / LSU / LSAck
-/// land in subsequent PRs.
+/// v3 packet payload. Hello, DBD, and LS Request are typed; LSU /
+/// LSAck still parse into `Unknown` so the codec roundtrips opaque
+/// captures without dropping the body. Typed variants for the
+/// remaining types land in subsequent PRs.
 #[derive(Debug, Clone)]
 pub enum Ospfv3Payload {
     Hello(Ospfv3Hello),
     DbDesc(Ospfv3DbDesc),
+    LsRequest(Ospfv3LsRequest),
     Unknown(Vec<u8>),
 }
 
@@ -117,6 +118,7 @@ impl Ospfv3Payload {
         match self {
             Ospfv3Payload::Hello(_) => OspfType::Hello,
             Ospfv3Payload::DbDesc(_) => OspfType::DbDesc,
+            Ospfv3Payload::LsRequest(_) => OspfType::LsRequest,
             // Unknown carries the raw body; the type stays in the
             // header where the caller put it.
             Ospfv3Payload::Unknown(_) => OspfType::Unknown(0),
@@ -127,6 +129,7 @@ impl Ospfv3Payload {
         match self {
             Ospfv3Payload::Hello(h) => h.emit(buf),
             Ospfv3Payload::DbDesc(d) => d.emit(buf),
+            Ospfv3Payload::LsRequest(r) => r.emit(buf),
             Ospfv3Payload::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -141,8 +144,12 @@ impl Ospfv3Payload {
                 let (input, dd) = Ospfv3DbDesc::parse_be(input)?;
                 Ok((input, Ospfv3Payload::DbDesc(dd)))
             }
-            // Until typed payloads land for LSR / LSU / LSAck,
-            // capture them as raw bytes.
+            OspfType::LsRequest => {
+                let (input, req) = Ospfv3LsRequest::parse_be(input)?;
+                Ok((input, Ospfv3Payload::LsRequest(req)))
+            }
+            // Until typed payloads land for LSU / LSAck, capture them
+            // as raw bytes.
             _ => Ok((&[][..], Ospfv3Payload::Unknown(input.to_vec()))),
         }
     }
@@ -342,6 +349,61 @@ impl ParseBe<Ospfv3DbDesc> for Ospfv3DbDesc {
     }
 }
 
+/// A single v3 LS Request entry (RFC 5340 §A.3.4). 12 octets each.
+///
+/// Differs from v2's request entry by carrying a 16-bit `ls_type`
+/// in the same encoding as the v3 LSA header (§A.4.2.1) — the high
+/// 16 bits are explicit Reserved instead of v2's "LS Type spans the
+/// whole 32-bit word". `link_state_id` and `advertising_router` are
+/// still 32 bits each.
+#[derive(Debug, Clone, NomBE, PartialEq, Eq)]
+pub struct Ospfv3LsRequestEntry {
+    pub reserved: u16,
+    pub ls_type: u16,
+    pub link_state_id: u32,
+    pub advertising_router: Ipv4Addr,
+}
+
+impl Ospfv3LsRequestEntry {
+    pub fn new(ls_type: u16, link_state_id: u32, advertising_router: Ipv4Addr) -> Self {
+        Self {
+            reserved: 0,
+            ls_type,
+            link_state_id,
+            advertising_router,
+        }
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.reserved);
+        buf.put_u16(self.ls_type);
+        buf.put_u32(self.link_state_id);
+        buf.put(&self.advertising_router.octets()[..]);
+    }
+}
+
+/// v3 LS Request packet body (RFC 5340 §A.3.4): a list of 12-octet
+/// `Ospfv3LsRequestEntry` records.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3LsRequest {
+    pub reqs: Vec<Ospfv3LsRequestEntry>,
+}
+
+impl Ospfv3LsRequest {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for req in &self.reqs {
+            req.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3LsRequest> for Ospfv3LsRequest {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LsRequest> {
+        let (input, reqs) = many0_complete(Ospfv3LsRequestEntry::parse_be).parse(input)?;
+        Ok((input, Ospfv3LsRequest { reqs }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,9 +485,9 @@ mod tests {
         assert_eq!(word & 0x00FF_FFFF, 0x0000_0013);
     }
 
-    /// Captures of v3 LSR / LSU / LSAck (the still-untyped payloads)
-    /// roundtrip as opaque bytes. Once those types land, this test
-    /// migrates to verifying the typed variant.
+    /// Captures of v3 LSU / LSAck (the still-untyped payloads) roundtrip
+    /// as opaque bytes. Once those types land, this test migrates to
+    /// verifying the typed variant.
     #[test]
     fn ospfv3_unknown_payload_roundtrip() {
         let body = vec![0xAA, 0xBB, 0xCC, 0xDD];
@@ -437,7 +499,7 @@ mod tests {
         );
         // The Unknown variant's `typ()` is a placeholder; preserve
         // the actual wire type via the header field.
-        pkt.typ = OspfType::LsRequest;
+        pkt.typ = OspfType::LsUpdate;
 
         let mut buf = BytesMut::new();
         pkt.emit(&mut buf);
@@ -445,10 +507,83 @@ mod tests {
 
         let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
-        assert_eq!(parsed.typ, OspfType::LsRequest);
+        assert_eq!(parsed.typ, OspfType::LsUpdate);
         match parsed.payload {
             Ospfv3Payload::Unknown(bytes) => assert_eq!(bytes, body),
             other => panic!("expected Unknown payload, got {:?}", other),
+        }
+    }
+
+    /// LS Request with two heterogeneous entries roundtrips every
+    /// field. Pins the entry at exactly 12 octets.
+    #[test]
+    fn ospfv3_lsr_packet_roundtrip() {
+        let lsr = Ospfv3LsRequest {
+            reqs: vec![
+                Ospfv3LsRequestEntry::new(0x2001, 0, Ipv4Addr::new(10, 0, 0, 1)),
+                Ospfv3LsRequestEntry::new(0x2002, 0x0102_0304, Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+        };
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 2),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsRequest(lsr),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Header (16) + 2 * entry (12) = 40.
+        assert_eq!(buf.len(), 40);
+        assert_eq!(BigEndian::read_u16(&buf[2..4]), 40);
+
+        // First request entry sits right after the 16-byte header.
+        // High 16 bits must be Reserved (= 0).
+        assert_eq!(
+            BigEndian::read_u16(&buf[OSPFV3_HEADER_LEN..OSPFV3_HEADER_LEN + 2]),
+            0
+        );
+        // Then the 16-bit LS Type (0x2001 = Router-LSA).
+        assert_eq!(
+            BigEndian::read_u16(&buf[OSPFV3_HEADER_LEN + 2..OSPFV3_HEADER_LEN + 4]),
+            0x2001
+        );
+
+        let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.typ, OspfType::LsRequest);
+        match parsed.payload {
+            Ospfv3Payload::LsRequest(r) => {
+                assert_eq!(r.reqs.len(), 2);
+                assert_eq!(r.reqs[0].ls_type, 0x2001);
+                assert_eq!(r.reqs[0].link_state_id, 0);
+                assert_eq!(r.reqs[1].ls_type, 0x2002);
+                assert_eq!(r.reqs[1].link_state_id, 0x0102_0304);
+                assert_eq!(r.reqs[1].advertising_router, Ipv4Addr::new(10, 0, 0, 1));
+            }
+            other => panic!("expected LsRequest payload, got {:?}", other),
+        }
+    }
+
+    /// Empty LS Request body parses without consuming any input and
+    /// emits just the header.
+    #[test]
+    fn ospfv3_lsr_empty() {
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 2),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsRequest(Ospfv3LsRequest::default()),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(buf.len(), OSPFV3_HEADER_LEN);
+
+        let (_, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        match parsed.payload {
+            Ospfv3Payload::LsRequest(r) => assert!(r.reqs.is_empty()),
+            other => panic!("expected LsRequest payload, got {:?}", other),
         }
     }
 
