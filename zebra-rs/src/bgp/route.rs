@@ -1456,11 +1456,18 @@ fn route_soft_out_peer_table(
         newly_advertised.insert(*prefix);
     }
 
-    // Direct-emit IPv4 unicast batch (no group fan-out).
+    // Direct-emit IPv4 unicast batch (no group fan-out). When the
+    // peer negotiated RFC 8950 ENHE for IPv4 unicast, pass the
+    // per-interface link-local so the encoder emits MP_REACH instead
+    // of the legacy inline-NLRI form.
     if rd.is_none()
         && let Some(peer) = peers.get_by_idx(peer_idx)
     {
-        super::update_group::send_ipv4_direct(peer, ipv4_entries);
+        let enhe_v6 = peer
+            .is_enhe_v4_negotiated()
+            .then(|| peer.next_hop_v6(bgp.interface_addrs))
+            .flatten();
+        super::update_group::send_ipv4_direct(peer, ipv4_entries, enhe_v6);
     }
 
     let to_withdraw: Vec<Ipv4Net> = was_advertised
@@ -3236,7 +3243,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         entries.push((arc_attr, nlri));
     }
 
-    super::update_group::send_ipv4_direct(peer, entries);
+    let enhe_v6 = peer
+        .is_enhe_v4_negotiated()
+        .then(|| peer.next_hop_v6(bgp.interface_addrs))
+        .flatten();
+    super::update_group::send_ipv4_direct(peer, entries, enhe_v6);
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);
@@ -3464,6 +3475,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         if !selected.is_empty() {
@@ -3490,6 +3502,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -3568,6 +3581,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         if !selected.is_empty() {
@@ -3594,6 +3608,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -3721,6 +3736,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         if !selected.is_empty() {
@@ -3839,6 +3855,7 @@ impl Bgp {
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
         };
 
         if !selected.is_empty() {
