@@ -44,6 +44,13 @@ pub struct BgpVrfHandle {
     /// `AbortHandle` via `Drop`.
     #[allow(dead_code)]
     pub task: Task<()>,
+    /// MPLS label allocated for this VRF by `Bgp::vrf_label_alloc`
+    /// at spawn time. Mirrored back onto the handle so the global
+    /// `Bgp` can reclaim it on despawn and reuse it on
+    /// respawn-with-kernel-ctx — a respawn must keep the same
+    /// label, otherwise a brief outage would invalidate PE-side
+    /// FIB entries that already point at this VRF's old label.
+    pub label: u32,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -93,6 +100,7 @@ pub fn spawn_bgp_vrf(
     cfg: &BgpVrfConfig,
     router_id: std::net::Ipv4Addr,
     asn: u32,
+    label: u32,
     kernel: Option<RibKnownVrf>,
     rib_subscriber: &RibSubscriber,
     global_tx: UnboundedSender<BgpGlobalMsg>,
@@ -131,6 +139,7 @@ pub fn spawn_bgp_vrf(
         cfg.rd,
         effective_router_id,
         asn,
+        label,
         global_tx,
     );
 
@@ -160,10 +169,11 @@ pub fn spawn_bgp_vrf(
         rd = ?cfg.rd,
         router_id = %effective_router_id,
         table_id = ?kernel_table_id,
+        label,
         peers = peer_count,
         "bgp: spawned per-VRF task",
     );
-    BgpVrfHandle { inbox, task }
+    BgpVrfHandle { inbox, task, label }
 }
 
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
@@ -255,6 +265,7 @@ mod tests {
             &cfg,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             None,
             &subscriber,
             global_tx,
@@ -293,6 +304,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 
@@ -339,6 +351,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 

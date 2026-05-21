@@ -348,6 +348,12 @@ pub struct Bgp {
     /// step-9 inbound dispatcher routes route installs into
     /// `vrf_tables[table_id]`.
     pub rib_subscriber: crate::config::RibSubscriber,
+    /// Per-VRF MPLS label allocator (step 19a). Hands out one
+    /// label per `spawn_bgp_vrf` call; reclaims at despawn. The
+    /// label gets stamped onto every `BgpGlobalMsg::Export` the
+    /// VRF emits and (step 19b) drives the matching ILM Decap
+    /// install on the PE.
+    pub vrf_label_alloc: super::vrf::VrfLabelAllocator,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -505,6 +511,7 @@ impl Bgp {
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
             rib_subscriber,
+            vrf_label_alloc: super::vrf::VrfLabelAllocator::new(),
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -797,6 +804,11 @@ impl Bgp {
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle);
+                // Return the label to the pool so a future VRF
+                // can pick it back up. Reclaim before the handle
+                // drops — handle drop aborts the task but doesn't
+                // know about the allocator.
+                self.vrf_label_alloc.free(handle.label);
                 // Drop every `peer_index` entry that pointed at
                 // this VRF — defensive cleanup against the VRF
                 // task exiting before its `UnregisterPeer`
@@ -812,11 +824,21 @@ impl Bgp {
                 continue;
             };
             let kernel = self.rib_known_vrfs.get(&name).cloned();
+            // Allocate a fresh MPLS label for this VRF — used in
+            // every `BgpGlobalMsg::Export` it emits and (step 19b)
+            // bound to an AF_MPLS ILM for PE-side decap. The
+            // 20-bit label space is large enough that the
+            // `.unwrap_or(0)` fallback effectively never fires;
+            // 0 would mean "no label" downstream, which the
+            // Export handler already treats as "skip label
+            // install" — a safe degradation.
+            let label = self.vrf_label_alloc.alloc().unwrap_or(0);
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
                 self.router_id,
                 self.asn,
+                label,
                 kernel,
                 &self.rib_subscriber,
                 self.vrf_global_tx.clone(),
@@ -848,19 +870,26 @@ impl Bgp {
         // Tear the placeholder-ctx task down before spawning the
         // real one. `despawn_bgp_vrf` sends Shutdown; the handle
         // drop right after aborts the runtime if the loop hasn't
-        // yet drained the signal.
-        if let Some(handle) = self.vrf_registry.remove(name) {
+        // yet drained the signal. Preserve the existing label so
+        // the respawn stays addressable from any PE that already
+        // cached it; the original allocation stays held on the
+        // new handle.
+        let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
             super::vrf::despawn_bgp_vrf(name, &handle);
             // Clear stale `peer_index` entries — the spawned task
             // is about to push fresh RegisterPeer messages.
             self.peer_index.retain(|_, owner| owner != name);
-        }
+            handle.label
+        } else {
+            self.vrf_label_alloc.alloc().unwrap_or(0)
+        };
         let table_id = kernel.table_id;
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
             self.router_id,
             self.asn,
+            preserved_label,
             Some(kernel),
             &self.rib_subscriber,
             self.vrf_global_tx.clone(),
