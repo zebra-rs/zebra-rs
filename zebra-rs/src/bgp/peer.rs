@@ -515,6 +515,19 @@ impl Peer {
         }
         false
     }
+
+    /// IPv6 next-hop to advertise in MP_REACH for IPv4-unicast NLRI
+    /// once RFC 8950 Extended Next Hop is negotiated on this peer.
+    /// Returns `None` for any peer that isn't interface-keyed, or when
+    /// the egress interface's link-local hasn't been observed yet via
+    /// `RibRx::AddrAdd`. Callers must already have confirmed ENHE was
+    /// negotiated — this only resolves the address.
+    pub fn next_hop_v6(&self, bgp: &Bgp) -> Option<std::net::Ipv6Addr> {
+        if !matches!(self.origin, PeerOrigin::Interface { .. }) {
+            return None;
+        }
+        bgp.interface_addrs.link_local_for(self.scope_id?)
+    }
 }
 
 pub struct BgpTop<'a> {
