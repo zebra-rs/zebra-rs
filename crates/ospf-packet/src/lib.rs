@@ -10,6 +10,8 @@ pub use packet_utils::Algo;
 pub use packet_utils::SidLabelTlv;
 pub use parser::*;
 pub use typ::OspfType;
-pub use v3::{OSPFV3_HEADER_LEN, OSPFV3_VERSION, Ospfv3Packet};
+pub use v3::{
+    OSPFV3_HEADER_LEN, OSPFV3_VERSION, Ospfv3Hello, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+};
 
 pub use packet_utils::many0_complete;
