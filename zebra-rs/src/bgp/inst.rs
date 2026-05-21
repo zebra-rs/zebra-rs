@@ -1213,14 +1213,63 @@ impl Bgp {
 
     fn process_vrf_global_msg(&mut self, msg: super::vrf::BgpGlobalMsg) {
         match msg {
-            super::vrf::BgpGlobalMsg::Export { vrf } => {
-                tracing::debug!(vrf = %vrf, "bgp: ignored Export (step 17 wires the handler)");
+            super::vrf::BgpGlobalMsg::Export {
+                vrf,
+                prefix,
+                attr: _,
+                label,
+            } => {
+                // Step 17b-i: resolve RD and export-RT set from
+                // already-staged state; emit a single info log so
+                // the operator can see the export decision land
+                // in real time. Step 17b-ii replaces this body
+                // with the actual `LocalRib.v4vpn[rd]` write and
+                // the update-group flush to VPNv4 peers.
+                let rd = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd);
+                let export_rts = self
+                    .rib_known_vrfs
+                    .get(&vrf)
+                    .map(|k| k.export_rts_v4.len())
+                    .unwrap_or(0);
+                match rd {
+                    Some(rd) => {
+                        tracing::info!(
+                            vrf = %vrf,
+                            %prefix,
+                            rd = %rd,
+                            export_rts = export_rts,
+                            label,
+                            "bgp: export (step 17b-ii will write to LocalRib.v4vpn)",
+                        );
+                    }
+                    None => {
+                        tracing::warn!(
+                            vrf = %vrf,
+                            %prefix,
+                            "bgp: export dropped — VRF has no RD configured",
+                        );
+                    }
+                }
             }
-            super::vrf::BgpGlobalMsg::WithdrawExport { vrf } => {
-                tracing::debug!(
-                    vrf = %vrf,
-                    "bgp: ignored WithdrawExport (step 17 wires the handler)",
-                );
+            super::vrf::BgpGlobalMsg::WithdrawExport { vrf, prefix } => {
+                let rd = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd);
+                match rd {
+                    Some(rd) => {
+                        tracing::info!(
+                            vrf = %vrf,
+                            %prefix,
+                            rd = %rd,
+                            "bgp: withdraw-export (step 17b-ii will withdraw from LocalRib.v4vpn)",
+                        );
+                    }
+                    None => {
+                        tracing::debug!(
+                            vrf = %vrf,
+                            %prefix,
+                            "bgp: withdraw-export dropped — VRF has no RD configured",
+                        );
+                    }
+                }
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
