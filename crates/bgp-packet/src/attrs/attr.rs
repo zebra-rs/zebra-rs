@@ -29,6 +29,7 @@ pub enum AttrType {
     ExtendedIpv6Com = 25,
     Aigp = 26,
     LargeCom = 32,
+    PrefixSid = 40,
     Unknown(u8),
 }
 
@@ -53,6 +54,7 @@ impl From<u8> for AttrType {
             25 => ExtendedIpv6Com,
             26 => Aigp,
             32 => LargeCom,
+            40 => PrefixSid,
             v => Unknown(v),
         }
     }
@@ -79,6 +81,7 @@ impl From<AttrType> for u8 {
             ExtendedIpv6Com => 25,
             Aigp => 26,
             LargeCom => 32,
+            PrefixSid => 40,
             Unknown(v) => v,
         }
     }
@@ -125,6 +128,8 @@ pub enum Attr {
     Aigp(Aigp),
     #[nom(Selector = "AttrSelector(AttrType::LargeCom, None)")]
     LargeCom(LargeCommunity),
+    #[nom(Selector = "AttrSelector(AttrType::PrefixSid, None)")]
+    PrefixSid(PrefixSid),
 }
 
 impl Attr {
@@ -146,6 +151,7 @@ impl Attr {
             Attr::PmsiTunnel(v) => v.attr_emit(buf),
             Attr::LargeCom(v) => v.attr_emit(buf),
             Attr::Aigp(v) => v.attr_emit(buf),
+            Attr::PrefixSid(v) => v.attr_emit(buf),
             _ => {
                 //
             }
@@ -173,6 +179,7 @@ impl fmt::Display for Attr {
             Attr::PmsiTunnel(v) => write!(f, "{}", v),
             Attr::LargeCom(v) => write!(f, "{}", v),
             Attr::Aigp(v) => write!(f, "{}", v),
+            Attr::PrefixSid(v) => write!(f, "{}", v),
             _ => write!(f, "Unknown"),
         }
     }
@@ -198,6 +205,7 @@ impl fmt::Debug for Attr {
             Attr::PmsiTunnel(v) => write!(f, "{:?}", v),
             Attr::LargeCom(v) => write!(f, "{:?}", v),
             Attr::Aigp(v) => write!(f, "{:?}", v),
+            Attr::PrefixSid(v) => write!(f, "{:?}", v),
             _ => write!(f, "Unknown"),
         }
     }
@@ -381,6 +389,9 @@ pub fn parse_bgp_update_attribute(
             }
             Attr::LargeCom(v) => {
                 bgp_attr.lcom = Some(v);
+            }
+            Attr::PrefixSid(v) => {
+                bgp_attr.prefix_sid = Some(v);
             }
         }
         remaining = new_remaining;

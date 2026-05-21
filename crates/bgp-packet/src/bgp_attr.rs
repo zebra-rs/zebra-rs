@@ -5,6 +5,7 @@ use bytes::BytesMut;
 use crate::{
     Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpNexthop, ClusterList, Community,
     ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, PmsiTunnel,
+    PrefixSid,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -39,6 +40,10 @@ pub struct BgpAttr {
     pub aigp: Option<Aigp>,
     /// Large Community
     pub lcom: Option<LargeCommunity>,
+    /// BGP Prefix-SID (RFC 8669) — Label-Index, Originator-SRGB, and
+    /// the RFC 9252 SRv6 Service TLVs. Parse-only for v1; semantics
+    /// land in follow-up PRs (SR-MPLS labeled unicast, SRv6 services).
+    pub prefix_sid: Option<PrefixSid>,
     // TODO: Unknown Attributes.
 }
 
@@ -98,6 +103,9 @@ impl BgpAttr {
         if let Some(v) = &self.lcom {
             v.attr_emit(buf);
         }
+        if let Some(v) = &self.prefix_sid {
+            v.attr_emit(buf);
+        }
     }
 
     pub fn neighboring_as(&self) -> Option<u32> {
@@ -147,6 +155,9 @@ impl fmt::Display for BgpAttr {
         }
         if let Some(v) = &self.lcom {
             writeln!(f, " LargeCommunity: {}", v)?;
+        }
+        if let Some(v) = &self.prefix_sid {
+            writeln!(f, " PrefixSid: {}", v)?;
         }
         // Nexthop
         if let Some(v) = &self.nexthop {

@@ -61,6 +61,9 @@ pub use emitter::*;
 pub mod pmsi_tunnel;
 pub use pmsi_tunnel::*;
 
+pub mod prefix_sid;
+pub use prefix_sid::*;
+
 pub mod mp_reach;
 pub use mp_reach::*;
 
