@@ -369,6 +369,22 @@ module exec {
           type empty;
         }
       }
+      container flex-algo {
+        ext:help "IS-IS Flexible Algorithm (RFC 9350)";
+        presence "Show flex-algo state";
+        container route {
+          ext:help "Per-algorithm IPv4 RIB";
+          presence "Show flex-algo per-algo routes";
+          list algorithm {
+            ext:help "Filter to a specific algorithm id";
+            ext:presence "Show flex-algo routes for one algorithm";
+            key value;
+            leaf value {
+              type uint8;
+            }
+          }
+        }
+      }
     }
     container ipv6 {
       ext:help "Show IPv6 commands";

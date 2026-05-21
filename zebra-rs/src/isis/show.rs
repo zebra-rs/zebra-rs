@@ -56,6 +56,12 @@ impl Isis {
         );
         self.show_add("/show/isis/topology", show_isis_topology);
         self.show_add("/show/isis/ti-lfa", show_isis_tilfa);
+        self.show_add("/show/isis/flex-algo", show_isis_flex_algo);
+        self.show_add("/show/isis/flex-algo/route", show_isis_flex_algo_route);
+        self.show_add(
+            "/show/isis/flex-algo/route/algorithm",
+            show_isis_flex_algo_route_algo,
+        );
     }
 }
 
@@ -2347,6 +2353,260 @@ fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
         if sr_mpls { "on" } else { "off" },
         if sr_srv6 { "on" } else { "off" },
     );
+}
+
+/// `show isis flex-algo` — summary of configured FADs, peer-
+/// advertised FADs, and per-peer SR-algorithm participation. The
+/// per-algo IPv4 RIB is reachable via `show isis flex-algo route`.
+fn show_isis_flex_algo(
+    isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    // Local FAD configuration.
+    writeln!(buf)?;
+    if isis.flex_algo.config.is_empty() {
+        writeln!(buf, "Local Flex-Algorithms: (none configured)")?;
+    } else {
+        writeln!(buf, "Local Flex-Algorithms:")?;
+        writeln!(
+            buf,
+            "  {:<5} {:<22} {:<8} {:<3} Constraints",
+            "Algo", "Metric", "Priority", "Adv"
+        )?;
+        for (algo, entry) in &isis.flex_algo.config {
+            let metric = match entry.metric_type {
+                Some(t) => format!("{:?}", t).to_lowercase(),
+                None => "igp".to_string(),
+            };
+            let prio = entry
+                .priority
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let adv = if entry.advertise_definition == Some(true) {
+                "yes"
+            } else {
+                "no"
+            };
+            let mut constraints = String::new();
+            if !entry.include_any.is_empty() {
+                let _ = write!(
+                    constraints,
+                    "include-any={} ",
+                    entry
+                        .include_any
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            if !entry.include_all.is_empty() {
+                let _ = write!(
+                    constraints,
+                    "include-all={} ",
+                    entry
+                        .include_all
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            if !entry.exclude_any.is_empty() {
+                let _ = write!(
+                    constraints,
+                    "exclude-any={} ",
+                    entry
+                        .exclude_any
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            if !entry.srlg_exclude.is_empty() {
+                let _ = write!(
+                    constraints,
+                    "srlg-exclude={} ",
+                    entry
+                        .srlg_exclude
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            if constraints.is_empty() {
+                constraints.push('-');
+            }
+            writeln!(
+                buf,
+                "  {:<5} {:<22} {:<8} {:<3} {}",
+                algo,
+                metric,
+                prio,
+                adv,
+                constraints.trim_end()
+            )?;
+        }
+    }
+
+    // Per-level peer state.
+    for level in &[Level::L1, Level::L2] {
+        let peer_fad = isis.peer_fad.get(level);
+        let peer_algos = isis.peer_algos.get(level);
+        if peer_fad.is_empty() && peer_algos.is_empty() {
+            continue;
+        }
+        let level_long = match level {
+            Level::L1 => "Level-1",
+            Level::L2 => "Level-2",
+        };
+        writeln!(buf)?;
+        writeln!(buf, "{level_long}:")?;
+
+        if !peer_fad.is_empty() {
+            writeln!(buf, "  Peer FADs:")?;
+            for (sys_id, fads) in peer_fad.iter() {
+                let name = hostname_for(isis, level, sys_id);
+                for (algo, fad) in fads {
+                    writeln!(
+                        buf,
+                        "    {name} ({sys_id}): algo {algo} priority {p} metric-type {m} calc-type {c}",
+                        p = fad.priority,
+                        m = fad.metric_type,
+                        c = fad.calc_type,
+                    )?;
+                }
+            }
+        }
+
+        if !peer_algos.is_empty() {
+            writeln!(buf, "  Peer SR-Algorithm Participation:")?;
+            for (sys_id, algos) in peer_algos.iter() {
+                let name = hostname_for(isis, level, sys_id);
+                let list = algos
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(buf, "    {name} ({sys_id}): [{list}]")?;
+            }
+        }
+    }
+
+    Ok(buf)
+}
+
+/// `show isis flex-algo route` — every per-algo IPv4 route, grouped
+/// by level then algorithm. Renders nothing for algos that haven't
+/// produced any routes yet (cold start, no peer Prefix-SIDs).
+fn show_isis_flex_algo_route(
+    isis: &Isis,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    write_flex_algo_routes(isis, None)
+}
+
+/// `show isis flex-algo route algorithm N` — filtered single-algo
+/// view. Returns an empty-result message when the operator picked an
+/// algorithm not in `flex_algo.config`.
+fn show_isis_flex_algo_route_algo(
+    isis: &Isis,
+    mut args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(algo) = args.u8() else {
+        return Ok("% Missing or invalid algorithm id\n".to_string());
+    };
+    write_flex_algo_routes(isis, Some(algo))
+}
+
+fn write_flex_algo_routes(
+    isis: &Isis,
+    filter: Option<u8>,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
+
+    let mut wrote_any = false;
+    for level in &[Level::L1, Level::L2] {
+        let per_algo = isis.rib_flex_algo.get(level);
+        if per_algo.is_empty() {
+            continue;
+        }
+        let level_long = match level {
+            Level::L1 => "Level-1",
+            Level::L2 => "Level-2",
+        };
+
+        for (algo, rib) in per_algo {
+            if let Some(f) = filter
+                && *algo != f
+            {
+                continue;
+            }
+            if rib.iter().next().is_none() {
+                continue;
+            }
+            wrote_any = true;
+            writeln!(buf)?;
+            writeln!(buf, "{level_long} Algorithm {algo}:")?;
+            writeln!(
+                buf,
+                "  {:<20} {:<8} {:<16} {:<12} Label",
+                "Prefix", "Metric", "Nexthop", "Interface"
+            )?;
+            for (prefix, route) in rib.iter() {
+                if route.nhops.is_empty() {
+                    let label = route
+                        .sid
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    writeln!(
+                        buf,
+                        "  {:<20} {:<8} {:<16} {:<12} {}",
+                        prefix.to_string(),
+                        route.metric,
+                        "(unreachable)",
+                        "-",
+                        label
+                    )?;
+                    continue;
+                }
+                for (addr, nhop) in route.nhops.iter() {
+                    let ifname = isis.ifname(nhop.ifindex);
+                    let label = route
+                        .sid
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    writeln!(
+                        buf,
+                        "  {:<20} {:<8} {:<16} {:<12} {}",
+                        prefix.to_string(),
+                        route.metric,
+                        addr.to_string(),
+                        ifname,
+                        label
+                    )?;
+                }
+            }
+        }
+    }
+
+    if !wrote_any {
+        match filter {
+            Some(a) => writeln!(buf, "\n% No routes for flex-algorithm {a}")?,
+            None => writeln!(buf, "\n% No flex-algorithm routes installed")?,
+        }
+    }
+
+    Ok(buf)
 }
 
 #[cfg(test)]
