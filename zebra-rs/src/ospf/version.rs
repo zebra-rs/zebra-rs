@@ -1,24 +1,30 @@
 //! OSPF address-family abstraction.
 //!
-//! The plan is to grow this trait into the boundary between
-//! version-agnostic protocol logic (IFSM / NFSM / LSDB plumbing /
-//! flooding) and the v2-vs-v3-specific bits (packet formats, address
-//! sizes, multicast groups). For now it captures only the small set
-//! of constants that already differ between v2 and v3 — `Addr`,
-//! protocol number, and the two well-known multicast groups — so the
-//! socket layer can reference them through the trait instead of
-//! hardcoding v2 literals.
+//! The boundary between version-agnostic protocol logic (IFSM /
+//! NFSM / LSDB plumbing / flooding) and the v2-vs-v3-specific bits
+//! (packet formats, address sizes, multicast groups). Subsequent
+//! Phase 6 PRs parameterize `Ospf<V>`, `OspfLink<V>`, `Neighbor<V>`,
+//! and `Lsdb<V>` over the associated types declared here.
 //!
-//! Subsequent PRs in the Phase 3 series will parameterize
-//! `Ospf<V>`, `OspfLink<V>`, `Neighbor<V>`, and `Lsdb<V>` and migrate
-//! the remaining `Ipv4Addr` references that are genuinely
-//! address-family-agnostic to `V::Addr`.
+//! The trait carries five associated wire types — `Packet`,
+//! `Hello`, `DbDesc`, `LsaHeader`, `Lsa` — that downstream generic
+//! code uses as opaque carriers. Methods on those types remain
+//! defined on the concrete `Ospfv2Packet` / `Ospfv3Packet` / …
+//! structs in the `ospf-packet` crate; generic consumers will
+//! gradually accumulate trait-bound methods as the parameterization
+//! progresses (mirroring how the IS-IS module's generic FSM accesses
+//! its packet types).
 
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ipnet::{Ipv4Net, Ipv6Net};
+
+use ospf_packet::{
+    OspfDbDesc, OspfHello, OspfLsa, OspfLsaHeader, Ospfv2Packet, Ospfv3DbDesc, Ospfv3Hello,
+    Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Packet,
+};
 
 /// Marker / dispatch trait for an OSPF protocol version (v2 or v3).
 ///
@@ -27,17 +33,49 @@ use ipnet::{Ipv4Net, Ipv6Net};
 /// (AllSPFRouters / AllDRouters) and the address family itself are
 /// what actually differs.
 pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
-    /// Address type used on the wire and for router/area identifiers.
-    /// v2 uses `Ipv4Addr`; v3 will use `Ipv6Addr`. Router-id and
-    /// area-id remain 32-bit in both versions, but the link-local
-    /// source address differs — those v3-specific fields will land
-    /// when `Ospfv3` is added.
+    /// Address type used on the wire and for L3 source / destination.
+    /// `Ipv4Addr` for v2, `Ipv6Addr` for v3. Router-id and area-id
+    /// stay 32-bit in both versions and live separately as `Ipv4Addr`
+    /// even on v3 (RFC 5340 §A.3.1).
     type Addr: Copy + Eq + Ord + Hash + Display + Debug + 'static;
 
-    /// Prefix (network + length) type. v2 uses `Ipv4Net`; v3 will
-    /// use `Ipv6Net`. Both are `ipnet::*Net` types so they share
-    /// `Copy`, `Eq`, `Display`, etc.
+    /// Prefix (network + length) type. `Ipv4Net` for v2, `Ipv6Net`
+    /// for v3. Both are `ipnet::*Net` types so they share `Copy`,
+    /// `Eq`, `Display`, etc.
     type Prefix: Copy + Eq + Display + Debug + 'static;
+
+    /// Full OSPF packet on the wire — header + payload.
+    /// `Ospfv2Packet` / `Ospfv3Packet`. Generic socket I/O and
+    /// flooding pass values of this type through.
+    //
+    // No `Clone` bound: `Ospfv2Packet` does not derive `Clone`, and
+    // the use sites all consume the packet once (channel send or
+    // pattern-match on the payload). If a future caller needs a
+    // cloned packet, add the bound to the trait and `derive(Clone)`
+    // on `Ospfv2Packet` then.
+    type Packet: Debug + Send + Sync + 'static;
+
+    /// Hello-packet payload. `OspfHello` / `Ospfv3Hello`. Carried
+    /// inside the packet variant for the IFSM HelloReceived path.
+    //
+    // No `Clone` bound — same rationale as `Packet`. Hello is read
+    // by reference after the parser surrenders the packet.
+    type Hello: Debug + Send + Sync + 'static;
+
+    /// Database-Description payload. `OspfDbDesc` / `Ospfv3DbDesc`.
+    /// Carried inside the packet variant; cached on `Neighbor<V>`
+    /// during the master / slave handshake.
+    type DbDesc: Debug + Clone + Send + Sync + 'static;
+
+    /// LSA header. `OspfLsaHeader` / `Ospfv3LsaHeader`. Same 20-octet
+    /// length in both versions but a different field layout
+    /// (RFC 5340 §A.4.2). LSDB indexes and DBD summary lists carry
+    /// just the header.
+    type LsaHeader: Debug + Clone + Send + Sync + 'static;
+
+    /// One LSA: header + body. `OspfLsa` / `Ospfv3Lsa`. LSDB entries
+    /// and LS Update packets carry the full LSA.
+    type Lsa: Debug + Clone + Send + Sync + 'static;
 
     /// IP protocol number for OSPF packets — 89 in both versions
     /// (RFC 2328 §A and RFC 5340 §2.3).
@@ -57,6 +95,11 @@ pub struct Ospfv2;
 impl OspfVersion for Ospfv2 {
     type Addr = Ipv4Addr;
     type Prefix = Ipv4Net;
+    type Packet = Ospfv2Packet;
+    type Hello = OspfHello;
+    type DbDesc = OspfDbDesc;
+    type LsaHeader = OspfLsaHeader;
+    type Lsa = OspfLsa;
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
 }
@@ -78,6 +121,11 @@ pub struct Ospfv3;
 impl OspfVersion for Ospfv3 {
     type Addr = Ipv6Addr;
     type Prefix = Ipv6Net;
+    type Packet = Ospfv3Packet;
+    type Hello = Ospfv3Hello;
+    type DbDesc = Ospfv3DbDesc;
+    type LsaHeader = Ospfv3LsaHeader;
+    type Lsa = Ospfv3Lsa;
     /// AllSPFRouters in v3 (RFC 5340 §A.1): `ff02::5`.
     const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
     /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.
