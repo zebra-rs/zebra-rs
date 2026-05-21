@@ -450,6 +450,11 @@ pub fn make_repair_list(
             State::LookingForFirst => {
                 if inter.p {
                     deepest_p = Some(inter.id);
+                    // The pseudonode hop into this P-vertex is folded
+                    // into the NodeSid prefix — its natural forwarding
+                    // already crosses the LAN. Drop the cached via so a
+                    // later AdjSid emission doesn't inherit it.
+                    pending_via = None;
                     state = State::InP;
                 } else {
                     sr_segments.push(SrSegment::AdjSid(s, inter.id, pending_via));
@@ -460,6 +465,10 @@ pub fn make_repair_list(
             State::InP => {
                 if inter.p {
                     deepest_p = Some(inter.id);
+                    // Same as the LookingForFirst → InP transition: a
+                    // pseudonode preceding this P-vertex is absorbed by
+                    // the NodeSid prefix, so the via cache is stale.
+                    pending_via = None;
                 } else {
                     if let Some(p) = deepest_p {
                         sr_segments.push(SrSegment::NodeSid(p));
@@ -1433,5 +1442,94 @@ mod tests {
             BTreeSet::from([(1, 10)]),
             "B must inherit A's first_hop_links (root→A link_id), not the A→B link's id"
         );
+    }
+
+    /// Mixed LAN/P2P topology drawn from a live IS-IS LSDB
+    /// ("TI-LFA Draft with Link#"). Reproduces the scenario where the
+    /// only LANs sit between {s,n2}, {s,n1}, {n2,r1}, {r1,n1}, and the
+    /// r1↔r2 / r2↔r3 / r3↔d links are point-to-point. SPF cost from s:
+    /// every LAN crossing costs s=10 / others=1; P2P r1↔r2 and r2↔r3
+    /// are metric 1000; n1↔r2, n1↔d, r3↔d are metric 1. With X=n1,
+    /// r1 has equal-cost paths from s with and without n1 — required
+    /// to land r1 in P-space and trigger the pending_via leak below.
+    fn mixed_lan_p2p_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+        for v in [
+            Vertex::new_node("s", 0),
+            Vertex::new_node("n1", 1),
+            Vertex::new_node("n2", 2),
+            Vertex::new_node("r1", 3),
+            Vertex::new_node("r2", 4),
+            Vertex::new_node("r3", 5),
+            Vertex::new_node("d", 6),
+        ] {
+            graph.insert(v.id, v);
+        }
+
+        // LANs (DIS-based pseudonode naming matches the LSDB).
+        add_lan(&mut graph, 7, "s.04", &[(0, 10), (2, 1)]);
+        add_lan(&mut graph, 8, "n1.03", &[(1, 1), (0, 10)]);
+        add_lan(&mut graph, 9, "n2.04", &[(2, 1), (3, 1)]);
+        add_lan(&mut graph, 10, "r1.04", &[(3, 1), (1, 1)]);
+
+        // P2P links (symmetric metric in both directions).
+        let p2p = [(1, 4, 1), (1, 6, 1), (3, 4, 1000), (4, 5, 1000), (5, 6, 1)];
+        for &(a, b, cost) in &p2p {
+            graph
+                .get_mut(&a)
+                .unwrap()
+                .olinks
+                .push(Link::new(a, b, cost));
+            graph
+                .get_mut(&b)
+                .unwrap()
+                .ilinks
+                .push(Link::new(a, b, cost));
+            graph
+                .get_mut(&b)
+                .unwrap()
+                .olinks
+                .push(Link::new(b, a, cost));
+            graph
+                .get_mut(&a)
+                .unwrap()
+                .ilinks
+                .push(Link::new(b, a, cost));
+        }
+        graph
+    }
+
+    /// Regression: `make_repair_list` used to leak `pending_via`
+    /// across a P-space real-router vertex. With X=n1, the modified
+    /// SPF path from s to r3 is
+    /// `s → s.04 → n2 → n2.04 → r1 → r2 → r3`. Both n2 and r1 are in
+    /// P-space (r1 has an equal-cost path via s.04 that avoids n1),
+    /// so `make_repair_list` enters InP at n2, observes the n2.04
+    /// pseudonode, then stays in InP at r1 — at which point n2.04's
+    /// LAN crossing is already absorbed into the NodeSid(r1) prefix.
+    /// Pre-fix, `pending_via=n2.04` survived past r1 and got stamped
+    /// onto the unrelated `AdjSid(r1, r2)` emission for the r1↔r2
+    /// P2P link, producing `AdjSid(r1, r2, via n2.04)`. Post-fix, the
+    /// via cache is cleared on every "stay in P" step, so the
+    /// AdjSid emits with `via = None`.
+    #[test]
+    fn tilfa_pending_via_does_not_leak_past_p_router() {
+        let graph = mixed_lan_p2p_graph();
+        let s = 0; // s
+        let d = 5; // r3
+        let x: &[usize] = &[1]; // exclude n1
+
+        let repair_paths = tilfa(&graph, s, d, x);
+        assert_eq!(repair_paths.len(), 1, "single PC path expected");
+        let repair = repair_paths.first().unwrap();
+
+        assert_eq!(repair.segs.len(), 3, "expected NodeSid + 2 AdjSids");
+        assert_eq!(seg_disp(&graph, &repair.segs[0]), "NodeSid(r1)");
+        assert_eq!(
+            seg_disp(&graph, &repair.segs[1]),
+            "AdjSid(r1, r2)",
+            "r1↔r2 is P2P — via must be None, not the absorbed n2.04 LAN"
+        );
+        assert_eq!(seg_disp(&graph, &repair.segs[2]), "AdjSid(r2, r3)");
     }
 }
