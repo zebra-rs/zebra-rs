@@ -1560,14 +1560,16 @@ fn route_soft_out_peer_table(
 
     // Direct-emit IPv4 unicast batch (no group fan-out). When the
     // peer negotiated RFC 8950 ENHE for IPv4 unicast, pass the
-    // per-interface link-local so the encoder emits MP_REACH instead
-    // of the legacy inline-NLRI form.
+    // per-interface next-hop so the encoder emits MP_REACH instead
+    // of the legacy inline-NLRI form. `compose_enhe_next_hop`
+    // selects 32-octet dual when the egress interface also has a
+    // global v6, else 16-octet link-local-only.
     if rd.is_none()
         && let Some(peer) = peers.get_by_idx(peer_idx)
     {
         let enhe_v6 = peer
             .is_enhe_v4_negotiated()
-            .then(|| peer.next_hop_v6(bgp.interface_addrs))
+            .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
             .flatten();
         super::update_group::send_ipv4_direct(peer, ipv4_entries, enhe_v6);
     }
@@ -3392,7 +3394,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
 
     let enhe_v6 = peer
         .is_enhe_v4_negotiated()
-        .then(|| peer.next_hop_v6(bgp.interface_addrs))
+        .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
         .flatten();
     super::update_group::send_ipv4_direct(peer, entries, enhe_v6);
 

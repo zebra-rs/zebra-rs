@@ -516,12 +516,13 @@ impl Peer {
         false
     }
 
-    /// IPv6 next-hop to advertise in MP_REACH for IPv4-unicast NLRI
-    /// once RFC 8950 Extended Next Hop is negotiated on this peer.
-    /// Returns `None` for any peer that isn't interface-keyed, or when
-    /// the egress interface's link-local hasn't been observed yet via
-    /// `RibRx::AddrAdd`. Callers should pair this with
-    /// [`Self::is_enhe_v4_negotiated`] before emitting.
+    /// IPv6 link-local next-hop to advertise in MP_REACH for
+    /// IPv4-unicast NLRI once RFC 8950 Extended Next Hop is
+    /// negotiated on this peer. Returns `None` for any peer that
+    /// isn't interface-keyed, or when the egress interface's
+    /// link-local hasn't been observed yet via `RibRx::AddrAdd`.
+    /// Callers should pair this with [`Self::is_enhe_v4_negotiated`]
+    /// before emitting.
     pub fn next_hop_v6(
         &self,
         addrs: &super::interface_addrs::InterfaceAddrs,
@@ -530,6 +531,22 @@ impl Peer {
             return None;
         }
         addrs.link_local_for(self.scope_id?)
+    }
+
+    /// Global IPv6 next-hop for the egress interface, or `None` if
+    /// none is registered (pure-unnumbered links typically have no
+    /// global v6). When this returns `Some` and
+    /// [`Self::next_hop_v6`] also returns `Some`, the encoder emits
+    /// the RFC 8950 32-octet `global || link-local` form; otherwise
+    /// it emits the 16-octet link-local-only form.
+    pub fn next_hop_v6_global(
+        &self,
+        addrs: &super::interface_addrs::InterfaceAddrs,
+    ) -> Option<std::net::Ipv6Addr> {
+        if !matches!(self.origin, PeerOrigin::Interface { .. }) {
+            return None;
+        }
+        addrs.global_for(self.scope_id?)
     }
 
     /// True iff both directions of the BGP capability exchange
