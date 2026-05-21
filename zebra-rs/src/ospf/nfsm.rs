@@ -325,9 +325,12 @@ pub fn ospf_db_summary_add(nbr: &mut Neighbor, lsa: &OspfLsa) {
     nbr.db_sum.push(lsa.h.clone());
 }
 
-fn ospf_db_summary_add_table(nbr: &mut Neighbor, table: &super::lsdb::LsTable) {
+fn ospf_db_summary_add_table<'a>(
+    nbr: &mut Neighbor,
+    lsas: impl Iterator<Item = &'a super::lsdb::Lsa>,
+) {
     use super::lsdb::OSPF_MAX_AGE;
-    for lsa in table.values() {
+    for lsa in lsas {
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
         }
@@ -343,15 +346,15 @@ pub fn ospf_nfsm_negotiation_done(
     use super::area::AreaType;
 
     // RFC 2328 §10.8: Initial DD Summary list is the attached area's LSDB.
-    ospf_db_summary_add_table(nbr, &oi.lsdb.tables.router);
-    ospf_db_summary_add_table(nbr, &oi.lsdb.tables.network);
-    ospf_db_summary_add_table(nbr, &oi.lsdb.tables.summary);
-    ospf_db_summary_add_table(nbr, &oi.lsdb.tables.summary_asbr);
-    ospf_db_summary_add_table(nbr, &oi.lsdb.tables.opaque_area);
+    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Router));
+    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Network));
+    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Summary));
+    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::SummaryAsbr));
+    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
 
     // AS-scope LSAs included only for non-stub / non-NSSA areas.
     if oi.area_type == AreaType::Normal {
-        ospf_db_summary_add_table(nbr, &oi.lsdb_as.tables.as_external);
+        ospf_db_summary_add_table(nbr, oi.lsdb_as.values_by_type(OspfLsType::AsExternal));
     }
 
     tracing::info!("[NFSM:NegotiationDone] DB Summary len {}", nbr.db_sum.len());
