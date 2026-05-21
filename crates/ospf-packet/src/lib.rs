@@ -11,13 +11,14 @@ pub use packet_utils::SidLabelTlv;
 pub use parser::*;
 pub use typ::OspfType;
 pub use v3::{
-    OSPFV3_HEADER_LEN, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LSA_HEADER_LEN,
-    OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E,
-    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, OSPFV3_VERSION,
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3IntraAreaPrefix, Ospfv3IntraAreaPrefixLsa, Ospfv3LsAck,
-    Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsaHeader, Ospfv3NetworkLsa, Ospfv3Options,
-    Ospfv3Packet, Ospfv3Payload, Ospfv3PrefixOptions, Ospfv3RouterLinkType, Ospfv3RouterLsa,
-    Ospfv3RouterLsaLink, ospfv3_prefix_wire_len,
+    OSPFV3_HEADER_LEN, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+    OSPFV3_LS_INFINITY, OSPFV3_LSA_HEADER_LEN, OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_FLAG_B,
+    OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W,
+    OSPFV3_ROUTER_LSA_TYPE, OSPFV3_VERSION, Ospfv3DbDesc, Ospfv3Hello, Ospfv3InterAreaPrefixLsa,
+    Ospfv3IntraAreaPrefix, Ospfv3IntraAreaPrefixLsa, Ospfv3LsAck, Ospfv3LsRequest,
+    Ospfv3LsRequestEntry, Ospfv3LsaHeader, Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet,
+    Ospfv3Payload, Ospfv3PrefixOptions, Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink,
+    ospfv3_prefix_wire_len,
 };
 
 pub use packet_utils::many0_complete;

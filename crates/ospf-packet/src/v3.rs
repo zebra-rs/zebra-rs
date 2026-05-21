@@ -781,6 +781,84 @@ impl ParseBe<Ospfv3IntraAreaPrefixLsa> for Ospfv3IntraAreaPrefixLsa {
     }
 }
 
+/// v3 Inter-Area-Prefix-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=1 (area scope), function code = 3.
+pub const OSPFV3_INTER_AREA_PREFIX_LSA_TYPE: u16 = 0x2003;
+
+/// LS-Infinity value for 24-bit OSPF metrics (RFC 5340 §A.4.5,
+/// §A.4.7). Mirrors the v2 macro. Set by an ABR / ASBR to withdraw
+/// a previously advertised reachability.
+pub const OSPFV3_LS_INFINITY: u32 = 0x00FF_FFFF;
+
+/// v3 Inter-Area-Prefix-LSA body (RFC 5340 §A.4.5).
+///
+/// v3 equivalent of v2's Type 3 (Network Summary) LSA: an ABR
+/// originates one of these per inter-area destination prefix, with
+/// the cost from the ABR.
+///
+/// Layout:
+///   - reserved (8 bits)       — must be 0
+///   - metric (24 bits)        — cost from this ABR to the prefix
+///   - prefix_length (8 bits)
+///   - prefix_options (8 bits) — same `Ospfv3PrefixOptions` shape
+///     introduced for Intra-Area-Prefix-LSA
+///   - reserved2 (16 bits)     — must be 0
+///   - address_prefix          — `ospfv3_prefix_wire_len(prefix_length)`
+///     octets, padded to a 32-bit boundary
+///
+/// Differences from Intra-Area-Prefix-LSA's per-prefix entries:
+///   - one prefix per LSA (no count + list);
+///   - the metric lives at the LSA level (24 bits) instead of
+///     per-prefix (16 bits);
+///   - the per-prefix 16-bit slot after `prefix_options` is reserved
+///     (must be 0), not a metric.
+///
+/// Differences from v2 Type 3 Summary-LSA:
+///   - v2 carries a fixed 32-bit `netmask`; v3 carries
+///     `prefix_length` + variable-length address bytes per §A.4.1.1;
+///   - v2's `tos_routes` carry-over is gone.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3InterAreaPrefixLsa {
+    pub metric: u32,
+    pub prefix_length: u8,
+    pub prefix_options: Ospfv3PrefixOptions,
+    pub address_prefix: Vec<u8>,
+}
+
+impl Ospfv3InterAreaPrefixLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // Reserved byte + 24-bit metric in one word.
+        let word = self.metric & 0x00FF_FFFF;
+        buf.put_u32(word);
+        buf.put_u8(self.prefix_length);
+        buf.put_u8(self.prefix_options.into_bits());
+        // Reserved (16 bits, must be 0).
+        buf.put_u16(0);
+        buf.put_slice(&self.address_prefix);
+    }
+}
+
+impl ParseBe<Ospfv3InterAreaPrefixLsa> for Ospfv3InterAreaPrefixLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3InterAreaPrefixLsa> {
+        let (input, _reserved) = be_u8(input)?;
+        let (input, metric) = be_u24(input)?;
+        let (input, prefix_length) = be_u8(input)?;
+        let (input, prefix_options_byte) = be_u8(input)?;
+        let (input, _reserved2) = be_u16(input)?;
+        let wire_len = ospfv3_prefix_wire_len(prefix_length);
+        let (input, prefix_bytes) = nom::bytes::complete::take(wire_len)(input)?;
+        Ok((
+            input,
+            Ospfv3InterAreaPrefixLsa {
+                metric,
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::from_bits(prefix_options_byte),
+                address_prefix: prefix_bytes.to_vec(),
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1402,6 +1480,84 @@ mod tests {
         let (rest, parsed) = Ospfv3IntraAreaPrefixLsa::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
         assert!(parsed.prefixes.is_empty());
+    }
+
+    /// Inter-Area-Prefix-LSA with a /64 prefix roundtrips every
+    /// field. Pins the (Reserved, Metric24, PrefixLen, PrefixOpts,
+    /// Reserved16) layout of the fixed 8-byte prefix.
+    #[test]
+    fn ospfv3_inter_area_prefix_lsa_roundtrip() {
+        let mut opts = Ospfv3PrefixOptions::new();
+        opts.set_nu(true);
+        let body = Ospfv3InterAreaPrefixLsa {
+            metric: 0x000A_BCDE, // fits in 24 bits
+            prefix_length: 64,
+            prefix_options: opts,
+            address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0xCA, 0xFE, 0xBA, 0xBE],
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed (8) + 8-byte prefix payload (for /64) = 16.
+        assert_eq!(buf.len(), 8 + 8);
+
+        // High byte of the first word is Reserved (must be 0).
+        assert_eq!(buf[0], 0);
+        // Lower 24 bits of the first word are the metric.
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), 0x000A_BCDE);
+        // Next byte is PrefixLength.
+        assert_eq!(buf[4], 64);
+        // Reserved16 after PrefixOptions must be 0.
+        assert_eq!(BigEndian::read_u16(&buf[6..8]), 0);
+
+        let (rest, parsed) = Ospfv3InterAreaPrefixLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.metric, 0x000A_BCDE);
+        assert_eq!(parsed.prefix_length, 64);
+        assert!(parsed.prefix_options.nu());
+        assert_eq!(parsed.address_prefix.len(), 8);
+        assert_eq!(parsed.address_prefix, body.address_prefix);
+    }
+
+    /// LS-Infinity metric (a withdraw) roundtrips and is exactly
+    /// 0x00FFFFFF — used by ABRs to retract a previously advertised
+    /// inter-area prefix.
+    #[test]
+    fn ospfv3_inter_area_prefix_lsa_ls_infinity() {
+        let body = Ospfv3InterAreaPrefixLsa {
+            metric: OSPFV3_LS_INFINITY,
+            prefix_length: 64,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0],
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), OSPFV3_LS_INFINITY);
+
+        let (_, parsed) = Ospfv3InterAreaPrefixLsa::parse_be(&buf).unwrap();
+        assert_eq!(parsed.metric, OSPFV3_LS_INFINITY);
+    }
+
+    /// Default-route prefix (length 0) parses with zero address-prefix
+    /// octets — covers the §A.4.1.1 edge case for the prefix wire
+    /// encoding.
+    #[test]
+    fn ospfv3_inter_area_prefix_lsa_default_route() {
+        let body = Ospfv3InterAreaPrefixLsa {
+            metric: 5,
+            prefix_length: 0,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            address_prefix: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Just the 8-byte fixed prefix.
+        assert_eq!(buf.len(), 8);
+
+        let (rest, parsed) = Ospfv3InterAreaPrefixLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.prefix_length, 0);
+        assert!(parsed.address_prefix.is_empty());
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
