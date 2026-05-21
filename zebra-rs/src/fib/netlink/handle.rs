@@ -1048,6 +1048,15 @@ impl FibHandle {
                 NetlinkPayload::Done(m) => {
                     tracing::info!("NewNexthop done {m:?}");
                 }
+                NetlinkPayload::InnerMessage(e) => {
+                    tracing::info!("NewNexthop inner message {:?}", e);
+                }
+                NetlinkPayload::Noop => {
+                    tracing::info!("NewNexthop noop");
+                }
+                NetlinkPayload::Overrun(e) => {
+                    tracing::info!("NewNexthop Overrun {:?}", e);
+                }
                 _ => {
                     tracing::info!("NewNexthop other return");
                 }
