@@ -241,6 +241,93 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
     }
 }
 
+/// Convert one entry of IS-IS's internal `SpfRoute` shape into the
+/// public `rib::api::FlexAlgoRoute` snapshot. Returns `None` when
+/// the route lacks a resolved per-algo SID or has no usable
+/// nexthops — both signal "no forwarding plane for this prefix in
+/// algo-N" and downstream callers should treat it as a delete.
+fn make_flex_algo_route(
+    algo: u8,
+    prefix: Ipv4Net,
+    route: &SpfRoute,
+) -> Option<crate::rib::api::FlexAlgoRoute> {
+    let outer_label = route.sid?;
+    let nexthops: Vec<crate::rib::api::FlexAlgoNexthop> = route
+        .nhops
+        .iter()
+        .map(|(addr, nhop)| crate::rib::api::FlexAlgoNexthop {
+            addr: *addr,
+            ifindex: nhop.ifindex,
+            label: outer_label,
+        })
+        .collect();
+    if nexthops.is_empty() {
+        return None;
+    }
+    Some(crate::rib::api::FlexAlgoRoute {
+        algo,
+        prefix,
+        metric: route.metric,
+        nexthops,
+    })
+}
+
+/// Diff per-algo IPv4 RIB snapshots and emit `Message::FlexAlgoRoute
+/// Add` / `Del` messages so RIB's shadow tracks the live state.
+///
+/// Iteration covers every algo present in either side so an algo
+/// dropped from `flex_algo.config` (and therefore absent from `next`)
+/// yields one Del per prefix that used to be there.
+///
+/// Within an algo we use `spf::table_diff` for the same `only_curr /
+/// different / only_next` split the IPv4 and IPv6 diff helpers use,
+/// so the semantics of "route changed under the hood but same
+/// prefix" match what RIB already sees from algo-0.
+pub fn diff_apply_flex_algo(
+    rib_client: &crate::rib::client::RibClient,
+    prev: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
+    next: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
+) {
+    let all_algos: BTreeSet<u8> = prev.keys().chain(next.keys()).copied().collect();
+    let empty: PrefixMap<Ipv4Net, SpfRoute> = PrefixMap::new();
+    for algo in all_algos {
+        let prev_table = prev.get(&algo).unwrap_or(&empty);
+        let next_table = next.get(&algo).unwrap_or(&empty);
+        let diff = spf::table_diff(prev_table.iter(), next_table.iter());
+
+        for (prefix, _) in diff.only_curr.iter() {
+            let msg = rib::Message::FlexAlgoRouteDel {
+                algo,
+                prefix: **prefix,
+            };
+            rib_client.send(msg).unwrap();
+        }
+        for (prefix, _, route) in diff.different.iter() {
+            // A changed route that no longer has a usable forwarding
+            // plane (lost SID or lost all nhops) collapses to a Del.
+            match make_flex_algo_route(algo, **prefix, route) {
+                Some(r) => {
+                    let msg = rib::Message::FlexAlgoRouteAdd { route: r };
+                    rib_client.send(msg).unwrap();
+                }
+                None => {
+                    let msg = rib::Message::FlexAlgoRouteDel {
+                        algo,
+                        prefix: **prefix,
+                    };
+                    rib_client.send(msg).unwrap();
+                }
+            }
+        }
+        for (prefix, route) in diff.only_next.iter() {
+            if let Some(r) = make_flex_algo_route(algo, **prefix, route) {
+                let msg = rib::Message::FlexAlgoRouteAdd { route: r };
+                rib_client.send(msg).unwrap();
+            }
+        }
+    }
+}
+
 pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
@@ -1021,18 +1108,12 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         .iter()
         .map(|(k, v)| (*k, v.clone()))
         .collect();
-    {
-        let active: BTreeSet<u8> = configured_algos.iter().map(|(k, _)| *k).collect();
-        top.graph_flex_algo
-            .get_mut(&level)
-            .retain(|k, _| active.contains(k));
-        top.spf_flex_algo
-            .get_mut(&level)
-            .retain(|k, _| active.contains(k));
-        top.rib_flex_algo
-            .get_mut(&level)
-            .retain(|k, _| active.contains(k));
-    }
+    // Build the new per-algo state into fresh maps; we diff against
+    // the previous `top.rib_flex_algo[level]` before swapping so the
+    // RIB-side shadow stays consistent with this cycle.
+    let mut new_flex_algo_graphs: BTreeMap<u8, Option<spf::Graph>> = BTreeMap::new();
+    let mut new_flex_algo_spfs: BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>> = BTreeMap::new();
+    let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
     for (algo, entry) in &configured_algos {
         let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
         let algo_spf = algo_source.map(|src| spf::spf(&algo_graph, src, &spf::SpfOpt::full_path()));
@@ -1050,12 +1131,28 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
             _ => PrefixMap::<Ipv4Net, SpfRoute>::new(),
         };
 
-        top.graph_flex_algo
-            .get_mut(&level)
-            .insert(*algo, Some(algo_graph));
-        top.spf_flex_algo.get_mut(&level).insert(*algo, algo_spf);
-        top.rib_flex_algo.get_mut(&level).insert(*algo, algo_rib);
+        new_flex_algo_graphs.insert(*algo, Some(algo_graph));
+        new_flex_algo_spfs.insert(*algo, algo_spf);
+        new_flex_algo_rib.insert(*algo, algo_rib);
     }
+    // Per-algo route diff → RIB publish (Phase 3). The shadow on
+    // `Rib::flex_algo_routes` is the colour-aware nexthop resolver's
+    // source of truth for the outer MPLS label per (algo, prefix).
+    if top.config.distribute.rib {
+        diff_apply_flex_algo(
+            top.rib_client,
+            top.rib_flex_algo.get(&level),
+            &new_flex_algo_rib,
+        );
+    }
+
+    // Swap the new state in. The retain that used to live above is
+    // implicit: any algo present in the old map but absent from the
+    // new one yielded `FlexAlgoRouteDel` messages above; the swap
+    // drops the old entry entirely.
+    *top.graph_flex_algo.get_mut(&level) = new_flex_algo_graphs;
+    *top.spf_flex_algo.get_mut(&level) = new_flex_algo_spfs;
+    *top.rib_flex_algo.get_mut(&level) = new_flex_algo_rib;
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
@@ -1215,6 +1312,180 @@ mod tests {
 
     fn mk_uni(addr: &str, metric: u32) -> rib::NexthopUni {
         rib::NexthopUni::new(addr.parse().unwrap(), metric, vec![])
+    }
+
+    fn spf_route(metric: u32, sid: Option<u32>, nhops: &[(&str, u32)]) -> SpfRoute {
+        let mut nh = BTreeMap::new();
+        for (addr, ifindex) in nhops {
+            nh.insert(
+                addr.parse::<Ipv4Addr>().unwrap(),
+                super::SpfNexthop {
+                    ifindex: *ifindex,
+                    adjacency: false,
+                    sys_id: None,
+                    backup: None,
+                },
+            );
+        }
+        SpfRoute {
+            metric,
+            nhops: nh,
+            sid,
+            prefix_sid: None,
+            dest_vertex: None,
+        }
+    }
+
+    fn pfx(s: &str) -> Ipv4Net {
+        s.parse().unwrap()
+    }
+
+    fn rib_client_for_test() -> (
+        crate::rib::client::RibClient,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            crate::rib::client::RibClient::new(tx, crate::rib::client::ProtoId::from_raw(u32::MAX)),
+            rx,
+        )
+    }
+
+    fn drain(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) -> Vec<crate::rib::inst::Message> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(m.msg);
+        }
+        out
+    }
+
+    #[test]
+    fn make_flex_algo_route_skips_route_with_no_sid() {
+        let r = spf_route(10, None, &[("10.0.0.1", 7)]);
+        assert!(make_flex_algo_route(128, pfx("192.0.2.0/24"), &r).is_none());
+    }
+
+    #[test]
+    fn make_flex_algo_route_skips_route_with_no_nhops() {
+        let r = spf_route(10, Some(17128), &[]);
+        assert!(make_flex_algo_route(128, pfx("192.0.2.0/24"), &r).is_none());
+    }
+
+    #[test]
+    fn make_flex_algo_route_flattens_multiple_nhops() {
+        let r = spf_route(10, Some(17128), &[("10.0.0.1", 7), ("10.0.0.2", 8)]);
+        let fr = make_flex_algo_route(128, pfx("192.0.2.0/24"), &r).expect("Some");
+        assert_eq!(fr.algo, 128);
+        assert_eq!(fr.metric, 10);
+        assert_eq!(fr.nexthops.len(), 2);
+        for n in &fr.nexthops {
+            assert_eq!(n.label, 17128);
+        }
+    }
+
+    #[test]
+    fn diff_apply_flex_algo_emits_add_for_new_route() {
+        let (client, mut rx) = rib_client_for_test();
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut t = PrefixMap::new();
+        t.insert(
+            pfx("10.0.0.1/32"),
+            spf_route(20, Some(17128), &[("10.0.0.5", 9)]),
+        );
+        next.insert(128, t);
+
+        diff_apply_flex_algo(&client, &BTreeMap::new(), &next);
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(
+            msgs[0],
+            crate::rib::inst::Message::FlexAlgoRouteAdd { ref route }
+                if route.algo == 128 && route.prefix == pfx("10.0.0.1/32")
+        ));
+    }
+
+    #[test]
+    fn diff_apply_flex_algo_emits_del_for_removed_algo() {
+        let (client, mut rx) = rib_client_for_test();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut t = PrefixMap::new();
+        t.insert(
+            pfx("10.0.0.1/32"),
+            spf_route(20, Some(17128), &[("10.0.0.5", 9)]),
+        );
+        t.insert(
+            pfx("10.0.0.2/32"),
+            spf_route(20, Some(17129), &[("10.0.0.5", 9)]),
+        );
+        prev.insert(128, t);
+
+        diff_apply_flex_algo(&client, &prev, &BTreeMap::new());
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 2);
+        for m in &msgs {
+            assert!(matches!(
+                m,
+                crate::rib::inst::Message::FlexAlgoRouteDel { algo: 128, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn diff_apply_flex_algo_changed_route_emits_single_add() {
+        let (client, mut rx) = rib_client_for_test();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut p = PrefixMap::new();
+        p.insert(
+            pfx("10.0.0.1/32"),
+            spf_route(20, Some(17128), &[("10.0.0.5", 9)]),
+        );
+        prev.insert(128, p);
+
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut n = PrefixMap::new();
+        // Same prefix, different metric → counts as `different`.
+        n.insert(
+            pfx("10.0.0.1/32"),
+            spf_route(30, Some(17128), &[("10.0.0.5", 9)]),
+        );
+        next.insert(128, n);
+
+        diff_apply_flex_algo(&client, &prev, &next);
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(
+            msgs[0],
+            crate::rib::inst::Message::FlexAlgoRouteAdd { ref route }
+                if route.metric == 30
+        ));
+    }
+
+    #[test]
+    fn diff_apply_flex_algo_changed_route_losing_sid_collapses_to_del() {
+        let (client, mut rx) = rib_client_for_test();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut p = PrefixMap::new();
+        p.insert(
+            pfx("10.0.0.1/32"),
+            spf_route(20, Some(17128), &[("10.0.0.5", 9)]),
+        );
+        prev.insert(128, p);
+
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut n = PrefixMap::new();
+        // Lost SID — no per-algo forwarding plane, must be a Del.
+        n.insert(pfx("10.0.0.1/32"), spf_route(30, None, &[("10.0.0.5", 9)]));
+        next.insert(128, n);
+
+        diff_apply_flex_algo(&client, &prev, &next);
+        let msgs = drain(&mut rx);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(
+            msgs[0],
+            crate::rib::inst::Message::FlexAlgoRouteDel { algo: 128, .. }
+        ));
     }
 
     #[test]
