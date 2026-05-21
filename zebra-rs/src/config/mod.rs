@@ -6,6 +6,7 @@ pub use vty::ExecCode;
 
 mod manager;
 pub use manager::ConfigManager;
+pub use manager::RibSubscriber;
 pub use manager::event_loop;
 
 mod serve;

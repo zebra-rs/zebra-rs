@@ -19,6 +19,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
     let bgp = inst::Bgp::new(
         ctx,
         rib_rx,
+        config.rib_subscriber(),
         config.policy_tx.clone(),
         bfd_client_tx,
         nd_client_tx,

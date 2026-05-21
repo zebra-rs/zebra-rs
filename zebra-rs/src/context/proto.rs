@@ -112,12 +112,10 @@ impl ProtoContext {
     }
 
     /// VRF-attached counterpart to [`Self::default_table_no_rib`].
-    /// Used by step 15's BGP-per-VRF spawn site, which doesn't yet
-    /// hand out a real per-VRF [`RibClient`] subscription — the
-    /// `SO_BINDTODEVICE` binding still fires on every socket the
-    /// factories return; the `ctx.rib.send(...)` path is a no-op
-    /// against a parked sender until a follow-up wires the
-    /// subscription.
+    /// Retained because tests construct contexts without a real
+    /// `RibClient`; production now goes through [`Self::for_vrf`]
+    /// since the per-VRF `RibClient` subscription landed.
+    #[allow(dead_code)]
     pub fn for_vrf_no_rib(vrf_id: u32, vrf_ifname: String) -> Self {
         debug_assert!(
             vrf_id != 0,

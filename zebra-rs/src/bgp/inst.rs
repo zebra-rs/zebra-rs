@@ -196,6 +196,13 @@ pub struct Bgp {
     /// context and the entry gets a respawn the moment `VrfAdd`
     /// arrives.
     pub rib_known_vrfs: BTreeMap<String, RibKnownVrf>,
+    /// Send-capable RIB-subscription handle, cloned from
+    /// `ConfigManager::rib_subscriber()` at spawn time. The
+    /// per-VRF spawn site uses this to mint a fresh `RibClient`
+    /// plus `Subscribe` with the VRF's kernel `table_id`, so the
+    /// step-9 inbound dispatcher routes route installs into
+    /// `vrf_tables[table_id]`.
+    pub rib_subscriber: crate::config::RibSubscriber,
     /// Outbound sender every per-VRF task uses to push messages
     /// back to the global runtime — peer registration, exports,
     /// withdraws. Cloned into [`super::vrf::BgpVrf::global_tx`] at
@@ -281,6 +288,7 @@ impl Bgp {
     pub fn new(
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
+        rib_subscriber: crate::config::RibSubscriber,
         policy_tx: UnboundedSender<policy::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         nd_client_tx: Option<UnboundedSender<crate::nd::inst::NdClientReq>>,
@@ -340,6 +348,7 @@ impl Bgp {
             vrfs: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            rib_subscriber,
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
@@ -614,6 +623,7 @@ impl Bgp {
                 &cfg,
                 self.router_id,
                 kernel,
+                &self.rib_subscriber,
                 self.vrf_global_tx.clone(),
             );
             self.vrf_registry.insert(name, handle);
@@ -652,6 +662,7 @@ impl Bgp {
             &cfg,
             self.router_id,
             Some(kernel),
+            &self.rib_subscriber,
             self.vrf_global_tx.clone(),
         );
         self.vrf_registry.insert(name.to_string(), new_handle);
