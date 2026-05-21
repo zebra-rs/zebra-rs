@@ -85,6 +85,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             attr_store: &mut bgp.attr_store,
             update_groups: &mut bgp.update_groups,
             interface_addrs: &bgp.interface_addrs,
+            vrf_export: None,
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
         bgp.peers.remove(&addr);

@@ -618,6 +618,7 @@ impl Bgp {
                     attr_store: &mut self.attr_store,
                     update_groups: &mut self.update_groups,
                     interface_addrs: &self.interface_addrs,
+                    vrf_export: None,
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);

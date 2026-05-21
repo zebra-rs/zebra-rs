@@ -579,6 +579,13 @@ pub struct BgpTop<'a> {
     /// Per-ifindex IPv6 link-local registry, used to resolve the v6
     /// next-hop for RFC 8950 IPv4-over-IPv6 emit on interface peers.
     pub interface_addrs: &'a super::interface_addrs::InterfaceAddrs,
+    /// Per-VRF export hook. `None` when the runtime is the global
+    /// `Bgp` (no VPNv4 export happens from default-VRF traffic);
+    /// `Some(...)` when running inside a `BgpVrf` task — the
+    /// shared route pipeline calls `vrf_emit_export` /
+    /// `vrf_emit_withdraw` on best-path transitions so the global
+    /// instance's VPNv4 LocRIB picks them up.
+    pub vrf_export: Option<&'a super::vrf::VrfExporter>,
 }
 
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
@@ -1315,6 +1322,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             attr_store: &mut bgp.attr_store,
             update_groups: &mut bgp.update_groups,
             interface_addrs: &bgp.interface_addrs,
+            vrf_export: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1344,6 +1352,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         attr_store: &mut bgp.attr_store,
         update_groups: &mut bgp.update_groups,
         interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }
