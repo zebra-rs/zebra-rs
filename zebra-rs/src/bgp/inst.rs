@@ -194,6 +194,13 @@ pub struct Bgp {
     /// `PeerConfig::neighbor_group` is not wired in the runtime
     /// yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
+
+    /// Color → Flex-Algorithm binding table
+    /// (zebra-bgp-color-policy.yang). Storage-only on landing — the
+    /// color-aware nexthop resolver (Phase 3 of the BGP ↔ Flex-Algo
+    /// plan) reads this to pick a per-algo entry from
+    /// `Isis::rib_flex_algo` when a route carries a Color extcomm.
+    pub color_policy: super::color_policy::ColorPolicy,
     /// `dynamic-neighbors` runtime (zebra-bgp-dynamic-neighbors.yang).
     /// Holds the configured listen-ranges and the soft cap on
     /// materialized passive peers. `dynamic_peer_count` is bumped on
@@ -387,6 +394,7 @@ impl Bgp {
             listen_fd_v6: None,
             key_chains: HashMap::new(),
             neighbor_groups: super::neighbor_group::empty_map(),
+            color_policy: super::color_policy::ColorPolicy::new(),
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),

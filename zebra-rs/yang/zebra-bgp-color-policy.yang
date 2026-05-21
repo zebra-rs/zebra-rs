@@ -1,0 +1,108 @@
+module zebra-bgp-color-policy {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-color-policy";
+  prefix "zbcp";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Color → Flex-Algorithm binding table for BGP. Maps a value of the
+     BGP Color Extended Community (RFC 9012 §4.3, type 0x03 0x0b) to
+     an IS-IS Flexible Algorithm identifier (RFC 9350) so the
+     resolver can pick the correct per-algorithm SR-MPLS LFIB entry
+     for routes carrying that color.
+
+     Example:
+
+       router bgp {
+         color-policy {
+           color 100 { flex-algorithm 128; }
+           color 200 { flex-algorithm 129; }
+         }
+       }
+
+     Multiple Color values may map to the same flex-algorithm
+     (RFC 9256 §2.5 fallback ordering); the mapping lives BGP-local —
+     IS-IS does not learn about BGP color. Schema-only on landing;
+     color-aware nexthop resolution against the IS-IS per-algo SPF
+     follows in a later PR.";
+
+  revision 2026-05-21 {
+    description
+      "Initial revision — color → flex-algorithm map. Storage on
+       `Bgp::color_policy`. No consumer in the runtime yet; the
+       resolver (Phase 3 of the BGP ↔ IS-IS Flex-Algo plan)
+       converts a route's Color list into an algo to look up in
+       `Isis::rib_flex_algo`.";
+    reference
+      "RFC 9012 §4.3 (Color extended community),
+       RFC 9256 §2.5 (SR Policy color-only fallback),
+       RFC 9350 (IGP Flexible Algorithm).";
+  }
+
+  grouping bgp-color-policy-extension {
+    description
+      "Container `color-policy` under the BGP top-level. Holds an
+       ordered list of color entries; ordering is BTreeMap key order
+       at runtime (ascending color id).";
+
+    container color-policy {
+      ext:help "Color → Flex-Algorithm binding table";
+      presence "Configure color-policy entries";
+
+      list color {
+        ext:help "One color → flex-algorithm binding";
+        key value;
+        leaf value {
+          ext:help "BGP Color community value (RFC 9012 §4.3, 0..2^32-1)";
+          type uint32;
+        }
+        leaf flex-algorithm {
+          ext:help "IS-IS Flex-Algorithm id (128..255 per RFC 9350 §4)";
+          type uint8 {
+            range "128..255";
+          }
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the color-policy block to the BGP top-level in the
+       candidate-set subtree.";
+    uses bgp-color-policy-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp color-policy color X` is path-valid.";
+    uses bgp-color-policy-extension;
+  }
+}

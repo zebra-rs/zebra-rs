@@ -56,6 +56,10 @@ module config {
     prefix zbb;
   }
 
+  import zebra-bgp-color-policy {
+    prefix zbcp;
+  }
+
   import zebra-bgp-soft-reconfiguration {
     prefix zbsr;
   }
