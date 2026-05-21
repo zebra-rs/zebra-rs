@@ -1,5 +1,5 @@
 pub mod version;
-pub use version::{OspfVersion, Ospfv2};
+pub use version::{OspfVersion, Ospfv2, Ospfv3};
 
 pub mod inst;
 pub use inst::{Message, Ospf, ShowCallback};

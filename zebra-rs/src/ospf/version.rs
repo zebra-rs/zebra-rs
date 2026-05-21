@@ -16,9 +16,9 @@
 
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 
 /// Marker / dispatch trait for an OSPF protocol version (v2 or v3).
 ///
@@ -59,4 +59,27 @@ impl OspfVersion for Ospfv2 {
     type Prefix = Ipv4Net;
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
+}
+
+/// OSPFv3 dispatch marker (RFC 5340). Distinct from the
+/// `Ospfv3Packet` / `Ospfv3Hello` / … codec types in the
+/// `ospf-packet` crate; this is the protocol-side address-family
+/// marker that subsequent Phase 5 PRs will use to thread v6
+/// constants into the socket / network code.
+//
+// `dead_code` allowed because nothing constructs `Ospfv3` yet —
+// the `Ospf<Ospfv3>` instance lands later in Phase 5 / Phase 6.
+// The trait impl is used (via `Ospfv3::ALL_SPF_ROUTERS` etc.) in
+// `socket.rs::ospf_socket_ipv6`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ospfv3;
+
+impl OspfVersion for Ospfv3 {
+    type Addr = Ipv6Addr;
+    type Prefix = Ipv6Net;
+    /// AllSPFRouters in v3 (RFC 5340 §A.1): `ff02::5`.
+    const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
+    /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.
+    const ALL_DROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 6);
 }

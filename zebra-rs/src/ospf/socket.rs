@@ -7,7 +7,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::context::ProtoContext;
 
-use super::{OspfVersion, Ospfv2};
+use super::{OspfVersion, Ospfv2, Ospfv3};
 
 pub fn ospf_socket_ipv4(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
     // Initial socket through the context so VRF binding (when
@@ -64,5 +64,85 @@ pub fn ospf_leave_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
         .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex))
     {
         tracing::warn!("ospf: leave AllDRouters on ifindex {ifindex} failed: {e}");
+    }
+}
+
+/// Create the raw IPv6 socket used by an OSPFv3 instance.
+///
+/// Mirrors `ospf_socket_ipv4`'s setup but for v6: same protocol
+/// number (89; OSPFv2 and v3 share it), `IPV6_V6ONLY` so dual-stack
+/// kernels don't surface v4-mapped sources, multicast loop off,
+/// multicast hop limit pinned to 1 (RFC 5340 §A.1 — OSPFv3 packets
+/// MUST NOT cross a router), and `IPV6_RECVPKTINFO` so the rx
+/// loop can recover the ingress ifindex and the destination v6
+/// address used for the IPv6 pseudo-header checksum.
+///
+/// The pseudo-header checksum itself (RFC 5340 §4.4) and the
+/// network read / write loop land in subsequent Phase 5 PRs; this
+/// function just constructs the socket and is not yet called by
+/// any consumer — hence the `dead_code` allow on the whole v6
+/// socket family below.
+#[allow(dead_code)]
+pub fn ospf_socket_ipv6(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
+    let socket = ctx.raw_socket(Domain::IPV6, Protocol::from(Ospfv3::IP_PROTO as i32))?;
+
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_only_v6(true)?;
+    socket.set_multicast_loop_v6(false)?;
+    socket.set_multicast_hops_v6(1)?;
+    set_ipv6_pktinfo(&socket);
+
+    Ok(socket)
+}
+
+/// Enable `IPV6_RECVPKTINFO` on the raw v6 socket. socket2 doesn't
+/// expose this directly, so set it via raw `setsockopt`. The rx
+/// loop reads the resulting `in6_pktinfo` ancillary data to recover
+/// (a) the ingress ifindex, used to dispatch the packet to the
+/// matching `OspfLink<Ospfv3>`, and (b) the destination v6 address,
+/// needed when verifying the IPv6 pseudo-header checksum (§4.4) on
+/// receive.
+#[allow(dead_code)]
+pub fn set_ipv6_pktinfo(socket: &Socket) {
+    let optval = true as c_int;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        );
+    };
+}
+
+/// Join `ff02::5` (AllSPFRouters) on the given interface.
+#[allow(dead_code)]
+pub fn ospf_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    let maddr = Ospfv3::ALL_SPF_ROUTERS;
+    if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
+        tracing::warn!("ospf: join AllSPFRouters (v6) on ifindex {ifindex} failed: {e}");
+    }
+}
+
+/// Join `ff02::6` (AllDRouters) on the given interface. Called when
+/// the v3 interface FSM transitions a router into the DR or BDR
+/// role on a broadcast / NBMA segment.
+#[allow(dead_code)]
+pub fn ospf_join_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    let maddr = Ospfv3::ALL_DROUTERS;
+    if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
+        tracing::warn!("ospf: join AllDRouters (v6) on ifindex {ifindex} failed: {e}");
+    }
+}
+
+/// Leave `ff02::6` on the given interface. Called when the v3 FSM
+/// drops out of the DR / BDR role.
+#[allow(dead_code)]
+pub fn ospf_leave_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    let maddr = Ospfv3::ALL_DROUTERS;
+    if let Err(e) = socket.get_ref().leave_multicast_v6(&maddr, ifindex) {
+        tracing::warn!("ospf: leave AllDRouters (v6) on ifindex {ifindex} failed: {e}");
     }
 }
