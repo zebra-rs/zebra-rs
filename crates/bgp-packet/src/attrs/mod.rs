@@ -64,6 +64,9 @@ pub use pmsi_tunnel::*;
 pub mod prefix_sid;
 pub use prefix_sid::*;
 
+pub mod tunnel_encap;
+pub use tunnel_encap::*;
+
 pub mod mp_reach;
 pub use mp_reach::*;
 
