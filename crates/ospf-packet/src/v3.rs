@@ -859,6 +859,65 @@ impl ParseBe<Ospfv3InterAreaPrefixLsa> for Ospfv3InterAreaPrefixLsa {
     }
 }
 
+/// v3 Inter-Area-Router-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=1 (area scope), function code = 4.
+pub const OSPFV3_INTER_AREA_ROUTER_LSA_TYPE: u16 = 0x2004;
+
+/// v3 Inter-Area-Router-LSA body (RFC 5340 §A.4.6).
+///
+/// v3 equivalent of v2's Type 4 (ASBR Summary) LSA: an ABR
+/// originates one of these per known ASBR in another area, so other
+/// routers can compute the cost to reach the ASBR for AS-external
+/// route resolution.
+///
+/// Layout (fixed 12 octets, no trailing variable data):
+///   - reserved (8 bits)            — must be 0
+///   - options (24 bits)            — same `Ospfv3Options` shape
+///   - reserved2 (8 bits)           — must be 0
+///   - metric (24 bits)             — cost from this ABR to the ASBR
+///   - destination_router_id (32 bits) — the ASBR's router-id
+///
+/// Differences from v2 Type 4 (ASBR Summary):
+///   - v2 carries a netmask (always 0.0.0.0 because LS ID is a
+///     router-id, not a network); v3 drops the netmask and carries
+///     the Options field instead;
+///   - v2's `tos_routes` carry-over is gone.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3InterAreaRouterLsa {
+    pub options: Ospfv3Options,
+    pub metric: u32,
+    pub destination_router_id: u32,
+}
+
+impl Ospfv3InterAreaRouterLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // Reserved + 24-bit options.
+        let word: u32 = self.options.into_bits() & 0x00FF_FFFF;
+        buf.put_u32(word);
+        // Reserved + 24-bit metric.
+        buf.put_u32(self.metric & 0x00FF_FFFF);
+        buf.put_u32(self.destination_router_id);
+    }
+}
+
+impl ParseBe<Ospfv3InterAreaRouterLsa> for Ospfv3InterAreaRouterLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3InterAreaRouterLsa> {
+        let (input, _reserved) = be_u8(input)?;
+        let (input, options_24) = be_u24(input)?;
+        let (input, _reserved2) = be_u8(input)?;
+        let (input, metric) = be_u24(input)?;
+        let (input, destination_router_id) = be_u32(input)?;
+        Ok((
+            input,
+            Ospfv3InterAreaRouterLsa {
+                options: Ospfv3Options::from_bits(options_24),
+                metric,
+                destination_router_id,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1558,6 +1617,64 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(parsed.prefix_length, 0);
         assert!(parsed.address_prefix.is_empty());
+    }
+
+    /// Inter-Area-Router-LSA roundtrips its 12-byte fixed body. Pins
+    /// the (Reserved, Options24) and (Reserved, Metric24) byte
+    /// layouts so a future drift in the field-packing surfaces
+    /// immediately.
+    #[test]
+    fn ospfv3_inter_area_router_lsa_roundtrip() {
+        let mut opts = Ospfv3Options::new();
+        opts.set_v6(true);
+        opts.set_e(true);
+        opts.set_r(true);
+        let body = Ospfv3InterAreaRouterLsa {
+            options: opts,
+            metric: 0x0001_2345,
+            destination_router_id: u32::from(Ipv4Addr::new(10, 0, 0, 99)),
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(buf.len(), 12);
+
+        // First word: Reserved byte (= 0) + 24-bit options.
+        assert_eq!(buf[0], 0);
+        // Options bits we set: v6 (bit 0) + e (bit 1) + r (bit 4) = 0x13.
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), 0x0000_0013);
+        // Second word: Reserved byte (= 0) + 24-bit metric.
+        assert_eq!(buf[4], 0);
+        assert_eq!(BigEndian::read_u24(&buf[5..8]), 0x0001_2345);
+        // Third word: 32-bit Destination Router ID.
+        assert_eq!(
+            BigEndian::read_u32(&buf[8..12]),
+            u32::from(Ipv4Addr::new(10, 0, 0, 99))
+        );
+
+        let (rest, parsed) = Ospfv3InterAreaRouterLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.options, body.options);
+        assert_eq!(parsed.metric, body.metric);
+        assert_eq!(parsed.destination_router_id, body.destination_router_id);
+    }
+
+    /// LS-Infinity metric (withdraw of a previously-advertised ASBR)
+    /// fits in the 24-bit metric field and roundtrips. Mirrors the
+    /// equivalent test on Inter-Area-Prefix-LSA.
+    #[test]
+    fn ospfv3_inter_area_router_lsa_ls_infinity() {
+        let body = Ospfv3InterAreaRouterLsa {
+            options: Ospfv3Options::new(),
+            metric: OSPFV3_LS_INFINITY,
+            destination_router_id: 0x0a00_0001,
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(BigEndian::read_u24(&buf[5..8]), OSPFV3_LS_INFINITY);
+
+        let (_, parsed) = Ospfv3InterAreaRouterLsa::parse_be(&buf).unwrap();
+        assert_eq!(parsed.metric, OSPFV3_LS_INFINITY);
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
