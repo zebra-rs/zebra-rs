@@ -43,17 +43,25 @@ pub enum BgpVrfMsg {
     ),
 
     /// VPNv4 best-path import. The global Loc-RIB resolved a route
-    /// whose RT list intersects this VRF's import-RT set; the per-
-    /// VRF task inserts it into its IPv4 unicast Loc-RIB and runs
-    /// best-path. Payload shape lands with step 18.
-    #[allow(dead_code)]
+    /// whose RT list intersects this VRF's `import_rts_v4`; the
+    /// per-VRF task strips the RD and inserts the route into its
+    /// own IPv4 unicast Loc-RIB. `attr` travels by value so the
+    /// per-VRF task can re-intern into its own `BgpAttrStore`
+    /// without locking; `label` is the per-VRF MPLS label the
+    /// originator advertised (step 19 wires the matching ILM
+    /// install). Step 18a delivers the payload but the per-VRF
+    /// handler is still a log-only stub — the LocRIB write lands
+    /// in step 18b.
     ImportV4 {
         rd: RouteDistinguisher,
-        // step 18 fills the remaining fields: prefix, BgpAttr id,
-        // label, peer ident, etc.
+        prefix: ipnet::Ipv4Net,
+        #[allow(dead_code)] // first reader lands in step 18b.
+        attr: BgpAttr,
+        label: u32,
     },
 
     /// VPNv6 best-path import. Symmetric to [`Self::ImportV4`].
+    /// Stays a placeholder until v6 imports follow v4.
     #[allow(dead_code)]
     ImportV6 {
         rd: RouteDistinguisher,
@@ -63,8 +71,10 @@ pub enum BgpVrfMsg {
     /// Withdraw a previously-imported route. RD identifies the
     /// origin row; the per-VRF task locates the matching imported
     /// path and runs best-path withdraw.
-    #[allow(dead_code)]
-    WithdrawImport { rd: RouteDistinguisher },
+    WithdrawImport {
+        rd: RouteDistinguisher,
+        prefix: ipnet::Ipv4Net,
+    },
 
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by step

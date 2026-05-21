@@ -128,6 +128,56 @@ pub(crate) fn tag_attr_with_export_rts(
     attr
 }
 
+/// Walk `vrf_index` and return every VRF name whose
+/// `import_rts_v4` intersects the route's Route-Target extended
+/// communities in `ecom`. RTs on the wire are distinguished from
+/// other extended communities by the (`high_type`, `low_type`)
+/// pair — RFC 4360 §4.1 puts the sub-type at `low_type = 0x02`.
+/// Routes with no RT extcomms match no VRF; routes with RTs that
+/// no configured VRF imports match no VRF either (and the global
+/// VPNv4 row sits in `local_rib.v4vpn` unimported).
+pub(crate) fn matching_import_vrfs(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+) -> Vec<String> {
+    let Some(ecom) = ecom else {
+        return Vec::new();
+    };
+    // Build the set of RTs the route carries: every extcomm with
+    // RT sub-type, reinterpreted as a `RouteDistinguisher` (RT and
+    // RD share the on-wire 6-octet shape — same trick as step 17a).
+    let route_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher> = ecom
+        .0
+        .iter()
+        .filter(|v| v.low_type == 0x02)
+        .map(|v| {
+            use bgp_packet::RouteDistinguisherType;
+            // high_type 0x00 = Two-Octet AS, 0x01 = IPv4. Anything
+            // else (0x02 = 4-byte AS, future types) maps onto ASN
+            // by default — `RouteDistinguisher::PartialEq` is per-
+            // byte so a 4-byte ASN extcomm just won't intersect
+            // any configured RT (the config builder rejects 4-byte
+            // ASN strings today).
+            let typ = if v.high_type == 0x01 {
+                RouteDistinguisherType::IP
+            } else {
+                RouteDistinguisherType::ASN
+            };
+            let mut rd = bgp_packet::RouteDistinguisher::new(typ);
+            rd.val = v.val;
+            rd
+        })
+        .collect();
+    if route_rts.is_empty() {
+        return Vec::new();
+    }
+    vrf_index
+        .iter()
+        .filter(|(_, info)| !info.import_rts_v4.is_disjoint(&route_rts))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd` and the matching RT sets observed via
 /// `RibRx::VrfRouteTargets`. Used by
@@ -621,6 +671,17 @@ impl Bgp {
                 // dynamic-peer GC below.
                 let prev_state = self.peers.get_by_idx(ident).map(|p| p.state);
 
+                // Step 18a: the global v4vpn ingest path uses this
+                // dispatcher to fan accepted VPNv4 routes out to
+                // every VRF whose `import_rts_v4` matches. Borrows
+                // are disjoint from the BgpTop mutable refs below
+                // (`rib_known_vrfs` and `vrf_registry` are different
+                // fields).
+                let import_dispatcher = super::vrf::VrfImportDispatcher {
+                    rib_known_vrfs: &self.rib_known_vrfs,
+                    vrf_registry: &self.vrf_registry,
+                };
+
                 let mut bgp_ref = BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
@@ -632,6 +693,7 @@ impl Bgp {
                     vrf_export: None,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    vrf_import: Some(&import_dispatcher),
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -1376,6 +1438,7 @@ impl Bgp {
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
+                    vrf_import: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1428,6 +1491,7 @@ impl Bgp {
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
+                    vrf_import: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1688,6 +1752,99 @@ mod tests {
             assert_eq!(ecom.0.len(), 2, "colour + RT");
             assert_eq!(ecom.0[0], preexisting, "colour stays at index 0");
             assert_eq!(ecom.0[1].low_type, 0x02, "RT appended");
+        }
+    }
+
+    /// Step 18a: `matching_import_vrfs` walks `rib_known_vrfs`
+    /// and returns every VRF whose `import_rts_v4` intersects
+    /// the route's RT ext-communities.
+    mod matching_import_vrfs_tests {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::str::FromStr;
+
+        use bgp_packet::{ExtCommunity, ExtCommunityValue, RouteDistinguisher};
+
+        use super::super::{RibKnownVrf, matching_import_vrfs};
+
+        fn rt(s: &str) -> RouteDistinguisher {
+            RouteDistinguisher::from_str(s).unwrap()
+        }
+
+        fn rt_extcom(rt_str: &str) -> ExtCommunityValue {
+            let mut v: ExtCommunityValue = rt(rt_str).into();
+            v.low_type = 0x02;
+            v
+        }
+
+        fn vrf_with_imports(rts: &[&str]) -> RibKnownVrf {
+            let mut import_rts_v4 = BTreeSet::new();
+            for s in rts {
+                import_rts_v4.insert(rt(s));
+            }
+            RibKnownVrf {
+                table_id: 100,
+                ifindex: 1,
+                import_rts_v4,
+                export_rts_v4: BTreeSet::new(),
+                import_rts_v6: BTreeSet::new(),
+                export_rts_v6: BTreeSet::new(),
+            }
+        }
+
+        #[test]
+        fn no_ecom_attr_matches_no_vrf() {
+            // A VPNv4 route with no RT ext-communities can't be
+            // imported anywhere.
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            assert!(matching_import_vrfs(&index, &None).is_empty());
+        }
+
+        #[test]
+        fn empty_ecom_attr_matches_no_vrf() {
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            let ecom = Some(ExtCommunity::default());
+            assert!(matching_import_vrfs(&index, &ecom).is_empty());
+        }
+
+        #[test]
+        fn rt_matches_single_importing_vrf() {
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            index.insert("v2".to_string(), vrf_with_imports(&["65000:2"]));
+            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+            assert_eq!(matching_import_vrfs(&index, &ecom), vec!["v1".to_string()]);
+        }
+
+        #[test]
+        fn rt_matches_multiple_importing_vrfs() {
+            // Two VRFs both import RT 65000:99. A route with that
+            // RT should be delivered to both. Order follows
+            // BTreeMap key iteration (sorted by name) — caller
+            // doesn't depend on order but the test pins it for
+            // determinism.
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:99"]));
+            index.insert("v2".to_string(), vrf_with_imports(&["65000:99"]));
+            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:99")]));
+            let mut got = matching_import_vrfs(&index, &ecom);
+            got.sort();
+            assert_eq!(got, vec!["v1".to_string(), "v2".to_string()]);
+        }
+
+        #[test]
+        fn non_rt_extcomm_does_not_count_as_rt() {
+            // An ext-community with low_type != 0x02 (e.g.
+            // Route-Origin sub-type 0x03) must not be treated as
+            // an RT — even if its 6-octet value happens to match
+            // a configured RT.
+            let mut origin: ExtCommunityValue = rt("65000:1").into();
+            origin.low_type = 0x03;
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            let ecom = Some(ExtCommunity(vec![origin]));
+            assert!(matching_import_vrfs(&index, &ecom).is_empty());
         }
     }
 }

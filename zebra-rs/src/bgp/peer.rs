@@ -586,6 +586,13 @@ pub struct BgpTop<'a> {
     /// `vrf_emit_withdraw` on best-path transitions so the global
     /// instance's VPNv4 LocRIB picks them up.
     pub vrf_export: Option<&'a super::vrf::VrfExporter>,
+    /// VRF import dispatcher. Inverse of `vrf_export`: `Some(...)`
+    /// in the global `Bgp` task; the v4vpn ingest path fans
+    /// incoming routes out to every VRF whose `import_rts_v4`
+    /// intersects the route's RT extcomms via
+    /// `BgpVrfMsg::ImportV4`. `None` inside per-VRF tasks (they
+    /// never receive VPNv4 NLRI directly).
+    pub vrf_import: Option<&'a super::vrf::VrfImportDispatcher<'a>>,
     /// Colour-aware nexthop resolver inputs (Phase 3b). Optional
     /// because per-VRF BGP runtimes don't carry them today — Color →
     /// Flex-Algo binding is a default-VRF concept; per-VRF support
@@ -1337,6 +1344,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             vrf_export: None,
             color_policy: Some(&bgp.color_policy),
             flex_algo_routes: Some(&bgp.flex_algo_routes),
+            vrf_import: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1369,6 +1377,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         vrf_export: None,
         color_policy: Some(&bgp.color_policy),
         flex_algo_routes: Some(&bgp.flex_algo_routes),
+        vrf_import: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }
