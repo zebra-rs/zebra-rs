@@ -29,7 +29,7 @@
 //! deferred until the v3 socket layer that has the src/dst v6
 //! addresses needed to build the pseudo-header.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bitfield_struct::bitfield;
 use byteorder::{BigEndian, ByteOrder};
@@ -918,6 +918,159 @@ impl ParseBe<Ospfv3InterAreaRouterLsa> for Ospfv3InterAreaRouterLsa {
     }
 }
 
+/// v3 AS-External-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=1, S1=0 (AS-wide scope), function code = 5.
+pub const OSPFV3_AS_EXTERNAL_LSA_TYPE: u16 = 0x4005;
+
+/// E flag (External metric Type 2) in `Ospfv3AsExternalLsa::flags`.
+/// When set, the metric is comparable only to other Type 2 externals.
+pub const OSPFV3_AS_EXTERNAL_FLAG_E: u8 = 0x04;
+
+/// F flag in `Ospfv3AsExternalLsa::flags`. When set, the LSA carries
+/// a 16-octet Forwarding Address after the address prefix.
+pub const OSPFV3_AS_EXTERNAL_FLAG_F: u8 = 0x02;
+
+/// T flag in `Ospfv3AsExternalLsa::flags`. When set, the LSA carries
+/// a 32-bit External Route Tag.
+pub const OSPFV3_AS_EXTERNAL_FLAG_T: u8 = 0x01;
+
+/// v3 AS-External-LSA body (RFC 5340 §A.4.7).
+///
+/// v3 equivalent of v2's Type 5 AS-External-LSA: an ASBR originates
+/// these to announce reachability of destinations outside the OSPF
+/// AS (typically redistributed from another routing protocol or from
+/// the kernel).
+///
+/// Fixed prefix layout (8 octets) — then variable trailing sections
+/// gated by the flag byte and `referenced_ls_type`:
+/// ```text
+/// |  0 (5 bits) | E | F | T |              Metric              |
+/// | PrefixLen   | PrefixOpts |         Referenced LS Type      |
+/// |                  Address Prefix (variable, padded)         |
+/// | [Forwarding Address — 16 octets, only if F=1]              |
+/// | [External Route Tag — 4 octets, only if T=1]               |
+/// | [Referenced Link State ID — 4 octets, only if              |
+/// |  Referenced LS Type != 0]                                  |
+/// ```
+///
+/// Each optional section is read on parse only if its gating
+/// condition is met, and is preserved as `Option<…>` so consumers
+/// can tell present-with-zero apart from absent. On emit, the codec
+/// honors the flag bits the user set — if `flags & FLAG_F` is set
+/// but `forwarding_address` is `None`, the codec writes all-zero
+/// padding rather than silently dropping the field; conversely, a
+/// `Some(_)` value is ignored unless the corresponding flag bit is
+/// set. Consumers building an LSA from scratch should keep the flag
+/// bits and the `Option<…>` fields in sync (a helper constructor
+/// could be added if this becomes error-prone).
+///
+/// Differences from v2 Type 5 AS-External-LSA:
+///   - v2 packs `(E, reserved, metric:u24)` in one word with E in the
+///     high bit; v3 reorders to `(reserved:5, E, F, T, metric:u24)`
+///     and adds the F / T flag bits (forwarding-address and
+///     route-tag were fixed-position fields in v2);
+///   - v2 carries netmask + 32-bit forwarding address + tag in
+///     fixed positions; v3 carries variable-length address prefix +
+///     128-bit forwarding address, with both Forwarding Address and
+///     Route Tag now flag-gated.
+///   - v2's `tos_routes` carry-over is gone.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3AsExternalLsa {
+    /// Flag byte: low three bits are T, F, E per RFC 5340 §A.4.7
+    /// (bit 0 = T, bit 1 = F, bit 2 = E). The five high bits are
+    /// reserved and must be 0 on emit.
+    pub flags: u8,
+    /// External metric (24 bits on the wire). Type 1 vs Type 2 is
+    /// signalled by the `E` bit in `flags`.
+    pub metric: u32,
+    pub prefix_length: u8,
+    pub prefix_options: Ospfv3PrefixOptions,
+    /// LS Type of an associated LSA, typically Type-7 NSSA-External
+    /// (`0x2007`) when an NSSA-AS-External is being translated to a
+    /// Type-5. Zero means no such association.
+    pub referenced_ls_type: u16,
+    pub address_prefix: Vec<u8>,
+    /// IPv6 forwarding address; present iff `flags & FLAG_F`.
+    pub forwarding_address: Option<Ipv6Addr>,
+    /// 32-bit External Route Tag; present iff `flags & FLAG_T`.
+    pub external_route_tag: Option<u32>,
+    /// Referenced Link State ID; present iff
+    /// `referenced_ls_type != 0`.
+    pub referenced_link_state_id: Option<u32>,
+}
+
+impl Ospfv3AsExternalLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // Flags (8) + 24-bit metric in one word.
+        let word: u32 = ((self.flags as u32) << 24) | (self.metric & 0x00FF_FFFF);
+        buf.put_u32(word);
+        buf.put_u8(self.prefix_length);
+        buf.put_u8(self.prefix_options.into_bits());
+        buf.put_u16(self.referenced_ls_type);
+        buf.put_slice(&self.address_prefix);
+        // Optional trailing sections, gated by the flag bits / referenced_ls_type.
+        if self.flags & OSPFV3_AS_EXTERNAL_FLAG_F != 0 {
+            let bytes = self
+                .forwarding_address
+                .map(|a| a.octets())
+                .unwrap_or([0u8; 16]);
+            buf.put_slice(&bytes);
+        }
+        if self.flags & OSPFV3_AS_EXTERNAL_FLAG_T != 0 {
+            buf.put_u32(self.external_route_tag.unwrap_or(0));
+        }
+        if self.referenced_ls_type != 0 {
+            buf.put_u32(self.referenced_link_state_id.unwrap_or(0));
+        }
+    }
+}
+
+impl ParseBe<Ospfv3AsExternalLsa> for Ospfv3AsExternalLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3AsExternalLsa> {
+        let (input, flags) = be_u8(input)?;
+        let (input, metric) = be_u24(input)?;
+        let (input, prefix_length) = be_u8(input)?;
+        let (input, prefix_options_byte) = be_u8(input)?;
+        let (input, referenced_ls_type) = be_u16(input)?;
+        let wire_len = ospfv3_prefix_wire_len(prefix_length);
+        let (input, prefix_bytes) = nom::bytes::complete::take(wire_len)(input)?;
+        let (input, forwarding_address) = if flags & OSPFV3_AS_EXTERNAL_FLAG_F != 0 {
+            let (i, bytes) = nom::bytes::complete::take(16usize)(input)?;
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(bytes);
+            (i, Some(Ipv6Addr::from(arr)))
+        } else {
+            (input, None)
+        };
+        let (input, external_route_tag) = if flags & OSPFV3_AS_EXTERNAL_FLAG_T != 0 {
+            let (i, t) = be_u32(input)?;
+            (i, Some(t))
+        } else {
+            (input, None)
+        };
+        let (input, referenced_link_state_id) = if referenced_ls_type != 0 {
+            let (i, l) = be_u32(input)?;
+            (i, Some(l))
+        } else {
+            (input, None)
+        };
+        Ok((
+            input,
+            Ospfv3AsExternalLsa {
+                flags,
+                metric,
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::from_bits(prefix_options_byte),
+                referenced_ls_type,
+                address_prefix: prefix_bytes.to_vec(),
+                forwarding_address,
+                external_route_tag,
+                referenced_link_state_id,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1675,6 +1828,105 @@ mod tests {
 
         let (_, parsed) = Ospfv3InterAreaRouterLsa::parse_be(&buf).unwrap();
         assert_eq!(parsed.metric, OSPFV3_LS_INFINITY);
+    }
+
+    /// AS-External-LSA with no optional fields set (E=F=T=0, no
+    /// referenced LSA): just the 8-byte fixed header + the address
+    /// prefix bytes. Pins the no-trailing-sections case.
+    #[test]
+    fn ospfv3_as_external_lsa_minimal() {
+        let body = Ospfv3AsExternalLsa {
+            flags: 0,
+            metric: 20,
+            prefix_length: 64,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0,
+            address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0],
+            forwarding_address: None,
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed (8) + 8-byte prefix payload (for /64) = 16.
+        assert_eq!(buf.len(), 8 + 8);
+        // High byte of first word is the flags byte (= 0).
+        assert_eq!(buf[0], 0);
+
+        let (rest, parsed) = Ospfv3AsExternalLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.flags, 0);
+        assert_eq!(parsed.metric, 20);
+        assert_eq!(parsed.prefix_length, 64);
+        assert_eq!(parsed.address_prefix.len(), 8);
+        assert!(parsed.forwarding_address.is_none());
+        assert!(parsed.external_route_tag.is_none());
+        assert!(parsed.referenced_link_state_id.is_none());
+    }
+
+    /// Full AS-External-LSA with E + F + T set and a referenced
+    /// NSSA-LSA. Exercises every optional section.
+    #[test]
+    fn ospfv3_as_external_lsa_all_options() {
+        let fwd = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x1234);
+        let body = Ospfv3AsExternalLsa {
+            flags: OSPFV3_AS_EXTERNAL_FLAG_E
+                | OSPFV3_AS_EXTERNAL_FLAG_F
+                | OSPFV3_AS_EXTERNAL_FLAG_T,
+            metric: 100,
+            prefix_length: 64,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0x2007,
+            address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0],
+            forwarding_address: Some(fwd),
+            external_route_tag: Some(0xDEAD_BEEF),
+            referenced_link_state_id: Some(0x0102_0304),
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed (8) + prefix bytes (8) + fwd (16) + tag (4)
+        // + referenced_link_state_id (4) = 40.
+        assert_eq!(buf.len(), 8 + 8 + 16 + 4 + 4);
+        // Flags byte should carry E | F | T = 0x07.
+        assert_eq!(buf[0], 0x07);
+
+        let (rest, parsed) = Ospfv3AsExternalLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.flags, 0x07);
+        assert_eq!(parsed.referenced_ls_type, 0x2007);
+        assert_eq!(parsed.forwarding_address, Some(fwd));
+        assert_eq!(parsed.external_route_tag, Some(0xDEAD_BEEF));
+        assert_eq!(parsed.referenced_link_state_id, Some(0x0102_0304));
+    }
+
+    /// Default-route AS-External (prefix_length == 0). No address
+    /// prefix bytes; optional sections still gated by flags.
+    #[test]
+    fn ospfv3_as_external_lsa_default_route_with_fwd() {
+        let fwd = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let body = Ospfv3AsExternalLsa {
+            flags: OSPFV3_AS_EXTERNAL_FLAG_F,
+            metric: 10,
+            prefix_length: 0,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0,
+            address_prefix: Vec::new(),
+            forwarding_address: Some(fwd),
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed (8) + zero prefix bytes + fwd (16) = 24.
+        assert_eq!(buf.len(), 8 + 16);
+
+        let (rest, parsed) = Ospfv3AsExternalLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.prefix_length, 0);
+        assert_eq!(parsed.forwarding_address, Some(fwd));
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
