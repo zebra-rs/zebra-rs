@@ -583,7 +583,7 @@ impl Rib {
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
-            &self.redists,
+            &self.client_registry,
             prefix,
             before.as_ref(),
             after.as_ref(),
@@ -608,7 +608,7 @@ impl Rib {
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
             &self.redist_filters,
-            &self.redists,
+            &self.client_registry,
             prefix,
             before.as_ref(),
             after.as_ref(),
@@ -690,7 +690,7 @@ impl Rib {
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
-            &self.redists,
+            &self.client_registry,
             prefix,
             before.as_ref(),
             after.as_ref(),
@@ -715,7 +715,7 @@ impl Rib {
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
             &self.redist_filters,
-            &self.redists,
+            &self.client_registry,
             prefix,
             before.as_ref(),
             after.as_ref(),

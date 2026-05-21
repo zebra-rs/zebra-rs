@@ -110,25 +110,23 @@ impl RibClient {
 /// One subscriber's entry in `ClientRegistry`.
 ///
 /// - `proto` is used by [`ClientRegistry::find_by_proto`] (the
-///   reverse lookup `proto_cleanup` runs).
-/// - `rib_rx_tx` is captured for step 10's per-VRF outbound dispatch,
-///   which will replace today's name-keyed `redists` HashMap with a
-///   per-id walk through this registry.
+///   reverse lookup `proto_cleanup` runs) and by the redistribute
+///   delta path, which matches `filters[proto]` against this row.
+/// - `rib_rx_tx` is the outbound sender every push path (link / addr
+///   / router-id / FDB / VXLAN broadcasts; redistribute delta) walks
+///   through. Step 10 makes the registry the sole source of truth
+///   for those pushes — the legacy `redists` HashMap is gone.
 /// - `vrf_id` is the subscriber's bound VRF (0 = default routing
-///   table). Used by step 9's inbound dispatcher to route protocol
-///   installs into the matching per-VRF table; the value itself is
-///   the kernel `rtm_table` id allocated by `VrfIdAllocator`. The
-///   `0 = default` convention matches `ProtoContext::vrf_id` so the
-///   same value flows end-to-end without translation.
+///   table). Step 9's inbound dispatcher routes installs into the
+///   matching per-VRF table; step 10's outbound dispatcher uses the
+///   same value to filter events so a VRF subscriber sees only its
+///   own VRF's links / addresses. The value itself is the kernel
+///   `rtm_table` id allocated by `VrfIdAllocator`; the `0 = default`
+///   convention matches `ProtoContext::vrf_id` so the same value
+///   flows end-to-end without translation.
 #[derive(Debug)]
 pub struct Subscriber {
     pub proto: String,
-    // Held for step 10 — that step replaces the legacy `redists` map
-    // with a per-id walk through this registry, at which point the
-    // outbound broadcast paths pull `rib_rx_tx` from here instead.
-    // No reader before then; allow dead_code rather than churn the
-    // field in/out across two PRs.
-    #[allow(dead_code)]
     pub rib_rx_tx: UnboundedSender<RibRx>,
     pub vrf_id: u32,
 }
@@ -190,10 +188,9 @@ impl ClientRegistry {
     }
 
     /// Reverse `proto` → `ProtoId` lookup. Used by `proto_cleanup`
-    /// to drop the registry row alongside the legacy `redists`
-    /// entry. Iterates because the registry is keyed by id;
-    /// subscriber counts stay small (a handful), so the linear
-    /// scan is cheap.
+    /// to drop the registry row by name. Iterates because the
+    /// registry is keyed by id; subscriber counts stay small (a
+    /// handful), so the linear scan is cheap.
     pub fn find_by_proto(&self, proto: &str) -> Option<ProtoId> {
         self.subscribers
             .iter()
@@ -201,9 +198,35 @@ impl ClientRegistry {
             .map(|(id, _)| *id)
     }
 
+    /// Reverse `proto` → `Subscriber` lookup. Steady-state delta
+    /// callers (`redist::notify_v4_delta` / `_v6`) walk
+    /// `filters[proto]` and resolve the matching subscriber row
+    /// through here. Returns `None` if no subscriber has registered
+    /// under `proto`.
+    pub fn subscriber_for_proto(&self, proto: &str) -> Option<&Subscriber> {
+        self.subscribers.values().find(|s| s.proto == proto)
+    }
+
+    /// Walk every recorded subscriber. Used by the outbound paths
+    /// that broadcast daemon-global events (FDB / VXLAN) to every
+    /// consumer.
+    pub fn iter(&self) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
+        self.subscribers.iter().map(|(id, s)| (*id, s))
+    }
+
+    /// Walk subscribers bound to `vrf_id`. Step 10's link / addr /
+    /// router-id push paths use this so a VRF subscriber only sees
+    /// events that originated in its own VRF.
+    pub fn iter_vrf(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
+        self.subscribers
+            .iter()
+            .filter(move |(_, s)| s.vrf_id == vrf_id)
+            .map(|(id, s)| (*id, s))
+    }
+
     /// Remove a subscriber. Returns the removed entry so callers can
-    /// also clean up parallel maps keyed by the protocol name
-    /// (e.g. the legacy `Rib::redists`).
+    /// clean up parallel maps keyed by the protocol name (e.g.
+    /// `Rib::redist_filters`).
     pub fn unregister(&mut self, id: ProtoId) -> Option<Subscriber> {
         self.subscribers.remove(&id)
     }
@@ -292,6 +315,61 @@ mod tests {
 
         assert_eq!(reg.vrf_id_for(ProtoId::from_raw(0)), 0);
         assert_eq!(reg.vrf_id_for(ProtoId::from_raw(1)), 10);
+    }
+
+    #[test]
+    fn iter_vrf_returns_only_matching_subscribers() {
+        // Step 10 outbound-dispatch invariant: a link / addr push
+        // for VRF 10 must reach the VRF-10 subscriber and *not* the
+        // default-VRF subscriber.
+        let mut reg = ClientRegistry::new();
+        let (tx_default, _rx_a) = unbounded_channel();
+        let (tx_vrf10, _rx_b) = unbounded_channel();
+        let (tx_vrf20, _rx_c) = unbounded_channel();
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10);
+        reg.register_with_id(ProtoId::from_raw(2), "bgp:vrf:v2", tx_vrf20, 20);
+
+        let default: Vec<_> = reg.iter_vrf(0).map(|(id, _)| id).collect();
+        let v10: Vec<_> = reg.iter_vrf(10).map(|(id, _)| id).collect();
+        let v20: Vec<_> = reg.iter_vrf(20).map(|(id, _)| id).collect();
+        let v99: Vec<_> = reg.iter_vrf(99).map(|(id, _)| id).collect();
+
+        assert_eq!(default, vec![ProtoId::from_raw(0)]);
+        assert_eq!(v10, vec![ProtoId::from_raw(1)]);
+        assert_eq!(v20, vec![ProtoId::from_raw(2)]);
+        assert!(v99.is_empty(), "unknown VRF id sees no subscribers");
+    }
+
+    #[test]
+    fn iter_returns_every_subscriber() {
+        // FDB / VXLAN broadcasts walk every subscriber regardless of
+        // VRF — confirm `iter()` keeps that contract after step 10's
+        // refactor.
+        let mut reg = ClientRegistry::new();
+        let (tx_default, _rx_a) = unbounded_channel();
+        let (tx_vrf10, _rx_b) = unbounded_channel();
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_default, 0);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp:vrf:v1", tx_vrf10, 10);
+
+        let ids: Vec<_> = reg.iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec![ProtoId::from_raw(0), ProtoId::from_raw(1)]);
+    }
+
+    #[test]
+    fn subscriber_for_proto_resolves_sender_by_name() {
+        // The redistribute delta path walks `filters` by proto name
+        // and needs to recover the matching subscriber's sender. A
+        // missing name returns `None`, not the wrong row.
+        let mut reg = ClientRegistry::new();
+        let (tx_a, _rx_a) = unbounded_channel();
+        let (tx_b, _rx_b) = unbounded_channel();
+        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0);
+        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 5);
+
+        assert!(reg.subscriber_for_proto("bgp").is_some());
+        assert_eq!(reg.subscriber_for_proto("ospf").map(|s| s.vrf_id), Some(5));
+        assert!(reg.subscriber_for_proto("isis").is_none());
     }
 
     #[tokio::test]
