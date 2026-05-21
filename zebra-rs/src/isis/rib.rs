@@ -998,11 +998,19 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         build_rib_from_spf_v6(top, level, source, &spf_result, &tilfa_result, false)
     };
 
-    // Per-algorithm SPF (RFC 9350). For every algo in
-    // `flex_algo.config` build the FAD-filtered graph and run
-    // Dijkstra; the result feeds future per-algo RIB / MPLS LFIB
-    // install (next PR). Algos no longer in config are purged from
-    // the level's BTreeMap so the snapshot tracks current intent.
+    // Per-algorithm SPF + RIB build (RFC 9350). For every algo in
+    // `flex_algo.config`:
+    //   1. Build the FAD-filtered graph and run Dijkstra.
+    //   2. Walk the SPF result against `peer_algo_sid` to produce a
+    //      per-algo IPv4 RIB snapshot (in-memory only — see
+    //      `Isis::rib_flex_algo`).
+    //   3. Fold the per-algo Prefix-SID labels into the combined
+    //      `ilm` map. Labels are globally unique, so per-algo entries
+    //      coexist with algo-0 entries in the kernel MPLS LFIB
+    //      without an algorithm dimension at the RIB API layer.
+    //
+    // Algos no longer in config are purged from every level snapshot
+    // so stale graphs / SPFs / RIBs don't survive a delete.
     //
     // Entries are cloned out of `top.flex_algo.config` because
     // `graph_flex_algo` takes `&mut top` and we'd otherwise hold a
@@ -1021,20 +1029,166 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         top.spf_flex_algo
             .get_mut(&level)
             .retain(|k, _| active.contains(k));
+        top.rib_flex_algo
+            .get_mut(&level)
+            .retain(|k, _| active.contains(k));
     }
     for (algo, entry) in &configured_algos {
         let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
         let algo_spf = algo_source.map(|src| spf::spf(&algo_graph, src, &spf::SpfOpt::full_path()));
+
+        // Build the per-algo IPv4 RIB iff we have both a source and
+        // an SPF result. Empty PrefixMap for the algo otherwise so
+        // the show command and downstream consumers still see a
+        // well-formed (if empty) snapshot.
+        let algo_rib = match (algo_source, algo_spf.as_ref()) {
+            (Some(src), Some(spf_res)) => {
+                let r = build_rib_from_flex_algo(top, level, *algo, src, spf_res);
+                mpls_route(&r, &mut ilm);
+                r
+            }
+            _ => PrefixMap::<Ipv4Net, SpfRoute>::new(),
+        };
+
         top.graph_flex_algo
             .get_mut(&level)
             .insert(*algo, Some(algo_graph));
         top.spf_flex_algo.get_mut(&level).insert(*algo, algo_spf);
+        top.rib_flex_algo.get_mut(&level).insert(*algo, algo_rib);
     }
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
     mpls_route(&rib, &mut ilm);
     apply_routing_updates(top, level, rib, rib_v6, ilm);
+}
+
+/// Build the per-algorithm IPv4 RIB from a Flex-Algo SPF result.
+/// Mirrors `build_rib_from_spf` but with two differences:
+///
+///   - **Prefix-SIDs come from `peer_algo_sid[origin][(algo, prefix)]`**
+///     instead of the algo-0 Prefix-SID on the reach entry. Resolution
+///     against the origin's SRGB (`label_map[origin]`) is identical to
+///     the legacy path — Flex-Algo uses the same label space as algo
+///     0, just at different indices (RFC 9350 §7).
+///   - **No TI-LFA backup stamping.** Per-algo fast-reroute is
+///     deferred; the FAD topology may not admit the algo-0 TI-LFA
+///     repair anyway.
+///
+/// Prefixes that the origin advertised without a per-algo Prefix-SID
+/// are silently skipped — algo-N SR-MPLS forwarding requires a label
+/// at every step. The algo-0 (legacy) RIB still installs the prefix
+/// via `build_rib_from_spf`, so reachability is not lost.
+fn build_rib_from_flex_algo(
+    top: &mut IsisTop,
+    level: Level,
+    algo: u8,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv4Net, SpfRoute> {
+    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
+
+    for (node, nhops) in spf_result {
+        if *node == source {
+            continue;
+        }
+        if top.lsp_map.get(&level).is_pseudo(*node) {
+            continue;
+        }
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node).copied() else {
+            continue;
+        };
+
+        // Build spf_nhops — same first-router-hop walk as the legacy
+        // builder. Pseudonodes appear as p[0] for LAN edges; the
+        // helper drops leading PN hops to land on a real router.
+        let mut spf_nhops = BTreeMap::new();
+        for p in &nhops.paths {
+            let Some(nhop_id) = first_router_hop_id(top.lsp_map.get(&level), p) else {
+                continue;
+            };
+            let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(nhop_id).copied() else {
+                continue;
+            };
+            for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
+                if *link_id == 0 {
+                    continue;
+                }
+                let Some(link) = top.links.get(link_id) else {
+                    continue;
+                };
+                let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
+                    continue;
+                };
+                for (addr, _) in nbr.addr4.iter() {
+                    let nhop = SpfNexthop {
+                        ifindex: *link_id,
+                        adjacency: *node == nhop_id,
+                        sys_id: Some(nhop_sys_id),
+                        backup: None,
+                    };
+                    spf_nhops.insert(*addr, nhop);
+                }
+            }
+        }
+
+        let Some(reach_entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) else {
+            continue;
+        };
+        for entry in reach_entries.iter() {
+            // Look up the per-algo Prefix-SID advertised by this
+            // origin for this prefix. `peer_algo_sid` is keyed on
+            // the raw (non-trunc) prefix as parsed off the wire,
+            // matching how `lsdb::rebuild_sys_state` inserts.
+            let Some(algo_sid) = top
+                .peer_algo_sid
+                .get(&level)
+                .get(&sys_id)
+                .and_then(|m| m.get(&(algo, entry.prefix)))
+                .cloned()
+            else {
+                continue;
+            };
+
+            let label_block = top.label_map.get(&level).get(&sys_id).cloned();
+            let sid = match &algo_sid {
+                SidLabelValue::Index(idx) => label_block.as_ref().map(|b| b.global.start + idx),
+                SidLabelValue::Label(label) => Some(*label),
+            };
+            let prefix_sid = label_block.as_ref().map(|b| (algo_sid.clone(), b.clone()));
+
+            let route = SpfRoute {
+                metric: nhops.cost + entry.metric,
+                nhops: spf_nhops.clone(),
+                sid,
+                prefix_sid,
+                dest_vertex: Some(*node),
+            };
+
+            if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
+                if curr.metric > route.metric {
+                    *curr = route;
+                } else if curr.metric == route.metric {
+                    // Same anycast / sibling merge as the legacy
+                    // builder. Metadata first-wins; new primaries
+                    // merge in.
+                    for (addr, nhop) in route.nhops {
+                        curr.nhops.insert(addr, nhop);
+                    }
+                    if curr.sid.is_none() && route.sid.is_some() {
+                        curr.sid = route.sid;
+                    }
+                    if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
+                        curr.prefix_sid = route.prefix_sid;
+                    }
+                }
+            } else {
+                rib.insert(entry.prefix.trunc(), route);
+            }
+        }
+    }
+
+    rib
 }
 
 pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {

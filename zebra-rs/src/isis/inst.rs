@@ -168,6 +168,17 @@ pub struct Isis {
     pub graph_flex_algo: Levels<BTreeMap<u8, Option<spf::Graph>>>,
     pub spf_flex_algo: Levels<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>,
 
+    /// Per-algorithm IPv4 RIB. Outer key is algo id; inner map is the
+    /// prefix → SpfRoute table built from `spf_flex_algo` plus the
+    /// per-algo Prefix-SIDs in `peer_algo_sid`. Held in-memory for
+    /// show commands and for the MPLS LFIB build pass — per-algo
+    /// IPv4 routes do **not** flow to the kernel today because the
+    /// global IPv4 table has no algorithm dimension. The MPLS LFIB
+    /// entries derived from these routes do install (labels are
+    /// globally unique, so they merge into the same `Isis::ilm` map
+    /// alongside the algo-0 entries).
+    pub rib_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>,
+
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
     pub sr_rx: UnboundedReceiver<RibSrRx>,
@@ -330,6 +341,11 @@ pub struct IsisTop<'a> {
     pub graph_flex_algo: &'a mut Levels<BTreeMap<u8, Option<spf::Graph>>>,
     pub spf_flex_algo: &'a mut Levels<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>,
 
+    /// Per-algorithm IPv4 RIB (see `Isis::rib_flex_algo`). Threaded
+    /// so `perform_spf_calculation` can install the per-algo RIB
+    /// snapshot after each SPF cycle.
+    pub rib_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>,
+
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
     /// Capability / SRv6 sub-TLVs.
@@ -448,6 +464,7 @@ impl Isis {
                 graph_flex_algo: Levels::<BTreeMap<u8, Option<spf::Graph>>>::default(),
                 spf_flex_algo: Levels::<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>::default(
                 ),
+                rib_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>::default(),
                 sr_rx,
                 watched_block: None,
                 watched_locator: None,
@@ -1195,6 +1212,7 @@ impl Isis {
             mt2_spf_result: &mut self.mt2_spf_result,
             graph_flex_algo: &mut self.graph_flex_algo,
             spf_flex_algo: &mut self.spf_flex_algo,
+            rib_flex_algo: &mut self.rib_flex_algo,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
