@@ -1515,6 +1515,58 @@ impl Bgp {
             "/router/bgp/dynamic-neighbors/listen-range/neighbor-group",
             super::dynamic_neighbors::config_listen_range_neighbor_group,
         );
+        // `set router bgp vrf <name> [...]` (zebra-bgp-vrf.yang).
+        // Staging-only in step 12: the callbacks populate
+        // `Bgp::vrfs` and the CommitEnd hook in `process_cm_msg`
+        // emits a debug log per VRF entry. Per-VRF task spawn / peer
+        // materialization land in step 13+.
+        self.callback_add("/router/bgp/vrf", super::vrf_config::config_vrf);
+        self.callback_add("/router/bgp/vrf/rd", super::vrf_config::config_vrf_rd);
+        self.callback_add(
+            "/router/bgp/vrf/router-id",
+            super::vrf_config::config_vrf_router_id,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/label-mode",
+            super::vrf_config::config_vrf_label_mode,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor",
+            super::vrf_config::config_vrf_neighbor,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/remote-as",
+            super::vrf_config::config_vrf_neighbor_remote_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/peer-group",
+            super::vrf_config::config_vrf_neighbor_peer_group,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/description",
+            super::vrf_config::config_vrf_neighbor_description,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/enabled",
+            super::vrf_config::config_vrf_neighbor_enabled,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4-unicast",
+            super::vrf_config::config_vrf_afi_ipv4_unicast,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4-unicast/network",
+            super::vrf_config::config_vrf_afi_ipv4_network,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6-unicast",
+            super::vrf_config::config_vrf_afi_ipv6_unicast,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6-unicast/network",
+            super::vrf_config::config_vrf_afi_ipv6_network,
+        );
+
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(
             "/router/bgp/interface-neighbor",
