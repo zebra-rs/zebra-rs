@@ -98,6 +98,36 @@ pub(crate) fn peer_index_unregister(
     }
 }
 
+/// Append `export_rts` to `attr.ecom` as Route-Target extended
+/// communities (RFC 4360 §4.1 — subtype `0x02`). RTs share the
+/// 6-octet on-wire encoding with RDs; the `From<RouteDistinguisher>`
+/// impl picks the right high_type (Two-Octet-AS vs IPv4) but
+/// leaves `low_type = 0`, so step 17b-ii sets it to `0x02` to
+/// mark each entry as RT. Returns `attr` unchanged when the
+/// export-RT set is empty.
+pub(crate) fn tag_attr_with_export_rts(
+    mut attr: bgp_packet::BgpAttr,
+    export_rts: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+) -> bgp_packet::BgpAttr {
+    use bgp_packet::{ExtCommunity, ExtCommunityValue};
+
+    if export_rts.is_empty() {
+        return attr;
+    }
+    let mut ecom = attr.ecom.take().unwrap_or_default();
+    for rt in export_rts {
+        let mut val: ExtCommunityValue = (*rt).into();
+        // RFC 4360 §4 — Route Target sub-type. The `From<RD>` impl
+        // sets `high_type` per ASN-vs-IPv4 RD but leaves the
+        // sub-type at the default 0; flipping it here is what
+        // distinguishes RT from Route-Origin (sub-type 0x03).
+        val.low_type = 0x02;
+        ecom.0.push(val);
+    }
+    attr.ecom = Some(ExtCommunity(ecom.0));
+    attr
+}
+
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd` and the matching RT sets observed via
 /// `RibRx::VrfRouteTargets`. Used by
@@ -1216,60 +1246,103 @@ impl Bgp {
             super::vrf::BgpGlobalMsg::Export {
                 vrf,
                 prefix,
-                attr: _,
+                attr,
                 label,
             } => {
-                // Step 17b-i: resolve RD and export-RT set from
-                // already-staged state; emit a single info log so
-                // the operator can see the export decision land
-                // in real time. Step 17b-ii replaces this body
-                // with the actual `LocalRib.v4vpn[rd]` write and
-                // the update-group flush to VPNv4 peers.
-                let rd = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd);
+                let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
+                    tracing::warn!(
+                        vrf = %vrf,
+                        %prefix,
+                        "bgp: export dropped — VRF has no RD configured",
+                    );
+                    return;
+                };
                 let export_rts = self
                     .rib_known_vrfs
                     .get(&vrf)
-                    .map(|k| k.export_rts_v4.len())
-                    .unwrap_or(0);
-                match rd {
-                    Some(rd) => {
-                        tracing::info!(
-                            vrf = %vrf,
-                            %prefix,
-                            rd = %rd,
-                            export_rts = export_rts,
-                            label,
-                            "bgp: export (step 17b-ii will write to LocalRib.v4vpn)",
-                        );
-                    }
-                    None => {
-                        tracing::warn!(
-                            vrf = %vrf,
-                            %prefix,
-                            "bgp: export dropped — VRF has no RD configured",
-                        );
-                    }
-                }
+                    .map(|k| k.export_rts_v4.clone())
+                    .unwrap_or_default();
+
+                // Tag with export-RT extcommunities, then intern
+                // the result in the global attr_store. The VRF
+                // task sent us `attr` by value so it could be
+                // mutated independently; this is the only place
+                // the global instance interns it.
+                let tagged = tag_attr_with_export_rts(attr, &export_rts);
+                let interned = self.attr_store.intern(tagged);
+
+                // VPNv4 NLRI carries a single MPLS label per route.
+                // Step 19 wires a real per-VRF label allocator;
+                // until then VRF tasks pass `0` and we treat that
+                // as "no label allocated yet", which `make_bgp_rib_entry_v4`
+                // and the VPNv4 emit path interpret as "skip
+                // install / advertise" rather than emit the
+                // explicit-null label.
+                let label_obj = if label != 0 {
+                    Some(bgp_packet::Label {
+                        label,
+                        exp: 0,
+                        bos: true,
+                    })
+                } else {
+                    None
+                };
+
+                let nexthop = bgp_packet::Vpnv4Nexthop {
+                    rd,
+                    nhop: self.router_id,
+                };
+
+                let rib = super::route::BgpRib {
+                    remote_id: 0,
+                    local_id: 0,
+                    attr: interned,
+                    ident: 0,
+                    router_id: self.router_id,
+                    weight: 0,
+                    typ: super::route::BgpRibType::Originated,
+                    best_path: false,
+                    best_reason: super::route::Reason::Default,
+                    label: label_obj,
+                    nexthop: Some(nexthop),
+                    egress_ifindex_v6: None,
+                    stale: false,
+                    esi: None,
+                };
+
+                let (added, removed, _gen) = self.local_rib.update(Some(rd), prefix, rib);
+                tracing::info!(
+                    vrf = %vrf,
+                    %prefix,
+                    rd = %rd,
+                    export_rts = export_rts.len(),
+                    label,
+                    added = added.len(),
+                    removed = removed.len(),
+                    "bgp: export written to LocalRib.v4vpn (update-group flush lands in step 17c)",
+                );
             }
             super::vrf::BgpGlobalMsg::WithdrawExport { vrf, prefix } => {
-                let rd = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd);
-                match rd {
-                    Some(rd) => {
-                        tracing::info!(
-                            vrf = %vrf,
-                            %prefix,
-                            rd = %rd,
-                            "bgp: withdraw-export (step 17b-ii will withdraw from LocalRib.v4vpn)",
-                        );
-                    }
-                    None => {
-                        tracing::debug!(
-                            vrf = %vrf,
-                            %prefix,
-                            "bgp: withdraw-export dropped — VRF has no RD configured",
-                        );
-                    }
-                }
+                let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
+                    tracing::debug!(
+                        vrf = %vrf,
+                        %prefix,
+                        "bgp: withdraw-export dropped — VRF has no RD configured",
+                    );
+                    return;
+                };
+                // VRF-originated routes always carry `ident == 0`
+                // and `local_id == 0` (the values used in the
+                // matching Export); the remove path uses that
+                // tuple to identify the row.
+                let removed = self.local_rib.remove(Some(rd), prefix, 0, 0);
+                tracing::info!(
+                    vrf = %vrf,
+                    %prefix,
+                    rd = %rd,
+                    removed = removed.len(),
+                    "bgp: export withdrawn from LocalRib.v4vpn",
+                );
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
@@ -1423,5 +1496,95 @@ mod tests {
         let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
         peer_index_unregister(&mut index, "vrfA", addr("203.0.113.1"));
         assert!(index.is_empty());
+    }
+
+    /// Step 17b-ii: helper that takes a `BgpAttr` and tags it with
+    /// one `ExtCommunity` per RT in the export set. Sub-type 0x02
+    /// distinguishes RT from Route Origin (sub-type 0x03);
+    /// `high_type` (0x00 for ASN, 0x01 for IPv4) is carried over
+    /// from the matching `RouteDistinguisher`.
+    mod tag_attr {
+        use std::str::FromStr;
+
+        use bgp_packet::{BgpAttr, RouteDistinguisher};
+
+        use super::super::tag_attr_with_export_rts;
+
+        fn rt(s: &str) -> RouteDistinguisher {
+            RouteDistinguisher::from_str(s).unwrap()
+        }
+
+        #[test]
+        fn empty_export_set_returns_attr_unchanged() {
+            // No exports configured -> no ExtCommunity added.
+            // Critical: tagging an empty set would otherwise
+            // create an empty `Some(ExtCommunity(vec![]))` and
+            // upset the dedup pool's PartialEq.
+            let attr = BgpAttr::default();
+            let out = tag_attr_with_export_rts(attr.clone(), &Default::default());
+            assert_eq!(out, attr);
+        }
+
+        #[test]
+        fn single_rt_adds_one_extcom_with_subtype_2() {
+            let mut rts = std::collections::BTreeSet::new();
+            rts.insert(rt("65000:100"));
+
+            let out = tag_attr_with_export_rts(BgpAttr::default(), &rts);
+            let ecom = out.ecom.expect("ecom populated");
+            assert_eq!(ecom.0.len(), 1);
+            let entry = &ecom.0[0];
+            // Two-byte ASN RD -> high_type 0x00.
+            assert_eq!(entry.high_type, 0x00);
+            assert_eq!(entry.low_type, 0x02, "RT sub-type per RFC 4360");
+        }
+
+        #[test]
+        fn ipv4_rt_uses_high_type_1() {
+            // The `From<RouteDistinguisher>` impl picks
+            // `high_type = 0x01` for IPv4-shaped RDs; the
+            // tagging helper must preserve that.
+            let mut rts = std::collections::BTreeSet::new();
+            rts.insert(rt("192.0.2.1:100"));
+
+            let out = tag_attr_with_export_rts(BgpAttr::default(), &rts);
+            let ecom = out.ecom.expect("ecom populated");
+            assert_eq!(ecom.0.len(), 1);
+            assert_eq!(ecom.0[0].high_type, 0x01);
+            assert_eq!(ecom.0[0].low_type, 0x02);
+        }
+
+        #[test]
+        fn multiple_rts_yield_one_extcom_per_rt() {
+            let mut rts = std::collections::BTreeSet::new();
+            rts.insert(rt("65000:1"));
+            rts.insert(rt("65000:2"));
+            rts.insert(rt("65001:3"));
+
+            let out = tag_attr_with_export_rts(BgpAttr::default(), &rts);
+            let ecom = out.ecom.expect("ecom populated");
+            assert_eq!(ecom.0.len(), 3);
+            for entry in &ecom.0 {
+                assert_eq!(entry.low_type, 0x02);
+            }
+        }
+
+        #[test]
+        fn pre_existing_ecom_is_preserved() {
+            // Caller-attached extcomms (colour, etc.) MUST NOT be
+            // dropped by the RT tag — append, don't replace.
+            let mut attr = BgpAttr::default();
+            let preexisting = bgp_packet::ExtCommunityValue::from_color(0, 100);
+            attr.ecom = Some(bgp_packet::ExtCommunity(vec![preexisting.clone()]));
+
+            let mut rts = std::collections::BTreeSet::new();
+            rts.insert(rt("65000:1"));
+
+            let out = tag_attr_with_export_rts(attr, &rts);
+            let ecom = out.ecom.expect("ecom populated");
+            assert_eq!(ecom.0.len(), 2, "colour + RT");
+            assert_eq!(ecom.0[0], preexisting, "colour stays at index 0");
+            assert_eq!(ecom.0[1].low_type, 0x02, "RT appended");
+        }
     }
 }
