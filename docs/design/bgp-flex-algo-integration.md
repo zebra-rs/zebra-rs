@@ -3,6 +3,11 @@
 Status as of 2026-05-21. Tracks the design and PR sequence for steering
 BGP-learned traffic into IS-IS Flex-Algorithm paths in zebra-rs.
 
+**Update 2026-05-21:** Phases 0–5 have shipped. Phase 6 (BGP-LS) remains
+deferred as designed. Companion doc
+[`bgp-flex-algo-deferred.md`](bgp-flex-algo-deferred.md) catalogues the
+18 conscious deferrals around the integration spine.
+
 Companion document: [`flex-algo-roadmap.md`](flex-algo-roadmap.md) tracks the
 IS-IS-only remaining work; this document covers everything BGP-side plus the
 glue layer (resolver + FIB).
@@ -35,11 +40,14 @@ the inner label is whatever the service AFI/SAFI requires.
 | Peer FAD / per-link ASLA / per-algo Prefix-SID caches | ✅ | `isis/flex_algo.rs`, `isis/lsdb.rs` |
 | SR Algorithms sub-TLV, SRGB, algo-0 LFIB | ✅ | `ospf/srmpls.rs`, `rib/segment_routing/` |
 | BGP recursive next-hop resolution via IGP | ✅ | `rib/resolve.rs` |
-| **Per-algorithm SPF & per-algo LFIB install** | ❌ | covered by `flex-algo-roadmap.md` |
-| BGP attr 23 (Tunnel-Encap), attr 40 (Prefix-SID) | ❌ | `crates/bgp-packet/src/attrs/attr.rs` falls into `Unknown(u8)` |
-| Color extended community `0x03 0x0b` | ❌ | `crates/bgp-packet/src/attrs/ext_com.rs` parses as opaque |
-| Color/algo-aware next-hop resolution | ❌ | `rib/resolve.rs` ignores algorithm |
-| Per-algo RIB sub-type / colored nexthop | ❌ | `rib/entry.rs::RibSubType` has only `Default` |
+| Per-algorithm SPF & per-algo MPLS LFIB install | ✅ | PRs #670 (SPF) / #675 (gating) / #679 (RIB) / #681 (show) |
+| BGP attr 40 (Prefix-SID, RFC 8669) | ✅ | PR #683 — `crates/bgp-packet/src/attrs/prefix_sid.rs` |
+| BGP attr 23 (Tunnel-Encap, RFC 9012) | ✅ | PR #684 — `crates/bgp-packet/src/attrs/tunnel_encap.rs` |
+| Color extended community `0x03 0x0b` | ✅ | PR #686 — `crates/bgp-packet/src/attrs/ext_com.rs` |
+| Route-map `match/set color`, `set prefix-sid label-index` | ✅ | PR #690 |
+| Color → flex-algorithm binding (`Bgp::color_policy`) | ✅ | PR #687 |
+| Color/algo-aware next-hop resolution + outer label push | ✅ | PRs #697 / #701 (`bgp_color_aware_nht_consumer`) |
+| `show ip bgp <prefix>` surfaces Prefix-SID / Color | ✅ | PR #692 |
 
 ---
 
