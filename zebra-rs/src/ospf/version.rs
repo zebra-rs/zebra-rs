@@ -18,6 +18,8 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::net::Ipv4Addr;
 
+use ipnet::Ipv4Net;
+
 /// Marker / dispatch trait for an OSPF protocol version (v2 or v3).
 ///
 /// Both versions use the same IP protocol number (89), so it's a
@@ -31,6 +33,11 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// source address differs — those v3-specific fields will land
     /// when `Ospfv3` is added.
     type Addr: Copy + Eq + Ord + Hash + Display + Debug + 'static;
+
+    /// Prefix (network + length) type. v2 uses `Ipv4Net`; v3 will
+    /// use `Ipv6Net`. Both are `ipnet::*Net` types so they share
+    /// `Copy`, `Eq`, `Display`, etc.
+    type Prefix: Copy + Eq + Display + Debug + 'static;
 
     /// IP protocol number for OSPF packets — 89 in both versions
     /// (RFC 2328 §A and RFC 5340 §2.3).
@@ -49,6 +56,7 @@ pub struct Ospfv2;
 
 impl OspfVersion for Ospfv2 {
     type Addr = Ipv4Addr;
+    type Prefix = Ipv4Net;
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
 }

@@ -12,7 +12,7 @@ use ospf_packet::OspfLsaHeader;
 
 use crate::rib::Link;
 
-use super::{Identity, IfsmState, Message, Neighbor};
+use super::{Identity, IfsmState, Message, Neighbor, Ospfv2};
 use super::{addr::OspfAddr, task::Timer};
 
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
@@ -70,7 +70,7 @@ pub struct OspfLink {
     pub name: String,
     pub mtu: u32,
     pub enabled: bool,
-    pub addr: Vec<OspfAddr>,
+    pub addr: Vec<OspfAddr<Ospfv2>>,
     pub area: Ipv4Addr,
     pub area_id: Ipv4Addr,
     pub state: IfsmState,
