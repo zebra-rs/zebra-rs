@@ -237,6 +237,11 @@ pub struct PolicyEntry {
     pub match_origin: Option<Origin>,
     pub match_evpn_route_type: Option<EvpnRouteType>,
     pub match_evpn_vni: Option<u32>,
+    /// `match color N` — true when the route's EXT_COMMUNITIES list
+    /// contains a Color extended community (RFC 9012 §4.3, type
+    /// 0x03 0x0b) with value `N`. CO bits are not compared in v1;
+    /// the value field is the discriminator.
+    pub match_color: Option<u32>,
     // Set.
     pub local_pref: Option<NumericSet>,
     pub med: Option<NumericSet>,
@@ -245,6 +250,19 @@ pub struct PolicyEntry {
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
     pub set_next_hop: Option<SetNextHop>,
     pub set_origin: Option<Origin>,
+    /// `set color N` — append a Color extended community (RFC 9012
+    /// §4.3) with CO bits = 00 and value `N` to the route's
+    /// EXT_COMMUNITIES attribute. v1 always emits a single Color
+    /// entry; multi-color fallback ordering (RFC 9256 §2.5) is a
+    /// follow-up once the resolver consumes color lists.
+    pub set_color: Option<u32>,
+    /// `set prefix-sid label-index N` — replace the BGP Prefix-SID
+    /// attribute (RFC 8669, attr 40) with a single Label-Index TLV
+    /// whose flags = 0 and label_index = `N`. Any previously-set
+    /// SRGB / SRv6-service TLVs on the route are dropped — the
+    /// route-map is authoritative when the operator chose to set
+    /// the label-index explicitly.
+    pub set_prefix_sid_label_index: Option<u32>,
     // Action.
     pub action: PolicyAction,
 }
@@ -839,6 +857,22 @@ impl ConfigBuilder {
                 entry.match_evpn_vni = None;
                 Ok(())
             })
+            // `match color N` — Color extended community (RFC 9012
+            // §4.3) value match. Set form takes a uint32 operand;
+            // delete clears the predicate.
+            .path("/entry/match/color")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_color = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_color = None;
+                Ok(())
+            })
             // `set local-preference {set|add|sub} NUM` — presence
             // container with mandatory choice; `set` overwrites,
             // `add`/`sub` mutate the route's current value with
@@ -1144,6 +1178,39 @@ impl ConfigBuilder {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.lookup(&seq).context(ARG_ERR)?;
                 entry.set_origin = None;
+                Ok(())
+            })
+            // `set color N` — append one Color extended community
+            // (RFC 9012 §4.3) with CO=0 to the route's ext-comm list
+            // at apply time.
+            .path("/entry/set/color")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.set_color = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_color = None;
+                Ok(())
+            })
+            // `set prefix-sid label-index N` — install a Label-Index
+            // TLV (RFC 8669 §3.1) inside attr 40 at apply time.
+            // Overwrites any existing Prefix-SID attribute on the
+            // route.
+            .path("/entry/set/prefix-sid/label-index")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.set_prefix_sid_label_index = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_prefix_sid_label_index = None;
                 Ok(())
             })
             .path("/entry/action")

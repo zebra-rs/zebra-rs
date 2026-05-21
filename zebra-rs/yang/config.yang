@@ -1668,6 +1668,16 @@ module config {
               enum incomplete;
             }
           }
+          leaf "color" {
+            type uint32;
+            description
+              "Match a BGP Color Extended Community (RFC 9012 §4.3,
+               opaque type 0x03 sub-type 0x0b) by value. The CO bits
+               in the Flags field are not compared in this revision —
+               only the 32-bit color value. At least one matching
+               entry in the route's EXT_COMMUNITIES attribute satisfies
+               the predicate.";
+          }
           container "evpn" {
             description
               "Match EVPN route attributes. `route-type` selects
@@ -1809,6 +1819,30 @@ module config {
             description
               "Set the route's ORIGIN attribute. Mirrors the
                three values that `match origin` accepts.";
+          }
+          leaf "color" {
+            type uint32;
+            description
+              "Append a BGP Color Extended Community (RFC 9012 §4.3)
+               with the given value and CO bits = 00 to the route's
+               EXT_COMMUNITIES attribute. The mapping from color to
+               IS-IS Flex-Algorithm lives under
+               `/router/bgp/color-policy`.";
+          }
+          container "prefix-sid" {
+            presence "set prefix-sid";
+            description
+              "Install a BGP Prefix-SID attribute (RFC 8669, attr 40)
+               on the route. Today only the Label-Index TLV is
+               settable; Originator-SRGB and SRv6 service TLVs are
+               populated by other code paths.";
+            leaf "label-index" {
+              type uint32;
+              description
+                "Replace the route's Prefix-SID attribute with a
+                 single Label-Index TLV whose flags = 0 and
+                 label-index = the given value. RFC 8669 §3.1.";
+            }
           }
           container "community" {
             presence "set community";
