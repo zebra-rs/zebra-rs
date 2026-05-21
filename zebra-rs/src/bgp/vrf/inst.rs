@@ -198,11 +198,16 @@ impl BgpVrf {
     /// non-`Shutdown` variant is a stub for later steps.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
         match msg {
-            BgpVrfMsg::Accept(_, _) => {
-                // Step 16 wires this to per-VRF passive-accept.
+            BgpVrfMsg::Accept(_, sockaddr) => {
+                // Step 16 lands the global accept dispatcher that
+                // routes us here; step 15d will pick up the
+                // `TcpStream` and continue the FSM. Until then the
+                // stream drops at the end of this arm and the TCP
+                // connection closes.
                 tracing::debug!(
                     vrf = %self.name,
-                    "bgp vrf: ignored Accept (step 16 wires the handler)",
+                    peer = %sockaddr.ip(),
+                    "bgp vrf: received inbound Accept (FSM driver lands in step 15d)",
                 );
             }
             BgpVrfMsg::ImportV4 { .. } | BgpVrfMsg::ImportV6 { .. } => {

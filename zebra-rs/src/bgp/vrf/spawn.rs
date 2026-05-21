@@ -140,6 +140,17 @@ pub fn spawn_bgp_vrf(
     // map with permanently-Idle entries.
     let peer_count = materialize_peers(&mut vrf, cfg);
 
+    // Step 16: register each materialised peer with the global
+    // accept dispatcher so an inbound `:179` from that IP lands
+    // on this VRF task via `BgpVrfMsg::Accept` instead of the
+    // global instance.
+    for addr in vrf.peers.keys().copied().collect::<Vec<_>>() {
+        let _ = vrf.global_tx.send(BgpGlobalMsg::RegisterPeer {
+            vrf: name.clone(),
+            addr,
+        });
+    }
+
     let task = serve_vrf(vrf);
     tracing::info!(
         vrf = %name,

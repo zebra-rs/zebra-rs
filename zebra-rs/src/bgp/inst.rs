@@ -62,6 +62,42 @@ pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
 pub type PCallback = fn(&mut CommunityListMap, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
+/// Insert (or refresh) the `peer_index` row claiming `addr` for
+/// `vrf`. Warns and overrides when a different VRF already owned
+/// the address — matches FRR behaviour for the same conflict.
+pub(crate) fn peer_index_register(
+    index: &mut BTreeMap<std::net::IpAddr, String>,
+    vrf: String,
+    addr: std::net::IpAddr,
+) {
+    if let Some(prev) = index.insert(addr, vrf.clone())
+        && prev != vrf
+    {
+        tracing::warn!(
+            peer = %addr,
+            old_vrf = %prev,
+            new_vrf = %vrf,
+            "bgp: peer address claimed by multiple VRFs; most recent wins",
+        );
+    }
+}
+
+/// Drop the `peer_index` entry for `addr` iff it currently
+/// belongs to `vrf`. Guards against a stale `UnregisterPeer`
+/// arriving after the operator moved the peer to a different
+/// VRF.
+pub(crate) fn peer_index_unregister(
+    index: &mut BTreeMap<std::net::IpAddr, String>,
+    vrf: &str,
+    addr: std::net::IpAddr,
+) {
+    if let Some(owner) = index.get(&addr)
+        && owner == vrf
+    {
+        index.remove(&addr);
+    }
+}
+
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd`. Used by [`Bgp::maybe_respawn_vrf_with_kernel_ctx`]
 /// to lift a step-14 placeholder `ProtoContext` to a real
@@ -203,6 +239,15 @@ pub struct Bgp {
     /// step-9 inbound dispatcher routes route installs into
     /// `vrf_tables[table_id]`.
     pub rib_subscriber: crate::config::RibSubscriber,
+    /// Inbound `:179` dispatch index — peer source IP to VRF name.
+    /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
+    /// each per-VRF task emits at spawn / materialise time, and
+    /// drained on `UnregisterPeer`. Step 16's accept handler
+    /// consults this: a connection from an IP claimed by some VRF
+    /// is forwarded via `BgpVrfMsg::Accept` to that VRF's task;
+    /// every other connection falls through to the existing
+    /// global-instance accept path.
+    pub peer_index: BTreeMap<std::net::IpAddr, String>,
     /// Outbound sender every per-VRF task uses to push messages
     /// back to the global runtime — peer registration, exports,
     /// withdraws. Cloned into [`super::vrf::BgpVrf::global_tx`] at
@@ -349,6 +394,7 @@ impl Bgp {
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
             rib_subscriber,
+            peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
@@ -529,8 +575,28 @@ impl Bgp {
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
             }
             Message::Accept(socket, sockaddr) => {
-                // println!("Accept: {:?}", sockaddr);
-                accept(self, socket, sockaddr);
+                // Step 16: if the source IP is claimed by a per-VRF
+                // task, hand the connection off there. The receiving
+                // task picks up the stream from `BgpVrfMsg::Accept`
+                // and continues the FSM. Unclaimed addresses fall
+                // through to the existing global-instance accept
+                // path — that's how default-VRF peers and the
+                // dynamic-neighbor fallback still work.
+                let src_ip = sockaddr.ip();
+                if let Some(vrf_name) = self.peer_index.get(&src_ip).cloned()
+                    && let Some(handle) = self.vrf_registry.get(&vrf_name)
+                {
+                    let msg = super::vrf::msg::BgpVrfMsg::Accept(socket, sockaddr);
+                    if handle.inbox.send(msg).is_err() {
+                        tracing::warn!(
+                            peer = %src_ip,
+                            vrf = %vrf_name,
+                            "bgp: VRF task gone while routing inbound accept; dropping connection",
+                        );
+                    }
+                } else {
+                    accept(self, socket, sockaddr);
+                }
             }
             Message::Show(tx) => {
                 let _ = self.tx.try_send(Message::Show(tx));
@@ -605,9 +671,11 @@ impl Bgp {
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle);
-                // `handle` drops at end of scope — its `Task<()>`
-                // aborts the spawned event loop if Shutdown
-                // hadn't already drained it.
+                // Drop every `peer_index` entry that pointed at
+                // this VRF — defensive cleanup against the VRF
+                // task exiting before its `UnregisterPeer`
+                // messages have been processed.
+                self.peer_index.retain(|_, owner| owner != &name);
             }
         }
 
@@ -657,6 +725,9 @@ impl Bgp {
         // yet drained the signal.
         if let Some(handle) = self.vrf_registry.remove(name) {
             super::vrf::despawn_bgp_vrf(name, &handle);
+            // Clear stale `peer_index` entries — the spawned task
+            // is about to push fresh RegisterPeer messages.
+            self.peer_index.retain(|_, owner| owner != name);
         }
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
@@ -1086,18 +1157,10 @@ impl Bgp {
                 );
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
-                tracing::debug!(
-                    vrf = %vrf,
-                    %addr,
-                    "bgp: ignored RegisterPeer (step 16 wires the handler)",
-                );
+                peer_index_register(&mut self.peer_index, vrf, addr);
             }
             super::vrf::BgpGlobalMsg::UnregisterPeer { vrf, addr } => {
-                tracing::debug!(
-                    vrf = %vrf,
-                    %addr,
-                    "bgp: ignored UnregisterPeer (step 16 wires the handler)",
-                );
+                peer_index_unregister(&mut self.peer_index, &vrf, addr);
             }
         }
     }
@@ -1178,4 +1241,72 @@ pub fn serve(mut bgp: Bgp) -> Task<()> {
     Task::spawn(async move {
         bgp.event_loop().await;
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pure-function tests on the step-16 `peer_index` mutations.
+    //! Building a full `Bgp` to drive `process_vrf_global_msg`
+    //! end-to-end would require netlink — out of reach for unit
+    //! tests; the BDD scenarios in step 21 cover that. Here we
+    //! exercise the index helpers directly.
+    use std::collections::BTreeMap;
+    use std::net::IpAddr;
+
+    use super::{peer_index_register, peer_index_unregister};
+
+    fn addr(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn register_inserts_the_mapping() {
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
+        assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfA".to_string()));
+    }
+
+    #[test]
+    fn register_overrides_a_conflicting_owner() {
+        // FRR-style "most recent wins" behaviour. A different
+        // VRF claiming the same peer IP is a config error the
+        // operator must fix, but we don't refuse the update.
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
+        peer_index_register(&mut index, "vrfB".to_string(), addr("192.0.2.1"));
+        assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfB".to_string()));
+    }
+
+    #[test]
+    fn re_register_same_owner_is_idempotent() {
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
+        peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
+        assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfA".to_string()));
+        assert_eq!(index.len(), 1);
+    }
+
+    #[test]
+    fn unregister_drops_only_when_owner_matches() {
+        // Defends against a stale `UnregisterPeer` arriving from
+        // a VRF that no longer owns the address (operator moved
+        // the peer to a different VRF since).
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_register(&mut index, "vrfB".to_string(), addr("192.0.2.1"));
+        peer_index_unregister(&mut index, "vrfA", addr("192.0.2.1"));
+        assert_eq!(
+            index.get(&addr("192.0.2.1")),
+            Some(&"vrfB".to_string()),
+            "stale Unregister from vrfA must not strip vrfB's claim",
+        );
+        peer_index_unregister(&mut index, "vrfB", addr("192.0.2.1"));
+        assert!(index.is_empty());
+    }
+
+    #[test]
+    fn unregister_unknown_addr_is_noop() {
+        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
+        peer_index_unregister(&mut index, "vrfA", addr("203.0.113.1"));
+        assert!(index.is_empty());
+    }
 }

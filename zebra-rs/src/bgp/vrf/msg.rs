@@ -30,11 +30,16 @@ use bgp_packet::RouteDistinguisher;
 pub enum BgpVrfMsg {
     /// Inbound TCP connection accepted on `:179` whose source IP
     /// matches a peer configured in this VRF. The stream is handed
-    /// off to the per-VRF runtime, which continues the FSM on its
-    /// own task. Populated by step 16's accept dispatcher; the
-    /// step-13 event loop just drops the connection.
-    #[allow(dead_code)]
-    Accept(TcpStream, SocketAddr),
+    /// off to the per-VRF runtime; the per-VRF FSM driver (step
+    /// 15d) picks up here. Until that lands, `BgpVrf::event_loop`
+    /// drops the stream silently — step 16 still wires the
+    /// dispatch so the global instance's accept path no longer
+    /// claims connections that should belong to a VRF.
+    Accept(
+        #[allow(dead_code)] // first reader lands in step 15d.
+        TcpStream,
+        SocketAddr,
+    ),
 
     /// VPNv4 best-path import. The global Loc-RIB resolved a route
     /// whose RT list intersects this VRF's import-RT set; the per-
@@ -91,13 +96,15 @@ pub enum BgpGlobalMsg {
 
     /// Register a peer IP with the global accept dispatcher so an
     /// inbound `:179` connect from that IP is handed to this VRF
-    /// via [`BgpVrfMsg::Accept`]. Emitted by step 15 / 16 when a
-    /// passive peer is configured in this VRF.
-    #[allow(dead_code)]
+    /// via [`BgpVrfMsg::Accept`]. Emitted by step 16's spawn
+    /// site for every materialised peer.
     RegisterPeer { vrf: String, addr: std::net::IpAddr },
 
     /// Inverse of [`Self::RegisterPeer`]. The global dispatcher
     /// stops routing inbound connects from this IP to the VRF.
+    /// Step 16 doesn't yet emit this from VRF code (despawn
+    /// scrubs `peer_index` defensively on the global side);
+    /// step 15d's per-VRF FSM cleanup is the first emitter.
     #[allow(dead_code)]
     UnregisterPeer { vrf: String, addr: std::net::IpAddr },
 }
