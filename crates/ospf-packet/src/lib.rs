@@ -18,10 +18,10 @@ pub use v3::{
     OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W,
     OSPFV3_ROUTER_LSA_TYPE, OSPFV3_VERSION, Ospfv3AsExternalLsa, Ospfv3DbDesc, Ospfv3Hello,
     Ospfv3InterAreaPrefixLsa, Ospfv3InterAreaRouterLsa, Ospfv3IntraAreaPrefix,
-    Ospfv3IntraAreaPrefixLsa, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsAck, Ospfv3LsRequest,
-    Ospfv3LsRequestEntry, Ospfv3LsaHeader, Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet,
-    Ospfv3Payload, Ospfv3PrefixOptions, Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink,
-    ospfv3_prefix_wire_len,
+    Ospfv3IntraAreaPrefixLsa, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsAck, Ospfv3LsBody,
+    Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader,
+    Ospfv3NetworkLsa, Ospfv3Options, Ospfv3Packet, Ospfv3Payload, Ospfv3PrefixOptions,
+    Ospfv3RouterLinkType, Ospfv3RouterLsa, Ospfv3RouterLsaLink, ospfv3_prefix_wire_len,
 };
 
 pub use packet_utils::many0_complete;
