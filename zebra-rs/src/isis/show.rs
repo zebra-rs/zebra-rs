@@ -1820,7 +1820,7 @@ fn render_spf(
                 .filter_map(|(name, graph, spf)| {
                     let g = graph.as_ref()?;
                     let s = spf.as_ref()?;
-                    Some((name.to_string(), spf_topology_json(g, s, detail)))
+                    Some((name.to_string(), spf_topology_json(isis, g, s, detail)))
                 })
                 .collect(),
         };
@@ -1843,23 +1843,16 @@ fn render_spf(
         writeln!(buf, "\n{} SPF results:", name)?;
         for (dest, path) in spf.iter() {
             let dest_name = vertex_name(graph, *dest);
-            writeln!(
-                buf,
-                "  Destination {} (vertex {}), cost {}",
-                dest_name, dest, path.cost,
-            )?;
+            writeln!(buf, "  Destination {}, cost {}", dest_name, path.cost)?;
             if path.first_hop_links.is_empty() {
-                writeln!(buf, "    (no first-hop — self or unreachable)")?;
+                writeln!(buf, "    (no nexthop — self or unreachable)")?;
             } else {
                 let mut hops: Vec<(usize, u32)> = path.first_hop_links.iter().copied().collect();
                 hops.sort();
                 for (i, (fh_vertex, link_id)) in hops.iter().enumerate() {
                     let fh_name = vertex_name(graph, *fh_vertex);
-                    writeln!(
-                        buf,
-                        "    [{}] first-hop {} (vertex {}, link_id {})",
-                        i, fh_name, fh_vertex, link_id,
-                    )?;
+                    let ifname = isis.ifname(*link_id);
+                    writeln!(buf, "    [{}] nexthop {} ({})", i, fh_name, ifname)?;
                 }
             }
             if path.paths.is_empty() {
@@ -1923,6 +1916,7 @@ fn format_vertex_path(graph: &spf::Graph, path: &[usize]) -> String {
 }
 
 fn spf_topology_json(
+    isis: &Isis,
     graph: &spf::Graph,
     spf: &BTreeMap<usize, spf::Path>,
     _detail: bool,
@@ -1936,12 +1930,12 @@ fn spf_topology_json(
                 vertex_id: *dest,
                 name: vertex_name(graph, *dest),
                 cost: path.cost,
-                first_hops: hops
+                nexthops: hops
                     .into_iter()
-                    .map(|(v, link_id)| SpfFirstHopJson {
+                    .map(|(v, link_id)| SpfNexthopJson {
                         vertex_id: v,
                         name: vertex_name(graph, v),
-                        link_id,
+                        interface: isis.ifname(link_id),
                     })
                     .collect(),
                 paths: path
@@ -1981,15 +1975,15 @@ struct SpfDestinationJson {
     vertex_id: usize,
     name: String,
     cost: u32,
-    first_hops: Vec<SpfFirstHopJson>,
+    nexthops: Vec<SpfNexthopJson>,
     paths: Vec<Vec<SpfPathVertexJson>>,
 }
 
 #[derive(Serialize)]
-struct SpfFirstHopJson {
+struct SpfNexthopJson {
     vertex_id: usize,
     name: String,
-    link_id: u32,
+    interface: String,
 }
 
 #[derive(Serialize)]
