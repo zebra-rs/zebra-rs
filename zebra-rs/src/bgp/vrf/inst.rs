@@ -9,16 +9,8 @@
 //! at spawn time.
 //!
 //! Step 13 ships the type and the lifecycle (`event_loop`,
-//! `serve_vrf`, `Shutdown` handling). Everything else lands in the
-//! steps named in [`crate::bgp::vrf`].
-//!
-//! Most of this module is `dead_code` from rustc's point of view
-//! until step 14 wires `spawn_bgp_vrf` — the test module
-//! constructs `BgpVrf` and runs `event_loop`, but those calls only
-//! happen under `#[cfg(test)]`, so the non-test build sees zero
-//! production consumers. The blanket allow goes away the moment
-//! the spawn site lands.
-#![allow(dead_code)]
+//! `serve_vrf`, `Shutdown` handling); step 14's `spawn_bgp_vrf`
+//! is the first production consumer.
 
 use std::net::Ipv4Addr;
 
@@ -34,6 +26,11 @@ use super::super::route::LocalRib;
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
 
 /// Per-VRF BGP runtime. One task per `router bgp vrf X` block.
+///
+/// Most fields are written by `BgpVrf::new` at spawn time but
+/// don't gain a reader until later steps (15-18). The
+/// `dead_code` allow goes away as each consumer site lands.
+#[allow(dead_code)]
 pub struct BgpVrf {
     /// VRF name (matches the YANG list key under
     /// `/router/bgp/vrf/<name>`). Used in log lines, `show bgp vrf
