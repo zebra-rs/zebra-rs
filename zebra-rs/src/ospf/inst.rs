@@ -36,6 +36,7 @@ use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
+use super::version::OspfVersion;
 use super::{
     AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
@@ -43,7 +44,18 @@ use super::{
 
 pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
 
-pub struct Ospf {
+/// OSPF protocol instance.
+///
+/// Parameterized over `V: OspfVersion` (default `Ospfv2`) so the
+/// embedded link/area/LSDB state can specialize per version while
+/// keeping every existing v2 callsite resolving to `Ospf<Ospfv2>`
+/// without textual churn. Methods on `Ospf` are still v2-bound and
+/// live in `impl Ospf<Ospfv2>` below — they manipulate v2-specific
+/// LSA bodies (`OspfLsp::OpaqueAreaRouterInfo`, etc.) and the v2
+/// `Message` enum directly. They generalize when the
+/// `OspfVersion` trait grows accessor methods, in a future round
+/// of trait expansion.
+pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
     pub ptx: UnboundedSender<Message>,
@@ -51,13 +63,13 @@ pub struct Ospf {
     pub callbacks: HashMap<String, Callback>,
     pub ctx: crate::context::ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
-    pub links: BTreeMap<u32, OspfLink>,
-    pub areas: OspfAreaMap,
+    pub links: BTreeMap<u32, OspfLink<V>>,
+    pub areas: OspfAreaMap<V>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub router_id: Ipv4Addr,
-    pub lsdb_as: Lsdb,
+    pub lsdb_as: Lsdb<V>,
     pub lsp_map: LspMap,
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub graph: Option<spf::Graph>,
@@ -69,15 +81,19 @@ pub struct Ospf {
 }
 
 // OSPF inteface structure which points out upper layer struct members.
-pub struct OspfInterface<'a> {
+//
+// Parameterized over V: OspfVersion via the borrowed references
+// into v3-shaped state (Identity<V>, Lsdb<V>, Vec<OspfAddr<V>>).
+// Default V = Ospfv2 keeps function signatures unchanged at callsites.
+pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub tx: &'a UnboundedSender<Message>,
     pub router_id: &'a Ipv4Addr,
-    pub ident: &'a Identity,
-    pub addr: &'a Vec<OspfAddr<Ospfv2>>,
+    pub ident: &'a Identity<V>,
+    pub addr: &'a Vec<OspfAddr<V>>,
     pub mtu: u32,
     pub db_desc_in: &'a mut usize,
-    pub lsdb: &'a mut Lsdb,
-    pub lsdb_as: &'a mut Lsdb,
+    pub lsdb: &'a mut Lsdb<V>,
+    pub lsdb_as: &'a mut Lsdb<V>,
     pub area_id: Ipv4Addr,
     pub area_type: super::area::AreaType,
     pub exchange_loading_count: usize,
@@ -86,7 +102,7 @@ pub struct OspfInterface<'a> {
     pub tracing: &'a OspfTracing,
 }
 
-impl Ospf {
+impl Ospf<Ospfv2> {
     pub fn ospf_interface<'a>(
         &'a mut self,
         ifindex: u32,

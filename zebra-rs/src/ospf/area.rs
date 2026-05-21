@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 
 use super::Lsdb;
 use super::task::Timer;
+use super::version::{OspfVersion, Ospfv2};
 
 pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
@@ -12,35 +13,46 @@ pub enum AreaType {
     Normal,
 }
 
-pub struct OspfAreaMap(BTreeMap<Ipv4Addr, OspfArea>);
+/// Map of OSPF area-id → `OspfArea<V>`.
+///
+/// Generic over `V: OspfVersion` so v3's areas will carry
+/// `Lsdb<Ospfv3>` when the v3 instance materializes. Default
+/// `V = Ospfv2` keeps existing callers resolving to the v2 shape.
+pub struct OspfAreaMap<V: OspfVersion = Ospfv2>(BTreeMap<Ipv4Addr, OspfArea<V>>);
 
-impl OspfAreaMap {
+impl<V: OspfVersion> OspfAreaMap<V> {
     pub fn new() -> Self {
         let mut areas = Self(BTreeMap::new());
         areas.fetch(Ipv4Addr::UNSPECIFIED);
         areas
     }
 
-    pub fn get(&self, id: Ipv4Addr) -> Option<&OspfArea> {
+    pub fn get(&self, id: Ipv4Addr) -> Option<&OspfArea<V>> {
         self.0.get(&id)
     }
 
-    pub fn get_mut(&mut self, id: Ipv4Addr) -> Option<&mut OspfArea> {
+    pub fn get_mut(&mut self, id: Ipv4Addr) -> Option<&mut OspfArea<V>> {
         self.0.get_mut(&id)
     }
 
-    pub fn fetch(&mut self, area_id: Ipv4Addr) -> &mut OspfArea {
+    pub fn fetch(&mut self, area_id: Ipv4Addr) -> &mut OspfArea<V> {
         self.0
             .entry(area_id)
             .or_insert_with(|| OspfArea::new(area_id))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Ipv4Addr, &OspfArea)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Ipv4Addr, &OspfArea<V>)> {
         self.0.iter()
     }
 }
 
-pub struct OspfArea {
+impl<V: OspfVersion> Default for OspfAreaMap<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct OspfArea<V: OspfVersion = Ospfv2> {
     // OSPF area id.  This value may be treated as IPv4 address.
     pub id: Ipv4Addr,
 
@@ -51,19 +63,19 @@ pub struct OspfArea {
     pub links: BTreeSet<u32>,
 
     // LSDB of this area.
-    pub lsdb: Lsdb,
+    pub lsdb: Lsdb<V>,
 
     // SPF calculation timer.
     pub spf_timer: Option<Timer>,
 }
 
-impl OspfArea {
+impl<V: OspfVersion> OspfArea<V> {
     pub fn new(id: Ipv4Addr) -> Self {
         Self {
             id,
             area_type: AreaType::default(),
             links: BTreeSet::new(),
-            lsdb: Lsdb::new(),
+            lsdb: Lsdb::<V>::new(),
             spf_timer: None,
         }
     }
