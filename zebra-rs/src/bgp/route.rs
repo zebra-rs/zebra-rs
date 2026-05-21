@@ -1111,7 +1111,7 @@ fn bump_group_counters_on_miss(
     }
 }
 
-fn route_advertise_to_peers(
+pub(super) fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     selected: &[BgpRib],
