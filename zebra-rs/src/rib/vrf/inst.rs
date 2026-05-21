@@ -13,11 +13,20 @@ use crate::rib::inst::IlmEntry;
 /// the kernel `vrf` master interface, and the result is recorded here.
 /// `ifindex` is the kernel-assigned ifindex of the VRF master device;
 /// callers enslave member interfaces to it via `IFLA_MASTER`.
+///
+/// Route-target sets attached via
+/// `set vrf X {ipv4,ipv6} route-target {import,export} …` flow in
+/// through [`Message::VrfRouteTargets`] and live on this struct so
+/// they replay alongside the kernel info when a subscriber attaches.
 #[derive(Debug, Clone)]
 pub struct Vrf {
     pub name: String,
     pub table_id: u32,
     pub ifindex: u32,
+    pub ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    pub ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    pub ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    pub ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 }
 
 /// Per-VRF routing-table set. Mirrors the `table` / `table_v6` /

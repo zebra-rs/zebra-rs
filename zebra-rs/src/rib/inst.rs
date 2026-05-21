@@ -138,6 +138,20 @@ pub enum Message {
     VrfDel {
         name: String,
     },
+    /// Replace the route-target sets for `name`. Emitted by
+    /// `VrfBuilder::commit` on every commit cycle so the RIB
+    /// state stays a snapshot of the staged config. Carries every
+    /// (afi, kind) tuple in one message so the receiving end
+    /// updates atomically — no risk of a half-updated state being
+    /// observed by a subscriber that drains the channel between
+    /// individual mutations.
+    VrfRouteTargets {
+        name: String,
+        ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    },
     /// Bind / unbind an interface to a VRF master device.
     /// `vrf == Some(name)` enslaves; `vrf == None` clears the binding
     /// (sets IFLA_MASTER = 0). The handler tolerates the interface or
@@ -956,6 +970,19 @@ impl Rib {
                 if tx.send(msg).is_err() {
                     return;
                 }
+                // RT snapshot follows the VrfAdd. The receiver
+                // can already key off `name` because step 15a's
+                // replay guarantees VrfAdd lands first.
+                let rt_msg = RibRx::VrfRouteTargets {
+                    name: vrf.name.clone(),
+                    ipv4_import_rts: vrf.ipv4_import_rts.clone(),
+                    ipv4_export_rts: vrf.ipv4_export_rts.clone(),
+                    ipv6_import_rts: vrf.ipv6_import_rts.clone(),
+                    ipv6_export_rts: vrf.ipv6_export_rts.clone(),
+                };
+                if tx.send(rt_msg).is_err() {
+                    return;
+                }
             }
         }
         if tx.send(RibRx::EoR).is_err() {
@@ -1317,6 +1344,14 @@ impl Rib {
                         name: name.clone(),
                         table_id,
                         ifindex,
+                        // RT sets arrive separately via
+                        // `Message::VrfRouteTargets` once the VRF
+                        // config builder has finished parsing
+                        // /vrf/<name>/{ipv4,ipv6}/route-target.
+                        ipv4_import_rts: std::collections::BTreeSet::new(),
+                        ipv4_export_rts: std::collections::BTreeSet::new(),
+                        ipv6_import_rts: std::collections::BTreeSet::new(),
+                        ipv6_export_rts: std::collections::BTreeSet::new(),
                     },
                 );
                 // Park an empty per-VRF routing table set keyed by the
@@ -1370,6 +1405,34 @@ impl Rib {
                 self.vrf_id_alloc.release(vrf.table_id);
                 tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);
                 self.api_vrf_del(&name);
+            }
+            Message::VrfRouteTargets {
+                name,
+                ipv4_import_rts,
+                ipv4_export_rts,
+                ipv6_import_rts,
+                ipv6_export_rts,
+            } => {
+                // Idempotent — the message carries a full snapshot
+                // of the staged RT sets, replacing whatever was on
+                // the `Vrf` row before. A `VrfRouteTargets` for an
+                // unknown VRF name is dropped silently: the YANG
+                // commit always emits `VrfAdd` first, so the only
+                // way to hit the `None` arm is via an out-of-order
+                // self-send.
+                if let Some(vrf) = self.vrfs.get_mut(&name) {
+                    vrf.ipv4_import_rts = ipv4_import_rts;
+                    vrf.ipv4_export_rts = ipv4_export_rts;
+                    vrf.ipv6_import_rts = ipv6_import_rts;
+                    vrf.ipv6_export_rts = ipv6_export_rts;
+                    let vrf_snapshot = vrf.clone();
+                    self.api_vrf_route_targets(&vrf_snapshot);
+                } else {
+                    tracing::debug!(
+                        vrf = %name,
+                        "rib: VrfRouteTargets for unknown VRF; dropping",
+                    );
+                }
             }
             Message::LinkVrfBind { ifname, vrf } => {
                 // Always record operator intent so a later kernel
