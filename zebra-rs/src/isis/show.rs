@@ -1862,14 +1862,12 @@ fn render_spf(
                     )?;
                 }
             }
-            if detail {
-                if path.paths.is_empty() {
-                    writeln!(buf, "    paths: (none)")?;
-                } else {
-                    writeln!(buf, "    paths:")?;
-                    for (i, p) in path.paths.iter().enumerate() {
-                        writeln!(buf, "      [{}] {}", i, format_vertex_path(graph, p))?;
-                    }
+            if path.paths.is_empty() {
+                writeln!(buf, "    paths: (none)")?;
+            } else {
+                writeln!(buf, "    paths:")?;
+                for (i, p) in path.paths.iter().enumerate() {
+                    writeln!(buf, "      [{}] {}", i, format_vertex_path(graph, p))?;
                 }
             }
         }
@@ -1927,7 +1925,7 @@ fn format_vertex_path(graph: &spf::Graph, path: &[usize]) -> String {
 fn spf_topology_json(
     graph: &spf::Graph,
     spf: &BTreeMap<usize, spf::Path>,
-    detail: bool,
+    _detail: bool,
 ) -> SpfTopologyJson {
     let destinations = spf
         .iter()
@@ -1946,23 +1944,18 @@ fn spf_topology_json(
                         link_id,
                     })
                     .collect(),
-                paths: if detail {
-                    Some(
-                        path.paths
-                            .iter()
-                            .map(|p| {
-                                p.iter()
-                                    .map(|v| SpfPathVertexJson {
-                                        vertex_id: *v,
-                                        name: vertex_name(graph, *v),
-                                    })
-                                    .collect()
+                paths: path
+                    .paths
+                    .iter()
+                    .map(|p| {
+                        p.iter()
+                            .map(|v| SpfPathVertexJson {
+                                vertex_id: *v,
+                                name: vertex_name(graph, *v),
                             })
-                            .collect(),
-                    )
-                } else {
-                    None
-                },
+                            .collect()
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -1989,8 +1982,7 @@ struct SpfDestinationJson {
     name: String,
     cost: u32,
     first_hops: Vec<SpfFirstHopJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    paths: Option<Vec<Vec<SpfPathVertexJson>>>,
+    paths: Vec<Vec<SpfPathVertexJson>>,
 }
 
 #[derive(Serialize)]
