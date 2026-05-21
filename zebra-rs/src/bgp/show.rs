@@ -2132,6 +2132,217 @@ fn show_bgp_attributes(
     Ok(buf)
 }
 
+/// `show ip bgp vrf` — without args lists every committed
+/// per-VRF block as a single table; with one arg (`show ip bgp
+/// vrf NAME`) renders the same row plus the kernel-known
+/// `table_id`, `ifindex`, RT sets, and the materialized peer
+/// addresses.
+///
+/// Reads from global-side state only — `Bgp::vrfs` (the
+/// committed `BgpVrfConfig` map), `Bgp::rib_known_vrfs` (the
+/// kernel mirror), and `Bgp::vrf_registry` (the running task
+/// handle with its allocated label and ILM ifindex). Per-peer
+/// detail (FSM state, AdjRib stats) lives on the per-VRF tokio
+/// task and isn't reachable from here; step 20b would mirror it
+/// via a `BgpGlobalMsg::VrfStatus` snapshot.
+fn show_bgp_vrf(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if let Some(name) = args.string() {
+        show_bgp_vrf_detail(bgp, &name, json)
+    } else if json {
+        show_bgp_vrf_list_json(bgp)
+    } else {
+        show_bgp_vrf_list_text(bgp)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct BgpVrfListRow {
+    name: String,
+    rd: Option<String>,
+    label: Option<u32>,
+    table_id: Option<u32>,
+    peers: usize,
+    running: bool,
+}
+
+fn show_bgp_vrf_list_text(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "{:<20} {:<14} {:>8} {:>8} {:>6} State",
+        "VRF", "RD", "Label", "TableID", "Peers"
+    )?;
+    for (name, cfg) in &bgp.vrfs {
+        let rd_str = cfg
+            .rd
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "-".into());
+        let kernel = bgp.rib_known_vrfs.get(name);
+        let table_id = kernel
+            .map(|k| k.table_id.to_string())
+            .unwrap_or_else(|| "-".into());
+        let handle = bgp.vrf_registry.get(name);
+        let label = handle
+            .map(|h| h.label.to_string())
+            .unwrap_or_else(|| "-".into());
+        let running = if handle.is_some() { "running" } else { "down" };
+        writeln!(
+            buf,
+            "{:<20} {:<14} {:>8} {:>8} {:>6} {}",
+            name,
+            rd_str,
+            label,
+            table_id,
+            cfg.neighbors.len(),
+            running,
+        )?;
+    }
+    if bgp.vrfs.is_empty() {
+        writeln!(buf, "  (no VRFs configured)")?;
+    }
+    Ok(buf)
+}
+
+fn show_bgp_vrf_list_json(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
+    let rows: Vec<BgpVrfListRow> = bgp
+        .vrfs
+        .iter()
+        .map(|(name, cfg)| {
+            let kernel = bgp.rib_known_vrfs.get(name);
+            let handle = bgp.vrf_registry.get(name);
+            BgpVrfListRow {
+                name: name.clone(),
+                rd: cfg.rd.as_ref().map(|r| r.to_string()),
+                label: handle.map(|h| h.label),
+                table_id: kernel.map(|k| k.table_id),
+                peers: cfg.neighbors.len(),
+                running: handle.is_some(),
+            }
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&rows).unwrap_or_default())
+}
+
+#[derive(serde::Serialize)]
+struct BgpVrfDetailJson {
+    name: String,
+    rd: Option<String>,
+    label: Option<u32>,
+    table_id: Option<u32>,
+    ifindex: Option<u32>,
+    router_id: Option<String>,
+    ipv4_import_rts: Vec<String>,
+    ipv4_export_rts: Vec<String>,
+    neighbors: Vec<String>,
+    running: bool,
+}
+
+fn show_bgp_vrf_detail(
+    bgp: &Bgp,
+    name: &str,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(cfg) = bgp.vrfs.get(name) else {
+        return Ok(format!("% VRF {name} not configured under router bgp\n"));
+    };
+    let kernel = bgp.rib_known_vrfs.get(name);
+    let handle = bgp.vrf_registry.get(name);
+
+    if json {
+        let detail = BgpVrfDetailJson {
+            name: name.to_string(),
+            rd: cfg.rd.as_ref().map(|r| r.to_string()),
+            label: handle.map(|h| h.label),
+            table_id: kernel.map(|k| k.table_id),
+            ifindex: kernel.map(|k| k.ifindex),
+            router_id: cfg.router_id.map(|r| r.to_string()),
+            ipv4_import_rts: kernel
+                .map(|k| k.import_rts_v4.iter().map(|r| r.to_string()).collect())
+                .unwrap_or_default(),
+            ipv4_export_rts: kernel
+                .map(|k| k.export_rts_v4.iter().map(|r| r.to_string()).collect())
+                .unwrap_or_default(),
+            neighbors: cfg.neighbors.keys().map(|a| a.to_string()).collect(),
+            running: handle.is_some(),
+        };
+        return Ok(serde_json::to_string_pretty(&detail).unwrap_or_default());
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "BGP VRF: {name}")?;
+    writeln!(
+        buf,
+        "  Running:    {}",
+        if handle.is_some() { "yes" } else { "no" }
+    )?;
+    writeln!(
+        buf,
+        "  Route Distinguisher: {}",
+        cfg.rd
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "not configured".into())
+    )?;
+    writeln!(
+        buf,
+        "  Router ID:  {}",
+        cfg.router_id
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "(global)".into())
+    )?;
+    writeln!(
+        buf,
+        "  MPLS Label: {}",
+        handle
+            .map(|h| h.label.to_string())
+            .unwrap_or_else(|| "(unallocated)".into())
+    )?;
+    writeln!(
+        buf,
+        "  Kernel:     table-id={} ifindex={}",
+        kernel
+            .map(|k| k.table_id.to_string())
+            .unwrap_or_else(|| "(unknown)".into()),
+        kernel
+            .map(|k| k.ifindex.to_string())
+            .unwrap_or_else(|| "(unknown)".into()),
+    )?;
+
+    if let Some(k) = kernel {
+        if !k.import_rts_v4.is_empty() {
+            writeln!(buf, "  Import RTs (IPv4):")?;
+            for rt in &k.import_rts_v4 {
+                writeln!(buf, "    {rt}")?;
+            }
+        }
+        if !k.export_rts_v4.is_empty() {
+            writeln!(buf, "  Export RTs (IPv4):")?;
+            for rt in &k.export_rts_v4 {
+                writeln!(buf, "    {rt}")?;
+            }
+        }
+    }
+
+    if cfg.neighbors.is_empty() {
+        writeln!(buf, "  Neighbors:  (none)")?;
+    } else {
+        writeln!(buf, "  Neighbors ({}):", cfg.neighbors.len())?;
+        for (addr, nbr) in &cfg.neighbors {
+            let remote_as = nbr
+                .remote_as
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "?".into());
+            writeln!(buf, "    {addr}  remote-as {remote_as}")?;
+        }
+    }
+    Ok(buf)
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -2169,6 +2380,7 @@ impl Bgp {
         self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
+        self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
         // IOS-XR style update-group observability — kept under
         // `show bgp ...` (not `show ip bgp ...`) per the design doc.

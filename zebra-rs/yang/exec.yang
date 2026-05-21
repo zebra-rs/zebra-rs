@@ -233,6 +233,15 @@ module exec {
         leaf attributes {
           type empty;
         }
+        list vrf {
+          ext:help "Per-VRF BGP runtime";
+          ext:presence "BGP per-VRF summary table";
+          key name;
+          leaf name {
+            ext:dynamic "bgp:vrf";
+            type string;
+          }
+        }
       }
 
       container ospf {
