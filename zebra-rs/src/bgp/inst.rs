@@ -99,14 +99,26 @@ pub(crate) fn peer_index_unregister(
 }
 
 /// Kernel VRF master info as observed by `Bgp` via
-/// `RibRx::VrfAdd`. Used by [`Bgp::maybe_respawn_vrf_with_kernel_ctx`]
-/// to lift a step-14 placeholder `ProtoContext` to a real
-/// `ProtoContext::for_vrf(rib, table_id, name)`.
-#[derive(Debug, Clone, Copy)]
+/// `RibRx::VrfAdd` and the matching RT sets observed via
+/// `RibRx::VrfRouteTargets`. Used by
+/// [`Bgp::maybe_respawn_vrf_with_kernel_ctx`] to lift a step-14
+/// placeholder `ProtoContext` to a real
+/// `ProtoContext::for_vrf(rib, table_id, name)`; step 17b's
+/// Export pipeline reads `export_rts_v4`/`v6` and step 18's
+/// Import pipeline reads `import_rts_v4`/`v6`.
+#[derive(Debug, Clone, Default)]
 pub struct RibKnownVrf {
     pub table_id: u32,
     #[allow(dead_code)] // read by step 16's accept dispatcher.
     pub ifindex: u32,
+    #[allow(dead_code)] // first reader lands in step 18.
+    pub import_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    #[allow(dead_code)] // first reader lands in step 17b.
+    pub export_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    #[allow(dead_code)] // first reader lands in step 18.
+    pub import_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    #[allow(dead_code)] // first reader lands in step 17b.
+    pub export_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 }
 
 #[allow(dead_code)]
@@ -693,7 +705,7 @@ impl Bgp {
             let Some(cfg) = self.vrfs.get(&name).cloned() else {
                 continue;
             };
-            let kernel = self.rib_known_vrfs.get(&name).copied();
+            let kernel = self.rib_known_vrfs.get(&name).cloned();
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
@@ -724,7 +736,7 @@ impl Bgp {
         if !self.vrf_registry.contains_key(name) {
             return;
         }
-        let Some(kernel) = self.rib_known_vrfs.get(name).copied() else {
+        let Some(kernel) = self.rib_known_vrfs.get(name).cloned() else {
             return;
         };
         // Tear the placeholder-ctx task down before spawning the
@@ -737,6 +749,7 @@ impl Bgp {
             // is about to push fresh RegisterPeer messages.
             self.peer_index.retain(|_, owner| owner != name);
         }
+        let table_id = kernel.table_id;
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
@@ -749,7 +762,7 @@ impl Bgp {
         self.vrf_registry.insert(name.to_string(), new_handle);
         tracing::info!(
             vrf = %name,
-            table_id = kernel.table_id,
+            table_id,
             "bgp: respawned per-VRF task with real ProtoContext::for_vrf",
         );
     }
@@ -943,8 +956,32 @@ impl Bgp {
                 table_id,
                 ifindex,
             } => {
-                self.rib_known_vrfs
-                    .insert(name.clone(), RibKnownVrf { table_id, ifindex });
+                // Preserve any RT cache already populated from a
+                // prior `VrfRouteTargets` (e.g. when the operator
+                // sets RTs in the same commit as the VRF itself
+                // and they happen to arrive before `VrfAdd`).
+                let prev_rts = self.rib_known_vrfs.remove(&name);
+                let entry = RibKnownVrf {
+                    table_id,
+                    ifindex,
+                    import_rts_v4: prev_rts
+                        .as_ref()
+                        .map(|p| p.import_rts_v4.clone())
+                        .unwrap_or_default(),
+                    export_rts_v4: prev_rts
+                        .as_ref()
+                        .map(|p| p.export_rts_v4.clone())
+                        .unwrap_or_default(),
+                    import_rts_v6: prev_rts
+                        .as_ref()
+                        .map(|p| p.import_rts_v6.clone())
+                        .unwrap_or_default(),
+                    export_rts_v6: prev_rts
+                        .as_ref()
+                        .map(|p| p.export_rts_v6.clone())
+                        .unwrap_or_default(),
+                };
+                self.rib_known_vrfs.insert(name.clone(), entry);
                 // If the operator already committed `router bgp vrf
                 // <name> ...` and the step-14 placeholder context
                 // is in place, swap it for a real `for_vrf` now. The
@@ -960,6 +997,27 @@ impl Bgp {
                 // per-VRF task carries the YANG intent. If the
                 // operator subsequently deletes the BGP VRF block,
                 // step 14's `apply_vrf_commit_diff` handles teardown.
+            }
+            RibRx::VrfRouteTargets {
+                name,
+                ipv4_import_rts,
+                ipv4_export_rts,
+                ipv6_import_rts,
+                ipv6_export_rts,
+            } => {
+                // Mutate-in-place if a `VrfAdd` already populated
+                // the row; otherwise stage the RT cache so a later
+                // `VrfAdd` picks it up (defensive against
+                // out-of-order delivery — step 15a's replay
+                // contract puts VrfAdd first, but the active
+                // commit path sends them as separate messages and
+                // a slow `tokio::select!` could draw the RT
+                // message ahead of the VrfAdd).
+                let entry = self.rib_known_vrfs.entry(name).or_default();
+                entry.import_rts_v4 = ipv4_import_rts;
+                entry.export_rts_v4 = ipv4_export_rts;
+                entry.import_rts_v6 = ipv6_import_rts;
+                entry.export_rts_v6 = ipv6_export_rts;
             }
             // Redistribute deliveries from RIB — initial walk
             // (chunks ending in `bulk: Eor`) plus steady-state deltas

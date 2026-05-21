@@ -93,6 +93,19 @@ pub enum RibRx {
     VrfDel {
         name: String,
     },
+    /// Route-target sets attached to a VRF.
+    /// `set vrf X {ipv4,ipv6} route-target {import,export} ...`
+    /// flows in through `VrfBuilder` and lands here as a snapshot
+    /// (the full set replaces whatever the subscriber had).
+    /// Replayed at subscribe time alongside `VrfAdd` so a
+    /// late-subscribing BGP catches the running config.
+    VrfRouteTargets {
+        name: String,
+        ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    },
     EoR,
 
     // ---- redistribute route push ---------------------------------
@@ -235,6 +248,23 @@ impl Rib {
         for (_, sub) in self.client_registry.iter_vrf(0) {
             let _ = sub.rib_rx_tx.send(RibRx::VrfDel {
                 name: name.to_string(),
+            });
+        }
+    }
+
+    /// Push the current RT snapshot for `vrf` to default-VRF
+    /// subscribers. The plan in step 17 / 18 is to give BGP a
+    /// chance to import / export against the matching RT set;
+    /// step 17a caches the snapshot on `Bgp::rib_known_vrfs`
+    /// without using it yet.
+    pub fn api_vrf_route_targets(&self, vrf: &crate::rib::vrf::Vrf) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::VrfRouteTargets {
+                name: vrf.name.clone(),
+                ipv4_import_rts: vrf.ipv4_import_rts.clone(),
+                ipv4_export_rts: vrf.ipv4_export_rts.clone(),
+                ipv6_import_rts: vrf.ipv6_import_rts.clone(),
+                ipv6_export_rts: vrf.ipv6_export_rts.clone(),
             });
         }
     }

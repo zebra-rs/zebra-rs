@@ -50,8 +50,24 @@ impl VrfBuilder {
                 self.config.remove(&name);
                 let _ = tx.send(Message::VrfDel { name });
             } else {
+                // Snapshot the RT sets before moving `config` into
+                // `self.config`. The two sends order matters: the
+                // receiving end relies on the `Vrf` row existing
+                // before `VrfRouteTargets` arrives so the RT
+                // update has a target to mutate.
+                let ipv4_import_rts = config.ipv4_import_rts.clone();
+                let ipv4_export_rts = config.ipv4_export_rts.clone();
+                let ipv6_import_rts = config.ipv6_import_rts.clone();
+                let ipv6_export_rts = config.ipv6_export_rts.clone();
                 self.config.insert(name.clone(), config);
-                let _ = tx.send(Message::VrfAdd { name });
+                let _ = tx.send(Message::VrfAdd { name: name.clone() });
+                let _ = tx.send(Message::VrfRouteTargets {
+                    name,
+                    ipv4_import_rts,
+                    ipv4_export_rts,
+                    ipv6_import_rts,
+                    ipv6_export_rts,
+                });
             }
         }
     }
@@ -101,7 +117,12 @@ struct ConfigBuilder {
 
 impl ConfigBuilder {
     pub fn new() -> Self {
+        use std::str::FromStr;
+
         const CONFIG_ERR: &str = "missing config";
+        const RT_ERR: &str = "missing route-target argument";
+        const RT_PARSE_ERR: &str =
+            "route-target must parse as ASN:value, IPv4:value, or 4byteASN:value";
 
         ConfigBuilder::default()
             .path("")
@@ -117,6 +138,96 @@ impl ConfigBuilder {
                     s.delete = true;
                     cache.insert(name.clone(), s);
                 }
+                Ok(())
+            })
+            // /vrf/<name>/ipv4/route-target/import — leaf-list, one
+            // RT value per callback. RT shares the on-wire 6-octet
+            // encoding with RD, so we parse via the `bgp_packet`
+            // `RouteDistinguisher::from_str` and store the same
+            // `RouteDistinguisher` value. The YANG-layer label
+            // distinguishes RT from RD at the user surface.
+            .path("/ipv4/route-target/import")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv4_import_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv4_import_rts
+                    .remove(&rt);
+                Ok(())
+            })
+            .path("/ipv4/route-target/export")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv4_export_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv4_export_rts
+                    .remove(&rt);
+                Ok(())
+            })
+            .path("/ipv6/route-target/import")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv6_import_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv6_import_rts
+                    .remove(&rt);
+                Ok(())
+            })
+            .path("/ipv6/route-target/export")
+            .set(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv6_export_rts
+                    .insert(rt);
+                Ok(())
+            })
+            .del(|config, cache, name, args| {
+                let raw = args.string().context(RT_ERR)?;
+                let rt = bgp_packet::RouteDistinguisher::from_str(&raw)
+                    .map_err(|_| anyhow::anyhow!(RT_PARSE_ERR))?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .ipv6_export_rts
+                    .remove(&rt);
                 Ok(())
             })
     }
@@ -135,5 +246,96 @@ impl ConfigBuilder {
     pub fn del(mut self, func: Handler) -> Self {
         self.map.insert((self.path.clone(), ConfigOp::Delete), func);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use tokio::sync::mpsc;
+
+    use crate::config::{Args, ConfigOp};
+
+    use super::*;
+
+    fn args(words: &[&str]) -> Args {
+        Args(words.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn commit_emits_vrf_add_then_route_targets() {
+        // Operator typed:
+        //   set vrf v1 ipv4 route-target import 65000:1
+        //   set vrf v1 ipv4 route-target export 65000:2
+        //   commit
+        // The receiving end should see `VrfAdd { v1 }` followed
+        // by a `VrfRouteTargets { v1, ... }` carrying both RTs.
+        let mut builder = VrfBuilder::new();
+        builder
+            .exec("/vrf".into(), args(&["v1"]), ConfigOp::Set)
+            .expect("create vrf");
+        builder
+            .exec(
+                "/vrf/ipv4/route-target/import".into(),
+                args(&["v1", "65000:1"]),
+                ConfigOp::Set,
+            )
+            .expect("add import RT");
+        builder
+            .exec(
+                "/vrf/ipv4/route-target/export".into(),
+                args(&["v1", "65000:2"]),
+                ConfigOp::Set,
+            )
+            .expect("add export RT");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+
+        let first = rx.try_recv().expect("VrfAdd present");
+        let Message::VrfAdd { name } = first else {
+            panic!("first message is not VrfAdd");
+        };
+        assert_eq!(name, "v1");
+
+        let second = rx.try_recv().expect("VrfRouteTargets present");
+        let Message::VrfRouteTargets {
+            name,
+            ipv4_import_rts,
+            ipv4_export_rts,
+            ipv6_import_rts,
+            ipv6_export_rts,
+        } = second
+        else {
+            panic!("second message is not VrfRouteTargets");
+        };
+        assert_eq!(name, "v1");
+        let imp = bgp_packet::RouteDistinguisher::from_str("65000:1").unwrap();
+        let exp = bgp_packet::RouteDistinguisher::from_str("65000:2").unwrap();
+        assert!(ipv4_import_rts.contains(&imp));
+        assert!(ipv4_export_rts.contains(&exp));
+        assert!(ipv6_import_rts.is_empty());
+        assert!(ipv6_export_rts.is_empty());
+        assert!(rx.try_recv().is_err(), "no third message expected");
+    }
+
+    #[test]
+    fn invalid_rt_string_returns_an_error() {
+        let mut builder = VrfBuilder::new();
+        builder
+            .exec("/vrf".into(), args(&["v1"]), ConfigOp::Set)
+            .expect("create vrf");
+        let err = builder
+            .exec(
+                "/vrf/ipv4/route-target/import".into(),
+                args(&["v1", "not-an-rt"]),
+                ConfigOp::Set,
+            )
+            .expect_err("garbage RT must be rejected");
+        assert!(
+            err.to_string().contains("route-target"),
+            "expected RT-specific error, got: {err}",
+        );
     }
 }

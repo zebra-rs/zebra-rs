@@ -97,6 +97,9 @@ pub fn spawn_bgp_vrf(
     rib_subscriber: &RibSubscriber,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
+    // Snapshot for logging so we can move `kernel` into the
+    // ctx-building arm without re-borrowing later.
+    let kernel_table_id = kernel.as_ref().map(|k| k.table_id);
     let ctx = match kernel {
         Some(k) => {
             // Mint a fresh `RibClient` for this VRF. The
@@ -156,7 +159,7 @@ pub fn spawn_bgp_vrf(
         vrf = %name,
         rd = ?cfg.rd,
         router_id = %effective_router_id,
-        table_id = ?kernel.map(|k| k.table_id),
+        table_id = ?kernel_table_id,
         peers = peer_count,
         "bgp: spawned per-VRF task",
     );
