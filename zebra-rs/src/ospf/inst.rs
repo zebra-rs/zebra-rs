@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::area::{OspfArea, OspfAreaMap};
-use super::config::{Callback, OspfNetworkConfig};
+use super::config::Callback;
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
 use super::link::{OspfLink, OspfNetworkType};
 use super::lsdb::{LsdbEvent, OspfLsaKey};
@@ -52,7 +52,6 @@ pub struct Ospf {
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink>,
     pub areas: OspfAreaMap,
-    pub table: PrefixMap<Ipv4Net, OspfNetworkConfig>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub sock: Arc<AsyncFd<Socket>>,
@@ -167,7 +166,6 @@ impl Ospf {
             ctx,
             links: BTreeMap::new(),
             areas: OspfAreaMap::new(),
-            table: PrefixMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
@@ -1082,7 +1080,7 @@ impl Ospf {
         link.addr.retain(|a| a.prefix != *prefix);
 
         // Re-evaluate enable state after address removal.
-        let (next, next_id) = super::config::link_should_enable(link, &self.table);
+        let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
     }
 

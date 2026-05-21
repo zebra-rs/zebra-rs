@@ -1,9 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
-use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
-
 use super::Ospf;
 use super::OspfLink;
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
@@ -11,19 +8,6 @@ use super::tracing::{config_tracing_fsm, config_tracing_packet};
 
 use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;
-use crate::rib::util::*;
-
-pub struct OspfNetworkConfig {
-    pub area_id: Ipv4Addr,
-}
-
-impl Default for OspfNetworkConfig {
-    fn default() -> Self {
-        Self {
-            area_id: Ipv4Addr::UNSPECIFIED,
-        }
-    }
-}
 
 pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
 
@@ -42,8 +26,8 @@ impl Ospf {
 
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
-        self.ospf_add("/network/area", config_ospf_network);
         self.ospf_add("/interface/enable", config_ospf_interface_enable);
+        self.ospf_add("/interface/area", config_ospf_interface_area);
         self.ospf_add("/interface/priority", config_ospf_interface_priority);
         self.ospf_add(
             "/interface/hello-interval",
@@ -72,25 +56,17 @@ impl Ospf {
     }
 }
 
-/// Determine whether an OSPF link should be enabled and its area ID.
-/// A link is enabled if either the explicit per-interface enable is set
-/// or the network table matches one of its addresses.
-pub(super) fn link_should_enable(
-    link: &OspfLink,
-    table: &PrefixMap<Ipv4Net, OspfNetworkConfig>,
-) -> (bool, Ipv4Addr) {
-    // Check network table match first (provides area ID).
-    for addr in link.addr.iter() {
-        let prefix = addr.prefix.addr().to_host_prefix();
-        if let Some((_, network_config)) = table.get_lpm(&prefix) {
-            return (true, network_config.area_id);
-        }
+/// Resolve the desired (enabled, area) state for `link` from its
+/// per-interface config. IS-IS-style: there is no `network X area Y`
+/// table; the interface is in OSPF iff `enable` is set, and its area
+/// comes from the per-interface `area` leaf (defaulting to the
+/// backbone 0.0.0.0 when unspecified).
+pub(super) fn link_should_enable(link: &OspfLink) -> (bool, Ipv4Addr) {
+    if !link.config.enable {
+        return (false, Ipv4Addr::UNSPECIFIED);
     }
-    // Explicit per-interface enable uses area 0 as default.
-    if link.config.enable {
-        return (true, Ipv4Addr::UNSPECIFIED);
-    }
-    (false, Ipv4Addr::UNSPECIFIED)
+    let area = link.config.area.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    (true, area)
 }
 
 pub(super) fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id: Ipv4Addr) {
@@ -114,34 +90,6 @@ pub(super) fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id:
     }
 }
 
-fn config_ospf_network_apply(
-    links: &mut BTreeMap<u32, OspfLink>,
-    table: &PrefixMap<Ipv4Net, OspfNetworkConfig>,
-) {
-    for (_, link) in links.iter() {
-        let (next, next_id) = link_should_enable(link, table);
-        apply_link_enable_transition(link, next, next_id);
-    }
-}
-
-fn config_ospf_network(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
-    let network = args.v4net()?;
-    let area_id_u32 = args.u32()?;
-    let area_id = Ipv4Addr::from(area_id_u32);
-
-    if op.is_set() {
-        let area = ospf.areas.fetch(area_id);
-        let network_config = ospf.table.entry(network).or_default();
-        network_config.area_id = area.id;
-    } else {
-        ospf.table.remove(&network);
-    }
-
-    config_ospf_network_apply(&mut ospf.links, &ospf.table);
-
-    Some(())
-}
-
 fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
     let _router_id = args.v4addr()?;
     None
@@ -162,7 +110,24 @@ fn config_ospf_interface_enable(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
 
     link.config.enable = op.is_set() && enable;
 
-    let (next, next_id) = link_should_enable(link, &ospf.table);
+    let (next, next_id) = link_should_enable(link);
+    apply_link_enable_transition(link, next, next_id);
+
+    Some(())
+}
+
+fn config_ospf_interface_area(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let area_id_u32 = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.area = Some(Ipv4Addr::from(area_id_u32));
+    } else {
+        link.config.area = None;
+    }
+
+    let (next, next_id) = link_should_enable(link);
     apply_link_enable_transition(link, next, next_id);
 
     Some(())
