@@ -38,6 +38,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use bitfield_struct::bitfield;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
+use internet_checksum::Checksum;
 use nom::IResult;
 use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
@@ -50,6 +51,55 @@ pub const OSPFV3_VERSION: u8 = 3;
 
 /// Length of the v3 packet header in octets (RFC 5340 §A.3.1).
 pub const OSPFV3_HEADER_LEN: usize = 16;
+
+/// Offset of the 2-octet checksum field within a v3 packet header.
+/// After version (1) + type (1) + length (2) + router_id (4) +
+/// area_id (4).
+const OSPFV3_CHECKSUM_OFFSET: usize = 12;
+
+/// IP protocol number for OSPF. Shared by v2 and v3 (RFC 5340 §2.3).
+/// Used as the `Next Header` field in the IPv6 pseudo-header for the
+/// v3 checksum computation.
+const IP_PROTO_OSPF: u8 = 89;
+
+/// Compute the IPv6 pseudo-header checksum (RFC 5340 §4.4 /
+/// RFC 8200 §8.1) for a v3 OSPF packet.
+///
+/// `packet_bytes` is the full v3 OSPF packet — header + payload —
+/// as it sits on the wire. When computing for an *outgoing* packet,
+/// the caller must have left the on-wire checksum field at zero
+/// (the standard `Ospfv3Packet::emit` does this); the returned
+/// value is what to stamp into octets 12..14.
+///
+/// When *verifying* an incoming packet, pass the bytes verbatim
+/// (with the received checksum still in place) — the returned value
+/// will be `[0, 0]` if the checksum is correct, by the well-known
+/// property of the one's-complement internet checksum.
+pub fn ospfv3_compute_checksum(src: &Ipv6Addr, dst: &Ipv6Addr, packet_bytes: &[u8]) -> [u8; 2] {
+    let mut cksum = Checksum::new();
+    // IPv6 pseudo-header (RFC 8200 §8.1):
+    //   src (16) | dst (16) | upper-layer-length (4) | zero (3) | next-header (1)
+    cksum.add_bytes(&src.octets());
+    cksum.add_bytes(&dst.octets());
+    let len = packet_bytes.len() as u32;
+    cksum.add_bytes(&len.to_be_bytes());
+    cksum.add_bytes(&[0, 0, 0, IP_PROTO_OSPF]);
+    // OSPF packet body.
+    cksum.add_bytes(packet_bytes);
+    cksum.checksum()
+}
+
+/// Verify the IPv6 pseudo-header checksum of a received v3 packet.
+/// Returns `true` if the checksum is correct.
+///
+/// Call this on raw socket bytes before parsing — once
+/// `Ospfv3Packet::parse_be` has run, the on-wire byte order of
+/// every field has been parsed away and a fresh checksum
+/// computation over a re-emitted packet would only verify the
+/// codec, not the original wire bytes.
+pub fn ospfv3_verify_checksum(src: &Ipv6Addr, dst: &Ipv6Addr, packet_bytes: &[u8]) -> bool {
+    ospfv3_compute_checksum(src, dst, packet_bytes) == [0, 0]
+}
 
 /// OSPFv3 packet header (RFC 5340 §A.3.1).
 #[derive(Debug, Clone, NomBE)]
@@ -86,11 +136,29 @@ impl Ospfv3Packet {
         }
     }
 
+    /// Serialize and stamp the IPv6 pseudo-header checksum in one
+    /// step. Use this from the v3 socket layer where the source and
+    /// destination v6 addresses are known (the destination is one
+    /// of the well-known multicast groups or a unicast neighbor
+    /// address; the source is the egress interface's link-local
+    /// address). Bytes are appended to `buf`; only the bytes from
+    /// the start of this emit onward are checksummed (the new
+    /// length of `buf` minus the length on entry).
+    pub fn emit_with_checksum(&self, buf: &mut BytesMut, src: &Ipv6Addr, dst: &Ipv6Addr) {
+        let start = buf.len();
+        self.emit(buf);
+        let cksum = ospfv3_compute_checksum(src, dst, &buf[start..]);
+        // Field offset is relative to the OSPF packet, not `buf`.
+        let cksum_off = start + OSPFV3_CHECKSUM_OFFSET;
+        buf[cksum_off..cksum_off + 2].copy_from_slice(&cksum);
+    }
+
     /// Serialize the packet to `buf`. Packet length is filled in
     /// after emission. The checksum is left at 0 — RFC 5340 §4.4
     /// computes it with an IPv6 pseudo-header that this layer
     /// doesn't have, so the v3 socket layer stamps it after picking
-    /// the source / destination v6 addresses.
+    /// the source / destination v6 addresses. Use
+    /// [`Self::emit_with_checksum`] to do both in one step.
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.version);
         buf.put_u8(self.typ.into());
@@ -1603,6 +1671,92 @@ mod tests {
             }
             other => panic!("expected LsUpdate payload, got {:?}", other),
         }
+    }
+
+    /// Pseudo-header checksum roundtrips: stamp on a Hello packet,
+    /// then verify over the resulting bytes returns true. Mutating
+    /// any of (packet body, src address, dst address) flips it to
+    /// false — that confirms the pseudo-header is actually folded
+    /// into the computation (otherwise changing src/dst wouldn't
+    /// matter).
+    #[test]
+    fn ospfv3_checksum_roundtrip() {
+        let src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
+
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::Hello(make_hello()),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit_with_checksum(&mut buf, &src, &dst);
+        // The on-wire checksum field must be non-zero — the
+        // pseudo-header + body sum is non-zero for a meaningful
+        // packet, so its one's-complement is too.
+        let stamped = BigEndian::read_u16(&buf[OSPFV3_CHECKSUM_OFFSET..OSPFV3_CHECKSUM_OFFSET + 2]);
+        assert_ne!(stamped, 0);
+
+        // Recomputing the checksum over the stamped bytes returns
+        // [0, 0] when everything matches.
+        assert!(ospfv3_verify_checksum(&src, &dst, &buf));
+
+        // Flipping one byte of the payload invalidates the checksum.
+        let mut tampered = buf.clone();
+        tampered[OSPFV3_HEADER_LEN] ^= 0x01;
+        assert!(!ospfv3_verify_checksum(&src, &dst, &tampered));
+
+        // Wrong src address invalidates the checksum (proves the
+        // src half of the pseudo-header is in scope).
+        let wrong_src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0xbeef);
+        assert!(!ospfv3_verify_checksum(&wrong_src, &dst, &buf));
+
+        // Wrong dst address likewise (proves the dst half).
+        let wrong_dst = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 6);
+        assert!(!ospfv3_verify_checksum(&src, &wrong_dst, &buf));
+    }
+
+    /// The checksum field lives at exactly octets 12..14 of the v3
+    /// packet header. Pin this so a future header-layout edit
+    /// surfaces immediately.
+    #[test]
+    fn ospfv3_checksum_field_offset() {
+        // Build a packet, emit normally (checksum left at 0), then
+        // verify the two bytes at offset 12..14 are zero. After
+        // stamping, they're not.
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::Hello(make_hello()),
+        );
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(
+            BigEndian::read_u16(&buf[OSPFV3_CHECKSUM_OFFSET..OSPFV3_CHECKSUM_OFFSET + 2]),
+            0
+        );
+
+        let src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
+        let mut buf2 = BytesMut::new();
+        pkt.emit_with_checksum(&mut buf2, &src, &dst);
+        assert_ne!(
+            BigEndian::read_u16(&buf2[OSPFV3_CHECKSUM_OFFSET..OSPFV3_CHECKSUM_OFFSET + 2]),
+            0
+        );
+        // All other bytes are identical between emit and
+        // emit_with_checksum.
+        assert_eq!(
+            &buf[..OSPFV3_CHECKSUM_OFFSET],
+            &buf2[..OSPFV3_CHECKSUM_OFFSET]
+        );
+        assert_eq!(
+            &buf[OSPFV3_CHECKSUM_OFFSET + 2..],
+            &buf2[OSPFV3_CHECKSUM_OFFSET + 2..]
+        );
     }
 
     /// Empty LSU (zero LSAs) still emits the 4-byte count and parses
