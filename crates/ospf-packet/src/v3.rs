@@ -412,6 +412,165 @@ impl ParseBe<Ospfv3LsRequest> for Ospfv3LsRequest {
     }
 }
 
+/// v3 Router-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0 (don't store-and-forward on unknown), S2=0, S1=1 (area scope),
+/// function code = 1.
+pub const OSPFV3_ROUTER_LSA_TYPE: u16 = 0x2001;
+
+/// v3 Router-LSA flag bit positions in the 8-bit flags field
+/// (RFC 5340 §A.4.3). Modelled as named bitmasks so the codec can
+/// preserve any future flag without changing the storage type.
+pub const OSPFV3_ROUTER_LSA_FLAG_B: u8 = 0x01;
+pub const OSPFV3_ROUTER_LSA_FLAG_E: u8 = 0x02;
+pub const OSPFV3_ROUTER_LSA_FLAG_V: u8 = 0x04;
+pub const OSPFV3_ROUTER_LSA_FLAG_W: u8 = 0x08;
+
+/// v3 Router-LSA link types (RFC 5340 §A.4.3).
+///
+/// Type 3 ("stub network") from v2 is gone — stub networks move to
+/// the Intra-Area-Prefix-LSA in v3. Type 3 in v3's space is reserved
+/// and treated as `PointToPoint` on parse (matching the v2 codec's
+/// permissive fallback).
+#[repr(u8)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum Ospfv3RouterLinkType {
+    #[default]
+    PointToPoint = 1,
+    Transit = 2,
+    VirtualLink = 4,
+}
+
+impl From<Ospfv3RouterLinkType> for u8 {
+    fn from(value: Ospfv3RouterLinkType) -> Self {
+        use Ospfv3RouterLinkType::*;
+        match value {
+            PointToPoint => 1,
+            Transit => 2,
+            VirtualLink => 4,
+        }
+    }
+}
+
+impl From<u8> for Ospfv3RouterLinkType {
+    fn from(value: u8) -> Self {
+        use Ospfv3RouterLinkType::*;
+        match value {
+            1 => PointToPoint,
+            2 => Transit,
+            4 => VirtualLink,
+            _ => PointToPoint,
+        }
+    }
+}
+
+impl ParseBe<Ospfv3RouterLinkType> for Ospfv3RouterLinkType {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3RouterLinkType> {
+        let (input, val) = be_u8(input)?;
+        Ok((input, val.into()))
+    }
+}
+
+/// One link entry inside an `Ospfv3RouterLsa` (16 octets each).
+///
+/// Wire layout (RFC 5340 §A.4.3):
+/// ```text
+/// | Type | Reserved |     Metric      |
+/// |        Interface ID                |
+/// |   Neighbor Interface ID            |
+/// |     Neighbor Router ID             |
+/// ```
+///
+/// Differences from v2's `RouterLsaLink`:
+///   - the v2 `(link_id, link_data): (Ipv4Addr, Ipv4Addr)` pair
+///     becomes a triple `(interface_id, neighbor_interface_id,
+///     neighbor_router_id)` — Interface IDs are 32-bit locally
+///     significant numeric IDs, not IPv4 addresses;
+///   - v2's `num_tos / tos_0_metric` pattern collapses to a fixed
+///     16-bit `metric` (v3 drops the TOS-routing carry-over);
+///   - the v2 stub-network link type (3) is gone.
+#[derive(Debug, Clone, NomBE)]
+pub struct Ospfv3RouterLsaLink {
+    pub link_type: Ospfv3RouterLinkType,
+    pub reserved: u8,
+    pub metric: u16,
+    pub interface_id: u32,
+    pub neighbor_interface_id: u32,
+    pub neighbor_router_id: Ipv4Addr,
+}
+
+impl Ospfv3RouterLsaLink {
+    pub fn new(
+        link_type: Ospfv3RouterLinkType,
+        metric: u16,
+        interface_id: u32,
+        neighbor_interface_id: u32,
+        neighbor_router_id: Ipv4Addr,
+    ) -> Self {
+        Self {
+            link_type,
+            reserved: 0,
+            metric,
+            interface_id,
+            neighbor_interface_id,
+            neighbor_router_id,
+        }
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.link_type.into());
+        buf.put_u8(self.reserved);
+        buf.put_u16(self.metric);
+        buf.put_u32(self.interface_id);
+        buf.put_u32(self.neighbor_interface_id);
+        buf.put(&self.neighbor_router_id.octets()[..]);
+    }
+}
+
+/// v3 Router-LSA body (RFC 5340 §A.4.3).
+///
+/// Layout:
+///   - flags (8 bits)    — V / E / B / W positions; see the
+///     `OSPFV3_ROUTER_LSA_FLAG_*` constants for the bitmasks
+///   - options (24 bits) — same `Ospfv3Options` shape as Hello / DBD
+///   - links             — variable number of 16-octet records
+///
+/// Stored without an `Ospfv3LsaHeader` wrapper because the LSU codec
+/// pairs each header with its body separately (lands with the LSU
+/// PR; this PR just provides the body type so it can be referenced).
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3RouterLsa {
+    pub flags: u8,
+    pub options: Ospfv3Options,
+    pub links: Vec<Ospfv3RouterLsaLink>,
+}
+
+impl Ospfv3RouterLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // (flags << 24) | options(24) packed into one 32-bit word.
+        let word: u32 = ((self.flags as u32) << 24) | (self.options.into_bits() & 0x00FF_FFFF);
+        buf.put_u32(word);
+        for link in &self.links {
+            link.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3RouterLsa> for Ospfv3RouterLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3RouterLsa> {
+        let (input, flags) = be_u8(input)?;
+        let (input, options_24) = be_u24(input)?;
+        let (input, links) = many0_complete(Ospfv3RouterLsaLink::parse_be).parse(input)?;
+        Ok((
+            input,
+            Ospfv3RouterLsa {
+                flags,
+                options: Ospfv3Options::from_bits(options_24),
+                links,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -804,5 +963,111 @@ mod tests {
             Ospfv3Payload::LsAck(a) => assert!(a.lsa_headers.is_empty()),
             other => panic!("expected LsAck payload, got {:?}", other),
         }
+    }
+
+    fn make_router_lsa() -> Ospfv3RouterLsa {
+        let mut options = Ospfv3Options::new();
+        options.set_v6(true);
+        options.set_e(true);
+        options.set_r(true);
+        Ospfv3RouterLsa {
+            flags: OSPFV3_ROUTER_LSA_FLAG_B | OSPFV3_ROUTER_LSA_FLAG_E,
+            options,
+            links: vec![
+                Ospfv3RouterLsaLink::new(
+                    Ospfv3RouterLinkType::PointToPoint,
+                    10,
+                    0x0000_0001,
+                    0x0000_0002,
+                    Ipv4Addr::new(10, 0, 0, 2),
+                ),
+                Ospfv3RouterLsaLink::new(
+                    Ospfv3RouterLinkType::Transit,
+                    20,
+                    0x0000_0003,
+                    0x0000_0004,
+                    Ipv4Addr::new(10, 0, 0, 3),
+                ),
+            ],
+        }
+    }
+
+    /// Roundtrip a Router-LSA body with two heterogeneous links
+    /// (P2P + Transit). Pins each link record at 16 octets and the
+    /// fixed-prefix header at 4 octets.
+    #[test]
+    fn ospfv3_router_lsa_roundtrip() {
+        let body = make_router_lsa();
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed prefix (4) + 2 links * 16 = 36.
+        assert_eq!(buf.len(), 4 + 2 * 16);
+
+        // High byte of the first word is the flags byte.
+        assert_eq!(buf[0], OSPFV3_ROUTER_LSA_FLAG_B | OSPFV3_ROUTER_LSA_FLAG_E);
+        // Options24 follows in the lower 3 bytes. v6 (bit 0) + e
+        // (bit 1) + r (bit 4) = 0x13.
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), 0x0000_0013);
+        // First link's first byte is link_type = PointToPoint (1).
+        assert_eq!(buf[4], 1);
+
+        let (rest, parsed) = Ospfv3RouterLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.flags, body.flags);
+        assert_eq!(parsed.options, body.options);
+        assert_eq!(parsed.links.len(), 2);
+        assert_eq!(
+            parsed.links[0].link_type,
+            Ospfv3RouterLinkType::PointToPoint
+        );
+        assert_eq!(parsed.links[0].metric, 10);
+        assert_eq!(parsed.links[0].interface_id, 0x0000_0001);
+        assert_eq!(
+            parsed.links[0].neighbor_router_id,
+            Ipv4Addr::new(10, 0, 0, 2)
+        );
+        assert_eq!(parsed.links[1].link_type, Ospfv3RouterLinkType::Transit);
+        assert_eq!(parsed.links[1].metric, 20);
+    }
+
+    /// A Router-LSA with no links still roundtrips its fixed 4-byte
+    /// prefix.
+    #[test]
+    fn ospfv3_router_lsa_no_links() {
+        let body = Ospfv3RouterLsa {
+            flags: 0,
+            options: Ospfv3Options::new(),
+            links: Vec::new(),
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(buf.len(), 4);
+
+        let (rest, parsed) = Ospfv3RouterLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert!(parsed.links.is_empty());
+    }
+
+    /// Unknown link-type bytes parse permissively to PointToPoint
+    /// (matches the v2 codec's behavior). The 16-byte record is
+    /// preserved on emit.
+    #[test]
+    fn ospfv3_router_lsa_unknown_link_type() {
+        // Build a synthetic link record directly with link_type = 7
+        // (reserved value) and parse it back.
+        let mut buf = BytesMut::new();
+        buf.put_u8(7); // link_type = unknown
+        buf.put_u8(0); // reserved
+        buf.put_u16(99); // metric
+        buf.put_u32(0xAABB_CCDD); // interface_id
+        buf.put_u32(0x1122_3344); // neighbor_interface_id
+        buf.put(&Ipv4Addr::new(192, 0, 2, 9).octets()[..]);
+
+        let (rest, link) = Ospfv3RouterLsaLink::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        // Permissive fallback matches v2's pattern.
+        assert_eq!(link.link_type, Ospfv3RouterLinkType::PointToPoint);
+        assert_eq!(link.metric, 99);
+        assert_eq!(link.interface_id, 0xAABB_CCDD);
     }
 }
