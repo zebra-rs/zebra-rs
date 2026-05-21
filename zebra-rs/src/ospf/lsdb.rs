@@ -104,8 +104,8 @@ impl<V: OspfVersion> Lsa<V> {
     }
 }
 
-fn lsdb_timer(
-    tx: &UnboundedSender<Message>,
+fn lsdb_timer<V: OspfVersion>(
+    tx: &UnboundedSender<Message<V>>,
     area_id: Option<Ipv4Addr>,
     key: OspfLsaKey,
     secs: u64,
@@ -114,15 +114,15 @@ fn lsdb_timer(
     let tx = tx.clone();
     Timer::new(Duration::from_secs(secs), TimerType::Once, move || {
         let tx = tx.clone();
-        let msg = Message::Lsdb(ev, area_id, key);
+        let msg = Message::<V>::Lsdb(ev, area_id, key);
         async move {
             let _ = tx.send(msg);
         }
     })
 }
 
-fn hold_timer(
-    tx: &UnboundedSender<Message>,
+fn hold_timer<V: OspfVersion>(
+    tx: &UnboundedSender<Message<V>>,
     area_id: Option<Ipv4Addr>,
     key: OspfLsaKey,
     ls_age: u16,
@@ -131,8 +131,8 @@ fn hold_timer(
     lsdb_timer(tx, area_id, key, remaining, LsdbEvent::HoldTimerExpire)
 }
 
-fn refresh_timer(
-    tx: &UnboundedSender<Message>,
+fn refresh_timer<V: OspfVersion>(
+    tx: &UnboundedSender<Message<V>>,
     area_id: Option<Ipv4Addr>,
     key: OspfLsaKey,
 ) -> Timer {
@@ -192,7 +192,7 @@ impl<V: OspfVersion> Lsdb<V> {
         ls_type: OspfLsType,
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
-        tx: &UnboundedSender<Message>,
+        tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) -> Option<V::Lsa> {
         let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
@@ -252,7 +252,7 @@ impl<V: OspfVersion> Lsdb<V> {
         ls_type: OspfLsType,
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
-        tx: &UnboundedSender<Message>,
+        tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
         let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
@@ -281,7 +281,7 @@ impl<V: OspfVersion> Lsdb<V> {
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
         min_seq: u32,
-        tx: &UnboundedSender<Message>,
+        tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
         let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
@@ -311,7 +311,7 @@ impl Lsdb<Ospfv2> {
     pub fn insert_self_originated(
         &mut self,
         mut ospf_lsa: OspfLsa,
-        tx: &UnboundedSender<Message>,
+        tx: &UnboundedSender<Message<Ospfv2>>,
         area_id: Option<Ipv4Addr>,
     ) {
         use OspfLsType::*;
@@ -334,7 +334,7 @@ impl Lsdb<Ospfv2> {
     pub fn insert_received(
         &mut self,
         ospf_lsa: OspfLsa,
-        tx: &UnboundedSender<Message>,
+        tx: &UnboundedSender<Message<Ospfv2>>,
         area_id: Option<Ipv4Addr>,
     ) {
         let ls_type = ospf_lsa.h.ls_type;
