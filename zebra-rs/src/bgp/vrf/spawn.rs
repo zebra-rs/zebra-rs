@@ -171,6 +171,13 @@ pub fn spawn_bgp_vrf(
         });
     }
 
+    // Step 21b: self-originated networks from
+    // `router bgp vrf X afi-safi ipv4-unicast network <p>` land
+    // in `vrf.local_rib.v4` as `BgpRibType::Originated` and
+    // emit a `BgpGlobalMsg::Export` so the global instance
+    // promotes them to VPNv4 advertisements toward PE peers.
+    let network_count = materialize_self_originated_networks(&mut vrf, cfg);
+
     // Step 19b: install the AF_MPLS DecapVrf ILM at the
     // allocated label so a remote PE's VPNv4 packet with this
     // label pops + lands in `vrf_tables[table_id]`. Only when
@@ -202,6 +209,7 @@ pub fn spawn_bgp_vrf(
         label,
         ilm_installed = ilm_decap_ifindex.is_some(),
         peers = peer_count,
+        networks = network_count,
         "bgp: spawned per-VRF task",
     );
     BgpVrfHandle {
@@ -251,6 +259,80 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
         );
         peer.start();
         vrf.peers.insert_with_key(PeerKey::Addr(*addr), peer);
+        count += 1;
+    }
+    count
+}
+
+/// Step 21b: insert each prefix from
+/// `cfg.ipv4_unicast.networks` into the per-VRF Loc-RIB as a
+/// `BgpRibType::Originated` row and emit a `BgpGlobalMsg::Export`
+/// so the global instance promotes it to a VPNv4 advertisement.
+///
+/// Mirrors `Bgp::route_add` (the global-Bgp equivalent for plain
+/// IPv4-unicast `network` statements) but bypasses the
+/// `route_advertise_to_peers` call — CE peers under this VRF
+/// reach the same prefix via the existing best-path → advertise
+/// path when an actual CE session establishes; the only emit
+/// path we need at spawn time is the cross-task `Export` toward
+/// PE peers.
+///
+/// We *don't* go through `route_ipv4_update` (which would also
+/// fire the step-17b-iii export hook) because that entry takes a
+/// `BgpTop` and treats the new candidate as if it came from a
+/// real peer — split-horizon and policy filters would have to
+/// be threaded through. The direct-write here is the same shape
+/// `Bgp::route_add` uses for the global case.
+fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
+    use bgp_packet::{BgpAttr, BgpNexthop, Origin};
+
+    let Some(af) = cfg.ipv4_unicast.as_ref() else {
+        return 0;
+    };
+    if af.networks.is_empty() {
+        return 0;
+    }
+
+    let exporter = super::VrfExporter {
+        name: vrf.name.clone(),
+        tx: vrf.global_tx.clone(),
+        label: vrf.label,
+    };
+
+    let mut count = 0usize;
+    for prefix in &af.networks {
+        // Build a self-originated attr: IGP origin, next-hop-self.
+        // Local-pref / weight default to the same values
+        // `BgpAttr::new` uses for the global `network` path.
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.nexthop = Some(BgpNexthop::Ipv4(vrf.router_id));
+        let interned = vrf.attr_store.intern(attr);
+
+        let rib = super::super::route::BgpRib {
+            remote_id: 0,
+            local_id: 0,
+            attr: interned,
+            ident: 0,
+            router_id: vrf.router_id,
+            weight: 32768,
+            typ: super::super::route::BgpRibType::Originated,
+            best_path: false,
+            best_reason: super::super::route::Reason::Default,
+            label: None,
+            nexthop: None,
+            egress_ifindex_v6: None,
+            stale: false,
+            esi: None,
+        };
+
+        let (_, selected, _) = vrf.local_rib.update(None, *prefix, rib);
+        // Best-path runs as part of `update`. A freshly-inserted
+        // self-originated row always wins (nothing else exists),
+        // so `selected.first()` carries the winner; emit Export.
+        if let Some(winner) = selected.first() {
+            super::vrf_emit_export(&exporter, *prefix, &winner.attr);
+        }
         count += 1;
     }
     count
