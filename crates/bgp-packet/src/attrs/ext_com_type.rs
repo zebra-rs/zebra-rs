@@ -28,6 +28,10 @@ pub enum ExtCommunitySubType {
     RouteTarget = 0x02,
     #[strum(serialize = "soo")]
     RouteOrigin = 0x03,
+    /// RFC 9012 §4.3 Color extended community. Sub-Type 0x0b when
+    /// carried inside Transitive Opaque extcomm type 0x03.
+    #[strum(serialize = "color")]
+    Color = 0x0b,
     #[strum(serialize = "opqque")]
     Opaque = 0x0c,
 }
