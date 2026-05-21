@@ -82,6 +82,7 @@ pub struct OspfInterface<'a> {
     pub area_type: super::area::AreaType,
     pub exchange_loading_count: usize,
     pub mtu_ignore: bool,
+    pub retransmit_interval: u16,
     pub tracing: &'a OspfTracing,
 }
 
@@ -95,6 +96,7 @@ impl Ospf {
         let exchange_loading_count = self.count_exchange_loading_neighbors(ifindex);
         self.links.get_mut(&ifindex).and_then(|link| {
             let link_area = link.area;
+            let retransmit_interval = link.retransmit_interval();
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -112,6 +114,7 @@ impl Ospf {
                             area_type,
                             exchange_loading_count,
                             mtu_ignore: link.config.mtu_ignore,
+                            retransmit_interval,
                             tracing: &self.tracing,
                         },
                         nbr,
@@ -898,6 +901,23 @@ impl Ospf {
         ));
     }
 
+    /// Handle Link State Request retransmit timer firing for a neighbor
+    /// (RFC 2328 §10.9). Resend the pending LS Request packet built from
+    /// `nbr.ls_req`. Stop the timer once the list is empty or the neighbor
+    /// has left Exchange/Loading.
+    fn process_ls_req_retransmit(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let Some((mut link, nbr)) = self.ospf_interface(ifindex, &addr) else {
+            return;
+        };
+        if nbr.state < NfsmState::Exchange || nbr.state >= NfsmState::Full || nbr.ls_req.is_empty()
+        {
+            nbr.timer.ls_req = None;
+            return;
+        }
+        let ident = link.ident;
+        super::ospf_ls_req_send(&mut link, nbr, ident);
+    }
+
     /// Handle delayed ack timer firing for an interface.
     fn process_delayed_ack(&mut self, ifindex: u32) {
         let Some(link) = self.links.get_mut(&ifindex) else {
@@ -1147,6 +1167,9 @@ impl Ospf {
             Message::Retransmit(ifindex, addr) => {
                 self.process_retransmit(ifindex, addr);
             }
+            Message::LsReqRetransmit(ifindex, addr) => {
+                self.process_ls_req_retransmit(ifindex, addr);
+            }
             Message::DelayedAck(ifindex) => {
                 self.process_delayed_ack(ifindex);
             }
@@ -1259,6 +1282,9 @@ pub enum Message {
     /// Retransmit LSAs to a specific neighbor.
     /// (ifindex, nbr_addr)
     Retransmit(u32, Ipv4Addr),
+    /// Retransmit pending Link State Request packet to a neighbor in
+    /// Exchange or Loading. (ifindex, nbr_addr)
+    LsReqRetransmit(u32, Ipv4Addr),
     /// Send delayed LS Acks on an interface.
     /// (ifindex)
     DelayedAck(u32),
