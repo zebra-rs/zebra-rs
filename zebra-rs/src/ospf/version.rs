@@ -135,19 +135,19 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// running. Tracked as a follow-up in the `ospf-packet` crate.
     fn update_lsa(lsa: &mut Self::Lsa);
 
-    // The five read-only header accessors below are part of the
-    // trait surface that subsequent behavioral-migration PRs will
-    // consume (rewriting v2-bound flooding / show / packet code
-    // to read header fields via V::foo(...) instead of direct
-    // field access). The `dead_code` allow attribute on the trait
-    // declarations themselves silences "associated function never
-    // used" until the first consumer in PR 7g.
+    // The five read-only header accessors below — `ls_type`,
+    // `ls_id`, `adv_router`, `ls_checksum`, `length` — are
+    // consumed by the matching wrapper methods on `Lsa<V>` in
+    // `lsdb.rs` (PR 7g), which in turn back the JSON-format
+    // database show paths in `show.rs`. `ls_type` and `ls_id`
+    // have wrappers but no callers yet — those land as more
+    // show / flooding / packet code migrates off direct
+    // `lsa.data.h.foo` access.
 
     /// LS Type as a 16-bit value. v2's `OspfLsType` is u8-sized so
     /// it widens cleanly; v3's `ls_type` is natively u16 per
     /// RFC 5340 §A.4.2.1 (U/S2/S1/function-code packing). u16 is
     /// the lower-common-denominator that fits both.
-    #[allow(dead_code)]
     fn ls_type(h: &Self::LsaHeader) -> u16;
 
     /// Link State ID as a 32-bit value. v2 carries it as
@@ -155,24 +155,20 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// IP, sometimes a network address depending on the LSA type);
     /// v3 (§A.4.2.1) carries an opaque 32-bit identifier. u32
     /// covers both.
-    #[allow(dead_code)]
     fn ls_id(h: &Self::LsaHeader) -> u32;
 
     /// Advertising Router. 32-bit router-id in both versions
     /// (RFC 2328 §A.4.1 / RFC 5340 §A.4.2.1 keep it as a 4-octet
     /// router-id; v3 §A.3.1 says router-ids stay 32-bit even on
     /// v3).
-    #[allow(dead_code)]
     fn adv_router(h: &Self::LsaHeader) -> Ipv4Addr;
 
     /// LSA checksum field (Fletcher in both versions per their
     /// respective §A.4).
-    #[allow(dead_code)]
     fn ls_checksum(h: &Self::LsaHeader) -> u16;
 
     /// Length of the full LSA (header + body) in octets. Header
     /// itself is 20 octets in both versions.
-    #[allow(dead_code)]
     fn length(h: &Self::LsaHeader) -> u16;
 }
 
