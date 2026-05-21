@@ -168,6 +168,23 @@ fn mask_v6(addr: std::net::Ipv6Addr, prefix_len: u8) -> std::net::Ipv6Addr {
 /// gets us back into table=main with kind=Unicast across the board, which
 /// keeps `ip -6 route show` honest and avoids the host-local route quirks
 /// (e.g. ip-rule lookup local).
+/// Stamp a `RouteMessage` with the destination routing-table id.
+///
+/// Kernel `rtm_table` is a single byte. Table ids `0..=255` fit
+/// there; `RT_TABLE_MAIN` (254) is the historical default. Ids
+/// greater than 255 — Linux VRF allocators happily hand out
+/// 1000+-range ids — must travel in the `RTA_TABLE` netlink
+/// attribute instead, with `rtm_table` set to `RT_TABLE_UNSPEC`
+/// (0) so the kernel knows to consult the attribute.
+fn set_route_table(msg: &mut RouteMessage, table_id: u32) {
+    if table_id <= u8::MAX as u32 {
+        msg.header.table = table_id as u8;
+    } else {
+        msg.header.table = RouteHeader::RT_TABLE_UNSPEC;
+        msg.attributes.push(RouteAttribute::Table(table_id));
+    }
+}
+
 fn sid_route_target(
     behavior: crate::rib::SidBehavior,
     addr: std::net::Ipv6Addr,
@@ -299,12 +316,18 @@ impl FibHandle {
         })
     }
 
-    pub async fn route_ipv4_add_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
+    pub async fn route_ipv4_add_uni(
+        &self,
+        prefix: &Ipv4Net,
+        entry: &RibEntry,
+        nexthop: &Nexthop,
+        table_id: u32,
+    ) {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
 
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        set_route_table(&mut msg, table_id);
         msg.header.protocol = match entry.rtype {
             RibType::Static => RouteProtocol::Static,
             RibType::Bgp => RouteProtocol::Bgp,
@@ -394,20 +417,22 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
         }
         match &entry.nexthop {
             Nexthop::Uni(_) => {
-                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
             }
             Nexthop::Multi(_) => {
-                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop).await;
+                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
             }
             Nexthop::List(pro) => {
                 for member in pro.nexthops.iter() {
-                    self.route_ipv4_add_uni(prefix, entry, &member.as_nexthop())
+                    self.route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
             }
@@ -417,7 +442,13 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv4_del_uni(&self, prefix: &Ipv4Net, entry: &RibEntry, nexthop: &Nexthop) {
+    pub async fn route_ipv4_del_uni(
+        &self,
+        prefix: &Ipv4Net,
+        entry: &RibEntry,
+        nexthop: &Nexthop,
+        table_id: u32,
+    ) {
         if !entry.is_protocol() {
             return;
         }
@@ -425,7 +456,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
 
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        set_route_table(&mut msg, table_id);
         msg.header.protocol = match entry.rtype {
             RibType::Static => RouteProtocol::Static,
             RibType::Bgp => RouteProtocol::Bgp,
@@ -504,7 +535,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry) {
+    pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
         }
@@ -512,18 +543,25 @@ impl FibHandle {
         match &entry.nexthop {
             Nexthop::Link(_) => {}
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
-                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop).await;
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
             }
             Nexthop::List(list) => {
                 for member in &list.nexthops {
-                    self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop())
+                    self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
             }
         }
     }
 
-    pub async fn route_ipv6_add_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
+    pub async fn route_ipv6_add_uni(
+        &self,
+        prefix: &Ipv6Net,
+        entry: &RibEntry,
+        nexthop: &Nexthop,
+        table_id: u32,
+    ) {
         if DEBUG_V6 {
             tracing::info!(
                 "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
@@ -538,7 +576,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
 
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        set_route_table(&mut msg, table_id);
         msg.header.protocol = match entry.rtype {
             RibType::Static => RouteProtocol::Static,
             RibType::Bgp => RouteProtocol::Bgp,
@@ -724,17 +762,18 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry) {
+    pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
         }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
-                self.route_ipv6_add_uni(prefix, entry, &entry.nexthop).await;
+                self.route_ipv6_add_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
             }
             Nexthop::List(pro) => {
                 for member in pro.nexthops.iter() {
-                    self.route_ipv6_add_uni(prefix, entry, &member.as_nexthop())
+                    self.route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
             }
@@ -742,7 +781,13 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv6_del_uni(&self, prefix: &Ipv6Net, entry: &RibEntry, nexthop: &Nexthop) {
+    pub async fn route_ipv6_del_uni(
+        &self,
+        prefix: &Ipv6Net,
+        entry: &RibEntry,
+        nexthop: &Nexthop,
+        table_id: u32,
+    ) {
         if !entry.is_protocol() {
             return;
         }
@@ -751,7 +796,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
 
-        msg.header.table = RouteHeader::RT_TABLE_MAIN;
+        set_route_table(&mut msg, table_id);
         msg.header.protocol = match entry.rtype {
             RibType::Static => RouteProtocol::Static,
             RibType::Bgp => RouteProtocol::Bgp,
@@ -853,7 +898,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn route_ipv6_del(&self, prefix: &Ipv6Net, entry: &RibEntry) {
+    pub async fn route_ipv6_del(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) {
         if !entry.is_protocol() {
             return;
         }
@@ -861,11 +906,12 @@ impl FibHandle {
         match &entry.nexthop {
             Nexthop::Link(_) => {}
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
-                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop).await;
+                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
             }
             Nexthop::List(list) => {
                 for member in &list.nexthops {
-                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop())
+                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
             }
@@ -2493,5 +2539,43 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             // }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_route_table_uses_rtm_table_byte_for_ids_under_256() {
+        let mut msg = RouteMessage::default();
+        set_route_table(&mut msg, RouteHeader::RT_TABLE_MAIN as u32);
+        assert_eq!(msg.header.table, RouteHeader::RT_TABLE_MAIN);
+        // No RTA_TABLE attribute is emitted for the byte-sized case.
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|a| matches!(a, RouteAttribute::Table(_)))
+        );
+    }
+
+    #[test]
+    fn set_route_table_falls_back_to_rta_table_attribute_for_large_ids() {
+        // Linux VRF allocators routinely hand out ids > 255; the
+        // single-byte `rtm_table` overflows, so the kernel relies on
+        // `RTA_TABLE` instead. `rtm_table` must be `RT_TABLE_UNSPEC`
+        // so the kernel reads the attribute.
+        let mut msg = RouteMessage::default();
+        set_route_table(&mut msg, 1000);
+        assert_eq!(msg.header.table, RouteHeader::RT_TABLE_UNSPEC);
+        let table_attr = msg
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                RouteAttribute::Table(v) => Some(*v),
+                _ => None,
+            })
+            .expect("RTA_TABLE attribute emitted");
+        assert_eq!(table_attr, 1000);
     }
 }

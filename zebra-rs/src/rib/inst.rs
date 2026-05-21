@@ -188,6 +188,11 @@ pub enum Message {
         proto_id: ProtoId,
         proto: String,
         tx: UnboundedSender<RibRx>,
+        /// VRF the subscriber's installs should land in (kernel
+        /// `rtm_table` id; `0` = default-VRF). Recorded on the
+        /// `Subscriber` row so the inbound dispatcher can pick the
+        /// right per-VRF table without a name-based lookup.
+        vrf_id: u32,
     },
 
     // ---- redistribute subscription messages ----------------------
@@ -431,6 +436,16 @@ pub struct Rib {
 /// Name of the dummy interface that hosts End-style seg6local routes
 /// (table=main + kind=Unicast). Created at startup if missing.
 pub const SR0_DUMMY_NAME: &str = "sr0";
+
+/// Kernel `rtm_table` id for the default routing table — what
+/// non-VRF protocol installs target. Matches
+/// `netlink_packet_route::route::RouteHeader::RT_TABLE_MAIN`
+/// (254) and is the value every callsite that operates on the
+/// global routing table passes to `FibHandle::route_ipv*_add/del`.
+/// Step 9 threads `table_id` through those calls so a future
+/// per-VRF dispatch can supply a different value without changing
+/// the call shape.
+pub const RT_TABLE_MAIN: u32 = 254;
 
 const DEFAULT_RIB_SYNC_INTERVAL_SEC: u64 = 1;
 
@@ -860,7 +875,13 @@ impl Rib {
     /// `redists` (keyed by name — still used by the outbound
     /// broadcast paths and by `proto_cleanup`). The initial-state
     /// dump and the trailing `EoR` are unchanged.
-    pub fn subscribe(&mut self, proto_id: ProtoId, tx: UnboundedSender<RibRx>, proto: String) {
+    pub fn subscribe(
+        &mut self,
+        proto_id: ProtoId,
+        tx: UnboundedSender<RibRx>,
+        proto: String,
+        vrf_id: u32,
+    ) {
         // A subscriber may have dropped its receiver before this
         // handler ran (e.g. its constructor failed after the
         // `Message::Subscribe` was already queued). Every dump send
@@ -932,7 +953,7 @@ impl Rib {
             return;
         }
         self.client_registry
-            .register_with_id(proto_id, &proto, tx.clone());
+            .register_with_id(proto_id, &proto, tx.clone(), vrf_id);
         self.redists.insert(proto, tx);
     }
 
@@ -952,7 +973,8 @@ impl Rib {
             })
             .collect();
         for prefix in v4_prefixes {
-            self.ipv4_route_del(&prefix, RibEntry::new(rtype)).await;
+            self.ipv4_route_del(&prefix, RibEntry::new(rtype), RT_TABLE_MAIN)
+                .await;
         }
 
         let v6_prefixes: Vec<Ipv6Net> = self
@@ -963,7 +985,8 @@ impl Rib {
             })
             .collect();
         for prefix in v6_prefixes {
-            self.ipv6_route_del(&prefix, RibEntry::new(rtype)).await;
+            self.ipv6_route_del(&prefix, RibEntry::new(rtype), RT_TABLE_MAIN)
+                .await;
         }
 
         let labels: Vec<u32> = self
@@ -1164,19 +1187,51 @@ impl Rib {
         }
     }
 
-    async fn process_msg(&mut self, msg: Message) {
+    /// `table_id` is the kernel `rtm_table` the route should be
+    /// installed into. Inbound envelopes from a VRF-bound subscriber
+    /// arrive with their VRF's table id; legacy / internal sends
+    /// arrive with [`RT_TABLE_MAIN`].
+    ///
+    /// IPv4/IPv6 installs dispatch to the global default-table
+    /// helper (legacy path, full best-path + FIB install) when
+    /// `table_id == RT_TABLE_MAIN`, or to the per-VRF helper that
+    /// records the install in `vrf_tables[table_id]` otherwise.
+    /// The per-VRF helper deliberately skips best-path / FIB; the
+    /// import / export pipeline in step 18 supplies the resolution
+    /// overlay that makes the kernel install correct.
+    ///
+    /// ILM is VRF-agnostic at the kernel (single global MPLS table),
+    /// so the dispatcher ignores `table_id` for those variants and
+    /// the global path runs unchanged — see `Rib::ilm_add`.
+    async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
             Message::Ipv4Add { prefix, rib } => {
-                self.ipv4_route_add(&prefix, rib).await;
+                if table_id == RT_TABLE_MAIN {
+                    self.ipv4_route_add(&prefix, rib, table_id).await;
+                } else {
+                    self.ipv4_route_add_vrf(table_id, &prefix, rib);
+                }
             }
             Message::Ipv4Del { prefix, rib } => {
-                self.ipv4_route_del(&prefix, rib).await;
+                if table_id == RT_TABLE_MAIN {
+                    self.ipv4_route_del(&prefix, rib, table_id).await;
+                } else {
+                    self.ipv4_route_del_vrf(table_id, &prefix, rib);
+                }
             }
             Message::Ipv6Add { prefix, rib } => {
-                self.ipv6_route_add(&prefix, rib).await;
+                if table_id == RT_TABLE_MAIN {
+                    self.ipv6_route_add(&prefix, rib, table_id).await;
+                } else {
+                    self.ipv6_route_add_vrf(table_id, &prefix, rib);
+                }
             }
             Message::Ipv6Del { prefix, rib } => {
-                self.ipv6_route_del(&prefix, rib).await;
+                if table_id == RT_TABLE_MAIN {
+                    self.ipv6_route_del(&prefix, rib, table_id).await;
+                } else {
+                    self.ipv6_route_del_vrf(table_id, &prefix, rib);
+                }
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;
@@ -1467,8 +1522,9 @@ impl Rib {
                 proto_id,
                 tx,
                 proto,
+                vrf_id,
             } => {
-                self.subscribe(proto_id, tx, proto);
+                self.subscribe(proto_id, tx, proto, vrf_id);
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
@@ -1541,7 +1597,14 @@ impl Rib {
                 // link_addr_update will flip its `fib` flag to true.
                 self.addr_add(addr, false);
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
-                ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+                ipv4_route_sync(
+                    &mut self.table,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                    RT_TABLE_MAIN,
+                    true,
+                )
+                .await;
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
@@ -1549,7 +1612,13 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
+                ipv6_route_sync(
+                    &mut self.table_v6,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                    RT_TABLE_MAIN,
+                )
+                .await;
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
@@ -1566,7 +1635,14 @@ impl Rib {
 
                 self.addr_del(addr);
                 ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
-                ipv4_route_sync(&mut self.table, &mut self.nmap, &self.fib_handle, true).await;
+                ipv4_route_sync(
+                    &mut self.table,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                    RT_TABLE_MAIN,
+                    true,
+                )
+                .await;
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
@@ -1574,17 +1650,25 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv6_route_sync(&mut self.table_v6, &mut self.nmap, &self.fib_handle).await;
+                ipv6_route_sync(
+                    &mut self.table_v6,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                    RT_TABLE_MAIN,
+                )
+                .await;
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_add(&prefix, route.entry).await;
+                    self.ipv4_route_add(&prefix, route.entry, RT_TABLE_MAIN)
+                        .await;
                 }
             }
             FibMessage::DelRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_del(&prefix, route.entry).await;
+                    self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
+                        .await;
                 }
             }
             FibMessage::NewNeighbor(nbr) => {
@@ -1737,19 +1821,30 @@ impl Rib {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
-                    self.process_msg(msg).await;
+                    // Legacy / internal channel. Every `rib_tx`
+                    // sender drives the default routing table — the
+                    // `Subscribe`, `VrfAdd`, `LinkVrfBind` and self-
+                    // re-schedule paths have no VRF semantics —
+                    // so `RT_TABLE_MAIN` is unconditional here.
+                    self.process_msg(msg, RT_TABLE_MAIN).await;
                 }
                 Some(env) = self.inbound_rx.recv() => {
-                    // Step 1: unwrap the envelope and forward to the
-                    // same `process_msg` the legacy `rx` channel
-                    // uses. `env.from` is the subscriber's ProtoId,
-                    // which step 9 will consult to decide which VRF
-                    // table the install lands in; for now it's
-                    // purely informational. Logging at trace level
-                    // makes it easy to confirm the wiring works
-                    // without spamming production logs.
-                    tracing::trace!(from = %env.from, "rib: inbound envelope");
-                    self.process_msg(env.msg).await;
+                    // Step 9: look up the sender's VRF binding from
+                    // `client_registry` and translate to the kernel
+                    // `rtm_table` id. `vrf_id == 0` is default-VRF
+                    // (= `RT_TABLE_MAIN`); a non-zero value flows
+                    // straight through as the kernel table id —
+                    // that's what `VrfIdAllocator` hands out and what
+                    // `vrf_tables` is keyed by.
+                    let vrf_id = self.client_registry.vrf_id_for(env.from);
+                    let table_id = if vrf_id == 0 { RT_TABLE_MAIN } else { vrf_id };
+                    tracing::trace!(
+                        from = %env.from,
+                        vrf_id,
+                        table_id,
+                        "rib: inbound envelope",
+                    );
+                    self.process_msg(env.msg, table_id).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
                     self.process_fib_msg(msg).await;

@@ -182,6 +182,10 @@ impl ConfigManager {
             proto_id,
             proto: proto.to_string(),
             tx: chan.tx.clone(),
+            // Default-VRF for every protocol task that uses this
+            // entry point. Per-VRF spawns (step 13) will go through
+            // a sibling that threads the VRF kernel table id here.
+            vrf_id: 0,
         });
 
         let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
