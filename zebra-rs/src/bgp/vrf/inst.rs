@@ -22,8 +22,11 @@ use crate::config::{ConfigChannel, ShowChannel};
 use crate::context::{ProtoContext, Task};
 
 use super::super::Message;
+use super::super::interface_addrs::InterfaceAddrs;
 use super::super::peer_map::PeerMap;
 use super::super::route::LocalRib;
+use super::super::store::BgpAttrStore;
+use super::super::update_group::UpdateGroupMap;
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
 
 /// Per-VRF BGP runtime. One task per `router bgp vrf X` block.
@@ -95,6 +98,23 @@ pub struct BgpVrf {
     /// separate ASN today; if a future spec requires one this is
     /// where it lives.
     pub asn: u32,
+    /// Dedup pool for `BgpAttr` instances seen by this VRF's
+    /// peers. Step 15d gives every per-VRF runtime its own pool
+    /// (cheaper than threading a shared lock across the `!Send`
+    /// boundary, and the attribute populations are largely
+    /// disjoint between VRFs in practice).
+    pub attr_store: BgpAttrStore,
+    /// IOS-XR-style update-groups scoped to this VRF. Same
+    /// rationale as `attr_store`: per-VRF copy avoids cross-task
+    /// sharing.
+    pub update_groups: UpdateGroupMap,
+    /// Per-link IPv6 link-local cache for RFC 8950 next-hop
+    /// resolution. The per-VRF runtime starts with an empty
+    /// cache; BGP unnumbered (interface-neighbor) lives on the
+    /// global instance and isn't yet exposed at the VRF surface.
+    /// Step 15d threads this through `BgpTop` so the FSM driver
+    /// compiles even though no path here populates it today.
+    pub interface_addrs: InterfaceAddrs,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
@@ -133,6 +153,9 @@ impl BgpVrf {
             tx,
             rx,
             asn,
+            attr_store: BgpAttrStore::new(),
+            update_groups: super::super::update_group::empty_map(),
+            interface_addrs: InterfaceAddrs::new(),
         };
         (vrf, inbox_tx)
     }
@@ -175,20 +198,61 @@ impl BgpVrf {
                     // step 20. Same drain rationale as above.
                 }
                 Some(msg) = self.rx.recv() => {
-                    // Per-VRF FSM event channel. Step 15c lands the
-                    // channel so peers materialised at spawn time
-                    // (also step 15c) have somewhere to send their
-                    // timer events; step 15d wires the actual FSM
-                    // driver. Until then, drain at debug — without
-                    // this arm the materialised peer's `start()`
-                    // timer would fill the bounded queue and stall
-                    // the per-VRF runtime.
-                    tracing::debug!(
-                        vrf = %self.name,
-                        msg = ?msg,
-                        "bgp vrf: drained FSM event (step 15d wires the handler)",
-                    );
+                    self.process_msg(msg);
                 }
+            }
+        }
+    }
+
+    /// Handle a per-VRF FSM event off `self.rx`. Step 15d wires
+    /// the same set the global `Bgp::process_msg` handles —
+    /// minus `Accept` (passive accept lives at the global task
+    /// and is forwarded via `BgpVrfMsg::Accept`; step 15d doesn't
+    /// yet drive that path because `peer::accept` is tied to the
+    /// global `Bgp`).
+    fn process_msg(&mut self, msg: Message) {
+        use super::super::peer::{BgpTop, fsm};
+        match msg {
+            Message::Event(ident, event) => {
+                let mut top = BgpTop {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_client: &self.ctx.rib,
+                    attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
+                };
+                fsm(&mut top, &mut self.peers, ident, event);
+            }
+            Message::Accept(_, _) => {
+                // Active-connect path is driven by `Event(...)` from
+                // peer-side timers; the global Bgp's accept
+                // dispatcher routes passive connections to a VRF
+                // via `BgpVrfMsg::Accept`, but `peer::accept` is
+                // tied to `&mut Bgp` — refactoring it for per-VRF
+                // is a follow-up. Drop here so the channel doesn't
+                // accumulate stale Accepts if `peer.rs::accept`
+                // ever gains a path that sends into `vrf.tx`.
+                tracing::debug!(
+                    vrf = %self.name,
+                    "bgp vrf: ignored Accept on vrf.tx (active-only path in step 15d)",
+                );
+            }
+            Message::Show(tx) => {
+                // Re-route to the global show subsystem by echoing
+                // the request back through the bounded tx. Step
+                // 20 wires `show bgp vrf <name>` properly.
+                let _ = self.tx.try_send(Message::Show(tx));
+            }
+            Message::FlushUpdateGroupIpv4(group_id) => {
+                super::super::update_group::flush_ipv4(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &mut self.attr_store,
+                    &group_id,
+                    &self.interface_addrs,
+                );
             }
         }
     }
