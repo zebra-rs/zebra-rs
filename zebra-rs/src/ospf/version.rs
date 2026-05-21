@@ -86,6 +86,32 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
 
     /// AllDRouters multicast group: 224.0.0.6 (v2) or ff02::6 (v3).
     const ALL_DROUTERS: Self::Addr;
+
+    // ---- LSA / header accessors --------------------------------
+    //
+    // Static-style trait methods (called as `V::ls_age(h)`, not
+    // `h.ls_age()`) per the Phase 6 PR 7 direction. The associated
+    // types `Lsa` and `LsaHeader` are opaque to generic code; these
+    // methods are how generic Lsdb / NFSM code reads and mutates
+    // the header fields that have identical semantics in v2
+    // (RFC 2328 §A.4.1) and v3 (RFC 5340 §A.4.2.1).
+
+    /// Borrow the LSA header out of an LSA. Both `OspfLsa` and
+    /// `Ospfv3Lsa` carry it as a public `h` field — this method is
+    /// the trait surface that lets generic code reach it.
+    fn lsa_header(lsa: &Self::Lsa) -> &Self::LsaHeader;
+
+    /// Mutably borrow the LSA header. Used by methods that update
+    /// `ls_age` / `ls_seq_number` etc. when refreshing or flushing
+    /// an LSA.
+    fn lsa_header_mut(lsa: &mut Self::Lsa) -> &mut Self::LsaHeader;
+
+    /// LS Age in seconds. 16-bit in both versions.
+    fn ls_age(h: &Self::LsaHeader) -> u16;
+
+    /// Set the LS Age in the header. Hold-timer expiry, flushing,
+    /// and refresh all need this.
+    fn set_ls_age(h: &mut Self::LsaHeader, age: u16);
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -102,6 +128,19 @@ impl OspfVersion for Ospfv2 {
     type Lsa = OspfLsa;
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
+
+    fn lsa_header(lsa: &OspfLsa) -> &OspfLsaHeader {
+        &lsa.h
+    }
+    fn lsa_header_mut(lsa: &mut OspfLsa) -> &mut OspfLsaHeader {
+        &mut lsa.h
+    }
+    fn ls_age(h: &OspfLsaHeader) -> u16 {
+        h.ls_age
+    }
+    fn set_ls_age(h: &mut OspfLsaHeader, age: u16) {
+        h.ls_age = age;
+    }
 }
 
 /// OSPFv3 dispatch marker (RFC 5340). Distinct from the
@@ -130,4 +169,17 @@ impl OspfVersion for Ospfv3 {
     const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
     /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.
     const ALL_DROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 6);
+
+    fn lsa_header(lsa: &Ospfv3Lsa) -> &Ospfv3LsaHeader {
+        &lsa.h
+    }
+    fn lsa_header_mut(lsa: &mut Ospfv3Lsa) -> &mut Ospfv3LsaHeader {
+        &mut lsa.h
+    }
+    fn ls_age(h: &Ospfv3LsaHeader) -> u16 {
+        h.ls_age
+    }
+    fn set_ls_age(h: &mut Ospfv3LsaHeader, age: u16) {
+        h.ls_age = age;
+    }
 }

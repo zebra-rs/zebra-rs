@@ -89,15 +89,15 @@ impl<V: OspfVersion> Lsa<V> {
             refresh_timer: None,
         }
     }
-}
 
-impl Lsa<Ospfv2> {
     /// Compute the current LSA age: original ls_age plus elapsed
-    /// time since install, capped at MaxAge. v2-specific because
-    /// it reads `self.data.h.ls_age` — the v3 LsaHeader has the
-    /// same field but no shared trait method yet exposes it.
+    /// time since install, capped at MaxAge. Now generic — reads
+    /// the header via `V::lsa_header` and `V::ls_age`, which both
+    /// `Ospfv2` and `Ospfv3` impl identically (the field has the
+    /// same semantics in RFC 2328 §A.4.1 and RFC 5340 §A.4.2.1).
     pub fn current_age(&self) -> u16 {
-        let initial_age = self.data.h.ls_age;
+        let header = V::lsa_header(&self.data);
+        let initial_age = V::ls_age(header);
         let elapsed = self.birth_time.elapsed().as_secs() as u16;
         let age = initial_age.saturating_add(elapsed);
         age.min(OSPF_MAX_AGE)
@@ -175,6 +175,72 @@ impl<V: OspfVersion> Lsdb<V> {
             .iter()
             .filter(move |((t, _, _), _)| *t == ls_type)
             .map(|(_, lsa)| lsa)
+    }
+
+    /// Drop the LSA at the given key. Key-only operation — no
+    /// header field access, so trivially generic.
+    pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
+        self.tables.remove(&(ls_type, ls_id, adv_router));
+    }
+
+    /// Flush an LSA by setting its age to MaxAge and returning a
+    /// clone for re-flooding. The refresh timer is cancelled, and
+    /// a new hold timer is set. Now generic — header mutation goes
+    /// through `V::lsa_header_mut` + `V::set_ls_age`.
+    pub fn flush_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        tx: &UnboundedSender<Message>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<V::Lsa> {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(lsa) = self.tables.get_mut(&lsa_key) {
+            V::set_ls_age(V::lsa_header_mut(&mut lsa.data), OSPF_MAX_AGE);
+            lsa.birth_time = tokio::time::Instant::now();
+            lsa.refresh_timer = None;
+            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
+            Some(lsa.data.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Look up an LSA's payload by key. Returns a reference into
+    /// the LSDB. Now generic — no header field access.
+    pub fn lookup_by_id(
+        &self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<&V::Lsa> {
+        self.tables
+            .get(&(ls_type, ls_id, adv_router))
+            .map(|lsa| &lsa.data)
+    }
+
+    /// Look up the full LSDB entry (including bookkeeping) by key.
+    /// Now generic.
+    pub fn lookup_lsa(
+        &self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<&Lsa<V>> {
+        self.tables.get(&(ls_type, ls_id, adv_router))
+    }
+
+    /// Return the install timestamp of an LSA, if present. Now
+    /// generic.
+    pub fn lookup_install_time(
+        &self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<tokio::time::Instant> {
+        self.lookup_lsa(ls_type, ls_id, adv_router)
+            .map(|lsa| lsa.install_time)
     }
 }
 
@@ -260,32 +326,6 @@ impl Lsdb<Ospfv2> {
         }
     }
 
-    pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
-        self.tables.remove(&(ls_type, ls_id, adv_router));
-    }
-
-    /// Flush an LSA by setting its age to MaxAge and returning a clone for reflooding.
-    /// The refresh timer is cancelled, and a new hold timer is set.
-    pub fn flush_lsa(
-        &mut self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-        tx: &UnboundedSender<Message>,
-        area_id: Option<Ipv4Addr>,
-    ) -> Option<OspfLsa> {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
-        if let Some(lsa) = self.tables.get_mut(&lsa_key) {
-            lsa.data.h.ls_age = OSPF_MAX_AGE;
-            lsa.birth_time = tokio::time::Instant::now();
-            lsa.refresh_timer = None;
-            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
-            Some(lsa.data.clone())
-        } else {
-            None
-        }
-    }
-
     pub fn refresh_lsa(
         &mut self,
         ls_type: OspfLsType,
@@ -306,36 +346,6 @@ impl Lsdb<Ospfv2> {
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
             self.tables.insert(lsa_key, lsa);
         }
-    }
-
-    pub fn lookup_by_id(
-        &self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-    ) -> Option<&OspfLsa> {
-        self.tables
-            .get(&(ls_type, ls_id, adv_router))
-            .map(|lsa| &lsa.data)
-    }
-
-    pub fn lookup_lsa(
-        &self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-    ) -> Option<&Lsa> {
-        self.tables.get(&(ls_type, ls_id, adv_router))
-    }
-
-    pub fn lookup_install_time(
-        &self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-    ) -> Option<tokio::time::Instant> {
-        self.lookup_lsa(ls_type, ls_id, adv_router)
-            .map(|lsa| lsa.install_time)
     }
 
     pub fn refresh_lsa_with_seq(
