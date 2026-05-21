@@ -3,9 +3,9 @@ use std::fmt;
 use bytes::BytesMut;
 
 use crate::{
-    Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpNexthop, ClusterList, Community,
-    ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, PmsiTunnel,
-    PrefixSid, TunnelEncap,
+    Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpNexthop, ClusterList, Color,
+    Community, ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId,
+    PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -122,6 +122,33 @@ impl BgpAttr {
             .as_ref()
             .and_then(|aspath| aspath.neighboring_as())
     }
+
+    /// Extract the Label-Index value carried in the BGP Prefix-SID
+    /// attribute (RFC 8669 §3.1). Returns `None` when the attribute
+    /// is absent or carries only non-LabelIndex TLVs (Originator-SRGB,
+    /// SRv6 service). When multiple Label-Index TLVs are present
+    /// (malformed per RFC 8669 §3.1.1 but tolerated on receive) the
+    /// first one wins so consumers see a deterministic value.
+    pub fn prefix_sid_label_index(&self) -> Option<u32> {
+        self.prefix_sid.as_ref()?.tlvs.iter().find_map(|t| match t {
+            PrefixSidTlv::LabelIndex { label_index, .. } => Some(*label_index),
+            _ => None,
+        })
+    }
+
+    /// Iterate every Color extended community (RFC 9012 §4.3, type
+    /// 0x03 0x0b) attached to the route, in attribute order. Returns
+    /// an empty iterator when the route has no EXT_COMMUNITIES or
+    /// the attribute carries no Color entries. Multiple Colors are
+    /// allowed (RFC 9256 §2.5 fallback ordering) and are yielded in
+    /// the order the originator placed them — preserving that order
+    /// matters for fallback semantics in the resolver.
+    pub fn colors(&self) -> impl Iterator<Item = Color> + '_ {
+        self.ecom
+            .iter()
+            .flat_map(|ec| ec.0.iter())
+            .filter_map(|v| v.as_color())
+    }
 }
 
 impl fmt::Display for BgpAttr {
@@ -193,6 +220,7 @@ impl fmt::Display for BgpAttr {
 mod tests {
     use crate::*;
     use std::net::Ipv4Addr;
+    use std::str::FromStr;
 
     #[test]
     fn test_bgp_attr_to_from_roundtrip() {
@@ -213,5 +241,105 @@ mod tests {
         assert!(bgp_attr.med.is_some());
         assert_eq!(bgp_attr.origin.unwrap(), Origin::Igp);
         assert_eq!(bgp_attr.aspath.unwrap().length(), 0);
+    }
+
+    #[test]
+    fn prefix_sid_label_index_returns_none_when_attr_absent() {
+        let attr = BgpAttr::default();
+        assert!(attr.prefix_sid_label_index().is_none());
+    }
+
+    #[test]
+    fn prefix_sid_label_index_returns_value_from_label_index_tlv() {
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::LabelIndex {
+                    flags: 0,
+                    label_index: 128,
+                }],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(attr.prefix_sid_label_index(), Some(128));
+    }
+
+    #[test]
+    fn prefix_sid_label_index_skips_non_label_index_tlvs() {
+        // Originator-SRGB present but no Label-Index → None.
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::OriginatorSrgb {
+                    flags: 0,
+                    srgbs: vec![SrgbRange {
+                        base: 16000,
+                        range: 8000,
+                    }],
+                }],
+            }),
+            ..Default::default()
+        };
+        assert!(attr.prefix_sid_label_index().is_none());
+    }
+
+    #[test]
+    fn prefix_sid_label_index_picks_first_when_multiple() {
+        let attr = BgpAttr {
+            prefix_sid: Some(PrefixSid {
+                tlvs: vec![
+                    PrefixSidTlv::LabelIndex {
+                        flags: 0,
+                        label_index: 42,
+                    },
+                    PrefixSidTlv::LabelIndex {
+                        flags: 0,
+                        label_index: 99,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        assert_eq!(attr.prefix_sid_label_index(), Some(42));
+    }
+
+    #[test]
+    fn colors_returns_empty_iterator_when_ecom_absent() {
+        let attr = BgpAttr::default();
+        assert_eq!(attr.colors().count(), 0);
+    }
+
+    #[test]
+    fn colors_yields_color_extcomms_in_attribute_order() {
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity(vec![
+                ExtCommunityValue::from_color(0, 100),
+                ExtCommunityValue::from_color(0b10, 200),
+            ])),
+            ..Default::default()
+        };
+        let cols: Vec<Color> = attr.colors().collect();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].color, 100);
+        assert_eq!(cols[0].co_bits(), 0);
+        assert_eq!(cols[1].color, 200);
+        assert_eq!(cols[1].co_bits(), 0b10);
+    }
+
+    #[test]
+    fn colors_skips_non_color_extcomms() {
+        // RT + Color + RT — only the Color in the middle should
+        // surface in colors().
+        let rt = ExtCommunity::from_str("rt:65001:100").unwrap().0;
+        let combined = vec![
+            rt[0].clone(),
+            ExtCommunityValue::from_color(0, 42),
+            rt[0].clone(),
+        ];
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity(combined)),
+            ..Default::default()
+        };
+        let cols: Vec<Color> = attr.colors().collect();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].color, 42);
     }
 }

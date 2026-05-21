@@ -948,6 +948,23 @@ fn show_bgp_route_entry(
                 writeln!(out, "{}", cluster_ids.join(" "))?;
             }
 
+            // Surface BGP Color extended communities (RFC 9012 §4.3)
+            // and the BGP Prefix-SID Label-Index (RFC 8669 §3.1).
+            // The future color-aware nexthop resolver consumes these;
+            // surfacing here gives operators visibility before the
+            // resolver lands.
+            let colors: Vec<String> = rib
+                .attr
+                .colors()
+                .map(|c| format!("{} (CO={})", c.color, c.co_bits()))
+                .collect();
+            if !colors.is_empty() {
+                writeln!(out, "    Color: {}", colors.join(", "))?;
+            }
+            if let Some(li) = rib.attr.prefix_sid_label_index() {
+                writeln!(out, "    Prefix-SID Label-Index: {}", li)?;
+            }
+
             writeln!(out)?;
         }
     }
