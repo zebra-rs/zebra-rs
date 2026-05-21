@@ -336,9 +336,9 @@ pub struct IsisConfig {
     pub sr_srv6_flex_algo_locators: BTreeMap<u8, String>,
 
     /// Set when /router/isis/fast-reroute/ti-lfa is committed (the
-    /// presence-marked YANG container). Will gate post-convergence
-    /// SPF + SR-label backup install once the repair-path computation
-    /// lands; for now no code reads it.
+    /// presence-marked YANG container). Gates the per-destination
+    /// `tilfa_repair_path` calls in `perform_spf_calculation` and the
+    /// Adj-SID B-flag (RFC 8667 §2.2.1) emitted in TLV 22 sub-TLVs.
     pub ti_lfa_enabled: bool,
 
     /// True when `/router/isis/multi-topology` carries an MT id.
@@ -748,14 +748,22 @@ fn config_sr_srv6_flex_algo_locator(isis: &mut Isis, mut args: Args, op: ConfigO
 }
 
 fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    let prev = isis.config.ti_lfa_enabled;
     isis.config.ti_lfa_enabled = op.is_set();
-    // Adj-SID B-flag (RFC 8667 §2.2.1) is built from ti_lfa_enabled
-    // at LSP-generation time, so the toggle is only observable after
-    // a fresh origination. has_level() inside process_lsp_originate
-    // filters out the level that doesn't apply for level-1-only /
-    // level-2-only instances, so sending both unconditionally is safe.
+    if isis.config.ti_lfa_enabled == prev {
+        return Some(());
+    }
+    // Re-originate the self LSP so the Adj-SID B-flag (RFC 8667 §2.2.1)
+    // reflects the new state at LSP-generation time. has_level() inside
+    // process_lsp_originate filters out the wrong level for
+    // level-1-only / level-2-only instances, so sending both
+    // unconditionally is safe.
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
+    // Recompute SPF so the RIB picks up repair paths (on enable) or
+    // drops them (on disable) for every prefix in this instance.
+    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
+    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
     Some(())
 }
 

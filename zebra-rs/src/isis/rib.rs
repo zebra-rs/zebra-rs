@@ -954,8 +954,14 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     // §5 strict NLPID gating across every transit node.
     let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
 
-    // TI-LFA repair path.
-    let tilfa_result = tilfa_repair_path(&graph, source, &spf_result);
+    // TI-LFA repair path. Gated on `fast-reroute ti-lfa` — when the
+    // knob is off we still install the primary RIB built from
+    // `spf_result`, just without the per-destination repair list.
+    let tilfa_result = if top.config.ti_lfa_enabled {
+        tilfa_repair_path(&graph, source, &spf_result)
+    } else {
+        BTreeMap::new()
+    };
 
     // Build RIB.
     let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
@@ -971,7 +977,11 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
         if let Some(mt2_src) = mt2_source {
             let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
-            let mt2_tilfa = tilfa_repair_path(&mt2_graph, mt2_src, &mt2_spf);
+            let mt2_tilfa = if top.config.ti_lfa_enabled {
+                tilfa_repair_path(&mt2_graph, mt2_src, &mt2_spf)
+            } else {
+                BTreeMap::new()
+            };
             let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, &mt2_tilfa, true);
             *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
             rib_v6
