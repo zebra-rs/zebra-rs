@@ -59,6 +59,21 @@ pub enum Message {
         label: u32,
         ilm: IlmEntry,
     },
+    /// IS-IS publishes a per-algorithm IPv4 route snapshot. RIB
+    /// shadows it in `flex_algo_routes` and re-broadcasts via
+    /// `RibRx::FlexAlgoRouteAdd`. No FIB install — per-algo IPv4
+    /// would collide with algo-0 in the kernel; forwarding goes
+    /// through the algo-N MPLS LFIB which IS-IS already installs.
+    FlexAlgoRouteAdd {
+        route: crate::rib::api::FlexAlgoRoute,
+    },
+    /// Inverse of `FlexAlgoRouteAdd`. Either the prefix is no longer
+    /// reachable in algo-N, or the algo itself has been removed from
+    /// the configuration.
+    FlexAlgoRouteDel {
+        algo: u8,
+        prefix: Ipv4Net,
+    },
     BridgeAdd {
         name: String,
         config: BridgeConfig,
@@ -358,6 +373,17 @@ pub struct Rib {
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
+    /// Per-IS-IS-Flex-Algorithm IPv4 route shadow (Phase 3 of the
+    /// BGP ↔ IS-IS Flex-Algo integration). Outer key is the algo id
+    /// (128..=255); inner map mirrors the per-algo subset of IS-IS's
+    /// `Isis::rib_flex_algo`. Populated by `Message::FlexAlgoRouteAdd`
+    /// / `Del`, cleared on shutdown. **Not** installed to the kernel
+    /// IPv4 table — algo-N routes would collide with algo-0; the
+    /// per-algo MPLS LFIB (already in `Isis::ilm` and pushed through
+    /// `ilm_add`) provides forwarding. The colour-aware nexthop
+    /// resolver (next PR) reads this shadow to attach the outer MPLS
+    /// label for service routes carrying a Color extcomm.
+    pub flex_algo_routes: BTreeMap<u8, PrefixMap<Ipv4Net, crate::rib::api::FlexAlgoRoute>>,
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
     /// Remote VTEPs we've installed as VXLAN BUM ingress-replication
     /// targets (zero-MAC FDB rows on the VXLAN device, keyed by
@@ -470,6 +496,7 @@ impl Rib {
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),
+            flex_algo_routes: BTreeMap::new(),
             mac_table: BTreeMap::new(),
             vtep_table: std::collections::BTreeSet::new(),
             neighbors: BTreeMap::new(),
@@ -1256,6 +1283,29 @@ impl Rib {
             }
             Message::IlmDel { label, ilm } => {
                 self.ilm_del(label, ilm).await;
+            }
+            Message::FlexAlgoRouteAdd { route } => {
+                // Last-writer-wins on (algo, prefix). The same key
+                // re-published from a later SPF cycle overwrites the
+                // previous snapshot in place; consumers see the new
+                // metric / nexthops on the next subscribe-side recv.
+                self.flex_algo_routes
+                    .entry(route.algo)
+                    .or_default()
+                    .insert(route.prefix, route.clone());
+                self.api_flex_algo_route_add(&route);
+            }
+            Message::FlexAlgoRouteDel { algo, prefix } => {
+                let became_empty = if let Some(table) = self.flex_algo_routes.get_mut(&algo) {
+                    table.remove(&prefix);
+                    table.iter().next().is_none()
+                } else {
+                    false
+                };
+                if became_empty {
+                    self.flex_algo_routes.remove(&algo);
+                }
+                self.api_flex_algo_route_del(algo, prefix);
             }
             Message::BridgeAdd { name, config } => {
                 let bridge = Bridge {

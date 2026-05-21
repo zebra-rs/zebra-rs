@@ -1,8 +1,40 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::{BulkPhase, Link, MacAddr, Rib, RibType, RouteBatch, link::LinkAddr};
+
+/// One nexthop entry inside a `FlexAlgoRoute`. Flattens the IS-IS
+/// internal `SpfNexthop` to the public-API minimum: the IPv4 next-hop
+/// address, the egress ifindex, and the outer MPLS label to push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlexAlgoNexthop {
+    pub addr: Ipv4Addr,
+    pub ifindex: u32,
+    /// Outer MPLS label = the route origin's SRGB.start + the algo-N
+    /// Prefix-SID index. The receiver of this struct (Color-aware
+    /// nexthop resolver) pushes this label as the outermost LSP
+    /// segment when forwarding a service route into the Flex-Algo
+    /// path.
+    pub label: u32,
+}
+
+/// Per-algorithm IPv4 route snapshot published from IS-IS (RFC 9350)
+/// to RIB. Carries only the fields downstream consumers need —
+/// IS-IS internals (`dest_vertex`, TI-LFA backup, raw `SidLabelValue`)
+/// stay in the IS-IS module.
+///
+/// `algo` is the IS-IS Flex-Algorithm id (128..=255). The same
+/// `(algo, prefix)` pair may arrive multiple times across IS-IS SPF
+/// cycles; each arrival replaces the previous snapshot for that key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlexAlgoRoute {
+    pub algo: u8,
+    pub prefix: Ipv4Net,
+    pub metric: u32,
+    pub nexthops: Vec<FlexAlgoNexthop>,
+}
 
 /// One bridge-FDB row, distilled from the larger `FibNeighbor` so
 /// subscribers don't need to drag the full address-family / state
@@ -116,6 +148,25 @@ pub enum RibRx {
         rtype: RibType,
         routes: RouteBatch,
         bulk: BulkPhase,
+    },
+
+    // ---- IS-IS Flex-Algorithm route fan-out -----------------------
+    //
+    // Phase 3 of the BGP ↔ IS-IS Flex-Algorithm integration: IS-IS
+    // publishes per-algo route snapshots to RIB via
+    // `Message::FlexAlgoRouteAdd/Del`; RIB shadows them in
+    // `flex_algo_routes` and re-broadcasts via the two RibRx variants
+    // below. The colour-aware nexthop resolver (next PR) is the first
+    // consumer; today the fan-out lands on every subscribed protocol
+    // and they ignore it.
+    #[allow(dead_code)]
+    FlexAlgoRouteAdd {
+        route: FlexAlgoRoute,
+    },
+    #[allow(dead_code)]
+    FlexAlgoRouteDel {
+        algo: u8,
+        prefix: Ipv4Net,
     },
 }
 
@@ -242,6 +293,25 @@ impl Rib {
     pub fn api_vxlan_del(&self, vni: u32) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::VxlanDel { vni });
+        }
+    }
+
+    /// Fan-out a Flex-Algorithm route add to every default-VRF
+    /// subscriber. Per-algo routes are global today — IS-IS runs as a
+    /// single instance and the colour-aware nexthop resolver (BGP)
+    /// resolves against the default-VRF table. When per-VRF flex-algo
+    /// arrives a vrf_id filter slots in here.
+    pub fn api_flex_algo_route_add(&self, route: &FlexAlgoRoute) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::FlexAlgoRouteAdd {
+                route: route.clone(),
+            });
+        }
+    }
+
+    pub fn api_flex_algo_route_del(&self, algo: u8, prefix: Ipv4Net) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::FlexAlgoRouteDel { algo, prefix });
         }
     }
 }
