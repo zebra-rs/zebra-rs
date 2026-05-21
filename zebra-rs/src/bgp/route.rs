@@ -900,7 +900,7 @@ pub fn route_ipv4_update(
         && let Some(exporter) = bgp.vrf_export
     {
         if let Some(winner) = selected.first() {
-            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr, 0);
+            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr);
         } else {
             super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
         }
@@ -1916,7 +1916,7 @@ pub fn route_ipv4_withdraw(
         && let Some(exporter) = bgp.vrf_export
     {
         if let Some(winner) = selected.first() {
-            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr, 0);
+            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr);
         } else {
             super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
         }

@@ -17,8 +17,11 @@
 //!   Loc-RIB across the `BgpGlobalMsg` / `BgpVrfMsg` channels.
 
 pub mod inst;
+pub mod label;
 pub mod msg;
 pub mod spawn;
+
+pub use label::VrfLabelAllocator;
 
 // External consumers (`Bgp` field types, `process_vrf_global_msg`)
 // only reach for the names below. `inst::{BgpVrf, serve_vrf}` and

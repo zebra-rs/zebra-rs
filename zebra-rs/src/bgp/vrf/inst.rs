@@ -98,6 +98,13 @@ pub struct BgpVrf {
     /// separate ASN today; if a future spec requires one this is
     /// where it lives.
     pub asn: u32,
+    /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`
+    /// at spawn time. Stamped onto every `BgpGlobalMsg::Export`
+    /// this VRF emits so receiving PEs can identify the egress
+    /// VRF; step 19b installs the matching AF_MPLS ILM that pops
+    /// this label and routes the inner packet into
+    /// `vrf_tables[table_id]`.
+    pub label: u32,
     /// Dedup pool for `BgpAttr` instances seen by this VRF's
     /// peers. Step 15d gives every per-VRF runtime its own pool
     /// (cheaper than threading a shared lock across the `!Send`
@@ -137,6 +144,13 @@ pub type BgpVrfInbox = UnboundedSender<BgpVrfMsg>;
 pub struct VrfExporter {
     pub name: String,
     pub tx: UnboundedSender<BgpGlobalMsg>,
+    /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`.
+    /// Stamped onto every `BgpGlobalMsg::Export` emitted from
+    /// this exporter; the receiving PE binds an AF_MPLS ILM at
+    /// this label (step 19b) so data-plane forwarding pops the
+    /// label and looks the inner packet up in the matching VRF
+    /// table.
+    pub label: u32,
 }
 
 /// Send a `BgpGlobalMsg::Export` for `prefix` carrying the
@@ -146,17 +160,12 @@ pub struct VrfExporter {
 /// `selected`. `label = 0` is the step-19 stub — the global
 /// handler treats that as "skip the per-route install" rather
 /// than emit an explicit-null label.
-pub fn vrf_emit_export(
-    exporter: &VrfExporter,
-    prefix: ipnet::Ipv4Net,
-    attr: &bgp_packet::BgpAttr,
-    label: u32,
-) {
+pub fn vrf_emit_export(exporter: &VrfExporter, prefix: ipnet::Ipv4Net, attr: &bgp_packet::BgpAttr) {
     let _ = exporter.tx.send(BgpGlobalMsg::Export {
         vrf: exporter.name.clone(),
         prefix,
         attr: attr.clone(),
-        label,
+        label: exporter.label,
     });
 }
 
@@ -243,6 +252,7 @@ impl BgpVrf {
         rd: Option<RouteDistinguisher>,
         router_id: Ipv4Addr,
         asn: u32,
+        label: u32,
         global_tx: UnboundedSender<BgpGlobalMsg>,
     ) -> (Self, BgpVrfInbox) {
         let (inbox_tx, global_rx) = mpsc::unbounded_channel();
@@ -261,6 +271,7 @@ impl BgpVrf {
             tx,
             rx,
             asn,
+            label,
             attr_store: BgpAttrStore::new(),
             update_groups: super::super::update_group::empty_map(),
             interface_addrs: InterfaceAddrs::new(),
@@ -365,6 +376,7 @@ impl BgpVrf {
                 let exporter = VrfExporter {
                     name: self.name.clone(),
                     tx: self.global_tx.clone(),
+                    label: self.label,
                 };
                 let mut top = BgpTop {
                     router_id: &self.router_id,
@@ -633,6 +645,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 
@@ -660,6 +673,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 
@@ -685,6 +699,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 
@@ -721,6 +736,7 @@ mod tests {
             None,
             Ipv4Addr::UNSPECIFIED,
             65000,
+            /* label */ 16,
             global_tx,
         );
 
@@ -748,11 +764,12 @@ mod tests {
         let exporter = VrfExporter {
             name: "vrf-hook".to_string(),
             tx,
+            label: 42,
         };
         let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
         let attr = bgp_packet::BgpAttr::default();
 
-        vrf_emit_export(&exporter, prefix, &attr, 0);
+        vrf_emit_export(&exporter, prefix, &attr);
 
         let msg = rx.try_recv().expect("Export pushed");
         match msg {
@@ -765,7 +782,7 @@ mod tests {
                 assert_eq!(vrf, "vrf-hook");
                 assert_eq!(p, prefix);
                 assert_eq!(a, attr);
-                assert_eq!(label, 0);
+                assert_eq!(label, 42, "exporter's label is stamped onto Export");
             }
             other => panic!("expected Export, got {other:?}"),
         }
@@ -777,6 +794,7 @@ mod tests {
         let exporter = VrfExporter {
             name: "vrf-hook2".to_string(),
             tx,
+            label: 17,
         };
         let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
 
