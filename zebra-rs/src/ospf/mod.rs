@@ -33,6 +33,8 @@ pub mod config;
 
 pub mod network;
 
+pub mod network_v6;
+
 pub mod socket;
 
 pub mod packet;
