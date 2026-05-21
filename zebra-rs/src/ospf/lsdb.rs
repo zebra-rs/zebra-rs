@@ -242,6 +242,63 @@ impl<V: OspfVersion> Lsdb<V> {
         self.lookup_lsa(ls_type, ls_id, adv_router)
             .map(|lsa| lsa.install_time)
     }
+
+    /// Re-originate an existing LSA with a bumped sequence number.
+    /// Drops it back at age 0, runs the version-specific
+    /// `update_lsa` to refresh length / checksum, and resets the
+    /// hold / refresh timers. Now generic.
+    pub fn refresh_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        tx: &UnboundedSender<Message>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(old_lsa) = self.tables.get(&lsa_key) {
+            let mut new_data = old_lsa.data.clone();
+            let h = V::lsa_header_mut(&mut new_data);
+            V::set_ls_seq_number(h, V::ls_seq_number(h) + 1);
+            V::set_ls_age(h, 0);
+            V::update_lsa(&mut new_data);
+            let mut lsa = Lsa::<V>::new(new_data);
+            lsa.originated = true;
+            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
+            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+            self.tables.insert(lsa_key, lsa);
+        }
+    }
+
+    /// Re-originate an existing LSA but only after raising the
+    /// sequence number above `min_seq`. Used when we see a peer
+    /// advertising our LSA with a higher sequence than what we
+    /// have on file (RFC 2328 §13.4 self-originated catch-up).
+    /// Now generic.
+    pub fn refresh_lsa_with_seq(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        min_seq: u32,
+        tx: &UnboundedSender<Message>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(old_lsa) = self.tables.get(&lsa_key) {
+            let mut new_data = old_lsa.data.clone();
+            let h = V::lsa_header_mut(&mut new_data);
+            let next_seq = V::ls_seq_number(h).max(min_seq) + 1;
+            V::set_ls_seq_number(h, next_seq);
+            V::set_ls_age(h, 0);
+            V::update_lsa(&mut new_data);
+            let mut lsa = Lsa::<V>::new(new_data);
+            lsa.originated = true;
+            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
+            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+            self.tables.insert(lsa_key, lsa);
+        }
+    }
 }
 
 impl<V: OspfVersion> Default for Lsdb<V> {
@@ -323,52 +380,6 @@ impl Lsdb<Ospfv2> {
             for tlv in lsp.tlvs.iter() {
                 self.reach_map.insert(tlv.prefix, tlv.subs.clone());
             }
-        }
-    }
-
-    pub fn refresh_lsa(
-        &mut self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-        tx: &UnboundedSender<Message>,
-        area_id: Option<Ipv4Addr>,
-    ) {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
-        if let Some(old_lsa) = self.tables.get(&lsa_key) {
-            let mut new_data = old_lsa.data.clone();
-            new_data.h.ls_seq_number += 1;
-            new_data.h.ls_age = 0;
-            new_data.update();
-            let mut lsa = Lsa::<Ospfv2>::new(new_data);
-            lsa.originated = true;
-            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
-            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            self.tables.insert(lsa_key, lsa);
-        }
-    }
-
-    pub fn refresh_lsa_with_seq(
-        &mut self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-        min_seq: u32,
-        tx: &UnboundedSender<Message>,
-        area_id: Option<Ipv4Addr>,
-    ) {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
-        if let Some(old_lsa) = self.tables.get(&lsa_key) {
-            let mut new_data = old_lsa.data.clone();
-            let next_seq = old_lsa.data.h.ls_seq_number.max(min_seq) + 1;
-            new_data.h.ls_seq_number = next_seq;
-            new_data.h.ls_age = 0;
-            new_data.update();
-            let mut lsa = Lsa::<Ospfv2>::new(new_data);
-            lsa.originated = true;
-            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
-            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            self.tables.insert(lsa_key, lsa);
         }
     }
 }

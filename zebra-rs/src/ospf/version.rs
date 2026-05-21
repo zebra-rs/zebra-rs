@@ -112,6 +112,24 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// Set the LS Age in the header. Hold-timer expiry, flushing,
     /// and refresh all need this.
     fn set_ls_age(h: &mut Self::LsaHeader, age: u16);
+
+    /// LS Sequence Number. Same field name and 32-bit width in
+    /// both versions (RFC 2328 §A.4.1 / RFC 5340 §A.4.2.1).
+    fn ls_seq_number(h: &Self::LsaHeader) -> u32;
+
+    /// Set the LS Sequence Number. Used when refreshing an LSA or
+    /// reseating one to override a higher sequence number we saw
+    /// on the wire.
+    fn set_ls_seq_number(h: &mut Self::LsaHeader, seq: u32);
+
+    /// Recompute the LSA's length and checksum after the caller
+    /// mutated header fields (`ls_age` / `ls_seq_number`) or the
+    /// body. For v2 this calls `OspfLsa::update` (Fletcher
+    /// checksum per RFC 2328 §A.4.1). For v3 the Fletcher
+    /// implementation hasn't landed yet — the impl is a TODO
+    /// no-op for now, fine since no `Ospf<Ospfv3>` instance is
+    /// running. Tracked as a follow-up in the `ospf-packet` crate.
+    fn update_lsa(lsa: &mut Self::Lsa);
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -140,6 +158,15 @@ impl OspfVersion for Ospfv2 {
     }
     fn set_ls_age(h: &mut OspfLsaHeader, age: u16) {
         h.ls_age = age;
+    }
+    fn ls_seq_number(h: &OspfLsaHeader) -> u32 {
+        h.ls_seq_number
+    }
+    fn set_ls_seq_number(h: &mut OspfLsaHeader, seq: u32) {
+        h.ls_seq_number = seq;
+    }
+    fn update_lsa(lsa: &mut OspfLsa) {
+        lsa.update();
     }
 }
 
@@ -181,5 +208,18 @@ impl OspfVersion for Ospfv3 {
     }
     fn set_ls_age(h: &mut Ospfv3LsaHeader, age: u16) {
         h.ls_age = age;
+    }
+    fn ls_seq_number(h: &Ospfv3LsaHeader) -> u32 {
+        h.ls_seq_number
+    }
+    fn set_ls_seq_number(h: &mut Ospfv3LsaHeader, seq: u32) {
+        h.ls_seq_number = seq;
+    }
+    fn update_lsa(_lsa: &mut Ospfv3Lsa) {
+        // TODO: implement Ospfv3Lsa::update() in ospf-packet —
+        // Fletcher checksum + length over §A.4.2.1 layout. Until
+        // that lands, this is a no-op. Safe today because no v3
+        // instance is running, so no caller relies on the updated
+        // fields.
     }
 }
