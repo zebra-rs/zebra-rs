@@ -38,7 +38,7 @@ use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::{ParseBe, many0_complete};
 
-use super::OspfType;
+use super::{DbDescFlags, OspfType};
 
 /// OSPFv3 protocol version (header octet 0).
 pub const OSPFV3_VERSION: u8 = 3;
@@ -101,13 +101,14 @@ impl Ospfv3Packet {
     }
 }
 
-/// v3 packet payload. Currently only `Hello` is typed; the other
-/// types parse into `Unknown` so the codec roundtrips opaque
-/// captures without dropping the body. Typed variants for DBD / LSR /
-/// LSU / LSAck land in subsequent PRs.
+/// v3 packet payload. Hello and DBD are typed; the remaining types
+/// parse into `Unknown` so the codec roundtrips opaque captures
+/// without dropping the body. Typed variants for LSR / LSU / LSAck
+/// land in subsequent PRs.
 #[derive(Debug, Clone)]
 pub enum Ospfv3Payload {
     Hello(Ospfv3Hello),
+    DbDesc(Ospfv3DbDesc),
     Unknown(Vec<u8>),
 }
 
@@ -115,6 +116,7 @@ impl Ospfv3Payload {
     pub fn typ(&self) -> OspfType {
         match self {
             Ospfv3Payload::Hello(_) => OspfType::Hello,
+            Ospfv3Payload::DbDesc(_) => OspfType::DbDesc,
             // Unknown carries the raw body; the type stays in the
             // header where the caller put it.
             Ospfv3Payload::Unknown(_) => OspfType::Unknown(0),
@@ -124,6 +126,7 @@ impl Ospfv3Payload {
     pub fn emit(&self, buf: &mut BytesMut) {
         match self {
             Ospfv3Payload::Hello(h) => h.emit(buf),
+            Ospfv3Payload::DbDesc(d) => d.emit(buf),
             Ospfv3Payload::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -134,7 +137,11 @@ impl Ospfv3Payload {
                 let (input, hello) = Ospfv3Hello::parse_be(input)?;
                 Ok((input, Ospfv3Payload::Hello(hello)))
             }
-            // Until typed payloads land for DBD / LSR / LSU / LSAck,
+            OspfType::DbDesc => {
+                let (input, dd) = Ospfv3DbDesc::parse_be(input)?;
+                Ok((input, Ospfv3Payload::DbDesc(dd)))
+            }
+            // Until typed payloads land for LSR / LSU / LSAck,
             // capture them as raw bytes.
             _ => Ok((&[][..], Ospfv3Payload::Unknown(input.to_vec()))),
         }
@@ -241,6 +248,100 @@ pub struct Ospfv3Options {
     pub reserved: u32,
 }
 
+/// Length of a v3 LSA header in octets (RFC 5340 §A.4.2). Same total
+/// size as v2's, but the v2 `(options: u8, ls_type: u8)` pair becomes
+/// a single 16-bit `ls_type` carrying the U/S2/S1/function-code
+/// encoding from §A.4.2.1.
+pub const OSPFV3_LSA_HEADER_LEN: u16 = 20;
+
+/// v3 LSA header (RFC 5340 §A.4.2).
+///
+/// The `ls_type` is stored as a raw `u16`. The §A.4.2.1 encoding
+/// (U bit, scope bits S2/S1, 13-bit function code) is decoded by
+/// downstream consumers when typed LSA bodies land — for now the
+/// codec just roundtrips the whole field.
+#[derive(Debug, Clone, NomBE)]
+pub struct Ospfv3LsaHeader {
+    pub ls_age: u16,
+    pub ls_type: u16,
+    pub link_state_id: u32,
+    pub advertising_router: Ipv4Addr,
+    pub ls_seq_number: u32,
+    pub ls_checksum: u16,
+    pub length: u16,
+}
+
+impl Ospfv3LsaHeader {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.ls_age);
+        buf.put_u16(self.ls_type);
+        buf.put_u32(self.link_state_id);
+        buf.put(&self.advertising_router.octets()[..]);
+        buf.put_u32(self.ls_seq_number);
+        buf.put_u16(self.ls_checksum);
+        buf.put_u16(self.length);
+    }
+}
+
+/// v3 Database Description packet body (RFC 5340 §A.3.3).
+///
+/// Layout:
+///   - Reserved (1 octet) — must be 0
+///   - Options (3 octets) — v3 24-bit Options field (same shape as
+///     `Ospfv3Hello::options`)
+///   - Interface MTU (2 octets)
+///   - Reserved (1 octet) — must be 0
+///   - Flags (1 octet) — same I/M/MS layout as v2 `DbDescFlags`
+///   - DD Sequence Number (4 octets)
+///   - LSA headers (variable, 20 octets each)
+#[derive(Debug, Clone)]
+pub struct Ospfv3DbDesc {
+    pub options: Ospfv3Options,
+    pub if_mtu: u16,
+    pub flags: DbDescFlags,
+    pub seqnum: u32,
+    pub lsa_headers: Vec<Ospfv3LsaHeader>,
+}
+
+impl Ospfv3DbDesc {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(0); // Reserved
+        let opts24 = self.options.into_bits() & 0x00FF_FFFF;
+        buf.put_u8(((opts24 >> 16) & 0xFF) as u8);
+        buf.put_u8(((opts24 >> 8) & 0xFF) as u8);
+        buf.put_u8((opts24 & 0xFF) as u8);
+        buf.put_u16(self.if_mtu);
+        buf.put_u8(0); // Reserved
+        buf.put_u8(self.flags.into_bits());
+        buf.put_u32(self.seqnum);
+        for h in &self.lsa_headers {
+            h.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3DbDesc> for Ospfv3DbDesc {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3DbDesc> {
+        let (input, _resv1) = be_u8(input)?;
+        let (input, options_24) = be_u24(input)?;
+        let (input, if_mtu) = be_u16(input)?;
+        let (input, _resv2) = be_u8(input)?;
+        let (input, flags_byte) = be_u8(input)?;
+        let (input, seqnum) = be_u32(input)?;
+        let (input, lsa_headers) = many0_complete(Ospfv3LsaHeader::parse_be).parse(input)?;
+        Ok((
+            input,
+            Ospfv3DbDesc {
+                options: Ospfv3Options::from_bits(options_24),
+                if_mtu,
+                flags: DbDescFlags::from_bits(flags_byte),
+                seqnum,
+                lsa_headers,
+            },
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,8 +423,9 @@ mod tests {
         assert_eq!(word & 0x00FF_FFFF, 0x0000_0013);
     }
 
-    /// Captures of v3 DBD / LSR / LSU / LSAck (the still-untyped
-    /// payloads) roundtrip as opaque bytes.
+    /// Captures of v3 LSR / LSU / LSAck (the still-untyped payloads)
+    /// roundtrip as opaque bytes. Once those types land, this test
+    /// migrates to verifying the typed variant.
     #[test]
     fn ospfv3_unknown_payload_roundtrip() {
         let body = vec![0xAA, 0xBB, 0xCC, 0xDD];
@@ -335,7 +437,7 @@ mod tests {
         );
         // The Unknown variant's `typ()` is a placeholder; preserve
         // the actual wire type via the header field.
-        pkt.typ = OspfType::DbDesc;
+        pkt.typ = OspfType::LsRequest;
 
         let mut buf = BytesMut::new();
         pkt.emit(&mut buf);
@@ -343,10 +445,121 @@ mod tests {
 
         let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
-        assert_eq!(parsed.typ, OspfType::DbDesc);
+        assert_eq!(parsed.typ, OspfType::LsRequest);
         match parsed.payload {
             Ospfv3Payload::Unknown(bytes) => assert_eq!(bytes, body),
             other => panic!("expected Unknown payload, got {:?}", other),
+        }
+    }
+
+    fn make_dbdesc() -> Ospfv3DbDesc {
+        let mut options = Ospfv3Options::new();
+        options.set_v6(true);
+        options.set_r(true);
+        let mut flags = DbDescFlags::new();
+        flags.set_init(true);
+        flags.set_more(true);
+        flags.set_master(true);
+        Ospfv3DbDesc {
+            options,
+            if_mtu: 1500,
+            flags,
+            seqnum: 0x1234_5678,
+            lsa_headers: vec![
+                // A Router-LSA-shaped header (LS Type 0x2001 per §A.4.2.1):
+                // S2=0, S1=1 (area scope), function code 1.
+                Ospfv3LsaHeader {
+                    ls_age: 0,
+                    ls_type: 0x2001,
+                    link_state_id: 0,
+                    advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                    ls_seq_number: 0x8000_0001,
+                    ls_checksum: 0xABCD,
+                    length: 24,
+                },
+                // A Network-LSA-shaped header (LS Type 0x2002).
+                Ospfv3LsaHeader {
+                    ls_age: 5,
+                    ls_type: 0x2002,
+                    link_state_id: 0x0102_0304,
+                    advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                    ls_seq_number: 0x8000_0002,
+                    ls_checksum: 0xCAFE,
+                    length: 32,
+                },
+            ],
+        }
+    }
+
+    /// Full DBD packet (header + body + two v3 LSA headers) roundtrips
+    /// every field. Pins the v3 LSA header at 20 octets and validates
+    /// the (Reserved, Options24, MTU, Reserved, Flags, Seq, headers)
+    /// field order in the body.
+    #[test]
+    fn ospfv3_dbdesc_packet_roundtrip() {
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::DbDesc(make_dbdesc()),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Header (16) + DBD fixed (12) + 2 LSA headers (40) = 68.
+        assert_eq!(buf.len(), 68);
+        assert_eq!(BigEndian::read_u16(&buf[2..4]), 68);
+
+        // After the 16-byte header, the DBD body's first octet is
+        // Reserved (must be 0).
+        assert_eq!(buf[OSPFV3_HEADER_LEN], 0);
+        // Then Options24 -- v6 (bit 0) + r (bit 4) = 0x11.
+        assert_eq!(
+            BigEndian::read_u24(&buf[OSPFV3_HEADER_LEN + 1..OSPFV3_HEADER_LEN + 4]),
+            0x0000_0011
+        );
+
+        let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.typ, OspfType::DbDesc);
+        match parsed.payload {
+            Ospfv3Payload::DbDesc(d) => {
+                let expected = make_dbdesc();
+                assert_eq!(d.options, expected.options);
+                assert_eq!(d.if_mtu, expected.if_mtu);
+                assert_eq!(d.flags, expected.flags);
+                assert_eq!(d.seqnum, expected.seqnum);
+                assert_eq!(d.lsa_headers.len(), 2);
+                assert_eq!(d.lsa_headers[0].ls_type, 0x2001);
+                assert_eq!(d.lsa_headers[1].ls_type, 0x2002);
+                assert_eq!(d.lsa_headers[1].link_state_id, 0x0102_0304);
+            }
+            other => panic!("expected DbDesc payload, got {:?}", other),
+        }
+    }
+
+    /// An empty-LSA-list DBD still emits the fixed 12-octet body and
+    /// the parse_be entry point doesn't trip up on zero-length
+    /// trailing data.
+    #[test]
+    fn ospfv3_dbdesc_no_lsa_headers() {
+        let mut body = make_dbdesc();
+        body.lsa_headers.clear();
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::DbDesc(body),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(buf.len(), OSPFV3_HEADER_LEN + 12);
+
+        let (_, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        match parsed.payload {
+            Ospfv3Payload::DbDesc(d) => assert!(d.lsa_headers.is_empty()),
+            other => panic!("expected DbDesc payload, got {:?}", other),
         }
     }
 }
