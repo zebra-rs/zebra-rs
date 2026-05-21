@@ -33,11 +33,35 @@ pub type LsTable<V = Ospfv2> = BTreeMap<OspfLsaKey, Lsa<V>>;
 
 /// LSDB key: `(LS-Type, LS-ID, Advertising-Router)`.
 ///
-/// Still v2-shaped — uses `OspfLsType` (v2's u8 enum). v3 LS-Types
-/// are 16-bit numeric per RFC 5340 §A.4.2.1; a unified key (or a
-/// `V::LsType` associated type) lands when the v3 LSDB consumer
-/// materializes.
-pub type OspfLsaKey = (OspfLsType, Ipv4Addr, Ipv4Addr);
+/// Widened from `(OspfLsType, Ipv4Addr, Ipv4Addr)` to a flat
+/// `(u16, u32, Ipv4Addr)` shape so v3 LS-Types (16-bit per
+/// RFC 5340 §A.4.2.1) and v3 Link State IDs (32-bit opaque
+/// values, not always IPs) fit alongside v2's smaller types.
+/// v2 callers convert their `OspfLsType` enum to `u16` via the
+/// existing `u8::from(ls_type)` impl, and their `Ipv4Addr`
+/// `ls_id` to `u32` via `u32::from`; the reverse conversions
+/// (`OspfLsType::from(x as u8)`, `Ipv4Addr::from(x)`) are used
+/// where the original v2-typed value is wanted back.
+pub type OspfLsaKey = (u16, u32, Ipv4Addr);
+
+/// Construct an `OspfLsaKey` from v2-typed components — `OspfLsType`
+/// widens to `u16` (via the existing `u8::from(ls_type)` impl) and
+/// `Ipv4Addr` widens to `u32`. Convenience for the v2-bound code
+/// paths that already speak the v2 types and just need a key for
+/// LSDB / channel use.
+pub fn v2_lsa_key(ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) -> OspfLsaKey {
+    (u8::from(ls_type) as u16, u32::from(ls_id), adv_router)
+}
+
+/// Destructure an `OspfLsaKey` back into v2-typed components.
+/// Inverse of [`v2_lsa_key`]; `OspfLsType::from(u8)` round-trips
+/// from u16, and `Ipv4Addr::from(u32)` from u32. The reverse
+/// conversion is safe for v2-shaped keys; on v3-shaped keys the
+/// `OspfLsType::from(... as u8)` truncates the upper byte and
+/// returns the `Unknown` variant for codepoints that don't fit v2.
+pub fn v2_lsa_key_unpack(key: OspfLsaKey) -> (OspfLsType, Ipv4Addr, Ipv4Addr) {
+    (OspfLsType::from(key.0 as u8), Ipv4Addr::from(key.1), key.2)
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LsdbEvent {
@@ -208,25 +232,27 @@ impl<V: OspfVersion> Lsdb<V> {
         &self,
         ls_type: OspfLsType,
     ) -> impl Iterator<Item = ((Ipv4Addr, Ipv4Addr), &Lsa<V>)> {
+        let want: u16 = u8::from(ls_type) as u16;
         self.tables
             .iter()
-            .filter(move |((t, _, _), _)| *t == ls_type)
-            .map(|((_, id, adv), lsa)| ((*id, *adv), lsa))
+            .filter(move |((t, _, _), _)| *t == want)
+            .map(|((_, id, adv), lsa)| ((Ipv4Addr::from(*id), *adv), lsa))
     }
 
     /// Iterate just the LSA values of a particular LS-Type. Convenience
     /// over `iter_by_type` for callers that don't need the key.
     pub fn values_by_type(&self, ls_type: OspfLsType) -> impl Iterator<Item = &Lsa<V>> {
+        let want: u16 = u8::from(ls_type) as u16;
         self.tables
             .iter()
-            .filter(move |((t, _, _), _)| *t == ls_type)
+            .filter(move |((t, _, _), _)| *t == want)
             .map(|(_, lsa)| lsa)
     }
 
     /// Drop the LSA at the given key. Key-only operation — no
     /// header field access, so trivially generic.
     pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
-        self.tables.remove(&(ls_type, ls_id, adv_router));
+        self.tables.remove(&v2_lsa_key(ls_type, ls_id, adv_router));
     }
 
     /// Flush an LSA by setting its age to MaxAge and returning a
@@ -241,7 +267,7 @@ impl<V: OspfVersion> Lsdb<V> {
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) -> Option<V::Lsa> {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
         if let Some(lsa) = self.tables.get_mut(&lsa_key) {
             V::set_ls_age(V::lsa_header_mut(&mut lsa.data), OSPF_MAX_AGE);
             lsa.birth_time = tokio::time::Instant::now();
@@ -262,7 +288,7 @@ impl<V: OspfVersion> Lsdb<V> {
         adv_router: Ipv4Addr,
     ) -> Option<&V::Lsa> {
         self.tables
-            .get(&(ls_type, ls_id, adv_router))
+            .get(&v2_lsa_key(ls_type, ls_id, adv_router))
             .map(|lsa| &lsa.data)
     }
 
@@ -274,7 +300,7 @@ impl<V: OspfVersion> Lsdb<V> {
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
     ) -> Option<&Lsa<V>> {
-        self.tables.get(&(ls_type, ls_id, adv_router))
+        self.tables.get(&v2_lsa_key(ls_type, ls_id, adv_router))
     }
 
     /// Return the install timestamp of an LSA, if present. Now
@@ -301,7 +327,7 @@ impl<V: OspfVersion> Lsdb<V> {
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
         if let Some(old_lsa) = self.tables.get(&lsa_key) {
             let mut new_data = old_lsa.data.clone();
             let h = V::lsa_header_mut(&mut new_data);
@@ -330,7 +356,7 @@ impl<V: OspfVersion> Lsdb<V> {
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
         if let Some(old_lsa) = self.tables.get(&lsa_key) {
             let mut new_data = old_lsa.data.clone();
             let h = V::lsa_header_mut(&mut new_data);
@@ -366,7 +392,8 @@ impl Lsdb<Ospfv2> {
             Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
             | OpaqueAreaLocal => {
                 ospf_lsa.update();
-                let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+                let lsa_key: OspfLsaKey =
+                    v2_lsa_key(ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
                 lsa.originated = true;
                 lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
@@ -384,7 +411,7 @@ impl Lsdb<Ospfv2> {
         area_id: Option<Ipv4Addr>,
     ) {
         let ls_type = ospf_lsa.h.ls_type;
-        let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
+        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
 
         self.update_lsa(&ospf_lsa);
 
