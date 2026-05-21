@@ -346,6 +346,22 @@ pub fn parse_bgp_update_attribute(
                             updates,
                         })
                     }
+                    MpReachAttr::Ipv4 {
+                        snpa,
+                        nhop,
+                        updates,
+                    } => {
+                        // RFC 8950 IPv4-over-IPv6: the next-hop is an
+                        // IPv6 address that `BgpNexthop` has no variant
+                        // for, so leave `bgp_attr.nexthop` unset — the
+                        // consumer in `bgp/route.rs` reads `nhop` off
+                        // the mp_update variant directly.
+                        mp_update = Some(MpReachAttr::Ipv4 {
+                            snpa,
+                            nhop,
+                            updates,
+                        });
+                    }
                     _ => {
                         //
                     }

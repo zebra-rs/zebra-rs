@@ -21,7 +21,7 @@
 //! handles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -478,7 +478,7 @@ pub fn flush_ipv4(
 
         // Canonical UPDATE: every NLRI in the bucket.
         let canonical: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let canonical_bytes = encode_ipv4_update(&attr, &canonical, max_packet_size);
+        let canonical_bytes = encode_ipv4_update(&attr, &canonical, max_packet_size, None);
         let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
 
         // Bump per-attr-bucket counters: one formatted variant
@@ -517,7 +517,7 @@ pub fn flush_ipv4(
                 }
                 continue;
             }
-            let pruned_bytes = encode_ipv4_update(&attr, &nlris, max_packet_size);
+            let pruned_bytes = encode_ipv4_update(&attr, &nlris, max_packet_size, None);
             let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
             if let Some(group) = af.group_by_id_mut(id) {
                 group.counters.messages_formatted += pruned_bytes.len() as u64;
@@ -560,7 +560,7 @@ pub(super) fn send_ipv4_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv4Nlri
         bgp_packet::BGP_PACKET_LEN
     };
     for (attr, nlris) in buckets {
-        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size);
+        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, None);
         for buf in bytes_list {
             peer.send_packet(buf);
         }
@@ -568,20 +568,37 @@ pub(super) fn send_ipv4_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv4Nlri
 }
 
 /// Encode one or more UPDATE PDUs carrying `nlris` under `attr`.
-/// Pagination is handled by `UpdatePacket::pop_ipv4`, which respects
-/// `max_packet_size`. Returns the encoded byte buffers; the caller
-/// is responsible for fan-out.
+///
+/// When `extended_next_hop_v6` is `Some(ll)`, NLRIs are emitted via
+/// `UpdatePacket::pop_ipv4_mp_reach` — MP_REACH(AFI=1, SAFI=1) with
+/// an IPv6 next-hop, per RFC 8950. When `None`, the legacy
+/// `pop_ipv4` path is used (NLRI inline, NEXT_HOP attribute carries
+/// the v4 next-hop).
+///
+/// All current callers pass `None`; the ENHE-aware call sites land
+/// in a follow-up that wires per-peer v6 next-hop derivation through
+/// to the flush/sync paths.
 fn encode_ipv4_update(
     attr: &Arc<BgpAttr>,
     nlris: &[Ipv4Nlri],
     max_packet_size: usize,
+    extended_next_hop_v6: Option<Ipv6Addr>,
 ) -> Vec<bytes::BytesMut> {
     let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
     update.bgp_attr = Some((**attr).clone());
     update.ipv4_update = nlris.to_vec();
     let mut out = Vec::new();
-    while let Some(bytes) = update.pop_ipv4() {
-        out.push(bytes);
+    match extended_next_hop_v6 {
+        Some(ll) => {
+            while let Some(bytes) = update.pop_ipv4_mp_reach(ll) {
+                out.push(bytes);
+            }
+        }
+        None => {
+            while let Some(bytes) = update.pop_ipv4() {
+                out.push(bytes);
+            }
+        }
     }
     out
 }
