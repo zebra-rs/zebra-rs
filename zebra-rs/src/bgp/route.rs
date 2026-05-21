@@ -33,6 +33,79 @@ impl BgpRibType {
     }
 }
 
+/// Build a `rib::entry::RibEntry` from the BGP best-path winner for an
+/// IPv4 unicast prefix. Returns `None` when the BGP route has no
+/// installable next-hop — VPNv4 / EVPN have their own install paths,
+/// and a 0.0.0.0 next-hop (originated routes that never got a self
+/// next-hop rewrite) shouldn't reach the kernel FIB.
+fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
+    let nh = match best.attr.nexthop.as_ref()? {
+        BgpNexthop::Ipv4(addr) => *addr,
+        // VPNv4 / EVPN nexthops are handled by their own per-AFI
+        // install paths; the plain v4 Loc-RIB shouldn't be carrying
+        // them but be defensive.
+        _ => return None,
+    };
+    if nh.is_unspecified() {
+        return None;
+    }
+
+    // Administrative distance per Cisco / FRR convention. eBGP=20,
+    // iBGP=200; originated paths take the iBGP value since they're
+    // local-precedence work and we don't currently expose a knob.
+    let distance = match best.typ {
+        BgpRibType::EBGP => 20,
+        BgpRibType::IBGP | BgpRibType::Originated => 200,
+    };
+    let metric = best.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = distance;
+    entry.metric = metric;
+    entry.valid = true;
+    entry.nexthop = rib::Nexthop::Uni(rib::NexthopUni {
+        addr: IpAddr::V4(nh),
+        metric,
+        weight: 1,
+        valid: true,
+        ..Default::default()
+    });
+    Some(entry)
+}
+
+/// Reconcile the kernel FIB state for `prefix` with the BGP best-path
+/// outcome. `selected` is the `select_best_path` return: at most one
+/// `BgpRib` after Phase-1 best-path selection. Empty means every
+/// candidate just disappeared — emit a withdraw.
+///
+/// VPNv4 / EVPN take their own install paths; this helper is for
+/// plain IPv4 unicast only.
+fn fib_install_v4(
+    rib_client: &crate::rib::client::RibClient,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+) {
+    let installable = selected.first().and_then(make_bgp_rib_entry_v4);
+    match installable {
+        Some(rib_entry) => {
+            let _ = rib_client.send(rib::Message::Ipv4Add {
+                prefix,
+                rib: rib_entry,
+            });
+        }
+        None => {
+            // Either selected is empty or the best path lacks a
+            // usable v4 next-hop. Either way, the prefix should not
+            // be in the FIB. The RIB layer ignores a Del for an
+            // entry it never installed, so this is safe to fire
+            // unconditionally.
+            let mut stub = rib::entry::RibEntry::new(rib::RibType::Bgp);
+            stub.valid = false;
+            let _ = rib_client.send(rib::Message::Ipv4Del { prefix, rib: stub });
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BgpRib {
     // AddPath ID from peer.
@@ -748,6 +821,13 @@ pub fn route_ipv4_update(
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
+
+    // Plain IPv4 unicast best-path winners are installed to the kernel
+    // FIB via RIB. VPNv4 lives in `local_rib.v4vpn` and has its own
+    // (still-deferred) install path, so gate on rd==None.
+    if rd.is_none() {
+        fib_install_v4(bgp.rib_client, nlri.prefix, &selected);
+    }
 
     // Advertise to peers if best path changed.
     if !selected.is_empty() {
@@ -1708,6 +1788,13 @@ pub fn route_ipv4_withdraw(
     } else {
         bgp.local_rib.select_best_path(nlri.prefix)
     };
+    // Reconcile FIB after the withdraw: empty `selected` means the
+    // last candidate just disappeared and we should withdraw from
+    // the kernel; non-empty means a replacement path is now best
+    // and a fresh Ipv4Add carries the new attrs.
+    if rd.is_none() {
+        fib_install_v4(bgp.rib_client, nlri.prefix, &selected);
+    }
     if !selected.is_empty() || !removed.is_empty() {
         route_advertise_to_peers(rd, nlri.prefix, &selected, ident, bgp, peers);
     }
@@ -4978,5 +5065,69 @@ mod tests {
         // 192.168.0.0/24 falls through to entry 20 (permit).
         let permitted = policy_list_apply(&list, &nlri("192.168.0.0/24"), BgpAttr::default());
         assert!(permitted.is_some());
+    }
+
+    // FIB install translation: `make_bgp_rib_entry_v4` produces an
+    // installable RibEntry only when the BGP best-path has a usable
+    // IPv4 next-hop. The four cases below cover the decision matrix.
+
+    fn bgp_rib_with_nexthop(nh: Option<BgpNexthop>, typ: super::BgpRibType) -> super::BgpRib {
+        let attr = BgpAttr {
+            nexthop: nh,
+            ..BgpAttr::default()
+        };
+        super::BgpRib::new(
+            42, // ident
+            Ipv4Addr::new(10, 0, 0, 1),
+            typ,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn fib_entry_built_for_v4_ebgp_route() {
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            super::BgpRibType::EBGP,
+        );
+        let entry = super::make_bgp_rib_entry_v4(&rib).expect("must build");
+        assert_eq!(entry.distance, 20);
+        assert!(entry.valid);
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(ref uni) => {
+                assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+            }
+            _ => panic!("expected NexthopUni"),
+        }
+    }
+
+    #[test]
+    fn fib_entry_uses_ibgp_distance_for_ibgp() {
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            super::BgpRibType::IBGP,
+        );
+        let entry = super::make_bgp_rib_entry_v4(&rib).expect("must build");
+        assert_eq!(entry.distance, 200);
+    }
+
+    #[test]
+    fn fib_entry_skipped_for_unspecified_nexthop() {
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::UNSPECIFIED)),
+            super::BgpRibType::EBGP,
+        );
+        assert!(super::make_bgp_rib_entry_v4(&rib).is_none());
+    }
+
+    #[test]
+    fn fib_entry_skipped_when_nexthop_missing() {
+        let rib = bgp_rib_with_nexthop(None, super::BgpRibType::EBGP);
+        assert!(super::make_bgp_rib_entry_v4(&rib).is_none());
     }
 }
