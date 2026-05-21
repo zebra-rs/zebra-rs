@@ -10,13 +10,13 @@
 //! code calls `ctx.tcp_socket_v4()?` instead of `TcpSocket::new_v4()`
 //! and the context decides whether to set `SO_BINDTODEVICE`.
 //!
-//! Step 4 lands the type and the factory API surface; the
-//! `maybe_bind_device` body is a no-op until step 8 wires the
-//! actual setsockopt call. The `for_vrf` constructor exists for
-//! symmetry but has no production caller until step 13 (per-VRF
-//! BGP tasks) reaches it — `default_table` is the only spawn-side
-//! constructor in tree today, which is exactly the no-binding
-//! behaviour the legacy `TcpSocket::new_*` callsites had.
+//! Step 4 landed the type and the factory API surface with a
+//! no-op `maybe_bind_device`; step 8 lights up the real
+//! `setsockopt(SO_BINDTODEVICE)` call on Linux. The `for_vrf`
+//! constructor still has no production caller until step 13
+//! (per-VRF BGP tasks) reaches it — `default_table` is the only
+//! spawn-side constructor in tree today, which keeps every
+//! existing socket binding-free.
 //!
 //! `Clone` is intentional: the per-task FSMs, listen accept loops,
 //! and timer callbacks all take their own copies. The clone is
@@ -40,9 +40,9 @@ pub struct ProtoContext {
     /// out from `VrfIdAllocator` when the master device is created.
     vrf_id: u32,
     /// VRF master device name. `Some(name)` iff `vrf_id != 0` — the
-    /// invariant the constructors enforce. The socket factories use
-    /// this for `SO_BINDTODEVICE` once step 8 lights up the body of
-    /// `maybe_bind_device`.
+    /// invariant the constructors enforce. The socket factories
+    /// drive [`Self::maybe_bind_device`] with this; the value is
+    /// passed verbatim to `setsockopt(SOL_SOCKET, SO_BINDTODEVICE)`.
     vrf_ifname: Option<String>,
     /// Bound RIB client. Public so the FSM / listen accept loop / SR
     /// allocator / redistribute helpers can clone it without having
@@ -216,25 +216,74 @@ impl ProtoContext {
         Ok(sock)
     }
 
-    /// Hook point for `SO_BINDTODEVICE`. The implementation is
-    /// deliberately empty in step 4 — every production caller uses
-    /// `default_table`, where binding is a no-op — and lands in
-    /// step 8 alongside per-VRF table support in RIB.
+    /// Apply `SO_BINDTODEVICE` if this context is attached to a
+    /// VRF. The kernel will then route every send through the VRF
+    /// master device's table.
     ///
-    /// Reading `vrf_ifname` here even though the body is a no-op
-    /// keeps the field from being flagged unused, and gives step 8
-    /// a single point to extend.
-    fn maybe_bind_device<S: AsRawFd>(&self, _sock: &S) -> io::Result<()> {
-        if let Some(ifname) = &self.vrf_ifname {
-            // for_vrf has no production caller in step 4, so this
-            // arm is reachable only from explicit unit tests. The
-            // `trace!` lets those tests observe that the field
-            // plumbing works without us actually issuing a
-            // privileged setsockopt.
-            tracing::trace!(
+    /// Requires `CAP_NET_RAW` on Linux; production callers run as
+    /// root or via systemd `AmbientCapabilities=CAP_NET_RAW`, but
+    /// tests can run unprivileged because all `default_table`
+    /// callers short-circuit on the `None` arm.
+    #[cfg(target_os = "linux")]
+    fn maybe_bind_device<S: AsRawFd>(&self, sock: &S) -> io::Result<()> {
+        let Some(ifname) = self.vrf_ifname.as_deref() else {
+            return Ok(());
+        };
+        // The kernel buffer is `char ifr_name[IFNAMSIZ]` (16 bytes
+        // including NUL), so reject names that would not survive
+        // the round-trip via `SIOCGIFNAME`. Done in Rust rather
+        // than via the kernel's `ENAMETOOLONG` so the error message
+        // names the offending leaf.
+        if ifname.len() >= libc::IFNAMSIZ {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "ProtoContext: vrf ifname {:?} exceeds IFNAMSIZ ({})",
+                    ifname,
+                    libc::IFNAMSIZ
+                ),
+            ));
+        }
+        if ifname.as_bytes().contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ProtoContext: vrf ifname contains an interior NUL",
+            ));
+        }
+        let rc = unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                ifname.as_ptr() as *const libc::c_void,
+                ifname.len() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            tracing::warn!(
                 vrf_id = self.vrf_id,
                 ifname = %ifname,
-                "ProtoContext: SO_BINDTODEVICE deferred to step 8"
+                error = %err,
+                "ProtoContext: SO_BINDTODEVICE failed",
+            );
+            return Err(err);
+        }
+        tracing::debug!(
+            vrf_id = self.vrf_id,
+            ifname = %ifname,
+            "ProtoContext: SO_BINDTODEVICE applied",
+        );
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn maybe_bind_device<S: AsRawFd>(&self, _sock: &S) -> io::Result<()> {
+        if let Some(ifname) = &self.vrf_ifname {
+            tracing::debug!(
+                vrf_id = self.vrf_id,
+                ifname = %ifname,
+                "ProtoContext: SO_BINDTODEVICE skipped (non-Linux target)",
             );
         }
         Ok(())
@@ -357,15 +406,55 @@ mod tests {
         let _ = ctx.rib.clone();
     }
 
-    #[tokio::test]
-    async fn for_vrf_socket_factory_still_succeeds_in_step_4() {
-        // maybe_bind_device is a no-op until step 8; for_vrf
-        // contexts must therefore produce sockets without error.
-        let ctx = ProtoContext::for_vrf(test_rib_client(), 10, "vrf-test".to_string());
-        let listener = ctx
-            .tcp_listen("127.0.0.1:0".parse().unwrap())
-            .await
-            .expect("for_vrf tcp_listen no-op in step 4");
-        assert!(listener.local_addr().is_ok());
+    #[test]
+    fn for_vrf_rejects_overly_long_ifname() {
+        // IFNAMSIZ = 16 (including NUL), so the longest valid name
+        // is 15 bytes. A 16-byte name must fail before reaching
+        // `setsockopt`.
+        let ctx = ProtoContext::for_vrf(test_rib_client(), 1, "a".repeat(libc::IFNAMSIZ));
+        let err = ctx
+            .tcp_socket_v4()
+            .expect_err("ifname >= IFNAMSIZ must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn for_vrf_rejects_ifname_with_interior_nul() {
+        let ctx = ProtoContext::for_vrf(test_rib_client(), 1, "vrf\0bad".to_string());
+        let err = ctx
+            .tcp_socket_v4()
+            .expect_err("ifname with NUL must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW: SO_BINDTODEVICE is privileged on Linux"]
+    fn for_vrf_socket_bind_to_lo_is_observable() {
+        // `lo` is always present; binding a fresh socket to it is
+        // the simplest positive test for the full setsockopt path.
+        // Marked `#[ignore]` so unprivileged CI doesn't hit EPERM —
+        // run with `sudo -E cargo test -- --ignored`.
+        let ctx = ProtoContext::for_vrf(test_rib_client(), 1, "lo".to_string());
+        let sock = ctx.tcp_socket_v4().expect("for_vrf tcp_socket_v4");
+        let mut buf = [0u8; libc::IFNAMSIZ];
+        let mut len = buf.len() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                sock.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "getsockopt failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let observed = std::str::from_utf8(&buf[..len.saturating_sub(1) as usize])
+            .expect("ifname is valid utf-8");
+        assert_eq!(observed, "lo");
     }
 }
