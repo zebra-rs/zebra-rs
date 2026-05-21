@@ -417,6 +417,146 @@ impl BgpVrf {
         }
     }
 
+    /// Step 18b: insert an imported VPNv4 route into the per-VRF
+    /// IPv4 unicast LocRIB and fan out to CE peers. `attr` is
+    /// re-interned in the per-VRF `attr_store`, the VPNv4
+    /// next-hop is rewritten to the VRF's router-id
+    /// (next-hop-self — CE peers cannot reach the PE address
+    /// the original carried), and the BgpRib lands with
+    /// `typ: Originated` because there's no peer-side ident
+    /// behind the import.
+    ///
+    /// After best-path runs, the shared `route_advertise_to_peers`
+    /// helper flows the winner out to every Established CE peer
+    /// with (AFI=Ip, SAFI=Unicast). The BgpTop hands
+    /// `vrf_export: None` so the export hook in
+    /// `route_ipv4_update` doesn't re-emit the imported route
+    /// back to the global instance — VPNv4 round-trip would be
+    /// a loop.
+    fn handle_import_v4(
+        &mut self,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv4Net,
+        mut attr: bgp_packet::BgpAttr,
+        label: u32,
+    ) {
+        // Rewrite the next-hop to "self" (the VRF's router-id)
+        // so CE peers receive a reachable v4 address.
+        attr.nexthop = Some(bgp_packet::BgpNexthop::Ipv4(self.router_id));
+        let interned = self.attr_store.intern(attr);
+
+        let label_obj = if label != 0 {
+            Some(bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            })
+        } else {
+            None
+        };
+
+        let rib = super::super::route::BgpRib {
+            remote_id: 0,
+            local_id: 0,
+            attr: interned,
+            ident: 0,
+            router_id: self.router_id,
+            weight: 0,
+            typ: super::super::route::BgpRibType::Originated,
+            best_path: false,
+            best_reason: super::super::route::Reason::Default,
+            label: label_obj,
+            // v4-unicast rows in LocRIB don't read the
+            // Vpnv4-shaped `nexthop` slot; FIB install pulls
+            // from `attr.nexthop` set above.
+            nexthop: None,
+            egress_ifindex_v6: None,
+            stale: false,
+            esi: None,
+        };
+
+        let (_, selected, _gen) = self.local_rib.update(None, prefix, rib);
+        let winners = selected.len();
+
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            // No re-export of imported routes: a VPNv4-from-RD
+            // re-emitted as a VPNv4-with-same-RD would loop.
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            vrf_import: None,
+        };
+        super::super::route::route_advertise_to_peers(
+            None,
+            prefix,
+            &selected,
+            /* source */ 0,
+            &mut top,
+            &mut self.peers,
+        );
+
+        tracing::info!(
+            vrf = %self.name,
+            %prefix,
+            rd = %rd,
+            label,
+            winners,
+            "bgp vrf: ImportV4 written to LocRIB and advertised to CE peers",
+        );
+    }
+
+    /// Step 18b: drop an imported route from the per-VRF LocRIB
+    /// and advertise the withdraw (or a replacement winner) to
+    /// CE peers. Symmetric with [`Self::handle_import_v4`].
+    fn handle_withdraw_import(
+        &mut self,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv4Net,
+    ) {
+        let removed = self.local_rib.remove(None, prefix, 0, 0);
+        let selected = self.local_rib.select_best_path(prefix);
+        let removed_n = removed.len();
+        let winners = selected.len();
+
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            vrf_import: None,
+        };
+        super::super::route::route_advertise_to_peers(
+            None,
+            prefix,
+            &selected,
+            /* source */ 0,
+            &mut top,
+            &mut self.peers,
+        );
+
+        tracing::info!(
+            vrf = %self.name,
+            %prefix,
+            rd = %rd,
+            removed = removed_n,
+            winners,
+            "bgp vrf: WithdrawImport removed from LocRIB and withdrawn from CE peers",
+        );
+    }
+
     /// Per-task handling of cross-task messages that aren't
     /// `Shutdown`. Step 13 is intentionally a no-op match — every
     /// non-`Shutdown` variant is a stub for later steps.
@@ -437,33 +577,16 @@ impl BgpVrf {
             BgpVrfMsg::ImportV4 {
                 rd,
                 prefix,
-                attr: _,
+                attr,
                 label,
             } => {
-                // Step 18a delivers the payload; step 18b's
-                // handler runs best-path insert into
-                // `self.local_rib.v4` with `BgpRibType::Originated`.
-                // Until then, surface the import at info so
-                // operators can spot the path arriving via the
-                // log stream during a development bring-up.
-                tracing::info!(
-                    vrf = %self.name,
-                    %prefix,
-                    rd = %rd,
-                    label,
-                    "bgp vrf: received ImportV4 (LocRIB insert lands in step 18b)",
-                );
+                self.handle_import_v4(rd, prefix, attr, label);
             }
             BgpVrfMsg::ImportV6 { .. } => {
                 // v6 import lands after v4 ships.
             }
             BgpVrfMsg::WithdrawImport { rd, prefix } => {
-                tracing::info!(
-                    vrf = %self.name,
-                    %prefix,
-                    rd = %rd,
-                    "bgp vrf: received WithdrawImport (LocRIB remove lands in step 18b)",
-                );
+                self.handle_withdraw_import(rd, prefix);
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }
