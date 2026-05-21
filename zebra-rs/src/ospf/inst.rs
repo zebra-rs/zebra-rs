@@ -1391,7 +1391,18 @@ impl LspMap {
 }
 
 /// Build SPF graph from OSPF LSDB (Router-LSAs and Network-LSAs).
+///
+/// Filters per RFC 2328 §16.1:
+///  - step 1: MaxAge LSAs are excluded from the SPF tree
+///  - step 2(b): the destination LSA must carry a back-link to us. For
+///    Router→Router (P2P/Virtual) edges the peer's Router-LSA must list
+///    our router-id as a P2P/Virtual link; for Router→Network (Transit)
+///    edges the Network-LSA must list our router-id in its
+///    attached_routers, and each attached router must itself have a
+///    valid Router-LSA before its edge is emitted.
 fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
     let mut graph = spf::Graph::new();
     let mut source_node = None;
 
@@ -1399,15 +1410,31 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
         return (graph, source_node);
     };
 
-    // Collect Router-LSA data.
+    // Collect non-MaxAge Router-LSA data.
     let mut router_lsas = Vec::new();
     for ((_ls_id, adv_router), lsa) in area.lsdb.tables.router.iter() {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
         router_lsas.push((*adv_router, lsa.originated, lsa.data.clone()));
     }
 
-    // Collect Network-LSA attached routers for transit network expansion.
+    // Side-table for the bidirectional back-link check on P2P / Virtual
+    // edges. Keyed by adv_router; refs into the local router_lsas Vec.
+    let mut router_lsa_by_id: HashMap<Ipv4Addr, &RouterLsa> = HashMap::new();
+    for (adv_router, _, lsa_data) in &router_lsas {
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            router_lsa_by_id.insert(*adv_router, router_lsa);
+        }
+    }
+
+    // Collect non-MaxAge Network-LSA attached routers for transit
+    // network expansion.
     let mut network_lsas: HashMap<Ipv4Addr, Vec<Ipv4Addr>> = HashMap::new();
     for ((ls_id, _adv_router), lsa) in area.lsdb.tables.network.iter() {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
         if let OspfLsp::Network(ref net_lsa) = lsa.data.lsp {
             network_lsas.insert(*ls_id, net_lsa.attached_routers.clone());
         }
@@ -1432,7 +1459,21 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
             for link in &router_lsa.links {
                 match link.link_type {
                     OspfLinkType::P2p | OspfLinkType::VirtualLink => {
-                        // Point-to-Point or Virtual Link: link_id = neighbor router ID.
+                        // Bidirectional check: peer's Router-LSA must exist
+                        // (non-MaxAge) AND carry a P2P/Virtual link back to
+                        // us. Otherwise the edge is one-way and SPF would
+                        // compute a route to a destination that can't route
+                        // back.
+                        let Some(peer_lsa) = router_lsa_by_id.get(&link.link_id) else {
+                            continue;
+                        };
+                        let has_backlink = peer_lsa.links.iter().any(|l| {
+                            matches!(l.link_type, OspfLinkType::P2p | OspfLinkType::VirtualLink)
+                                && l.link_id == *adv_router
+                        });
+                        if !has_backlink {
+                            continue;
+                        }
                         let to_id = top.lsp_map.get(link.link_id);
                         vertex.olinks.push(spf::Link {
                             from: node_id,
@@ -1442,24 +1483,42 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
                         });
                     }
                     OspfLinkType::Transit => {
-                        // Transit Network: expand through the Network-LSA pseudo-node.
-                        // link_id = DR's interface IP, which is the Network-LSA's ls_id.
-                        if let Some(attached) = network_lsas.get(&link.link_id) {
-                            for attached_router in attached {
-                                if *attached_router != *adv_router {
-                                    let to_id = top.lsp_map.get(*attached_router);
-                                    vertex.olinks.push(spf::Link {
-                                        from: node_id,
-                                        to: to_id,
-                                        cost: link.tos_0_metric as u32,
-                                        link_id: 0,
-                                    });
-                                }
+                        // Bidirectional check: the Network-LSA must list us
+                        // in its attached_routers; otherwise our claim of
+                        // membership doesn't match the DR's view and the
+                        // back-edge is missing.
+                        //
+                        // link_id = DR's interface IP, which is the
+                        // Network-LSA's ls_id.
+                        let Some(attached) = network_lsas.get(&link.link_id) else {
+                            continue;
+                        };
+                        if !attached.contains(adv_router) {
+                            continue;
+                        }
+                        for attached_router in attached {
+                            if *attached_router == *adv_router {
+                                continue;
                             }
+                            // Each peer router on the network must itself
+                            // have a valid Router-LSA. Without one, the
+                            // back-link from the pseudo-node to that
+                            // router is missing.
+                            if !router_lsa_by_id.contains_key(attached_router) {
+                                continue;
+                            }
+                            let to_id = top.lsp_map.get(*attached_router);
+                            vertex.olinks.push(spf::Link {
+                                from: node_id,
+                                to: to_id,
+                                cost: link.tos_0_metric as u32,
+                                link_id: 0,
+                            });
                         }
                     }
                     OspfLinkType::Stub => {
-                        // Stub (3) and unknown: not part of the SPF graph.
+                        // Stub (3): destination prefix, not an SPF edge.
+                        // Consumed by build_rib_from_spf.
                     }
                 }
             }
