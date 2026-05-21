@@ -2726,7 +2726,18 @@ pub fn route_update_ipv4(
     }
 
     // 3. NEXT_HOP
-    if peer.is_ebgp() || rib.is_originated() {
+    //
+    // eBGP and self-originated routes always get a v4 rewrite. ENHE-
+    // sourced routes (`egress_ifindex_v6.is_some()`) join that set
+    // unconditionally: the inbound NEXT_HOP for such a route is
+    // 0.0.0.0 (RFC 8950 §4) — preserving it for iBGP-iBGP, the way
+    // RFC 4271 normally prescribes, would forward a black-hole. The
+    // rewrite is harmless for ENHE-aware peers (they ignore the v4
+    // NEXT_HOP attribute and read the LL from MP_REACH per RFC 8950
+    // §4) and necessary for non-ENHE peers (they're the ones who
+    // can't decode an MP_REACH with a v6 next-hop in the first place).
+    let needs_v4_rewrite = peer.is_ebgp() || rib.is_originated() || rib.egress_ifindex_v6.is_some();
+    if needs_v4_rewrite {
         let nexthop = if let Some(ref local_addr) = peer.param.local_addr
             && let IpAddr::V4(local_addr) = local_addr.ip()
         {
