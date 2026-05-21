@@ -1306,6 +1306,10 @@ fn write_ilm_entry(
     let prefix_or_id = match &ilm.ilm_type {
         super::inst::IlmType::Node(idx) => format!("SR Pfx (idx {:<3})", idx),
         super::inst::IlmType::Adjacency(idx) => format!("SR Adj (idx {:<3})", idx),
+        super::inst::IlmType::DecapVrf {
+            table_id,
+            vrf_ifindex: _,
+        } => format!("VPN Decap (tbl {:<3})", table_id),
         super::inst::IlmType::None => {
             // Try to find a matching route for this nexthop
             if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
@@ -1356,6 +1360,10 @@ fn ilm_to_json(
     let prefix_or_id = match &ilm.ilm_type {
         super::inst::IlmType::Node(idx) => format!("SR Pfx (idx {})", idx),
         super::inst::IlmType::Adjacency(idx) => format!("SR Adj (idx {})", idx),
+        super::inst::IlmType::DecapVrf {
+            table_id,
+            vrf_ifindex: _,
+        } => format!("VPN Decap (tbl {})", table_id),
         super::inst::IlmType::None => {
             if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
                 prefix.to_string()

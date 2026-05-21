@@ -283,6 +283,18 @@ pub enum IlmType {
     None,
     Node(u32),
     Adjacency(u32),
+    /// BGP/MPLS-VPN per-VRF decap (RFC 4364). The kernel pops
+    /// the label and routes the inner packet through the VRF
+    /// master device, which lands the lookup in
+    /// `vrf_tables[table_id]`. `vrf_ifindex` is the kernel
+    /// ifindex of the VRF master (e.g. `ip link show vrf-blue`);
+    /// `table_id` is informational only (the netlink action
+    /// keys off the Oif, not the table id), but the show path
+    /// renders it for operators.
+    DecapVrf {
+        table_id: u32,
+        vrf_ifindex: u32,
+    },
 }
 
 #[derive(Default, Debug, Clone)]

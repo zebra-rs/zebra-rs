@@ -111,6 +111,23 @@ impl RibSubscriber {
         let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
         (client, chan.rx)
     }
+
+    /// Send a `Message::IlmAdd` directly to RIB. Step 19b's
+    /// per-VRF BGP spawn site uses this to install the
+    /// AF_MPLS Decap ILM bound to the VRF master interface.
+    /// The legacy `rib_tx` is the right channel — `IlmAdd` is
+    /// a global RIB mutation, not a per-protocol envelope, so
+    /// the `RibInbound` path doesn't fit.
+    pub fn send_ilm_add(&self, label: u32, ilm: crate::rib::inst::IlmEntry) {
+        let _ = self.rib_tx.send(crate::rib::Message::IlmAdd { label, ilm });
+    }
+
+    /// Inverse of [`Self::send_ilm_add`]. Reclaims the AF_MPLS
+    /// route at `despawn_bgp_vrf` time so a freed VRF doesn't
+    /// leave its decap route in the FIB.
+    pub fn send_ilm_del(&self, label: u32, ilm: crate::rib::inst::IlmEntry) {
+        let _ = self.rib_tx.send(crate::rib::Message::IlmDel { label, ilm });
+    }
 }
 
 pub struct ConfigManager {

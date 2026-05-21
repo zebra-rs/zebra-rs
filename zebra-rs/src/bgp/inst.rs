@@ -804,6 +804,22 @@ impl Bgp {
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle);
+                // Step 19b: withdraw the AF_MPLS DecapVrf ILM
+                // ahead of returning the label. The netlink
+                // delete keys off the label alone so the
+                // IlmEntry contents are mostly informational —
+                // any non-zero match on `rtype = Bgp` works.
+                if let Some(vrf_ifindex) = handle.ilm_decap_ifindex {
+                    let entry = crate::rib::inst::IlmEntry {
+                        rtype: crate::rib::RibType::Bgp,
+                        ilm_type: crate::rib::inst::IlmType::DecapVrf {
+                            table_id: 0,
+                            vrf_ifindex,
+                        },
+                        nexthop: crate::rib::Nexthop::default(),
+                    };
+                    self.rib_subscriber.send_ilm_del(handle.label, entry);
+                }
                 // Return the label to the pool so a future VRF
                 // can pick it back up. Reclaim before the handle
                 // drops — handle drop aborts the task but doesn't
