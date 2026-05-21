@@ -9,6 +9,7 @@ use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
 use super::ReachMap;
 use super::inst::Message;
 use super::task::{Timer, TimerType};
+use super::version::{OspfVersion, Ospfv2};
 
 pub type OspfLabelMap = LabelMap<Ipv4Addr>;
 
@@ -18,7 +19,19 @@ pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
 pub const OSPF_MIN_LS_ARRIVAL: u64 = 1; // 1 second (RFC 2328)
 
-pub type LsTable = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa>;
+/// Per-LSA-type storage indexed by `(LS-ID, Advertising-Router)`.
+///
+/// Generic over `V: OspfVersion` so v3's LSDB can wrap `Ospfv3Lsa`
+/// when its consumers materialize. Default `V = Ospfv2` keeps all
+/// existing references resolving to the v2 shape.
+pub type LsTable<V = Ospfv2> = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa<V>>;
+
+/// LSDB key: `(LS-Type, LS-ID, Advertising-Router)`.
+///
+/// Still v2-shaped — uses `OspfLsType` (v2's u8 enum). v3 LS-Types
+/// are 16-bit numeric per RFC 5340 §A.4.2.1; a unified key (or a
+/// `V::LsType` associated type) lands when the v3 LSDB consumer
+/// materializes.
 pub type OspfLsaKey = (OspfLsType, Ipv4Addr, Ipv4Addr);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -28,8 +41,18 @@ pub enum LsdbEvent {
     SelfOriginatedReceived,
 }
 
-pub struct Lsdb {
-    pub tables: LsTypes<LsTable>,
+/// Per-area (or AS-scope) Link State Database.
+///
+/// Parameterized over `V: OspfVersion`. The storage layout
+/// (`tables: LsTypes<LsTable<V>>`) is generic; the methods that
+/// manipulate LSAs live in `impl Lsdb<Ospfv2>` for now because they
+/// destructure v2-specific header / body types
+/// (`OspfLsType` enum match, `OspfLsp::OpaqueAreaRouterInfo` body
+/// shape). Those move into a generic impl when the `OspfVersion`
+/// trait grows accessor methods (`fn ls_type(&Lsa) -> u16`,
+/// `fn ls_id(&Lsa) -> Ipv4Addr`, etc.).
+pub struct Lsdb<V: OspfVersion = Ospfv2> {
+    pub tables: LsTypes<LsTable<V>>,
     pub label_map: OspfLabelMap,
     pub reach_map: ReachMap,
 }
@@ -71,8 +94,14 @@ impl<T> LsTypes<T> {
     }
 }
 
-pub struct Lsa {
-    pub data: OspfLsa,
+/// One LSDB entry — the parsed LSA plus the bookkeeping the LSDB
+/// needs (origination flag, install/refresh timestamps, age and
+/// refresh timer handles).
+///
+/// `data: V::Lsa` is the concrete wire-LSA type for the version
+/// (e.g. `OspfLsa` for v2, `Ospfv3Lsa` for v3).
+pub struct Lsa<V: OspfVersion = Ospfv2> {
+    pub data: V::Lsa,
     pub originated: bool,
     pub birth_time: tokio::time::Instant,
     pub install_time: tokio::time::Instant,
@@ -80,11 +109,11 @@ pub struct Lsa {
     pub refresh_timer: Option<Timer>,
 }
 
-impl Lsa {
-    pub fn new(ospf_lsa: OspfLsa) -> Self {
+impl<V: OspfVersion> Lsa<V> {
+    pub fn new(data: V::Lsa) -> Self {
         let now = tokio::time::Instant::now();
         Self {
-            data: ospf_lsa,
+            data,
             originated: false,
             birth_time: now,
             install_time: now,
@@ -92,7 +121,13 @@ impl Lsa {
             refresh_timer: None,
         }
     }
+}
 
+impl Lsa<Ospfv2> {
+    /// Compute the current LSA age: original ls_age plus elapsed
+    /// time since install, capped at MaxAge. v2-specific because
+    /// it reads `self.data.h.ls_age` — the v3 LsaHeader has the
+    /// same field but no shared trait method yet exposes it.
     pub fn current_age(&self) -> u16 {
         let initial_age = self.data.h.ls_age;
         let elapsed = self.birth_time.elapsed().as_secs() as u16;
@@ -142,15 +177,23 @@ fn refresh_timer(
     )
 }
 
-impl Lsdb {
+impl<V: OspfVersion> Lsdb<V> {
     pub fn new() -> Self {
         Self {
-            tables: LsTypes::<LsTable>::default(),
+            tables: LsTypes::<LsTable<V>>::default(),
             label_map: OspfLabelMap::default(),
             reach_map: ReachMap::default(),
         }
     }
+}
 
+impl<V: OspfVersion> Default for Lsdb<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Lsdb<Ospfv2> {
     pub fn insert_self_originated(
         &mut self,
         mut ospf_lsa: OspfLsa,
@@ -165,7 +208,7 @@ impl Lsdb {
                 ospf_lsa.update();
                 let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
-                let mut lsa = Lsa::new(ospf_lsa);
+                let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
                 lsa.originated = true;
                 lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
                 lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
@@ -187,7 +230,7 @@ impl Lsdb {
 
         self.update_lsa(&ospf_lsa);
 
-        let mut lsa = Lsa::new(ospf_lsa);
+        let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
         lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
 
         self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
@@ -273,7 +316,7 @@ impl Lsdb {
             new_data.h.ls_age = 0;
             new_data.update();
             let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
-            let mut lsa = Lsa::new(new_data);
+            let mut lsa = Lsa::<Ospfv2>::new(new_data);
             lsa.originated = true;
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
@@ -329,7 +372,7 @@ impl Lsdb {
             new_data.h.ls_age = 0;
             new_data.update();
             let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
-            let mut lsa = Lsa::new(new_data);
+            let mut lsa = Lsa::<Ospfv2>::new(new_data);
             lsa.originated = true;
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
