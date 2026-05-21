@@ -3,7 +3,7 @@ use std::time::Duration;
 use ospf_packet::*;
 
 use super::inst::Message;
-use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey};
+use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey, v2_lsa_key};
 use super::task::{Timer, TimerType};
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
 
@@ -90,7 +90,7 @@ pub fn ospf_is_self_originated(oi: &OspfInterface, lsa: &OspfLsa) -> bool {
 /// The actual re-origination or flush is handled by the Ospf instance
 /// via the message channel, since it needs access to the full router state.
 pub fn ospf_flood_self_originated_lsa(oi: &OspfInterface, lsa: &OspfLsa) {
-    let key = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let key = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     let msg = Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(oi.area_id), key);
     let _ = oi.tx.send(msg);
 }
@@ -181,7 +181,7 @@ pub fn ospf_retransmit_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer 
 }
 
 pub fn ospf_ls_retransmit_add(nbr: &mut Neighbor, lsa: &OspfLsa, retransmit_interval: u16) {
-    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     nbr.ls_rxmt.insert(key, lsa.clone());
     if nbr.timer.ls_rxmt.is_none() {
         nbr.timer.ls_rxmt = Some(ospf_retransmit_timer(nbr, retransmit_interval));
@@ -189,7 +189,7 @@ pub fn ospf_ls_retransmit_add(nbr: &mut Neighbor, lsa: &OspfLsa, retransmit_inte
 }
 
 pub fn ospf_ls_retransmit_delete(nbr: &mut Neighbor, lsa: &OspfLsa) {
-    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     nbr.ls_rxmt.remove(&key);
     if nbr.ls_rxmt.is_empty() {
         nbr.timer.ls_rxmt = None;
@@ -197,6 +197,6 @@ pub fn ospf_ls_retransmit_delete(nbr: &mut Neighbor, lsa: &OspfLsa) {
 }
 
 pub fn ospf_ls_retransmit_lookup<'a>(nbr: &'a Neighbor, lsa: &OspfLsa) -> Option<&'a OspfLsa> {
-    let key: OspfLsaKey = (lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
     nbr.ls_rxmt.get(&key)
 }

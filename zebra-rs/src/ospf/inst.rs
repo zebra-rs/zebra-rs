@@ -30,7 +30,7 @@ use super::area::{OspfArea, OspfAreaMap};
 use super::config::Callback;
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
 use super::link::{OspfLink, OspfNetworkType};
-use super::lsdb::{LsdbEvent, OspfLsaKey};
+use super::lsdb::{LsdbEvent, OspfLsaKey, v2_lsa_key_unpack};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
@@ -449,7 +449,9 @@ impl Ospf<Ospfv2> {
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
-        let (ls_type, ls_id, adv_router) = key;
+        // Unpack the widened key back into v2-typed components for the
+        // v2-bound match arms / method calls below.
+        let (ls_type, ls_id, adv_router) = v2_lsa_key_unpack(key);
 
         // Handle SelfOriginatedReceived before borrowing lsdb, since
         // re-origination needs full &mut self access.
