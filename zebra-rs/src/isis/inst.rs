@@ -158,6 +158,16 @@ pub struct Isis {
     pub mt2_graph: Levels<Option<spf::Graph>>,
     pub mt2_spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
 
+    /// Per-algorithm SPF graphs (RFC 9350). Outer key is the algo id
+    /// from `flex_algo.config` (128..=255); inner Option mirrors the
+    /// legacy `graph` shape — None means SPF could not run this cycle
+    /// (e.g. we have no source LSP yet). Recomputed every time
+    /// `perform_spf_calculation` runs; stale algos no longer in
+    /// `flex_algo.config` are purged before each refill so the
+    /// snapshot stays consistent with current config.
+    pub graph_flex_algo: Levels<BTreeMap<u8, Option<spf::Graph>>>,
+    pub spf_flex_algo: Levels<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>,
+
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
     pub sr_rx: UnboundedReceiver<RibSrRx>,
@@ -313,6 +323,13 @@ pub struct IsisTop<'a> {
     pub mt2_graph: &'a mut Levels<Option<spf::Graph>>,
     pub mt2_spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 
+    /// Per-algorithm SPF state (see `Isis::graph_flex_algo` /
+    /// `spf_flex_algo`). Threaded through IsisTop so
+    /// `perform_spf_calculation` can refresh per-algo runs alongside
+    /// the legacy + MT 2 SPF.
+    pub graph_flex_algo: &'a mut Levels<BTreeMap<u8, Option<spf::Graph>>>,
+    pub spf_flex_algo: &'a mut Levels<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>,
+
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
     /// Capability / SRv6 sub-TLVs.
@@ -428,6 +445,9 @@ impl Isis {
                 tilfa_result: Levels::<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>::default(),
                 mt2_graph: Levels::<Option<spf::Graph>>::default(),
                 mt2_spf_result: Levels::<Option<BTreeMap<usize, spf::Path>>>::default(),
+                graph_flex_algo: Levels::<BTreeMap<u8, Option<spf::Graph>>>::default(),
+                spf_flex_algo: Levels::<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>::default(
+                ),
                 sr_rx,
                 watched_block: None,
                 watched_locator: None,
@@ -1173,6 +1193,8 @@ impl Isis {
             tilfa_result: &mut self.tilfa_result,
             mt2_graph: &mut self.mt2_graph,
             mt2_spf_result: &mut self.mt2_spf_result,
+            graph_flex_algo: &mut self.graph_flex_algo,
+            spf_flex_algo: &mut self.spf_flex_algo,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
