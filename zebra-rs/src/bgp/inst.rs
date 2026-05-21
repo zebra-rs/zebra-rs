@@ -168,6 +168,11 @@ pub struct Bgp {
     /// (config staged before the link surfaces) defer materialization
     /// until the next link-add event.
     pub link_index_by_name: BTreeMap<String, u32>,
+    /// Per-ifindex IPv6 link-local registry, populated from
+    /// `RibRx::AddrAdd`/`AddrDel`. Source of the v6 next-hop emitted
+    /// in MP_REACH for IPv4-unicast advertisements on interface peers
+    /// (RFC 8950). See [`super::interface_addrs`].
+    pub interface_addrs: super::interface_addrs::InterfaceAddrs,
     /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
     /// Phase-1: signature + membership tracking only — the advertise
     /// pipeline does not yet share work across members. See
@@ -285,6 +290,7 @@ impl Bgp {
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
             link_index_by_name: BTreeMap::new(),
+            interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
             debug_flags: BgpDebugFlags::default(),
             policy_tx,
@@ -667,13 +673,11 @@ impl Bgp {
                 self.link_index_by_name
                     .insert(link.name.clone(), link.index);
             }
-            RibRx::AddrAdd(_addr) => {
-                // isis_info!("Isis::AddrAdd {}", addr.addr);
-                // self.addr_add(addr);
+            RibRx::AddrAdd(addr) => {
+                self.interface_addrs.record(&addr);
             }
-            RibRx::AddrDel(_addr) => {
-                // isis_info!("Isis::AddrDel {}", addr.addr);
-                // self.addr_del(addr);
+            RibRx::AddrDel(addr) => {
+                self.interface_addrs.forget(&addr);
             }
             RibRx::RouterIdUpdate(router_id) => {
                 // RIB auto-derived a router-id from interface IPv4
