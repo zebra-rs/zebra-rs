@@ -435,7 +435,9 @@ impl Ospf {
             return;
         }
 
-        // Handle RefreshTimerExpire: refresh in LSDB then flood to neighbors.
+        // Handle RefreshTimerExpire: rebuild the LSA from current state when
+        // a dedicated originator exists (Router / Network LSA). Otherwise
+        // fall back to cloning the old body and bumping the sequence number.
         if ev == LsdbEvent::RefreshTimerExpire {
             tracing::info!(
                 "LSDB refresh timer expired: type={} id={} adv={}",
@@ -443,7 +445,37 @@ impl Ospf {
                 ls_id,
                 adv_router
             );
-            // Refresh the LSA and clone it for flooding.
+
+            // Self-originated only. Defensive — refresh timers should only
+            // ever be armed for our own LSAs.
+            if adv_router != self.router_id {
+                return;
+            }
+
+            match ls_type {
+                OspfLsType::Router => {
+                    self.router_lsa_originate();
+                    return;
+                }
+                OspfLsType::Network => {
+                    // The Network LSA's LS-ID is the DR interface IP. Find
+                    // the matching interface and rebuild from its current
+                    // Full-adjacency set.
+                    let ifindex = self.links.iter().find_map(|(idx, link)| {
+                        link.addr
+                            .iter()
+                            .any(|a| a.prefix.addr() == ls_id)
+                            .then_some(*idx)
+                    });
+                    if let Some(ifindex) = ifindex {
+                        self.update_network_lsa_by_interface(ifindex);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+
+            // Fallback: clone body, bump seq#, reinstall, then flood.
             let refreshed = {
                 let lsdb = if let Some(area_id) = area_id {
                     let Some(area) = self.areas.get_mut(area_id) else {
@@ -456,7 +488,6 @@ impl Ospf {
                 lsdb.refresh_lsa(ls_type, ls_id, adv_router, &self.tx, area_id);
                 lsdb.lookup_by_id(ls_type, ls_id, adv_router).cloned()
             };
-            // Flood the refreshed LSA to all Full neighbors in the area.
             if let Some(lsa) = refreshed
                 && let Some(area_id) = area_id
             {
