@@ -14,6 +14,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{DisplayRequest, ShowChannel};
+use crate::ospf::Ospfv2;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
@@ -72,7 +73,7 @@ pub struct OspfInterface<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub router_id: &'a Ipv4Addr,
     pub ident: &'a Identity,
-    pub addr: &'a Vec<OspfAddr>,
+    pub addr: &'a Vec<OspfAddr<Ospfv2>>,
     pub mtu: u32,
     pub db_desc_in: &'a mut usize,
     pub lsdb: &'a mut Lsdb,
