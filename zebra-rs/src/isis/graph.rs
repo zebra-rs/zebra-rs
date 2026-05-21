@@ -9,6 +9,7 @@ use isis_packet::{
 use crate::spf;
 
 use super::config::MtId;
+use super::flex_algo::{FlexAlgoEntry, link_passes_fad, local_link_affinity};
 use super::inst::IsisTop;
 use super::level::Level;
 
@@ -475,4 +476,160 @@ fn process_neighbor_link_mt2(
         cost: entry.metric,
         link_id: 0,
     });
+}
+
+/// Build a per-algorithm SPF graph for Flex-Algo `algo` using `entry`
+/// as the Flexible Algorithm Definition (RFC 9350 §5). The result has
+/// the same shape as `graph()` so existing `spf::spf` consumers work
+/// unchanged.
+///
+/// Filtering vs the legacy graph:
+///   - **Peer participation gate (§5.2):** vertices from non-self
+///     LSPs are dropped when the source sys-id is missing from
+///     `peer_algos` or has not listed `algo`. The local router is
+///     always included — `flex_algo.config[algo]` is the participation
+///     signal on our side, and SPF is only called for algos in that
+///     map.
+///   - **Per-link affinity gate (§6):** every ExtIsReach edge is
+///     filtered through `link_passes_fad`. Our own edges resolve
+///     local `LinkConfig::affinity` via `affinity_map`; peer edges
+///     read `peer_link_affinity[source_sys][neighbor_id]`.
+///   - **SRLG exclude:** *not* enforced — peer SRLG state is not yet
+///     cached. `entry.srlg_exclude` is read but produces no effect; a
+///     `tracing::warn` would be reasonable but is left to the
+///     scheduler layer.
+///   - **Metric type:** IGP only. `entry.metric_type ==
+///     MinUnidirLinkDelay` or `TeDefault` falls back to IGP with no
+///     warning (TODO when those metric caches arrive).
+pub fn graph_flex_algo(
+    top: &mut IsisTop,
+    level: Level,
+    algo: u8,
+    entry: &FlexAlgoEntry,
+) -> (spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>) {
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+    let mut adjacency_sids = BTreeMap::new();
+    let self_sys_id = top.config.net.sys_id();
+
+    // First pass: clone every LSP we plan to walk. Mirrors `graph()`
+    // so the borrow of `top.lsdb` releases before we start mutating
+    // `top.lsp_map` in the second pass. Same fragment-collapse
+    // behaviour applies (LspMap keys on IsisNeighborId).
+    //
+    // Peer-participation filter happens here: drop non-self real
+    // routers that haven't listed `algo` in SR-Algorithms. Pseudonode
+    // LSPs are always kept — they belong to a real router whose
+    // participation is already gated by this filter.
+    let peer_algos_at_level = top.peer_algos.get(&level);
+    let mut nodes_to_process = Vec::new();
+    for (_, lsa) in top.lsdb.get(&level).iter() {
+        let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
+        let is_originated = lsa.originated;
+        let is_pseudo = lsa.lsp.lsp_id.is_pseudo();
+
+        if !is_originated && !is_pseudo {
+            let participates = peer_algos_at_level
+                .get(&neighbor_id.sys_id())
+                .is_some_and(|s| s.contains(&algo));
+            if !participates {
+                continue;
+            }
+        }
+        let lsp = lsa.lsp.clone();
+        nodes_to_process.push((neighbor_id, is_originated, lsp));
+    }
+
+    // Vertex construction — identical to graph().
+    for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
+        let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
+        if *is_originated && !lsp.lsp_id.is_pseudo() {
+            source_node = Some(node_id);
+            collect_adjacency_sids(lsp, &mut adjacency_sids);
+        }
+        let vertex = create_graph_vertex(top, level, node_id, neighbor_id, lsp);
+        graph.insert(node_id, vertex);
+    }
+
+    // Same local-adj → ifindex map as graph(); used both for link_id
+    // stamping and for resolving the local link's affinity.
+    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
+    for (ifindex, link) in top.links.iter() {
+        if let Some((adj, _)) = link.state.adj.get(&level) {
+            local_adj_to_ifindex.insert(*adj, *ifindex);
+        }
+    }
+
+    // Edge construction with per-link affinity filtering.
+    for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
+        let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
+        let own_router_lsp = *is_originated && !lsp.lsp_id.is_pseudo();
+        let source_sys_id = neighbor_id.sys_id();
+
+        for tlv in &lsp.tlvs {
+            let IsisTlv::ExtIsReach(ext_reach) = tlv else {
+                continue;
+            };
+            for entry_reach in &ext_reach.entries {
+                let neighbor_lsp_id: IsisLspId = entry_reach.neighbor_id.into();
+
+                if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
+                    continue;
+                }
+
+                // Resolve the link's affinity bitmap for the FAD
+                // predicate. Local LSPs are not in
+                // `peer_link_affinity` (rebuild skips self), so own
+                // edges go through `LinkConfig::affinity` + the
+                // configured `affinity_map`.
+                let local_affinity;
+                let affinity: Option<&isis_packet::ExtAdminGroup> = if source_sys_id == self_sys_id
+                {
+                    let ifindex = local_adj_to_ifindex.get(&entry_reach.neighbor_id).copied();
+                    if let Some(ifx) = ifindex
+                        && let Some(link) = top.links.get(&ifx)
+                    {
+                        local_affinity =
+                            local_link_affinity(&link.config.affinity, top.affinity_map);
+                        Some(&local_affinity)
+                    } else {
+                        None
+                    }
+                } else {
+                    top.peer_link_affinity
+                        .get(&level)
+                        .get(&source_sys_id)
+                        .and_then(|m| m.get(&entry_reach.neighbor_id))
+                };
+
+                if !link_passes_fad(affinity, entry, top.affinity_map) {
+                    continue;
+                }
+
+                let to_id = top
+                    .lsp_map
+                    .get_mut(&level)
+                    .get(&neighbor_lsp_id.neighbor_id());
+
+                let link_id = if own_router_lsp {
+                    local_adj_to_ifindex
+                        .get(&entry_reach.neighbor_id)
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+
+                let link = spf::Link::with_id(node_id, to_id, entry_reach.metric, link_id);
+                if let Some(from) = graph.get_mut(&node_id) {
+                    from.olinks.push(link.clone());
+                }
+                if let Some(to) = graph.get_mut(&to_id) {
+                    to.ilinks.push(link);
+                }
+            }
+        }
+    }
+
+    (graph, source_node, adjacency_sids)
 }

@@ -19,7 +19,8 @@ use crate::spf;
 use isis_packet::srv6::EncapType;
 
 use super::config::MtId;
-use super::graph::{graph, graph_mt2};
+use super::flex_algo::FlexAlgoEntry;
+use super::graph::{graph, graph_flex_algo, graph_mt2};
 use super::inst::{IsisTop, Message};
 use super::level::Level;
 use super::link::{Afi, LinkTop};
@@ -996,6 +997,39 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
         *top.mt2_spf_result.get_mut(&level) = None;
         build_rib_from_spf_v6(top, level, source, &spf_result, &tilfa_result, false)
     };
+
+    // Per-algorithm SPF (RFC 9350). For every algo in
+    // `flex_algo.config` build the FAD-filtered graph and run
+    // Dijkstra; the result feeds future per-algo RIB / MPLS LFIB
+    // install (next PR). Algos no longer in config are purged from
+    // the level's BTreeMap so the snapshot tracks current intent.
+    //
+    // Entries are cloned out of `top.flex_algo.config` because
+    // `graph_flex_algo` takes `&mut top` and we'd otherwise hold a
+    // read borrow on `top.flex_algo` across the call.
+    let configured_algos: Vec<(u8, FlexAlgoEntry)> = top
+        .flex_algo
+        .config
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    {
+        let active: BTreeSet<u8> = configured_algos.iter().map(|(k, _)| *k).collect();
+        top.graph_flex_algo
+            .get_mut(&level)
+            .retain(|k, _| active.contains(k));
+        top.spf_flex_algo
+            .get_mut(&level)
+            .retain(|k, _| active.contains(k));
+    }
+    for (algo, entry) in &configured_algos {
+        let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
+        let algo_spf = algo_source.map(|src| spf::spf(&algo_graph, src, &spf::SpfOpt::full_path()));
+        top.graph_flex_algo
+            .get_mut(&level)
+            .insert(*algo, Some(algo_graph));
+        top.spf_flex_algo.get_mut(&level).insert(*algo, algo_spf);
+    }
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
