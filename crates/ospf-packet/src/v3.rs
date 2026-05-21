@@ -5,10 +5,14 @@
 //! 16-octet header (Instance ID + Reserved), and the per-packet-type
 //! payloads (Hello, DBD, LSR/LSU/LSAck) differ in field layout.
 //!
-//! Hello / DBD / LS Request / LS Ack are typed today; LSU stays
-//! opaque until at least one v3 LSA body lands (its on-wire format
-//! is `(num: u32, lsa: variable)*`). The v3 LSA bodies and the LSU
-//! migration come in subsequent PRs.
+//! All five v3 control-packet types (Hello, DBD, LS Request, LSU,
+//! LS Ack) are typed, and the LSU's `Ospfv3LsBody` dispatch covers
+//! every §A.4 LSA body modelled by this crate (Router, Network,
+//! Inter-Area-Prefix, Inter-Area-Router, AS-External, Link, and
+//! Intra-Area-Prefix). Unrecognised LS Types — e.g. NSSA-AS-External
+//! 0x2007, opaque variants, future allocations — fall into
+//! `Ospfv3LsBody::Unknown(Vec<u8>)` so captures roundtrip without
+//! loss.
 //!
 //! Header wire layout per RFC 5340 §A.3.1:
 //! ```text
@@ -102,16 +106,15 @@ impl Ospfv3Packet {
     }
 }
 
-/// v3 packet payload. Hello, DBD, LS Request, and LS Ack are typed;
-/// LSU still parses into `Unknown` since its `(num: u32, lsa:
-/// variable)*` body has no typed value until at least one v3 LSA
-/// body lands. The codec roundtrips that opaque case so captured
-/// packets aren't lossy.
+/// v3 packet payload. All five control-packet types are now typed.
+/// `Unknown` remains as a fallback for any future OspfType variant
+/// or a malformed packet body.
 #[derive(Debug, Clone)]
 pub enum Ospfv3Payload {
     Hello(Ospfv3Hello),
     DbDesc(Ospfv3DbDesc),
     LsRequest(Ospfv3LsRequest),
+    LsUpdate(Ospfv3LsUpdate),
     LsAck(Ospfv3LsAck),
     Unknown(Vec<u8>),
 }
@@ -122,6 +125,7 @@ impl Ospfv3Payload {
             Ospfv3Payload::Hello(_) => OspfType::Hello,
             Ospfv3Payload::DbDesc(_) => OspfType::DbDesc,
             Ospfv3Payload::LsRequest(_) => OspfType::LsRequest,
+            Ospfv3Payload::LsUpdate(_) => OspfType::LsUpdate,
             Ospfv3Payload::LsAck(_) => OspfType::LsAck,
             // Unknown carries the raw body; the type stays in the
             // header where the caller put it.
@@ -134,6 +138,7 @@ impl Ospfv3Payload {
             Ospfv3Payload::Hello(h) => h.emit(buf),
             Ospfv3Payload::DbDesc(d) => d.emit(buf),
             Ospfv3Payload::LsRequest(r) => r.emit(buf),
+            Ospfv3Payload::LsUpdate(u) => u.emit(buf),
             Ospfv3Payload::LsAck(a) => a.emit(buf),
             Ospfv3Payload::Unknown(bytes) => buf.put_slice(bytes),
         }
@@ -153,11 +158,15 @@ impl Ospfv3Payload {
                 let (input, req) = Ospfv3LsRequest::parse_be(input)?;
                 Ok((input, Ospfv3Payload::LsRequest(req)))
             }
+            OspfType::LsUpdate => {
+                let (input, upd) = Ospfv3LsUpdate::parse_be(input)?;
+                Ok((input, Ospfv3Payload::LsUpdate(upd)))
+            }
             OspfType::LsAck => {
                 let (input, ack) = Ospfv3LsAck::parse_be(input)?;
                 Ok((input, Ospfv3Payload::LsAck(ack)))
             }
-            // Until typed payload lands for LSU, capture as raw bytes.
+            // Fallback for any future OspfType variant or malformed input.
             _ => Ok((&[][..], Ospfv3Payload::Unknown(input.to_vec()))),
         }
     }
@@ -1206,6 +1215,158 @@ impl ParseBe<Ospfv3LinkLsa> for Ospfv3LinkLsa {
     }
 }
 
+/// Typed dispatch for a v3 LSA body, keyed by the header's
+/// `ls_type` (RFC 5340 §A.4.2.1). Variants cover every body type
+/// defined in §A.4.3 – §A.4.10 that this crate models; anything
+/// else (NSSA-AS-External 0x2007, opaque flavours, future allocations)
+/// lands in `Unknown(Vec<u8>)` so captures roundtrip without loss.
+///
+/// Each variant carries the body alone — the 20-octet `Ospfv3LsaHeader`
+/// is held separately in `Ospfv3Lsa::h`, mirroring the v2 codec's
+/// `OspfLsa { h, lsp }` shape.
+#[derive(Debug, Clone)]
+pub enum Ospfv3LsBody {
+    Router(Ospfv3RouterLsa),
+    Network(Ospfv3NetworkLsa),
+    InterAreaPrefix(Ospfv3InterAreaPrefixLsa),
+    InterAreaRouter(Ospfv3InterAreaRouterLsa),
+    AsExternal(Ospfv3AsExternalLsa),
+    Link(Ospfv3LinkLsa),
+    IntraAreaPrefix(Ospfv3IntraAreaPrefixLsa),
+    /// Unrecognised LS Type — bytes preserved verbatim.
+    Unknown(Vec<u8>),
+}
+
+impl Ospfv3LsBody {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        match self {
+            Ospfv3LsBody::Router(b) => b.emit(buf),
+            Ospfv3LsBody::Network(b) => b.emit(buf),
+            Ospfv3LsBody::InterAreaPrefix(b) => b.emit(buf),
+            Ospfv3LsBody::InterAreaRouter(b) => b.emit(buf),
+            Ospfv3LsBody::AsExternal(b) => b.emit(buf),
+            Ospfv3LsBody::Link(b) => b.emit(buf),
+            Ospfv3LsBody::IntraAreaPrefix(b) => b.emit(buf),
+            Ospfv3LsBody::Unknown(bytes) => buf.put_slice(bytes),
+        }
+    }
+
+    /// Parse a body of the given LS Type from `input`. The caller is
+    /// responsible for slicing `input` to exactly the body's wire
+    /// length (typically `header.length - OSPFV3_LSA_HEADER_LEN`);
+    /// unrecognised types fall into the `Unknown` variant carrying
+    /// the slice verbatim.
+    pub fn parse_be(input: &[u8], ls_type: u16) -> IResult<&[u8], Ospfv3LsBody> {
+        match ls_type {
+            OSPFV3_ROUTER_LSA_TYPE => {
+                let (rest, b) = Ospfv3RouterLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Router(b)))
+            }
+            OSPFV3_NETWORK_LSA_TYPE => {
+                let (rest, b) = Ospfv3NetworkLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Network(b)))
+            }
+            OSPFV3_INTER_AREA_PREFIX_LSA_TYPE => {
+                let (rest, b) = Ospfv3InterAreaPrefixLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::InterAreaPrefix(b)))
+            }
+            OSPFV3_INTER_AREA_ROUTER_LSA_TYPE => {
+                let (rest, b) = Ospfv3InterAreaRouterLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::InterAreaRouter(b)))
+            }
+            OSPFV3_AS_EXTERNAL_LSA_TYPE => {
+                let (rest, b) = Ospfv3AsExternalLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::AsExternal(b)))
+            }
+            OSPFV3_LINK_LSA_TYPE => {
+                let (rest, b) = Ospfv3LinkLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Link(b)))
+            }
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
+                let (rest, b) = Ospfv3IntraAreaPrefixLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::IntraAreaPrefix(b)))
+            }
+            _ => Ok((&[][..], Ospfv3LsBody::Unknown(input.to_vec()))),
+        }
+    }
+}
+
+/// One v3 LSA on the wire: 20-octet header + typed body.
+///
+/// Mirrors v2's `OspfLsa { h, lsp }` shape. Parse drives body
+/// dispatch from `h.length` (total LSA size) and `h.ls_type`; emit
+/// writes the header verbatim followed by the body. The header's
+/// `length` and `ls_checksum` fields are NOT recomputed on emit —
+/// callers building a new LSA from scratch need to set those
+/// explicitly (a future PR will add an `update()` helper paralleling
+/// the v2 codec's, which runs Fletcher checksum + length over the
+/// IPv6-aware §A.4.2.1 layout).
+#[derive(Debug, Clone)]
+pub struct Ospfv3Lsa {
+    pub h: Ospfv3LsaHeader,
+    pub body: Ospfv3LsBody,
+}
+
+impl Ospfv3Lsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        self.h.emit(buf);
+        self.body.emit(buf);
+    }
+}
+
+impl ParseBe<Ospfv3Lsa> for Ospfv3Lsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3Lsa> {
+        let (input, h) = Ospfv3LsaHeader::parse_be(input)?;
+        // header.length covers the full LSA including the 20-byte
+        // header; the body lives in the remaining bytes.
+        let body_len = (h.length as usize).saturating_sub(OSPFV3_LSA_HEADER_LEN as usize);
+        let (input, body_bytes) = nom::bytes::complete::take(body_len)(input)?;
+        let (_, body) = Ospfv3LsBody::parse_be(body_bytes, h.ls_type)?;
+        Ok((input, Ospfv3Lsa { h, body }))
+    }
+}
+
+/// v3 Link State Update packet body (RFC 5340 §A.3.5).
+///
+/// Carries one or more LSAs each with a typed body. Wire layout:
+/// ```text
+/// |               # Advertisements (32 bits)               |
+/// |                          LSAs                          |
+/// ```
+///
+/// Replaces the prior opaque `Ospfv3Payload::Unknown` fallback for
+/// `OspfType::LsUpdate`. The LSA count is derived from `lsas.len()`
+/// on emit; on parse it gates the number of LSAs consumed (the LSU
+/// could be followed by padding or trailing IPv6 ICMP-style data
+/// the upper layer hasn't trimmed).
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3LsUpdate {
+    pub lsas: Vec<Ospfv3Lsa>,
+}
+
+impl Ospfv3LsUpdate {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        let num: u32 = self.lsas.len().min(u32::MAX as usize) as u32;
+        buf.put_u32(num);
+        for lsa in &self.lsas {
+            lsa.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3LsUpdate> for Ospfv3LsUpdate {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LsUpdate> {
+        let (mut input, num) = be_u32(input)?;
+        let mut lsas = Vec::with_capacity(num as usize);
+        for _ in 0..num {
+            let (rest, lsa) = Ospfv3Lsa::parse_be(input)?;
+            lsas.push(lsa);
+            input = rest;
+        }
+        Ok((input, Ospfv3LsUpdate { lsas }))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1311,32 +1472,159 @@ mod tests {
         assert_eq!(word & 0x00FF_FFFF, 0x0000_0013);
     }
 
-    /// Captures of v3 LSU / LSAck (the still-untyped payloads) roundtrip
-    /// as opaque bytes. Once those types land, this test migrates to
-    /// verifying the typed variant.
+    /// LSU carrying two LSAs of different LS Types (Router + Network)
+    /// roundtrips every field, with the body dispatch picking the
+    /// right typed variant for each. Also pins the 4-byte
+    /// `# Advertisements` count + per-LSA header.length bookkeeping.
     #[test]
-    fn ospfv3_unknown_payload_roundtrip() {
-        let body = vec![0xAA, 0xBB, 0xCC, 0xDD];
-        let mut pkt = Ospfv3Packet::new(
-            &Ipv4Addr::new(192, 0, 2, 1),
-            &Ipv4Addr::new(0, 0, 0, 7),
-            42,
-            Ospfv3Payload::Unknown(body.clone()),
+    fn ospfv3_lsupdate_typed_lsas_roundtrip() {
+        // --- Router-LSA + its header ---
+        let router_body = make_router_lsa();
+        let mut router_buf = BytesMut::new();
+        router_body.emit(&mut router_buf);
+        let router_h = Ospfv3LsaHeader {
+            ls_age: 1,
+            ls_type: OSPFV3_ROUTER_LSA_TYPE,
+            link_state_id: 0,
+            advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: OSPFV3_LSA_HEADER_LEN + router_buf.len() as u16,
+        };
+
+        // --- Network-LSA + its header ---
+        let net_body = Ospfv3NetworkLsa {
+            options: Ospfv3Options::new(),
+            attached_routers: vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+        };
+        let mut net_buf = BytesMut::new();
+        net_body.emit(&mut net_buf);
+        let net_h = Ospfv3LsaHeader {
+            ls_age: 2,
+            ls_type: OSPFV3_NETWORK_LSA_TYPE,
+            link_state_id: 0x0102_0304,
+            advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+            ls_seq_number: 0x8000_0002,
+            ls_checksum: 0,
+            length: OSPFV3_LSA_HEADER_LEN + net_buf.len() as u16,
+        };
+
+        let lsu = Ospfv3LsUpdate {
+            lsas: vec![
+                Ospfv3Lsa {
+                    h: router_h.clone(),
+                    body: Ospfv3LsBody::Router(router_body),
+                },
+                Ospfv3Lsa {
+                    h: net_h.clone(),
+                    body: Ospfv3LsBody::Network(net_body),
+                },
+            ],
+        };
+
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsUpdate(lsu),
         );
-        // The Unknown variant's `typ()` is a placeholder; preserve
-        // the actual wire type via the header field.
-        pkt.typ = OspfType::LsUpdate;
 
         let mut buf = BytesMut::new();
         pkt.emit(&mut buf);
-        assert_eq!(buf.len(), OSPFV3_HEADER_LEN + body.len());
+        assert_eq!(buf[0], OSPFV3_VERSION);
+        // # Advertisements is the first 32-bit word of the body.
+        assert_eq!(
+            BigEndian::read_u32(&buf[OSPFV3_HEADER_LEN..OSPFV3_HEADER_LEN + 4]),
+            2
+        );
 
         let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
         assert_eq!(parsed.typ, OspfType::LsUpdate);
         match parsed.payload {
-            Ospfv3Payload::Unknown(bytes) => assert_eq!(bytes, body),
-            other => panic!("expected Unknown payload, got {:?}", other),
+            Ospfv3Payload::LsUpdate(u) => {
+                assert_eq!(u.lsas.len(), 2);
+                assert_eq!(u.lsas[0].h.ls_type, OSPFV3_ROUTER_LSA_TYPE);
+                assert!(matches!(u.lsas[0].body, Ospfv3LsBody::Router(_)));
+                assert_eq!(u.lsas[1].h.ls_type, OSPFV3_NETWORK_LSA_TYPE);
+                match &u.lsas[1].body {
+                    Ospfv3LsBody::Network(n) => {
+                        assert_eq!(n.attached_routers.len(), 2);
+                    }
+                    other => panic!("expected Network body, got {:?}", other),
+                }
+            }
+            other => panic!("expected LsUpdate payload, got {:?}", other),
+        }
+    }
+
+    /// An LSU carrying an LSA whose LS Type isn't in our dispatch
+    /// table (e.g. NSSA-AS-External 0x2007 or any reserved value)
+    /// falls into `Ospfv3LsBody::Unknown` with the body bytes
+    /// preserved. This is the residual roundtrip guarantee.
+    #[test]
+    fn ospfv3_lsupdate_unknown_ls_type_roundtrip() {
+        // Synthesise an LSA with a reserved LS Type and 8 bytes of
+        // body.
+        let body_bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF];
+        let h = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: 0x2007, // NSSA-AS-External, currently Unknown
+            link_state_id: 0,
+            advertising_router: Ipv4Addr::new(192, 0, 2, 1),
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: OSPFV3_LSA_HEADER_LEN + body_bytes.len() as u16,
+        };
+        let lsu = Ospfv3LsUpdate {
+            lsas: vec![Ospfv3Lsa {
+                h,
+                body: Ospfv3LsBody::Unknown(body_bytes.clone()),
+            }],
+        };
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(192, 0, 2, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsUpdate(lsu),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+
+        let (_, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        match parsed.payload {
+            Ospfv3Payload::LsUpdate(u) => {
+                assert_eq!(u.lsas.len(), 1);
+                match &u.lsas[0].body {
+                    Ospfv3LsBody::Unknown(bytes) => assert_eq!(bytes, &body_bytes),
+                    other => panic!("expected Unknown body, got {:?}", other),
+                }
+            }
+            other => panic!("expected LsUpdate payload, got {:?}", other),
+        }
+    }
+
+    /// Empty LSU (zero LSAs) still emits the 4-byte count and parses
+    /// back cleanly.
+    #[test]
+    fn ospfv3_lsupdate_empty() {
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsUpdate(Ospfv3LsUpdate::default()),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Header (16) + # Advertisements word (4) = 20.
+        assert_eq!(buf.len(), OSPFV3_HEADER_LEN + 4);
+
+        let (_, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        match parsed.payload {
+            Ospfv3Payload::LsUpdate(u) => assert!(u.lsas.is_empty()),
+            other => panic!("expected LsUpdate payload, got {:?}", other),
         }
     }
 
