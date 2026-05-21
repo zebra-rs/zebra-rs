@@ -171,6 +171,66 @@ pub fn vrf_emit_withdraw(exporter: &VrfExporter, prefix: ipnet::Ipv4Net) {
     });
 }
 
+/// Inverse of [`VrfExporter`] — references the global Bgp state
+/// the shared `route_ipv4_update` path needs to fan a VPNv4
+/// route out to every importing VRF task.
+///
+/// Carries `rib_known_vrfs` (for the RT intersection check) and
+/// `vrf_registry` (for the per-VRF inbound senders). Both are
+/// borrowed from the global `Bgp` for the span of one
+/// `process_msg` call.
+pub struct VrfImportDispatcher<'a> {
+    pub rib_known_vrfs: &'a std::collections::BTreeMap<String, super::super::inst::RibKnownVrf>,
+    pub vrf_registry: &'a std::collections::BTreeMap<String, super::spawn::BgpVrfHandle>,
+}
+
+/// Fan a freshly best-path-selected VPNv4 route out to every
+/// VRF whose `import_rts_v4` intersects the route's RT extcomms.
+/// Called from the shared `route_ipv4_update` after
+/// `local_rib.update(Some(rd), ...)` returns. `label = 0` is the
+/// step-19 stub — the receiving VRF treats it the same way the
+/// Export side does (skip the install).
+pub fn dispatch_import_v4(
+    dispatcher: &VrfImportDispatcher<'_>,
+    rd: bgp_packet::RouteDistinguisher,
+    prefix: ipnet::Ipv4Net,
+    attr: &bgp_packet::BgpAttr,
+    label: u32,
+) {
+    let matches = super::super::inst::matching_import_vrfs(dispatcher.rib_known_vrfs, &attr.ecom);
+    for vrf_name in matches {
+        let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
+            continue;
+        };
+        let _ = handle.inbox.send(BgpVrfMsg::ImportV4 {
+            rd,
+            prefix,
+            attr: attr.clone(),
+            label,
+        });
+    }
+}
+
+/// Inverse of [`dispatch_import_v4`]. Floods
+/// `BgpVrfMsg::WithdrawImport` to every VRF whose
+/// `import_rts_v4` matches; the receiver decides whether the
+/// matching imported route is one it actually holds (step 18b
+/// wires the receive-side filter).
+pub fn dispatch_withdraw_import_v4(
+    dispatcher: &VrfImportDispatcher<'_>,
+    rd: bgp_packet::RouteDistinguisher,
+    prefix: ipnet::Ipv4Net,
+    attr: &bgp_packet::BgpAttr,
+) {
+    let matches = super::super::inst::matching_import_vrfs(dispatcher.rib_known_vrfs, &attr.ecom);
+    for vrf_name in matches {
+        let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
+            continue;
+        };
+        let _ = handle.inbox.send(BgpVrfMsg::WithdrawImport { rd, prefix });
+    }
+}
+
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
     /// caller (step 14's `spawn_bgp_vrf`) keeps the
@@ -319,6 +379,9 @@ impl BgpVrf {
                     // concept today; per-VRF support is a follow-up.
                     color_policy: None,
                     flex_algo_routes: None,
+                    // Per-VRF tasks never receive VPNv4 NLRI directly,
+                    // so no import dispatcher to thread through.
+                    vrf_import: None,
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
@@ -371,11 +434,36 @@ impl BgpVrf {
                     "bgp vrf: received inbound Accept (FSM driver lands in step 15d)",
                 );
             }
-            BgpVrfMsg::ImportV4 { .. } | BgpVrfMsg::ImportV6 { .. } => {
-                // Step 18 wires the import insert + best-path.
+            BgpVrfMsg::ImportV4 {
+                rd,
+                prefix,
+                attr: _,
+                label,
+            } => {
+                // Step 18a delivers the payload; step 18b's
+                // handler runs best-path insert into
+                // `self.local_rib.v4` with `BgpRibType::Originated`.
+                // Until then, surface the import at info so
+                // operators can spot the path arriving via the
+                // log stream during a development bring-up.
+                tracing::info!(
+                    vrf = %self.name,
+                    %prefix,
+                    rd = %rd,
+                    label,
+                    "bgp vrf: received ImportV4 (LocRIB insert lands in step 18b)",
+                );
             }
-            BgpVrfMsg::WithdrawImport { .. } => {
-                // Step 18.
+            BgpVrfMsg::ImportV6 { .. } => {
+                // v6 import lands after v4 ships.
+            }
+            BgpVrfMsg::WithdrawImport { rd, prefix } => {
+                tracing::info!(
+                    vrf = %self.name,
+                    %prefix,
+                    rd = %rd,
+                    "bgp vrf: received WithdrawImport (LocRIB remove lands in step 18b)",
+                );
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

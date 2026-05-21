@@ -906,6 +906,25 @@ pub fn route_ipv4_update(
         }
     }
 
+    // Step 18a: global v4vpn best-path → per-VRF import. Inverse
+    // of the step-17b-iii hook: when an incoming VPNv4 route
+    // becomes the global best-path winner, fan out to every VRF
+    // whose `import_rts_v4` intersects the route's RT extcomms.
+    // `vrf_import` is `Some(...)` only in the global Bgp task;
+    // per-VRF runtimes never receive VPNv4 NLRI directly.
+    if let Some(rd) = rd
+        && let Some(dispatcher) = bgp.vrf_import
+    {
+        if let Some(winner) = selected.first() {
+            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0);
+        } else {
+            // best-path stripped the candidate; flood withdraw
+            // using the *new* attr (the one just rejected) so
+            // the matching-VRF set still resolves the same way.
+            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &rib.attr);
+        }
+    }
+
     // Plain IPv4 unicast best-path winners are installed to the kernel
     // FIB via RIB. VPNv4 lives in `local_rib.v4vpn` and has its own
     // (still-deferred) install path, so gate on rd==None.
@@ -1900,6 +1919,22 @@ pub fn route_ipv4_withdraw(
             super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr, 0);
         } else {
             super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
+        }
+    }
+
+    // Step 18a: global v4vpn withdraw → per-VRF import dispatch.
+    // If a replacement winner survives best-path, that VPNv4 row
+    // now carries a different attr; re-import with the new attr.
+    // If `selected` is empty, the route truly went away — flood
+    // a WithdrawImport using the *removed* row's attr to resolve
+    // the matching-VRF set (we no longer have the new attr).
+    if let Some(rd) = rd
+        && let Some(dispatcher) = bgp.vrf_import
+    {
+        if let Some(winner) = selected.first() {
+            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0);
+        } else if let Some(gone) = removed.first() {
+            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &gone.attr);
         }
     }
     if !selected.is_empty() || !removed.is_empty() {
@@ -3747,6 +3782,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -3785,6 +3821,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -3872,6 +3909,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -3908,6 +3946,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -4043,6 +4082,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         if !selected.is_empty() {
@@ -4165,6 +4205,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
         };
 
         if !selected.is_empty() {
