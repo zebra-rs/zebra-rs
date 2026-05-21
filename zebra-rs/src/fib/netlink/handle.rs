@@ -35,7 +35,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
-use crate::rib::inst::IlmEntry;
+use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::route::{DEBUG_ADDR, DEBUG_EVPN};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
@@ -1713,6 +1713,37 @@ impl FibHandle {
 
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
+
+        // BGP/MPLS-VPN per-VRF decap: emit a pure-pop AF_MPLS
+        // route — no NEW_DESTINATION (= no swap), just an
+        // `Oif(vrf_ifindex)` so the kernel routes the popped
+        // packet via the VRF master, which lands in
+        // `vrf_tables[table_id]`. Skips the per-`Nexthop` branch
+        // because `IlmEntry::nexthop` is `Nexthop::default()` for
+        // this variant.
+        if let IlmType::DecapVrf {
+            table_id: _,
+            vrf_ifindex,
+        } = ilm.ilm_type
+        {
+            msg.attributes.push(RouteAttribute::Oif(vrf_ifindex));
+            let attr = RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
+                label,
+                traffic_class: 0,
+                bottom_of_stack: true,
+                ttl: 0,
+            }));
+            msg.attributes.push(attr);
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE;
+            let mut response = self.handle.clone().request(req).unwrap();
+            while let Some(msg) = response.next().await {
+                if let NetlinkPayload::Error(e) = msg.payload {
+                    tracing::info!("ilm_add DecapVrf error: {}", e);
+                }
+            }
+            return;
+        }
 
         match ilm.nexthop {
             Nexthop::Uni(ref uni) => {

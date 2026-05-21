@@ -51,6 +51,12 @@ pub struct BgpVrfHandle {
     /// label, otherwise a brief outage would invalidate PE-side
     /// FIB entries that already point at this VRF's old label.
     pub label: u32,
+    /// VRF master ifindex used in the AF_MPLS DecapVrf ILM, when
+    /// step 19b's spawn site successfully installed one. `None`
+    /// when the spawn ran with no kernel info (placeholder ctx);
+    /// the next `maybe_respawn_vrf_with_kernel_ctx` after the
+    /// kernel VRF appears installs the ILM.
+    pub ilm_decap_ifindex: Option<u32>,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -105,9 +111,11 @@ pub fn spawn_bgp_vrf(
     rib_subscriber: &RibSubscriber,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
-    // Snapshot for logging so we can move `kernel` into the
-    // ctx-building arm without re-borrowing later.
+    // Snapshot for logging + ILM install so we can move
+    // `kernel` into the ctx-building arm without re-borrowing
+    // later.
     let kernel_table_id = kernel.as_ref().map(|k| k.table_id);
+    let kernel_ifindex = kernel.as_ref().map(|k| k.ifindex);
     let ctx = match kernel {
         Some(k) => {
             // Mint a fresh `RibClient` for this VRF. The
@@ -163,6 +171,28 @@ pub fn spawn_bgp_vrf(
         });
     }
 
+    // Step 19b: install the AF_MPLS DecapVrf ILM at the
+    // allocated label so a remote PE's VPNv4 packet with this
+    // label pops + lands in `vrf_tables[table_id]`. Only when
+    // we have kernel info — a placeholder-ctx spawn skips the
+    // install; the `maybe_respawn_vrf_with_kernel_ctx` path
+    // re-runs with kernel info and installs the ILM then.
+    let ilm_decap_ifindex = match (kernel_table_id, kernel_ifindex) {
+        (Some(table_id), Some(vrf_ifindex)) if label != 0 => {
+            let entry = crate::rib::inst::IlmEntry {
+                rtype: crate::rib::RibType::Bgp,
+                ilm_type: crate::rib::inst::IlmType::DecapVrf {
+                    table_id,
+                    vrf_ifindex,
+                },
+                nexthop: crate::rib::Nexthop::default(),
+            };
+            rib_subscriber.send_ilm_add(label, entry);
+            Some(vrf_ifindex)
+        }
+        _ => None,
+    };
+
     let task = serve_vrf(vrf);
     tracing::info!(
         vrf = %name,
@@ -170,10 +200,16 @@ pub fn spawn_bgp_vrf(
         router_id = %effective_router_id,
         table_id = ?kernel_table_id,
         label,
+        ilm_installed = ilm_decap_ifindex.is_some(),
         peers = peer_count,
         "bgp: spawned per-VRF task",
     );
-    BgpVrfHandle { inbox, task, label }
+    BgpVrfHandle {
+        inbox,
+        task,
+        label,
+        ilm_decap_ifindex,
+    }
 }
 
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
