@@ -186,7 +186,7 @@ pub fn ospf_packet_db_desc_set(nbr: &mut Neighbor, dd: &mut OspfDbDesc) {
 }
 
 pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
-    let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+    let area = link.area_id;
     let mut dd = OspfDbDesc::default();
 
     tracing::info!("DB_DESC: send {:?}", nbr.dd.flags);
@@ -218,8 +218,8 @@ pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
     }
 }
 
-pub fn ospf_ls_req_send(_link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
-    let area: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
+    let area = link.area_id;
     let mut ls_req = OspfLsRequest::default();
 
     ospf_packet_ls_req_set(nbr, &mut ls_req);
@@ -441,7 +441,7 @@ pub fn ospf_db_desc_recv(
 }
 
 pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) {
-    let area = Ipv4Addr::UNSPECIFIED;
+    let area = oi.area_id;
     let ls_upd = OspfLsUpdate {
         num_adv: lsas.len() as u32,
         lsas,
@@ -458,7 +458,7 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
 }
 
 pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<OspfLsaHeader>) {
-    let area = Ipv4Addr::UNSPECIFIED;
+    let area = oi.area_id;
     let ls_ack = OspfLsAck { lsa_headers };
     let packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
     tracing::info!("[LS Ack:Send] to {}", nbr.ident.prefix.addr());
