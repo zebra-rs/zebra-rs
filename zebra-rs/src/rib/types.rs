@@ -133,7 +133,7 @@ impl From<u8> for RibSubType {
 impl RibSubType {
     pub fn abbrev(&self) -> String {
         match self {
-            Self::Default => "  ".to_string(),
+            Self::Default => "".to_string(),
             Self::OspfIa => "IA".to_string(),
             Self::OspfNssa1 => "N1".to_string(),
             Self::OspfNssa2 => "N2".to_string(),
@@ -142,7 +142,7 @@ impl RibSubType {
             Self::IsisLevel1 => "L1".to_string(),
             Self::IsisLevel2 => "L2".to_string(),
             Self::IsisIntraArea => "ia".to_string(),
-            Self::Other(_) => "  ".to_string(),
+            Self::Other(_) => "".to_string(),
         }
     }
 }

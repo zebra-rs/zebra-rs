@@ -7,10 +7,28 @@ use crate::{
     rib::{Label, Nexthop, nexthop::NexthopMember, nexthop::NexthopUni},
 };
 
-use super::{Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show};
+use super::{
+    Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show,
+    types::RibSubType, types::RibType,
+};
 use std::fmt::Write;
 use std::net::IpAddr;
 use std::time::Duration;
+
+// Two-char tag column used in `show ip route` lines. When the route has
+// a meaningful sub-type (OSPF inter-area, IS-IS L1/L2, …) we show that
+// two-letter tag; otherwise we show the protocol letter padded with one
+// space so the `*>` FIB-mark column lines up across both forms:
+//   `D  *> 0.0.0.0/0 …`
+//   `O IA *> 10.0.0.0/24 …`
+fn route_tag(rtype: &RibType, rsubtype: &RibSubType) -> String {
+    let sub = rsubtype.abbrev();
+    if sub.is_empty() {
+        format!("{} ", rtype.abbrev())
+    } else {
+        sub
+    }
+}
 
 /// Format a route's age the way `show ip route` lines render it:
 /// `HH:MM:SS` for sub-day, `Nd Nh Nm` for ≥ 24 hours. Matches the
@@ -383,9 +401,8 @@ pub fn rib_entry_show(
     // All type route.
     write!(
         buf,
-        "{} {} {} {}",
-        e.rtype.abbrev(),
-        e.rsubtype.abbrev(),
+        "{} {} {}",
+        route_tag(&e.rtype, &e.rsubtype),
         e.selected(),
         prefix,
     )?;
@@ -534,9 +551,8 @@ pub fn rib_entry_show_v6(
     // All type route.
     write!(
         buf,
-        "{} {} {} {}",
-        e.rtype.abbrev(),
-        e.rsubtype.abbrev(),
+        "{} {} {}",
+        route_tag(&e.rtype, &e.rsubtype),
         e.selected(),
         prefix,
     )?;
