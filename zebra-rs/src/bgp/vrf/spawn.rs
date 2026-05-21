@@ -24,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::context::{ProtoContext, Task};
 
+use super::super::inst::RibKnownVrf;
 use super::super::vrf_config::BgpVrfConfig;
 use super::inst::{BgpVrf, BgpVrfInbox, serve_vrf};
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
@@ -67,23 +68,36 @@ pub fn compute_vrf_diff(
 }
 
 /// Build + spawn a per-VRF task. Returns the handle the caller
-/// stashes on `vrf_registry`. The `global_tx` argument is the
-/// shared sender every VRF task uses to push back to the global
-/// runtime (one channel, fanned in from every VRF).
+/// stashes on `vrf_registry`. `kernel` carries the matching
+/// kernel VRF master info if RIB has already told us about it
+/// (step 15); when `None`, the spawn falls back to a placeholder
+/// `ProtoContext::default_table_no_rib()` and the per-VRF runtime
+/// won't bind sockets to a VRF master until the global Bgp task
+/// re-spawns via [`super::super::inst::Bgp::maybe_respawn_vrf_with_kernel_ctx`].
+///
+/// `global_tx` is the shared sender every VRF task uses to push
+/// back to the global runtime (one channel, fanned in from every
+/// VRF).
 pub fn spawn_bgp_vrf(
     name: String,
     cfg: &BgpVrfConfig,
     router_id: std::net::Ipv4Addr,
+    kernel: Option<RibKnownVrf>,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
-    // Placeholder context — step 15 lifts this to
-    // `ProtoContext::for_vrf(rib, table_id, ifname)` once a per-VRF
-    // RibClient subscription with the right vrf_id is in place.
-    let ctx = ProtoContext::default_table_no_rib();
-    // Per-VRF override on router-id wins over the global one. Step
-    // 14 reads the cfg snapshot at spawn time; an operator edit to
-    // router-id post-spawn doesn't bubble through yet — step 15
-    // adds the respawn-on-edit detection.
+    let ctx = match kernel {
+        Some(k) => ProtoContext::for_vrf_no_rib(k.table_id, name.clone()),
+        None => {
+            tracing::debug!(
+                vrf = %name,
+                "bgp: spawning per-VRF task with placeholder context (kernel VRF not yet known)",
+            );
+            ProtoContext::default_table_no_rib()
+        }
+    };
+    // Per-VRF override on router-id wins over the global one. An
+    // operator edit to router-id post-spawn doesn't bubble through
+    // yet — a follow-up adds the respawn-on-edit detection.
     let effective_router_id = cfg.router_id.unwrap_or(router_id);
     let (vrf, inbox) = BgpVrf::new(name.clone(), ctx, cfg.rd, effective_router_id, global_tx);
     let task = serve_vrf(vrf);
@@ -91,6 +105,7 @@ pub fn spawn_bgp_vrf(
         vrf = %name,
         rd = ?cfg.rd,
         router_id = %effective_router_id,
+        table_id = ?kernel.map(|k| k.table_id),
         "bgp: spawned per-VRF task",
     );
     BgpVrfHandle { inbox, task }
@@ -132,7 +147,16 @@ mod tests {
     fn handle(name: &str) -> BgpVrfHandle {
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let cfg = BgpVrfConfig::default();
-        spawn_bgp_vrf(name.to_string(), &cfg, Ipv4Addr::UNSPECIFIED, global_tx)
+        // Pass `None` for the kernel info — the diff tests don't
+        // need the per-VRF `SO_BINDTODEVICE` binding; the
+        // placeholder context is enough for lifecycle testing.
+        spawn_bgp_vrf(
+            name.to_string(),
+            &cfg,
+            Ipv4Addr::UNSPECIFIED,
+            None,
+            global_tx,
+        )
     }
 
     #[tokio::test]

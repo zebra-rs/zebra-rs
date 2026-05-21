@@ -95,14 +95,37 @@ impl ProtoContext {
     /// `vrf_ifname` so the resulting socket lands in the matching
     /// kernel routing table.
     ///
-    /// Has no production caller in step 4; step 13 (per-VRF BGP
-    /// task spawn) is the first.
-    #[allow(dead_code)] // first caller lands in step 13.
+    /// First production caller arrives in a step-15 follow-up
+    /// that wires per-VRF [`RibClient`] subscriptions. Until then
+    /// [`Self::for_vrf_no_rib`] is the spawn-side entry point.
+    #[allow(dead_code)]
     pub fn for_vrf(rib: RibClient, vrf_id: u32, vrf_ifname: String) -> Self {
         debug_assert!(
             vrf_id != 0,
             "ProtoContext::for_vrf requires a non-zero vrf_id; use default_table for vrf 0"
         );
+        Self {
+            vrf_id,
+            vrf_ifname: Some(vrf_ifname),
+            rib,
+        }
+    }
+
+    /// VRF-attached counterpart to [`Self::default_table_no_rib`].
+    /// Used by step 15's BGP-per-VRF spawn site, which doesn't yet
+    /// hand out a real per-VRF [`RibClient`] subscription — the
+    /// `SO_BINDTODEVICE` binding still fires on every socket the
+    /// factories return; the `ctx.rib.send(...)` path is a no-op
+    /// against a parked sender until a follow-up wires the
+    /// subscription.
+    pub fn for_vrf_no_rib(vrf_id: u32, vrf_ifname: String) -> Self {
+        debug_assert!(
+            vrf_id != 0,
+            "ProtoContext::for_vrf_no_rib requires a non-zero vrf_id"
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let rib = RibClient::new(tx, crate::rib::client::ProtoId::from_raw(u32::MAX));
         Self {
             vrf_id,
             vrf_ifname: Some(vrf_ifname),
@@ -456,5 +479,12 @@ mod tests {
         let observed = std::str::from_utf8(&buf[..len.saturating_sub(1) as usize])
             .expect("ifname is valid utf-8");
         assert_eq!(observed, "lo");
+    }
+
+    #[test]
+    fn for_vrf_no_rib_records_id_and_ifname() {
+        let ctx = ProtoContext::for_vrf_no_rib(17, "vrf-test".to_string());
+        assert_eq!(ctx.vrf_id(), 17);
+        assert_eq!(ctx.vrf_ifname.as_deref(), Some("vrf-test"));
     }
 }

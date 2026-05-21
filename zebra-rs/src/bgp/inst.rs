@@ -62,6 +62,17 @@ pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
 pub type PCallback = fn(&mut CommunityListMap, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Bgp, Args, bool) -> std::result::Result<String, std::fmt::Error>;
 
+/// Kernel VRF master info as observed by `Bgp` via
+/// `RibRx::VrfAdd`. Used by [`Bgp::maybe_respawn_vrf_with_kernel_ctx`]
+/// to lift a step-14 placeholder `ProtoContext` to a real
+/// `ProtoContext::for_vrf(rib, table_id, name)`.
+#[derive(Debug, Clone, Copy)]
+pub struct RibKnownVrf {
+    pub table_id: u32,
+    #[allow(dead_code)] // read by step 16's accept dispatcher.
+    pub ifindex: u32,
+}
+
 #[allow(dead_code)]
 pub struct Bgp {
     pub asn: u32,
@@ -171,12 +182,20 @@ pub struct Bgp {
     /// Per-VRF tasks currently running. The diff against
     /// [`Self::vrfs`] at `CommitEnd` spawns the names that show up
     /// in the desired set but not here, and despawns names that
-    /// show up here but not in the desired set. Step 14's
-    /// placeholder `ProtoContext::default_table_no_rib` means the
-    /// per-VRF tasks aren't yet bound to any kernel VRF — step 15
-    /// lifts the context to a real `ProtoContext::for_vrf` once
-    /// the peer-bind site needs the binding.
+    /// show up here but not in the desired set. Step 15 lifts the
+    /// step-14 placeholder `ProtoContext::default_table_no_rib`
+    /// to a real `ProtoContext::for_vrf(rib, table_id, name)` when
+    /// [`Self::rib_known_vrfs`] gains the matching kernel info via
+    /// `RibRx::VrfAdd`.
     pub vrf_registry: BTreeMap<String, super::vrf::BgpVrfHandle>,
+    /// Kernel VRF master devices RIB has told us about, keyed by
+    /// VRF name. Populated by `RibRx::VrfAdd` (and replayed from
+    /// `Rib::subscribe`). Step 15 consults this at per-VRF spawn
+    /// time to build a real `ProtoContext::for_vrf`; when the kernel
+    /// info isn't yet known the spawn falls back to a placeholder
+    /// context and the entry gets a respawn the moment `VrfAdd`
+    /// arrives.
+    pub rib_known_vrfs: BTreeMap<String, RibKnownVrf>,
     /// Outbound sender every per-VRF task uses to push messages
     /// back to the global runtime — peer registration, exports,
     /// withdraws. Cloned into [`super::vrf::BgpVrf::global_tx`] at
@@ -320,6 +339,7 @@ impl Bgp {
             interface_neighbors: super::interface_neighbor::empty_map(),
             vrfs: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
@@ -588,14 +608,58 @@ impl Bgp {
             let Some(cfg) = self.vrfs.get(&name).cloned() else {
                 continue;
             };
+            let kernel = self.rib_known_vrfs.get(&name).copied();
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
                 self.router_id,
+                kernel,
                 self.vrf_global_tx.clone(),
             );
             self.vrf_registry.insert(name, handle);
         }
+    }
+
+    /// Called when `RibRx::VrfAdd` for `name` arrives. If a step-14
+    /// placeholder per-VRF task is already running for this name,
+    /// tear it down and respawn it with the real
+    /// `ProtoContext::for_vrf` so the `SO_BINDTODEVICE` binding
+    /// kicks in. If the VRF intent hasn't been committed yet, this
+    /// is a no-op — the next `apply_vrf_commit_diff` will pick up
+    /// the kernel info via [`Self::rib_known_vrfs`].
+    fn maybe_respawn_vrf_with_kernel_ctx(&mut self, name: &str) {
+        // Nothing to do if there's no BGP intent for this VRF yet.
+        let Some(cfg) = self.vrfs.get(name).cloned() else {
+            return;
+        };
+        // Likewise if nothing is currently running for the name —
+        // the next `apply_vrf_commit_diff` will spawn it.
+        if !self.vrf_registry.contains_key(name) {
+            return;
+        }
+        let Some(kernel) = self.rib_known_vrfs.get(name).copied() else {
+            return;
+        };
+        // Tear the placeholder-ctx task down before spawning the
+        // real one. `despawn_bgp_vrf` sends Shutdown; the handle
+        // drop right after aborts the runtime if the loop hasn't
+        // yet drained the signal.
+        if let Some(handle) = self.vrf_registry.remove(name) {
+            super::vrf::despawn_bgp_vrf(name, &handle);
+        }
+        let new_handle = super::vrf::spawn_bgp_vrf(
+            name.to_string(),
+            &cfg,
+            self.router_id,
+            Some(kernel),
+            self.vrf_global_tx.clone(),
+        );
+        self.vrf_registry.insert(name.to_string(), new_handle);
+        tracing::info!(
+            vrf = %name,
+            table_id = kernel.table_id,
+            "bgp: respawned per-VRF task with real ProtoContext::for_vrf",
+        );
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -781,6 +845,29 @@ impl Bgp {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
+            }
+            RibRx::VrfAdd {
+                name,
+                table_id,
+                ifindex,
+            } => {
+                self.rib_known_vrfs
+                    .insert(name.clone(), RibKnownVrf { table_id, ifindex });
+                // If the operator already committed `router bgp vrf
+                // <name> ...` and the step-14 placeholder context
+                // is in place, swap it for a real `for_vrf` now. The
+                // placeholder spawn happened before the kernel had
+                // assigned `table_id`; without this respawn the
+                // `SO_BINDTODEVICE` binding step 8 installed would
+                // never fire for that VRF.
+                self.maybe_respawn_vrf_with_kernel_ctx(&name);
+            }
+            RibRx::VrfDel { name } => {
+                self.rib_known_vrfs.remove(&name);
+                // No despawn here — the VRF could come back, and the
+                // per-VRF task carries the YANG intent. If the
+                // operator subsequently deletes the BGP VRF block,
+                // step 14's `apply_vrf_commit_diff` handles teardown.
             }
             // Redistribute deliveries from RIB — initial walk
             // (chunks ending in `bulk: Eor`) plus steady-state deltas

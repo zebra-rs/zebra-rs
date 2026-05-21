@@ -941,6 +941,23 @@ impl Rib {
                 return;
             }
         }
+        // VRF dump — only for default-VRF subscribers (BGP). A
+        // per-VRF subscriber wouldn't act on VrfAdd for sibling
+        // VRFs and the global Bgp is the only one that needs to
+        // lift placeholder `BgpVrf` contexts to real `for_vrf`
+        // once the kernel has acknowledged the master.
+        if vrf_id == 0 {
+            for vrf in self.vrfs.values() {
+                let msg = RibRx::VrfAdd {
+                    name: vrf.name.clone(),
+                    table_id: vrf.table_id,
+                    ifindex: vrf.ifindex,
+                };
+                if tx.send(msg).is_err() {
+                    return;
+                }
+            }
+        }
         if tx.send(RibRx::EoR).is_err() {
             return;
         }
@@ -1315,6 +1332,13 @@ impl Rib {
                     table_id,
                     ifindex
                 );
+                // Notify default-VRF subscribers (currently only the
+                // global BGP instance). The per-VRF spawn site lifts
+                // the placeholder `ProtoContext` to a real
+                // `for_vrf(rib, table_id, name)` when the VrfAdd
+                // arrives — see `bgp::vrf::spawn::spawn_bgp_vrf`.
+                let vrf = self.vrfs.get(&name).expect("just inserted").clone();
+                self.api_vrf_add(&vrf);
                 // Replay any interface bindings that were waiting for
                 // this VRF to come up.
                 let to_replay: Vec<(String, Option<String>)> = self
@@ -1345,6 +1369,7 @@ impl Rib {
                 self.fib_handle.vrf_del(&name).await;
                 self.vrf_id_alloc.release(vrf.table_id);
                 tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);
+                self.api_vrf_del(&name);
             }
             Message::LinkVrfBind { ifname, vrf } => {
                 // Always record operator intent so a later kernel

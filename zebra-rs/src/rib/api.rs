@@ -73,6 +73,26 @@ pub enum RibRx {
     VxlanDel {
         vni: u32,
     },
+    /// A Linux VRF master device the operator has committed. Emitted
+    /// when [`crate::rib::inst::Message::VrfAdd`] has allocated a
+    /// `table_id` and the netlink-side `ip link add` succeeded; also
+    /// replayed at subscribe time so a late-subscribing protocol
+    /// (e.g. BGP spawning after VRFs were configured at startup)
+    /// catches the running set. Step 15 introduces this so the global
+    /// BGP runtime can lift `BgpVrf` from the step-14 placeholder
+    /// `ProtoContext::default_table_no_rib` to a real
+    /// `ProtoContext::for_vrf(rib, table_id, name)` once the kernel
+    /// has acknowledged the VRF master.
+    VrfAdd {
+        name: String,
+        table_id: u32,
+        ifindex: u32,
+    },
+    /// Inverse of [`Self::VrfAdd`] — the VRF master has been torn
+    /// down.
+    VrfDel {
+        name: String,
+    },
     EoR,
 
     // ---- redistribute route push ---------------------------------
@@ -193,6 +213,29 @@ impl Rib {
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        }
+    }
+
+    /// Announce a Linux VRF master device. Only default-VRF
+    /// subscribers see this — per-VRF subscribers, once they exist,
+    /// don't need cross-VRF visibility (they only care about their
+    /// own kernel context, which is implicit in the
+    /// `ProtoContext::for_vrf` they were spawned with).
+    pub fn api_vrf_add(&self, vrf: &crate::rib::vrf::Vrf) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::VrfAdd {
+                name: vrf.name.clone(),
+                table_id: vrf.table_id,
+                ifindex: vrf.ifindex,
+            });
+        }
+    }
+
+    pub fn api_vrf_del(&self, name: &str) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::VrfDel {
+                name: name.to_string(),
+            });
         }
     }
 
