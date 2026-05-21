@@ -102,12 +102,18 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub tracing: &'a OspfTracing,
 }
 
-impl Ospf<Ospfv2> {
+// Version-agnostic helpers. These methods touch only generic-safe
+// fields on `Ospf<V>` (links, areas, lsdb_as, router_id, tracing,
+// the v2-shaped tx channel) and produce `OspfInterface<V>` /
+// `&Neighbor<V>` values typed by `V`. They moved here from
+// `impl Ospf<Ospfv2>` as part of the Phase 6 behavioral migration
+// — same code, just no longer pinned to `Ospfv2`.
+impl<V: OspfVersion> Ospf<V> {
     pub fn ospf_interface<'a>(
         &'a mut self,
         ifindex: u32,
         src: &Ipv4Addr,
-    ) -> Option<(OspfInterface<'a>, &'a mut Neighbor)> {
+    ) -> Option<(OspfInterface<'a, V>, &'a mut Neighbor<V>)> {
         // Compute area-wide exchange/loading count before borrowing mutably.
         let exchange_loading_count = self.count_exchange_loading_neighbors(ifindex);
         self.links.get_mut(&ifindex).and_then(|link| {
@@ -167,7 +173,9 @@ impl Ospf<Ospfv2> {
             .get(&ifindex)
             .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
     }
+}
 
+impl Ospf<Ospfv2> {
     pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
 
