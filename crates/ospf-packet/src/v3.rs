@@ -5,9 +5,10 @@
 //! 16-octet header (Instance ID + Reserved), and the per-packet-type
 //! payloads (Hello, DBD, LSR/LSU/LSAck) differ in field layout.
 //!
-//! Hello / DBD / LS Request are typed today; LSU / LSAck and the v3
-//! LSA bodies land in subsequent PRs as the v3 protocol code comes
-//! online.
+//! Hello / DBD / LS Request / LS Ack are typed today; LSU stays
+//! opaque until at least one v3 LSA body lands (its on-wire format
+//! is `(num: u32, lsa: variable)*`). The v3 LSA bodies and the LSU
+//! migration come in subsequent PRs.
 //!
 //! Header wire layout per RFC 5340 §A.3.1:
 //! ```text
@@ -101,15 +102,17 @@ impl Ospfv3Packet {
     }
 }
 
-/// v3 packet payload. Hello, DBD, and LS Request are typed; LSU /
-/// LSAck still parse into `Unknown` so the codec roundtrips opaque
-/// captures without dropping the body. Typed variants for the
-/// remaining types land in subsequent PRs.
+/// v3 packet payload. Hello, DBD, LS Request, and LS Ack are typed;
+/// LSU still parses into `Unknown` since its `(num: u32, lsa:
+/// variable)*` body has no typed value until at least one v3 LSA
+/// body lands. The codec roundtrips that opaque case so captured
+/// packets aren't lossy.
 #[derive(Debug, Clone)]
 pub enum Ospfv3Payload {
     Hello(Ospfv3Hello),
     DbDesc(Ospfv3DbDesc),
     LsRequest(Ospfv3LsRequest),
+    LsAck(Ospfv3LsAck),
     Unknown(Vec<u8>),
 }
 
@@ -119,6 +122,7 @@ impl Ospfv3Payload {
             Ospfv3Payload::Hello(_) => OspfType::Hello,
             Ospfv3Payload::DbDesc(_) => OspfType::DbDesc,
             Ospfv3Payload::LsRequest(_) => OspfType::LsRequest,
+            Ospfv3Payload::LsAck(_) => OspfType::LsAck,
             // Unknown carries the raw body; the type stays in the
             // header where the caller put it.
             Ospfv3Payload::Unknown(_) => OspfType::Unknown(0),
@@ -130,6 +134,7 @@ impl Ospfv3Payload {
             Ospfv3Payload::Hello(h) => h.emit(buf),
             Ospfv3Payload::DbDesc(d) => d.emit(buf),
             Ospfv3Payload::LsRequest(r) => r.emit(buf),
+            Ospfv3Payload::LsAck(a) => a.emit(buf),
             Ospfv3Payload::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -148,8 +153,11 @@ impl Ospfv3Payload {
                 let (input, req) = Ospfv3LsRequest::parse_be(input)?;
                 Ok((input, Ospfv3Payload::LsRequest(req)))
             }
-            // Until typed payloads land for LSU / LSAck, capture them
-            // as raw bytes.
+            OspfType::LsAck => {
+                let (input, ack) = Ospfv3LsAck::parse_be(input)?;
+                Ok((input, Ospfv3Payload::LsAck(ack)))
+            }
+            // Until typed payload lands for LSU, capture as raw bytes.
             _ => Ok((&[][..], Ospfv3Payload::Unknown(input.to_vec()))),
         }
     }
@@ -401,6 +409,30 @@ impl ParseBe<Ospfv3LsRequest> for Ospfv3LsRequest {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LsRequest> {
         let (input, reqs) = many0_complete(Ospfv3LsRequestEntry::parse_be).parse(input)?;
         Ok((input, Ospfv3LsRequest { reqs }))
+    }
+}
+
+/// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
+/// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
+/// identical to the LSA-header stretch of a DBD body, but stands on
+/// its own so the payload enum can dispatch cleanly.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3LsAck {
+    pub lsa_headers: Vec<Ospfv3LsaHeader>,
+}
+
+impl Ospfv3LsAck {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for h in &self.lsa_headers {
+            h.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3LsAck> for Ospfv3LsAck {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LsAck> {
+        let (input, lsa_headers) = many0_complete(Ospfv3LsaHeader::parse_be).parse(input)?;
+        Ok((input, Ospfv3LsAck { lsa_headers }))
     }
 }
 
@@ -695,6 +727,82 @@ mod tests {
         match parsed.payload {
             Ospfv3Payload::DbDesc(d) => assert!(d.lsa_headers.is_empty()),
             other => panic!("expected DbDesc payload, got {:?}", other),
+        }
+    }
+
+    /// LS Ack with two v3 LSA headers roundtrips every field. Pins
+    /// the LSA header at 20 octets each.
+    #[test]
+    fn ospfv3_lsack_packet_roundtrip() {
+        let ack = Ospfv3LsAck {
+            lsa_headers: vec![
+                Ospfv3LsaHeader {
+                    ls_age: 0,
+                    ls_type: 0x2001,
+                    link_state_id: 0,
+                    advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                    ls_seq_number: 0x8000_0001,
+                    ls_checksum: 0xABCD,
+                    length: 24,
+                },
+                Ospfv3LsaHeader {
+                    ls_age: 5,
+                    ls_type: 0x2002,
+                    link_state_id: 0x0102_0304,
+                    advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                    ls_seq_number: 0x8000_0002,
+                    ls_checksum: 0xCAFE,
+                    length: 32,
+                },
+            ],
+        };
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 2),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsAck(ack),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Header (16) + 2 * Ospfv3LsaHeader (40) = 56.
+        assert_eq!(buf.len(), 56);
+        assert_eq!(
+            buf.len() as u16 - OSPFV3_HEADER_LEN as u16,
+            2 * OSPFV3_LSA_HEADER_LEN
+        );
+
+        let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.typ, OspfType::LsAck);
+        match parsed.payload {
+            Ospfv3Payload::LsAck(a) => {
+                assert_eq!(a.lsa_headers.len(), 2);
+                assert_eq!(a.lsa_headers[0].ls_type, 0x2001);
+                assert_eq!(a.lsa_headers[1].link_state_id, 0x0102_0304);
+            }
+            other => panic!("expected LsAck payload, got {:?}", other),
+        }
+    }
+
+    /// Empty LS Ack still parses and emits just the header.
+    #[test]
+    fn ospfv3_lsack_empty() {
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 2),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsAck(Ospfv3LsAck::default()),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        assert_eq!(buf.len(), OSPFV3_HEADER_LEN);
+
+        let (_, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        match parsed.payload {
+            Ospfv3Payload::LsAck(a) => assert!(a.lsa_headers.is_empty()),
+            other => panic!("expected LsAck payload, got {:?}", other),
         }
     }
 }
