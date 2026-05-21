@@ -2165,6 +2165,27 @@ pub fn route_from_peer(
                     route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
                 }
             }
+            MpReachAttr::Ipv4 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                // RFC 8950 IPv4-over-IPv6: the wire is now parseable
+                // and the session no longer resets on receipt, but
+                // Loc-RIB and FIB plumbing for an IPv4 prefix with an
+                // IPv6 next-hop is deferred. PR D will wire the
+                // best-path winner into FIB via the ND-resolved
+                // ifindex; until then the route is acknowledged and
+                // logged for visibility.
+                for update in updates.iter() {
+                    tracing::debug!(
+                        "RFC 8950: IPv4 prefix {} via v6 next-hop {} (peer {}) — Loc-RIB / FIB install deferred",
+                        update.prefix,
+                        nhop,
+                        peer_id,
+                    );
+                }
+            }
             _ => {
                 //
             }

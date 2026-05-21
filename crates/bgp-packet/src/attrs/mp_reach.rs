@@ -104,6 +104,44 @@ impl MpReachAttr {
             let mp_nlri = MpReachAttr::Vpnv4(nlri);
             return Ok((input, mp_nlri));
         }
+        if header.afi == Afi::Ip && header.safi == Safi::Unicast {
+            // RFC 8950 §3: once Extended Next Hop is negotiated, an
+            // MP_REACH carrying IPv4 unicast NLRI may use either an
+            // IPv4 next-hop (4 octets) or an IPv6 next-hop (16 octets,
+            // or 32 octets carrying global || link-local). Receivers
+            // SHOULD accept either length; for the 32-octet form, we
+            // take the first 16 octets as the canonical next-hop —
+            // the global half by convention, falling back to the
+            // link-local when the sender only has one.
+            let (input, nhop): (&[u8], IpAddr) = match header.nhop_len {
+                4 => {
+                    let (input, addr) = be_u32(input)?;
+                    (input, IpAddr::V4(Ipv4Addr::from(addr)))
+                }
+                16 => {
+                    let (input, addr) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(addr)))
+                }
+                32 => {
+                    // Global || link-local; consume both, surface the
+                    // global for now. PR D will revisit if best-path
+                    // resolution wants the link-local explicitly.
+                    let (input, global) = be_u128(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(global)))
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (_, updates) =
+                many0_complete(|i| Ipv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let mp_nlri = MpReachAttr::Ipv4 {
+                snpa,
+                nhop,
+                updates,
+            };
+            return Ok((input, mp_nlri));
+        }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
             if header.nhop_len != 16 {
                 return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
@@ -187,6 +225,15 @@ impl fmt::Display for MpReachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use MpReachAttr::*;
         match self {
+            Ipv4 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for update in updates.iter() {
+                    writeln!(f, "{}:{} => {}", update.id, update.prefix, nhop)?;
+                }
+            }
             Ipv6 {
                 snpa: _,
                 nhop,
@@ -298,4 +345,96 @@ pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], bu
         buf.put_u8(len as u8);
     }
     buf.put(&value[..]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hand-rolled MP_REACH value (no attr header — `parse_nlri_opt`
+    /// reads just the inner value): AFI + SAFI + nhop_len + nhop +
+    /// SNPA + NLRI.
+    fn build(afi: u16, safi: u8, nhop: &[u8], nlri: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&afi.to_be_bytes());
+        v.push(safi);
+        v.push(nhop.len() as u8);
+        v.extend_from_slice(nhop);
+        v.push(0); // SNPA
+        v.extend_from_slice(nlri);
+        v
+    }
+
+    /// One IPv4 prefix `10.0.0.0/24` in compact NLRI form: 1-octet
+    /// prefix length followed by the high-order 3 octets.
+    fn nlri_10_24() -> Vec<u8> {
+        vec![24, 10, 0, 0]
+    }
+
+    #[test]
+    fn rfc8950_ipv4_with_v6_link_local_nexthop() {
+        // Single 16-octet IPv6 next-hop (link-local), AFI=1, SAFI=1.
+        let nhop: Ipv6Addr = "fe80::1".parse().unwrap();
+        let value = build(1, 1, &nhop.octets(), &nlri_10_24());
+        let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpReachAttr::Ipv4 { nhop, updates, .. } => {
+                assert_eq!(nhop, IpAddr::V6("fe80::1".parse().unwrap()));
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("expected Ipv4, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rfc8950_ipv4_with_dual_v6_nexthop_takes_global() {
+        // 32-octet form: global || link-local. We expose the global.
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+        let mut nhop = global.octets().to_vec();
+        nhop.extend_from_slice(&ll.octets());
+        let value = build(1, 1, &nhop, &nlri_10_24());
+        let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpReachAttr::Ipv4 { nhop, .. } => {
+                assert_eq!(nhop, IpAddr::V6("2001:db8::1".parse().unwrap()));
+            }
+            other => panic!("expected Ipv4, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rfc8950_ipv4_with_v4_nexthop_still_decodes() {
+        // 4-octet IPv4 next-hop is the pre-8950 native case — keep
+        // accepting it.
+        let nhop: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        let value = build(1, 1, &nhop.octets(), &nlri_10_24());
+        let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpReachAttr::Ipv4 { nhop, .. } => {
+                assert_eq!(nhop, IpAddr::V4("192.0.2.1".parse().unwrap()));
+            }
+            other => panic!("expected Ipv4, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rfc8950_ipv4_rejects_other_nexthop_lengths() {
+        // Anything outside {4, 16, 32} must error so a malformed
+        // sender resets cleanly instead of being silently truncated.
+        for bad in [0u8, 1, 8, 15, 17, 31, 33, 64] {
+            let mut value = Vec::new();
+            value.extend_from_slice(&1u16.to_be_bytes()); // AFI=1
+            value.push(1); // SAFI=1
+            value.push(bad); // nhop_len
+            value.extend(std::iter::repeat_n(0u8, bad as usize));
+            value.push(0); // SNPA
+            value.extend_from_slice(&nlri_10_24());
+            assert!(
+                MpReachAttr::parse_nlri_opt(&value, None).is_err(),
+                "expected parse error for nhop_len={bad}",
+            );
+        }
+    }
 }
