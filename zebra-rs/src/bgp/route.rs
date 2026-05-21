@@ -844,6 +844,22 @@ pub fn route_ipv4_update(
     rib.weight = decision.weight;
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
+    // Step 17b-iii: per-VRF best-path → global VPNv4 export. The
+    // hook only fires for IPv4 unicast (rd==None) inside a VRF
+    // task (`vrf_export` is Some). Empty `selected` after an
+    // update means the new candidate didn't survive best-path
+    // and there are no remaining winners — translate to a
+    // WithdrawExport so the global instance drops the row.
+    if rd.is_none()
+        && let Some(exporter) = bgp.vrf_export
+    {
+        if let Some(winner) = selected.first() {
+            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr, 0);
+        } else {
+            super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
+        }
+    }
+
     // Plain IPv4 unicast best-path winners are installed to the kernel
     // FIB via RIB. VPNv4 lives in `local_rib.v4vpn` and has its own
     // (still-deferred) install path, so gate on rd==None.
@@ -1825,6 +1841,20 @@ pub fn route_ipv4_withdraw(
     // and a fresh Ipv4Add carries the new attrs.
     if rd.is_none() {
         fib_install_v4(bgp.rib_client, nlri.prefix, &selected);
+    }
+
+    // Step 17b-iii: VRF export — symmetric with `route_update_ipv4`.
+    // After a withdraw, either a replacement winner exists (emit a
+    // fresh Export so the global v4vpn row carries the new attrs)
+    // or `selected` is empty (emit WithdrawExport to drop the row).
+    if rd.is_none()
+        && let Some(exporter) = bgp.vrf_export
+    {
+        if let Some(winner) = selected.first() {
+            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr, 0);
+        } else {
+            super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
+        }
     }
     if !selected.is_empty() || !removed.is_empty() {
         route_advertise_to_peers(rd, nlri.prefix, &selected, ident, bgp, peers);
@@ -3676,6 +3706,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         if !selected.is_empty() {
@@ -3703,6 +3734,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -3793,6 +3825,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         if !selected.is_empty() {
@@ -3820,6 +3853,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -3952,6 +3986,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         if !selected.is_empty() {
@@ -4071,6 +4106,7 @@ impl Bgp {
             attr_store: &mut self.attr_store,
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
+            vrf_export: None,
         };
 
         if !selected.is_empty() {

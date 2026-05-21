@@ -24,5 +24,6 @@ pub mod spawn;
 // only reach for the names below. `inst::{BgpVrf, serve_vrf}` and
 // `msg::BgpVrfMsg` stay internal — they're constructed / consumed
 // inside `vrf::spawn` only.
+pub use inst::{VrfExporter, vrf_emit_export, vrf_emit_withdraw};
 pub use msg::BgpGlobalMsg;
 pub use spawn::{BgpVrfHandle, compute_vrf_diff, despawn_bgp_vrf, spawn_bgp_vrf};

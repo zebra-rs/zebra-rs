@@ -123,6 +123,54 @@ pub struct BgpVrf {
 /// (step 16 / 18) can locate the matching VRF's queue.
 pub type BgpVrfInbox = UnboundedSender<BgpVrfMsg>;
 
+/// Hook handed to the shared `route_update_ipv4` path so a
+/// per-VRF best-path winner gets pushed up to the global Bgp
+/// task as a VPNv4 export candidate. Carries the VRF name (so
+/// the global side can look up RD + RT) and the per-VRF
+/// `global_tx` channel.
+///
+/// The global `Bgp` task constructs its own `BgpTop` with
+/// `vrf_export = None`, so the shared route pipeline doesn't
+/// fire any export for default-VRF traffic. Per-VRF tasks build
+/// a `BgpTop` with `Some(VrfExporter { ... })` and the same
+/// code path emits exports as a side-effect.
+pub struct VrfExporter {
+    pub name: String,
+    pub tx: UnboundedSender<BgpGlobalMsg>,
+}
+
+/// Send a `BgpGlobalMsg::Export` for `prefix` carrying the
+/// winner's `BgpAttr` (cloned out of the `Arc` so the global
+/// task can re-intern). Step 17b-iii's hook calls this from
+/// `route_update_ipv4` after best-path returns a non-empty
+/// `selected`. `label = 0` is the step-19 stub — the global
+/// handler treats that as "skip the per-route install" rather
+/// than emit an explicit-null label.
+pub fn vrf_emit_export(
+    exporter: &VrfExporter,
+    prefix: ipnet::Ipv4Net,
+    attr: &bgp_packet::BgpAttr,
+    label: u32,
+) {
+    let _ = exporter.tx.send(BgpGlobalMsg::Export {
+        vrf: exporter.name.clone(),
+        prefix,
+        attr: attr.clone(),
+        label,
+    });
+}
+
+/// Send a `BgpGlobalMsg::WithdrawExport` for `prefix`. Step
+/// 17b-iii calls this when `route_update_ipv4` / withdraw path
+/// observes the per-VRF best-path go from "has a winner" to
+/// "empty" — the global instance drops the matching VPNv4 row.
+pub fn vrf_emit_withdraw(exporter: &VrfExporter, prefix: ipnet::Ipv4Net) {
+    let _ = exporter.tx.send(BgpGlobalMsg::WithdrawExport {
+        vrf: exporter.name.clone(),
+        prefix,
+    });
+}
+
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
     /// caller (step 14's `spawn_bgp_vrf`) keeps the
@@ -247,6 +295,17 @@ impl BgpVrf {
         use super::super::peer::{BgpTop, fsm};
         match msg {
             Message::Event(ident, event) => {
+                // Build a fresh `VrfExporter` per call so the
+                // shared `route_update_ipv4` path emits Export to
+                // the global Bgp instance when this VRF's
+                // best-path changes. The handle is the same
+                // `global_tx` the per-VRF runtime already holds;
+                // we wrap it with the VRF name so the receiver
+                // can resolve RD/RT.
+                let exporter = VrfExporter {
+                    name: self.name.clone(),
+                    tx: self.global_tx.clone(),
+                };
                 let mut top = BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
@@ -255,6 +314,7 @@ impl BgpVrf {
                     attr_store: &mut self.attr_store,
                     update_groups: &mut self.update_groups,
                     interface_addrs: &self.interface_addrs,
+                    vrf_export: Some(&exporter),
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
@@ -458,6 +518,59 @@ mod tests {
         match msg {
             BgpGlobalMsg::WithdrawExport { vrf: v, prefix: p } => {
                 assert_eq!(v, "vrf-withdraw");
+                assert_eq!(p, prefix);
+            }
+            other => panic!("expected WithdrawExport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vrf_emit_export_sends_export_msg_via_exporter() {
+        // Step 17b-iii: the free-function hook called from
+        // `route_update_ipv4`'s post-best-path arm pushes an
+        // Export with the winner's prefix + attr + label stub.
+        let (tx, mut rx) = unbounded_channel::<BgpGlobalMsg>();
+        let exporter = VrfExporter {
+            name: "vrf-hook".to_string(),
+            tx,
+        };
+        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let attr = bgp_packet::BgpAttr::default();
+
+        vrf_emit_export(&exporter, prefix, &attr, 0);
+
+        let msg = rx.try_recv().expect("Export pushed");
+        match msg {
+            BgpGlobalMsg::Export {
+                vrf,
+                prefix: p,
+                attr: a,
+                label,
+            } => {
+                assert_eq!(vrf, "vrf-hook");
+                assert_eq!(p, prefix);
+                assert_eq!(a, attr);
+                assert_eq!(label, 0);
+            }
+            other => panic!("expected Export, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn vrf_emit_withdraw_sends_withdraw_export_msg() {
+        let (tx, mut rx) = unbounded_channel::<BgpGlobalMsg>();
+        let exporter = VrfExporter {
+            name: "vrf-hook2".to_string(),
+            tx,
+        };
+        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
+
+        vrf_emit_withdraw(&exporter, prefix);
+
+        let msg = rx.try_recv().expect("WithdrawExport pushed");
+        match msg {
+            BgpGlobalMsg::WithdrawExport { vrf, prefix: p } => {
+                assert_eq!(vrf, "vrf-hook2");
                 assert_eq!(p, prefix);
             }
             other => panic!("expected WithdrawExport, got {other:?}"),
