@@ -182,6 +182,9 @@ pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
     // Clear Retransmit list.
     nbr.ls_rxmt.clear();
 
+    // Clear last sent DD copy so a fresh DD is built next time.
+    nbr.dd.sent = None;
+
     // Clear timers.
     nbr.timer.inactivity = None;
     nbr.timer.db_desc = None;
@@ -222,6 +225,22 @@ pub fn ospf_nfsm_timer_set(nbr: &mut Neighbor) {
             nbr.timer.ls_upd = None;
         }
     }
+}
+
+pub fn ospf_db_desc_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer {
+    let tx = nbr.tx.clone();
+    let prefix = nbr.ident.prefix;
+    let ifindex = nbr.ifindex;
+    Timer::new(
+        Timer::second(retransmit_interval as u64),
+        TimerType::Infinite,
+        move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::DdRetransmit(ifindex, prefix.addr()));
+            }
+        },
+    )
 }
 
 pub fn ospf_ls_req_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer {
