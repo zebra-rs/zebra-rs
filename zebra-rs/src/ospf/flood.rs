@@ -124,8 +124,10 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     lsdb.insert_received(lsa.clone(), oi.tx, area_id);
     if matches!(
         lsa.h.ls_type,
-        OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary
+        OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary | OspfLsType::AsExternal
     ) {
+        // For AS-scoped LSAs `area_id` is None; the dispatcher treats
+        // that as "schedule SPF on all areas".
         let _ = oi.tx.send(Message::SpfSchedule(area_id));
     }
     tracing::info!(
