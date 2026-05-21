@@ -620,6 +620,167 @@ impl ParseBe<Ospfv3NetworkLsa> for Ospfv3NetworkLsa {
     }
 }
 
+/// v3 Intra-Area-Prefix-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=1 (area scope), function code = 9.
+pub const OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE: u16 = 0x2009;
+
+/// 8-bit PrefixOptions field (RFC 5340 §A.4.1.1) carried alongside
+/// every v3 address-prefix entry. Backing storage is u8; the four
+/// named bits (NU, LA, MC, P) are LSB-first per the wire diagram.
+#[bitfield(u8, debug = true)]
+#[derive(PartialEq)]
+pub struct Ospfv3PrefixOptions {
+    /// NU — No Unicast. When set, this prefix is excluded from
+    /// unicast routing calculations.
+    pub nu: bool,
+    /// LA — Local Address. When set, the prefix is a host route to
+    /// one of the advertising router's interfaces.
+    pub la: bool,
+    /// MC — MultiCast capable.
+    pub mc: bool,
+    /// P — Propagate. NSSA-related; set on Type-7 LSAs to direct an
+    /// ABR to translate to Type-5 on advertise.
+    pub p: bool,
+    #[bits(4)]
+    pub reserved: u8,
+}
+
+/// Number of octets needed on the wire to carry a v3 address prefix
+/// of `prefix_length` bits, per RFC 5340 §A.4.1.1: `ceil(len / 32) * 4`.
+/// 0-length prefixes contribute 0 octets. Used by both
+/// `Ospfv3IntraAreaPrefix` and downstream LSA bodies (Inter-Area-Prefix,
+/// AS-External, …) that follow the same prefix-encoding rule.
+pub const fn ospfv3_prefix_wire_len(prefix_length: u8) -> usize {
+    (prefix_length as usize).div_ceil(32) * 4
+}
+
+/// One prefix entry inside an `Ospfv3IntraAreaPrefixLsa`.
+///
+/// Wire layout (RFC 5340 §A.4.10):
+/// ```text
+/// | PrefixLength | PrefixOptions |          Metric            |
+/// |                Address Prefix (variable, padded)          |
+/// ```
+///
+/// The address prefix is encoded MSB-first with right-padded zero
+/// bits to land on a 32-bit boundary — `ospfv3_prefix_wire_len`
+/// computes the byte count. Stored here as the raw on-wire bytes so
+/// roundtrip is lossless; helpers that bridge to / from `Ipv6Net`
+/// come later when v3 protocol code lands.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3IntraAreaPrefix {
+    pub prefix_length: u8,
+    pub prefix_options: Ospfv3PrefixOptions,
+    pub metric: u16,
+    pub address_prefix: Vec<u8>,
+}
+
+impl Ospfv3IntraAreaPrefix {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.prefix_length);
+        buf.put_u8(self.prefix_options.into_bits());
+        buf.put_u16(self.metric);
+        buf.put_slice(&self.address_prefix);
+    }
+}
+
+impl ParseBe<Ospfv3IntraAreaPrefix> for Ospfv3IntraAreaPrefix {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3IntraAreaPrefix> {
+        let (input, prefix_length) = be_u8(input)?;
+        let (input, prefix_options_byte) = be_u8(input)?;
+        let (input, metric) = be_u16(input)?;
+        let wire_len = ospfv3_prefix_wire_len(prefix_length);
+        let (input, prefix_bytes) = nom::bytes::complete::take(wire_len)(input)?;
+        Ok((
+            input,
+            Ospfv3IntraAreaPrefix {
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::from_bits(prefix_options_byte),
+                metric,
+                address_prefix: prefix_bytes.to_vec(),
+            },
+        ))
+    }
+}
+
+/// v3 Intra-Area-Prefix-LSA body (RFC 5340 §A.4.10).
+///
+/// This is a v3-specific LSA type with no v2 analogue. It carries
+/// the address prefixes that v2 packed into the body of Router-LSA
+/// (stub-link entries) and Network-LSA (the netmask field), letting
+/// the Router-LSA / Network-LSA bodies focus on topology only.
+///
+/// Layout:
+///   - `# Prefixes` (16 bits) — count of trailing prefix entries
+///   - `Referenced LS Type` (16 bits) — the LSA whose prefixes these
+///     are (typically `OSPFV3_ROUTER_LSA_TYPE` for stub-network
+///     entries owned by a Router-LSA, or
+///     `OSPFV3_NETWORK_LSA_TYPE` for the transit prefix of a
+///     broadcast / NBMA network)
+///   - `Referenced Link State ID` (32 bits)
+///   - `Referenced Advertising Router` (32 bits)
+///   - prefix entries — `# Prefixes` of `Ospfv3IntraAreaPrefix`
+///
+/// On parse we honor the `# Prefixes` count rather than consuming
+/// trailing bytes greedily; the LSU codec splits LSA bodies by their
+/// header `length` field, so any extra bytes belong to the next LSA
+/// or to padding.
+#[derive(Debug, Clone)]
+pub struct Ospfv3IntraAreaPrefixLsa {
+    pub referenced_ls_type: u16,
+    pub referenced_link_state_id: u32,
+    pub referenced_advertising_router: Ipv4Addr,
+    pub prefixes: Vec<Ospfv3IntraAreaPrefix>,
+}
+
+impl Default for Ospfv3IntraAreaPrefixLsa {
+    fn default() -> Self {
+        Self {
+            referenced_ls_type: 0,
+            referenced_link_state_id: 0,
+            referenced_advertising_router: Ipv4Addr::UNSPECIFIED,
+            prefixes: Vec::new(),
+        }
+    }
+}
+
+impl Ospfv3IntraAreaPrefixLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        let num: u16 = self.prefixes.len().min(u16::MAX as usize) as u16;
+        buf.put_u16(num);
+        buf.put_u16(self.referenced_ls_type);
+        buf.put_u32(self.referenced_link_state_id);
+        buf.put(&self.referenced_advertising_router.octets()[..]);
+        for p in &self.prefixes {
+            p.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3IntraAreaPrefixLsa> for Ospfv3IntraAreaPrefixLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3IntraAreaPrefixLsa> {
+        let (input, num_prefixes) = be_u16(input)?;
+        let (input, referenced_ls_type) = be_u16(input)?;
+        let (input, referenced_link_state_id) = be_u32(input)?;
+        let (mut input, referenced_advertising_router) = Ipv4Addr::parse_be(input)?;
+        let mut prefixes = Vec::with_capacity(num_prefixes as usize);
+        for _ in 0..num_prefixes {
+            let (rest, p) = Ospfv3IntraAreaPrefix::parse_be(input)?;
+            prefixes.push(p);
+            input = rest;
+        }
+        Ok((
+            input,
+            Ospfv3IntraAreaPrefixLsa {
+                referenced_ls_type,
+                referenced_link_state_id,
+                referenced_advertising_router,
+                prefixes,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1141,6 +1302,106 @@ mod tests {
         let (rest, parsed) = Ospfv3NetworkLsa::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
         assert!(parsed.attached_routers.is_empty());
+    }
+
+    /// Wire-length helper covers the §A.4.1.1 corner cases:
+    ///   - 0-length prefix takes 0 octets
+    ///   - 1-32 bits take 4 octets
+    ///   - 33-64 bits take 8 octets
+    ///   - 65-96 bits take 12 octets
+    ///   - 97-128 bits take 16 octets
+    #[test]
+    fn ospfv3_prefix_wire_len_boundaries() {
+        assert_eq!(ospfv3_prefix_wire_len(0), 0);
+        assert_eq!(ospfv3_prefix_wire_len(1), 4);
+        assert_eq!(ospfv3_prefix_wire_len(32), 4);
+        assert_eq!(ospfv3_prefix_wire_len(33), 8);
+        assert_eq!(ospfv3_prefix_wire_len(64), 8);
+        assert_eq!(ospfv3_prefix_wire_len(96), 12);
+        assert_eq!(ospfv3_prefix_wire_len(128), 16);
+    }
+
+    /// Intra-Area-Prefix-LSA carrying three prefixes of different
+    /// lengths (32, 64, and 128) roundtrips every field. Covers the
+    /// header count, the referenced-LSA triple, and the variable
+    /// per-prefix payload size.
+    #[test]
+    fn ospfv3_intra_area_prefix_lsa_roundtrip() {
+        let mut opts = Ospfv3PrefixOptions::new();
+        opts.set_la(true);
+        let body = Ospfv3IntraAreaPrefixLsa {
+            referenced_ls_type: OSPFV3_ROUTER_LSA_TYPE,
+            referenced_link_state_id: 0,
+            referenced_advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+            prefixes: vec![
+                // 32-bit prefix — 4 wire octets.
+                Ospfv3IntraAreaPrefix {
+                    prefix_length: 32,
+                    prefix_options: opts,
+                    metric: 10,
+                    address_prefix: vec![0x20, 0x01, 0x0D, 0xB8],
+                },
+                // 64-bit prefix — 8 wire octets.
+                Ospfv3IntraAreaPrefix {
+                    prefix_length: 64,
+                    prefix_options: Ospfv3PrefixOptions::new(),
+                    metric: 20,
+                    address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0x00, 0x00, 0x00, 0x01],
+                },
+                // 128-bit host route — 16 wire octets.
+                Ospfv3IntraAreaPrefix {
+                    prefix_length: 128,
+                    prefix_options: opts,
+                    metric: 0,
+                    address_prefix: vec![
+                        0x20, 0x01, 0x0D, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x01,
+                    ],
+                },
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed prefix (12) + 4 (entry hdr) + 4 + 4 + 8 + 4 + 16 = 12 + 4+4 + 4+8 + 4+16 = 52.
+        // Per-prefix overhead is 4 bytes (length + options + metric).
+        assert_eq!(buf.len(), 12 + (4 + 4) + (4 + 8) + (4 + 16));
+
+        // # Prefixes is the first 16 bits.
+        assert_eq!(BigEndian::read_u16(&buf[0..2]), 3);
+        // Referenced LS Type next.
+        assert_eq!(BigEndian::read_u16(&buf[2..4]), OSPFV3_ROUTER_LSA_TYPE);
+
+        let (rest, parsed) = Ospfv3IntraAreaPrefixLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.referenced_ls_type, OSPFV3_ROUTER_LSA_TYPE);
+        assert_eq!(
+            parsed.referenced_advertising_router,
+            Ipv4Addr::new(10, 0, 0, 1)
+        );
+        assert_eq!(parsed.prefixes.len(), 3);
+        assert_eq!(parsed.prefixes[0].prefix_length, 32);
+        assert_eq!(parsed.prefixes[0].metric, 10);
+        assert_eq!(parsed.prefixes[0].address_prefix.len(), 4);
+        assert!(parsed.prefixes[0].prefix_options.la());
+        assert_eq!(parsed.prefixes[1].prefix_length, 64);
+        assert_eq!(parsed.prefixes[1].address_prefix.len(), 8);
+        assert_eq!(parsed.prefixes[2].prefix_length, 128);
+        assert_eq!(parsed.prefixes[2].address_prefix.len(), 16);
+    }
+
+    /// Zero-prefix LSA: degenerate but legal; just the 12-byte
+    /// fixed prefix.
+    #[test]
+    fn ospfv3_intra_area_prefix_lsa_no_prefixes() {
+        let body = Ospfv3IntraAreaPrefixLsa::default();
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(buf.len(), 12);
+
+        let (rest, parsed) = Ospfv3IntraAreaPrefixLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert!(parsed.prefixes.is_empty());
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
