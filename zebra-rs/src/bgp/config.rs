@@ -86,6 +86,8 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             update_groups: &mut bgp.update_groups,
             interface_addrs: &bgp.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&bgp.color_policy),
+            flex_algo_routes: Some(&bgp.flex_algo_routes),
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
         bgp.peers.remove(&addr);

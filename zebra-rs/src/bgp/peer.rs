@@ -586,6 +586,18 @@ pub struct BgpTop<'a> {
     /// `vrf_emit_withdraw` on best-path transitions so the global
     /// instance's VPNv4 LocRIB picks them up.
     pub vrf_export: Option<&'a super::vrf::VrfExporter>,
+    /// Colour-aware nexthop resolver inputs (Phase 3b). Optional
+    /// because per-VRF BGP runtimes don't carry them today — Color →
+    /// Flex-Algo binding is a default-VRF concept; per-VRF support
+    /// is a follow-up. `None` short-circuits the resolver to
+    /// "no Color-based label push".
+    pub color_policy: Option<&'a super::color_policy::ColorPolicy>,
+    pub flex_algo_routes: Option<
+        &'a std::collections::BTreeMap<
+            u8,
+            prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>,
+        >,
+    >,
 }
 
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
@@ -1323,6 +1335,8 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             update_groups: &mut bgp.update_groups,
             interface_addrs: &bgp.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&bgp.color_policy),
+            flex_algo_routes: Some(&bgp.flex_algo_routes),
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1353,6 +1367,8 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         update_groups: &mut bgp.update_groups,
         interface_addrs: &bgp.interface_addrs,
         vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

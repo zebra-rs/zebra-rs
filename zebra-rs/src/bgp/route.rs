@@ -92,15 +92,22 @@ fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
 ///
 /// VPNv4 / EVPN take their own install paths; this helper is for
 /// plain IPv4 unicast only.
-fn fib_install_v4(
-    rib_client: &crate::rib::client::RibClient,
-    prefix: Ipv4Net,
-    selected: &[BgpRib],
-) {
+fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
     let installable = selected.first().and_then(make_bgp_rib_entry_v4);
     match installable {
-        Some(rib_entry) => {
-            let _ = rib_client.send(rib::Message::Ipv4Add {
+        Some(mut rib_entry) => {
+            // Colour-aware Flex-Algo label push (Phase 3b). When the
+            // route carries a Color extcomm bound to a configured
+            // IS-IS Flex-Algorithm, append the per-algo outer MPLS
+            // label IS-IS published via RIB.
+            if let Some(best) = selected.first()
+                && let Some(BgpNexthop::Ipv4(nh)) = best.attr.nexthop.as_ref()
+                && let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh)
+                && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
+            {
+                uni.mpls.push(rib::Label::Explicit(label));
+            }
+            let _ = bgp.rib_client.send(rib::Message::Ipv4Add {
                 prefix,
                 rib: rib_entry,
             });
@@ -113,9 +120,48 @@ fn fib_install_v4(
             // unconditionally.
             let mut stub = rib::entry::RibEntry::new(rib::RibType::Bgp);
             stub.valid = false;
-            let _ = rib_client.send(rib::Message::Ipv4Del { prefix, rib: stub });
+            let _ = bgp
+                .rib_client
+                .send(rib::Message::Ipv4Del { prefix, rib: stub });
         }
     }
+}
+
+/// Walk the route's Color extcomms in order, look each up in
+/// `color_policy`, LPM the next-hop against the matching per-algo
+/// shadow, return the first hit's outer label.
+fn resolve_flex_algo_label(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: Ipv4Addr) -> Option<u32> {
+    resolve_flex_algo_label_inner(bgp.color_policy?, bgp.flex_algo_routes?, attr, nh)
+}
+
+/// Pure-function inner for `resolve_flex_algo_label` — testable
+/// without a full `BgpTop`. Same algorithm: walk the Color extcomms
+/// in attribute order, return the first one bound to an algo whose
+/// per-algo shadow has a covering route for `nh`.
+fn resolve_flex_algo_label_inner(
+    color_policy: &super::color_policy::ColorPolicy,
+    flex_algo_routes: &std::collections::BTreeMap<
+        u8,
+        prefix_trie::PrefixMap<Ipv4Net, crate::rib::api::FlexAlgoNexthop>,
+    >,
+    attr: &BgpAttr,
+    nh: Ipv4Addr,
+) -> Option<u32> {
+    let host = Ipv4Net::new(nh, 32).ok()?;
+    for color in attr.colors() {
+        let Some(algo) = color_policy.flex_algo_for(color.color) else {
+            // Color unbound — try the next one rather than bailing,
+            // so a route with both an "unbound colour" and a "bound
+            // colour" still resolves on the bound one.
+            continue;
+        };
+        if let Some(table) = flex_algo_routes.get(&algo)
+            && let Some((_, entry)) = table.get_lpm(&host)
+        {
+            return Some(entry.label);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -864,7 +910,7 @@ pub fn route_ipv4_update(
     // FIB via RIB. VPNv4 lives in `local_rib.v4vpn` and has its own
     // (still-deferred) install path, so gate on rd==None.
     if rd.is_none() {
-        fib_install_v4(bgp.rib_client, nlri.prefix, &selected);
+        fib_install_v4(bgp, nlri.prefix, &selected);
     }
 
     // Advertise to peers if best path changed.
@@ -1796,7 +1842,7 @@ fn route_soft_in_peer_table(
                     // for this prefix; reconcile the FIB so the kernel
                     // tracks whatever Loc-RIB now considers best.
                     if rd.is_none() {
-                        fib_install_v4(bgp.rib_client, prefix, &selected);
+                        fib_install_v4(bgp, prefix, &selected);
                     }
 
                     if !selected.is_empty() {
@@ -1840,7 +1886,7 @@ pub fn route_ipv4_withdraw(
     // the kernel; non-empty means a replacement path is now best
     // and a fresh Ipv4Add carries the new attrs.
     if rd.is_none() {
-        fib_install_v4(bgp.rib_client, nlri.prefix, &selected);
+        fib_install_v4(bgp, nlri.prefix, &selected);
     }
 
     // Step 17b-iii: VRF export — symmetric with `route_update_ipv4`.
@@ -3690,14 +3736,6 @@ impl Bgp {
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
-        // An originated route lacks a v4 NEXT_HOP attribute, so when
-        // it wins best by weight=32768 `fib_install_v4` will emit an
-        // `Ipv4Del` for any BGP-typed FIB entry that a peer route
-        // previously installed for the same prefix. That's correct:
-        // the underlying source (Static / Connected / IGP) owns the
-        // forwarding entry now, and BGP shouldn't shadow it.
-        fib_install_v4(&self.ctx.rib, prefix, &selected);
-
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
@@ -3707,7 +3745,17 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
+
+        // An originated route lacks a v4 NEXT_HOP attribute, so when
+        // it wins best by weight=32768 `fib_install_v4` will emit an
+        // `Ipv4Del` for any BGP-typed FIB entry that a peer route
+        // previously installed for the same prefix. That's correct:
+        // the underlying source (Static / Connected / IGP) owns the
+        // forwarding entry now, and BGP shouldn't shadow it.
+        fib_install_v4(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() {
             route_advertise_to_peers(
@@ -3735,13 +3783,15 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
         // When the originated route disappears, a peer route may now
         // be the best (or no path may remain). Reconcile so the FIB
         // matches Loc-RIB.
-        fib_install_v4(bgp_ref.rib_client, prefix, &selected);
+        fib_install_v4(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() || !removed.is_empty() {
             route_advertise_to_peers(
@@ -3811,12 +3861,6 @@ impl Bgp {
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
-        // Same logic as `route_add`: the redistributed BGP route has
-        // no v4 NEXT_HOP, so winning best causes BGP to withdraw any
-        // peer-installed FIB entry for this prefix and let the source
-        // protocol's own RIB entry handle forwarding.
-        fib_install_v4(&self.ctx.rib, prefix, &selected);
-
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
@@ -3826,7 +3870,15 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
+
+        // Same logic as `route_add`: the redistributed BGP route has
+        // no v4 NEXT_HOP, so winning best causes BGP to withdraw any
+        // peer-installed FIB entry for this prefix and let the source
+        // protocol's own RIB entry handle forwarding.
+        fib_install_v4(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() {
             route_advertise_to_peers(
@@ -3854,12 +3906,14 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
         // A peer route may now be best again (or nothing's left);
         // reconcile the FIB.
-        fib_install_v4(bgp_ref.rib_client, prefix, &selected);
+        fib_install_v4(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() || !removed.is_empty() {
             route_advertise_to_peers(
@@ -3987,6 +4041,8 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
 
         if !selected.is_empty() {
@@ -4107,6 +4163,8 @@ impl Bgp {
             update_groups: &mut self.update_groups,
             interface_addrs: &self.interface_addrs,
             vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
         };
 
         if !selected.is_empty() {
@@ -4898,6 +4956,167 @@ mod policy_apply_tests {
         assert!(
             evpn_apply(&list, &evpn_multicast(), attr_with_rt_vni(65501, 100)).is_none(),
             "VNI matches but route-type differs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod color_aware_nht_tests {
+    use std::net::Ipv4Addr;
+
+    use bgp_packet::{BgpAttr, ExtCommunity, ExtCommunityValue};
+    use ipnet::Ipv4Net;
+    use prefix_trie::PrefixMap;
+
+    use super::resolve_flex_algo_label_inner;
+    use crate::bgp::color_policy::ColorPolicy;
+    use crate::rib::api::FlexAlgoNexthop;
+
+    fn attr_with_colors(colors: &[u32]) -> BgpAttr {
+        let entries: Vec<ExtCommunityValue> = colors
+            .iter()
+            .map(|c| ExtCommunityValue::from_color(0, *c))
+            .collect();
+        BgpAttr {
+            ecom: Some(ExtCommunity(entries)),
+            ..Default::default()
+        }
+    }
+
+    fn shadow_with(
+        algo: u8,
+        prefix: &str,
+        label: u32,
+    ) -> std::collections::BTreeMap<u8, PrefixMap<Ipv4Net, FlexAlgoNexthop>> {
+        let mut table = PrefixMap::new();
+        table.insert(
+            prefix.parse().unwrap(),
+            FlexAlgoNexthop {
+                addr: Ipv4Addr::new(10, 0, 0, 1),
+                ifindex: 1,
+                label,
+            },
+        );
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(algo, table);
+        map
+    }
+
+    #[test]
+    fn no_color_returns_none() {
+        let cp = ColorPolicy::new();
+        let shadow = std::collections::BTreeMap::new();
+        let attr = BgpAttr::default();
+        assert!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unbound_color_returns_none() {
+        let cp = ColorPolicy::new();
+        let shadow = std::collections::BTreeMap::new();
+        let attr = attr_with_colors(&[100]);
+        assert!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bound_color_with_matching_route_returns_label() {
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let shadow = shadow_with(128, "10.0.0.0/24", 17128);
+        let attr = attr_with_colors(&[100]);
+        assert_eq!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
+            Some(17128)
+        );
+    }
+
+    #[test]
+    fn bound_color_without_route_falls_through() {
+        // Algo 128 is bound but the shadow has no covering route for
+        // the next-hop. Should return None (strict, no fallback yet).
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let shadow = shadow_with(128, "192.0.2.0/24", 17128);
+        let attr = attr_with_colors(&[100]);
+        assert!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unbound_color_then_bound_color_resolves_bound_one() {
+        // First Color (200) is unbound; second (100) is bound and has
+        // a route — the second one must win, not abort on the first.
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let shadow = shadow_with(128, "10.0.0.0/24", 17128);
+        let attr = attr_with_colors(&[200, 100]);
+        assert_eq!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
+            Some(17128)
+        );
+    }
+
+    #[test]
+    fn first_bound_color_wins() {
+        // Two bound colours, both with covering routes — attribute
+        // order decides (no preference/fallback semantics yet).
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        cp.bindings.insert(200, 129);
+        let mut shadow = shadow_with(128, "10.0.0.0/24", 17128);
+        let mut algo_129 = PrefixMap::new();
+        algo_129.insert(
+            "10.0.0.0/24".parse().unwrap(),
+            FlexAlgoNexthop {
+                addr: Ipv4Addr::new(10, 0, 0, 1),
+                ifindex: 1,
+                label: 17129,
+            },
+        );
+        shadow.insert(129, algo_129);
+        let attr = attr_with_colors(&[100, 200]);
+        assert_eq!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
+            Some(17128)
+        );
+    }
+
+    #[test]
+    fn lpm_picks_longest_covering_prefix() {
+        // Both /24 and /16 cover 10.0.0.5; resolver picks /24's label.
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let mut table = PrefixMap::new();
+        table.insert(
+            "10.0.0.0/24".parse().unwrap(),
+            FlexAlgoNexthop {
+                addr: Ipv4Addr::new(10, 0, 0, 1),
+                ifindex: 1,
+                label: 17128,
+            },
+        );
+        table.insert(
+            "10.0.0.0/16".parse().unwrap(),
+            FlexAlgoNexthop {
+                addr: Ipv4Addr::new(10, 0, 0, 1),
+                ifindex: 1,
+                label: 99999,
+            },
+        );
+        let mut shadow = std::collections::BTreeMap::new();
+        shadow.insert(128, table);
+        let attr = attr_with_colors(&[100]);
+        assert_eq!(
+            resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
+            Some(17128)
         );
     }
 }

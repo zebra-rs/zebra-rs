@@ -238,11 +238,21 @@ pub struct Bgp {
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
 
     /// Color → Flex-Algorithm binding table
-    /// (zebra-bgp-color-policy.yang). Storage-only on landing — the
-    /// color-aware nexthop resolver (Phase 3 of the BGP ↔ Flex-Algo
-    /// plan) reads this to pick a per-algo entry from
-    /// `Isis::rib_flex_algo` when a route carries a Color extcomm.
+    /// (zebra-bgp-color-policy.yang). The colour-aware nexthop
+    /// resolver consults this to pick a per-algo entry from
+    /// `flex_algo_routes` when a route carries a Color extcomm.
     pub color_policy: super::color_policy::ColorPolicy,
+
+    /// Local shadow of `Rib::flex_algo_routes`, populated by
+    /// `RibRx::FlexAlgoRouteAdd/Del` events emitted from IS-IS via
+    /// RIB (PR #697). Outer key is the IS-IS Flex-Algorithm id; inner
+    /// map is the per-algo IPv4 RIB. The colour-aware resolver does
+    /// a longest-prefix match on the BGP next-hop against the
+    /// inner map for the algo bound to the route's Color extcomm,
+    /// and pushes the resulting outer MPLS label onto the FIB
+    /// install.
+    pub flex_algo_routes:
+        BTreeMap<u8, prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>>,
     /// `dynamic-neighbors` runtime (zebra-bgp-dynamic-neighbors.yang).
     /// Holds the configured listen-ranges and the soft cap on
     /// materialized passive peers. `dynamic_peer_count` is bumped on
@@ -437,6 +447,7 @@ impl Bgp {
             key_chains: HashMap::new(),
             neighbor_groups: super::neighbor_group::empty_map(),
             color_policy: super::color_policy::ColorPolicy::new(),
+            flex_algo_routes: BTreeMap::new(),
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
@@ -619,6 +630,8 @@ impl Bgp {
                     update_groups: &mut self.update_groups,
                     interface_addrs: &self.interface_addrs,
                     vrf_export: None,
+                    color_policy: Some(&self.color_policy),
+                    flex_algo_routes: Some(&self.flex_algo_routes),
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -1060,6 +1073,35 @@ impl Bgp {
             }
             RibRx::RouteDel { rtype, routes, .. } => {
                 self.route_redist_del(rtype, routes);
+            }
+            // IS-IS per-algo routes published via RIB (#697). We
+            // shadow only the first nexthop per (algo, prefix); a
+            // future ECMP-aware resolver can extend this to walk the
+            // full set.
+            RibRx::FlexAlgoRouteAdd { route } => {
+                if let Some(nh) = route.nexthops.into_iter().next() {
+                    self.flex_algo_routes
+                        .entry(route.algo)
+                        .or_default()
+                        .insert(route.prefix, nh);
+                } else {
+                    // Defensive: a FlexAlgoRoute with zero nexthops
+                    // is meaningless; treat it as a delete.
+                    if let Some(table) = self.flex_algo_routes.get_mut(&route.algo) {
+                        table.remove(&route.prefix);
+                    }
+                }
+            }
+            RibRx::FlexAlgoRouteDel { algo, prefix } => {
+                let became_empty = if let Some(table) = self.flex_algo_routes.get_mut(&algo) {
+                    table.remove(&prefix);
+                    table.iter().next().is_none()
+                } else {
+                    false
+                };
+                if became_empty {
+                    self.flex_algo_routes.remove(&algo);
+                }
             }
             _ => {
                 //

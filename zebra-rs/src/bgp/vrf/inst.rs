@@ -315,6 +315,10 @@ impl BgpVrf {
                     update_groups: &mut self.update_groups,
                     interface_addrs: &self.interface_addrs,
                     vrf_export: Some(&exporter),
+                    // Color → Flex-Algo binding is a default-VRF
+                    // concept today; per-VRF support is a follow-up.
+                    color_policy: None,
+                    flex_algo_routes: None,
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
