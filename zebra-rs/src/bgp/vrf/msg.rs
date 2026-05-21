@@ -20,9 +20,10 @@
 
 use std::net::SocketAddr;
 
+use ipnet::Ipv4Net;
 use tokio::net::TcpStream;
 
-use bgp_packet::RouteDistinguisher;
+use bgp_packet::{BgpAttr, RouteDistinguisher};
 
 /// Message from the global `Bgp` task to a per-VRF [`BgpVrf`]
 /// task. The receiver lives on `BgpVrf::global_rx`.
@@ -77,22 +78,29 @@ pub enum BgpVrfMsg {
 #[derive(Debug)]
 pub enum BgpGlobalMsg {
     /// A best-path winner inside this VRF that the global task
-    /// should re-emit as VPNv4/v6 (step 17). Carries the VRF name
-    /// so the global task can look up the RD/RT policy when
-    /// re-encoding the NLRI.
-    #[allow(dead_code)]
+    /// should re-emit as VPNv4. The VRF name lets the global side
+    /// look up the matching RD (from `Bgp::vrfs`) and the export
+    /// RT set (from `Bgp::rib_known_vrfs`). `attr` travels by
+    /// value — the receiver re-interns into its own
+    /// `BgpAttrStore`. `label` is a per-VRF MPLS label allocated
+    /// by step 19; step 17b passes `0` as a stub and the global
+    /// instance treats that as "no label yet" (skip the install
+    /// until a real label arrives).
     Export {
         vrf: String,
-        // step 17 fills prefix, BgpAttr id, label, etc.
+        prefix: Ipv4Net,
+        // First reader lands in step 17b-ii (LocRIB write). The
+        // step-17b-i handler logs the export decision but doesn't
+        // yet consume the attributes themselves.
+        #[allow(dead_code)]
+        attr: BgpAttr,
+        label: u32,
     },
 
-    /// Inverse of [`Self::Export`]. Tells the global task to
-    /// withdraw the corresponding VPNv4/v6 advertisement.
-    #[allow(dead_code)]
-    WithdrawExport {
-        vrf: String,
-        // step 17 fills the prefix identifier.
-    },
+    /// Inverse of [`Self::Export`]. The global instance withdraws
+    /// the VPNv4 advertisement matching this VRF's RD and the
+    /// given prefix.
+    WithdrawExport { vrf: String, prefix: Ipv4Net },
 
     /// Register a peer IP with the global accept dispatcher so an
     /// inbound `:179` connect from that IP is handed to this VRF

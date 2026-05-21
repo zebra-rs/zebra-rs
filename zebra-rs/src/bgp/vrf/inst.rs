@@ -204,6 +204,39 @@ impl BgpVrf {
         }
     }
 
+    /// Step 17b-i hook: push a freshly-elected best-path winner to
+    /// the global Bgp task as a VPNv4 export candidate. The global
+    /// side prepends the VRF's RD and tags the configured
+    /// export-RT set before inserting into `LocalRib.v4vpn`.
+    ///
+    /// Caller hands over `attr` by value — the global task
+    /// re-interns into its own `BgpAttrStore`. `label` is a per-VRF
+    /// MPLS label allocated by step 19; until that lands, callers
+    /// pass `0` and the global side logs / skips the install.
+    ///
+    /// Not yet wired into the per-VRF FSM. Step 17b-ii hooks it
+    /// to the post-best-path notification in
+    /// [`Self::process_msg`].
+    #[allow(dead_code)] // first caller lands in step 17b-ii.
+    pub fn export_best_path(&self, prefix: ipnet::Ipv4Net, attr: bgp_packet::BgpAttr, label: u32) {
+        let _ = self.global_tx.send(BgpGlobalMsg::Export {
+            vrf: self.name.clone(),
+            prefix,
+            attr,
+            label,
+        });
+    }
+
+    /// Inverse of [`Self::export_best_path`]. Tells the global
+    /// task to withdraw the matching VPNv4 advertisement.
+    #[allow(dead_code)] // first caller lands in step 17b-ii.
+    pub fn withdraw_exported(&self, prefix: ipnet::Ipv4Net) {
+        let _ = self.global_tx.send(BgpGlobalMsg::WithdrawExport {
+            vrf: self.name.clone(),
+            prefix,
+        });
+    }
+
     /// Handle a per-VRF FSM event off `self.rx`. Step 15d wires
     /// the same set the global `Bgp::process_msg` handles —
     /// minus `Accept` (passive accept lives at the global task
@@ -360,5 +393,74 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), vrf.event_loop())
             .await
             .expect("event_loop exits when inbox is dropped");
+    }
+
+    #[tokio::test]
+    async fn export_best_path_sends_global_msg_with_payload() {
+        // Step 17b-i invariant: `export_best_path` pushes a
+        // `BgpGlobalMsg::Export` carrying the VRF name, prefix,
+        // attr (by value), and label stub. The global instance's
+        // handler is exercised separately; here we only verify
+        // the producer side.
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(20, "vrf-export");
+        let (vrf, _inbox) = BgpVrf::new(
+            "vrf-export".to_string(),
+            ctx,
+            None,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            global_tx,
+        );
+
+        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let attr = bgp_packet::BgpAttr::default();
+        vrf.export_best_path(prefix, attr.clone(), 0);
+
+        let msg = global_rx
+            .try_recv()
+            .expect("Export pushed onto global channel");
+        match msg {
+            BgpGlobalMsg::Export {
+                vrf: v,
+                prefix: p,
+                attr: a,
+                label,
+            } => {
+                assert_eq!(v, "vrf-export");
+                assert_eq!(p, prefix);
+                assert_eq!(a, attr);
+                assert_eq!(label, 0);
+            }
+            other => panic!("expected Export, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn withdraw_exported_sends_global_msg() {
+        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(21, "vrf-withdraw");
+        let (vrf, _inbox) = BgpVrf::new(
+            "vrf-withdraw".to_string(),
+            ctx,
+            None,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            global_tx,
+        );
+
+        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        vrf.withdraw_exported(prefix);
+
+        let msg = global_rx
+            .try_recv()
+            .expect("WithdrawExport pushed onto global channel");
+        match msg {
+            BgpGlobalMsg::WithdrawExport { vrf: v, prefix: p } => {
+                assert_eq!(v, "vrf-withdraw");
+                assert_eq!(p, prefix);
+            }
+            other => panic!("expected WithdrawExport, got {other:?}"),
+        }
     }
 }
