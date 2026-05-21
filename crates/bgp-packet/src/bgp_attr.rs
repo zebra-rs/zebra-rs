@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use crate::{
     Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpNexthop, ClusterList, Community,
     ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, PmsiTunnel,
-    PrefixSid,
+    PrefixSid, TunnelEncap,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -44,6 +44,12 @@ pub struct BgpAttr {
     /// the RFC 9252 SRv6 Service TLVs. Parse-only for v1; semantics
     /// land in follow-up PRs (SR-MPLS labeled unicast, SRv6 services).
     pub prefix_sid: Option<PrefixSid>,
+    /// BGP Tunnel Encapsulation (RFC 9012). Carries SR Policy
+    /// candidate-path encoding (Color, Preference, Binding-SID,
+    /// Segment List, ...) and other tunnel endpoint signalling.
+    /// Sub-TLV bodies are opaque in v1; structural framing is bit-
+    /// exact for forward-propagation.
+    pub tunnel_encap: Option<TunnelEncap>,
     // TODO: Unknown Attributes.
 }
 
@@ -106,6 +112,9 @@ impl BgpAttr {
         if let Some(v) = &self.prefix_sid {
             v.attr_emit(buf);
         }
+        if let Some(v) = &self.tunnel_encap {
+            v.attr_emit(buf);
+        }
     }
 
     pub fn neighboring_as(&self) -> Option<u32> {
@@ -158,6 +167,9 @@ impl fmt::Display for BgpAttr {
         }
         if let Some(v) = &self.prefix_sid {
             writeln!(f, " PrefixSid: {}", v)?;
+        }
+        if let Some(v) = &self.tunnel_encap {
+            writeln!(f, " TunnelEncap: {}", v)?;
         }
         // Nexthop
         if let Some(v) = &self.nexthop {
