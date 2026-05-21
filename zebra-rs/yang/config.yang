@@ -308,16 +308,6 @@ module config {
         leaf router-id {
           type inet:ipv4-address;
         }
-        list network {
-          key prefix;
-          leaf prefix {
-            type inet:ipv4-prefix;
-          }
-          leaf area {
-            mandatory true;
-            type uint8;
-          }
-        }
         list interface {
           key "if-name";
           leaf if-name {
