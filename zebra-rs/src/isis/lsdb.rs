@@ -181,6 +181,14 @@ pub(super) struct SysStateRefs<'a> {
     /// Algorithm in 128..=255 (RFC 9350 §7). Union across
     /// fragments.
     pub peer_algo_sid: &'a mut BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>>,
+
+    /// Per-peer SR algorithm participation sets. Populated from the
+    /// SR-Algorithms sub-TLV (RFC 8667 §3.2, sub-TLV 19) inside Router
+    /// Capability TLV 242 — fragment-0-only, like the FAD store.
+    /// Consumers (per-algo SPF gating, `show isis flex-algo`) read
+    /// this instead of re-walking the LSDB; missing entry means the
+    /// peer is not a candidate for any non-default algo.
+    pub peer_algos: &'a mut BTreeMap<IsisSysId, BTreeSet<u8>>,
 }
 
 /// Recompute the per-sys-id consumer maps from the union of every
@@ -240,6 +248,7 @@ pub(super) fn rebuild_sys_state(
         s.peer_fad.remove(sys_id);
         s.peer_link_affinity.remove(sys_id);
         s.peer_algo_sid.remove(sys_id);
+        s.peer_algos.remove(sys_id);
         return;
     }
 
@@ -324,6 +333,25 @@ pub(super) fn rebuild_sys_state(
         s.peer_fad.remove(sys_id);
     } else {
         s.peer_fad.insert(*sys_id, fad_map);
+    }
+
+    // SR algorithm participation (RFC 8667 §3.2, sub-TLV 19). Like
+    // FADs, this lives inside Router Capability TLV 242 — fragment-0-
+    // only. The wire enum maps to a byte via `Algo::to_byte()`; we
+    // store the byte form so consumers can compare against per-algo
+    // computation requests without round-tripping through the enum.
+    let mut algo_set: BTreeSet<u8> = BTreeSet::new();
+    if let Some(cap_tlv) = frag0_cap
+        && let Some(algo_tlv) = lsp_cap_view(cap_tlv).algo
+    {
+        for a in &algo_tlv.algo {
+            algo_set.insert(a.to_byte());
+        }
+    }
+    if algo_set.is_empty() {
+        s.peer_algos.remove(sys_id);
+    } else {
+        s.peer_algos.insert(*sys_id, algo_set);
     }
 
     // Per-link affinity bitmaps from peer-advertised ASLA sub-TLVs
@@ -516,6 +544,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
                 peer_fad: top.peer_fad.get_mut(&level),
                 peer_link_affinity: top.peer_link_affinity.get_mut(&level),
                 peer_algo_sid: top.peer_algo_sid.get_mut(&level),
+                peer_algos: top.peer_algos.get_mut(&level),
             },
         );
     }
@@ -603,6 +632,7 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
             peer_fad: top.peer_fad.get_mut(&level),
             peer_link_affinity: top.peer_link_affinity.get_mut(&level),
             peer_algo_sid: top.peer_algo_sid.get_mut(&level),
+            peer_algos: top.peer_algos.get_mut(&level),
         },
     );
 }
@@ -707,6 +737,7 @@ mod tests {
             BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -723,6 +754,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
 
@@ -753,6 +785,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
         assert!(
@@ -780,6 +813,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
         assert!(reach_v4.get(&peer).is_none());
@@ -817,6 +851,7 @@ mod tests {
             BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -833,6 +868,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
 
@@ -889,6 +925,7 @@ mod tests {
             BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -905,6 +942,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
 
@@ -932,6 +970,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
         assert!(
@@ -1003,6 +1042,7 @@ mod tests {
             BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -1019,6 +1059,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
 
@@ -1047,6 +1088,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
         assert!(!peer_link_affinity.contains_key(&peer));
@@ -1099,6 +1141,7 @@ mod tests {
             BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
 
         rebuild_sys_state(
             &lsdb,
@@ -1115,6 +1158,7 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
 
@@ -1144,8 +1188,98 @@ mod tests {
                 peer_fad: &mut peer_fad,
                 peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
             },
         );
         assert!(!peer_algo_sid.contains_key(&peer));
+    }
+
+    /// A peer LSP fragment 0 carrying a Router Capability TLV with an
+    /// SR-Algorithms sub-TLV (RFC 8667 §3.2, sub-TLV 19) must populate
+    /// `peer_algos[sys_id]` with the byte form of every advertised
+    /// algorithm — algo 0 (SPF), 1 (Strict SPF), and any Flex-Algo
+    /// identifiers in 128..=255. Dropping the fragment must clear the
+    /// entry, since SR-Algorithms is fragment-0-only.
+    #[test]
+    fn rebuild_populates_and_clears_peer_algos() {
+        let mut lsdb = Lsdb::default();
+        let peer = sys(43);
+
+        let algo_sub = isis_packet::IsisSubSegmentRoutingAlgo {
+            algo: vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(129)],
+        };
+        let cap = IsisTlvRouterCap {
+            router_id: Ipv4Addr::new(3, 3, 3, 3),
+            flags: 0u8.into(),
+            subs: vec![cap::IsisSubTlv::SegmentRoutingAlgo(algo_sub)],
+        };
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(IsisTlv::RouterCap(cap));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+
+        let mut hostname = Hostname::default();
+        let mut label_map = IsisLabelMap::default();
+        let mut reach_v4 = ReachMap::default();
+        let mut reach_v6 = ReachMapV6::default();
+        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
+        let mut mt2_reach_v6 = ReachMapV6::default();
+        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
+            BTreeMap::new();
+        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
+            BTreeMap::new();
+        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
+
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+                peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
+            },
+        );
+
+        let advertised = peer_algos
+            .get(&peer)
+            .expect("peer_algos must populate after fragment 0 ingest");
+        assert_eq!(
+            advertised,
+            &BTreeSet::from([0u8, 128, 129]),
+            "SR-Algorithms byte-form must round-trip Spf + FlexAlgo IDs"
+        );
+
+        // Drop fragment 0 — peer_algos must clear since the cap TLV
+        // is fragment-0-only.
+        lsdb.map.remove(&IsisLspId::new(peer, 0, 0));
+        rebuild_sys_state(
+            &lsdb,
+            &sys(0xFF),
+            &peer,
+            SysStateRefs {
+                hostname: &mut hostname,
+                label_map: &mut label_map,
+                reach_v4: &mut reach_v4,
+                reach_v6: &mut reach_v6,
+                mt_membership: &mut mt_membership,
+                mt2_reach_v6: &mut mt2_reach_v6,
+                srv6_end_map: &mut srv6_end_map,
+                peer_fad: &mut peer_fad,
+                peer_link_affinity: &mut peer_link_affinity,
+                peer_algo_sid: &mut peer_algo_sid,
+                peer_algos: &mut peer_algos,
+            },
+        );
+        assert!(!peer_algos.contains_key(&peer));
     }
 }
