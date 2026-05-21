@@ -261,7 +261,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         if find.is_none() {
             let lsr = ospf_ls_rquest_new(lsah);
             ospf_ls_request_add(nbr, lsr);
-            ospf_nfsm_ls_req_timer_on(nbr);
+            ospf_nfsm_ls_req_timer_on(nbr, oi.retransmit_interval);
         }
     }
 
