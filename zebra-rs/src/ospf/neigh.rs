@@ -56,6 +56,7 @@ pub struct NeighborDbDesc {
     pub flags: DbDescFlags,
     pub seqnum: u32,
     pub recv: OspfDbDesc,
+    pub sent: Option<OspfDbDesc>,
 }
 
 impl NeighborDbDesc {
@@ -64,6 +65,7 @@ impl NeighborDbDesc {
             flags: 0.into(),
             seqnum: 0,
             recv: OspfDbDesc::default(),
+            sent: None,
         }
     }
 }

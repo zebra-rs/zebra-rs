@@ -200,16 +200,32 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     ospf_packet_db_desc_set(nbr, &mut dd);
 
+    // RFC 2328 §10.8: remember the DD we sent so it can be retransmitted by
+    // the master while waiting for the slave's response, or resent by the
+    // slave when the master sends a duplicate.
+    nbr.dd.sent = Some(dd.clone());
+
+    // RFC 2328 §10.8: master retransmits its DD at RxmtInterval until acked.
+    // Slave does not retransmit on a timer; it only resends on duplicate
+    // receipt. Replacing the timer here also resets the interval whenever a
+    // fresh DD is sent.
+    if nbr.dd.flags.master() {
+        nbr.timer.db_desc = Some(super::nfsm::ospf_db_desc_timer(
+            nbr,
+            link.retransmit_interval,
+        ));
+    } else {
+        nbr.timer.db_desc = None;
+    }
+
     let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
     tracing::info!("DB_DESC: Send");
     // tracing::info!("{}", packet);
-    nbr.ptx
-        .send(Message::Send(
-            packet,
-            nbr.ifindex,
-            Some(nbr.ident.prefix.addr()),
-        ))
-        .unwrap();
+    let _ = nbr.ptx.send(Message::Send(
+        packet,
+        nbr.ifindex,
+        Some(nbr.ident.prefix.addr()),
+    ));
 }
 
 pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
@@ -407,9 +423,13 @@ pub fn ospf_db_desc_recv(
         Exchange => {
             if is_dd_dup(dd, &nbr.dd.recv) {
                 if nbr.dd.flags.master() {
-                    // Packet dup (Master).
+                    // We are master, slave is repeating its previous reply.
+                    // Master ignores the dup; its own retransmit timer drives
+                    // forward progress.
                 } else {
-                    // Resend packet.
+                    // We are slave, master is retransmitting. Resend our last
+                    // DD packet (RFC 2328 §10.6).
+                    ospf_db_desc_resend(oi, nbr);
                 }
                 return;
             }
@@ -434,10 +454,36 @@ pub fn ospf_db_desc_recv(
 
             ospf_db_desc_proc(oi, nbr, dd);
         }
-        _ => {
-            //
+        Loading | Full => {
+            // RFC 2328 §10.6: in Loading or Full, the only valid DD packet
+            // from the peer is a duplicate of its last DD. Slave resends its
+            // last response; master treats any DD as a sequence-number
+            // mismatch (forcing renegotiation).
+            if is_dd_dup(dd, &nbr.dd.recv) && !nbr.dd.flags.master() {
+                ospf_db_desc_resend(oi, nbr);
+            } else {
+                nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+            }
         }
     }
+}
+
+/// Resend the DD packet stored in `nbr.dd.sent`. Used by the slave on
+/// duplicate DD receipt (RFC 2328 §10.6) and by the master retransmit timer.
+fn ospf_db_desc_resend(oi: &OspfInterface, nbr: &Neighbor) {
+    let Some(ref sent) = nbr.dd.sent else {
+        return;
+    };
+    let packet = Ospfv2Packet::new(
+        &oi.ident.router_id,
+        &oi.area_id,
+        Ospfv2Payload::DbDesc(sent.clone()),
+    );
+    let _ = nbr.ptx.send(Message::Send(
+        packet,
+        nbr.ifindex,
+        Some(nbr.ident.prefix.addr()),
+    ));
 }
 
 pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) {

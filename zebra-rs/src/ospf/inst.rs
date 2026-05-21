@@ -901,6 +901,37 @@ impl Ospf {
         ));
     }
 
+    /// Handle Database Description master-retransmit timer firing
+    /// (RFC 2328 §10.8). Resend the DD packet stored in `nbr.dd.sent` while
+    /// the master is still in ExStart or Exchange. The timer is replaced
+    /// (not cancelled) when the master sends the next DD; once the neighbor
+    /// progresses past Exchange the regular timer-set logic clears it.
+    fn process_dd_retransmit(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let Some((link, nbr)) = self.ospf_interface(ifindex, &addr) else {
+            return;
+        };
+        if (nbr.state != NfsmState::ExStart && nbr.state != NfsmState::Exchange)
+            || !nbr.dd.flags.master()
+        {
+            nbr.timer.db_desc = None;
+            return;
+        }
+        let Some(ref sent) = nbr.dd.sent else {
+            return;
+        };
+        let packet = Ospfv2Packet::new(
+            link.router_id,
+            &link.area_id,
+            Ospfv2Payload::DbDesc(sent.clone()),
+        );
+        tracing::info!("[DB Desc:Retransmit] to {} seq={:#x}", addr, sent.seqnum);
+        let _ = nbr.ptx.send(Message::Send(
+            packet,
+            nbr.ifindex,
+            Some(nbr.ident.prefix.addr()),
+        ));
+    }
+
     /// Handle Link State Request retransmit timer firing for a neighbor
     /// (RFC 2328 §10.9). Resend the pending LS Request packet built from
     /// `nbr.ls_req`. Stop the timer once the list is empty or the neighbor
@@ -1170,6 +1201,9 @@ impl Ospf {
             Message::LsReqRetransmit(ifindex, addr) => {
                 self.process_ls_req_retransmit(ifindex, addr);
             }
+            Message::DdRetransmit(ifindex, addr) => {
+                self.process_dd_retransmit(ifindex, addr);
+            }
             Message::DelayedAck(ifindex) => {
                 self.process_delayed_ack(ifindex);
             }
@@ -1285,6 +1319,9 @@ pub enum Message {
     /// Retransmit pending Link State Request packet to a neighbor in
     /// Exchange or Loading. (ifindex, nbr_addr)
     LsReqRetransmit(u32, Ipv4Addr),
+    /// Master retransmit of pending Database Description packet.
+    /// (ifindex, nbr_addr)
+    DdRetransmit(u32, Ipv4Addr),
     /// Send delayed LS Acks on an interface.
     /// (ifindex)
     DelayedAck(u32),
