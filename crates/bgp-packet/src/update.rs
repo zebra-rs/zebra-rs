@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::Ipv6Addr;
 
 use bytes::{BufMut, BytesMut};
 use fixedbuf::FixedBuf;
@@ -6,9 +7,9 @@ use nom::number::complete::be_u16;
 use nom_derive::*;
 
 use crate::{
-    Afi, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr, BgpHeader, BgpParseError, BgpType, Ipv4Nlri,
-    MpReachAttr, MpUnreachAttr, ParseOption, Safi, nlri_psize, parse_bgp_nlri_ipv4,
-    parse_bgp_update_attribute,
+    Afi, AttrFlags, AttrType, BGP_HEADER_LEN, BGP_PACKET_LEN, BgpAttr, BgpHeader, BgpParseError,
+    BgpType, Ipv4Nlri, MpReachAttr, MpUnreachAttr, ParseOption, Safi, nlri_psize,
+    parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
 };
 
 #[derive(NomBE)]
@@ -112,6 +113,105 @@ impl UpdatePacket {
             buf.put(&ip.prefix.addr().octets()[0..plen]);
         }
 
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length: u16 = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+
+        Some(buf)
+    }
+
+    /// Emit a BGP UPDATE carrying `MP_REACH_NLRI` for AFI=1 / SAFI=1
+    /// (IPv4 unicast) with an IPv6 next-hop, per RFC 8950. Mirrors the
+    /// pagination shape of [`Self::pop_ipv4`]: pop NLRIs into a single
+    /// packet until adding another would exceed `max_packet_size`,
+    /// push the spilled NLRI back, return the encoded packet.
+    ///
+    /// The MP_REACH attribute is emitted with the extended-length
+    /// (2-octet length) form unconditionally — once a single /24 is
+    /// added alongside the 21-octet MP_REACH preamble the value
+    /// already crowds the 255-byte budget; pagination almost always
+    /// produces values that need 2-octet lengths.
+    ///
+    /// `bgp_attr`, if set, is emitted verbatim (including any v4
+    /// NEXT_HOP attribute). RFC 8950 §4 says the receiver MUST ignore
+    /// NEXT_HOP when MP_REACH carries an IPv6 next-hop, so passing
+    /// the attribute through is harmless and matches what FRR /
+    /// IOS-XR emit.
+    pub fn pop_ipv4_mp_reach(&mut self, next_hop: Ipv6Addr) -> Option<BytesMut> {
+        if self.ipv4_update.is_empty() {
+            return None;
+        }
+        let mut buf = BytesMut::with_capacity(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        buf.put(&header[..]);
+
+        // Empty legacy IPv4 withdraw field — required by RFC 4271 §4.3
+        // even though every reachable NLRI lives inside MP_REACH here.
+        buf.put_u16(0u16);
+
+        // Total Path Attributes Length placeholder.
+        let attr_len_pos = buf.len();
+        buf.put_u16(0u16);
+        let attr_pos: std::ops::Range<usize> = attr_len_pos..attr_len_pos + 2;
+
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(&mut buf);
+        }
+
+        // MP_REACH attribute header — Optional + Extended Length.
+        let flags = AttrFlags::new().with_optional(true).with_extended(true);
+        buf.put_u8(flags.into());
+        buf.put_u8(AttrType::MpReachNlri.into());
+        let mp_len_pos = buf.len();
+        buf.put_u16(0u16);
+
+        // MP_REACH value preamble: AFI + SAFI + nhop_len + nhop + SNPA.
+        let mp_value_start = buf.len();
+        buf.put_u16(u16::from(Afi::Ip));
+        buf.put_u8(u8::from(Safi::Unicast));
+        buf.put_u8(16);
+        buf.put(&next_hop.octets()[..]);
+        buf.put_u8(0);
+
+        // Per-NLRI emit, breaking out when the next prefix wouldn't
+        // fit. Symmetric with `pop_ipv4` — caller paginates by
+        // looping until `None`.
+        let mut emitted_any = false;
+        while let Some(ip) = self.ipv4_update.pop() {
+            let mut nlri_len: usize = if ip.id != 0 { 4 } else { 0 };
+            nlri_len += 1 + nlri_psize(ip.prefix.prefix_len());
+
+            if buf.len() + nlri_len > self.max_packet_size {
+                self.ipv4_update.push(ip);
+                break;
+            }
+
+            if ip.id != 0 {
+                buf.put_u32(ip.id);
+            }
+            buf.put_u8(ip.prefix.prefix_len());
+            let plen = nlri_psize(ip.prefix.prefix_len());
+            buf.put(&ip.prefix.addr().octets()[0..plen]);
+            emitted_any = true;
+        }
+
+        if !emitted_any {
+            // First NLRI didn't fit — caller has a pathologically
+            // small `max_packet_size` (smaller than a single NLRI plus
+            // the MP_REACH preamble). Drop the packet rather than
+            // emit an empty MP_REACH.
+            return None;
+        }
+
+        // Patch MP_REACH attribute length.
+        let mp_value_len = (buf.len() - mp_value_start) as u16;
+        buf[mp_len_pos..mp_len_pos + 2].copy_from_slice(&mp_value_len.to_be_bytes());
+
+        // Patch Path Attributes total length.
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        buf[attr_pos].copy_from_slice(&attr_len.to_be_bytes());
+
+        // Patch BGP header length.
         const LENGTH_POS: std::ops::Range<usize> = 16..18;
         let length: u16 = buf.len() as u16;
         buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
@@ -350,5 +450,136 @@ impl UpdatePacket {
         let (input, mut updates) = parse_bgp_nlri_ipv4(input, nlri_len, add_path)?;
         packet.ipv4_update.append(&mut updates);
         Ok((input, packet))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use ipnet::Ipv4Net;
+
+    use super::*;
+
+    fn nlri(prefix: &str) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id: 0,
+            prefix: prefix.parse::<Ipv4Net>().unwrap(),
+        }
+    }
+
+    /// Encode via `pop_ipv4_mp_reach` and parse the bytes back through
+    /// `UpdatePacket::parse_packet`, then assert the recovered
+    /// MP_REACH carries the next-hop and prefixes we put in.
+    fn encode_and_parse(
+        next_hop: Ipv6Addr,
+        nlris: &[Ipv4Nlri],
+        max: usize,
+    ) -> (UpdatePacket, Vec<BytesMut>) {
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.bgp_attr = Some(BgpAttr::new());
+        update.ipv4_update = nlris.to_vec();
+
+        let mut packets = Vec::new();
+        while let Some(bytes) = update.pop_ipv4_mp_reach(next_hop) {
+            packets.push(bytes);
+        }
+        assert!(!packets.is_empty(), "expected at least one packet");
+
+        let (_, parsed) =
+            UpdatePacket::parse_packet(&packets[0], true, None).expect("must round-trip");
+        (parsed, packets)
+    }
+
+    #[test]
+    fn returns_none_with_no_nlris() {
+        let mut update = UpdatePacket::new();
+        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert!(update.pop_ipv4_mp_reach(nh).is_none());
+    }
+
+    #[test]
+    fn single_prefix_round_trips_through_decoder() {
+        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        let (parsed, _) = encode_and_parse(nh, &[nlri("10.0.0.0/24")], BGP_PACKET_LEN);
+        match parsed.mp_update {
+            Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
+                assert_eq!(nhop, IpAddr::V6(nh));
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("expected MpReachAttr::Ipv4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn many_prefixes_round_trip_into_one_packet() {
+        let nh: Ipv6Addr = "fe80::abcd".parse().unwrap();
+        let prefixes: Vec<Ipv4Nlri> = (0..50).map(|i| nlri(&format!("10.{i}.0.0/24"))).collect();
+        let (parsed, packets) = encode_and_parse(nh, &prefixes, BGP_PACKET_LEN);
+        assert_eq!(packets.len(), 1, "50 /24 should comfortably fit one MTU");
+        match parsed.mp_update {
+            Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
+                assert_eq!(nhop, IpAddr::V6(nh));
+                assert_eq!(updates.len(), 50);
+            }
+            other => panic!("expected MpReachAttr::Ipv4, got {other:?}"),
+        }
+    }
+
+    /// Pagination is forced by squeezing `max_packet_size` so far down
+    /// that only one or two NLRIs fit per UPDATE. `parse_packet` on
+    /// each emitted buffer must independently recover a valid
+    /// MP_REACH; the union of decoded NLRIs must equal what we
+    /// pushed in.
+    #[test]
+    fn pagination_splits_across_packets() {
+        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        // Build 20 distinct /24s; cap at 80 bytes so only one or two
+        // NLRIs (~4 bytes each) fit alongside ~50 bytes of header +
+        // attrs + MP_REACH preamble.
+        let prefixes: Vec<Ipv4Nlri> = (0..20).map(|i| nlri(&format!("10.{i}.0.0/24"))).collect();
+        let mut update = UpdatePacket::with_max_packet_size(80);
+        update.bgp_attr = Some(BgpAttr::new());
+        update.ipv4_update = prefixes.clone();
+
+        let mut packets = Vec::new();
+        while let Some(bytes) = update.pop_ipv4_mp_reach(nh) {
+            packets.push(bytes);
+        }
+        assert!(
+            packets.len() > 1,
+            "expected pagination, got {} packet(s)",
+            packets.len()
+        );
+
+        let mut recovered: Vec<String> = Vec::new();
+        for buf in &packets {
+            let (_, parsed) = UpdatePacket::parse_packet(buf, true, None).expect("decode");
+            match parsed.mp_update {
+                Some(MpReachAttr::Ipv4 { updates, .. }) => {
+                    for u in updates {
+                        recovered.push(u.prefix.to_string());
+                    }
+                }
+                other => panic!("unexpected mp_update: {other:?}"),
+            }
+        }
+        recovered.sort();
+        let mut expected: Vec<String> = prefixes.iter().map(|n| n.prefix.to_string()).collect();
+        expected.sort();
+        assert_eq!(recovered, expected);
+    }
+
+    /// A `max_packet_size` smaller than the fixed packet preamble (so
+    /// the first NLRI can never fit) returns `None` rather than an
+    /// empty MP_REACH packet.
+    #[test]
+    fn returns_none_when_first_nlri_does_not_fit() {
+        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        let mut update = UpdatePacket::with_max_packet_size(40);
+        update.bgp_attr = Some(BgpAttr::new());
+        update.ipv4_update = vec![nlri("10.0.0.0/24")];
+        assert!(update.pop_ipv4_mp_reach(nh).is_none());
     }
 }
