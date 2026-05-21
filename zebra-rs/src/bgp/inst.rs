@@ -459,6 +459,7 @@ impl Bgp {
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
                     update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -478,6 +479,7 @@ impl Bgp {
                     &mut self.peers,
                     &mut self.attr_store,
                     &group_id,
+                    &self.interface_addrs,
                 );
             }
         }

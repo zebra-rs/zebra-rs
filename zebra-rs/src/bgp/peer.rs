@@ -520,13 +520,35 @@ impl Peer {
     /// once RFC 8950 Extended Next Hop is negotiated on this peer.
     /// Returns `None` for any peer that isn't interface-keyed, or when
     /// the egress interface's link-local hasn't been observed yet via
-    /// `RibRx::AddrAdd`. Callers must already have confirmed ENHE was
-    /// negotiated — this only resolves the address.
-    pub fn next_hop_v6(&self, bgp: &Bgp) -> Option<std::net::Ipv6Addr> {
+    /// `RibRx::AddrAdd`. Callers should pair this with
+    /// [`Self::is_enhe_v4_negotiated`] before emitting.
+    pub fn next_hop_v6(
+        &self,
+        addrs: &super::interface_addrs::InterfaceAddrs,
+    ) -> Option<std::net::Ipv6Addr> {
         if !matches!(self.origin, PeerOrigin::Interface { .. }) {
             return None;
         }
-        bgp.interface_addrs.link_local_for(self.scope_id?)
+        addrs.link_local_for(self.scope_id?)
+    }
+
+    /// True iff both directions of the BGP capability exchange
+    /// advertised RFC 8950 Extended Next Hop for (IPv4-unicast,
+    /// IPv6 next-hop). Mirrors the per-AFI/SAFI gate used by
+    /// `update_group::signature_of` so the encoder and the
+    /// update-group accounting agree on what's negotiated.
+    pub fn is_enhe_v4_negotiated(&self) -> bool {
+        let sent = self
+            .cap_send
+            .extended_nexthop
+            .as_ref()
+            .is_some_and(|c| c.supports_v6_nexthop_for_ipv4_unicast());
+        let received = self
+            .cap_recv
+            .extended_nexthop
+            .as_ref()
+            .is_some_and(|c| c.supports_v6_nexthop_for_ipv4_unicast());
+        sent && received
     }
 }
 
@@ -537,6 +559,9 @@ pub struct BgpTop<'a> {
     pub rib_client: &'a crate::rib::client::RibClient,
     pub attr_store: &'a mut BgpAttrStore,
     pub update_groups: &'a mut super::update_group::UpdateGroupMap,
+    /// Per-ifindex IPv6 link-local registry, used to resolve the v6
+    /// next-hop for RFC 8950 IPv4-over-IPv6 emit on interface peers.
+    pub interface_addrs: &'a super::interface_addrs::InterfaceAddrs,
 }
 
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
@@ -1272,6 +1297,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             rib_client: &bgp.ctx.rib,
             attr_store: &mut bgp.attr_store,
             update_groups: &mut bgp.update_groups,
+            interface_addrs: &bgp.interface_addrs,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1300,6 +1326,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         rib_client: &bgp.ctx.rib,
         attr_store: &mut bgp.attr_store,
         update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

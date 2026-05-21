@@ -421,6 +421,7 @@ pub fn flush_ipv4(
     peers: &mut PeerMap,
     _attr_store: &mut BgpAttrStore,
     id: &UpdateGroupId,
+    interface_addrs: &super::interface_addrs::InterfaceAddrs,
 ) {
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
     let Some(af) = update_groups.get_mut(&afi_safi) else {
@@ -453,14 +454,34 @@ pub fn flush_ipv4(
     } else {
         bgp_packet::BGP_PACKET_LEN
     };
+    let enhe = group.sig.extended_next_hop;
     let member_idents: Vec<usize> = group.members.iter().copied().collect();
 
-    // Resolve packet_tx for each member up front.
-    let members: Vec<(usize, Option<mpsc::UnboundedSender<bytes::BytesMut>>)> = member_idents
+    // Resolve packet_tx and (when ENHE) per-member v6 next-hop up
+    // front. The next-hop derives from each peer's egress ifindex
+    // (`scope_id`), so it varies per member even within one
+    // update-group; the canonical-bytes sharing the legacy path
+    // relies on cannot apply.
+    struct MemberCtx {
+        ident: usize,
+        tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
+        enhe_v6: Option<std::net::Ipv6Addr>,
+    }
+    let members: Vec<MemberCtx> = member_idents
         .iter()
         .map(|ident| {
-            let tx = peers.get_by_idx(*ident).and_then(|p| p.packet_tx.clone());
-            (*ident, tx)
+            let peer = peers.get_by_idx(*ident);
+            let tx = peer.and_then(|p| p.packet_tx.clone());
+            let enhe_v6 = if enhe {
+                peer.and_then(|p| p.next_hop_v6(interface_addrs))
+            } else {
+                None
+            };
+            MemberCtx {
+                ident: *ident,
+                tx,
+                enhe_v6,
+            }
         })
         .collect();
 
@@ -476,6 +497,52 @@ pub fn flush_ipv4(
             .filter(|m| source_idents.contains(m))
             .collect();
 
+        if enhe {
+            // Per-member encode: each member's v6 next-hop is its own
+            // interface link-local; canonical-bytes sharing across
+            // members would force every member onto the same LL,
+            // which would break ENHE for everyone but one peer.
+            for ctx in &members {
+                let Some(tx) = ctx.tx.as_ref() else { continue };
+                let Some(ll) = ctx.enhe_v6 else {
+                    // ND hasn't observed any link-local on this
+                    // peer's egress interface yet; the operator-side
+                    // address-add events haven't reached BGP. Skip
+                    // this member's flush — we'll re-cache on the
+                    // next event arrival rather than emit a
+                    // garbage next-hop.
+                    continue;
+                };
+                let nlris: Vec<Ipv4Nlri> = entries
+                    .iter()
+                    .filter(|(_, src)| *src != ctx.ident)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                if nlris.is_empty() {
+                    if pruned_members.contains(&ctx.ident)
+                        && let Some(group) = af.group_by_id_mut(id)
+                    {
+                        group.counters.split_horizon_excluded += 1;
+                    }
+                    continue;
+                }
+                let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, Some(ll));
+                let byte_total: usize = bytes_list.iter().map(|b| b.len()).sum();
+                for bytes in &bytes_list {
+                    let _ = tx.send(bytes.clone());
+                }
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.messages_formatted += bytes_list.len() as u64;
+                    group.counters.messages_replicated += bytes_list.len() as u64;
+                    group.counters.bytes_formatted += byte_total as u64;
+                    if pruned_members.contains(&ctx.ident) {
+                        group.counters.split_horizon_excluded += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
         // Canonical UPDATE: every NLRI in the bucket.
         let canonical: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
         let canonical_bytes = encode_ipv4_update(&attr, &canonical, max_packet_size, None);
@@ -489,11 +556,11 @@ pub fn flush_ipv4(
         }
 
         // Send canonical to every non-pruned member.
-        for (ident, packet_tx) in &members {
-            if pruned_members.contains(ident) {
+        for ctx in &members {
+            if pruned_members.contains(&ctx.ident) {
                 continue;
             }
-            if let Some(tx) = packet_tx {
+            if let Some(tx) = ctx.tx.as_ref() {
                 for bytes in &canonical_bytes {
                     let _ = tx.send(bytes.clone());
                 }
@@ -524,7 +591,11 @@ pub fn flush_ipv4(
                 group.counters.bytes_formatted += pruned_byte_total as u64;
                 group.counters.split_horizon_excluded += 1;
             }
-            if let Some((_, Some(tx))) = members.iter().find(|(i, _)| *i == prune_ident) {
+            if let Some(tx) = members
+                .iter()
+                .find(|c| c.ident == prune_ident)
+                .and_then(|c| c.tx.as_ref())
+            {
                 for bytes in &pruned_bytes {
                     let _ = tx.send(bytes.clone());
                 }
@@ -546,7 +617,17 @@ pub fn flush_ipv4(
 /// peer's `packet_tx`. Per-attr clustering preserves the wire-level
 /// efficiency the cache provided (one MP_REACH UPDATE per shared
 /// attr-set rather than one per NLRI).
-pub(super) fn send_ipv4_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)>) {
+///
+/// `extended_next_hop_v6` is the IPv6 next-hop to emit in MP_REACH
+/// for RFC 8950 IPv4-over-IPv6; `None` keeps the legacy
+/// `pop_ipv4` / inline-NLRI emit. Callers compute this from the
+/// peer's negotiated ENHE state and its egress interface's
+/// link-local.
+pub(super) fn send_ipv4_direct(
+    peer: &Peer,
+    entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)>,
+    extended_next_hop_v6: Option<Ipv6Addr>,
+) {
     if entries.is_empty() {
         return;
     }
@@ -560,7 +641,7 @@ pub(super) fn send_ipv4_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv4Nlri
         bgp_packet::BGP_PACKET_LEN
     };
     for (attr, nlris) in buckets {
-        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, None);
+        let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, extended_next_hop_v6);
         for buf in bytes_list {
             peer.send_packet(buf);
         }
