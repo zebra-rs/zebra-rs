@@ -163,11 +163,30 @@ pub struct Bgp {
     /// [`super::interface_neighbor::materialize_peer`].
     pub interface_neighbors: BTreeMap<String, super::interface_neighbor::InterfaceNeighborCfg>,
     /// Staged per-VRF BGP intent — populated by the callbacks for
-    /// `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang). Step 13
-    /// reads this map at `CommitEnd` to spawn / despawn per-VRF
-    /// tasks; until then `bgp::vrf_config::log_commit_diff` is the
-    /// only consumer, emitting a debug log line per entry.
+    /// `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang, steps 11
+    /// and 12). Diffed against [`Self::vrf_registry`] at each
+    /// `CommitEnd` to drive [`super::vrf::spawn_bgp_vrf`] and
+    /// [`super::vrf::despawn_bgp_vrf`] (step 14).
     pub vrfs: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    /// Per-VRF tasks currently running. The diff against
+    /// [`Self::vrfs`] at `CommitEnd` spawns the names that show up
+    /// in the desired set but not here, and despawns names that
+    /// show up here but not in the desired set. Step 14's
+    /// placeholder `ProtoContext::default_table_no_rib` means the
+    /// per-VRF tasks aren't yet bound to any kernel VRF — step 15
+    /// lifts the context to a real `ProtoContext::for_vrf` once
+    /// the peer-bind site needs the binding.
+    pub vrf_registry: BTreeMap<String, super::vrf::BgpVrfHandle>,
+    /// Outbound sender every per-VRF task uses to push messages
+    /// back to the global runtime — peer registration, exports,
+    /// withdraws. Cloned into [`super::vrf::BgpVrf::global_tx`] at
+    /// spawn time so all VRFs fan in to one channel here.
+    pub vrf_global_tx: UnboundedSender<super::vrf::BgpGlobalMsg>,
+    /// Receiver paired with [`Self::vrf_global_tx`], drained in
+    /// the event loop. Step 14 logs each variant at debug; the
+    /// real handlers wire in at step 16 (peer register / accept
+    /// dispatch) and step 17 (export -> VPNv4/v6).
+    pub vrf_global_rx: UnboundedReceiver<super::vrf::BgpGlobalMsg>,
     /// `if-name` → `ifindex` mirror fed by `RibRx::LinkAdd`. Needed
     /// because the YANG callback receives a name but
     /// `PeerKey::Interface` keys on ifindex. Lookups that miss
@@ -256,6 +275,10 @@ impl Bgp {
 
         let (tx, rx) = mpsc::channel(8192);
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+        // Fan-in channel: every per-VRF task gets a clone of
+        // `vrf_global_tx_init` at spawn time, so all VRF→global
+        // messages land on one receiver in the global event loop.
+        let (vrf_global_tx_init, vrf_global_rx_init) = mpsc::unbounded_channel();
 
         // Subscribe to ND `NeighborDiscovered` events so the BGP
         // unnumbered runtime can materialize an interface-keyed Peer
@@ -296,6 +319,9 @@ impl Bgp {
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
             vrfs: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            vrf_global_tx: vrf_global_tx_init,
+            vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
@@ -540,6 +566,38 @@ impl Bgp {
             .collect()
     }
 
+    /// Reconcile [`Self::vrfs`] (desired set, populated by step 12
+    /// callbacks) against [`Self::vrf_registry`] (running set):
+    /// spawn the additions, despawn the removals. Called from
+    /// `CommitEnd` once per commit.
+    fn apply_vrf_commit_diff(&mut self) {
+        let (to_spawn, to_despawn) = super::vrf::compute_vrf_diff(&self.vrfs, &self.vrf_registry);
+
+        for name in to_despawn {
+            if let Some(handle) = self.vrf_registry.remove(&name) {
+                super::vrf::despawn_bgp_vrf(&name, &handle);
+                // `handle` drops at end of scope — its `Task<()>`
+                // aborts the spawned event loop if Shutdown
+                // hadn't already drained it.
+            }
+        }
+
+        for name in to_spawn {
+            // `to_spawn` came from a key iteration on `self.vrfs`;
+            // the entry is guaranteed to still be present.
+            let Some(cfg) = self.vrfs.get(&name).cloned() else {
+                continue;
+            };
+            let handle = super::vrf::spawn_bgp_vrf(
+                name.clone(),
+                &cfg,
+                self.router_id,
+                self.vrf_global_tx.clone(),
+            );
+            self.vrf_registry.insert(name, handle);
+        }
+    }
+
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
@@ -552,10 +610,15 @@ impl Bgp {
                 }
             }
             ConfigOp::CommitEnd => {
-                // Step 12: observe the per-VRF intent that just
-                // committed. Step 13 replaces this with spawn /
-                // despawn against a `running` map.
+                // Step 12 observed the per-VRF intent at debug;
+                // step 14 turns the observation into action: diff
+                // `self.vrfs` (desired) against `self.vrf_registry`
+                // (running), spawn the additions, despawn the
+                // removals. Edits to an already-spawned VRF aren't
+                // detected here — step 15 layers cfg-hash
+                // comparison on top.
                 super::vrf_config::log_commit_diff(self);
+                self.apply_vrf_commit_diff();
             }
             ConfigOp::Completion => {
                 msg.resp.unwrap().send(self.peer_comps()).unwrap();
@@ -900,6 +963,41 @@ impl Bgp {
                 Some(event) = self.nd_event_rx.recv() => {
                     self.process_nd_event(event);
                 }
+                Some(msg) = self.vrf_global_rx.recv() => {
+                    // VRF→global fan-in. Step 14 just logs each
+                    // variant — the real handlers wire in later
+                    // (step 16: peer register / accept dispatch;
+                    // step 17: Export → VPNv4/v6).
+                    self.process_vrf_global_msg(msg);
+                }
+            }
+        }
+    }
+
+    fn process_vrf_global_msg(&mut self, msg: super::vrf::BgpGlobalMsg) {
+        match msg {
+            super::vrf::BgpGlobalMsg::Export { vrf } => {
+                tracing::debug!(vrf = %vrf, "bgp: ignored Export (step 17 wires the handler)");
+            }
+            super::vrf::BgpGlobalMsg::WithdrawExport { vrf } => {
+                tracing::debug!(
+                    vrf = %vrf,
+                    "bgp: ignored WithdrawExport (step 17 wires the handler)",
+                );
+            }
+            super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
+                tracing::debug!(
+                    vrf = %vrf,
+                    %addr,
+                    "bgp: ignored RegisterPeer (step 16 wires the handler)",
+                );
+            }
+            super::vrf::BgpGlobalMsg::UnregisterPeer { vrf, addr } => {
+                tracing::debug!(
+                    vrf = %vrf,
+                    %addr,
+                    "bgp: ignored UnregisterPeer (step 16 wires the handler)",
+                );
             }
         }
     }

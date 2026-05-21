@@ -11,16 +11,12 @@
 //!   dispatcher knows which VRF to forward a given source IP to
 //!   (step 16), and the matching withdraw/unregister events.
 //!
-//! Step 13 lands the enums with `Shutdown` / `Accept` populated;
-//! every other variant is a stub waiting on its consumer. Adding
-//! the variants now keeps the channel typing stable across later
-//! steps — adding a variant to a public enum that other modules
-//! `match` exhaustively is the only kind of change that would
-//! force a wide refactor at step 16/17/18.
-//!
-//! The module-level allow goes away when step 14 wires the
-//! cross-task channel ends to real producers / consumers.
-#![allow(dead_code)]
+//! Step 13 landed the enums with `Shutdown` and `Accept`
+//! populated; step 14 drains `BgpGlobalMsg` in the global event
+//! loop (`process_vrf_global_msg`) and uses `Shutdown` from
+//! `despawn_bgp_vrf`. Every other variant is still a stub for
+//! steps 16-18; the per-variant `#[allow(dead_code)]` on those
+//! variants will drop as each step lands its consumer.
 
 use std::net::SocketAddr;
 

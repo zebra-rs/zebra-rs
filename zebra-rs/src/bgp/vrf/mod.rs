@@ -18,11 +18,11 @@
 
 pub mod inst;
 pub mod msg;
+pub mod spawn;
 
-// Step-14 consumers (`spawn_bgp_vrf` / `despawn_bgp_vrf`) will
-// reach for these names. The `unused_imports` allow is removed
-// at that point.
-#[allow(unused_imports)]
-pub use inst::{BgpVrf, serve_vrf};
-#[allow(unused_imports)]
-pub use msg::{BgpGlobalMsg, BgpVrfMsg};
+// External consumers (`Bgp` field types, `process_vrf_global_msg`)
+// only reach for the names below. `inst::{BgpVrf, serve_vrf}` and
+// `msg::BgpVrfMsg` stay internal — they're constructed / consumed
+// inside `vrf::spawn` only.
+pub use msg::BgpGlobalMsg;
+pub use spawn::{BgpVrfHandle, compute_vrf_diff, despawn_bgp_vrf, spawn_bgp_vrf};
