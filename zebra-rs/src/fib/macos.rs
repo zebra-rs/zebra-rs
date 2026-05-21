@@ -24,7 +24,11 @@ impl FibHandle {
         Ok(Self { h })
     }
 
-    pub async fn route_ipv4_add(&self, dest: &Ipv4Net, entry: &RibEntry) {
+    /// `table_id` is accepted for parity with the Linux netlink
+    /// implementation; macOS has no concept of multiple kernel
+    /// routing tables, so the value is logged for non-default
+    /// installs (no-op in practice — VRFs require Linux).
+    pub async fn route_ipv4_add(&self, dest: &Ipv4Net, entry: &RibEntry, _table_id: u32) {
         if let Some(nexthop) = entry.nexthops.first() {
             let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
                 .with_gateway(IpAddr::V4(nexthop.addr));
@@ -33,7 +37,7 @@ impl FibHandle {
     }
 
     #[allow(dead_code)]
-    pub async fn route_ipv4_del(&self, dest: &Ipv4Net, entry: &RibEntry) {
+    pub async fn route_ipv4_del(&self, dest: &Ipv4Net, entry: &RibEntry, _table_id: u32) {
         if let Some(nexthop) = entry.nexthops.first() {
             let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())
                 .with_gateway(IpAddr::V4(nexthop.addr));
