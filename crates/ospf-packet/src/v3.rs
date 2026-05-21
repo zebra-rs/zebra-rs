@@ -1071,6 +1071,141 @@ impl ParseBe<Ospfv3AsExternalLsa> for Ospfv3AsExternalLsa {
     }
 }
 
+/// v3 Link-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=0 (link-local scope), function code = 8.
+pub const OSPFV3_LINK_LSA_TYPE: u16 = 0x0008;
+
+/// One prefix entry inside an `Ospfv3LinkLsa`.
+///
+/// Wire layout (RFC 5340 §A.4.9):
+/// ```text
+/// | PrefixLength | PrefixOptions |          0 (reserved)       |
+/// |                Address Prefix (variable, padded)            |
+/// ```
+///
+/// Differs from `Ospfv3IntraAreaPrefix` (no per-prefix metric — the
+/// 16-bit slot after PrefixOptions is reserved here) and from the
+/// Inter-Area-Prefix-LSA single-prefix shape (no leading 24-bit
+/// metric — that lives at the LSA level there). Kept as its own
+/// type rather than reused because the metric/no-metric shape isn't
+/// uniform across §A.4.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3LinkLsaPrefix {
+    pub prefix_length: u8,
+    pub prefix_options: Ospfv3PrefixOptions,
+    pub address_prefix: Vec<u8>,
+}
+
+impl Ospfv3LinkLsaPrefix {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.prefix_length);
+        buf.put_u8(self.prefix_options.into_bits());
+        buf.put_u16(0);
+        buf.put_slice(&self.address_prefix);
+    }
+}
+
+impl ParseBe<Ospfv3LinkLsaPrefix> for Ospfv3LinkLsaPrefix {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LinkLsaPrefix> {
+        let (input, prefix_length) = be_u8(input)?;
+        let (input, prefix_options_byte) = be_u8(input)?;
+        let (input, _reserved) = be_u16(input)?;
+        let wire_len = ospfv3_prefix_wire_len(prefix_length);
+        let (input, prefix_bytes) = nom::bytes::complete::take(wire_len)(input)?;
+        Ok((
+            input,
+            Ospfv3LinkLsaPrefix {
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::from_bits(prefix_options_byte),
+                address_prefix: prefix_bytes.to_vec(),
+            },
+        ))
+    }
+}
+
+/// v3 Link-LSA body (RFC 5340 §A.4.9).
+///
+/// v3-specific LSA with no v2 analogue. Originated by every router
+/// on every interface (link-local scope — never flooded beyond the
+/// link) and carries:
+///   - the originating router's Hello-priority for the link,
+///   - the router's options bits for this link,
+///   - the router's *link-local* IPv6 address on this link, used by
+///     other routers on the same link to install a usable next hop,
+///   - the list of IPv6 prefixes the router wishes to advertise for
+///     the link (the DR then aggregates these into the
+///     Intra-Area-Prefix-LSA referenced from the Network-LSA).
+///
+/// Layout:
+///   - priority (8 bits)
+///   - options (24 bits)  — same `Ospfv3Options` shape
+///   - link_local_address (16 octets)  — IPv6 link-local
+///   - # prefixes (32 bits)
+///   - prefix entries (variable)
+///
+/// On parse we honor the `# Prefixes` count, matching the
+/// Intra-Area-Prefix-LSA convention — the LSU codec will split LSA
+/// bodies by header length and trailing bytes belong to padding /
+/// the next LSA.
+#[derive(Debug, Clone)]
+pub struct Ospfv3LinkLsa {
+    pub priority: u8,
+    pub options: Ospfv3Options,
+    pub link_local_address: Ipv6Addr,
+    pub prefixes: Vec<Ospfv3LinkLsaPrefix>,
+}
+
+impl Default for Ospfv3LinkLsa {
+    fn default() -> Self {
+        Self {
+            priority: 0,
+            options: Ospfv3Options::new(),
+            link_local_address: Ipv6Addr::UNSPECIFIED,
+            prefixes: Vec::new(),
+        }
+    }
+}
+
+impl Ospfv3LinkLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // (priority << 24) | options24 packed into one word.
+        let word: u32 = ((self.priority as u32) << 24) | (self.options.into_bits() & 0x00FF_FFFF);
+        buf.put_u32(word);
+        buf.put_slice(&self.link_local_address.octets());
+        let num: u32 = self.prefixes.len().min(u32::MAX as usize) as u32;
+        buf.put_u32(num);
+        for p in &self.prefixes {
+            p.emit(buf);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3LinkLsa> for Ospfv3LinkLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3LinkLsa> {
+        let (input, priority) = be_u8(input)?;
+        let (input, options_24) = be_u24(input)?;
+        let (input, ll_bytes) = nom::bytes::complete::take(16usize)(input)?;
+        let mut ll_arr = [0u8; 16];
+        ll_arr.copy_from_slice(ll_bytes);
+        let (mut input, num_prefixes) = be_u32(input)?;
+        let mut prefixes = Vec::with_capacity(num_prefixes as usize);
+        for _ in 0..num_prefixes {
+            let (rest, p) = Ospfv3LinkLsaPrefix::parse_be(input)?;
+            prefixes.push(p);
+            input = rest;
+        }
+        Ok((
+            input,
+            Ospfv3LinkLsa {
+                priority,
+                options: Ospfv3Options::from_bits(options_24),
+                link_local_address: Ipv6Addr::from(ll_arr),
+                prefixes,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1927,6 +2062,77 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(parsed.prefix_length, 0);
         assert_eq!(parsed.forwarding_address, Some(fwd));
+    }
+
+    /// Link-LSA with priority, options, link-local v6 address, and
+    /// two prefixes. Pins the (priority << 24 | options24) packing,
+    /// the 16-byte link-local stretch, and the 4-byte # prefixes
+    /// count.
+    #[test]
+    fn ospfv3_link_lsa_roundtrip() {
+        let mut options = Ospfv3Options::new();
+        options.set_v6(true);
+        options.set_r(true);
+        let ll = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let body = Ospfv3LinkLsa {
+            priority: 128,
+            options,
+            link_local_address: ll,
+            prefixes: vec![
+                Ospfv3LinkLsaPrefix {
+                    prefix_length: 64,
+                    prefix_options: Ospfv3PrefixOptions::new(),
+                    address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0],
+                },
+                Ospfv3LinkLsaPrefix {
+                    prefix_length: 128,
+                    prefix_options: Ospfv3PrefixOptions::new(),
+                    address_prefix: vec![
+                        0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+                    ],
+                },
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed (4) + link-local (16) + # prefixes (4) + 2 prefix entries
+        // (4 + 8) + (4 + 16) = 24 + 12 + 20 = 56.
+        assert_eq!(buf.len(), 4 + 16 + 4 + (4 + 8) + (4 + 16));
+
+        // High byte of the first word is the priority byte.
+        assert_eq!(buf[0], 128);
+        // Options24 in the lower 3 bytes. v6 (bit 0) + r (bit 4) = 0x11.
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), 0x0000_0011);
+        // # prefixes at offset 4 + 16 = 20.
+        assert_eq!(BigEndian::read_u32(&buf[20..24]), 2);
+
+        let (rest, parsed) = Ospfv3LinkLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.priority, 128);
+        assert_eq!(parsed.options, body.options);
+        assert_eq!(parsed.link_local_address, ll);
+        assert_eq!(parsed.prefixes.len(), 2);
+        assert_eq!(parsed.prefixes[0].prefix_length, 64);
+        assert_eq!(parsed.prefixes[0].address_prefix.len(), 8);
+        assert_eq!(parsed.prefixes[1].prefix_length, 128);
+        assert_eq!(parsed.prefixes[1].address_prefix.len(), 16);
+    }
+
+    /// Link-LSA with no prefixes still emits the fixed 24-byte
+    /// prefix-and-count portion.
+    #[test]
+    fn ospfv3_link_lsa_no_prefixes() {
+        let body = Ospfv3LinkLsa::default();
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // 4 (priority + options24) + 16 (link-local v6) + 4 (# prefixes) = 24.
+        assert_eq!(buf.len(), 24);
+
+        let (rest, parsed) = Ospfv3LinkLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert!(parsed.prefixes.is_empty());
+        assert_eq!(parsed.link_local_address, Ipv6Addr::UNSPECIFIED);
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
