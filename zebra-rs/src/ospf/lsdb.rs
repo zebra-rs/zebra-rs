@@ -90,17 +90,63 @@ impl<V: OspfVersion> Lsa<V> {
         }
     }
 
+    /// Borrow the LSA header. Convenience over `V::lsa_header(&lsa.data)`.
+    pub fn header(&self) -> &V::LsaHeader {
+        V::lsa_header(&self.data)
+    }
+
     /// Compute the current LSA age: original ls_age plus elapsed
-    /// time since install, capped at MaxAge. Now generic — reads
-    /// the header via `V::lsa_header` and `V::ls_age`, which both
-    /// `Ospfv2` and `Ospfv3` impl identically (the field has the
-    /// same semantics in RFC 2328 §A.4.1 and RFC 5340 §A.4.2.1).
+    /// time since install, capped at MaxAge.
     pub fn current_age(&self) -> u16 {
-        let header = V::lsa_header(&self.data);
-        let initial_age = V::ls_age(header);
+        let initial_age = V::ls_age(self.header());
         let elapsed = self.birth_time.elapsed().as_secs() as u16;
         let age = initial_age.saturating_add(elapsed);
         age.min(OSPF_MAX_AGE)
+    }
+
+    /// True when the LSA's `ls_age` field has reached MaxAge —
+    /// the canonical signal that an LSA is being flushed.
+    #[allow(dead_code)]
+    pub fn is_max_age(&self) -> bool {
+        V::ls_age(self.header()) == OSPF_MAX_AGE
+    }
+
+    // The remaining wrappers below delegate to the matching
+    // OspfVersion trait accessors. They give consumers a uniform
+    // `lsa.foo()` method-call surface instead of `V::foo(&lsa.data)`,
+    // which is easier on the eye for show / display code that
+    // needs several fields at once.
+
+    /// LS Type as a 16-bit value. See [`OspfVersion::ls_type`].
+    #[allow(dead_code)]
+    pub fn ls_type(&self) -> u16 {
+        V::ls_type(self.header())
+    }
+
+    /// Link State ID as a 32-bit value. See [`OspfVersion::ls_id`].
+    #[allow(dead_code)]
+    pub fn ls_id(&self) -> u32 {
+        V::ls_id(self.header())
+    }
+
+    /// Advertising Router. See [`OspfVersion::adv_router`].
+    pub fn adv_router(&self) -> Ipv4Addr {
+        V::adv_router(self.header())
+    }
+
+    /// LS Sequence Number. See [`OspfVersion::ls_seq_number`].
+    pub fn ls_seq_number(&self) -> u32 {
+        V::ls_seq_number(self.header())
+    }
+
+    /// LSA checksum. See [`OspfVersion::ls_checksum`].
+    pub fn ls_checksum(&self) -> u16 {
+        V::ls_checksum(self.header())
+    }
+
+    /// LSA total length in octets. See [`OspfVersion::length`].
+    pub fn length(&self) -> u16 {
+        V::length(self.header())
     }
 }
 

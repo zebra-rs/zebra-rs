@@ -317,7 +317,7 @@ fn render_link(out: &mut String, oi: &OspfLink, ospf: &Ospf) {
         writeln!(
             out,
             "  Saved Network-LSA sequence number 0x{:08x}",
-            lsa.data.h.ls_seq_number
+            lsa.ls_seq_number()
         )
         .unwrap();
     }
@@ -872,8 +872,8 @@ fn show_ospf_database(
                     link_id: lsa_id.to_string(),
                     adv_router: adv_router.to_string(),
                     age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
-                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
                     link_count,
                 });
             }
@@ -883,8 +883,8 @@ fn show_ospf_database(
                     link_id: lsa_id.to_string(),
                     adv_router: adv_router.to_string(),
                     age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
-                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
                     link_count: None,
                 });
             }
@@ -894,8 +894,8 @@ fn show_ospf_database(
                     link_id: lsa_id.to_string(),
                     adv_router: adv_router.to_string(),
                     age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
-                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
+                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
                     link_count: None,
                 });
             }
@@ -946,8 +946,8 @@ fn show_ospf_database(
                 lsa_id,
                 adv_router,
                 lsa.current_age(),
-                lsa.data.h.ls_seq_number,
-                lsa.data.h.ls_checksum,
+                lsa.ls_seq_number(),
+                lsa.ls_checksum(),
                 lsp.links.len(),
             );
         }
@@ -968,8 +968,8 @@ fn show_ospf_database(
                 lsa_id,
                 adv_router,
                 lsa.current_age(),
-                lsa.data.h.ls_seq_number,
-                lsa.data.h.ls_checksum,
+                lsa.ls_seq_number(),
+                lsa.ls_checksum(),
             );
         }
 
@@ -993,8 +993,8 @@ fn show_ospf_database(
                     lsa_id,
                     adv_router,
                     lsa.current_age(),
-                    lsa.data.h.ls_seq_number,
-                    lsa.data.h.ls_checksum,
+                    lsa.ls_seq_number(),
+                    lsa.ls_checksum(),
                 );
             }
         }
@@ -1047,10 +1047,10 @@ fn show_ospf_database_detail(
                     ls_age: lsa.current_age(),
                     options: format_options_flags(&opts),
                     link_state_id: lsa.data.h.ls_id.to_string(),
-                    advertising_router: lsa.data.h.adv_router.to_string(),
-                    ls_seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
-                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
-                    length: lsa.data.h.length,
+                    advertising_router: lsa.adv_router().to_string(),
+                    ls_seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
+                    length: lsa.length(),
                     num_links: lsp.links.len(),
                     links,
                 });
@@ -1067,10 +1067,10 @@ fn show_ospf_database_detail(
                     ls_age: lsa.current_age(),
                     options: format_options_flags(&opts),
                     link_state_id: lsa.data.h.ls_id.to_string(),
-                    advertising_router: lsa.data.h.adv_router.to_string(),
-                    ls_seq_number: format!("0x{:08x}", lsa.data.h.ls_seq_number),
-                    checksum: format!("0x{:04x}", lsa.data.h.ls_checksum),
-                    length: lsa.data.h.length,
+                    advertising_router: lsa.adv_router().to_string(),
+                    ls_seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
+                    length: lsa.length(),
                     network_mask: format!("/{}", u32::from(lsp.netmask).leading_ones()),
                     attached_routers,
                 });
@@ -1115,9 +1115,9 @@ fn show_ospf_database_detail(
             writeln!(out, "  LS Type: Router Links")?;
             writeln!(out, "  Link State ID: {}", lsa_id)?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
-            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
-            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
-            writeln!(out, "  Length: {}", lsa.data.h.length)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
+            writeln!(out, "  Length: {}", lsa.length())?;
 
             let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
@@ -1193,9 +1193,9 @@ fn show_ospf_database_detail(
                 lsa_id
             )?;
             writeln!(out, "  Advertising Router: {}", adv_router)?;
-            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
-            writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
-            writeln!(out, "  Length: {}", lsa.data.h.length)?;
+            writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
+            writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
+            writeln!(out, "  Length: {}", lsa.length())?;
 
             let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
                 continue;
@@ -1252,11 +1252,11 @@ fn show_ospf_database_detail(
                 writeln!(out, "  Opaque-Type {} ({})", opaque_type, opaque_type_name)?;
                 writeln!(out, "  Opaque-ID   0x{:x}", opaque_id)?;
                 writeln!(out, "  Advertising Router: {}", adv_router)?;
-                writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.data.h.ls_seq_number)?;
-                writeln!(out, "  Checksum: 0x{:04x}", lsa.data.h.ls_checksum)?;
-                writeln!(out, "  Length: {}", lsa.data.h.length)?;
+                writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
+                writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
+                writeln!(out, "  Length: {}", lsa.length())?;
 
-                let payload_len = lsa.data.h.length.saturating_sub(20);
+                let payload_len = lsa.length().saturating_sub(20);
                 writeln!(out, "  Opaque-Info: {} octets of data", payload_len)?;
 
                 match &lsa.data.lsp {
@@ -1586,7 +1586,7 @@ fn show_ospf_segment_routing(
             let algo_str = lsdb
                 .values_by_type(OspfLsType::OpaqueAreaLocal)
                 .find_map(|lsa| {
-                    if lsa.data.h.adv_router == *router_id
+                    if lsa.adv_router() == *router_id
                         && let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp
                     {
                         return Some(format_algo_list(ri));
@@ -1626,7 +1626,7 @@ fn show_ospf_segment_routing(
 
             // Find Extended Prefix LSAs from this router.
             for (_, lsa) in lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
-                if lsa.data.h.adv_router != *router_id {
+                if lsa.adv_router() != *router_id {
                     continue;
                 }
                 if let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp {
