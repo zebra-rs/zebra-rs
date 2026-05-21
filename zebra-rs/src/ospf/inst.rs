@@ -826,11 +826,8 @@ impl Ospf {
                     num_adv: 1,
                     lsas: vec![lsa.clone()],
                 };
-                let packet = Ospfv2Packet::new(
-                    &self.router_id,
-                    &Ipv4Addr::UNSPECIFIED,
-                    Ospfv2Payload::LsUpdate(ls_upd),
-                );
+                let packet =
+                    Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
                 tracing::info!(
                     "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
                     lsa.h.ls_type,
@@ -874,6 +871,7 @@ impl Ospf {
             return;
         };
         let retransmit_interval = link.retransmit_interval();
+        let area_id = link.area;
         let Some(nbr) = link.nbrs.get_mut(&addr) else {
             return;
         };
@@ -887,11 +885,7 @@ impl Ospf {
             num_adv: lsas.len() as u32,
             lsas,
         };
-        let packet = Ospfv2Packet::new(
-            &self.router_id,
-            &Ipv4Addr::UNSPECIFIED,
-            Ospfv2Payload::LsUpdate(ls_upd),
-        );
+        let packet = Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
         let _ = nbr.ptx.send(Message::Send(
             packet,
             nbr.ifindex,
@@ -923,11 +917,7 @@ impl Ospf {
         let ls_ack = OspfLsAck {
             lsa_headers: ack_headers,
         };
-        let packet = Ospfv2Packet::new(
-            &self.router_id,
-            &Ipv4Addr::UNSPECIFIED,
-            Ospfv2Payload::LsAck(ls_ack),
-        );
+        let packet = Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
         // Send to AllSPFRouters multicast.
         let _ = link.ptx.send(Message::Send(packet, ifindex, None));
     }
@@ -1087,6 +1077,8 @@ impl Ospf {
                     return;
                 };
                 link.enabled = true;
+                link.area = area_id;
+                link.area_id = area_id;
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
@@ -1097,6 +1089,8 @@ impl Ospf {
                     return;
                 };
                 link.enabled = false;
+                link.area = Ipv4Addr::UNSPECIFIED;
+                link.area_id = Ipv4Addr::UNSPECIFIED;
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 self.router_lsa_originate();
