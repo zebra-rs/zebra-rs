@@ -1353,16 +1353,47 @@ impl Bgp {
                     esi: None,
                 };
 
-                let (added, removed, _gen) = self.local_rib.update(Some(rd), prefix, rib);
+                let (_, selected, _gen) = self.local_rib.update(Some(rd), prefix, rib);
+                let selected_len = selected.len();
+
+                // Step 17c: fan out the new VPNv4 winner to PE
+                // peers via the existing `route_advertise_to_peers`
+                // helper. The helper iterates Established peers
+                // matching (Afi=Ip, Safi=MplsVpn), runs split-
+                // horizon + outbound policy + RTC, and pushes to
+                // each peer's `cache_vpnv4` (debounced flush). The
+                // global instance has `vrf_export = None`, so no
+                // infinite loop on the export hook in
+                // `route_ipv4_update`.
+                let mut top = super::peer::BgpTop {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_client: &self.ctx.rib,
+                    attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
+                    color_policy: Some(&self.color_policy),
+                    flex_algo_routes: Some(&self.flex_algo_routes),
+                    vrf_export: None,
+                };
+                super::route::route_advertise_to_peers(
+                    Some(rd),
+                    prefix,
+                    &selected,
+                    /* source peer */ 0,
+                    &mut top,
+                    &mut self.peers,
+                );
+
                 tracing::info!(
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
                     export_rts = export_rts.len(),
                     label,
-                    added = added.len(),
-                    removed = removed.len(),
-                    "bgp: export written to LocalRib.v4vpn (update-group flush lands in step 17c)",
+                    winners = selected_len,
+                    "bgp: export written to LocalRib.v4vpn and advertised to PE peers",
                 );
             }
             super::vrf::BgpGlobalMsg::WithdrawExport { vrf, prefix } => {
@@ -1379,12 +1410,41 @@ impl Bgp {
                 // matching Export); the remove path uses that
                 // tuple to identify the row.
                 let removed = self.local_rib.remove(Some(rd), prefix, 0, 0);
+
+                // Re-run best-path so any remaining candidate at
+                // (rd, prefix) becomes the new selected winner.
+                // Pass that result to `route_advertise_to_peers` —
+                // empty `selected` triggers the Withdraw branch
+                // there (`peer.adj_out` cleanup, MP_UNREACH emit).
+                let selected = self.local_rib.select_best_path_vpn(&rd, prefix);
+                let mut top = super::peer::BgpTop {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_client: &self.ctx.rib,
+                    attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
+                    color_policy: Some(&self.color_policy),
+                    flex_algo_routes: Some(&self.flex_algo_routes),
+                    vrf_export: None,
+                };
+                super::route::route_advertise_to_peers(
+                    Some(rd),
+                    prefix,
+                    &selected,
+                    /* source peer */ 0,
+                    &mut top,
+                    &mut self.peers,
+                );
+
                 tracing::info!(
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
                     removed = removed.len(),
-                    "bgp: export withdrawn from LocalRib.v4vpn",
+                    winners = selected.len(),
+                    "bgp: export withdrawn from LocalRib.v4vpn and PE peers",
                 );
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
