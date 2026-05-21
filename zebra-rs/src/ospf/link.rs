@@ -8,11 +8,10 @@ use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
 
-use ospf_packet::OspfLsaHeader;
-
 use crate::rib::Link;
 
-use super::{Identity, IfsmState, Message, Neighbor, Ospfv2};
+use super::version::{OspfVersion, Ospfv2};
+use super::{Identity, IfsmState, Message, Neighbor};
 use super::{addr::OspfAddr, task::Timer};
 
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
@@ -65,20 +64,47 @@ pub enum PrefixSid {
     Absolute(u32),
 }
 
-pub struct OspfLink {
+/// Per-interface OSPF state.
+///
+/// Parameterized over `V: OspfVersion` so address-family-specific
+/// fields (configured interface addresses, neighbor map, queued LSA
+/// acks) specialize via the trait's associated types. Default
+/// `V = Ospfv2` keeps every existing callsite resolving to
+/// `OspfLink<Ospfv2>` without textual churn — same pattern as
+/// `Identity<V>` and `Neighbor<V>`.
+///
+/// Parameterized:
+///   - `addr: Vec<OspfAddr<V>>`              (V::Prefix)
+///   - `ident: Identity<V>`                  (V::Prefix)
+///   - `nbrs: BTreeMap<Ipv4Addr, Neighbor<V>>`  (V::DbDesc, LsaHeader, Lsa)
+///   - `ls_ack_delayed: Vec<V::LsaHeader>`
+///
+/// Still v2-bound (concrete types):
+///   - `tx` / `ptx: UnboundedSender<Message>` — the v2 Message enum
+///     carries v2-specific packet variants; pending its own
+///     parameterization PR.
+///   - `config: LinkConfig` — area / intervals only; no
+///     version-specific types.
+///   - `sock: Arc<AsyncFd<Socket>>` — same socket type for both
+///     versions (raw socket, just different domain).
+///
+/// `nbrs` key stays `Ipv4Addr`. The semantics differ between
+/// versions — v2 keys by source IP, v3 by router-id per RFC 5340
+/// §10 — but both are 32-bit and the storage works.
+pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub index: u32,
     pub name: String,
     pub mtu: u32,
     pub enabled: bool,
-    pub addr: Vec<OspfAddr<Ospfv2>>,
+    pub addr: Vec<OspfAddr<V>>,
     pub area: Ipv4Addr,
     pub area_id: Ipv4Addr,
     pub state: IfsmState,
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
-    pub ident: Identity,
+    pub ident: Identity<V>,
     pub tx: UnboundedSender<Message>,
-    pub nbrs: BTreeMap<Ipv4Addr, Neighbor>,
+    pub nbrs: BTreeMap<Ipv4Addr, Neighbor<V>>,
     pub flags: OspfLinkFlags,
     pub link_flags: LinkFlags,
     pub network_type: OspfNetworkType,
@@ -90,7 +116,7 @@ pub struct OspfLink {
     pub full_nbr_count: usize,
     pub ptx: UnboundedSender<Message>,
     pub config: LinkConfig,
-    pub ls_ack_delayed: Vec<OspfLsaHeader>,
+    pub ls_ack_delayed: Vec<V::LsaHeader>,
 }
 
 #[derive(Default)]
@@ -101,7 +127,10 @@ pub struct LinkTimer {
     pub ls_upd_event: Option<Timer>,
 }
 
-impl OspfLink {
+impl<V: OspfVersion> OspfLink<V>
+where
+    V::Prefix: Default,
+{
     pub fn from(
         tx: UnboundedSender<Message>,
         link: Link,
@@ -120,7 +149,7 @@ impl OspfLink {
             state: IfsmState::Down,
             ostate: IfsmState::Down,
             sock,
-            ident: Identity::new(router_id),
+            ident: Identity::<V>::new(router_id),
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
@@ -137,7 +166,9 @@ impl OspfLink {
             ls_ack_delayed: Vec::new(),
         }
     }
+}
 
+impl<V: OspfVersion> OspfLink<V> {
     pub fn priority(&self) -> u8 {
         self.config.priority.unwrap_or(OSPF_DEFAULT_PRIORITY)
     }
