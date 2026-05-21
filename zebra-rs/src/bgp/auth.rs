@@ -2,7 +2,6 @@
 // helpers for BGP session authentication, plus the zebra-rs-side
 // RFC 8177 key-chain data model used by TCP-AO.
 //
-// Adapted from zebra-rs/examples/tcp_md5_*.rs and tcp_ao_*.rs.
 // Linux-only; non-Linux builds log a warning and no-op so that
 // configuration with MD5 / AO still parses but does not enforce
 // authentication. This matches zebra-rs's Linux-primary posture.
