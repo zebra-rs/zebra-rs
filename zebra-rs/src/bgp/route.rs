@@ -1774,6 +1774,13 @@ fn route_soft_in_peer_table(
                     new_rib.weight = decision.weight;
                     let (_, selected, next_id) = bgp.local_rib.update(rd, prefix, new_rib.clone());
 
+                    // Policy-in change may have shifted the best path
+                    // for this prefix; reconcile the FIB so the kernel
+                    // tracks whatever Loc-RIB now considers best.
+                    if rd.is_none() {
+                        fib_install_v4(bgp.rib_client, prefix, &selected);
+                    }
+
                     if !selected.is_empty() {
                         route_advertise_to_peers(rd, prefix, &selected, peer_idx, bgp, peers);
                     }
@@ -3608,6 +3615,14 @@ impl Bgp {
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
+        // An originated route lacks a v4 NEXT_HOP attribute, so when
+        // it wins best by weight=32768 `fib_install_v4` will emit an
+        // `Ipv4Del` for any BGP-typed FIB entry that a peer route
+        // previously installed for the same prefix. That's correct:
+        // the underlying source (Static / Connected / IGP) owns the
+        // forwarding entry now, and BGP shouldn't shadow it.
+        fib_install_v4(&self.ctx.rib, prefix, &selected);
+
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
@@ -3646,6 +3661,11 @@ impl Bgp {
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
+        // When the originated route disappears, a peer route may now
+        // be the best (or no path may remain). Reconcile so the FIB
+        // matches Loc-RIB.
+        fib_install_v4(bgp_ref.rib_client, prefix, &selected);
+
         if !selected.is_empty() || !removed.is_empty() {
             route_advertise_to_peers(
                 None,
@@ -3714,6 +3734,12 @@ impl Bgp {
         let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
+        // Same logic as `route_add`: the redistributed BGP route has
+        // no v4 NEXT_HOP, so winning best causes BGP to withdraw any
+        // peer-installed FIB entry for this prefix and let the source
+        // protocol's own RIB entry handle forwarding.
+        fib_install_v4(&self.ctx.rib, prefix, &selected);
+
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             local_rib: &mut self.local_rib,
@@ -3752,6 +3778,10 @@ impl Bgp {
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
+        // A peer route may now be best again (or nothing's left);
+        // reconcile the FIB.
+        fib_install_v4(bgp_ref.rib_client, prefix, &selected);
+
         if !selected.is_empty() || !removed.is_empty() {
             route_advertise_to_peers(
                 None,
