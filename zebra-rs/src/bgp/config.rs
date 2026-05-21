@@ -1806,6 +1806,21 @@ mod bfd_wiring_tests {
         (ctx, rib_rx)
     }
 
+    /// Build a minimal `RibSubscriber` for tests. Mints into a
+    /// leaked rib channel — the spawn site for per-VRF subscriptions
+    /// is exercised in integration / BDD tests; the BGP-config
+    /// callbacks tested here never call into the subscriber.
+    fn test_rib_subscriber() -> crate::config::RibSubscriber {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_inbound_rx));
+        // ProtoId allocator starts from 1 to avoid colliding with
+        // the `ProtoId::from_raw(0)` baked into `test_ctx`.
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id)
+    }
+
     /// Construct a Bgp with mock channels and an optional BFD
     /// client_tx. Returned alongside the BFD ClientReq receiver so
     /// the caller can assert what was sent.
@@ -1813,7 +1828,14 @@ mod bfd_wiring_tests {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
-        let bgp = Bgp::new(ctx, rib_rx, policy_tx, Some(bfd_client_tx), None);
+        let bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            test_rib_subscriber(),
+            policy_tx,
+            Some(bfd_client_tx),
+            None,
+        );
         (bgp, bfd_client_rx)
     }
 
@@ -1871,7 +1893,7 @@ mod bfd_wiring_tests {
     async fn enable_without_bfd_handle_is_noop() {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        let mut bgp = Bgp::new(ctx, rib_rx, policy_tx, None, None);
+        let mut bgp = Bgp::new(ctx, rib_rx, test_rib_subscriber(), policy_tx, None, None);
         config_peer(&mut bgp, arg_words(&["10.0.0.4"]), ConfigOp::Set).unwrap();
         // No bfd handle to assert against; the call must not panic.
         config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.4", "true"]), ConfigOp::Set).unwrap();

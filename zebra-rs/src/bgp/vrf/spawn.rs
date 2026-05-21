@@ -29,6 +29,8 @@ use super::super::vrf_config::BgpVrfConfig;
 use super::inst::{BgpVrf, BgpVrfInbox, serve_vrf};
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
 
+use crate::config::RibSubscriber;
+
 /// Per-VRF task handle stashed on [`crate::bgp::Bgp::vrf_registry`].
 /// Holds the inbound sender so the global task can dispatch
 /// `Shutdown` / `Accept` / import deliveries, plus the spawned
@@ -69,11 +71,19 @@ pub fn compute_vrf_diff(
 
 /// Build + spawn a per-VRF task. Returns the handle the caller
 /// stashes on `vrf_registry`. `kernel` carries the matching
-/// kernel VRF master info if RIB has already told us about it
-/// (step 15); when `None`, the spawn falls back to a placeholder
+/// kernel VRF master info if RIB has already told us about it;
+/// when `None`, the spawn falls back to a placeholder
 /// `ProtoContext::default_table_no_rib()` and the per-VRF runtime
 /// won't bind sockets to a VRF master until the global Bgp task
-/// re-spawns via [`super::super::inst::Bgp::maybe_respawn_vrf_with_kernel_ctx`].
+/// re-spawns via
+/// [`super::super::inst::Bgp::maybe_respawn_vrf_with_kernel_ctx`].
+///
+/// `rib_subscriber` mints the per-VRF [`RibClient`] when kernel
+/// info is present — route installs from this task flow through
+/// the matching `vrf_tables[table_id]` via step 9's inbound
+/// dispatcher. With no kernel info, the spawn uses a parked
+/// `RibClient`; routes sent through it land in the global table
+/// until the respawn happens.
 ///
 /// `global_tx` is the shared sender every VRF task uses to push
 /// back to the global runtime (one channel, fanned in from every
@@ -83,10 +93,23 @@ pub fn spawn_bgp_vrf(
     cfg: &BgpVrfConfig,
     router_id: std::net::Ipv4Addr,
     kernel: Option<RibKnownVrf>,
+    rib_subscriber: &RibSubscriber,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
     let ctx = match kernel {
-        Some(k) => ProtoContext::for_vrf_no_rib(k.table_id, name.clone()),
+        Some(k) => {
+            // Mint a fresh `RibClient` for this VRF. The
+            // subscription's `vrf_id` tells RIB to route the
+            // task's route installs into `vrf_tables[table_id]`
+            // (step 9's inbound dispatcher). The `RibRx` half is
+            // leaked here — per-VRF subscribers don't yet consume
+            // RIB outbound notifications; that's a step-15c
+            // follow-up.
+            let proto = format!("bgp:vrf:{name}");
+            let (rib_client, rib_rx) = rib_subscriber.subscribe_for_vrf(&proto, k.table_id);
+            Box::leak(Box::new(rib_rx));
+            ProtoContext::for_vrf(rib_client, k.table_id, name.clone())
+        }
         None => {
             tracing::debug!(
                 vrf = %name,
@@ -150,12 +173,26 @@ mod tests {
         // Pass `None` for the kernel info — the diff tests don't
         // need the per-VRF `SO_BINDTODEVICE` binding; the
         // placeholder context is enough for lifecycle testing.
+        let subscriber = test_rib_subscriber();
         spawn_bgp_vrf(
             name.to_string(),
             &cfg,
             Ipv4Addr::UNSPECIFIED,
             None,
+            &subscriber,
             global_tx,
+        )
+    }
+
+    fn test_rib_subscriber() -> RibSubscriber {
+        let (rib_tx, rib_rx) = unbounded_channel();
+        let (rib_inbound_tx, inbound_rx) = unbounded_channel();
+        Box::leak(Box::new(rib_rx));
+        Box::leak(Box::new(inbound_rx));
+        RibSubscriber::for_test(
+            rib_tx,
+            rib_inbound_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
         )
     }
 

@@ -58,6 +58,61 @@ impl ConfigStore {
     }
 }
 
+/// Send-capable subset of [`ConfigManager`] that knows how to mint
+/// RIB subscriptions. Cloned into spawn sites that run inside a
+/// tokio task — `ConfigManager` itself is `!Send` (it holds
+/// `RefCell`s), so per-task code reaches for this instead.
+#[derive(Clone)]
+pub struct RibSubscriber {
+    rib_tx: UnboundedSender<crate::rib::Message>,
+    rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
+    next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl RibSubscriber {
+    /// Test-only constructor — production code reaches for
+    /// [`ConfigManager::rib_subscriber`].
+    #[cfg(test)]
+    pub fn for_test(
+        rib_tx: UnboundedSender<crate::rib::Message>,
+        rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
+        next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        Self {
+            rib_tx,
+            rib_inbound_tx,
+            next_proto_id,
+        }
+    }
+
+    /// Mint a `RibClient` and `RibRx` for `proto` bound to
+    /// `vrf_id`. Mirrors [`ConfigManager::subscribe_to_rib_for_vrf`]
+    /// but is callable from a `Send` context.
+    pub fn subscribe_for_vrf(
+        &self,
+        proto: &str,
+        vrf_id: u32,
+    ) -> (
+        crate::rib::client::RibClient,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let id_raw = self.next_proto_id.fetch_add(1, Ordering::Relaxed);
+        let proto_id = crate::rib::client::ProtoId::from_raw(id_raw);
+
+        let chan = crate::rib::api::RibRxChannel::new();
+        let _ = self.rib_tx.send(crate::rib::Message::Subscribe {
+            proto_id,
+            proto: proto.to_string(),
+            tx: chan.tx.clone(),
+            vrf_id,
+        });
+
+        let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
+        (client, chan.rx)
+    }
+}
+
 pub struct ConfigManager {
     pub yang_path: String,
     pub config_path: PathBuf,
@@ -76,9 +131,12 @@ pub struct ConfigManager {
     /// not attributable to a single subscriber.
     pub rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
     /// Monotonic allocator for `ProtoId`s handed out at
-    /// `subscribe_to_rib` time. `Cell` because allocation is sync
-    /// and ConfigManager is `!Send` (uses `RefCell` elsewhere).
-    pub next_proto_id: std::cell::Cell<u32>,
+    /// `subscribe_to_rib` time. `Arc<AtomicU32>` so per-protocol
+    /// tasks that need to mint their own subscriptions later (e.g.
+    /// the per-VRF BGP spawn site, step 15) can clone the
+    /// allocator and call `fetch_add` from a tokio task without
+    /// re-entering `ConfigManager` (which is `!Send`).
+    pub next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
     /// [`super::bfd::spawn_bfd`] when a `bfd { ... }` block first
@@ -132,7 +190,7 @@ impl ConfigManager {
             show_clients: RefCell::new(HashMap::new()),
             rib_tx,
             rib_inbound_tx,
-            next_proto_id: std::cell::Cell::new(0),
+            next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             policy_tx,
             bfd_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
@@ -156,16 +214,15 @@ impl ConfigManager {
     }
 
     /// Allocate a `ProtoId`, build a `RibClient` bound to it, and
-    /// register the matching `RibRx` sender with RIB via the legacy
-    /// `Message::Subscribe` (still the only path that knows how to
-    /// replay the link / addr / VXLAN / FDB dump and emit `EoR`).
-    /// Returns the bound client plus the receiver half the caller
-    /// polls for notifications.
+    /// register the matching `RibRx` sender with RIB via
+    /// `Message::Subscribe`. Returns the bound client plus the
+    /// receiver half the caller polls for notifications.
     ///
-    /// In step 2 the returned `ProtoId` exists only in the client —
-    /// RIB doesn't yet consult it for dispatch. Step 9 wires it
-    /// through to the per-VRF table lookup; this allocator stays
-    /// the canonical mint point for ids regardless of that.
+    /// Default-VRF subscriptions go through this entry point; the
+    /// per-VRF sibling [`Self::subscribe_to_rib_for_vrf`] is used
+    /// by step 15+ to hand out subscriptions with a non-zero VRF
+    /// id so the inbound dispatcher (step 9) routes installs into
+    /// the matching per-VRF table.
     pub fn subscribe_to_rib(
         &self,
         proto: &str,
@@ -173,8 +230,40 @@ impl ConfigManager {
         crate::rib::client::RibClient,
         tokio::sync::mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
     ) {
-        let id_raw = self.next_proto_id.get();
-        self.next_proto_id.set(id_raw + 1);
+        self.subscribe_to_rib_for_vrf(proto, 0)
+    }
+
+    /// Clone the Send-capable subset of [`ConfigManager`] used to
+    /// mint RIB subscriptions from inside a spawned task.
+    /// `ConfigManager` itself is `!Send` (holds `RefCell`s), but the
+    /// three fields the subscriber needs — `rib_tx`,
+    /// `rib_inbound_tx`, `next_proto_id` — are all clone-Send. Used
+    /// by step 15's BGP-per-VRF spawn site so each new per-VRF task
+    /// can register its own `RibClient` with a non-zero `vrf_id`.
+    pub fn rib_subscriber(&self) -> RibSubscriber {
+        RibSubscriber {
+            rib_tx: self.rib_tx.clone(),
+            rib_inbound_tx: self.rib_inbound_tx.clone(),
+            next_proto_id: std::sync::Arc::clone(&self.next_proto_id),
+        }
+    }
+
+    /// VRF-aware counterpart to [`Self::subscribe_to_rib`]. Used by
+    /// step 15's per-VRF BGP spawn site: every per-VRF task gets a
+    /// fresh `ProtoId` whose `Subscriber` row is bound to the VRF's
+    /// kernel `table_id`, so step 9's inbound dispatcher routes the
+    /// task's route installs into `vrf_tables[vrf_id]` instead of
+    /// the global table.
+    pub fn subscribe_to_rib_for_vrf(
+        &self,
+        proto: &str,
+        vrf_id: u32,
+    ) -> (
+        crate::rib::client::RibClient,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let id_raw = self.next_proto_id.fetch_add(1, Ordering::Relaxed);
         let proto_id = crate::rib::client::ProtoId::from_raw(id_raw);
 
         let chan = crate::rib::api::RibRxChannel::new();
@@ -182,10 +271,7 @@ impl ConfigManager {
             proto_id,
             proto: proto.to_string(),
             tx: chan.tx.clone(),
-            // Default-VRF for every protocol task that uses this
-            // entry point. Per-VRF spawns (step 13) will go through
-            // a sibling that threads the VRF kernel table id here.
-            vrf_id: 0,
+            vrf_id,
         });
 
         let client = crate::rib::client::RibClient::new(self.rib_inbound_tx.clone(), proto_id);
