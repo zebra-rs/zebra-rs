@@ -122,6 +122,17 @@ pub struct Isis {
     /// field is in 128..=255 (RFC 9350 §7). Cleared on peer purge.
     pub peer_algo_sid:
         Levels<BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>>,
+
+    /// Per-peer set of SR algorithms the peer participates in. Outer
+    /// key is peer sys-id; inner set contains the algo identifiers
+    /// the peer listed in its SR-Algorithms sub-TLV (RFC 8667 §3.2,
+    /// sub-TLV 19) — algo 0 (SPF), algo 1 (Strict SPF), and any
+    /// Flex-Algo identifiers in 128..=255. Populated from peer LSP
+    /// fragment 0 Router Capability TLV by `lsdb::rebuild_sys_state`.
+    /// Per-algo SPF must drop peers whose `peer_algos[sys_id]` does
+    /// not contain the algo being computed (RFC 9350 §5.2
+    /// participation requirement). Cleared on peer purge.
+    pub peer_algos: Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -283,6 +294,12 @@ pub struct IsisTop<'a> {
     /// it from peer Ext IP-Reach TLVs.
     pub peer_algo_sid:
         &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>>,
+
+    /// Per-peer SR algorithm participation sets (see
+    /// `Isis::peer_algos`). Threaded through IsisTop so the LSDB
+    /// rebuild path can populate it from peer Router Capability
+    /// SR-Algorithms sub-TLVs.
+    pub peer_algos: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -390,6 +407,7 @@ impl Isis {
                 peer_algo_sid: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
                 >::default(),
+                peer_algos: Levels::<BTreeMap<IsisSysId, BTreeSet<u8>>>::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
@@ -1142,6 +1160,7 @@ impl Isis {
             peer_fad: &mut self.peer_fad,
             peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
+            peer_algos: &mut self.peer_algos,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -1190,6 +1209,7 @@ impl Isis {
             peer_fad: &mut self.peer_fad,
             peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
+            peer_algos: &mut self.peer_algos,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
             rib_client: &self.ctx.rib,
