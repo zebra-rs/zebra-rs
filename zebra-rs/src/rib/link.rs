@@ -11,7 +11,6 @@ use crate::fib::message::{FibAddr, FibLink};
 use crate::fib::os_traffic_dump;
 use crate::fib::sysctl::{sysctl_keep_addr_on_down, sysctl_mpls_enable, sysctl_seg6_enable};
 
-use super::api::RibRx;
 use super::entry::RibEntry;
 use super::route::{DEBUG_ADDR, DEBUG_EVPN};
 use super::util::IpNetExt;
@@ -701,10 +700,7 @@ impl Rib {
 
             link_addr_del(link, addr.clone());
 
-            for tx in self.redists.values() {
-                let link = RibRx::AddrDel(addr.clone());
-                let _ = tx.send(link);
-            }
+            self.api_addr_del(&addr);
         }
     }
 }

@@ -100,59 +100,105 @@ pub enum RibRx {
 }
 
 impl Rib {
+    /// Resolve a link's VRF id (kernel `rtm_table` value) by
+    /// matching its `master` field against the ifindex of each
+    /// known VRF master. Returns `0` for top-level links and for
+    /// slaves of non-VRF masters (e.g. bridges) — both equate to
+    /// the default routing table.
+    fn link_vrf_id(&self, link: &Link) -> u32 {
+        let Some(master) = link.master else {
+            return 0;
+        };
+        self.vrfs
+            .values()
+            .find(|v| v.ifindex == master)
+            .map(|v| v.table_id)
+            .unwrap_or(0)
+    }
+
+    /// Resolve the VRF id for a link looked up by ifindex. Returns
+    /// `0` when the ifindex is unknown — fail-safe to default-VRF,
+    /// matching the inbound dispatcher's behaviour for ghost
+    /// `ProtoId`s.
+    fn ifindex_vrf_id(&self, ifindex: u32) -> u32 {
+        self.links
+            .get(&ifindex)
+            .map(|l| self.link_vrf_id(l))
+            .unwrap_or(0)
+    }
+
+    /// Push `LinkAdd` only to subscribers bound to this link's VRF.
     pub fn api_link_add(&self, link: &Link) {
-        for tx in self.redists.values() {
-            let link = RibRx::LinkAdd(link.clone());
-            let _ = tx.send(link);
+        let vrf_id = self.link_vrf_id(link);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkAdd(link.clone()));
         }
     }
 
     pub fn api_link_up(&self, ifindex: u32) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::LinkUp(ifindex));
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkUp(ifindex));
         }
     }
 
     pub fn api_link_down(&self, ifindex: u32) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::LinkDown(ifindex));
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkDown(ifindex));
         }
     }
 
     pub fn api_addr_add(&self, addr: &LinkAddr) {
-        for tx in self.redists.values() {
-            let link = RibRx::AddrAdd(addr.clone());
-            let _ = tx.send(link);
+        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
         }
     }
 
+    pub fn api_addr_del(&self, addr: &LinkAddr) {
+        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrDel(addr.clone()));
+        }
+    }
+
+    /// Router id is daemon-global today (one IPv4 address per
+    /// instance), so this push always targets default-VRF
+    /// subscribers. Per-VRF router-id arrives with the BGP-per-VRF
+    /// config in step 12 and will gain its own emit path.
     pub fn api_router_id_update(&self, router_id: Ipv4Addr) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::RouterIdUpdate(router_id));
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::RouterIdUpdate(router_id));
         }
     }
 
+    /// FDB / VXLAN events are EVPN-specific and today flow to every
+    /// subscriber regardless of VRF — EVPN consumers (BGP) run as a
+    /// single instance and need the full view. Per-VRF EVPN will
+    /// pick up a filter here when step 13+ introduces multi-instance
+    /// BGP.
     pub fn api_fdb_add(&self, entry: &FdbEntry) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::FdbAdd(entry.clone()));
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::FdbAdd(entry.clone()));
         }
     }
 
     pub fn api_fdb_del(&self, entry: &FdbEntry) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::FdbDel(entry.clone()));
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::FdbDel(entry.clone()));
         }
     }
 
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::VxlanAdd { vni, vtep_local });
         }
     }
 
     pub fn api_vxlan_del(&self, vni: u32) {
-        for tx in self.redists.values() {
-            let _ = tx.send(RibRx::VxlanDel { vni });
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::VxlanDel { vni });
         }
     }
 }

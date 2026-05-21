@@ -21,6 +21,7 @@ use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::api::RibRx;
+use super::client::ClientRegistry;
 use super::entry::{RibEntries, RibEntry};
 use super::nexthop::Nexthop;
 use super::types::{
@@ -296,13 +297,20 @@ fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
     })
 }
 
-/// Notify every subscriber whose filter matches the before/after
-/// transition of the selected entry at `prefix`. Single-entry batches,
-/// `bulk: More`. EoR is reserved for initial walk / Redist{Add,Update,
-/// Del} replays — steady-state never emits Eor.
+/// Notify every default-VRF subscriber whose filter matches the
+/// before/after transition of the selected entry at `prefix`. Single-
+/// entry batches, `bulk: More`. EoR is reserved for initial walk /
+/// `Redist{Add,Update,Del}` replays — steady-state never emits Eor.
+///
+/// VRF-attached subscribers (`vrf_id != 0`) are skipped here because
+/// `notify_v*_delta` is called from the default-VRF route paths
+/// (`Rib::ipv*_route_{add,del}` on `self.table` / `self.table_v6`).
+/// The per-VRF resolve + select pipeline that lands in step 18 will
+/// install a sibling hook that walks `vrf_tables[vrf_id]` and pushes
+/// to subscribers bound to that VRF.
 pub fn notify_v4_delta(
     filters: &HashMap<String, FilterMap>,
-    redists: &HashMap<String, UnboundedSender<RibRx>>,
+    registry: &ClientRegistry,
     prefix: &Ipv4Net,
     before: Option<&RibEntry>,
     after: Option<&RibEntry>,
@@ -311,9 +319,13 @@ pub fn notify_v4_delta(
         return;
     }
     for (proto, filter_map) in filters {
-        let Some(tx) = redists.get(proto) else {
+        let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
         };
+        if sub.vrf_id != 0 {
+            continue;
+        }
+        let tx = &sub.rib_rx_tx;
         // For each (afi, rtype) row this proto has — only IPv4 rows
         // apply here, and only those whose rtype matches at least one
         // side of the transition.
@@ -330,7 +342,7 @@ pub fn notify_v4_delta(
 
 pub fn notify_v6_delta(
     filters: &HashMap<String, FilterMap>,
-    redists: &HashMap<String, UnboundedSender<RibRx>>,
+    registry: &ClientRegistry,
     prefix: &Ipv6Net,
     before: Option<&RibEntry>,
     after: Option<&RibEntry>,
@@ -339,9 +351,13 @@ pub fn notify_v6_delta(
         return;
     }
     for (proto, filter_map) in filters {
-        let Some(tx) = redists.get(proto) else {
+        let Some(sub) = registry.subscriber_for_proto(proto) else {
             continue;
         };
+        if sub.vrf_id != 0 {
+            continue;
+        }
+        let tx = &sub.rib_rx_tx;
         for ((afi, rtype), subtypes) in filter_map {
             if *afi != RedistAfi::Ipv6 {
                 continue;

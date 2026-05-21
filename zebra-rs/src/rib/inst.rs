@@ -311,16 +311,10 @@ pub struct Rib {
     pub show_cb: HashMap<String, ShowCallback>,
     pub fib: FibChannel,
     pub fib_handle: FibHandle,
-    /// Legacy proto-name → `RibRx` sender map kept alongside
-    /// `client_registry` for as long as the outbound broadcast paths
-    /// (api_link_add, api_addr_add, …) iterate by name. Step 9
-    /// replaces those walks with `client_registry.iter()` and drops
-    /// this field.
-    pub redists: HashMap<String, UnboundedSender<RibRx>>,
-    /// Typed subscriber registry. Populated by
-    /// `Rib::subscribe` (the `Message::Subscribe` handler) alongside
-    /// the legacy `redists` map; consulted by `proto_cleanup` and by
-    /// step 9's per-VRF dispatch.
+    /// Subscriber registry — the sole source of truth for protocol
+    /// modules attached to RIB. Populated by `Rib::subscribe`,
+    /// drained by `proto_cleanup`, walked by the inbound dispatcher
+    /// (step 9) and by the outbound `api_*` push paths (step 10).
     pub client_registry: ClientRegistry,
     /// Sender half of the `RibInbound` channel — cloned by
     /// `ConfigManager` into every `RibClient` it hands out at
@@ -333,10 +327,11 @@ pub struct Rib {
     /// but is otherwise inert in step 1.
     pub inbound_rx: UnboundedReceiver<RibInbound>,
     /// Per-proto redistribute subscription registry. Outer key is the
-    /// subscriber's protocol name (matches `redists`); inner map is
-    /// keyed by `(afi, rtype)` and holds the subtype filter set
+    /// subscriber's protocol name (matches `Subscriber::proto`); inner
+    /// map is keyed by `(afi, rtype)` and holds the subtype filter set
     /// (empty = wildcard). Updated by RedistAdd / RedistUpdate /
-    /// RedistDel; consulted by the steady-state delta hook (follow-up).
+    /// RedistDel; consulted by `redist::notify_v*_delta`, which
+    /// resolves each row's sender through `client_registry`.
     pub redist_filters: HashMap<String, super::redist::FilterMap>,
     pub links: BTreeMap<u32, Link>,
     pub bridges: BTreeMap<String, Bridge>,
@@ -461,7 +456,6 @@ impl Rib {
             show_cb: HashMap::new(),
             fib,
             fib_handle,
-            redists: HashMap::new(),
             client_registry: ClientRegistry::new(),
             inbound_tx,
             inbound_rx,
@@ -870,11 +864,10 @@ impl Rib {
 
     /// Register a subscriber. `proto_id` is allocated by
     /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
-    /// runs; we record the row in both `client_registry` (keyed by
-    /// id — the canonical lookup for step 9's per-VRF dispatch) and
-    /// `redists` (keyed by name — still used by the outbound
-    /// broadcast paths and by `proto_cleanup`). The initial-state
-    /// dump and the trailing `EoR` are unchanged.
+    /// runs; we record the row in `client_registry`, which is the
+    /// sole source of truth for both inbound dispatch (step 9) and
+    /// the outbound push paths (step 10). The initial-state dump
+    /// and the trailing `EoR` are unchanged.
     pub fn subscribe(
         &mut self,
         proto_id: ProtoId,
@@ -887,8 +880,7 @@ impl Rib {
         // `Message::Subscribe` was already queued). Every dump send
         // below is therefore best-effort: on the first `SendError` we
         // bail out without registering the subscriber, so we don't
-        // panic and don't leave a dead entry in `client_registry` /
-        // `redists`.
+        // panic and don't leave a dead entry in `client_registry`.
         if tx.is_closed() {
             tracing::warn!(
                 "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
@@ -930,11 +922,11 @@ impl Rib {
         // FDB dump. Replay every existing AF_BRIDGE neighbor that
         // resolves to a known VNI. Without this, FDB entries learned
         // during `fib_dump` — i.e. *before* BGP subscribed — would
-        // never reach the EVPN advertise path: `api_fdb_add` would
-        // have sent them into `self.redists` while `self.redists` was
-        // still empty. The typical cold-start order is fib_dump
-        // (populates `self.neighbors`) → BGP subscribe (this fn), so
-        // every entry needs an explicit replay here.
+        // never reach the EVPN advertise path: `api_fdb_add` walks
+        // `client_registry`, which was empty at fib_dump time. The
+        // typical cold-start order is fib_dump (populates
+        // `self.neighbors`) → BGP subscribe (this fn), so every
+        // entry needs an explicit replay here.
         for (key, nbr) in self.neighbors.iter() {
             if !matches!(key, NeighborKey::Bridge { .. }) {
                 continue;
@@ -953,8 +945,7 @@ impl Rib {
             return;
         }
         self.client_registry
-            .register_with_id(proto_id, &proto, tx.clone(), vrf_id);
-        self.redists.insert(proto, tx);
+            .register_with_id(proto_id, &proto, tx, vrf_id);
     }
 
     async fn proto_cleanup(&mut self, proto: String) {
@@ -1000,13 +991,11 @@ impl Rib {
             }
         }
 
-        // Drop the typed registry row alongside the legacy redists
-        // entry. Once step 9 removes redists, this becomes the only
-        // teardown call here.
+        // Drop the registry row + every parallel name-keyed table
+        // (`redist_filters`, `sr_clients`, watcher sets).
         if let Some(proto_id) = self.client_registry.find_by_proto(&proto) {
             self.client_registry.unregister(proto_id);
         }
-        self.redists.remove(&proto);
         self.redist_filters.remove(&proto);
         self.sr_clients.remove(&proto);
         for watchers in self.block_watch.values_mut() {
@@ -1040,7 +1029,11 @@ impl Rib {
         if !super::redist::deliverable(proto, rtype) {
             return None;
         }
-        let tx = self.redists.get(proto)?.clone();
+        let tx = self
+            .client_registry
+            .subscriber_for_proto(proto)?
+            .rib_rx_tx
+            .clone();
         self.redist_filters
             .entry(proto.to_string())
             .or_default()
@@ -1089,7 +1082,11 @@ impl Rib {
         if !super::redist::deliverable(&proto, rtype) {
             return;
         }
-        let Some(tx) = self.redists.get(&proto).cloned() else {
+        let Some(tx) = self
+            .client_registry
+            .subscriber_for_proto(&proto)
+            .map(|s| s.rib_rx_tx.clone())
+        else {
             return;
         };
         let prior = self
@@ -1145,7 +1142,11 @@ impl Rib {
     }
 
     fn redist_del(&mut self, proto: String, afi: super::RedistAfi, rtype: RibType) {
-        let Some(tx) = self.redists.get(&proto).cloned() else {
+        let Some(tx) = self
+            .client_registry
+            .subscriber_for_proto(&proto)
+            .map(|s| s.rib_rx_tx.clone())
+        else {
             // No Tx → nothing to withdraw. Still clear the filter row
             // so memory doesn't leak across re-subscribes.
             if let Some(f) = self.redist_filters.get_mut(&proto) {
