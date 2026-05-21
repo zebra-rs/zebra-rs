@@ -134,6 +134,46 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// no-op for now, fine since no `Ospf<Ospfv3>` instance is
     /// running. Tracked as a follow-up in the `ospf-packet` crate.
     fn update_lsa(lsa: &mut Self::Lsa);
+
+    // The five read-only header accessors below are part of the
+    // trait surface that subsequent behavioral-migration PRs will
+    // consume (rewriting v2-bound flooding / show / packet code
+    // to read header fields via V::foo(...) instead of direct
+    // field access). The `dead_code` allow attribute on the trait
+    // declarations themselves silences "associated function never
+    // used" until the first consumer in PR 7g.
+
+    /// LS Type as a 16-bit value. v2's `OspfLsType` is u8-sized so
+    /// it widens cleanly; v3's `ls_type` is natively u16 per
+    /// RFC 5340 §A.4.2.1 (U/S2/S1/function-code packing). u16 is
+    /// the lower-common-denominator that fits both.
+    #[allow(dead_code)]
+    fn ls_type(h: &Self::LsaHeader) -> u16;
+
+    /// Link State ID as a 32-bit value. v2 carries it as
+    /// `Ipv4Addr` (sometimes a router-id, sometimes an interface
+    /// IP, sometimes a network address depending on the LSA type);
+    /// v3 (§A.4.2.1) carries an opaque 32-bit identifier. u32
+    /// covers both.
+    #[allow(dead_code)]
+    fn ls_id(h: &Self::LsaHeader) -> u32;
+
+    /// Advertising Router. 32-bit router-id in both versions
+    /// (RFC 2328 §A.4.1 / RFC 5340 §A.4.2.1 keep it as a 4-octet
+    /// router-id; v3 §A.3.1 says router-ids stay 32-bit even on
+    /// v3).
+    #[allow(dead_code)]
+    fn adv_router(h: &Self::LsaHeader) -> Ipv4Addr;
+
+    /// LSA checksum field (Fletcher in both versions per their
+    /// respective §A.4).
+    #[allow(dead_code)]
+    fn ls_checksum(h: &Self::LsaHeader) -> u16;
+
+    /// Length of the full LSA (header + body) in octets. Header
+    /// itself is 20 octets in both versions.
+    #[allow(dead_code)]
+    fn length(h: &Self::LsaHeader) -> u16;
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -171,6 +211,32 @@ impl OspfVersion for Ospfv2 {
     }
     fn update_lsa(lsa: &mut OspfLsa) {
         lsa.update();
+    }
+    // The five read-only header accessors below are part of the
+    // trait surface that subsequent behavioral-migration PRs will
+    // consume (rewriting v2-bound flooding / show / packet code
+    // to read header fields via V::foo(...) instead of direct
+    // field access). `dead_code` allowed until the first consumer
+    // lands -- removed in PR 7g.
+    fn ls_type(h: &OspfLsaHeader) -> u16 {
+        let v: u8 = h.ls_type.into();
+        v as u16
+    }
+    #[allow(dead_code)]
+    fn ls_id(h: &OspfLsaHeader) -> u32 {
+        h.ls_id.into()
+    }
+    #[allow(dead_code)]
+    fn adv_router(h: &OspfLsaHeader) -> Ipv4Addr {
+        h.adv_router
+    }
+    #[allow(dead_code)]
+    fn ls_checksum(h: &OspfLsaHeader) -> u16 {
+        h.ls_checksum
+    }
+    #[allow(dead_code)]
+    fn length(h: &OspfLsaHeader) -> u16 {
+        h.length
     }
 }
 
@@ -225,5 +291,25 @@ impl OspfVersion for Ospfv3 {
         // that lands, this is a no-op. Safe today because no v3
         // instance is running, so no caller relies on the updated
         // fields.
+    }
+    #[allow(dead_code)]
+    fn ls_type(h: &Ospfv3LsaHeader) -> u16 {
+        h.ls_type
+    }
+    #[allow(dead_code)]
+    fn ls_id(h: &Ospfv3LsaHeader) -> u32 {
+        h.link_state_id
+    }
+    #[allow(dead_code)]
+    fn adv_router(h: &Ospfv3LsaHeader) -> Ipv4Addr {
+        h.advertising_router
+    }
+    #[allow(dead_code)]
+    fn ls_checksum(h: &Ospfv3LsaHeader) -> u16 {
+        h.ls_checksum
+    }
+    #[allow(dead_code)]
+    fn length(h: &Ospfv3LsaHeader) -> u16 {
+        h.length
     }
 }
