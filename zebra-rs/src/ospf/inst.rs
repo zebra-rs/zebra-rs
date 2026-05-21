@@ -519,15 +519,21 @@ impl Ospf {
             }
         }
 
-        if ev == LsdbEvent::HoldTimerExpire
-            && matches!(
-                ls_type,
-                OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary
-            )
-            && let Some(area_id) = area_id
-            && let Some(area) = self.areas.get_mut(area_id)
-        {
-            Self::ospf_spf_schedule(&self.tx, area);
+        if ev == LsdbEvent::HoldTimerExpire {
+            match ls_type {
+                OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary => {
+                    if let Some(area_id) = area_id
+                        && let Some(area) = self.areas.get_mut(area_id)
+                    {
+                        Self::ospf_spf_schedule(&self.tx, area);
+                    }
+                }
+                OspfLsType::AsExternal => {
+                    // AS-scoped; reschedule SPF on every area.
+                    let _ = self.tx.send(Message::SpfSchedule(None));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1245,10 +1251,20 @@ impl Ospf {
                 self.queue_delayed_acks(ifindex, headers);
             }
             Message::SpfSchedule(area_id) => {
-                if let Some(area_id) = area_id
-                    && let Some(area) = self.areas.get_mut(area_id)
-                {
-                    Self::ospf_spf_schedule(&self.tx, area);
+                if let Some(area_id) = area_id {
+                    if let Some(area) = self.areas.get_mut(area_id) {
+                        Self::ospf_spf_schedule(&self.tx, area);
+                    }
+                } else {
+                    // None = AS-scope event (e.g. AS-external LSA install /
+                    // expiry); recompute SPF on every attached area so each
+                    // area's RIB picks up the new external routes.
+                    let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+                    for id in area_ids {
+                        if let Some(area) = self.areas.get_mut(id) {
+                            Self::ospf_spf_schedule(&self.tx, area);
+                        }
+                    }
                 }
             }
             Message::SpfCalc(area_id) => {
@@ -1756,7 +1772,89 @@ fn build_rib_from_spf(
     // to the originating ABR.
     add_inter_area_routes(top, area_id, spf_result, &mut rib);
 
+    // AS-external: walk Type 5 LSAs and install via SPF nexthop to the
+    // originating ASBR. Uses this area's SPF result to resolve the
+    // ASBR -- correct for single-area today; multi-area routers should
+    // pick the best per-area SPF cost when this lands.
+    add_as_external_routes(top, spf_result, &mut rib);
+
     rib
+}
+
+/// Walk Type 5 (AS-External) LSAs in the AS-scoped LSDB and install
+/// external routes per RFC 2328 §16.4.
+///
+/// For each LSA whose advertising router (ASBR) is reachable via SPF
+/// in the current area, compute the route metric per the LSA's E bit:
+///   - Type 1 external: SPF(ASBR) + LSA.metric
+///   - Type 2 external: LSA.metric only (SPF cost is the tiebreak,
+///     but the FIB-installed metric is the external cost)
+///
+/// Non-zero forwarding-address LSAs are skipped for now. §16.4 step 3
+/// requires resolving the forwarding address against an intra-area
+/// route, which is a separate code path.
+fn add_as_external_routes(
+    top: &Ospf,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    // OSPF metrics are 24-bit; 0xFFFFFF = LSInfinity (unreachable).
+    const LS_INFINITY: u32 = 0x00FF_FFFF;
+    // E flag in the AS-external LSA's `ext_and_resvd` byte.
+    const E_FLAG: u8 = 0x80;
+
+    for ((ls_id, _key_adv), lsa) in top.lsdb_as.tables.as_external.iter() {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.adv_router == top.router_id {
+            continue;
+        }
+        let OspfLsp::AsExternal(ref ext) = lsa.data.lsp else {
+            continue;
+        };
+        if ext.metric >= LS_INFINITY {
+            continue;
+        }
+        // Forwarding-address resolution (§16.4 step 3) deferred.
+        if !ext.forwarding_address.is_unspecified() {
+            continue;
+        }
+
+        let Some(asbr_vertex) = top.lsp_map.lookup(lsa.data.h.adv_router) else {
+            continue;
+        };
+        let Some(asbr_path) = spf_result.get(&asbr_vertex) else {
+            continue;
+        };
+
+        let is_type2 = (ext.ext_and_resvd & E_FLAG) != 0;
+        let metric = if is_type2 {
+            ext.metric
+        } else {
+            asbr_path.cost.saturating_add(ext.metric)
+        };
+
+        let mask = u32::from(ext.netmask).leading_ones() as u8;
+        let Ok(prefix) = Ipv4Net::new(*ls_id, mask) else {
+            continue;
+        };
+        let prefix = prefix.trunc();
+
+        let nhops = build_spf_nexthops(top, asbr_vertex, asbr_path);
+        if nhops.is_empty() {
+            continue;
+        }
+
+        let spf_route = SpfRoute {
+            metric,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        rib_insert(rib, prefix, spf_route);
+    }
 }
 
 fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
