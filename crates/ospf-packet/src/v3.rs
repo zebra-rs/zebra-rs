@@ -571,6 +571,55 @@ impl ParseBe<Ospfv3RouterLsa> for Ospfv3RouterLsa {
     }
 }
 
+/// v3 Network-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=1 (area scope), function code = 2.
+pub const OSPFV3_NETWORK_LSA_TYPE: u16 = 0x2002;
+
+/// v3 Network-LSA body (RFC 5340 §A.4.4).
+///
+/// Layout:
+///   - reserved (8 bits) — must be 0
+///   - options (24 bits) — same `Ospfv3Options` shape as Hello / DBD
+///   - attached routers — variable list of 32-bit router-IDs
+///
+/// Differences from v2 Network-LSA:
+///   - the leading `netmask: Ipv4Addr` field is gone; v3 Network-LSAs
+///     carry no prefix information (it moves to Intra-Area-Prefix-LSA),
+///     so the body opens with reserved + the 24-bit Options field
+///     instead.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3NetworkLsa {
+    pub options: Ospfv3Options,
+    pub attached_routers: Vec<Ipv4Addr>,
+}
+
+impl Ospfv3NetworkLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        // Reserved byte (must be 0) + 24-bit options packed into the
+        // first word.
+        let word: u32 = self.options.into_bits() & 0x00FF_FFFF;
+        buf.put_u32(word);
+        for r in &self.attached_routers {
+            buf.put(&r.octets()[..]);
+        }
+    }
+}
+
+impl ParseBe<Ospfv3NetworkLsa> for Ospfv3NetworkLsa {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3NetworkLsa> {
+        let (input, _reserved) = be_u8(input)?;
+        let (input, options_24) = be_u24(input)?;
+        let (input, attached_routers) = many0_complete(Ipv4Addr::parse_be).parse(input)?;
+        Ok((
+            input,
+            Ospfv3NetworkLsa {
+                options: Ospfv3Options::from_bits(options_24),
+                attached_routers,
+            },
+        ))
+    }
+}
+
 /// v3 LS Acknowledgement packet body (RFC 5340 §A.3.6): a list of
 /// `Ospfv3LsaHeader` records, each 20 octets. The encoding is
 /// identical to the LSA-header stretch of a DBD body, but stands on
@@ -1046,6 +1095,52 @@ mod tests {
         let (rest, parsed) = Ospfv3RouterLsa::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
         assert!(parsed.links.is_empty());
+    }
+
+    /// Roundtrip a Network-LSA with three attached routers. Pins the
+    /// fixed 4-byte prefix and the 4-byte-per-router list layout.
+    #[test]
+    fn ospfv3_network_lsa_roundtrip() {
+        let mut options = Ospfv3Options::new();
+        options.set_v6(true);
+        options.set_r(true);
+        let body = Ospfv3NetworkLsa {
+            options,
+            attached_routers: vec![
+                Ipv4Addr::new(10, 0, 0, 1),
+                Ipv4Addr::new(10, 0, 0, 2),
+                Ipv4Addr::new(10, 0, 0, 3),
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        // Fixed prefix (4) + 3 routers * 4 = 16.
+        assert_eq!(buf.len(), 4 + 3 * 4);
+
+        // High byte of the first word must be 0 (Reserved).
+        assert_eq!(buf[0], 0);
+        // Options24 in the lower 3 bytes. v6 (bit 0) + r (bit 4) = 0x11.
+        assert_eq!(BigEndian::read_u24(&buf[1..4]), 0x0000_0011);
+
+        let (rest, parsed) = Ospfv3NetworkLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.options, body.options);
+        assert_eq!(parsed.attached_routers, body.attached_routers);
+    }
+
+    /// A Network-LSA with no attached routers (degenerate but legal
+    /// before any neighbors are Full) still emits the 4-byte prefix.
+    #[test]
+    fn ospfv3_network_lsa_no_attached() {
+        let body = Ospfv3NetworkLsa::default();
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        assert_eq!(buf.len(), 4);
+
+        let (rest, parsed) = Ospfv3NetworkLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert!(parsed.attached_routers.is_empty());
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint
