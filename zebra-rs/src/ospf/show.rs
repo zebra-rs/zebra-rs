@@ -862,7 +862,7 @@ fn show_ospf_database(
         let mut areas = Vec::new();
         if let Some(area) = ospf.areas.get(AREA0) {
             let mut router_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
                 let link_count = if let OspfLsp::Router(ref lsp) = lsa.data.lsp {
                     Some(lsp.links.len())
                 } else {
@@ -878,7 +878,7 @@ fn show_ospf_database(
                 });
             }
             let mut network_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
                 network_lsas.push(OspfLsaSummaryJson {
                     link_id: lsa_id.to_string(),
                     adv_router: adv_router.to_string(),
@@ -889,9 +889,7 @@ fn show_ospf_database(
                 });
             }
             let mut opaque_area_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in
-                area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal).iter()
-            {
+            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
                 opaque_area_lsas.push(OspfLsaSummaryJson {
                     link_id: lsa_id.to_string(),
                     adv_router: adv_router.to_string(),
@@ -931,7 +929,7 @@ fn show_ospf_database(
         let _ = writeln!(out);
 
         let mut header = true;
-        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+        for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
             if header {
                 header = false;
                 writeln!(
@@ -959,7 +957,7 @@ fn show_ospf_database(
         writeln!(out)?;
 
         let mut header = true;
-        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+        for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
             if header {
                 header = false;
                 writeln!(out, "Link ID         ADV Router      Age  Seq#       CkSum")?;
@@ -975,8 +973,11 @@ fn show_ospf_database(
             );
         }
 
-        let opaque_table = area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal);
-        if !opaque_table.is_empty() {
+        let mut opaque_iter = area
+            .lsdb
+            .iter_by_type(OspfLsType::OpaqueAreaLocal)
+            .peekable();
+        if opaque_iter.peek().is_some() {
             writeln!(out)?;
             writeln!(
                 out,
@@ -985,7 +986,7 @@ fn show_ospf_database(
             )?;
             writeln!(out)?;
             writeln!(out, "Opaque-Type/Id  ADV Router      Age  Seq#       CkSum")?;
-            for ((lsa_id, adv_router), lsa) in opaque_table.iter() {
+            for ((lsa_id, adv_router), lsa) in opaque_iter {
                 let _ = writeln!(
                     out,
                     "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
@@ -1017,7 +1018,7 @@ fn show_ospf_database_detail(
         let mut areas = Vec::new();
         if let Some(area) = ospf.areas.get(AREA0) {
             let mut router_lsas = Vec::new();
-            for ((_lsa_id, _adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+            for ((_lsa_id, _adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
                 let opts = OspfOptions::from(lsa.data.h.options);
                 let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                     continue;
@@ -1055,7 +1056,7 @@ fn show_ospf_database_detail(
                 });
             }
             let mut network_lsas = Vec::new();
-            for ((_lsa_id, _adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+            for ((_lsa_id, _adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
                 let opts = OspfOptions::from(lsa.data.h.options);
                 let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
                     continue;
@@ -1102,7 +1103,7 @@ fn show_ospf_database_detail(
         writeln!(out, "                Router Link States (Area {})", area.id)?;
         writeln!(out)?;
 
-        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Router).iter() {
+        for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
             writeln!(out, "  LS age: {}", lsa.current_age())?;
             let opts = OspfOptions::from(lsa.data.h.options);
             writeln!(
@@ -1176,7 +1177,7 @@ fn show_ospf_database_detail(
         writeln!(out, "                Net Link States (Area {})", area.id)?;
         writeln!(out)?;
 
-        for ((lsa_id, adv_router), lsa) in area.lsdb.tables.get(&OspfLsType::Network).iter() {
+        for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
             writeln!(out, "  LS age: {}", lsa.current_age())?;
             let opts = OspfOptions::from(lsa.data.h.options);
             writeln!(
@@ -1211,8 +1212,11 @@ fn show_ospf_database_detail(
             writeln!(out)?;
         }
 
-        let opaque_table = area.lsdb.tables.get(&OspfLsType::OpaqueAreaLocal);
-        if !opaque_table.is_empty() {
+        let mut opaque_iter = area
+            .lsdb
+            .iter_by_type(OspfLsType::OpaqueAreaLocal)
+            .peekable();
+        if opaque_iter.peek().is_some() {
             writeln!(
                 out,
                 "                Area-Local Opaque-LSA (Area {})",
@@ -1220,7 +1224,7 @@ fn show_ospf_database_detail(
             )?;
             writeln!(out)?;
 
-            for ((lsa_id, adv_router), lsa) in opaque_table.iter() {
+            for ((lsa_id, adv_router), lsa) in opaque_iter {
                 let octets = lsa_id.octets();
                 let opaque_type = octets[0];
                 let opaque_id =
@@ -1580,9 +1584,7 @@ fn show_ospf_segment_routing(
 
             // Look up Router Info LSA for this router to get algorithm info.
             let algo_str = lsdb
-                .tables
-                .opaque_area
-                .values()
+                .values_by_type(OspfLsType::OpaqueAreaLocal)
                 .find_map(|lsa| {
                     if lsa.data.h.adv_router == *router_id
                         && let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp
@@ -1623,7 +1625,7 @@ fn show_ospf_segment_routing(
             )?;
 
             // Find Extended Prefix LSAs from this router.
-            for (_, lsa) in lsdb.tables.opaque_area.iter() {
+            for (_, lsa) in lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
                 if lsa.data.h.adv_router != *router_id {
                     continue;
                 }

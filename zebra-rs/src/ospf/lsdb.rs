@@ -19,12 +19,17 @@ pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
 pub const OSPF_MIN_LS_ARRIVAL: u64 = 1; // 1 second (RFC 2328)
 
-/// Per-LSA-type storage indexed by `(LS-ID, Advertising-Router)`.
+/// Flat LSDB storage: a single BTreeMap keyed by the full
+/// `(LS-Type, LS-ID, Advertising-Router)` triple. Replaces the
+/// earlier per-LS-type bucket layout (`LsTypes<LsTable>`).
 ///
-/// Generic over `V: OspfVersion` so v3's LSDB can wrap `Ospfv3Lsa`
-/// when its consumers materialize. Default `V = Ospfv2` keeps all
-/// existing references resolving to the v2 shape.
-pub type LsTable<V = Ospfv2> = BTreeMap<(Ipv4Addr, Ipv4Addr), Lsa<V>>;
+/// The flat shape is friendlier to the v3 generification arc — v3's
+/// LSA types (RFC 5340 §A.4.2.1, 0x2001 / 0x2002 / 0x2003 / …)
+/// don't map cleanly onto v2's named buckets (Router / Network /
+/// Summary / SummaryAsbr / AsExternal / OpaqueAreaLocal /
+/// Unknown). Iterating per-type now goes through
+/// [`Lsdb::iter_by_type`].
+pub type LsTable<V = Ospfv2> = BTreeMap<OspfLsaKey, Lsa<V>>;
 
 /// LSDB key: `(LS-Type, LS-ID, Advertising-Router)`.
 ///
@@ -44,54 +49,17 @@ pub enum LsdbEvent {
 /// Per-area (or AS-scope) Link State Database.
 ///
 /// Parameterized over `V: OspfVersion`. The storage layout
-/// (`tables: LsTypes<LsTable<V>>`) is generic; the methods that
+/// (`tables: LsTable<V>`) is generic; the methods that
 /// manipulate LSAs live in `impl Lsdb<Ospfv2>` for now because they
 /// destructure v2-specific header / body types
 /// (`OspfLsType` enum match, `OspfLsp::OpaqueAreaRouterInfo` body
 /// shape). Those move into a generic impl when the `OspfVersion`
 /// trait grows accessor methods (`fn ls_type(&Lsa) -> u16`,
-/// `fn ls_id(&Lsa) -> Ipv4Addr`, etc.).
+/// `fn ls_id(&Lsa) -> Ipv4Addr`, etc.) — PR 7b.
 pub struct Lsdb<V: OspfVersion = Ospfv2> {
-    pub tables: LsTypes<LsTable<V>>,
+    pub tables: LsTable<V>,
     pub label_map: OspfLabelMap,
     pub reach_map: ReachMap,
-}
-
-#[derive(Default, Debug)]
-pub struct LsTypes<T> {
-    pub router: T,
-    pub network: T,
-    pub summary: T,
-    pub summary_asbr: T,
-    pub as_external: T,
-    pub opaque_area: T,
-    pub unknown: T,
-}
-
-impl<T> LsTypes<T> {
-    pub fn get(&self, ls_type: &OspfLsType) -> &T {
-        match ls_type {
-            OspfLsType::Router => &self.router,
-            OspfLsType::Network => &self.network,
-            OspfLsType::Summary => &self.summary,
-            OspfLsType::SummaryAsbr => &self.summary_asbr,
-            OspfLsType::AsExternal => &self.as_external,
-            OspfLsType::OpaqueAreaLocal => &self.opaque_area,
-            _ => &self.unknown,
-        }
-    }
-
-    pub fn get_mut(&mut self, ls_type: &OspfLsType) -> &mut T {
-        match ls_type {
-            OspfLsType::Router => &mut self.router,
-            OspfLsType::Network => &mut self.network,
-            OspfLsType::Summary => &mut self.summary,
-            OspfLsType::SummaryAsbr => &mut self.summary_asbr,
-            OspfLsType::AsExternal => &mut self.as_external,
-            OspfLsType::OpaqueAreaLocal => &mut self.opaque_area,
-            _ => &mut self.unknown,
-        }
-    }
 }
 
 /// One LSDB entry — the parsed LSA plus the bookkeeping the LSDB
@@ -180,10 +148,33 @@ fn refresh_timer(
 impl<V: OspfVersion> Lsdb<V> {
     pub fn new() -> Self {
         Self {
-            tables: LsTypes::<LsTable<V>>::default(),
+            tables: LsTable::<V>::default(),
             label_map: OspfLabelMap::default(),
             reach_map: ReachMap::default(),
         }
+    }
+
+    /// Iterate the LSAs of a particular LS-Type. Yields the
+    /// historic `(ls_id, adv_router)` 2-tuple key shape so existing
+    /// callsites that destructure `((ls_id, adv_router), lsa)`
+    /// keep working unchanged after the storage flattening.
+    pub fn iter_by_type(
+        &self,
+        ls_type: OspfLsType,
+    ) -> impl Iterator<Item = ((Ipv4Addr, Ipv4Addr), &Lsa<V>)> {
+        self.tables
+            .iter()
+            .filter(move |((t, _, _), _)| *t == ls_type)
+            .map(|((_, id, adv), lsa)| ((*id, *adv), lsa))
+    }
+
+    /// Iterate just the LSA values of a particular LS-Type. Convenience
+    /// over `iter_by_type` for callers that don't need the key.
+    pub fn values_by_type(&self, ls_type: OspfLsType) -> impl Iterator<Item = &Lsa<V>> {
+        self.tables
+            .iter()
+            .filter(move |((t, _, _), _)| *t == ls_type)
+            .map(|(_, lsa)| lsa)
     }
 }
 
@@ -206,13 +197,12 @@ impl Lsdb<Ospfv2> {
             Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
             | OpaqueAreaLocal => {
                 ospf_lsa.update();
-                let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
                 let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
                 lsa.originated = true;
                 lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
                 lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-                self.tables.get_mut(&ls_type).insert(key, lsa);
+                self.tables.insert(lsa_key, lsa);
             }
             _ => {}
         }
@@ -225,7 +215,6 @@ impl Lsdb<Ospfv2> {
         area_id: Option<Ipv4Addr>,
     ) {
         let ls_type = ospf_lsa.h.ls_type;
-        let key = (ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
         let lsa_key: OspfLsaKey = (ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
 
         self.update_lsa(&ospf_lsa);
@@ -233,7 +222,7 @@ impl Lsdb<Ospfv2> {
         let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
         lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
 
-        self.tables.get_mut(&lsa.data.h.ls_type).insert(key, lsa);
+        self.tables.insert(lsa_key, lsa);
     }
 
     pub fn update_lsa(&mut self, lsa: &OspfLsa) {
@@ -272,8 +261,7 @@ impl Lsdb<Ospfv2> {
     }
 
     pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
-        let table = self.tables.get_mut(&ls_type);
-        table.remove(&(ls_id, adv_router));
+        self.tables.remove(&(ls_type, ls_id, adv_router));
     }
 
     /// Flush an LSA by setting its age to MaxAge and returning a clone for reflooding.
@@ -286,13 +274,11 @@ impl Lsdb<Ospfv2> {
         tx: &UnboundedSender<Message>,
         area_id: Option<Ipv4Addr>,
     ) -> Option<OspfLsa> {
-        let table = self.tables.get_mut(&ls_type);
-        let key = (ls_id, adv_router);
-        if let Some(lsa) = table.get_mut(&key) {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(lsa) = self.tables.get_mut(&lsa_key) {
             lsa.data.h.ls_age = OSPF_MAX_AGE;
             lsa.birth_time = tokio::time::Instant::now();
             lsa.refresh_timer = None;
-            let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
             Some(lsa.data.clone())
         } else {
@@ -308,19 +294,17 @@ impl Lsdb<Ospfv2> {
         tx: &UnboundedSender<Message>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let table = self.tables.get_mut(&ls_type);
-        let key = (ls_id, adv_router);
-        if let Some(old_lsa) = table.get(&key) {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(old_lsa) = self.tables.get(&lsa_key) {
             let mut new_data = old_lsa.data.clone();
             new_data.h.ls_seq_number += 1;
             new_data.h.ls_age = 0;
             new_data.update();
-            let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
             let mut lsa = Lsa::<Ospfv2>::new(new_data);
             lsa.originated = true;
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            table.insert(key, lsa);
+            self.tables.insert(lsa_key, lsa);
         }
     }
 
@@ -330,8 +314,9 @@ impl Lsdb<Ospfv2> {
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
     ) -> Option<&OspfLsa> {
-        let table = self.tables.get(&ls_type);
-        table.get(&(ls_id, adv_router)).map(|lsa| &lsa.data)
+        self.tables
+            .get(&(ls_type, ls_id, adv_router))
+            .map(|lsa| &lsa.data)
     }
 
     pub fn lookup_lsa(
@@ -340,8 +325,7 @@ impl Lsdb<Ospfv2> {
         ls_id: Ipv4Addr,
         adv_router: Ipv4Addr,
     ) -> Option<&Lsa> {
-        let table = self.tables.get(&ls_type);
-        table.get(&(ls_id, adv_router))
+        self.tables.get(&(ls_type, ls_id, adv_router))
     }
 
     pub fn lookup_install_time(
@@ -363,20 +347,18 @@ impl Lsdb<Ospfv2> {
         tx: &UnboundedSender<Message>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let table = self.tables.get_mut(&ls_type);
-        let key = (ls_id, adv_router);
-        if let Some(old_lsa) = table.get(&key) {
+        let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
+        if let Some(old_lsa) = self.tables.get(&lsa_key) {
             let mut new_data = old_lsa.data.clone();
             let next_seq = old_lsa.data.h.ls_seq_number.max(min_seq) + 1;
             new_data.h.ls_seq_number = next_seq;
             new_data.h.ls_age = 0;
             new_data.update();
-            let lsa_key: OspfLsaKey = (ls_type, ls_id, adv_router);
             let mut lsa = Lsa::<Ospfv2>::new(new_data);
             lsa.originated = true;
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
             lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            table.insert(key, lsa);
+            self.tables.insert(lsa_key, lsa);
         }
     }
 }

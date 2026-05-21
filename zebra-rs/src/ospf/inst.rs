@@ -1454,11 +1454,11 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
 
     // Collect non-MaxAge Router-LSA data.
     let mut router_lsas = Vec::new();
-    for ((_ls_id, adv_router), lsa) in area.lsdb.tables.router.iter() {
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
         }
-        router_lsas.push((*adv_router, lsa.originated, lsa.data.clone()));
+        router_lsas.push((adv_router, lsa.originated, lsa.data.clone()));
     }
 
     // Side-table for the bidirectional back-link check on P2P / Virtual
@@ -1473,12 +1473,12 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
     // Collect non-MaxAge Network-LSA attached routers for transit
     // network expansion.
     let mut network_lsas: HashMap<Ipv4Addr, Vec<Ipv4Addr>> = HashMap::new();
-    for ((ls_id, _adv_router), lsa) in area.lsdb.tables.network.iter() {
+    for ((ls_id, _adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
         }
         if let OspfLsp::Network(ref net_lsa) = lsa.data.lsp {
-            network_lsas.insert(*ls_id, net_lsa.attached_routers.clone());
+            network_lsas.insert(ls_id, net_lsa.attached_routers.clone());
         }
     }
 
@@ -1658,7 +1658,7 @@ fn add_inter_area_routes(
         return;
     };
 
-    for ((ls_id, _key_adv), lsa) in area.lsdb.tables.summary.iter() {
+    for ((ls_id, _key_adv), lsa) in area.lsdb.iter_by_type(OspfLsType::Summary) {
         // RFC 2328 §16.2: skip MaxAge LSAs.
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
@@ -1685,7 +1685,7 @@ fn add_inter_area_routes(
         };
 
         let mask = u32::from(summary.netmask).leading_ones() as u8;
-        let Ok(prefix) = Ipv4Net::new(*ls_id, mask) else {
+        let Ok(prefix) = Ipv4Net::new(ls_id, mask) else {
             continue;
         };
         let prefix = prefix.trunc();
@@ -1742,7 +1742,7 @@ fn build_rib_from_spf(
                     OspfLinkType::Transit => {
                         // Transit Network: look up Network-LSA to get the
                         // network prefix (link_id = dr's interface ip).
-                        for ((_ls_id, _adv), nlsa) in area.lsdb.tables.network.iter() {
+                        for ((_ls_id, _adv), nlsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
                             if let OspfLsp::Network(ref net) = nlsa.data.lsp
                                 && nlsa.data.h.ls_id == link.link_id
                             {
@@ -1819,7 +1819,7 @@ fn add_as_external_routes(
     // E flag in the AS-external LSA's `ext_and_resvd` byte.
     const E_FLAG: u8 = 0x80;
 
-    for ((ls_id, _key_adv), lsa) in top.lsdb_as.tables.as_external.iter() {
+    for ((ls_id, _key_adv), lsa) in top.lsdb_as.iter_by_type(OspfLsType::AsExternal) {
         if lsa.data.h.ls_age >= OSPF_MAX_AGE {
             continue;
         }
@@ -1852,7 +1852,7 @@ fn add_as_external_routes(
         };
 
         let mask = u32::from(ext.netmask).leading_ones() as u8;
-        let Ok(prefix) = Ipv4Net::new(*ls_id, mask) else {
+        let Ok(prefix) = Ipv4Net::new(ls_id, mask) else {
             continue;
         };
         let prefix = prefix.trunc();
