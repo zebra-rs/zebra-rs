@@ -520,7 +520,10 @@ impl Ospf {
         }
 
         if ev == LsdbEvent::HoldTimerExpire
-            && (ls_type == OspfLsType::Router || ls_type == OspfLsType::Network)
+            && matches!(
+                ls_type,
+                OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary
+            )
             && let Some(area_id) = area_id
             && let Some(area) = self.areas.get_mut(area_id)
         {
@@ -1388,6 +1391,14 @@ impl LspMap {
     pub fn resolve(&self, id: usize) -> Option<&Ipv4Addr> {
         self.val.get(id)
     }
+
+    /// Read-only lookup. Returns None if `router_id` is not in the map.
+    /// Use this when iterating LSAs that reference a router_id whose
+    /// vertex may not have been allocated (e.g. ABR for an unreachable
+    /// network).
+    pub fn lookup(&self, router_id: Ipv4Addr) -> Option<usize> {
+        self.map.get(&router_id).copied()
+    }
 }
 
 /// Build SPF graph from OSPF LSDB (Router-LSAs and Network-LSAs).
@@ -1559,6 +1570,111 @@ fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: Sp
     }
 }
 
+/// Build the nexthop map for an SPF destination vertex. The set is
+/// computed from `path.nexthops` (which each begin with the first-hop
+/// neighbor's vertex id) by walking our links and matching neighbors
+/// by router-id. Shared by intra-area and inter-area route building.
+fn build_spf_nexthops(
+    top: &Ospf,
+    target_id: usize,
+    path: &spf::Path,
+) -> BTreeMap<Ipv4Addr, SpfNexthop> {
+    let mut nhops = BTreeMap::new();
+    for p in &path.nexthops {
+        // p.is_empty() means the destination is the SPF root (us).
+        if p.is_empty() {
+            continue;
+        }
+        let Some(nhop_id) = top.lsp_map.resolve(p[0]) else {
+            continue;
+        };
+        for (ifindex, link) in top.links.iter() {
+            for (_, nbr) in link.nbrs.iter() {
+                if *nhop_id == nbr.ident.router_id {
+                    let addr = nbr.ident.prefix.addr();
+                    let nhop = SpfNexthop {
+                        ifindex: *ifindex,
+                        adjacency: p[0] == target_id,
+                        router_id: Some(*nhop_id),
+                    };
+                    nhops.insert(addr, nhop);
+                }
+            }
+        }
+    }
+    nhops
+}
+
+/// Walk Type 3 (Network Summary) LSAs in `area`'s LSDB and install
+/// inter-area routes per RFC 2328 §16.2. For each Summary LSA whose
+/// advertising router is reachable via SPF, install a route at cost
+/// SPF(ABR) + LSA.metric, with the ABR's nexthops.
+///
+/// Type 4 (ASBR Summary) LSAs are consumed by AS-external route
+/// computation (§16.4), not direct prefix install — they're handled
+/// separately when that path lands.
+fn add_inter_area_routes(
+    top: &Ospf,
+    area_id: Ipv4Addr,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    // OSPF metrics are 24-bit; 0xFFFFFF = LSInfinity (unreachable).
+    const LS_INFINITY: u32 = 0x00FF_FFFF;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for ((ls_id, _key_adv), lsa) in area.lsdb.tables.summary.iter() {
+        // RFC 2328 §16.2: skip MaxAge LSAs.
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        // Skip self-originated summaries — we are the ABR for these.
+        if lsa.data.h.adv_router == top.router_id {
+            continue;
+        }
+        let OspfLsp::Summary(ref summary) = lsa.data.lsp else {
+            continue;
+        };
+        if summary.metric >= LS_INFINITY {
+            continue;
+        }
+
+        // Resolve the advertising router (the ABR) to its SPF vertex.
+        // If the ABR has no allocated vertex, or isn't reachable in
+        // this SPF run, the inter-area destination is unreachable.
+        let Some(abr_vertex) = top.lsp_map.lookup(lsa.data.h.adv_router) else {
+            continue;
+        };
+        let Some(abr_path) = spf_result.get(&abr_vertex) else {
+            continue;
+        };
+
+        let mask = u32::from(summary.netmask).leading_ones() as u8;
+        let Ok(prefix) = Ipv4Net::new(*ls_id, mask) else {
+            continue;
+        };
+        let prefix = prefix.trunc();
+
+        let nhops = build_spf_nexthops(top, abr_vertex, abr_path);
+        if nhops.is_empty() {
+            continue;
+        }
+
+        let total_metric = abr_path.cost.saturating_add(summary.metric);
+        let spf_route = SpfRoute {
+            metric: total_metric,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        rib_insert(rib, prefix, spf_route);
+    }
+}
+
 fn build_rib_from_spf(
     top: &Ospf,
     area_id: Ipv4Addr,
@@ -1571,43 +1687,20 @@ fn build_rib_from_spf(
         return rib;
     };
 
-    // Process each node in the SPF result
+    // Intra-area: walk each SPF destination's Router-LSA links.
     for (node, nhops) in spf_result {
-        // Skip self node
+        // Skip self node.
         if *node == source {
             continue;
         }
 
-        // Resolve node to system ID
+        // Resolve node to router-id.
         let Some(router_id) = top.lsp_map.resolve(*node) else {
             continue;
         };
 
-        // Build nexthop map
-        let mut spf_nhops = BTreeMap::new();
-        for p in &nhops.nexthops {
-            // p.is_empty() means myself
-            if !p.is_empty()
-                && let Some(nhop_id) = top.lsp_map.resolve(p[0])
-            {
-                // Find nhop from links
-                for (ifindex, link) in top.links.iter() {
-                    for (_, nbr) in link.nbrs.iter() {
-                        if *nhop_id == nbr.ident.router_id {
-                            let addr = nbr.ident.prefix.addr();
-                            let nhop = SpfNexthop {
-                                ifindex: *ifindex,
-                                adjacency: p[0] == *node,
-                                router_id: Some(*nhop_id),
-                            };
-                            spf_nhops.insert(addr, nhop);
-                        }
-                    }
-                }
-            }
-        }
+        let spf_nhops = build_spf_nexthops(top, *node, nhops);
 
-        // Process reachability entries for this node.
         if let Some(lsa) = area
             .lsdb
             .lookup_by_id(OspfLsType::Router, *router_id, *router_id)
@@ -1625,9 +1718,6 @@ fn build_rib_from_spf(
                                 let mask = u32::from(net.netmask).leading_ones() as u8;
                                 if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                     let prefix = prefix.trunc();
-
-                                    // sid?
-                                    // prefix_sid?
 
                                     let spf_route = SpfRoute {
                                         metric: nhops.cost,
@@ -1661,6 +1751,10 @@ fn build_rib_from_spf(
             }
         }
     }
+
+    // Inter-area: walk Type 3 Summary LSAs and install via SPF nexthop
+    // to the originating ABR.
+    add_inter_area_routes(top, area_id, spf_result, &mut rib);
 
     rib
 }

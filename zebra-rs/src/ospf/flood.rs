@@ -122,7 +122,10 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
         _ => Some(oi.area_id),
     };
     lsdb.insert_received(lsa.clone(), oi.tx, area_id);
-    if lsa.h.ls_type == OspfLsType::Router || lsa.h.ls_type == OspfLsType::Network {
+    if matches!(
+        lsa.h.ls_type,
+        OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary
+    ) {
         let _ = oi.tx.send(Message::SpfSchedule(area_id));
     }
     tracing::info!(
