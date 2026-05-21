@@ -281,12 +281,8 @@ impl OspfVersion for Ospfv3 {
     fn set_ls_seq_number(h: &mut Ospfv3LsaHeader, seq: u32) {
         h.ls_seq_number = seq;
     }
-    fn update_lsa(_lsa: &mut Ospfv3Lsa) {
-        // TODO: implement Ospfv3Lsa::update() in ospf-packet —
-        // Fletcher checksum + length over §A.4.2.1 layout. Until
-        // that lands, this is a no-op. Safe today because no v3
-        // instance is running, so no caller relies on the updated
-        // fields.
+    fn update_lsa(lsa: &mut Ospfv3Lsa) {
+        lsa.update();
     }
     #[allow(dead_code)]
     fn ls_type(h: &Ospfv3LsaHeader) -> u16 {

@@ -451,7 +451,12 @@ impl OspfLsa {
 
 /// Calculate LSA checksum according to RFC 2328 using Fletcher algorithm.
 /// The checksum is calculated over the data with the checksum field at `cksum_offset`.
-fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
+///
+/// Shared between `OspfLsa::update` (RFC 2328 §A.4.1) and
+/// `Ospfv3Lsa::update` (RFC 5340 §A.4.2). The two versions have the
+/// same checksum-field placement at LSA-offset 16 / data-offset 14,
+/// so the algorithm and offset are identical.
+pub(crate) fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
     if data.len() <= cksum_offset {
         return 0;
     }
