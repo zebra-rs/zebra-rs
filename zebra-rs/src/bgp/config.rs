@@ -1515,6 +1515,18 @@ impl Bgp {
             "/router/bgp/dynamic-neighbors/listen-range/neighbor-group",
             super::dynamic_neighbors::config_listen_range_neighbor_group,
         );
+        // `set router bgp color-policy color <N> [flex-algorithm <M>]`
+        // (zebra-bgp-color-policy.yang). Storage-only on landing —
+        // the consumer is the color-aware nexthop resolver that lands
+        // in a follow-up PR.
+        self.callback_add(
+            "/router/bgp/color-policy/color",
+            super::color_policy::config_color,
+        );
+        self.callback_add(
+            "/router/bgp/color-policy/color/flex-algorithm",
+            super::color_policy::config_color_flex_algorithm,
+        );
         // `set router bgp vrf <name> [...]` (zebra-bgp-vrf.yang).
         // Staging-only in step 12: the callbacks populate
         // `Bgp::vrfs` and the CommitEnd hook in `process_cm_msg`

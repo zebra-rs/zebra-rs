@@ -19,6 +19,8 @@ pub mod update_group;
 pub mod vrf;
 pub mod vrf_config;
 
+pub mod color_policy;
+
 pub mod cap;
 
 pub mod tracing;
