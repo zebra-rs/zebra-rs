@@ -12,6 +12,23 @@ use crate::{
     parse_bgp_nlri_ipv4, parse_bgp_update_attribute,
 };
 
+/// IPv6 next-hop that an RFC 8950 IPv4-over-IPv6 advertisement carries
+/// in `MP_REACH_NLRI`. Pure-unnumbered links have no global half and
+/// emit the 16-octet `LinkLocal` form; speakers with both a global
+/// v6 and a link-local on the egress interface emit the 32-octet
+/// `Dual` form, which receivers prefer for next-hop resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ipv4MpReachNextHop {
+    /// 16-octet form — link-local only.
+    LinkLocal(Ipv6Addr),
+    /// 32-octet form — global address followed by link-local, per
+    /// RFC 8950 §3.
+    Dual {
+        global: Ipv6Addr,
+        link_local: Ipv6Addr,
+    },
+}
+
 #[derive(NomBE)]
 pub struct UpdatePacket {
     pub header: BgpHeader,
@@ -126,18 +143,23 @@ impl UpdatePacket {
     /// packet until adding another would exceed `max_packet_size`,
     /// push the spilled NLRI back, return the encoded packet.
     ///
+    /// `next_hop` controls whether the 16-octet (`LinkLocal`-only) or
+    /// 32-octet (global || link-local) form is emitted; both are
+    /// RFC 8950 §3 compliant and the receiver accepts either.
+    ///
     /// The MP_REACH attribute is emitted with the extended-length
     /// (2-octet length) form unconditionally — once a single /24 is
-    /// added alongside the 21-octet MP_REACH preamble the value
-    /// already crowds the 255-byte budget; pagination almost always
-    /// produces values that need 2-octet lengths.
+    /// added alongside the 21-octet (or 37-octet for dual) MP_REACH
+    /// preamble the value already crowds the 255-byte budget;
+    /// pagination almost always produces values that need 2-octet
+    /// lengths.
     ///
     /// `bgp_attr`, if set, is emitted verbatim (including any v4
     /// NEXT_HOP attribute). RFC 8950 §4 says the receiver MUST ignore
     /// NEXT_HOP when MP_REACH carries an IPv6 next-hop, so passing
     /// the attribute through is harmless and matches what FRR /
     /// IOS-XR emit.
-    pub fn pop_ipv4_mp_reach(&mut self, next_hop: Ipv6Addr) -> Option<BytesMut> {
+    pub fn pop_ipv4_mp_reach(&mut self, next_hop: Ipv4MpReachNextHop) -> Option<BytesMut> {
         if self.ipv4_update.is_empty() {
             return None;
         }
@@ -169,8 +191,21 @@ impl UpdatePacket {
         let mp_value_start = buf.len();
         buf.put_u16(u16::from(Afi::Ip));
         buf.put_u8(u8::from(Safi::Unicast));
-        buf.put_u8(16);
-        buf.put(&next_hop.octets()[..]);
+        match next_hop {
+            Ipv4MpReachNextHop::LinkLocal(ll) => {
+                buf.put_u8(16);
+                buf.put(&ll.octets()[..]);
+            }
+            Ipv4MpReachNextHop::Dual { global, link_local } => {
+                // RFC 8950 §3: 32-octet form carries global || LL in
+                // that order. Receivers prefer the global for next-hop
+                // resolution and use the LL when both peers agree the
+                // route is on-link.
+                buf.put_u8(32);
+                buf.put(&global.octets()[..]);
+                buf.put(&link_local.octets()[..]);
+            }
+        }
         buf.put_u8(0);
 
         // Per-NLRI emit, breaking out when the next prefix wouldn't
@@ -472,7 +507,7 @@ mod tests {
     /// `UpdatePacket::parse_packet`, then assert the recovered
     /// MP_REACH carries the next-hop and prefixes we put in.
     fn encode_and_parse(
-        next_hop: Ipv6Addr,
+        next_hop: Ipv4MpReachNextHop,
         nlris: &[Ipv4Nlri],
         max: usize,
     ) -> (UpdatePacket, Vec<BytesMut>) {
@@ -494,17 +529,25 @@ mod tests {
     #[test]
     fn returns_none_with_no_nlris() {
         let mut update = UpdatePacket::new();
-        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
-        assert!(update.pop_ipv4_mp_reach(nh).is_none());
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert!(
+            update
+                .pop_ipv4_mp_reach(Ipv4MpReachNextHop::LinkLocal(ll))
+                .is_none()
+        );
     }
 
     #[test]
     fn single_prefix_round_trips_through_decoder() {
-        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
-        let (parsed, _) = encode_and_parse(nh, &[nlri("10.0.0.0/24")], BGP_PACKET_LEN);
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+        let (parsed, _) = encode_and_parse(
+            Ipv4MpReachNextHop::LinkLocal(ll),
+            &[nlri("10.0.0.0/24")],
+            BGP_PACKET_LEN,
+        );
         match parsed.mp_update {
             Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
-                assert_eq!(nhop, IpAddr::V6(nh));
+                assert_eq!(nhop, IpAddr::V6(ll));
                 assert_eq!(updates.len(), 1);
                 assert_eq!(updates[0].prefix.to_string(), "10.0.0.0/24");
             }
@@ -512,15 +555,40 @@ mod tests {
         }
     }
 
+    /// 32-octet form carries `global || link-local`. The decoder
+    /// surfaces the global half, matching the RFC 8950 §3 receiver
+    /// recommendation and the convention FRR / IOS-XR follow.
+    #[test]
+    fn dual_nexthop_round_trips_global_half_to_decoder() {
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let ll: Ipv6Addr = "fe80::abcd".parse().unwrap();
+        let (parsed, _) = encode_and_parse(
+            Ipv4MpReachNextHop::Dual {
+                global,
+                link_local: ll,
+            },
+            &[nlri("10.0.0.0/24")],
+            BGP_PACKET_LEN,
+        );
+        match parsed.mp_update {
+            Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
+                assert_eq!(nhop, IpAddr::V6(global));
+                assert_eq!(updates.len(), 1);
+            }
+            other => panic!("expected MpReachAttr::Ipv4, got {other:?}"),
+        }
+    }
+
     #[test]
     fn many_prefixes_round_trip_into_one_packet() {
-        let nh: Ipv6Addr = "fe80::abcd".parse().unwrap();
+        let ll: Ipv6Addr = "fe80::abcd".parse().unwrap();
         let prefixes: Vec<Ipv4Nlri> = (0..50).map(|i| nlri(&format!("10.{i}.0.0/24"))).collect();
-        let (parsed, packets) = encode_and_parse(nh, &prefixes, BGP_PACKET_LEN);
+        let (parsed, packets) =
+            encode_and_parse(Ipv4MpReachNextHop::LinkLocal(ll), &prefixes, BGP_PACKET_LEN);
         assert_eq!(packets.len(), 1, "50 /24 should comfortably fit one MTU");
         match parsed.mp_update {
             Some(MpReachAttr::Ipv4 { nhop, updates, .. }) => {
-                assert_eq!(nhop, IpAddr::V6(nh));
+                assert_eq!(nhop, IpAddr::V6(ll));
                 assert_eq!(updates.len(), 50);
             }
             other => panic!("expected MpReachAttr::Ipv4, got {other:?}"),
@@ -534,7 +602,7 @@ mod tests {
     /// pushed in.
     #[test]
     fn pagination_splits_across_packets() {
-        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
         // Build 20 distinct /24s; cap at 80 bytes so only one or two
         // NLRIs (~4 bytes each) fit alongside ~50 bytes of header +
         // attrs + MP_REACH preamble.
@@ -544,7 +612,7 @@ mod tests {
         update.ipv4_update = prefixes.clone();
 
         let mut packets = Vec::new();
-        while let Some(bytes) = update.pop_ipv4_mp_reach(nh) {
+        while let Some(bytes) = update.pop_ipv4_mp_reach(Ipv4MpReachNextHop::LinkLocal(ll)) {
             packets.push(bytes);
         }
         assert!(
@@ -576,10 +644,14 @@ mod tests {
     /// empty MP_REACH packet.
     #[test]
     fn returns_none_when_first_nlri_does_not_fit() {
-        let nh: Ipv6Addr = "fe80::1".parse().unwrap();
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
         let mut update = UpdatePacket::with_max_packet_size(40);
         update.bgp_attr = Some(BgpAttr::new());
         update.ipv4_update = vec![nlri("10.0.0.0/24")];
-        assert!(update.pop_ipv4_mp_reach(nh).is_none());
+        assert!(
+            update
+                .pop_ipv4_mp_reach(Ipv4MpReachNextHop::LinkLocal(ll))
+                .is_none()
+        );
     }
 }

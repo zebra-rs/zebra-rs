@@ -21,11 +21,13 @@
 //! handles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bgp_packet::{Afi, AfiSafi, BgpAttr, CapExtendedNextHop, Ipv4Nlri, Safi, UpdatePacket};
+use bgp_packet::{
+    Afi, AfiSafi, BgpAttr, CapExtendedNextHop, Ipv4MpReachNextHop, Ipv4Nlri, Safi, UpdatePacket,
+};
 use tokio::sync::mpsc;
 
 use super::BgpAttrStore;
@@ -465,7 +467,7 @@ pub fn flush_ipv4(
     struct MemberCtx {
         ident: usize,
         tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
-        enhe_v6: Option<std::net::Ipv6Addr>,
+        enhe_v6: Option<Ipv4MpReachNextHop>,
     }
     let members: Vec<MemberCtx> = member_idents
         .iter()
@@ -473,7 +475,7 @@ pub fn flush_ipv4(
             let peer = peers.get_by_idx(*ident);
             let tx = peer.and_then(|p| p.packet_tx.clone());
             let enhe_v6 = if enhe {
-                peer.and_then(|p| p.next_hop_v6(interface_addrs))
+                peer.and_then(|p| compose_enhe_next_hop(p, interface_addrs))
             } else {
                 None
             };
@@ -504,7 +506,7 @@ pub fn flush_ipv4(
             // which would break ENHE for everyone but one peer.
             for ctx in &members {
                 let Some(tx) = ctx.tx.as_ref() else { continue };
-                let Some(ll) = ctx.enhe_v6 else {
+                let Some(nh) = ctx.enhe_v6 else {
                     // ND hasn't observed any link-local on this
                     // peer's egress interface yet; the operator-side
                     // address-add events haven't reached BGP. Skip
@@ -526,7 +528,7 @@ pub fn flush_ipv4(
                     }
                     continue;
                 }
-                let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, Some(ll));
+                let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, Some(nh));
                 let byte_total: usize = bytes_list.iter().map(|b| b.len()).sum();
                 for bytes in &bytes_list {
                     let _ = tx.send(bytes.clone());
@@ -620,13 +622,14 @@ pub fn flush_ipv4(
 ///
 /// `extended_next_hop_v6` is the IPv6 next-hop to emit in MP_REACH
 /// for RFC 8950 IPv4-over-IPv6; `None` keeps the legacy
-/// `pop_ipv4` / inline-NLRI emit. Callers compute this from the
-/// peer's negotiated ENHE state and its egress interface's
-/// link-local.
+/// `pop_ipv4` / inline-NLRI emit. Callers compute this via
+/// [`compose_enhe_next_hop`] which picks the 32-octet dual form when
+/// the egress interface also has a global v6, else the 16-octet
+/// link-local-only form.
 pub(super) fn send_ipv4_direct(
     peer: &Peer,
     entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)>,
-    extended_next_hop_v6: Option<Ipv6Addr>,
+    extended_next_hop_v6: Option<Ipv4MpReachNextHop>,
 ) {
     if entries.is_empty() {
         return;
@@ -650,28 +653,25 @@ pub(super) fn send_ipv4_direct(
 
 /// Encode one or more UPDATE PDUs carrying `nlris` under `attr`.
 ///
-/// When `extended_next_hop_v6` is `Some(ll)`, NLRIs are emitted via
+/// When `extended_next_hop_v6` is `Some(...)`, NLRIs are emitted via
 /// `UpdatePacket::pop_ipv4_mp_reach` — MP_REACH(AFI=1, SAFI=1) with
-/// an IPv6 next-hop, per RFC 8950. When `None`, the legacy
-/// `pop_ipv4` path is used (NLRI inline, NEXT_HOP attribute carries
-/// the v4 next-hop).
-///
-/// All current callers pass `None`; the ENHE-aware call sites land
-/// in a follow-up that wires per-peer v6 next-hop derivation through
-/// to the flush/sync paths.
+/// an IPv6 next-hop, per RFC 8950. The `Ipv4MpReachNextHop` variant
+/// selects the 16-octet link-local-only form or the 32-octet
+/// `global || link-local` form. `None` keeps the legacy `pop_ipv4`
+/// path (NLRI inline, NEXT_HOP attribute carries the v4 next-hop).
 fn encode_ipv4_update(
     attr: &Arc<BgpAttr>,
     nlris: &[Ipv4Nlri],
     max_packet_size: usize,
-    extended_next_hop_v6: Option<Ipv6Addr>,
+    extended_next_hop_v6: Option<Ipv4MpReachNextHop>,
 ) -> Vec<bytes::BytesMut> {
     let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
     update.bgp_attr = Some((**attr).clone());
     update.ipv4_update = nlris.to_vec();
     let mut out = Vec::new();
     match extended_next_hop_v6 {
-        Some(ll) => {
-            while let Some(bytes) = update.pop_ipv4_mp_reach(ll) {
+        Some(nh) => {
+            while let Some(bytes) = update.pop_ipv4_mp_reach(nh) {
                 out.push(bytes);
             }
         }
@@ -682,6 +682,24 @@ fn encode_ipv4_update(
         }
     }
     out
+}
+
+/// Build the `Ipv4MpReachNextHop` to advertise to `peer` for an
+/// RFC 8950 IPv4-over-IPv6 UPDATE. Returns `None` when the peer
+/// has no link-local on its egress interface — without a link-local
+/// the dual form is malformed and the speaker can't emit either
+/// MP_REACH variant. When both an LL and a global are registered on
+/// the egress ifindex, returns the 32-octet `Dual` form; otherwise
+/// the 16-octet `LinkLocal` form.
+pub(super) fn compose_enhe_next_hop(
+    peer: &Peer,
+    addrs: &super::interface_addrs::InterfaceAddrs,
+) -> Option<Ipv4MpReachNextHop> {
+    let link_local = peer.next_hop_v6(addrs)?;
+    match peer.next_hop_v6_global(addrs) {
+        Some(global) => Some(Ipv4MpReachNextHop::Dual { global, link_local }),
+        None => Some(Ipv4MpReachNextHop::LinkLocal(link_local)),
+    }
 }
 
 #[cfg(test)]
