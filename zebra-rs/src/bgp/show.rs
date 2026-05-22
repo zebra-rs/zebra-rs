@@ -1239,6 +1239,13 @@ struct Neighbor<'a> {
     // pre-policy Adj-RIB-In is retained so `clear ... soft in` can
     // replay it locally without sending Route Refresh.
     soft_reconfig_in: bool,
+    /// Name of the IOS-XR-style `neighbor-group` this peer inherits
+    /// from, if any. `remote_as_inherited` says whether the peer's
+    /// `remote_as` actually came off the group (vs. an explicit
+    /// per-peer override). Both serialize to JSON as flat fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    neighbor_group: Option<String>,
+    remote_as_inherited: bool,
 }
 
 const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
@@ -1371,6 +1378,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         count: HashMap::default(),
         reflector_client: peer.reflector_client,
         soft_reconfig_in: peer.config.soft_reconfig_in,
+        neighbor_group: peer.config.neighbor_group.clone(),
+        remote_as_inherited: peer.config.remote_as_inherited,
     };
 
     // Timers.
@@ -1452,6 +1461,15 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
     if neighbor.soft_reconfig_in {
         writeln!(out, "  Inbound soft reconfiguration allowed")?;
+    }
+
+    if let Some(ref group) = neighbor.neighbor_group {
+        let suffix = if neighbor.remote_as_inherited {
+            " (remote-as inherited)"
+        } else {
+            ""
+        };
+        writeln!(out, "  Neighbor-group: {group}{suffix}")?;
     }
 
     writeln!(out)?;
@@ -2343,6 +2361,159 @@ fn show_bgp_vrf_detail(
     Ok(buf)
 }
 
+// ---------------------------------------------------------------------
+// `show ip bgp neighbor-group [NAME]`
+// ---------------------------------------------------------------------
+
+/// One row of `show ip bgp neighbor-group` (list form). Captures the
+/// configured fields plus a member-peer count to make the list useful
+/// at a glance.
+#[derive(Serialize)]
+struct BgpNeighborGroupListRow {
+    name: String,
+    remote_as: Option<u32>,
+    members: usize,
+}
+
+/// Detail view: configured fields plus the peer addresses that
+/// reference this group. The `inherited_remote_as` flag echoes
+/// `PeerConfig::remote_as_inherited` so consumers can see at a glance
+/// whether the group actually supplied the asn or a per-peer override
+/// won.
+#[derive(Serialize)]
+struct BgpNeighborGroupMember {
+    address: String,
+    remote_as: u32,
+    inherited_remote_as: bool,
+    state: String,
+}
+
+#[derive(Serialize)]
+struct BgpNeighborGroupDetail {
+    name: String,
+    remote_as: Option<u32>,
+    members: Vec<BgpNeighborGroupMember>,
+}
+
+fn neighbor_group_members(bgp: &Bgp, name: &str) -> Vec<BgpNeighborGroupMember> {
+    let mut members: Vec<BgpNeighborGroupMember> = bgp
+        .peers
+        .iter()
+        .filter_map(|(_, peer)| {
+            if peer.config.neighbor_group.as_deref() == Some(name) {
+                Some(BgpNeighborGroupMember {
+                    address: peer.address.to_string(),
+                    remote_as: peer.remote_as,
+                    inherited_remote_as: peer.config.remote_as_inherited,
+                    state: peer.state.to_str().to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+    // Stable order for golden-style diffs.
+    members.sort_by(|a, b| a.address.cmp(&b.address));
+    members
+}
+
+fn show_bgp_neighbor_group(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if let Some(name) = args.string() {
+        show_bgp_neighbor_group_detail(bgp, &name, json)
+    } else if json {
+        show_bgp_neighbor_group_list_json(bgp)
+    } else {
+        show_bgp_neighbor_group_list_text(bgp)
+    }
+}
+
+fn show_bgp_neighbor_group_list_text(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    writeln!(buf, "{:<24} {:>10} {:>8}", "Name", "Remote-AS", "Members")?;
+    if bgp.neighbor_groups.is_empty() {
+        writeln!(buf, "  (no neighbor-groups configured)")?;
+        return Ok(buf);
+    }
+    for (name, group) in &bgp.neighbor_groups {
+        let asn = group
+            .remote_as
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "-".into());
+        let members = neighbor_group_members(bgp, name).len();
+        writeln!(buf, "{:<24} {:>10} {:>8}", name, asn, members)?;
+    }
+    Ok(buf)
+}
+
+fn show_bgp_neighbor_group_list_json(bgp: &Bgp) -> std::result::Result<String, std::fmt::Error> {
+    let rows: Vec<BgpNeighborGroupListRow> = bgp
+        .neighbor_groups
+        .iter()
+        .map(|(name, group)| BgpNeighborGroupListRow {
+            name: name.clone(),
+            remote_as: group.remote_as,
+            members: neighbor_group_members(bgp, name).len(),
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&rows).unwrap_or_default())
+}
+
+fn show_bgp_neighbor_group_detail(
+    bgp: &Bgp,
+    name: &str,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(group) = bgp.neighbor_groups.get(name) else {
+        if json {
+            return Ok(format!("{{\"error\": \"No such neighbor-group: {name}\"}}"));
+        }
+        return Ok(format!("% No such neighbor-group: {name}\n"));
+    };
+    let members = neighbor_group_members(bgp, name);
+
+    if json {
+        let detail = BgpNeighborGroupDetail {
+            name: name.to_string(),
+            remote_as: group.remote_as,
+            members,
+        };
+        return Ok(serde_json::to_string_pretty(&detail).unwrap_or_default());
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "BGP neighbor-group: {name}")?;
+    writeln!(
+        buf,
+        "  Remote-AS: {}",
+        group
+            .remote_as
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "(unset)".into())
+    )?;
+    if members.is_empty() {
+        writeln!(buf, "  Members:   (no peers reference this group)")?;
+    } else {
+        writeln!(buf, "  Members ({}):", members.len())?;
+        for m in &members {
+            let inherited = if m.inherited_remote_as {
+                " (inherited)"
+            } else {
+                ""
+            };
+            writeln!(
+                buf,
+                "    {:<24} remote-as {}{} state {}",
+                m.address, m.remote_as, inherited, m.state,
+            )?;
+        }
+    }
+    Ok(buf)
+}
+
 impl Bgp {
     fn show_add(&mut self, path: &str, cb: ShowCallback) {
         self.show_cb.insert(path.to_string(), cb);
@@ -2381,6 +2552,7 @@ impl Bgp {
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
+        self.show_add("/show/ip/bgp/neighbor-group", show_bgp_neighbor_group);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
         // IOS-XR style update-group observability — kept under
         // `show bgp ...` (not `show ip bgp ...`) per the design doc.
