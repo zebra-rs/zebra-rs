@@ -8,8 +8,8 @@ use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
 use ospf_packet::{
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequestEntry, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options,
-    Ospfv3Packet, Ospfv3Payload,
+    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3Lsa, Ospfv3LsaHeader,
+    Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -594,5 +594,57 @@ pub fn ospfv3_db_desc_recv(
                 ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
             }
         }
+    }
+}
+
+/// Pack the pending LS Request entries on `nbr.ls_req` into the
+/// outgoing packet. Mirrors v2's `ospf_packet_ls_req_set`.
+fn ospfv3_packet_ls_req_set(nbr: &Neighbor<Ospfv3>, ls_req: &mut Ospfv3LsRequest) {
+    for entry in nbr.ls_req.iter() {
+        ls_req.reqs.push(entry.clone());
+    }
+}
+
+/// Emit an OSPFv3 Link State Request packet (RFC 5340 §A.3.4).
+///
+/// Mirrors v2's `ospf_ls_req_send`. The packet body is a series of
+/// 12-octet `Ospfv3LsRequestEntry` records (reserved/u16 + ls_type/u16 +
+/// link_state_id/u32 + advertising_router/Ipv4Addr), one for each
+/// LSA the peer holds but we don't (populated by
+/// `ospfv3_db_desc_proc` in #779). Sent unicast to the neighbor's
+/// link-local v6 via the dedicated v3 send channel.
+pub fn ospfv3_ls_req_send(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    oident: &Identity<Ospfv3>,
+) {
+    let area = oi.area_id;
+    let mut ls_req = Ospfv3LsRequest::default();
+    ospfv3_packet_ls_req_set(nbr, &mut ls_req);
+
+    let packet = Ospfv3Packet::new(
+        &oident.router_id,
+        &area,
+        0,
+        Ospfv3Payload::LsRequest(ls_req),
+    );
+
+    let Some(tx) = oi.v3_send_tx else {
+        tracing::debug!("[v3 LSReq:Send] no v3 send channel on OspfInterface");
+        return;
+    };
+    let Some(src) = interface_link_local_src(oi) else {
+        tracing::debug!("[v3 LSReq:Send] no link-local source on interface");
+        return;
+    };
+
+    let item = Ospfv3Send {
+        packet,
+        ifindex: nbr.ifindex,
+        dest: Some(nbr.ident.prefix.addr()),
+        src,
+    };
+    if let Err(e) = tx.send(item) {
+        tracing::warn!("[v3 LSReq:Send] channel send failed: {}", e);
     }
 }
