@@ -5,8 +5,8 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, Ipv6Nlri, ParseBe, ParseNlri, ParseOption, Rtcv4,
-    Rtcv4Unreach, Safi, Vpnv4Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, Ipv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption,
+    Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach};
@@ -31,6 +31,13 @@ pub enum MpUnreachAttr {
     EvpnEor,
     Rtcv4(Vec<Rtcv4>),
     Rtcv4Eor,
+    /// BGP MUP withdraws (RFC 9833 §11). The outer AFI is preserved
+    /// so the emitter can re-encode it without a separate Eor
+    /// variant; an empty `withdraws` list represents end-of-RIB.
+    Mup {
+        afi: Afi,
+        withdraws: Vec<MupRoute>,
+    },
 }
 
 impl MpUnreachAttr {
@@ -55,6 +62,9 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::EvpnEor => {
                 evpn_unreach_attr_emit(&[], buf);
+            }
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                mup_unreach_attr_emit(*afi, withdraws, buf);
             }
             _ => {
                 //
@@ -83,6 +93,41 @@ fn evpn_unreach_attr_emit(withdraw: &[EvpnRoute], buf: &mut BytesMut) {
     value.put_u16(u16::from(Afi::L2vpn));
     value.put_u8(u8::from(Safi::Evpn));
     for r in withdraw {
+        r.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpUnreachAttr::Mup { afi, withdraws }` (empty
+/// `withdraws` encodes an end-of-RIB marker) as a complete
+/// `MP_UNREACH_NLRI` path attribute.
+///
+/// Wire format (RFC 4760 §4 + RFC 9833 §11):
+/// ```text
+///   AFI  (2 octets) = 1 (IPv4) or 2 (IPv6)
+///   SAFI (1 octet)  = 85 (MUP)
+///   Withdrawn Routes (zero or more MupRoute encodings)
+/// ```
+fn mup_unreach_attr_emit(afi: Afi, withdraws: &[MupRoute], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(Safi::Mup));
+    for r in withdraws {
         r.nlri_emit(&mut value);
     }
 
@@ -147,6 +192,26 @@ impl MpUnreachAttr {
                 many0_complete(|i| EvpnRoute::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpUnreachAttr::Evpn(evpns);
             return Ok((input, mp_nlri));
+        }
+        if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::Mup {
+            if input.is_empty() {
+                return Ok((
+                    input,
+                    MpUnreachAttr::Mup {
+                        afi: header.afi,
+                        withdraws: vec![],
+                    },
+                ));
+            }
+            let (input, withdraws) =
+                many0_complete(|i| MupRoute::parse_nlri(i, add_path)).parse(input)?;
+            return Ok((
+                input,
+                MpUnreachAttr::Mup {
+                    afi: header.afi,
+                    withdraws,
+                },
+            ));
         }
         if header.afi == Afi::Ip && header.safi == Safi::Rtc {
             if input.is_empty() {
@@ -228,6 +293,20 @@ impl fmt::Display for MpUnreachAttr {
             Rtcv4Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::Rtc)
             }
+            Mup { afi, withdraws } => {
+                if withdraws.is_empty() {
+                    return writeln!(f, " EoR: {}/{}", afi, Safi::Mup);
+                }
+                for r in withdraws {
+                    writeln!(
+                        f,
+                        " {afi}/MUP rt={:?} arch={:?}",
+                        r.route_type(),
+                        r.architecture()
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -235,5 +314,122 @@ impl fmt::Display for MpUnreachAttr {
 impl fmt::Debug for MpUnreachAttr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MupArchitectureType;
+
+    /// MUP MP_UNREACH inner value: AFI + SAFI + withdraws.
+    fn build(afi: u16, withdraws: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&afi.to_be_bytes());
+        v.push(u8::from(Safi::Mup));
+        v.extend_from_slice(withdraws);
+        v
+    }
+
+    fn mup_nlri(route_type: u16, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.push(0x01);
+        v.extend_from_slice(&route_type.to_be_bytes());
+        v.push(payload.len() as u8);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    #[test]
+    fn mup_ipv4_unreach_round_trips() {
+        let mut nlri = mup_nlri(1, &[0xaa, 0xbb]);
+        nlri.extend_from_slice(&mup_nlri(4, &[]));
+        let value = build(1, &nlri);
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip);
+                assert_eq!(withdraws.len(), 2);
+                assert!(matches!(withdraws[0], MupRoute::Isd { .. }));
+                assert!(matches!(withdraws[1], MupRoute::T2st { .. }));
+            }
+            other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mup_ipv6_unreach_round_trips() {
+        let nlri = mup_nlri(2, &[0x10]);
+        let value = build(2, &nlri);
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert_eq!(withdraws.len(), 1);
+                assert!(matches!(withdraws[0], MupRoute::Dsd { .. }));
+            }
+            other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mup_unreach_empty_is_eor() {
+        // Header-only, no NLRI bytes.
+        let value = build(1, &[]);
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
+        match mp {
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip);
+                assert!(withdraws.is_empty());
+            }
+            other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mup_unreach_emit_round_trips_through_parser() {
+        let withdraws = vec![
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                body: vec![1, 2, 3],
+            },
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                body: vec![],
+            },
+        ];
+        let mut buf = BytesMut::new();
+        mup_unreach_attr_emit(Afi::Ip6, &withdraws, &mut buf);
+        // Strip header: flags(1) + type(1) + length(1).
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpUnreachAttr::Mup {
+                afi,
+                withdraws: parsed,
+            } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert_eq!(parsed, withdraws);
+            }
+            other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mup_unreach_emit_eor_round_trips() {
+        let mut buf = BytesMut::new();
+        mup_unreach_attr_emit(Afi::Ip, &[], &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(value, None).expect("EoR must round-trip");
+        match mp {
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip);
+                assert!(withdraws.is_empty());
+            }
+            other => panic!("expected Mup, got {other:?}"),
+        }
     }
 }
