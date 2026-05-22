@@ -36,6 +36,8 @@ pub enum Safi {
     #[strum(serialize = "RTC")]
     Rtc = 132,
     Flowspec = 133,
+    #[strum(serialize = "MUP")]
+    Mup = 85,
     #[strum(to_string = "Unknown({0})")]
     Unknown(u8),
 }
@@ -146,6 +148,7 @@ impl From<Safi> for u8 {
             MplsVpn => 128,
             Rtc => 132,
             Flowspec => 133,
+            Mup => 85,
             Unknown(v) => v,
         }
     }
@@ -160,6 +163,7 @@ impl From<u8> for Safi {
             4 => MplsLabel,
             7 => Encap,
             70 => Evpn,
+            85 => Mup,
             128 => MplsVpn,
             132 => Rtc,
             133 => Flowspec,
@@ -185,3 +189,42 @@ impl Safi {
 }
 
 // Display implementation now provided by strum_macros::Display
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safi_round_trip_known_values() {
+        let known = [
+            Safi::Unicast,
+            Safi::Multicast,
+            Safi::MplsLabel,
+            Safi::Encap,
+            Safi::Evpn,
+            Safi::Mup,
+            Safi::MplsVpn,
+            Safi::Rtc,
+            Safi::Flowspec,
+        ];
+        for safi in known {
+            let raw: u8 = safi.into();
+            assert_eq!(Safi::from(raw), safi, "round-trip failed for {safi}");
+        }
+    }
+
+    #[test]
+    fn safi_mup_wire_value() {
+        assert_eq!(u8::from(Safi::Mup), 85);
+        assert_eq!(Safi::from(85u8), Safi::Mup);
+        assert_eq!(format!("{}", Safi::Mup), "MUP");
+    }
+
+    #[test]
+    fn safi_unknown_round_trip() {
+        let unknown = Safi::Unknown(200);
+        let raw: u8 = unknown.into();
+        assert_eq!(raw, 200);
+        assert_eq!(Safi::from(raw), unknown);
+    }
+}

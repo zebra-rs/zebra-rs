@@ -7,6 +7,10 @@ pub enum ExtCommunityType {
     // TransIpv4Addr = 0x01,
     // TransFourOctetAS = 0x03,
     TransOpaque = 0x03,
+    /// RFC 9833 — BGP MUP Extended Community high-type byte. Sub-type
+    /// decode is deferred to a later phase; raw 8-byte value passes
+    /// through the generic ExtCommunity path for now.
+    Mup = 0x0c,
 }
 
 #[derive(
