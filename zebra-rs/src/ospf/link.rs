@@ -123,6 +123,12 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     /// to 0; the v3 interface-enable path sets it.
     #[allow(dead_code)]
     pub interface_id: u32,
+    /// Per-link LSDB (RFC 5340 §A.4.9). Holds link-scope LSAs —
+    /// `Link-LSAs` — that the v3 standard restricts to flooding
+    /// only on the segment they were originated on. Empty on v2
+    /// (no link-scope LSA types exist in RFC 2328) but the field
+    /// stays generic for shape simplicity.
+    pub lsdb: super::lsdb::Lsdb<V>,
 }
 
 #[derive(Default)]
@@ -171,6 +177,7 @@ where
             config: LinkConfig::default(),
             ls_ack_delayed: Vec::new(),
             interface_id: 0,
+            lsdb: super::lsdb::Lsdb::new(),
         }
     }
 }

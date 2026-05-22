@@ -418,7 +418,8 @@ fn ospfv3_lsa_lookup_raw<'a>(
     match ospfv3_ls_type_scope(ls_type) {
         Ospfv3LsaScope::Area => oi.lsdb.lookup_by_raw_key(key),
         Ospfv3LsaScope::As => oi.lsdb_as.lookup_by_raw_key(key),
-        Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => None,
+        Ospfv3LsaScope::Link => oi.link_lsdb.lookup_by_raw_key(key),
+        Ospfv3LsaScope::Reserved => None,
     }
 }
 
@@ -825,8 +826,8 @@ pub fn ospfv3_ls_upd_recv(
         });
 
         // Route by scope into the correct LSDB. Link-scope LSAs
-        // don't yet have a per-link LSDB in zebra-rs; drop them
-        // (matches the `None` fallthrough in `ospfv3_lsa_lookup_raw`).
+        // land in the per-link LSDB (RFC 5340 §4.5.2: link-scope
+        // flooding is bounded to one segment).
         let cloned = lsa.clone();
         match scope {
             Ospfv3LsaScope::Area => {
@@ -835,7 +836,10 @@ pub fn ospfv3_ls_upd_recv(
             Ospfv3LsaScope::As => {
                 oi.lsdb_as.install_lsa(cloned, oi.tx, None);
             }
-            Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => {
+            Ospfv3LsaScope::Link => {
+                oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+            }
+            Ospfv3LsaScope::Reserved => {
                 continue;
             }
         }
