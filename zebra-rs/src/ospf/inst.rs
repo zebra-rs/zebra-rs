@@ -1376,6 +1376,63 @@ impl Ospf<Ospfv2> {
 /// builder can be reviewed and tested ahead of the spawn wiring.
 #[allow(dead_code)]
 impl Ospf<Ospfv3> {
+    /// Construct an `Ospf<Ospfv3>` instance.
+    ///
+    /// Mirrors the shape of `Ospf<Ospfv2>::new` (see above) so the
+    /// two version-specific constructors stay readable side by side.
+    /// The differences from v2:
+    ///
+    /// - **Socket.** Uses `ospf_socket_ipv6` — same IP protocol
+    ///   number 89, but `Domain::IPV6` with `IPV6_V6ONLY`,
+    ///   `IPV6_MULTICAST_HOPS=1`, and `IPV6_RECVPKTINFO` enabled.
+    /// - **Router-id default.** Still 32-bit (RFC 5340 §2.1).
+    /// - **No `callback_build` / `show_build`.** The v2 versions
+    ///   register paths under `/router/ospf/...`; the v3 schema is
+    ///   currently an empty `container ospfv3` stub with no Rust
+    ///   handlers wired. The `callbacks` and `show_cb` maps stay
+    ///   empty for v3 until the v3 config plumbing lands.
+    /// - **No network read/write task spawn.** The v2 path uses
+    ///   `read_packet` / `write_packet`, which are typed against
+    ///   `Message<Ospfv2>` and the v2 wire format. The v3 packet
+    ///   path is its own substantial PR (Hello over `ff02::5`,
+    ///   pseudo-header checksum, Interface-ID handling); until it
+    ///   lands the `tx` / `ptx` channels exist but nothing drives
+    ///   them. The four `build_*_lsa` self-origination helpers
+    ///   above can still be exercised from tests.
+    ///
+    /// Behind `#[allow(dead_code)]` until `main.rs` learns to spawn
+    /// an `Ospf<Ospfv3>` alongside (or in place of) the v2 instance.
+    pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+        let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx,
+            ptx,
+            cm: ConfigChannel::new(),
+            callbacks: HashMap::new(),
+            rib_rx,
+            ctx,
+            links: BTreeMap::new(),
+            areas: OspfAreaMap::new(),
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
+            router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
+            lsdb_as: Lsdb::new(),
+            lsp_map: LspMap::default(),
+            spf_result: None,
+            graph: None,
+            rib: PrefixMap::new(),
+            tracing: OspfTracing::default(),
+            segment_routing: super::srmpls::SegmentRoutingMode::default(),
+            spf_last: None,
+            spf_duration: None,
+            sock,
+        }
+    }
+
     /// Build the v3 Intra-Area-Prefix-LSA that references this
     /// router's Router-LSA in `area_id` (RFC 5340 §A.4.10).
     ///
