@@ -225,7 +225,7 @@ impl MpReachAttr {
             };
             let (input, snpa) = be_u8(input)?;
             let (input, updates) =
-                many0_complete(|i| MupRoute::parse_nlri(i, add_path)).parse(input)?;
+                many0_complete(|i| MupRoute::parse(i, add_path, header.afi)).parse(input)?;
             let mp_nlri = MpReachAttr::Mup {
                 afi: header.afi,
                 snpa,
@@ -340,13 +340,7 @@ impl fmt::Display for MpReachAttr {
                         " {afi}/MUP rt={:?} arch={:?} body={}B => {nhop}",
                         update.route_type(),
                         update.architecture(),
-                        match update {
-                            MupRoute::Isd { body, .. }
-                            | MupRoute::Dsd { body, .. }
-                            | MupRoute::T1st { body, .. }
-                            | MupRoute::T2st { body, .. }
-                            | MupRoute::Unknown { body, .. } => body.len(),
-                        }
+                        update.body_len()
                     )?;
                 }
             }
@@ -559,10 +553,18 @@ mod tests {
         v
     }
 
+    /// Minimal ISD body: 8 zero RD bytes + plen=0 (default route).
+    /// AFI-agnostic at plen=0, so safe to reuse for both v4 and v6.
+    fn min_isd_body() -> Vec<u8> {
+        let mut v = vec![0u8; 8];
+        v.push(0); // plen=0 → no prefix bytes follow
+        v
+    }
+
     #[test]
     fn mup_ipv4_round_trip_via_parse_nlri_opt() {
         let nhop: Ipv4Addr = "192.0.2.1".parse().unwrap();
-        let mut nlri = mup_nlri(1, &[0xde, 0xad, 0xbe, 0xef]);
+        let mut nlri = mup_nlri(1, &min_isd_body());
         nlri.extend_from_slice(&mup_nlri(2, &[0x01, 0x02]));
         let value = build(1, 85, &nhop.octets(), &nlri);
         let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
@@ -605,7 +607,7 @@ mod tests {
         let ll: Ipv6Addr = "fe80::1".parse().unwrap();
         let mut nhop = global.octets().to_vec();
         nhop.extend_from_slice(&ll.octets());
-        let nlri = mup_nlri(1, &[]);
+        let nlri = mup_nlri(1, &min_isd_body());
         let value = build(2, 85, &nhop, &nlri);
         let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
         match mp {
@@ -625,7 +627,7 @@ mod tests {
             value.push(bad);
             value.extend(std::iter::repeat_n(0u8, bad as usize));
             value.push(0); // SNPA
-            value.extend_from_slice(&mup_nlri(1, &[]));
+            value.extend_from_slice(&mup_nlri(1, &min_isd_body()));
             assert!(
                 MpReachAttr::parse_nlri_opt(&value, None).is_err(),
                 "expected parse error for nhop_len={bad}",
@@ -638,12 +640,14 @@ mod tests {
         // Emit the full attribute, strip the 1-byte flags + 1-byte
         // type + 1-byte length header, then feed the inner value back
         // through `parse_nlri_opt`.
+        use std::str::FromStr;
         let nhop = IpAddr::V4("203.0.113.7".parse().unwrap());
         let updates = vec![
             MupRoute::Isd {
                 id: 0,
                 arch: crate::MupArchitectureType::Gpp5g,
-                body: vec![1, 2, 3, 4],
+                rd: crate::RouteDistinguisher::from_str("65000:1").unwrap(),
+                prefix: "10.0.0.0/24".parse().unwrap(),
             },
             MupRoute::T2st {
                 id: 0,

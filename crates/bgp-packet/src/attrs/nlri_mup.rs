@@ -1,6 +1,6 @@
-//! BGP MUP (Mobile User Plane) SAFI 85 NLRI — Phase 2 dispatch shell.
+//! BGP MUP (Mobile User Plane) SAFI 85 NLRI.
 //!
-//! Implements the outer NLRI envelope from RFC 9833 §3.1:
+//! Outer envelope (RFC 9833 §3.1):
 //!
 //! ```text
 //! +------------------------------------+
@@ -14,19 +14,29 @@
 //! +------------------------------------+
 //! ```
 //!
-//! Per-route-type bodies are intentionally kept opaque (`Vec<u8>`) at
-//! this phase; typed decoders land in Phases 4–6. Add-Path follows
-//! the EVPN convention used elsewhere in this crate: a non-zero `id`
-//! signals a 4-octet Path Identifier (RFC 7911) is prepended on the
-//! wire.
+//! As of Phase 4, the Type 1 (Interwork Segment Discovery, §3.1.1)
+//! body is decoded into typed fields (RD + prefix). Types 2–4 remain
+//! opaque (`Vec<u8>`) and land in Phases 5–6. Add-Path follows the
+//! EVPN convention used elsewhere in this crate: a non-zero `id`
+//! signals a 4-octet RFC 7911 Path Identifier on the wire.
+//!
+//! Parsing the typed ISD body requires the outer AFI (IPv4 ⇒ 4-octet
+//! prefix max; IPv6 ⇒ 16-octet prefix max), so `MupRoute::parse` is
+//! an associated function rather than a `ParseNlri` impl — that
+//! trait's signature does not carry AFI context.
+
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::{BufMut, BytesMut};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use nom::IResult;
 use nom::Parser;
 use nom::bytes::complete::take;
+use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u16, be_u32};
+use nom_derive::Parse;
 
-use crate::ParseNlri;
+use crate::{Afi, RouteDistinguisher, nlri_psize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MupArchitectureType {
@@ -95,15 +105,22 @@ impl From<u16> for MupRouteType {
 }
 
 /// MUP NLRI route. Each variant carries the Add-Path identifier
-/// (`id`, zero when Add-Path is off), the architecture type, and the
-/// route-type-specific payload as opaque bytes. Typed bodies arrive
-/// in later phases.
+/// (`id`, zero when Add-Path is off) and the architecture type.
+/// Type 1 (Isd) holds typed fields (RD + prefix); the remaining
+/// types still hold their route-type-specific payload as opaque
+/// bytes until Phases 5–6 decode them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MupRoute {
+    /// Interwork Segment Discovery Route (RFC 9833 §3.1.1).
+    ///
+    /// Wire body: 8-octet RD + 1-octet prefix length + prefix bytes
+    /// (variable, sized to cover the prefix length). The address
+    /// family of `prefix` is selected by the outer AFI at parse time.
     Isd {
         id: u32,
         arch: MupArchitectureType,
-        body: Vec<u8>,
+        rd: RouteDistinguisher,
+        prefix: IpNet,
     },
     Dsd {
         id: u32,
@@ -158,28 +175,95 @@ impl MupRoute {
             | MupRoute::Unknown { id, .. } => *id,
         }
     }
+
+    /// Wire-encoded payload length (the value the Length byte carries
+    /// on the wire — bytes *after* the length byte itself).
+    pub fn body_len(&self) -> usize {
+        match self {
+            MupRoute::Isd { prefix, .. } => 8 + 1 + nlri_psize(prefix.prefix_len()),
+            MupRoute::Dsd { body, .. }
+            | MupRoute::T1st { body, .. }
+            | MupRoute::T2st { body, .. }
+            | MupRoute::Unknown { body, .. } => body.len(),
+        }
+    }
 }
 
-impl ParseNlri<MupRoute> for MupRoute {
-    fn parse_nlri(input: &[u8], addpath: bool) -> IResult<&[u8], MupRoute> {
+impl MupRoute {
+    /// Parse one MUP NLRI from `input`. `afi` is the outer AFI from
+    /// the MP_REACH / MP_UNREACH header and selects IPv4 vs IPv6
+    /// address-family decoding for route types whose body carries
+    /// a prefix (currently only ISD).
+    pub fn parse(input: &[u8], addpath: bool, afi: Afi) -> IResult<&[u8], Self> {
         let (input, id) = if addpath { be_u32(input)? } else { (input, 0) };
         let (input, arch_raw) = be_u8(input)?;
         let arch: MupArchitectureType = arch_raw.into();
         let (input, type_raw) = be_u16(input)?;
         let (input, length) = be_u8(input)?;
-        let (input, body_raw) = take(length as usize).parse(input)?;
-        let body = body_raw.to_vec();
+        let (input, body_slice) = take(length as usize).parse(input)?;
 
         let route = match MupRouteType::from(type_raw) {
-            MupRouteType::Isd => MupRoute::Isd { id, arch, body },
-            MupRouteType::Dsd => MupRoute::Dsd { id, arch, body },
-            MupRouteType::T1st => MupRoute::T1st { id, arch, body },
-            MupRouteType::T2st => MupRoute::T2st { id, arch, body },
+            MupRouteType::Isd => {
+                let (rest, rd) = RouteDistinguisher::parse_be(body_slice)?;
+                let (rest, plen) = be_u8(rest)?;
+                let max_plen = match afi {
+                    Afi::Ip => 32u8,
+                    Afi::Ip6 => 128u8,
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
+                };
+                if plen > max_plen {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                }
+                let psize = nlri_psize(plen);
+                if rest.len() < psize {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                }
+                let prefix = match afi {
+                    Afi::Ip => {
+                        let mut octets = [0u8; 4];
+                        octets[..psize].copy_from_slice(&rest[..psize]);
+                        IpNet::V4(
+                            Ipv4Net::new(Ipv4Addr::from(octets), plen)
+                                .expect("Ipv4Net create error"),
+                        )
+                    }
+                    Afi::Ip6 => {
+                        let mut octets = [0u8; 16];
+                        octets[..psize].copy_from_slice(&rest[..psize]);
+                        IpNet::V6(
+                            Ipv6Net::new(Ipv6Addr::from(octets), plen)
+                                .expect("Ipv6Net create error"),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                MupRoute::Isd {
+                    id,
+                    arch,
+                    rd,
+                    prefix,
+                }
+            }
+            MupRouteType::Dsd => MupRoute::Dsd {
+                id,
+                arch,
+                body: body_slice.to_vec(),
+            },
+            MupRouteType::T1st => MupRoute::T1st {
+                id,
+                arch,
+                body: body_slice.to_vec(),
+            },
+            MupRouteType::T2st => MupRoute::T2st {
+                id,
+                arch,
+                body: body_slice.to_vec(),
+            },
             MupRouteType::Unknown(rt) => MupRoute::Unknown {
                 id,
                 arch,
                 route_type: rt,
-                body,
+                body: body_slice.to_vec(),
             },
         };
         Ok((input, route))
@@ -188,10 +272,7 @@ impl ParseNlri<MupRoute> for MupRoute {
 
 impl MupRoute {
     /// Emit one MUP NLRI (optional Path Identifier + architecture +
-    /// route type + length + opaque body) onto `buf`. Mirror of
-    /// `parse_nlri`. Non-zero `id` prepends the 4-octet RFC 7911 Path
-    /// Identifier, matching the asymmetry the EVPN and VPNv4 encoders
-    /// already use.
+    /// route type + length + body) onto `buf`. Mirror of `parse`.
     pub fn nlri_emit(&self, buf: &mut BytesMut) {
         let id = self.add_path_id();
         if id != 0 {
@@ -201,25 +282,50 @@ impl MupRoute {
         let rt: u16 = self.route_type().into();
         buf.put_u16(rt);
 
-        let body: &[u8] = match self {
-            MupRoute::Isd { body, .. }
-            | MupRoute::Dsd { body, .. }
+        let mut payload = BytesMut::new();
+        match self {
+            MupRoute::Isd { rd, prefix, .. } => {
+                payload.put_u16(rd.typ as u16);
+                payload.put(&rd.val[..]);
+                let plen = prefix.prefix_len();
+                payload.put_u8(plen);
+                let psize = nlri_psize(plen);
+                match prefix {
+                    IpNet::V4(p) => payload.put(&p.addr().octets()[..psize]),
+                    IpNet::V6(p) => payload.put(&p.addr().octets()[..psize]),
+                }
+            }
+            MupRoute::Dsd { body, .. }
             | MupRoute::T1st { body, .. }
             | MupRoute::T2st { body, .. }
-            | MupRoute::Unknown { body, .. } => body,
-        };
-        buf.put_u8(body.len() as u8);
-        buf.put(body);
+            | MupRoute::Unknown { body, .. } => {
+                payload.put(&body[..]);
+            }
+        }
+        buf.put_u8(payload.len() as u8);
+        buf.put(&payload[..]);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RouteDistinguisherType;
+    use std::str::FromStr;
 
-    fn sample_isd_bytes() -> Vec<u8> {
-        // arch=1 (5G), route_type=1 (ISD), length=4, payload=[0xde,0xad,0xbe,0xef]
-        vec![0x01, 0x00, 0x01, 0x04, 0xde, 0xad, 0xbe, 0xef]
+    fn sample_rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65000:3").unwrap()
+    }
+
+    fn opaque_isd_bytes() -> Vec<u8> {
+        // arch=1, route_type=1, length=12 (RD=8 + plen=1 + prefix=3).
+        let mut v = vec![0x01, 0x00, 0x01, 12];
+        v.extend_from_slice(&[0x00, 0x00]); // RD type=ASN
+        v.extend_from_slice(&[0xFD, 0xE8]); // ASN 65000
+        v.extend_from_slice(&[0x00, 0x00, 0x00, 0x03]); // value 3
+        v.push(24); // prefix len
+        v.extend_from_slice(&[10, 0, 0]); // 10.0.0.0
+        v
     }
 
     #[test]
@@ -240,29 +346,141 @@ mod tests {
         assert_eq!(MupRouteType::from(3), MupRouteType::T1st);
     }
 
-    fn round_trip(route: MupRoute, addpath: bool) {
+    fn round_trip(route: MupRoute, addpath: bool, afi: Afi) {
         let mut buf = BytesMut::new();
         route.nlri_emit(&mut buf);
         let (rest, parsed) =
-            MupRoute::parse_nlri(&buf[..], addpath).expect("nlri_emit must round-trip");
+            MupRoute::parse(&buf[..], addpath, afi).expect("nlri_emit must round-trip");
         assert!(rest.is_empty(), "trailing bytes after parse: {rest:?}");
         assert_eq!(parsed, route);
     }
 
     #[test]
-    fn isd_round_trips_without_addpath() {
+    fn isd_v4_round_trip() {
         round_trip(
             MupRoute::Isd {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
-                body: vec![0xde, 0xad, 0xbe, 0xef],
+                rd: sample_rd(),
+                prefix: "10.0.0.0/24".parse().unwrap(),
             },
             false,
+            Afi::Ip,
         );
     }
 
     #[test]
-    fn dsd_round_trips_without_addpath() {
+    fn isd_v4_host_route_round_trip() {
+        round_trip(
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "192.0.2.1/32".parse().unwrap(),
+            },
+            false,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn isd_v4_default_route_round_trip() {
+        round_trip(
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "0.0.0.0/0".parse().unwrap(),
+            },
+            false,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn isd_v6_round_trip() {
+        round_trip(
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8::/64".parse().unwrap(),
+            },
+            false,
+            Afi::Ip6,
+        );
+    }
+
+    #[test]
+    fn isd_v6_host_route_round_trip() {
+        round_trip(
+            MupRoute::Isd {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8::1/128".parse().unwrap(),
+            },
+            false,
+            Afi::Ip6,
+        );
+    }
+
+    #[test]
+    fn isd_add_path_round_trip() {
+        round_trip(
+            MupRoute::Isd {
+                id: 0xCAFEBABE,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.1.0.0/16".parse().unwrap(),
+            },
+            true,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn isd_parses_known_bytes_against_v4_afi() {
+        let bytes = opaque_isd_bytes();
+        let (rest, route) = MupRoute::parse(&bytes, false, Afi::Ip).unwrap();
+        assert!(rest.is_empty());
+        match route {
+            MupRoute::Isd {
+                arch,
+                rd,
+                prefix,
+                id,
+            } => {
+                assert_eq!(id, 0);
+                assert_eq!(arch, MupArchitectureType::Gpp5g);
+                assert_eq!(rd.typ, RouteDistinguisherType::ASN);
+                assert_eq!(prefix.to_string(), "10.0.0.0/24");
+            }
+            other => panic!("expected Isd, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn isd_rejects_prefix_len_over_v4_max() {
+        // arch=1, route_type=1, length=10, RD(8) + plen=33 + 1 byte
+        let mut v = vec![0x01, 0x00, 0x01, 10];
+        v.extend_from_slice(&[0; 8]); // RD
+        v.push(33); // > 32 for IPv4
+        v.push(0);
+        assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn isd_rejects_prefix_len_over_v6_max() {
+        let mut v = vec![0x01, 0x00, 0x01, 10];
+        v.extend_from_slice(&[0; 8]);
+        v.push(129); // > 128
+        v.push(0);
+        assert!(MupRoute::parse(&v, false, Afi::Ip6).is_err());
+    }
+
+    #[test]
+    fn dsd_opaque_round_trip() {
         round_trip(
             MupRoute::Dsd {
                 id: 0,
@@ -270,11 +488,12 @@ mod tests {
                 body: vec![1, 2, 3],
             },
             false,
+            Afi::Ip,
         );
     }
 
     #[test]
-    fn t1st_round_trips_without_addpath() {
+    fn t1st_opaque_round_trip() {
         round_trip(
             MupRoute::T1st {
                 id: 0,
@@ -282,11 +501,12 @@ mod tests {
                 body: vec![0; 16],
             },
             false,
+            Afi::Ip6,
         );
     }
 
     #[test]
-    fn t2st_round_trips_without_addpath() {
+    fn t2st_opaque_round_trip() {
         round_trip(
             MupRoute::T2st {
                 id: 0,
@@ -294,11 +514,12 @@ mod tests {
                 body: vec![],
             },
             false,
+            Afi::Ip,
         );
     }
 
     #[test]
-    fn unknown_route_type_round_trips() {
+    fn unknown_route_type_round_trip() {
         round_trip(
             MupRoute::Unknown {
                 id: 0,
@@ -307,18 +528,7 @@ mod tests {
                 body: vec![0xaa, 0xbb],
             },
             false,
-        );
-    }
-
-    #[test]
-    fn add_path_round_trips() {
-        round_trip(
-            MupRoute::Isd {
-                id: 0x1234_5678,
-                arch: MupArchitectureType::Gpp5g,
-                body: vec![0xff; 10],
-            },
-            true,
+            Afi::Ip,
         );
     }
 
@@ -328,43 +538,32 @@ mod tests {
             MupRoute::Isd {
                 id: 0,
                 arch: MupArchitectureType::Unknown(42),
-                body: vec![0xde, 0xad],
+                rd: sample_rd(),
+                prefix: "10.0.0.0/8".parse().unwrap(),
             },
             false,
+            Afi::Ip,
         );
     }
 
     #[test]
-    fn parses_known_isd_bytes() {
-        let bytes = sample_isd_bytes();
-        let (rest, route) = MupRoute::parse_nlri(&bytes, false).unwrap();
-        assert!(rest.is_empty());
-        match route {
-            MupRoute::Isd { id, arch, body } => {
-                assert_eq!(id, 0);
-                assert_eq!(arch, MupArchitectureType::Gpp5g);
-                assert_eq!(body, vec![0xde, 0xad, 0xbe, 0xef]);
-            }
-            other => panic!("expected Isd, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn truncated_input_errors() {
-        // Header says length=4 but only 2 body bytes follow.
+    fn truncated_body_errors() {
+        // Header length=4 but only 2 body bytes follow.
         let bytes = [0x01, 0x00, 0x01, 0x04, 0x00, 0x00];
-        assert!(MupRoute::parse_nlri(&bytes, false).is_err());
+        assert!(MupRoute::parse(&bytes, false, Afi::Ip).is_err());
     }
 
     #[test]
-    fn empty_body_round_trips() {
-        round_trip(
-            MupRoute::T2st {
-                id: 0,
-                arch: MupArchitectureType::Gpp5g,
-                body: vec![],
-            },
-            false,
-        );
+    fn isd_body_len_matches_emitted_size() {
+        let route = MupRoute::Isd {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        };
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        // 1 arch + 2 rt + 1 len + body
+        assert_eq!(buf.len(), 4 + route.body_len());
     }
 }

@@ -204,7 +204,7 @@ impl MpUnreachAttr {
                 ));
             }
             let (input, withdraws) =
-                many0_complete(|i| MupRoute::parse_nlri(i, add_path)).parse(input)?;
+                many0_complete(|i| MupRoute::parse(i, add_path, header.afi)).parse(input)?;
             return Ok((
                 input,
                 MpUnreachAttr::Mup {
@@ -320,7 +320,15 @@ impl fmt::Debug for MpUnreachAttr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MupArchitectureType;
+    use crate::{MupArchitectureType, RouteDistinguisher};
+    use std::str::FromStr;
+
+    /// Minimal ISD body: 8 zero RD bytes + plen=0 (default route).
+    fn min_isd_body() -> Vec<u8> {
+        let mut v = vec![0u8; 8];
+        v.push(0);
+        v
+    }
 
     /// MUP MP_UNREACH inner value: AFI + SAFI + withdraws.
     fn build(afi: u16, withdraws: &[u8]) -> Vec<u8> {
@@ -342,7 +350,7 @@ mod tests {
 
     #[test]
     fn mup_ipv4_unreach_round_trips() {
-        let mut nlri = mup_nlri(1, &[0xaa, 0xbb]);
+        let mut nlri = mup_nlri(1, &min_isd_body());
         nlri.extend_from_slice(&mup_nlri(4, &[]));
         let value = build(1, &nlri);
         let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
@@ -392,7 +400,8 @@ mod tests {
             MupRoute::Isd {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
-                body: vec![1, 2, 3],
+                rd: RouteDistinguisher::from_str("65000:7").unwrap(),
+                prefix: "2001:db8::/64".parse().unwrap(),
             },
             MupRoute::T1st {
                 id: 0,
