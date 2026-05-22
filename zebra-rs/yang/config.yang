@@ -434,10 +434,12 @@ module config {
         }
       }
       container ospfv3 {
-        // Schema stub mirroring the OSPFv2 shape. No Rust wiring yet:
-        // `Ospf<Ospfv3>::new` is not implemented and there is no v3
-        // config callback registration. Present so configs can be
-        // staged and the CLI completion works once v3 lands.
+        // OSPFv3 (RFC 5340). Shape mirrors `container ospf` so a
+        // v3 config differs from v2 only in the top-level keyword.
+        // Per-interface knobs (`priority`, `hello-interval`,
+        // `dead-interval`, `retransmit-interval`, `mtu-ignore`)
+        // share semantics with their v2 counterparts; the v3
+        // callbacks live in `config_v3.rs`.
         presence "Enables configuration of OSPFv3";
         leaf router-id {
           type inet:ipv4-address;
@@ -457,6 +459,21 @@ module config {
               type string;
             }
             leaf enable {
+              type boolean;
+            }
+            leaf priority {
+              type uint8;
+            }
+            leaf hello-interval {
+              type uint16;
+            }
+            leaf dead-interval {
+              type uint32;
+            }
+            leaf retransmit-interval {
+              type uint16;
+            }
+            leaf mtu-ignore {
               type boolean;
             }
           }
