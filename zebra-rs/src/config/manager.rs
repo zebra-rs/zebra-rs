@@ -10,7 +10,7 @@ use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::json_read;
 use super::nd::spawn_nd;
-use super::ospf::{despawn_ospf, spawn_ospf};
+use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
@@ -365,6 +365,7 @@ impl ConfigManager {
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
 
         let mut ospf = false;
+        let mut ospfv3 = false;
         let mut isis = false;
         let mut bgp = false;
         let mut bfd = false;
@@ -421,7 +422,18 @@ impl ConfigManager {
             if paths.is_none() {
                 continue;
             }
-            if !ospf && op == ConfigOp::Set && line.starts_with("router ospf") {
+            // `router ospfv3` must be matched before `router ospf`:
+            // the latter's prefix-match would otherwise swallow it
+            // and spawn an OSPFv2 instance for a v3 config block.
+            if !ospfv3 && op == ConfigOp::Set && line.starts_with("router ospfv3") {
+                ospfv3 = true;
+                spawn_ospfv3(self);
+            }
+            if !ospf
+                && op == ConfigOp::Set
+                && line.starts_with("router ospf")
+                && !line.starts_with("router ospfv3")
+            {
                 ospf = true;
                 spawn_ospf(self);
             }
@@ -511,7 +523,17 @@ impl ConfigManager {
         if self.protocol_tasks.borrow().contains_key("bgp") && !proto_in_candidate("bgp") {
             despawn_bgp(self);
         }
-        if self.protocol_tasks.borrow().contains_key("ospf") && !proto_in_candidate("ospf") {
+        // `router ospf` vs `router ospfv3`: the prefix-match in
+        // `proto_in_candidate` would match v2 against a v3-only
+        // config, so look up v3 first with its full needle.
+        if self.protocol_tasks.borrow().contains_key("ospfv3") && !proto_in_candidate("ospfv3") {
+            despawn_ospfv3(self);
+        }
+        if self.protocol_tasks.borrow().contains_key("ospf")
+            && !candidate
+                .lines()
+                .any(|l| l.starts_with("router ospf") && !l.starts_with("router ospfv3"))
+        {
             despawn_ospf(self);
         }
         if self.protocol_tasks.borrow().contains_key("isis") && !proto_in_candidate("isis") {

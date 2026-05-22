@@ -5,11 +5,16 @@ use super::Ospf;
 use super::OspfLink;
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
+use super::version::{OspfVersion, Ospfv2};
 
 use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;
 
-pub type Callback = fn(&mut Ospf, Args, ConfigOp) -> Option<()>;
+/// YANG-path → handler dispatch type. Parameterized over `V` so an
+/// `Ospf<Ospfv3>` instance carries its own `Callback<Ospfv3>` table,
+/// distinct from `Ospf<Ospfv2>`'s. Defaults to `Ospfv2` to keep
+/// existing v2 callsites resolving unchanged.
+pub type Callback<V = Ospfv2> = fn(&mut Ospf<V>, Args, ConfigOp) -> Option<()>;
 
 impl Ospf {
     const OSPF: &str = "/router/ospf";
@@ -62,7 +67,7 @@ impl Ospf {
 /// the 32-bit area ID. `area 0` and `area 0.0.0.0` both normalize to
 /// `0.0.0.0`. Tries dotted-quad first (more specific) so a bare digit
 /// only falls through to the decimal interpretation.
-fn parse_area_id(s: &str) -> Option<Ipv4Addr> {
+pub(super) fn parse_area_id(s: &str) -> Option<Ipv4Addr> {
     if let Ok(addr) = s.parse::<Ipv4Addr>() {
         return Some(addr);
     }
@@ -73,7 +78,7 @@ fn parse_area_id(s: &str) -> Option<Ipv4Addr> {
 /// comes from the parent `area` list in the YANG schema; each
 /// per-interface callback writes it into `link.config.area` so this
 /// IFSM transition helper keeps working unchanged.
-pub(super) fn link_should_enable(link: &OspfLink) -> (bool, Ipv4Addr) {
+pub(super) fn link_should_enable<V: OspfVersion>(link: &OspfLink<V>) -> (bool, Ipv4Addr) {
     if !link.config.enable {
         return (false, Ipv4Addr::UNSPECIFIED);
     }
@@ -81,7 +86,11 @@ pub(super) fn link_should_enable(link: &OspfLink) -> (bool, Ipv4Addr) {
     (true, area)
 }
 
-pub(super) fn apply_link_enable_transition(link: &OspfLink, next: bool, next_id: Ipv4Addr) {
+pub(super) fn apply_link_enable_transition<V: OspfVersion>(
+    link: &OspfLink<V>,
+    next: bool,
+    next_id: Ipv4Addr,
+) {
     let curr = link.enabled;
     let curr_id = link.area_id;
 
@@ -107,10 +116,10 @@ fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Opt
     None
 }
 
-fn ospf_link_get_mut_by_name<'a>(
-    links: &'a mut BTreeMap<u32, OspfLink>,
+pub(super) fn ospf_link_get_mut_by_name<'a, V: OspfVersion>(
+    links: &'a mut BTreeMap<u32, OspfLink<V>>,
     name: &str,
-) -> Option<&'a mut OspfLink> {
+) -> Option<&'a mut OspfLink<V>> {
     links.values_mut().find(|link| link.name == name)
 }
 
