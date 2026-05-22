@@ -78,6 +78,18 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub segment_routing: super::srmpls::SegmentRoutingMode,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
+    /// v3-only outbound packet channel. `Ospf<Ospfv3>::new` spawns
+    /// `network_v6::write_packet_v6` consuming the matching receiver;
+    /// producers of v3 outgoing packets (the v3 IFSM/NFSM, once they
+    /// land) clone this sender to push packets. `None` on v2.
+    #[allow(dead_code)]
+    pub v3_send_tx: Option<UnboundedSender<super::network_v6::Ospfv3Send>>,
+    /// v3-only inbound packet channel. `Ospf<Ospfv3>::new` spawns
+    /// `network_v6::read_packet_v6` producing into the matching
+    /// sender; the v3 serve loop (once it lands) will `take()` this
+    /// receiver. `None` on v2.
+    #[allow(dead_code)]
+    pub v3_recv_rx: Option<UnboundedReceiver<super::network_v6::Ospfv3Recv>>,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -204,6 +216,8 @@ impl Ospf<Ospfv2> {
             spf_last: None,
             spf_duration: None,
             sock,
+            v3_send_tx: None,
+            v3_recv_rx: None,
         };
         ospf.callback_build();
         ospf.show_build();
@@ -1393,11 +1407,13 @@ impl Ospf<Ospfv3> {
     ///   empty for v3 until the v3 config plumbing lands.
     /// - **No network read/write task spawn.** The v2 path uses
     ///   `read_packet` / `write_packet`, which are typed against
-    ///   `Message<Ospfv2>` and the v2 wire format. The v3 packet
-    ///   path is its own substantial PR (Hello over `ff02::5`,
-    ///   pseudo-header checksum, Interface-ID handling); until it
-    ///   lands the `tx` / `ptx` channels exist but nothing drives
-    ///   them. The four `build_*_lsa` self-origination helpers
+    ///   `Message<Ospfv2>` and the v2 wire format. The v3 wire path
+    ///   uses `network_v6::{read_packet_v6, write_packet_v6}` —
+    ///   spawned here, but the channels they drive are not yet
+    ///   bridged into `Message<Ospfv3>` events. Until the v3 IFSM /
+    ///   NFSM lands the rx side just buffers; producers will clone
+    ///   `v3_send_tx` to push outgoing packets through the v6
+    ///   socket. The four `build_*_lsa` self-origination helpers
     ///   above can still be exercised from tests.
     ///
     /// Behind `#[allow(dead_code)]` until `main.rs` learns to spawn
@@ -1407,6 +1423,29 @@ impl Ospf<Ospfv3> {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, _prx) = mpsc::unbounded_channel();
+
+        // v3 raw-IPv6 packet path. `read_packet_v6` recvmsg's,
+        // verifies the RFC 5340 §4.4 pseudo-header checksum, parses
+        // `Ospfv3Packet`, and pushes `Ospfv3Recv` items. `write_packet_v6`
+        // consumes `Ospfv3Send` items, stamps the checksum using the
+        // supplied (src, dst) v6, and sendmsg's with an `in6_pktinfo`
+        // ancillary so the kernel emits from the chosen ifindex /
+        // link-local source.
+        let (v3_send_tx, v3_send_rx) = mpsc::unbounded_channel();
+        let (v3_recv_tx, v3_recv_rx) = mpsc::unbounded_channel();
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                super::network_v6::read_packet_v6(sock, v3_recv_tx).await;
+            });
+        }
+        {
+            let sock = sock.clone();
+            tokio::spawn(async move {
+                super::network_v6::write_packet_v6(sock, v3_send_rx).await;
+            });
+        }
+
         Self {
             tx,
             rx,
@@ -1430,6 +1469,8 @@ impl Ospf<Ospfv3> {
             spf_last: None,
             spf_duration: None,
             sock,
+            v3_send_tx: Some(v3_send_tx),
+            v3_recv_rx: Some(v3_recv_rx),
         }
     }
 

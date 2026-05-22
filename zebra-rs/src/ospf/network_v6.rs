@@ -9,9 +9,9 @@
 //! `in6_pktinfo` ancillary message so the kernel uses the egress
 //! interface we picked instead of doing a fresh route lookup.
 //!
-//! These tasks are dormant until the `Ospf<Ospfv3>` instance type
-//! (Phase 6) spawns them — every public item carries
-//! `#[allow(dead_code)]` for now.
+//! Spawned by `Ospf<Ospfv3>::new` (see `ospf::inst`). The channels
+//! they drive are stored on the v3 instance as `v3_send_tx` /
+//! `v3_recv_rx`; consumers / producers wire up as the v3 FSM lands.
 
 use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::net::Ipv6Addr;
@@ -36,7 +36,6 @@ use ospf_packet::{Ospfv3Packet, ospfv3_verify_checksum, parse_v3};
 /// address; the IPv6 pseudo-header checksum (RFC 5340 §4.4) folds
 /// it in, so the receiver's verify will fail if this doesn't
 /// match what the kernel ends up putting in the IPv6 header.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Ospfv3Send {
     pub packet: Ospfv3Packet,
@@ -67,7 +66,6 @@ pub struct Ospfv3Recv {
 /// IPv6 raw sockets (unlike v4) deliver the OSPF payload directly
 /// — the kernel strips the IPv6 header on receive — so there's no
 /// `IPV4_HEADER_LEN` skip to mirror.
-#[allow(dead_code)]
 pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospfv3Recv>) {
     let mut buf = [0u8; 1024 * 16];
     let mut iov = [IoSliceMut::new(&mut buf)];
@@ -131,7 +129,6 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
 /// Long-lived send loop for the v3 socket. Consumes `Ospfv3Send`
 /// items from `rx` and pushes them onto the wire with the IPv6
 /// pseudo-header checksum stamped in.
-#[allow(dead_code)]
 pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Ospfv3Send>) {
     while let Some(item) = rx.recv().await {
         let Ospfv3Send {
