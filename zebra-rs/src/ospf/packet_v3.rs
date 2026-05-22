@@ -7,12 +7,15 @@
 use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
-use ospf_packet::{Ospfv3Hello, Ospfv3Options, Ospfv3Packet, Ospfv3Payload};
+use ospf_packet::{Ospfv3DbDesc, Ospfv3Hello, Ospfv3Options, Ospfv3Packet, Ospfv3Payload};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::network_v6::Ospfv3Send;
 use super::version::Ospfv3;
-use super::{IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink};
+use super::{
+    Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
+    inst::OspfInterface,
+};
 
 /// First link-local address on this interface, or `None` if none has
 /// been picked up from `rib::Link` yet. The v3 send loop folds this
@@ -230,5 +233,99 @@ pub fn ospfv3_hello_recv(
                 .send(Message::Ifsm(oi.index, IfsmEvent::NeighborChange))
                 .unwrap();
         }
+    }
+}
+
+/// First link-local v6 address among the interface's configured
+/// addresses. Same helper as `link_local_src` but on the
+/// `OspfInterface<Ospfv3>` borrow used by NFSM-side packet senders.
+fn interface_link_local_src(oi: &OspfInterface<Ospfv3>) -> Option<Ipv6Addr> {
+    oi.addr.iter().find_map(|a| {
+        let addr = a.prefix.addr();
+        addr.is_unicast_link_local().then_some(addr)
+    })
+}
+
+/// Pack the LSAs currently queued on `nbr.db_sum` into `dd.lsa_headers`.
+/// Mirrors v2's `ospf_packet_db_desc_set`.
+fn db_desc_pack(nbr: &mut Neighbor<Ospfv3>, dd: &mut Ospfv3DbDesc) {
+    while let Some(lsah) = nbr.db_sum.pop() {
+        dd.lsa_headers.push(lsah);
+    }
+}
+
+/// Emit an OSPFv3 Database Description packet (RFC 5340 §A.3.3).
+///
+/// Mirrors v2's `ospf_db_desc_send`. Differences from v2:
+///
+/// - Wire format. The v3 DBD has a 24-bit Options field (V6/E/R
+///   set), an 8-bit reserved, then the master/slave flags and DD
+///   sequence number; LSA headers are v3-shaped (`Ospfv3LsaHeader`,
+///   §A.4.2).
+/// - Transport. v3 sends through the dedicated `Ospfv3Send` channel
+///   (so `network_v6::write_packet_v6` can stamp the IPv6
+///   pseudo-header checksum); v2 sends through the generic
+///   `Message<V>::Send` channel. The trait override
+///   `Ospfv3::send_db_desc` (in `version.rs`) routes here.
+/// - Destination is the neighbor's link-local v6 (a `/128` we
+///   captured from the Hello recv). Source is our own link-local.
+pub fn ospfv3_db_desc_send(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    oident: &Identity<Ospfv3>,
+) {
+    let area = oi.area_id;
+    let mut dd = Ospfv3DbDesc {
+        if_mtu: oi.mtu as u16,
+        flags: nbr.dd.flags,
+        seqnum: nbr.dd.seqnum,
+        ..Default::default()
+    };
+    dd.options.set_v6(true);
+    dd.options.set_e(true);
+    dd.options.set_r(true);
+
+    db_desc_pack(nbr, &mut dd);
+
+    // Remember the DD we sent so it can be retransmitted by the
+    // master while waiting for the slave's response, or resent by
+    // the slave when the master sends a duplicate. RFC 2328 §10.8 /
+    // RFC 5340 §4.2.2 (reuses v2 §10.8).
+    nbr.dd.sent = Some(dd.clone());
+
+    // Master retransmits its DD at RxmtInterval until acked; slave
+    // does not retransmit on a timer, only on duplicate receipt.
+    if nbr.dd.flags.master() {
+        nbr.timer.db_desc = Some(super::nfsm::ospf_db_desc_timer(nbr, oi.retransmit_interval));
+    } else {
+        nbr.timer.db_desc = None;
+    }
+
+    let packet = Ospfv3Packet::new(
+        &oident.router_id,
+        &area,
+        0, // instance_id (RFC 5340 §A.3.1)
+        Ospfv3Payload::DbDesc(dd),
+    );
+
+    let Some(tx) = oi.v3_send_tx else {
+        tracing::debug!("[v3 DBD:Send] no v3 send channel on OspfInterface");
+        return;
+    };
+    let Some(src) = interface_link_local_src(oi) else {
+        tracing::debug!("[v3 DBD:Send] no link-local source on interface");
+        return;
+    };
+
+    let item = Ospfv3Send {
+        packet,
+        ifindex: nbr.ifindex,
+        // Unicast to the neighbor's link-local (captured in
+        // `ospfv3_hello_recv` as a `/128` Ipv6Net).
+        dest: Some(nbr.ident.prefix.addr()),
+        src,
+    };
+    if let Err(e) = tx.send(item) {
+        tracing::warn!("[v3 DBD:Send] channel send failed: {}", e);
     }
 }
