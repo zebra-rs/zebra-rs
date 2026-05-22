@@ -198,6 +198,29 @@ impl<V: OspfVersion> Ospf<V> {
             .get(&ifindex)
             .map_or_else(|| "unknown".to_string(), |link| link.name.clone())
     }
+
+    /// One-second deferred SPF trigger for `area_id`. Same shape
+    /// for v2 and v3; the `Message::SpfCalc` variant doesn't carry
+    /// V-specific data, so the timer body is generic.
+    fn ospf_spf_timer_generic(tx: &UnboundedSender<Message<V>>, area_id: Ipv4Addr) -> Timer {
+        let tx = tx.clone();
+        Timer::new(Timer::second(1), TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::SpfCalc(area_id));
+            }
+        })
+    }
+
+    /// Arm the SPF timer on `area` if not already armed. v3 calls
+    /// this from `router_lsa_originate` / `network_lsa_originate`
+    /// / `router_intra_area_prefix_lsa_originate` so any LSA
+    /// install kicks off an SPF after a 1-second coalescing window.
+    fn ospf_spf_schedule_generic(tx: &UnboundedSender<Message<V>>, area: &mut OspfArea<V>) {
+        if area.spf_timer.is_none() {
+            area.spf_timer = Some(Self::ospf_spf_timer_generic(tx, area.id));
+        }
+    }
 }
 
 impl Ospf<Ospfv2> {
@@ -255,13 +278,7 @@ impl Ospf<Ospfv2> {
     }
 
     fn ospf_spf_timer(tx: &UnboundedSender<Message>, area_id: Ipv4Addr) -> Timer {
-        let tx = tx.clone();
-        Timer::new(Timer::second(1), TimerType::Once, move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::SpfCalc(area_id));
-            }
-        })
+        Self::ospf_spf_timer_generic(tx, area_id)
     }
 
     fn ospf_spf_schedule(tx: &UnboundedSender<Message>, area: &mut OspfArea) {
@@ -1847,6 +1864,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(AREA0) {
             area.lsdb.install_originated(lsa, &self.tx, Some(AREA0));
+            Self::ospf_spf_schedule_generic(&self.tx, area);
         }
 
         self.flood_self_originated_lsa(AREA0, &flood_lsa);
@@ -1915,6 +1933,41 @@ impl Ospf<Ospfv3> {
                     tracing::warn!("[v3 Flood] channel send failed: {}", e);
                 }
             }
+        }
+    }
+
+    /// Run an intra-area SPF calculation for `area_id`.
+    ///
+    /// Walks the area's Router-LSAs and Network-LSAs (both
+    /// area-scope, both in `area.lsdb`), builds a `spf::Graph` with
+    /// one vertex per advertising router, runs Dijkstra via the
+    /// existing `spf::spf`, and stores the result in
+    /// `top.spf_result` / `top.graph`. No RIB push yet —
+    /// Intra-Area-Prefix-LSA prefix walk + IPv6 next-hop resolution
+    /// + RIB integration land in a follow-up PR.
+    ///
+    /// Differences from v2's `perform_spf_calculation`:
+    ///
+    /// - Router-LSA links use `(interface_id,
+    ///   neighbor_interface_id, neighbor_router_id)` per
+    ///   RFC 5340 §A.4.3 — there's no `(link_id, link_data)` pair.
+    ///   The transit-network key is the DR's
+    ///   `(router_id, interface_id)`, looked up in the
+    ///   Network-LSA table by `(ls_id, adv_router)`.
+    /// - No stub-network link type (gone in v3).
+    /// - No TOS metric column (collapsed to a single 16-bit metric).
+    pub fn perform_spf_calculation(&mut self, area_id: Ipv4Addr) {
+        let (graph, source_node) = graph_v3(self, area_id);
+
+        if let Some(source) = source_node {
+            let start = Instant::now();
+            let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+            let end = Instant::now();
+            self.spf_duration = Some(end.duration_since(start));
+            self.spf_last = Some(end);
+
+            self.spf_result = Some(spf_result);
+            self.graph = Some(graph);
         }
     }
 
@@ -1997,6 +2050,20 @@ impl Ospf<Ospfv3> {
                 if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
                     self.process_neighbor_state_change(index, src, old_state, new_state);
                 }
+            }
+            Message::SpfSchedule(area_id) => {
+                if let Some(area_id) = area_id
+                    && let Some(area) = self.areas.get_mut(area_id)
+                {
+                    Self::ospf_spf_schedule_generic(&self.tx, area);
+                }
+            }
+            Message::SpfCalc(area_id) => {
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_timer = None;
+                }
+                tracing::info!("[v3 SPF] Calculation triggered for area {}", area_id);
+                self.perform_spf_calculation(area_id);
             }
             other => {
                 tracing::debug!(
@@ -2150,6 +2217,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Self::ospf_spf_schedule_generic(&self.tx, area);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -2270,6 +2338,7 @@ impl Ospf<Ospfv3> {
         let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Self::ospf_spf_schedule_generic(&self.tx, area);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
@@ -2905,6 +2974,140 @@ fn add_as_external_routes(
         };
         rib_insert(rib, prefix, spf_route);
     }
+}
+
+/// Build the intra-area SPF graph for an OSPFv3 area.
+///
+/// Mirrors v2's `graph` but uses the v3 LSA-body shapes (Router-LSA
+/// links carry `neighbor_router_id` directly; Network-LSAs are
+/// keyed by `(interface_id_of_DR, advertising_router=DR_router_id)`).
+/// Returns `(graph, Some(source))` where `source` is the SPF
+/// vertex index for this router's Router-LSA, or
+/// `(graph, None)` if no own Router-LSA exists yet.
+fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody};
+
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return (graph, source_node);
+    };
+
+    // Collect non-MaxAge Router-LSAs.
+    let mut router_lsas = Vec::new();
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        router_lsas.push((adv_router, lsa.originated, lsa.data.clone()));
+    }
+
+    // Side-table for the bidirectional back-link check on
+    // PointToPoint / VirtualLink edges. Keyed by adv_router; refs
+    // into the local router_lsas Vec.
+    let mut router_lsa_by_id: std::collections::HashMap<Ipv4Addr, &ospf_packet::Ospfv3RouterLsa> =
+        std::collections::HashMap::new();
+    for (adv_router, _, lsa_data) in &router_lsas {
+        if let Ospfv3LsBody::Router(ref router_body) = lsa_data.body {
+            router_lsa_by_id.insert(*adv_router, router_body);
+        }
+    }
+
+    // Collect Network-LSAs by (DR_interface_id, DR_router_id) →
+    // attached_routers. RFC 5340 §A.4.4: Network-LSA's ls_id is the
+    // DR's Interface ID; adv_router is the DR's router-id.
+    let mut network_lsas: std::collections::HashMap<(u32, Ipv4Addr), Vec<Ipv4Addr>> =
+        std::collections::HashMap::new();
+    for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_NETWORK_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if let Ospfv3LsBody::Network(ref net_body) = lsa.data.body {
+            network_lsas.insert((ls_id, adv_router), net_body.attached_routers.clone());
+        }
+    }
+
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = top.lsp_map.get(*adv_router);
+
+        if *originated {
+            source_node = Some(node_id);
+        }
+
+        let mut vertex = spf::Vertex {
+            id: node_id,
+            name: adv_router.to_string(),
+            sys_id: adv_router.to_string(),
+            ..Default::default()
+        };
+
+        if let Ospfv3LsBody::Router(ref router_body) = lsa_data.body {
+            for link in &router_body.links {
+                use ospf_packet::Ospfv3RouterLinkType;
+                match link.link_type {
+                    Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
+                        // Bidirectional check: peer's Router-LSA
+                        // must exist (non-MaxAge) AND carry a
+                        // matching link back to us.
+                        let Some(peer_lsa) = router_lsa_by_id.get(&link.neighbor_router_id) else {
+                            continue;
+                        };
+                        let has_backlink = peer_lsa.links.iter().any(|l| {
+                            matches!(
+                                l.link_type,
+                                Ospfv3RouterLinkType::PointToPoint
+                                    | Ospfv3RouterLinkType::VirtualLink
+                            ) && l.neighbor_router_id == *adv_router
+                        });
+                        if !has_backlink {
+                            continue;
+                        }
+                        let to_id = top.lsp_map.get(link.neighbor_router_id);
+                        vertex.olinks.push(spf::Link {
+                            from: node_id,
+                            to: to_id,
+                            cost: link.metric as u32,
+                            link_id: 0,
+                        });
+                    }
+                    Ospfv3RouterLinkType::Transit => {
+                        // Bidirectional check: Network-LSA must list
+                        // us in attached_routers. Key is the DR's
+                        // (interface_id, router_id) from the
+                        // Router-LSA link's
+                        // (neighbor_interface_id, neighbor_router_id).
+                        let net_key = (link.neighbor_interface_id, link.neighbor_router_id);
+                        let Some(attached) = network_lsas.get(&net_key) else {
+                            continue;
+                        };
+                        if !attached.iter().any(|r| r == adv_router) {
+                            continue;
+                        }
+                        // Add edges to every other attached router
+                        // (excluding self) at the link's metric.
+                        for peer in attached {
+                            if peer == adv_router {
+                                continue;
+                            }
+                            let to_id = top.lsp_map.get(*peer);
+                            vertex.olinks.push(spf::Link {
+                                from: node_id,
+                                to: to_id,
+                                cost: link.metric as u32,
+                                link_id: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        graph.insert(node_id, vertex);
+    }
+
+    (graph, source_node)
 }
 
 fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {

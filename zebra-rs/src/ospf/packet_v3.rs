@@ -829,9 +829,11 @@ pub fn ospfv3_ls_upd_recv(
         // land in the per-link LSDB (RFC 5340 §4.5.2: link-scope
         // flooding is bounded to one segment).
         let cloned = lsa.clone();
+        let mut area_lsa_installed = false;
         match scope {
             Ospfv3LsaScope::Area => {
                 oi.lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+                area_lsa_installed = true;
             }
             Ospfv3LsaScope::As => {
                 oi.lsdb_as.install_lsa(cloned, oi.tx, None);
@@ -842,6 +844,13 @@ pub fn ospfv3_ls_upd_recv(
             Ospfv3LsaScope::Reserved => {
                 continue;
             }
+        }
+        // Area-scope install changes the SPF graph; ask the
+        // instance to schedule a calculation. v3 process_msg has
+        // a `Message::SpfSchedule` arm that defers to the generic
+        // `ospf_spf_schedule_generic`.
+        if area_lsa_installed {
+            let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
         }
 
         ack_headers.push(h.clone());

@@ -249,6 +249,21 @@ impl<V: OspfVersion> Lsdb<V> {
             .map(|(_, lsa)| lsa)
     }
 
+    /// Iterate LSAs of a particular raw `u16` LS-Type. Parallel to
+    /// `iter_by_type` but accepts the v3-shaped raw type (which
+    /// doesn't compress to a v2 `OspfLsType`). Yields the
+    /// `((ls_id, advertising_router), &Lsa)` key shape that v3
+    /// graph builders expect.
+    pub fn iter_by_raw_type(
+        &self,
+        ls_type: u16,
+    ) -> impl Iterator<Item = ((u32, Ipv4Addr), &Lsa<V>)> {
+        self.tables
+            .iter()
+            .filter(move |((t, _, _), _)| *t == ls_type)
+            .map(|((_, id, adv), lsa)| ((*id, *adv), lsa))
+    }
+
     /// Drop the LSA at the given key. Key-only operation — no
     /// header field access, so trivially generic.
     pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
