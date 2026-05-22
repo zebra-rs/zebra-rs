@@ -601,6 +601,61 @@ impl Ospfv3RouterLsaLink {
         }
     }
 
+    /// PointToPoint link (RFC 5340 §A.4.3 link type 1) — unnumbered
+    /// adjacency across an OSPF point-to-point segment. The neighbor's
+    /// interface-id and router-id come from its Hellos.
+    pub fn point_to_point(
+        metric: u16,
+        my_interface_id: u32,
+        nbr_interface_id: u32,
+        nbr_router_id: Ipv4Addr,
+    ) -> Self {
+        Self::new(
+            Ospfv3RouterLinkType::PointToPoint,
+            metric,
+            my_interface_id,
+            nbr_interface_id,
+            nbr_router_id,
+        )
+    }
+
+    /// TransitNetwork link (RFC 5340 §A.4.3 link type 2) — broadcast
+    /// or NBMA segment where this router is fully adjacent with the
+    /// DR. Per §A.4.3 the "neighbor" fields name the DR: its
+    /// interface-id and its router-id.
+    pub fn transit_network(
+        metric: u16,
+        my_interface_id: u32,
+        dr_interface_id: u32,
+        dr_router_id: Ipv4Addr,
+    ) -> Self {
+        Self::new(
+            Ospfv3RouterLinkType::Transit,
+            metric,
+            my_interface_id,
+            dr_interface_id,
+            dr_router_id,
+        )
+    }
+
+    /// VirtualLink (RFC 5340 §A.4.3 link type 4) — neighbor across a
+    /// virtual link traversing the backbone area. The neighbor's
+    /// interface-id and router-id name the VL endpoint router.
+    pub fn virtual_link(
+        metric: u16,
+        my_interface_id: u32,
+        vl_endpoint_interface_id: u32,
+        vl_endpoint_router_id: Ipv4Addr,
+    ) -> Self {
+        Self::new(
+            Ospfv3RouterLinkType::VirtualLink,
+            metric,
+            my_interface_id,
+            vl_endpoint_interface_id,
+            vl_endpoint_router_id,
+        )
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put_u8(self.link_type.into());
         buf.put_u8(self.reserved);
@@ -630,6 +685,22 @@ pub struct Ospfv3RouterLsa {
 }
 
 impl Ospfv3RouterLsa {
+    /// Construct a Router-LSA body for self-origination.
+    ///
+    /// `flags` is built from the `OSPFV3_ROUTER_LSA_FLAG_*` bitmasks
+    /// (W / V / E / B per RFC 5340 §A.4.3). `options` is the standard
+    /// 24-bit Hello/DBD/LSA options bitfield. `links` is the list of
+    /// advertised adjacencies — typically constructed via the typed
+    /// `Ospfv3RouterLsaLink::point_to_point` / `transit_network` /
+    /// `virtual_link` helpers.
+    pub fn new(flags: u8, options: Ospfv3Options, links: Vec<Ospfv3RouterLsaLink>) -> Self {
+        Self {
+            flags,
+            options,
+            links,
+        }
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
         // (flags << 24) | options(24) packed into one 32-bit word.
         let word: u32 = ((self.flags as u32) << 24) | (self.options.into_bits() & 0x00FF_FFFF);
@@ -1796,6 +1867,83 @@ mod tests {
     }
 
     /// `Ospfv3Lsa::update` recomputes `length` to match the
+    /// Typed `Ospfv3RouterLsaLink::point_to_point` constructs a
+    /// PointToPoint (type 1) link with the supplied metric and
+    /// IDs. The other typed constructors follow the same shape.
+    #[test]
+    fn ospfv3_router_lsa_link_typed_constructors() {
+        let p2p = Ospfv3RouterLsaLink::point_to_point(
+            10,
+            0x0001_0001,
+            0x0002_0002,
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        assert_eq!(p2p.link_type, Ospfv3RouterLinkType::PointToPoint);
+        assert_eq!(p2p.metric, 10);
+        assert_eq!(p2p.interface_id, 0x0001_0001);
+        assert_eq!(p2p.neighbor_interface_id, 0x0002_0002);
+        assert_eq!(p2p.neighbor_router_id, Ipv4Addr::new(10, 0, 0, 2));
+
+        let transit = Ospfv3RouterLsaLink::transit_network(1, 7, 42, Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(transit.link_type, Ospfv3RouterLinkType::Transit);
+        assert_eq!(transit.interface_id, 7);
+        assert_eq!(transit.neighbor_interface_id, 42);
+        assert_eq!(transit.neighbor_router_id, Ipv4Addr::new(10, 0, 0, 5));
+
+        let vl = Ospfv3RouterLsaLink::virtual_link(100, 13, 99, Ipv4Addr::new(192, 0, 2, 1));
+        assert_eq!(vl.link_type, Ospfv3RouterLinkType::VirtualLink);
+        assert_eq!(vl.metric, 100);
+        assert_eq!(vl.interface_id, 13);
+        assert_eq!(vl.neighbor_interface_id, 99);
+    }
+
+    /// `Ospfv3RouterLsa::new` + the typed link constructors
+    /// produce a body that, wrapped in `Ospfv3Lsa` and updated,
+    /// roundtrips through emit/parse cleanly. Exercises the
+    /// "self-origination" build path end-to-end.
+    #[test]
+    fn ospfv3_router_lsa_self_origination_roundtrip() {
+        let body = Ospfv3RouterLsa::new(
+            OSPFV3_ROUTER_LSA_FLAG_B | OSPFV3_ROUTER_LSA_FLAG_E,
+            Ospfv3Options::new(),
+            vec![
+                Ospfv3RouterLsaLink::transit_network(10, 1, 5, Ipv4Addr::new(10, 0, 0, 5)),
+                Ospfv3RouterLsaLink::point_to_point(10, 2, 1, Ipv4Addr::new(10, 0, 0, 7)),
+            ],
+        );
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_ROUTER_LSA_TYPE,
+                link_state_id: 0,
+                advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Router(body),
+        };
+        lsa.update();
+
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        assert_eq!(buf.len(), lsa.h.length as usize);
+
+        let (_, parsed) = Ospfv3Lsa::parse_be(&buf).unwrap();
+        assert_eq!(parsed.h.ls_type, OSPFV3_ROUTER_LSA_TYPE);
+        assert_eq!(parsed.h.length, lsa.h.length);
+        assert_eq!(parsed.h.ls_checksum, lsa.h.ls_checksum);
+        match parsed.body {
+            Ospfv3LsBody::Router(r) => {
+                assert_eq!(r.flags, OSPFV3_ROUTER_LSA_FLAG_B | OSPFV3_ROUTER_LSA_FLAG_E);
+                assert_eq!(r.links.len(), 2);
+                assert_eq!(r.links[0].link_type, Ospfv3RouterLinkType::Transit);
+                assert_eq!(r.links[1].link_type, Ospfv3RouterLinkType::PointToPoint);
+            }
+            other => panic!("expected Router body, got {:?}", other),
+        }
+    }
+
     /// serialized body and stamps a non-zero Fletcher `ls_checksum`.
     /// Mutating any header or body field and re-running `update`
     /// produces a different checksum; mutating without running
