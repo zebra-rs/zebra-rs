@@ -303,6 +303,52 @@ impl<V: OspfVersion> Lsdb<V> {
         self.tables.get(&v2_lsa_key(ls_type, ls_id, adv_router))
     }
 
+    /// Install a parsed LSA into the LSDB and start its hold
+    /// timer. The key is derived from the LSA header via the
+    /// `OspfVersion` trait accessors; no version-specific body
+    /// destructuring happens here. v2 callers that need to do
+    /// extra processing (e.g. ingesting Opaque LSA TLVs into the
+    /// label / reach maps) wrap this with their own pre-step.
+    pub fn install_lsa(
+        &mut self,
+        lsa_data: V::Lsa,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        let lsa_key: OspfLsaKey = {
+            let h = V::lsa_header(&lsa_data);
+            (V::ls_type(h), V::ls_id(h), V::adv_router(h))
+        };
+        let ls_age = V::ls_age(V::lsa_header(&lsa_data));
+        let mut lsa = Lsa::<V>::new(lsa_data);
+        lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, ls_age));
+        self.tables.insert(lsa_key, lsa);
+    }
+
+    /// Install a self-originated LSA: same as [`install_lsa`] but
+    /// also marks `originated = true` and starts the refresh
+    /// timer. Caller is responsible for filtering (which LS Types
+    /// are originatable) and for recomputing checksum / length
+    /// via `V::update_lsa` before calling, since the body bytes
+    /// are committed to the LSDB verbatim.
+    pub fn install_originated(
+        &mut self,
+        lsa_data: V::Lsa,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        let lsa_key: OspfLsaKey = {
+            let h = V::lsa_header(&lsa_data);
+            (V::ls_type(h), V::ls_id(h), V::adv_router(h))
+        };
+        let ls_age = V::ls_age(V::lsa_header(&lsa_data));
+        let mut lsa = Lsa::<V>::new(lsa_data);
+        lsa.originated = true;
+        lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, ls_age));
+        lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+        self.tables.insert(lsa_key, lsa);
+    }
+
     /// Return the install timestamp of an LSA, if present. Now
     /// generic.
     pub fn lookup_install_time(
@@ -387,18 +433,13 @@ impl Lsdb<Ospfv2> {
         area_id: Option<Ipv4Addr>,
     ) {
         use OspfLsType::*;
-        let ls_type = ospf_lsa.h.ls_type;
-        match ls_type {
+        match ospf_lsa.h.ls_type {
             Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
             | OpaqueAreaLocal => {
+                // v2-specific Fletcher checksum + length recompute,
+                // then dispatch through the generic install path.
                 ospf_lsa.update();
-                let lsa_key: OspfLsaKey =
-                    v2_lsa_key(ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
-                let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
-                lsa.originated = true;
-                lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
-                lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-                self.tables.insert(lsa_key, lsa);
+                self.install_originated(ospf_lsa, tx, area_id);
             }
             _ => {}
         }
@@ -410,15 +451,12 @@ impl Lsdb<Ospfv2> {
         tx: &UnboundedSender<Message<Ospfv2>>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let ls_type = ospf_lsa.h.ls_type;
-        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ospf_lsa.h.ls_id, ospf_lsa.h.adv_router);
-
+        // v2-specific SR-MPLS / Opaque ExtPrefix ingestion (label
+        // map + reach map). Stays v2-only because OspfLsp variants
+        // are v2 codec types with no v3 analogue.
         self.update_lsa(&ospf_lsa);
-
-        let mut lsa = Lsa::<Ospfv2>::new(ospf_lsa);
-        lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, lsa.data.h.ls_age));
-
-        self.tables.insert(lsa_key, lsa);
+        // Generic key construction + hold timer + insertion.
+        self.install_lsa(ospf_lsa, tx, area_id);
     }
 
     pub fn update_lsa(&mut self, lsa: &OspfLsa) {
