@@ -1,0 +1,16 @@
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    neighbor-groups:
+      neighbor-group:
+      - name: RR
+        remote-as: 65002
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      neighbor-group: RR
