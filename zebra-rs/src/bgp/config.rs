@@ -2108,3 +2108,203 @@ mod bfd_wiring_tests {
         assert!(bgp.rx.try_recv().is_err());
     }
 }
+
+#[cfg(test)]
+mod neighbor_group_wiring_tests {
+    //! End-to-end exercise of the neighbor-group inheritance callback
+    //! paths landed across PR #758 (static-peer resolver), PR #760
+    //! (reactive sweep on group remote-as Set/Delete), and PR #762
+    //! (group-level delete cascade). Asserts the user-observable
+    //! state after each callback rather than the internal sweep
+    //! decision — the decision matrix itself is unit-tested in
+    //! `neighbor_group::tests`.
+
+    use std::collections::VecDeque;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use tokio::sync::mpsc;
+
+    use super::super::neighbor_group::{config_neighbor_group, config_neighbor_group_remote_as};
+    use super::*;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    /// Parked `ProtoContext` plus its `rib_rx` half. Mirror of the
+    /// helper in `bfd_wiring_tests` — duplicated here so the two
+    /// test modules stay independent.
+    fn test_ctx() -> (
+        crate::context::ProtoContext,
+        mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
+    ) {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+        (ctx, rib_rx)
+    }
+
+    fn test_rib_subscriber() -> crate::config::RibSubscriber {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id)
+    }
+
+    fn fresh_bgp() -> Bgp {
+        let (ctx, rib_rx) = test_ctx();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(ctx, rib_rx, test_rib_subscriber(), policy_tx, None, None)
+    }
+
+    fn peer_addr() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    }
+
+    /// Drain `bgp.rx`, returning the peer-ident of every queued
+    /// `Event::Stop`. Other event variants are ignored.
+    fn drain_stop_events(bgp: &mut Bgp) -> Vec<usize> {
+        use crate::bgp::inst::Message;
+        use crate::bgp::peer::Event;
+        let mut out = Vec::new();
+        while let Ok(msg) = bgp.rx.try_recv() {
+            if let Message::Event(ident, Event::Stop) = msg {
+                out.push(ident);
+            }
+        }
+        out
+    }
+
+    /// Group defined first, then peer attaches to it: the resolver
+    /// pulls the asn off the group, marks inheritance, and starts
+    /// the peer.
+    #[tokio::test]
+    async fn group_first_then_peer_resolves_and_starts() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group(&mut bgp, arg_words(&["RR"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "RR"]), ConfigOp::Set)
+            .unwrap();
+
+        let peer = bgp.peers.get(&peer_addr()).expect("peer exists");
+        assert_eq!(peer.remote_as, 65000);
+        assert!(peer.config.remote_as_inherited);
+        assert!(peer.active, "peer.start() must have fired");
+    }
+
+    /// Peer references the group before any remote-as is configured
+    /// on it: the peer stays dormant until the group gets its asn,
+    /// at which point the reactive sweep adopts and starts.
+    #[tokio::test]
+    async fn peer_first_then_group_adopts_via_sweep() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // Group doesn't exist yet — reference is recorded; peer dormant.
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "RR"]), ConfigOp::Set)
+            .unwrap();
+        {
+            let peer = bgp.peers.get(&peer_addr()).unwrap();
+            assert_eq!(peer.remote_as, 0);
+            assert!(!peer.active);
+        }
+        // Group's remote-as lands — reactive sweep should adopt.
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65000"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(peer.remote_as, 65000);
+        assert!(peer.config.remote_as_inherited);
+        assert!(peer.active);
+    }
+
+    /// Explicit per-peer remote-as always wins, even if the group
+    /// reference is added afterwards.
+    #[tokio::test]
+    async fn explicit_remote_as_overrides_group() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // Explicit remote-as first.
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        // Now attach the group — must NOT clobber the explicit value.
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "RR"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(peer.remote_as, 65001, "explicit asn must win");
+        assert!(!peer.config.remote_as_inherited);
+    }
+
+    /// Deleting the whole group cascades through `sweep_peers_for_group`
+    /// and tears inherited peers down. Verified by asserting the
+    /// peer's post-state and that `Event::Stop` was enqueued.
+    #[tokio::test]
+    async fn group_delete_cascades_to_inherited_peers() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "RR"]), ConfigOp::Set)
+            .unwrap();
+        let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+        // Drain the no-op channel state before the delete.
+        let _ = drain_stop_events(&mut bgp);
+
+        config_neighbor_group(&mut bgp, arg_words(&["RR"]), ConfigOp::Delete).unwrap();
+
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(peer.remote_as, 0);
+        assert!(!peer.config.remote_as_inherited);
+        assert!(!peer.active);
+        assert!(
+            drain_stop_events(&mut bgp).contains(&peer_ident),
+            "Event::Stop must have been enqueued",
+        );
+        assert!(
+            !bgp.neighbor_groups.contains_key("RR"),
+            "group entry removed after cascade",
+        );
+    }
+
+    /// Changing the group's remote-as while a peer is actively
+    /// inheriting bounces the peer (resets `active`, enqueues
+    /// `Event::Stop`) so the FSM renegotiates with the new asn.
+    #[tokio::test]
+    async fn group_remote_as_change_rebounces_active_peer() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "RR"]), ConfigOp::Set)
+            .unwrap();
+        let peer_ident = bgp.peers.get(&peer_addr()).unwrap().ident;
+        assert!(bgp.peers.get(&peer_addr()).unwrap().active);
+        let _ = drain_stop_events(&mut bgp);
+
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["RR", "65001"]), ConfigOp::Set)
+            .unwrap();
+
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(peer.remote_as, 65001, "new asn applied");
+        assert!(peer.config.remote_as_inherited);
+        assert!(!peer.active, "active cleared in preparation for FSM bounce");
+        assert!(
+            drain_stop_events(&mut bgp).contains(&peer_ident),
+            "Event::Stop must have been enqueued",
+        );
+    }
+}
