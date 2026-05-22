@@ -50,6 +50,56 @@ impl ExtCommunitySubType {
     }
 }
 
+/// MUP Extended Community sub-type values (high-type 0x0c, RFC 9833 §5).
+///
+/// Names are kept numeric for now because the exact IANA-assigned
+/// names and payload layouts in RFC 9833 §5 haven't been confirmed
+/// against the spec in-tree; the 6-octet value travels as opaque
+/// bytes via `ExtCommunityValue::val`. A follow-up phase will rename
+/// these and add typed accessors once the per-sub-type layout is
+/// pinned down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MupExtComSubType {
+    Sub00,
+    Sub01,
+    Sub02,
+    Sub03,
+    Unknown(u8),
+}
+
+impl From<MupExtComSubType> for u8 {
+    fn from(val: MupExtComSubType) -> u8 {
+        use MupExtComSubType::*;
+        match val {
+            Sub00 => 0x00,
+            Sub01 => 0x01,
+            Sub02 => 0x02,
+            Sub03 => 0x03,
+            Unknown(v) => v,
+        }
+    }
+}
+
+impl From<u8> for MupExtComSubType {
+    fn from(val: u8) -> Self {
+        use MupExtComSubType::*;
+        match val {
+            0x00 => Sub00,
+            0x01 => Sub01,
+            0x02 => Sub02,
+            0x03 => Sub03,
+            v => Unknown(v),
+        }
+    }
+}
+
+impl std::fmt::Display for MupExtComSubType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw: u8 = (*self).into();
+        write!(f, "mup-sub-0x{raw:02x}")
+    }
+}
+
 #[derive(TryFromPrimitive, IntoPrimitive, EnumString, Display)]
 #[repr(u16)]
 pub enum TunnelType {
