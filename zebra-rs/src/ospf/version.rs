@@ -170,6 +170,22 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// Length of the full LSA (header + body) in octets. Header
     /// itself is 20 octets in both versions.
     fn length(h: &Self::LsaHeader) -> u16;
+
+    /// Address by which a neighbor is uniquely identified on the
+    /// local router, projected to a 32-bit value for storage in
+    /// the v2-shaped `Message::Retransmit` / `Nfsm` channel
+    /// variants (those carry an `Ipv4Addr` regardless of V).
+    ///
+    /// - v2 (RFC 2328 §10): the neighbor's interface IP, i.e.
+    ///   `ident.prefix.addr()`.
+    /// - v3 (RFC 5340 §10): the neighbor's router-id, i.e.
+    ///   `ident.router_id`. v3 keys neighbor identity by
+    ///   router-id since multiple v6 link-local sources can share
+    ///   a router and v3 link-local addresses aren't suitable as
+    ///   stable identifiers.
+    fn nbr_addr(ident: &crate::ospf::Identity<Self>) -> Ipv4Addr
+    where
+        Self: Sized;
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -233,6 +249,9 @@ impl OspfVersion for Ospfv2 {
     #[allow(dead_code)]
     fn length(h: &OspfLsaHeader) -> u16 {
         h.length
+    }
+    fn nbr_addr(ident: &crate::ospf::Identity<Ospfv2>) -> Ipv4Addr {
+        ident.prefix.addr()
     }
 }
 
@@ -303,5 +322,8 @@ impl OspfVersion for Ospfv3 {
     #[allow(dead_code)]
     fn length(h: &Ospfv3LsaHeader) -> u16 {
         h.length
+    }
+    fn nbr_addr(ident: &crate::ospf::Identity<Ospfv3>) -> Ipv4Addr {
+        ident.router_id
     }
 }
