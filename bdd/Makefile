@@ -44,9 +44,9 @@ bgp_policy_dynamic_update:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_policy_dynamic_update"
 
-bgp_community_no_export_advertise:
+bgp_community:
 	mkdir -p allure-results
-	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_community_no_export_advertise"
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_community"
 
 generate:
 	rm -rf allure-report

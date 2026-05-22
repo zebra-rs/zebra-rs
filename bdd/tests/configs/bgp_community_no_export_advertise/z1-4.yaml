@@ -29,7 +29,7 @@ router:
       policy:
         out: set-no-advertise
       enabled: true
-      peer-as: 65002
+      remote-as: 65002
     afi-safi:
     - name: ipv4
       network:
