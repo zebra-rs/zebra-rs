@@ -1923,6 +1923,7 @@ impl Ospf<Ospfv3> {
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
+                self.router_intra_area_prefix_lsa_originate(area_id);
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
@@ -1935,6 +1936,7 @@ impl Ospf<Ospfv3> {
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 self.router_lsa_originate();
+                self.router_intra_area_prefix_lsa_originate(area_id);
                 let _ = self
                     .tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
@@ -1983,6 +1985,60 @@ impl Ospf<Ospfv3> {
                 );
             }
         }
+    }
+
+    /// Originate (or flush) this router's Router-referenced
+    /// Intra-Area-Prefix-LSA for `area_id` (RFC 5340 §A.4.10).
+    /// Mirrors `router_lsa_originate`'s shape:
+    ///
+    /// - Build via `build_router_intra_area_prefix_lsa`. Returns
+    ///   `None` when no advertisable prefixes exist in the area —
+    ///   in that case, flush the previous LSA so receivers age it
+    ///   out.
+    /// - Look up the existing area-LSDB entry via
+    ///   `lookup_by_raw_key` (#779). Key is
+    ///   `(OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, link_state_id=0,
+    ///   advertising_router=self.router_id)`.
+    /// - Bump `ls_seq_number` past the prior entry, restamp via
+    ///   `Ospfv3Lsa::update`, install through `install_originated`,
+    ///   flood via `flood_self_originated_lsa`.
+    ///
+    /// Called from `Message::Enable` / `Message::Disable` arms in
+    /// `process_msg` — the link's address set changes when an
+    /// interface joins or leaves the area.
+    pub fn router_intra_area_prefix_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE;
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, 0, self.router_id);
+
+        // No prefixes to advertise — flush any existing copy.
+        let Some(mut lsa) = self.build_router_intra_area_prefix_lsa(area_id) else {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+            return;
+        };
+
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(prev_seq) = area
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number)
+        {
+            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
     /// Detect Full state transitions on `nbr` and re-originate the
