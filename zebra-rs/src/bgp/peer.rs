@@ -184,9 +184,16 @@ pub struct PeerConfig {
     /// Reference to a `neighbor-group` (zebra-bgp-neighbor-group.yang)
     /// whose attributes this peer should inherit. Recorded on
     /// `set router bgp neighbor <addr> neighbor-group <name>`. The
-    /// runtime stores the reference but does not yet resolve
-    /// inheritance — that's a follow-up.
+    /// peer's `remote_as` is resolved from the group when the operator
+    /// has not set it explicitly on the neighbor; the `remote_as_inherited`
+    /// flag below tracks which side won.
     pub neighbor_group: Option<String>,
+    /// `true` when [`Peer::remote_as`] was populated from the
+    /// referenced [`Self::neighbor_group`] rather than from an
+    /// explicit per-peer `remote-as`. Used by the group-side and
+    /// per-peer config callbacks to decide whether a change to the
+    /// group should propagate (or unset) the peer's remote-as.
+    pub remote_as_inherited: bool,
     /// BFD attachment for this neighbor. Inert in PR 5b — the
     /// `bfd.client_req_tx` plumbing arrives in PR 5c.
     pub bfd: PeerBfdConfig,
@@ -207,6 +214,7 @@ impl Default for PeerConfig {
             timer: Default::default(),
             sub: Default::default(),
             neighbor_group: None,
+            remote_as_inherited: false,
             bfd: PeerBfdConfig::default(),
         }
     }
@@ -1283,8 +1291,8 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
         return Some(stream);
     }
     let (range_prefix, range) = bgp.dynamic_neighbors.lpm_match(&peer_addr)?;
-    let group_name = range.neighbor_group.as_ref()?;
-    let remote_as = bgp.neighbor_groups.get(group_name)?.remote_as?;
+    let group_name = range.neighbor_group.as_ref()?.clone();
+    let remote_as = super::neighbor_group::group_remote_as(bgp, &group_name)?;
 
     let mut peer = Peer::new(
         0,
@@ -1299,6 +1307,12 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
     peer.config.transport.passive = true;
+    // The remote-as came from the listen-range's neighbor-group, so a
+    // later change to the group must flow through to this peer. Stamp
+    // the inherited flag and the back-reference for the reactive
+    // sweep in `config_neighbor_group_remote_as` to consult.
+    peer.config.neighbor_group = Some(group_name);
+    peer.config.remote_as_inherited = true;
 
     bgp.peers.insert(peer_addr, peer);
     bgp.dynamic_peer_count += 1;

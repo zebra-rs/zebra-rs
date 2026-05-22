@@ -1,18 +1,17 @@
 //! IOS-XR-style BGP `neighbor-group` (zebra-bgp-neighbor-group.yang).
 //!
-//! Phase 1 (this commit): schema + storage only. Each
-//! `set router bgp neighbor-groups neighbor-group <name> remote-as <asn>`
-//! lands here; each `set router bgp neighbor <addr> neighbor-group <g>`
-//! records the per-peer reference. The runtime does NOT yet resolve
-//! field-level inheritance — peers continue to use values set
-//! explicitly on the neighbor (and zero / default for the rest).
-//! Field-level override resolution is a follow-up.
+//! Storage + the resolver shared by every peer-materialization path
+//! that may inherit from a group: static peers (`config_peer_neighbor_group`),
+//! IPv6 unnumbered (`interface_neighbor::resolve_remote_as`), and dynamic
+//! peers (`peer::try_dynamic_accept`). The v1 surface inherits only
+//! `remote-as`; per-peer overrides win via the
+//! [`super::peer::PeerConfig::remote_as_inherited`] flag.
 //!
 //! Naming-wise this sits alongside the existing
 //! `peer-groups/peer-group` schema, not on top of it: a peer can
 //! reference exactly one of (neighbor-group, peer-group) — for now
-//! the runtime ignores both, and the future resolver will pick
-//! one.
+//! the runtime ignores `peer-group` here, and a future mutual-exclusion
+//! pass will pick one.
 
 use std::collections::BTreeMap;
 
@@ -60,4 +59,42 @@ pub fn config_neighbor_group_remote_as(bgp: &mut Bgp, mut args: Args, op: Config
 /// so `Bgp::new` doesn't need to know the storage type.
 pub fn empty_map() -> BTreeMap<String, NeighborGroup> {
     BTreeMap::new()
+}
+
+/// Look up the `remote-as` advertised by the named neighbor-group, if
+/// any. Returns `None` when the group is absent or has no `remote-as`
+/// set — both cases mean "the referring peer cannot start yet" and
+/// the caller is expected to leave the peer dormant.
+pub fn group_remote_as(bgp: &Bgp, name: &str) -> Option<u32> {
+    bgp.neighbor_groups.get(name)?.remote_as
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_as_present() {
+        let mut map: BTreeMap<String, NeighborGroup> = BTreeMap::new();
+        map.insert(
+            "RR".into(),
+            NeighborGroup {
+                remote_as: Some(65000),
+            },
+        );
+        assert_eq!(map.get("RR").and_then(|g| g.remote_as), Some(65000));
+    }
+
+    #[test]
+    fn remote_as_absent_when_group_missing() {
+        let map: BTreeMap<String, NeighborGroup> = BTreeMap::new();
+        assert!(!map.contains_key("RR"));
+    }
+
+    #[test]
+    fn remote_as_absent_when_group_has_no_asn() {
+        let mut map: BTreeMap<String, NeighborGroup> = BTreeMap::new();
+        map.insert("RR".into(), NeighborGroup { remote_as: None });
+        assert_eq!(map.get("RR").and_then(|g| g.remote_as), None);
+    }
 }
