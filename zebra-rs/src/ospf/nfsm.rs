@@ -187,7 +187,7 @@ pub fn ospf_db_summary_isempty(nbr: &Neighbor) -> bool {
     nbr.db_sum.is_empty()
 }
 
-pub fn ospf_nfsm_reset_nbr(nbr: &mut Neighbor) {
+pub fn ospf_nfsm_reset_nbr<V: super::version::OspfVersion>(nbr: &mut Neighbor<V>) {
     // Clear Database Summary list.
     nbr.db_sum.clear();
 

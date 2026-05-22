@@ -33,7 +33,7 @@ use ospf_packet::{
 /// default on the trait. The well-known multicast groups
 /// (AllSPFRouters / AllDRouters) and the address family itself are
 /// what actually differs.
-pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
+pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// Address type used on the wire and for L3 source / destination.
     /// `Ipv4Addr` for v2, `Ipv6Addr` for v3. Router-id and area-id
     /// stay 32-bit in both versions and live separately as `Ipv4Addr`
@@ -204,6 +204,54 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     fn nbr_addr(ident: &crate::ospf::Identity<Self>) -> Ipv4Addr
     where
         Self: Sized;
+
+    // ---- IFSM trait accessors ----------------------------------
+    //
+    // The IFSM is shared verbatim across v2 and v3 (RFC 5340 §4.2.1),
+    // but two pieces of its body are version-specific: DR / BDR
+    // identity (interface IP vs. router-id per RFC 5340 §A.3.2) and
+    // the multicast group joins on the underlying raw socket (v4
+    // groups via `IP_ADD_MEMBERSHIP` vs. v6 groups via
+    // `IPV6_JOIN_GROUP`). The accessors below are how the generic
+    // IFSM in `ifsm.rs` reaches each.
+
+    /// True iff `ident` considers itself the DR on its link.
+    ///
+    /// - v2 (RFC 2328 §9.4): `d_router` holds the DR's interface
+    ///   IP; we're the DR when that matches `prefix.addr()`.
+    /// - v3 (RFC 5340 §A.3.2): `d_router` holds the DR's router-id;
+    ///   we're the DR when that matches `router_id`.
+    fn is_declared_dr(ident: &crate::ospf::Identity<Self>) -> bool
+    where
+        Self: Sized;
+
+    /// True iff `ident` considers itself the BDR. Mirrors
+    /// `is_declared_dr` for the backup election.
+    fn is_declared_bdr(ident: &crate::ospf::Identity<Self>) -> bool
+    where
+        Self: Sized;
+
+    /// The 32-bit value to store in `Identity::d_router` /
+    /// `Identity::bd_router` after election picks `ident`.
+    ///
+    /// - v2: the elected router's interface IP (`prefix.addr()`).
+    /// - v3: the elected router's router-id.
+    fn ident_dr_id(ident: &crate::ospf::Identity<Self>) -> Ipv4Addr
+    where
+        Self: Sized;
+
+    /// Join the version's AllSPFRouters multicast group on the
+    /// raw socket scoped to the given interface. Called when the
+    /// IFSM moves an interface out of `Down`.
+    fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
+
+    /// Join the version's AllDRouters multicast group. Called by
+    /// DR-election state changes when this router becomes DR or BDR.
+    fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
+
+    /// Leave the AllDRouters group. Called when this router moves
+    /// out of DR / BDR back to DROther.
+    fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -273,6 +321,25 @@ impl OspfVersion for Ospfv2 {
     }
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv2>) -> Ipv4Addr {
         ident.prefix.addr()
+    }
+
+    fn is_declared_dr(ident: &crate::ospf::Identity<Ospfv2>) -> bool {
+        ident.prefix.addr() == ident.d_router
+    }
+    fn is_declared_bdr(ident: &crate::ospf::Identity<Ospfv2>) -> bool {
+        ident.prefix.addr() == ident.bd_router
+    }
+    fn ident_dr_id(ident: &crate::ospf::Identity<Ospfv2>) -> Ipv4Addr {
+        ident.prefix.addr()
+    }
+    fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_join_if(sock, ifindex);
+    }
+    fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_join_alldrouters(sock, ifindex);
+    }
+    fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_leave_alldrouters(sock, ifindex);
     }
 }
 
@@ -349,5 +416,24 @@ impl OspfVersion for Ospfv3 {
     }
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv3>) -> Ipv4Addr {
         ident.router_id
+    }
+
+    fn is_declared_dr(ident: &crate::ospf::Identity<Ospfv3>) -> bool {
+        ident.d_router == ident.router_id
+    }
+    fn is_declared_bdr(ident: &crate::ospf::Identity<Ospfv3>) -> bool {
+        ident.bd_router == ident.router_id
+    }
+    fn ident_dr_id(ident: &crate::ospf::Identity<Ospfv3>) -> Ipv4Addr {
+        ident.router_id
+    }
+    fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_join_if_v6(sock, ifindex);
+    }
+    fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_join_alldrouters_v6(sock, ifindex);
+    }
+    fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_leave_alldrouters_v6(sock, ifindex);
     }
 }

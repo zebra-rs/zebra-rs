@@ -42,23 +42,9 @@ where
     }
 }
 
-impl Identity<Ospfv2> {
-    /// True iff this identity considers itself the DR on its link
-    /// (v2 semantics: `d_router` is the DR's interface IP, which
-    /// matches our own when we won the election).
-    ///
-    /// v2-only because v3 stores router-ids in `d_router` per
-    /// RFC 5340 §A.3.2; the equivalent check there compares
-    /// `d_router` against `self.router_id`, not `prefix.addr()`.
-    /// The v3 variant lands when an `Identity<Ospfv3>` consumer
-    /// needs it.
-    pub fn is_declared_dr(&self) -> bool {
-        self.prefix.addr() == self.d_router
-    }
-
-    /// True iff this identity considers itself the BDR. v2-only
-    /// for the same reason as [`Self::is_declared_dr`].
-    pub fn is_declared_bdr(&self) -> bool {
-        self.prefix.addr() == self.bd_router
-    }
-}
+// Note: the v2-bound `is_declared_dr` / `is_declared_bdr` inherent
+// methods were replaced by `OspfVersion::is_declared_dr` /
+// `OspfVersion::is_declared_bdr` static methods in `version.rs`.
+// The trait accessors carry v3 semantics too (router-id comparison
+// per RFC 5340 §A.3.2) and are how the generic IFSM reaches the
+// DR / BDR predicates.
