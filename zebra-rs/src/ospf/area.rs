@@ -67,6 +67,13 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
 
     // SPF calculation timer.
     pub spf_timer: Option<Timer>,
+
+    // SPF in-flight gate: true while a SPF run for this area is
+    // executing. New `Message::SpfCalc(area_id)` events that arrive
+    // during a run set `spf_pending` instead of starting a second
+    // SPF; the completion path re-fires exactly one follow-up.
+    pub spf_inflight: bool,
+    pub spf_pending: bool,
 }
 
 impl<V: OspfVersion> OspfArea<V> {
@@ -77,6 +84,8 @@ impl<V: OspfVersion> OspfArea<V> {
             links: BTreeSet::new(),
             lsdb: Lsdb::<V>::new(),
             spf_timer: None,
+            spf_inflight: false,
+            spf_pending: false,
         }
     }
 }

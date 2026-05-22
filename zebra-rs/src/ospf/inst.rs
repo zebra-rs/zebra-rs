@@ -1337,11 +1337,26 @@ impl Ospf<Ospfv2> {
                 }
             }
             Message::SpfCalc(area_id) => {
-                if let Some(area) = self.areas.get_mut(area_id) {
-                    area.spf_timer = None;
+                let Some(area) = self.areas.get_mut(area_id) else {
+                    return;
+                };
+                if area.spf_inflight {
+                    // A SPF is already running for this area. Remember
+                    // that another trigger arrived; the completion
+                    // path re-fires exactly one follow-up SpfCalc.
+                    area.spf_pending = true;
+                    return;
                 }
+                area.spf_timer = None;
+                area.spf_inflight = true;
                 tracing::info!("[SPF] Calculation triggered for area {}", area_id);
                 perform_spf_calculation(self, area_id);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_inflight = false;
+                    if std::mem::take(&mut area.spf_pending) {
+                        let _ = self.tx.send(Message::SpfCalc(area_id));
+                    }
+                }
             }
             _ => {}
         }
@@ -2061,11 +2076,26 @@ impl Ospf<Ospfv3> {
                 }
             }
             Message::SpfCalc(area_id) => {
-                if let Some(area) = self.areas.get_mut(area_id) {
-                    area.spf_timer = None;
+                let Some(area) = self.areas.get_mut(area_id) else {
+                    return;
+                };
+                if area.spf_inflight {
+                    // A SPF is already running for this area. Remember
+                    // that another trigger arrived; the completion
+                    // path re-fires exactly one follow-up SpfCalc.
+                    area.spf_pending = true;
+                    return;
                 }
+                area.spf_timer = None;
+                area.spf_inflight = true;
                 tracing::info!("[v3 SPF] Calculation triggered for area {}", area_id);
                 self.perform_spf_calculation(area_id);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_inflight = false;
+                    if std::mem::take(&mut area.spf_pending) {
+                        let _ = self.tx.send(Message::SpfCalc(area_id));
+                    }
+                }
             }
             Message::Lsdb(ev, area_id, key) => {
                 // RFC 2328 §13.4: a peer flooded our own LSA back to
