@@ -857,10 +857,15 @@ enum LsaProcessResult {
 }
 
 /// Per-LSA RFC 2328 §13.1 step machine.
+///
+/// `src` is the source neighbor's link-local v6 (passed through
+/// from `ospfv3_ls_upd_recv`); step 5 uses it to exempt the source
+/// from the `Message::Flood` re-broadcast (§13.3 Step 1c).
 fn ospfv3_ls_upd_proc(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
     lsa: &Ospfv3Lsa,
+    src: &Ipv6Addr,
 ) -> LsaProcessResult {
     use super::area::AreaType;
     use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ};
@@ -925,6 +930,18 @@ fn ospfv3_ls_upd_proc(
         }
         if area_lsa_installed {
             let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
+        }
+
+        // RFC 2328 §13.3: re-flood the LSA to every other
+        // Exchange-or-later neighbor in the area, exempting the
+        // source we got it from. Link-scope LSAs are NOT re-flooded
+        // across the area (§4.5.2 bounds them to the segment), but
+        // they're still installed on the link's per-link LSDB by
+        // the install path above.
+        if matches!(scope, Ospfv3LsaScope::Area | Ospfv3LsaScope::As) {
+            let _ = oi
+                .tx
+                .send(Message::Flood(area_id, lsa.clone(), nbr.ifindex, *src));
         }
 
         // RFC 2328 §13.4: peer sent us our own LSA at a higher
@@ -1012,7 +1029,7 @@ pub fn ospfv3_ls_upd_recv(
 
     for lsa in ls_upd.lsas.iter() {
         let h_for_ack = lsa.h.clone();
-        match ospfv3_ls_upd_proc(oi, nbr, lsa) {
+        match ospfv3_ls_upd_proc(oi, nbr, lsa, src) {
             LsaProcessResult::Installed | LsaProcessResult::AckAndDiscard => {
                 ack_headers.push(h_for_ack);
             }
