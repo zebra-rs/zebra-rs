@@ -56,9 +56,7 @@ pub fn resolve_remote_as(bgp: &Bgp, cfg: &InterfaceNeighborCfg) -> Option<u32> {
     if let Some(asn) = cfg.remote_as.materialize(bgp.asn) {
         return Some(asn);
     }
-    let group_name = cfg.neighbor_group.as_ref()?;
-    let group = bgp.neighbor_groups.get(group_name)?;
-    group.remote_as
+    super::neighbor_group::group_remote_as(bgp, cfg.neighbor_group.as_ref()?)
 }
 
 /// Materialize a Peer for `interface-neighbor IFNAME` once an RA has

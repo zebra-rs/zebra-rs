@@ -139,18 +139,90 @@ fn clear_peer_listener_auth(bgp: &mut Bgp, addr: &IpAddr) {
     }
 }
 
-/// `set router bgp neighbor <addr> neighbor-group <name>` —
-/// stores the reference on the peer's `PeerConfig`. No inheritance
-/// resolution yet; follow-up reads this and merges fields from
-/// `Bgp::neighbor_groups`.
+/// `set router bgp neighbor <addr> neighbor-group <name>`.
+///
+/// Stores the reference on the peer's `PeerConfig` and — if the peer
+/// has no explicit `remote-as` yet — pulls the group's `remote-as`
+/// in via [`super::neighbor_group::group_remote_as`] and kicks
+/// [`super::peer::Peer::start`]. An explicit per-peer `remote-as`
+/// (signalled by `remote_as_inherited == false` and `remote_as != 0`)
+/// always wins; in that case the reference is recorded but the
+/// resolved value is left alone.
+///
+/// On Delete (or unset of the reference), peers whose `remote_as`
+/// came from the group are reset to 0 and sent `Event::Stop` so the
+/// FSM tears the session down; explicit-remote-as peers are left
+/// alone.
 fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.neighbor_group = if op == ConfigOp::Set {
+    let new_ref = if op == ConfigOp::Set {
         args.string()
     } else {
         None
     };
+
+    // Stash what we need to act on outside the &mut peer borrow.
+    let (peer_ident, resolve_now, should_stop_inherited) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.neighbor_group = new_ref.clone();
+
+        match op {
+            ConfigOp::Set => {
+                // Resolve only if the peer doesn't already carry an
+                // explicit per-peer remote-as.
+                let needs_resolve = peer.remote_as == 0 || peer.config.remote_as_inherited;
+                (peer.ident, needs_resolve, false)
+            }
+            ConfigOp::Delete => {
+                // Tear down only when the peer was relying on the
+                // group's remote-as.
+                let was_inherited = peer.config.remote_as_inherited && peer.remote_as != 0;
+                if was_inherited {
+                    peer.remote_as = 0;
+                    peer.config.remote_as_inherited = false;
+                    peer.active = false;
+                }
+                (peer.ident, false, was_inherited)
+            }
+            _ => (peer.ident, false, false),
+        }
+    };
+
+    if resolve_now {
+        // SAFE: `Set` arm above always populated `new_ref` from
+        // `args.string()`; falling back to `None` here means the
+        // argument was missing, in which case there is nothing to
+        // resolve.
+        if let Some(group_name) = new_ref.as_deref() {
+            if let Some(asn) = super::neighbor_group::group_remote_as(bgp, group_name) {
+                if let Some(peer) = bgp.peers.get_mut(&addr) {
+                    peer.remote_as = asn;
+                    peer.config.remote_as_inherited = true;
+                    peer.peer_type = if asn == bgp.asn {
+                        crate::bgp::peer::PeerType::IBGP
+                    } else {
+                        crate::bgp::peer::PeerType::EBGP
+                    };
+                    peer.start();
+                }
+            } else {
+                tracing::warn!(
+                    peer = %addr,
+                    group = %group_name,
+                    "bgp: neighbor-group reference unresolved (missing group or no remote-as); peer stays dormant",
+                );
+            }
+        }
+    }
+
+    if should_stop_inherited {
+        // FSM teardown — same mechanism `clear bgp ... hard` uses.
+        let _ = bgp.tx.try_send(super::inst::Message::Event(
+            peer_ident,
+            super::peer::Event::Stop,
+        ));
+    }
+
     Some(())
 }
 
@@ -161,6 +233,9 @@ fn config_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             let asn: u32 = args.u32()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.remote_as = asn;
+                // Explicit per-peer remote-as wins over any
+                // neighbor-group fallback from here on.
+                peer.config.remote_as_inherited = false;
                 peer.peer_type = if peer.remote_as == bgp.asn {
                     PeerType::IBGP
                 } else {
@@ -173,6 +248,7 @@ fn config_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             let asn: u32 = args.u32()?;
             if let Some(peer) = bgp.peers.get_mut(&addr) {
                 peer.remote_as = asn;
+                peer.config.remote_as_inherited = false;
                 peer.peer_type = if peer.remote_as == bgp.asn {
                     PeerType::IBGP
                 } else {
