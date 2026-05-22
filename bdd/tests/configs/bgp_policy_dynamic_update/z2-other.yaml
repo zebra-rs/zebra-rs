@@ -22,4 +22,4 @@ router:
       policy:
         in: HOGE
       enabled: true
-      peer-as: 65001
+      remote-as: 65001

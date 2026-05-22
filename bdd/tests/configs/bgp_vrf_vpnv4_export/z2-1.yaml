@@ -17,7 +17,7 @@ router:
       - name: vpnv4
         enabled: true
       enabled: true
-      peer-as: 65001
+      remote-as: 65001
     vrf:
     - name: vrf-blue
       rd: 65001:200

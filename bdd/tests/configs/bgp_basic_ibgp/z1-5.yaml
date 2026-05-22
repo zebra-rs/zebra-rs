@@ -22,7 +22,7 @@ router:
       policy:
         out: out-test
       enabled: true
-      peer-as: 65001
+      remote-as: 65001
     afi-safi:
     - name: ipv4
       network:

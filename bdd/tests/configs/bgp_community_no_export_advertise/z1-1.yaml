@@ -9,4 +9,4 @@ router:
       - name: ipv4
         enabled: true
       enabled: true
-      peer-as: 65002
+      remote-as: 65002

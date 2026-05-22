@@ -20,7 +20,7 @@ router:
       - name: ipv4
         enabled: true
       enabled: true
-      peer-as: 65001
+      remote-as: 65001
       tcp-ao:
         key-chain: BGP-AO
         include-tcp-options: true

@@ -9,7 +9,7 @@ router:
       - name: ipv4
         enabled: true
       enabled: true
-      peer-as: 65002
+      remote-as: 65002
       tcp-md5:
         encoding: clear
         password: "shared-md5-secret"
