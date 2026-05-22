@@ -18,6 +18,8 @@
 - [IS-IS](ch-07-00-isis.md)
   - [Timer Configuration](ch-07-01-isis-timers.md)
   - [Shared Risk Link Group (SRLG)](ch-07-02-isis-srlg.md)
+- [OSPFv2](ch-08-00-ospf.md)
+  - [Configuration](ch-08-01-ospf-configuration.md)
 
 ## SRv6
 
