@@ -64,6 +64,10 @@ module config {
     prefix zbsr;
   }
 
+  import zebra-bgp-timer {
+    prefix zbtm;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }

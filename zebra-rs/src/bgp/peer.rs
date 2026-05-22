@@ -401,6 +401,13 @@ pub struct Peer {
     /// the peer is in; written by `update_group::attach` on entering
     /// Established and cleared by `detach` on leaving. Empty otherwise.
     pub update_group_id: BTreeMap<AfiSafi, super::update_group::UpdateGroupId>,
+
+    /// Snapshot of `Bgp::adv_interval` captured at peer construction
+    /// and refreshed by the global config callback. Read by the VPNv4
+    /// / EVPN adv-debounce timers (`start_adv_timer_vpnv4` /
+    /// `start_adv_timer_evpn`) so the timer-arming path doesn't need
+    /// to reach back into the global `Bgp`.
+    pub adv_interval: timer::AdvInterval,
 }
 
 impl Peer {
@@ -461,6 +468,7 @@ impl Peer {
             cache_evpn_timer: None,
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
+            adv_interval: timer::AdvInterval::default(),
         };
         peer.config
             .mp

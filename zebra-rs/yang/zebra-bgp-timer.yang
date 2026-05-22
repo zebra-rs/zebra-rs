@@ -1,0 +1,114 @@
+module zebra-bgp-timer {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-timer";
+  prefix "zbtm";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Global BGP timer configuration under `router bgp timer`.
+
+     Today this carries the `adv-interval` knob — the
+     MinRouteAdvertisementInterval (MRAI) per RFC 4271 §9.2.1.1 —
+     split into separate iBGP and eBGP values. The interval gates how
+     frequently each update-group flushes its pending advertisement
+     cache, batching multiple route changes into a single MP_REACH
+     UPDATE per attribute group.
+
+     Example:
+
+       router bgp {
+         timer {
+           adv-interval {
+             ibgp 5;
+             ebgp 30;
+           }
+         }
+       }
+
+     Defaults (RFC 4271 §10): iBGP=5s, eBGP=30s.";
+
+  revision 2026-05-22 {
+    description
+      "Initial revision — global iBGP/eBGP adv-interval knobs.";
+    reference
+      "RFC 4271: A Border Gateway Protocol 4 (BGP-4), §9.2.1.1
+       and §10 (MinRouteAdvertisementInterval).";
+  }
+
+  grouping bgp-timer-extension {
+    description
+      "Container `timer` under the BGP top-level. Today carries
+       only `adv-interval`; future per-AFI/SAFI or per-peer timer
+       knobs (originate-interval, refresh) attach here.";
+
+    container timer {
+      ext:help "Global BGP timer configuration";
+
+      container adv-interval {
+        ext:help "MinRouteAdvertisementInterval (MRAI), split by peer type";
+        description
+          "Per-peer-type MRAI override. iBGP and eBGP peers
+           consult separate values when arming the advertisement
+           debounce timer used to coalesce burst route changes
+           into a single MP_REACH UPDATE.";
+
+        leaf ibgp {
+          ext:help "iBGP MRAI in seconds (default 5)";
+          type uint16;
+          units "seconds";
+          description
+            "MinRouteAdvertisementInterval applied to iBGP
+             update-groups. Default 5s per RFC 4271 §10.";
+        }
+        leaf ebgp {
+          ext:help "eBGP MRAI in seconds (default 30)";
+          type uint16;
+          units "seconds";
+          description
+            "MinRouteAdvertisementInterval applied to eBGP
+             update-groups. Default 30s per RFC 4271 §10.";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the timer block to the BGP top-level in the
+       candidate-set subtree.";
+    uses bgp-timer-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp timer adv-interval ibgp` is path-valid.";
+    uses bgp-timer-extension;
+  }
+}

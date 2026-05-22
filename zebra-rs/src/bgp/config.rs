@@ -1746,6 +1746,21 @@ impl Bgp {
         self.timer("/advertisement-interval", timer::config::adv_interval);
         self.timer("/originate-interval", timer::config::orig_interval);
 
+        // Global BGP timer configuration (zebra-bgp-timer.yang).
+        // `router bgp timer adv-interval { ibgp; ebgp; }` overrides
+        // the MRAI cadence used by the IPv4 / VPNv4 / EVPN adv-debounce
+        // timers; defaults are 5s (iBGP) and 30s (eBGP) per RFC 4271
+        // §10. The callbacks write to `Bgp::adv_interval` and re-snapshot
+        // every existing peer and update-group.
+        self.callback_add(
+            "/router/bgp/timer/adv-interval/ibgp",
+            timer::config::adv_interval_ibgp,
+        );
+        self.callback_add(
+            "/router/bgp/timer/adv-interval/ebgp",
+            timer::config::adv_interval_ebgp,
+        );
+
         self.pcallback_add("/community-list", config_com_list);
         self.pcallback_add("/community-list/seq", config_com_list_seq);
         self.pcallback_add("/community-list/seq/action", config_com_list_action);
