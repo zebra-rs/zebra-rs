@@ -252,6 +252,58 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// Leave the AllDRouters group. Called when this router moves
     /// out of DR / BDR back to DROther.
     fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
+
+    // ---- NFSM trait accessors ----------------------------------
+    //
+    // RFC 5340 §4.2.2 reuses the v2 NFSM verbatim, but the side
+    // effects on `Loading` / `Exchange` / `ExStart` transitions
+    // involve packet emission and database-summary population that
+    // are wire-format specific. The trait methods below dispatch
+    // those operations; v2 impls call the existing v2 packet
+    // helpers, v3 impls inherit the empty default body until the
+    // v3 packet path lands.
+
+    /// Emit a Database Description packet on the wire for `nbr`.
+    /// Called on transitions into ExStart (Master kicks off DBD
+    /// exchange) and during the master / slave handshake.
+    /// Default body: no-op.
+    fn send_db_desc(
+        oi: &mut crate::ospf::inst::OspfInterface<Self>,
+        nbr: &mut crate::ospf::Neighbor<Self>,
+        oident: &crate::ospf::Identity<Self>,
+    ) where
+        Self: Sized,
+    {
+        let _ = (oi, nbr, oident);
+    }
+
+    /// Emit a Link State Request packet for the pending LSAs on
+    /// `nbr.ls_req`. Called on the Exchange → Loading transition.
+    /// Default body: no-op.
+    fn send_ls_request(
+        oi: &mut crate::ospf::inst::OspfInterface<Self>,
+        nbr: &mut crate::ospf::Neighbor<Self>,
+        oident: &crate::ospf::Identity<Self>,
+    ) where
+        Self: Sized,
+    {
+        let _ = (oi, nbr, oident);
+    }
+
+    /// Populate `nbr.db_sum` with the LSAs that the initial DBD
+    /// summary should advertise (RFC 2328 §10.8). The set of LSA
+    /// types differs between v2 (Router / Network / Summary /
+    /// Summary-ASBR / Opaque-Area / AS-External) and v3 (which
+    /// adds Link / Intra-Area-Prefix and elides the v2 opaque
+    /// types). Default body: no-op.
+    fn populate_initial_db_summary(
+        oi: &mut crate::ospf::inst::OspfInterface<Self>,
+        nbr: &mut crate::ospf::Neighbor<Self>,
+    ) where
+        Self: Sized,
+    {
+        let _ = (oi, nbr);
+    }
 }
 
 /// OSPFv2 dispatch marker (RFC 2328).
@@ -340,6 +392,27 @@ impl OspfVersion for Ospfv2 {
     }
     fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_leave_alldrouters(sock, ifindex);
+    }
+
+    fn send_db_desc(
+        oi: &mut crate::ospf::inst::OspfInterface<Ospfv2>,
+        nbr: &mut crate::ospf::Neighbor<Ospfv2>,
+        oident: &crate::ospf::Identity<Ospfv2>,
+    ) {
+        crate::ospf::ospf_db_desc_send(oi, nbr, oident);
+    }
+    fn send_ls_request(
+        oi: &mut crate::ospf::inst::OspfInterface<Ospfv2>,
+        nbr: &mut crate::ospf::Neighbor<Ospfv2>,
+        oident: &crate::ospf::Identity<Ospfv2>,
+    ) {
+        crate::ospf::ospf_ls_req_send(oi, nbr, oident);
+    }
+    fn populate_initial_db_summary(
+        oi: &mut crate::ospf::inst::OspfInterface<Ospfv2>,
+        nbr: &mut crate::ospf::Neighbor<Ospfv2>,
+    ) {
+        crate::ospf::nfsm::ospfv2_populate_initial_db_summary(oi, nbr);
     }
 }
 
