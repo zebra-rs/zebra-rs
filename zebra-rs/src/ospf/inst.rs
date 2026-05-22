@@ -1376,6 +1376,70 @@ impl Ospf<Ospfv2> {
 /// builder can be reviewed and tested ahead of the spawn wiring.
 #[allow(dead_code)]
 impl Ospf<Ospfv3> {
+    /// Build the v3 Network-LSA for a broadcast / NBMA segment
+    /// on which this router is the elected DR (RFC 5340 §A.4.4).
+    ///
+    /// Returns `None` if any of these conditions hold:
+    ///   - the ifindex doesn't name an enabled link
+    ///   - the link isn't Broadcast / NBMA
+    ///   - this router is not the DR on the link (i.e.
+    ///     `link.ident.d_router != self.router_id`)
+    ///
+    /// LS-ID = the local Interface ID for the link (§A.4.4 — v3
+    /// Network-LSA LS-ID is the DR's Interface ID, not the
+    /// interface's IP as in v2). Attached routers = every
+    /// neighbor in Full state plus ourselves.
+    ///
+    /// Unlike v2's Network-LSA, the v3 body carries no netmask /
+    /// prefix info — those move to the Intra-Area-Prefix-LSA.
+    pub fn build_network_lsa(&self, ifindex: u32) -> Option<ospf_packet::Ospfv3Lsa> {
+        use ospf_packet::{
+            OSPFV3_NETWORK_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3NetworkLsa,
+            Ospfv3Options,
+        };
+
+        let link = self.links.get(&ifindex)?;
+        if !link.enabled {
+            return None;
+        }
+        if !matches!(link.network_type, OspfNetworkType::Broadcast) {
+            return None;
+        }
+        if link.ident.d_router != self.router_id {
+            return None;
+        }
+
+        // RFC 5340 §A.4.4: the DR's Network-LSA enumerates every
+        // router fully adjacent to it on the segment, including
+        // the DR itself.
+        let mut attached_routers: Vec<Ipv4Addr> = vec![self.router_id];
+        attached_routers.extend(
+            link.nbrs
+                .values()
+                .filter(|n| n.state == NfsmState::Full)
+                .map(|n| n.ident.router_id),
+        );
+
+        let body = Ospfv3NetworkLsa {
+            options: Ospfv3Options::default(),
+            attached_routers,
+        };
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_NETWORK_LSA_TYPE,
+                link_state_id: link.interface_id,
+                advertising_router: self.router_id,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Network(body),
+        };
+        lsa.update();
+        Some(lsa)
+    }
+
     /// Build the Router-LSA for self-origination (RFC 5340 §A.4.3).
     ///
     /// Walks every enabled `OspfLink<Ospfv3>` and emits one
