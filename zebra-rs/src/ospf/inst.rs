@@ -118,6 +118,11 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// instead). Populated by `Ospf<Ospfv3>::ospf_interface` from
     /// `self.v3_send_tx`.
     pub v3_send_tx: Option<&'a UnboundedSender<super::network_v6::Ospfv3Send>>,
+    /// Per-link LSDB (RFC 5340 §A.4.9). Holds link-scope LSAs that
+    /// flood only on the segment they originated on. Always
+    /// borrowed from `OspfLink::lsdb`; on v2 it's empty (no
+    /// link-scope LSA types in RFC 2328).
+    pub link_lsdb: &'a mut Lsdb<V>,
 }
 
 // Version-agnostic helpers. These methods touch only generic-safe
@@ -157,6 +162,7 @@ impl<V: OspfVersion> Ospf<V> {
                             retransmit_interval,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
+                            link_lsdb: &mut link.lsdb,
                         },
                         nbr,
                     )
@@ -1937,6 +1943,7 @@ impl Ospf<Ospfv3> {
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
                 self.router_intra_area_prefix_lsa_originate(area_id);
+                self.link_lsa_originate(ifindex);
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
@@ -1996,6 +2003,99 @@ impl Ospf<Ospfv3> {
                     "v3 process_msg: unhandled variant {:?}",
                     std::mem::discriminant(&other)
                 );
+            }
+        }
+    }
+
+    /// Originate this router's Link-LSA for `ifindex` into the
+    /// per-link LSDB (RFC 5340 §A.4.9). Mirrors
+    /// `router_lsa_originate`'s shape, with two differences forced
+    /// by the link scope:
+    ///
+    /// - Lookup / install go into `OspfLink::lsdb` (not the area
+    ///   LSDB), since RFC 5340 §4.5.2 forbids Link-LSAs from
+    ///   leaving the segment.
+    /// - Flooding uses `flood_link_scope_lsa(ifindex, lsa)`, which
+    ///   walks only the neighbors on this one link.
+    ///
+    /// Returns silently if `build_link_lsa(ifindex)` declines (the
+    /// interface is unknown or disabled).
+    pub fn link_lsa_originate(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_LINK_LSA_TYPE;
+
+        let Some(mut lsa) = self.build_link_lsa(ifindex) else {
+            return;
+        };
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_LINK_LSA_TYPE, ifindex, self.router_id);
+
+        // Pull the prior sequence number out of the link's LSDB.
+        if let Some(link) = self.links.get(&ifindex)
+            && let Some(prev_seq) = link
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number)
+        {
+            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            // Link-LSA lives in the per-link LSDB; no area_id is
+            // associated with link-scope LSAs in the hold-timer
+            // protocol, so pass `None`.
+            link.lsdb.install_originated(lsa, &self.tx, None);
+        }
+        self.flood_link_scope_lsa(ifindex, &flood_lsa);
+    }
+
+    /// Flood a link-scope LSA to every Exchange-or-later neighbor
+    /// on the originating link only. Counterpart to
+    /// `flood_self_originated_lsa` which walks the whole area;
+    /// RFC 5340 §4.5.2 bounds link-scope flooding to the segment.
+    fn flood_link_scope_lsa(&mut self, ifindex: u32, lsa: &ospf_packet::Ospfv3Lsa) {
+        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
+
+        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
+            return;
+        };
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let Some(src) = link.addr.iter().find_map(|a| {
+            let addr = a.prefix.addr();
+            addr.is_unicast_link_local().then_some(addr)
+        }) else {
+            return;
+        };
+
+        let recipients: Vec<std::net::Ipv6Addr> = link
+            .nbrs
+            .values()
+            .filter(|n| n.state >= NfsmState::Exchange)
+            .map(|n| n.ident.prefix.addr())
+            .collect();
+
+        for nbr_v6 in recipients {
+            let ls_upd = Ospfv3LsUpdate {
+                lsas: vec![lsa.clone()],
+            };
+            let packet = Ospfv3Packet::new(
+                &self.router_id,
+                &area_id,
+                0,
+                Ospfv3Payload::LsUpdate(ls_upd),
+            );
+            let item = super::network_v6::Ospfv3Send {
+                packet,
+                ifindex,
+                dest: Some(nbr_v6),
+                src,
+            };
+            if let Err(e) = tx.send(item) {
+                tracing::warn!("[v3 Link-LSA Flood] channel send failed: {}", e);
             }
         }
     }
