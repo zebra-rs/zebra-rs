@@ -1840,6 +1840,12 @@ impl Ospf<Ospfv3> {
                 };
                 super::packet_v3::ospfv3_hello_send(link, tx);
             }
+            Message::Nfsm(index, src, ev) => {
+                if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
+                    let ident = link.ident;
+                    super::nfsm::ospf_nfsm(&mut link, nbr, ev, ident);
+                }
+            }
             other => {
                 tracing::debug!(
                     "v3 process_msg: unhandled variant {:?}",
@@ -1849,11 +1855,49 @@ impl Ospf<Ospfv3> {
         }
     }
 
+    /// Dispatch one v3 packet received off the wire (`network_v6`).
+    /// Bridges the `Ospfv3Recv` channel into the v3 instance by
+    /// looking up the ingress link and routing by payload type.
+    /// Only Hello is handled at the moment; the four other v3 packet
+    /// types (DBD / LSReq / LSUpd / LSAck) fall through with a debug
+    /// log until their recv handlers land.
+    pub fn process_recv(&mut self, recv: super::network_v6::Ospfv3Recv) {
+        let super::network_v6::Ospfv3Recv {
+            packet,
+            src,
+            dst: _,
+            ifindex,
+        } = recv;
+        let our_router_id = self.router_id;
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        match &packet.payload {
+            Ospfv3Payload::Hello(_) => {
+                super::packet_v3::ospfv3_hello_recv(&our_router_id, link, &packet, &src);
+            }
+            other => {
+                tracing::debug!(
+                    "v3 process_recv: unhandled packet payload {:?}",
+                    std::mem::discriminant(other)
+                );
+            }
+        }
+    }
+
     /// Main event loop for the v3 instance. Mirrors v2's `event_loop`
-    /// but only `rx` (instance-level events) and `rib_rx` (RIB updates)
-    /// are wired here; `cm.rx` / `show.rx` will follow when the v3
-    /// config schema and show paths land.
+    /// but only `rx` / `rib_rx` / the v3 packet recv channel are
+    /// wired; `cm.rx` / `show.rx` follow with the v3 config schema.
+    ///
+    /// `self.v3_recv_rx` is taken out of the `Option` at start so
+    /// the `select!` arm doesn't have to re-borrow it through the
+    /// `&mut self` used by `process_*`. `Ospf<Ospfv3>::new` always
+    /// populates it (#768).
     pub async fn event_loop(&mut self) {
+        let mut v3_recv_rx = self
+            .v3_recv_rx
+            .take()
+            .expect("Ospf<Ospfv3> has no v3 recv channel");
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
@@ -1862,6 +1906,9 @@ impl Ospf<Ospfv3> {
                 Some(_msg) = self.rib_rx.recv() => {
                     // v3 RIB integration TBD; drain for now so the
                     // channel doesn't back-pressure the rib client.
+                }
+                Some(recv) = v3_recv_rx.recv() => {
+                    self.process_recv(recv);
                 }
             }
         }
