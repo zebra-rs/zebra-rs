@@ -50,13 +50,35 @@ pub struct InterfaceNeighborCfg {
     pub remote_as: RemoteAsSpec,
 }
 
-/// Look up the resolved remote AS for an interface-neighbor against
-/// its referenced neighbor-group fallback.
-pub fn resolve_remote_as(bgp: &Bgp, cfg: &InterfaceNeighborCfg) -> Option<u32> {
+/// Resolved remote-as for an interface-neighbor plus a hint about
+/// where the value came from. The provenance bit lets
+/// [`materialize_peer`] stamp the inheritance flag on the synthesized
+/// peer so the reactive sweep in
+/// [`super::neighbor_group::config_neighbor_group_remote_as`] picks
+/// it up later.
+struct ResolvedRemoteAs {
+    asn: u32,
+    inherited_from_group: bool,
+}
+
+/// Resolve the interface-neighbor's remote-as with provenance. Returns
+/// `None` when neither the per-cfg spec nor the referenced group
+/// supplies one.
+fn resolve_remote_as_with_source(
+    bgp: &Bgp,
+    cfg: &InterfaceNeighborCfg,
+) -> Option<ResolvedRemoteAs> {
     if let Some(asn) = cfg.remote_as.materialize(bgp.asn) {
-        return Some(asn);
+        return Some(ResolvedRemoteAs {
+            asn,
+            inherited_from_group: false,
+        });
     }
-    super::neighbor_group::group_remote_as(bgp, cfg.neighbor_group.as_ref()?)
+    let asn = super::neighbor_group::group_remote_as(bgp, cfg.neighbor_group.as_ref()?)?;
+    Some(ResolvedRemoteAs {
+        asn,
+        inherited_from_group: true,
+    })
 }
 
 /// Materialize a Peer for `interface-neighbor IFNAME` once an RA has
@@ -70,7 +92,7 @@ pub fn materialize_peer(
     link_local: Ipv6Addr,
 ) -> Option<usize> {
     let cfg = bgp.interface_neighbors.get(name)?.clone();
-    let remote_as = resolve_remote_as(bgp, &cfg)?;
+    let resolved = resolve_remote_as_with_source(bgp, &cfg)?;
 
     // Already materialized? Refresh address (the peer's link-local
     // can change if the kernel reassigns it) but otherwise leave the
@@ -84,7 +106,7 @@ pub fn materialize_peer(
         0,
         bgp.asn,
         bgp.router_id,
-        remote_as,
+        resolved.asn,
         link_local.into(),
         bgp.hostname(),
         bgp.tx.clone(),
@@ -96,6 +118,13 @@ pub fn materialize_peer(
     // path in `peer_start_connection` reads this back out and
     // builds the SocketAddrV6 accordingly.
     peer.scope_id = Some(ifindex);
+    // When the remote-as came off the group rather than the per-cfg
+    // spec, stamp the back-reference so the reactive sweep on
+    // `neighbor-group remote-as` changes can find this peer.
+    if resolved.inherited_from_group {
+        peer.config.neighbor_group = cfg.neighbor_group.clone();
+        peer.config.remote_as_inherited = true;
+    }
     bgp.peers.insert_with_key(PeerKey::Interface(ifindex), peer);
 
     // Kick the FSM. `peer.start()` arms the idle-hold timer which
