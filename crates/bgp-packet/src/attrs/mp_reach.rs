@@ -668,7 +668,8 @@ mod tests {
             MupRoute::T2st {
                 id: 0,
                 arch: crate::MupArchitectureType::Gpp5g,
-                body: vec![],
+                rd: crate::RouteDistinguisher::from_str("65000:2").unwrap(),
+                endpoint: "192.0.2.50/32".parse().unwrap(),
             },
         ];
         let mut buf = BytesMut::new();
