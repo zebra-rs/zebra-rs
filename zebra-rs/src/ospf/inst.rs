@@ -3348,32 +3348,92 @@ fn collect_v3_nexthops(top: &Ospf<Ospfv3>, path: &spf::Path) -> Vec<(std::net::I
     out
 }
 
-fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
+/// Owned, `Send`-able inputs to a single v2 SPF run for one area.
+///
+/// Built on the main task by [`build_spf_input`] (which reads the
+/// LSDB to assemble the graph); the resulting value carries no
+/// borrow on `Ospf`, so [`compute_spf`] can in a follow-up patch be
+/// dispatched onto `tokio::task::spawn_blocking`.
+struct SpfInput {
+    area_id: Ipv4Addr,
+    graph: spf::Graph,
+    source: usize,
+}
+
+/// Result of a single v2 SPF run, ready to be applied back to
+/// `Ospf` by [`apply_spf_result`] on the main task.
+struct SpfOutput {
+    area_id: Ipv4Addr,
+    graph: spf::Graph,
+    source: usize,
+    spf_result: BTreeMap<usize, spf::Path>,
+    duration: Duration,
+    last: Instant,
+}
+
+/// Build the SPF graph for `area_id` and resolve the local vertex.
+/// Returns `None` if the area has no source node (router-LSA for
+/// self not yet originated), matching the previous early-return.
+fn build_spf_input(top: &mut Ospf, area_id: Ipv4Addr) -> Option<SpfInput> {
     let (graph, source_node) = graph(top, area_id);
+    source_node.map(|source| SpfInput {
+        area_id,
+        graph,
+        source,
+    })
+}
 
-    if let Some(source) = source_node {
-        let start = Instant::now();
-        let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
-        let end = Instant::now();
-        top.spf_duration = Some(end.duration_since(start));
-        top.spf_last = Some(end);
-        // println!("[SPF] area {} nodes: {}", area_id, spf_result.len());
-        // for (node_id, path) in &spf_result {
-        //     if let Some(node) = graph.get(node_id) {
-        //         println!(
-        //             "[SPF]   {} cost {} nexthops {:?}",
-        //             node.name, path.cost, path.nexthops
-        //         );
-        //     }
-        // }
+/// Pure compute: runs Dijkstra. Holds no reference to `Ospf` so it
+/// can later move to a blocking worker without touching shared state.
+fn compute_spf(input: SpfInput) -> SpfOutput {
+    let SpfInput {
+        area_id,
+        graph,
+        source,
+    } = input;
+    let start = Instant::now();
+    let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+    let last = Instant::now();
+    let duration = last.duration_since(start);
+    SpfOutput {
+        area_id,
+        graph,
+        source,
+        spf_result,
+        duration,
+        last,
+    }
+}
 
-        let rib = build_rib_from_spf(top, area_id, source, &spf_result);
+/// Apply a completed SPF run: stamp telemetry, build the area RIB
+/// from the SPF tree, and push the diff into the system RIB. Must
+/// run on the main task — `build_rib_from_spf` reads the LSDB and
+/// `apply_routing_updates` mutates `Ospf` and emits on `ctx.rib`.
+fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
+    let SpfOutput {
+        area_id,
+        graph,
+        source,
+        spf_result,
+        duration,
+        last,
+    } = output;
+    top.spf_duration = Some(duration);
+    top.spf_last = Some(last);
 
-        // Store the SPF result and graph in OSPF instance.
-        top.spf_result = Some(spf_result);
-        top.graph = Some(graph);
+    let rib = build_rib_from_spf(top, area_id, source, &spf_result);
 
-        apply_routing_updates(top, rib);
+    // Store the SPF result and graph in OSPF instance.
+    top.spf_result = Some(spf_result);
+    top.graph = Some(graph);
+
+    apply_routing_updates(top, rib);
+}
+
+fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
+    if let Some(input) = build_spf_input(top, area_id) {
+        let output = compute_spf(input);
+        apply_spf_result(top, output);
     }
 }
 
