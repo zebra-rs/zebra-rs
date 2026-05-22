@@ -1388,6 +1388,34 @@ impl Ospfv3Lsa {
         self.h.emit(buf);
         self.body.emit(buf);
     }
+
+    /// Recompute `length` and `ls_checksum` after the caller
+    /// mutated header fields (`ls_age` / `ls_seq_number`) or the
+    /// body — for instance during LSA refresh or flush.
+    ///
+    /// Per RFC 5340 §A.4.2.1 the v3 LSA header is the same 20
+    /// octets as v2's (§A.4.1) with LS Checksum at offset 16 and
+    /// Length at offset 18. The Fletcher checksum (RFC 905 Annex
+    /// B / RFC 1008) is computed over the whole LSA **except**
+    /// the LS Age field, with the checksum field included as
+    /// zero. Both versions share the same checksum offset, so
+    /// the calculator is reused from the v2 codec.
+    pub fn update(&mut self) {
+        // 1) Length = 20-octet header + serialized body length.
+        let mut body_buf = BytesMut::new();
+        self.body.emit(&mut body_buf);
+        self.h.length = (OSPFV3_LSA_HEADER_LEN as usize + body_buf.len()) as u16;
+
+        // 2) Zero the checksum field, emit the header, append the
+        //    body, and run Fletcher over (LSA[2..]) — skipping the
+        //    LS Age. The checksum field's position within the
+        //    Fletcher data is 14 (16 in LSA - 2 for skipped age).
+        self.h.ls_checksum = 0;
+        let mut buf = BytesMut::with_capacity(self.h.length as usize);
+        self.h.emit(&mut buf);
+        buf.extend_from_slice(&body_buf);
+        self.h.ls_checksum = super::parser::lsa_checksum_calc(&buf[2..], 14);
+    }
 }
 
 impl ParseBe<Ospfv3Lsa> for Ospfv3Lsa {
@@ -1765,6 +1793,48 @@ mod tests {
             &buf[OSPFV3_CHECKSUM_OFFSET + 2..],
             &buf2[OSPFV3_CHECKSUM_OFFSET + 2..]
         );
+    }
+
+    /// `Ospfv3Lsa::update` recomputes `length` to match the
+    /// serialized body and stamps a non-zero Fletcher `ls_checksum`.
+    /// Mutating any header or body field and re-running `update`
+    /// produces a different checksum; mutating without running
+    /// `update` is a no-op (the field stays at whatever the
+    /// caller left it).
+    #[test]
+    fn ospfv3_lsa_update_recomputes_length_and_checksum() {
+        let body = make_router_lsa();
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_ROUTER_LSA_TYPE,
+                link_state_id: 0,
+                advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Router(body),
+        };
+
+        lsa.update();
+
+        // Length matches serialized form (20 octets header + body).
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        assert_eq!(lsa.h.length as usize, buf.len());
+
+        // Checksum is non-zero (Fletcher on a non-trivial body
+        // can technically come out to any 16-bit value, but for
+        // the make_router_lsa fixture it isn't 0).
+        assert_ne!(lsa.h.ls_checksum, 0);
+        let checksum_first = lsa.h.ls_checksum;
+
+        // Bumping the sequence number and re-running `update`
+        // changes the checksum.
+        lsa.h.ls_seq_number += 1;
+        lsa.update();
+        assert_ne!(lsa.h.ls_checksum, checksum_first);
     }
 
     /// Empty LSU (zero LSAs) still emits the 4-byte count and parses
