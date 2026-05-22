@@ -34,6 +34,7 @@ use super::BgpAttrStore;
 use super::inst::Message;
 use super::peer::{Peer, PeerType};
 use super::peer_map::PeerMap;
+use super::timer::AdvInterval;
 use crate::bgp::InOut;
 use crate::context::Timer;
 
@@ -148,6 +149,13 @@ pub struct UpdateGroup {
     /// Adv-debounce timer. Started on first send; on fire,
     /// `Bgp::serve` drains the cache and ships UPDATEs to members.
     pub cache_ipv4_timer: Option<Timer>,
+
+    /// Snapshot of `Bgp::adv_interval` captured at group creation
+    /// (`attach`) and refreshed by the global config callback. Used
+    /// by `start_adv_timer_ipv4` to arm the debounce — the
+    /// peer-type→seconds lookup happens against this snapshot, not a
+    /// hard-coded 5/30.
+    pub adv_interval: AdvInterval,
 }
 
 /// Per-AFI/SAFI bookkeeping: the active groups plus a monotonic seq
@@ -252,7 +260,10 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
     };
 
     // Snapshot signatures so we can mutate update_groups + peer
-    // without overlapping borrows.
+    // without overlapping borrows. The adv_interval snapshot rides
+    // along onto every freshly-created group so the IPv4 adv-timer
+    // can read its cadence without reaching back into `Bgp`.
+    let adv_interval = peer.adv_interval;
     let mut sigs: Vec<(AfiSafi, UpdateGroupSig)> = Vec::new();
     for (afi, safi) in TRACKED_AFI_SAFIS {
         if let Some(sig) = signature_of(peer, afi, safi) {
@@ -274,6 +285,7 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
+                adv_interval,
             }
         });
         entry.members.insert(peer_idx);
@@ -337,9 +349,6 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
 // group cache via `send_ipv4_direct` — encoding stays per-attr-
 // batched without fanning out to the whole group.
 
-const ADV_TIMER_IBGP_SECS: u64 = 5;
-const ADV_TIMER_EBGP_SECS: u64 = 30;
-
 /// Bucket the (nlri, attr, source_ident) into the group's IPv4
 /// pending-advert cache. Also kicks the adv-debounce timer if not
 /// already running. The `tx` channel is the global Bgp tx (every
@@ -360,7 +369,8 @@ pub fn send_ipv4(
         .insert(nlri.clone(), source_ident);
     group.cache_ipv4_rev.insert(nlri, attr);
     if kick_timer && group.cache_ipv4_timer.is_none() {
-        group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, group.sig.peer_type));
+        let secs = group.adv_interval.secs_for(group.sig.peer_type);
+        group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, secs));
     }
 }
 
@@ -383,15 +393,7 @@ pub fn cache_remove_ipv4(group: &mut UpdateGroup, prefix: ipnet::Ipv4Net, id: u3
     }
 }
 
-fn start_adv_timer_ipv4(
-    tx: &mpsc::Sender<Message>,
-    id: &UpdateGroupId,
-    peer_type: PeerType,
-) -> Timer {
-    let secs = match peer_type {
-        PeerType::IBGP => ADV_TIMER_IBGP_SECS,
-        PeerType::EBGP => ADV_TIMER_EBGP_SECS,
-    };
+fn start_adv_timer_ipv4(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u64) -> Timer {
     let tx = tx.clone();
     let id = id.clone();
     Timer::once(secs, move || {
@@ -810,6 +812,7 @@ mod tests {
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
+                adv_interval: AdvInterval::default(),
             },
         );
         af.next_seq = 1;

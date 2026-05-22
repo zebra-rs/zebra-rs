@@ -6,7 +6,7 @@ use rand::RngExt;
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 
-use super::peer::{Event, Peer, State};
+use super::peer::{Event, Peer, PeerType, State};
 use super::{Bgp, Message};
 
 #[derive(Debug, Default, Clone)]
@@ -17,6 +17,37 @@ pub struct Config {
     pub connect_retry_time: Option<u16>,
     pub min_adv_interval: Option<u16>,
     pub orig_interval: Option<u16>,
+}
+
+/// Global MinRouteAdvertisementInterval (MRAI) per RFC 4271 §9.2.1.1,
+/// split by peer type. Stored once on `Bgp` and snapshotted onto each
+/// `Peer` / `UpdateGroup` so the timer-arming code path doesn't need
+/// to reach the global instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvInterval {
+    pub ibgp: u16,
+    pub ebgp: u16,
+}
+
+impl AdvInterval {
+    pub const DEFAULT_IBGP: u16 = 5;
+    pub const DEFAULT_EBGP: u16 = 30;
+
+    pub fn secs_for(&self, peer_type: PeerType) -> u64 {
+        match peer_type {
+            PeerType::IBGP => self.ibgp as u64,
+            PeerType::EBGP => self.ebgp as u64,
+        }
+    }
+}
+
+impl Default for AdvInterval {
+    fn default() -> Self {
+        Self {
+            ibgp: Self::DEFAULT_IBGP,
+            ebgp: Self::DEFAULT_EBGP,
+        }
+    }
 }
 
 impl Config {
@@ -103,22 +134,16 @@ fn start_hold_timer(peer: &Peer) -> Timer {
 }
 
 pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
-    if peer.is_ibgp() {
-        start_timer!(peer, 5_u64, Event::AdvTimerVpnv4Expires)
-    } else {
-        start_timer!(peer, 30_u64, Event::AdvTimerVpnv4Expires)
-    }
+    let secs = peer.adv_interval.secs_for(peer.peer_type);
+    start_timer!(peer, secs, Event::AdvTimerVpnv4Expires)
 }
 
 /// EVPN advertise debounce — same iBGP/eBGP cadence as the IPv4 /
 /// VPNv4 timers. Buffers a burst of FDB learns into one MP_REACH
 /// UPDATE per attribute group.
 pub fn start_adv_timer_evpn(peer: &Peer) -> Timer {
-    if peer.is_ibgp() {
-        start_timer!(peer, 5_u64, Event::AdvTimerEvpnExpires)
-    } else {
-        start_timer!(peer, 30_u64, Event::AdvTimerEvpnExpires)
-    }
+    let secs = peer.adv_interval.secs_for(peer.peer_type);
+    start_timer!(peer, secs, Event::AdvTimerEvpnExpires)
 }
 
 fn start_keepalive_timer(peer: &Peer) -> Timer {
@@ -315,5 +340,48 @@ pub mod config {
             peer.config.timer.orig_interval = None;
         }
         Some(())
+    }
+
+    /// `router bgp timer adv-interval ibgp <secs>` — global iBGP MRAI.
+    /// Updating the value re-snapshots `peer.adv_interval` /
+    /// `update_group.adv_interval` for every existing peer / group so
+    /// the next timer arm picks up the new value. Already-armed timers
+    /// keep their captured value until they fire — there is no
+    /// observable benefit to cancelling them early since the
+    /// adv-debounce is a coalescing knob, not a session timer.
+    pub fn adv_interval_ibgp(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+        let val = if op.is_set() {
+            args.u16()?
+        } else {
+            AdvInterval::DEFAULT_IBGP
+        };
+        bgp.adv_interval.ibgp = val;
+        propagate_adv_interval(bgp);
+        Some(())
+    }
+
+    /// `router bgp timer adv-interval ebgp <secs>` — global eBGP MRAI.
+    /// See [`adv_interval_ibgp`] for the propagation contract.
+    pub fn adv_interval_ebgp(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+        let val = if op.is_set() {
+            args.u16()?
+        } else {
+            AdvInterval::DEFAULT_EBGP
+        };
+        bgp.adv_interval.ebgp = val;
+        propagate_adv_interval(bgp);
+        Some(())
+    }
+
+    fn propagate_adv_interval(bgp: &mut Bgp) {
+        let snapshot = bgp.adv_interval;
+        for (_, peer) in bgp.peers.iter_mut_all() {
+            peer.adv_interval = snapshot;
+        }
+        for af in bgp.update_groups.values_mut() {
+            for group in af.groups.values_mut() {
+                group.adv_interval = snapshot;
+            }
+        }
     }
 }

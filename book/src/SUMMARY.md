@@ -15,6 +15,7 @@
 - [BGP](ch-02-00-what-is-bgp.md)
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
+  - [Timer Configuration](ch-02-03-bgp-timers.md)
 - [IS-IS](ch-07-00-isis.md)
   - [Timer Configuration](ch-07-01-isis-timers.md)
   - [Shared Risk Link Group (SRLG)](ch-07-02-isis-srlg.md)

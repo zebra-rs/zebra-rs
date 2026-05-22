@@ -442,6 +442,12 @@ pub struct Bgp {
     /// follow-up (step 5b).
     pub redist_v4: BTreeMap<(crate::rib::RibType, ipnet::Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: BTreeMap<(crate::rib::RibType, ipnet::Ipv6Net), crate::rib::RouteEntryV6>,
+
+    /// Global MinRouteAdvertisementInterval (MRAI) per RFC 4271
+    /// §9.2.1.1, split by peer type. Source of truth for the per-Peer
+    /// / per-UpdateGroup `adv_interval` snapshots. Configured under
+    /// `router bgp timer adv-interval { ibgp; ebgp; }`.
+    pub adv_interval: super::timer::AdvInterval,
 }
 
 impl Bgp {
@@ -529,6 +535,7 @@ impl Bgp {
             redistribute: BTreeMap::new(),
             redist_v4: BTreeMap::new(),
             redist_v6: BTreeMap::new(),
+            adv_interval: super::timer::AdvInterval::default(),
         };
         bgp.callback_build();
         bgp.show_build();
