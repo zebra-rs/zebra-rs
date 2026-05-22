@@ -31,6 +31,8 @@ pub mod show;
 
 pub mod config;
 
+pub mod config_v3;
+
 pub mod network;
 
 pub mod network_v6;

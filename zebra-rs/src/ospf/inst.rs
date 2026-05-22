@@ -60,7 +60,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub rx: UnboundedReceiver<Message<V>>,
     pub ptx: UnboundedSender<Message<V>>,
     pub cm: ConfigChannel,
-    pub callbacks: HashMap<String, Callback>,
+    pub callbacks: HashMap<String, Callback<V>>,
     pub ctx: crate::context::ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink<V>>,
@@ -1453,7 +1453,7 @@ impl Ospf<Ospfv3> {
             });
         }
 
-        Self {
+        let mut ospf = Self {
             tx,
             rx,
             ptx,
@@ -1478,6 +1478,19 @@ impl Ospf<Ospfv3> {
             sock,
             v3_send_tx: Some(v3_send_tx),
             v3_recv_rx: Some(v3_recv_rx),
+        };
+        ospf.callback_build();
+        ospf
+    }
+
+    /// Look up the v3 YANG-path handler for `msg.paths` and invoke
+    /// it. Mirrors v2's `process_cm_msg`. Currently only
+    /// `/router/ospfv3/area/interface/enable` is registered (#791-stub
+    /// path); more leaves land alongside the YANG schema expansion.
+    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.callbacks.get(&path) {
+            f(self, args, msg.op);
         }
     }
 
@@ -2210,9 +2223,10 @@ impl Ospf<Ospfv3> {
         }
     }
 
-    /// Main event loop for the v3 instance. Mirrors v2's `event_loop`
-    /// but only `rx` / `rib_rx` / the v3 packet recv channel are
-    /// wired; `cm.rx` / `show.rx` follow with the v3 config schema.
+    /// Main event loop for the v3 instance. Mirrors v2's `event_loop`:
+    /// pulls instance events from `rx`, RIB updates from `rib_rx`,
+    /// config-manager requests from `cm.rx`, show requests from
+    /// `show.rx`, and v3 packets from `v3_recv_rx`.
     ///
     /// `self.v3_recv_rx` is taken out of the `Option` at start so
     /// the `select!` arm doesn't have to re-borrow it through the
@@ -2231,6 +2245,12 @@ impl Ospf<Ospfv3> {
                 Some(_msg) = self.rib_rx.recv() => {
                     // v3 RIB integration TBD; drain for now so the
                     // channel doesn't back-pressure the rib client.
+                }
+                Some(msg) = self.cm.rx.recv() => {
+                    self.process_cm_msg(msg);
+                }
+                Some(_msg) = self.show.rx.recv() => {
+                    // v3 show path TBD; drain for now.
                 }
                 Some(recv) = v3_recv_rx.recv() => {
                     self.process_recv(recv);
