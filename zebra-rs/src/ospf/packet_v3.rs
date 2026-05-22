@@ -8,8 +8,8 @@ use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
 use ospf_packet::{
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3Lsa, Ospfv3LsaHeader,
-    Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa,
+    Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -403,16 +403,32 @@ fn ospfv3_ls_type_scope(ls_type: u16) -> Ospfv3LsaScope {
 /// `ospf_lsa_lookup`. Link-scope LSAs aren't yet tracked in any
 /// dedicated link-LSDB; they return `None` for now (same shape as
 /// v2's Unknown-scope fallthrough).
-fn ospfv3_lsa_lookup<'a>(
+///
+/// Takes the raw 3-tuple so both DBD recv (where we have a full
+/// `Ospfv3LsaHeader`) and LS Request recv (where the entry carries
+/// just `ls_type` / `link_state_id` / `advertising_router`) can use
+/// it without constructing intermediate values.
+fn ospfv3_lsa_lookup_raw<'a>(
     oi: &'a OspfInterface<Ospfv3>,
-    h: &Ospfv3LsaHeader,
+    ls_type: u16,
+    link_state_id: u32,
+    advertising_router: std::net::Ipv4Addr,
 ) -> Option<&'a Ospfv3Lsa> {
-    let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
-    match ospfv3_ls_type_scope(h.ls_type) {
+    let key: super::lsdb::OspfLsaKey = (ls_type, link_state_id, advertising_router);
+    match ospfv3_ls_type_scope(ls_type) {
         Ospfv3LsaScope::Area => oi.lsdb.lookup_by_raw_key(key),
         Ospfv3LsaScope::As => oi.lsdb_as.lookup_by_raw_key(key),
         Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => None,
     }
+}
+
+/// Convenience wrapper that takes an `Ospfv3LsaHeader`. Used by
+/// DBD recv (#779) where the header is what gets iterated.
+fn ospfv3_lsa_lookup<'a>(
+    oi: &'a OspfInterface<Ospfv3>,
+    h: &Ospfv3LsaHeader,
+) -> Option<&'a Ospfv3Lsa> {
+    ospfv3_lsa_lookup_raw(oi, h.ls_type, h.link_state_id, h.advertising_router)
 }
 
 /// Per-DBD processing once both sides have agreed on master / slave.
@@ -646,5 +662,85 @@ pub fn ospfv3_ls_req_send(
     };
     if let Err(e) = tx.send(item) {
         tracing::warn!("[v3 LSReq:Send] channel send failed: {}", e);
+    }
+}
+
+/// Emit an OSPFv3 Link State Update packet (RFC 5340 §A.3.5) with
+/// the given LSAs to the specified neighbor. Mirrors v2's
+/// `ospf_ls_upd_send`. Body is `num_lsa: u32` followed by the LSAs
+/// in serialized form.
+pub fn ospfv3_ls_upd_send(
+    oi: &OspfInterface<Ospfv3>,
+    nbr: &Neighbor<Ospfv3>,
+    lsas: Vec<Ospfv3Lsa>,
+) {
+    let area = oi.area_id;
+    let ls_upd = Ospfv3LsUpdate { lsas };
+
+    let packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsUpdate(ls_upd));
+
+    let Some(tx) = oi.v3_send_tx else {
+        tracing::debug!("[v3 LSUpd:Send] no v3 send channel on OspfInterface");
+        return;
+    };
+    let Some(src) = interface_link_local_src(oi) else {
+        tracing::debug!("[v3 LSUpd:Send] no link-local source on interface");
+        return;
+    };
+
+    let item = Ospfv3Send {
+        packet,
+        ifindex: nbr.ifindex,
+        dest: Some(nbr.ident.prefix.addr()),
+        src,
+    };
+    if let Err(e) = tx.send(item) {
+        tracing::warn!("[v3 LSUpd:Send] channel send failed: {}", e);
+    }
+}
+
+/// Process one OSPFv3 Link State Request packet — RFC 5340 §4.2.2
+/// inheriting RFC 2328 §10.7. For each requested LSA, look it up in
+/// the appropriate LSDB and collect into an LS Update reply. Any
+/// requested LSA we don't hold triggers `BadLSReq` (RFC 2328 §10.7),
+/// which the NFSM treats as a fatal exchange error and forces
+/// renegotiation from ExStart.
+pub fn ospfv3_ls_req_recv(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    packet: &Ospfv3Packet,
+    src: &Ipv6Addr,
+) {
+    // RFC 2328 §10.7: LS Request only valid once we've established
+    // the DBD exchange (i.e. >= Exchange).
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv3Payload::LsRequest(ref ls_req) = packet.payload else {
+        return;
+    };
+
+    tracing::info!("[v3 LSReq:Recv] from {} entries={}", src, ls_req.reqs.len());
+
+    let mut lsas: Vec<Ospfv3Lsa> = Vec::new();
+    for req in ls_req.reqs.iter() {
+        match ospfv3_lsa_lookup_raw(oi, req.ls_type, req.link_state_id, req.advertising_router) {
+            Some(lsa) => lsas.push(lsa.clone()),
+            None => {
+                tracing::info!(
+                    "[v3 LSReq] BadLSReq: not in LSDB ls_type=0x{:04x} id={} adv={}",
+                    req.ls_type,
+                    req.link_state_id,
+                    req.advertising_router
+                );
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::BadLSReq);
+                return;
+            }
+        }
+    }
+
+    if !lsas.is_empty() {
+        ospfv3_ls_upd_send(oi, nbr, lsas);
     }
 }
