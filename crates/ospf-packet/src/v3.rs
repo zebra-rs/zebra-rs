@@ -394,7 +394,7 @@ impl Ospfv3LsaHeader {
 ///   - Flags (1 octet) — same I/M/MS layout as v2 `DbDescFlags`
 ///   - DD Sequence Number (4 octets)
 ///   - LSA headers (variable, 20 octets each)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Ospfv3DbDesc {
     pub options: Ospfv3Options,
     pub if_mtu: u16,
