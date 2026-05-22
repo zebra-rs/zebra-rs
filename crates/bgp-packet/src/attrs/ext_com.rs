@@ -6,8 +6,8 @@ use bytes::{BufMut, BytesMut};
 use nom_derive::NomBE;
 
 use crate::{
-    AttrEmitter, AttrFlags, AttrType, ExtCommunitySubType, ExtCommunityType, RouteDistinguisher,
-    RouteDistinguisherType, TunnelType,
+    AttrEmitter, AttrFlags, AttrType, ExtCommunitySubType, ExtCommunityType, MupExtComSubType,
+    RouteDistinguisher, RouteDistinguisherType, TunnelType,
 };
 
 use super::ext_com_token::{Token, tokenizer};
@@ -57,6 +57,50 @@ impl ExtCommunityValue {
         let flags: u16 = ((co_bits as u16) & 0b11) << 14;
         Color { flags, color }.into()
     }
+
+    /// True iff this entry is a MUP Extended Community (RFC 9833 §5):
+    /// high-type byte 0x0c.
+    pub fn is_mup(&self) -> bool {
+        self.high_type == ExtCommunityType::Mup as u8
+    }
+
+    /// Decode the MUP Extended Community sub-type and surface the
+    /// 6-octet payload as opaque bytes. Typed payload decoding per
+    /// RFC 9833 §5 is deferred to a follow-up.
+    pub fn as_mup(&self) -> Option<MupExtCom> {
+        if !self.is_mup() {
+            return None;
+        }
+        Some(MupExtCom {
+            sub_type: MupExtComSubType::from(self.low_type),
+            value: self.val,
+        })
+    }
+}
+
+/// Decoded MUP Extended Community (RFC 9833 §5). The `value` field
+/// is the raw 6-octet payload; typed accessors per sub-type will
+/// follow once the spec layout is in-tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MupExtCom {
+    pub sub_type: MupExtComSubType,
+    pub value: [u8; 6],
+}
+
+impl MupExtCom {
+    pub fn new(sub_type: MupExtComSubType, value: [u8; 6]) -> Self {
+        Self { sub_type, value }
+    }
+}
+
+impl From<MupExtCom> for ExtCommunityValue {
+    fn from(m: MupExtCom) -> Self {
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Mup as u8,
+            low_type: m.sub_type.into(),
+            val: m.value,
+        }
+    }
 }
 
 /// Decoded Color extended community (RFC 9012 §4.3). `flags` is the
@@ -99,6 +143,15 @@ impl fmt::Display for ExtCommunityValue {
                 f,
                 "{}:{asn}:{val}",
                 ExtCommunitySubType::display(self.low_type)
+            )
+        } else if let Some(m) = self.as_mup() {
+            // MUP Extended Community (RFC 9833 §5). Until typed
+            // payloads land, render the sub-type identifier plus the
+            // raw 6-byte value as a colon-joined hex string.
+            write!(
+                f,
+                "{}:{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                m.sub_type, m.value[0], m.value[1], m.value[2], m.value[3], m.value[4], m.value[5]
             )
         } else if self.high_type == TransOpaque as u8 {
             // Color extcomm (RFC 9012 §4.3) has its own 2-octet flags
@@ -333,5 +386,92 @@ mod tests {
         let c = parsed.as_color().unwrap();
         assert_eq!(c.color, 128);
         assert_eq!(c.co_bits(), 0b10);
+    }
+
+    #[test]
+    fn mup_subtype_round_trip_known_and_unknown() {
+        for raw in [0u8, 1, 2, 3, 4, 99, 255] {
+            let st = MupExtComSubType::from(raw);
+            assert_eq!(u8::from(st), raw);
+        }
+        assert_eq!(MupExtComSubType::from(0), MupExtComSubType::Sub00);
+        assert_eq!(MupExtComSubType::from(3), MupExtComSubType::Sub03);
+    }
+
+    #[test]
+    fn mup_extcom_recognized_via_high_type_0x0c() {
+        let ev = ExtCommunityValue {
+            high_type: 0x0c,
+            low_type: 0x02,
+            val: [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02],
+        };
+        assert!(ev.is_mup());
+        let m = ev.as_mup().expect("must decode");
+        assert_eq!(m.sub_type, MupExtComSubType::Sub02);
+        assert_eq!(m.value, [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn non_mup_extcom_returns_none_from_as_mup() {
+        let color = ExtCommunityValue::from_color(0, 5);
+        assert!(!color.is_mup());
+        assert!(color.as_mup().is_none());
+    }
+
+    #[test]
+    fn mup_extcom_round_trip_via_from() {
+        let original = MupExtCom::new(MupExtComSubType::Sub01, [1, 2, 3, 4, 5, 6]);
+        let ev: ExtCommunityValue = original.into();
+        assert_eq!(ev.high_type, 0x0c);
+        assert_eq!(ev.low_type, 0x01);
+        let decoded = ev.as_mup().unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn mup_extcom_unknown_subtype_preserved() {
+        let original = MupExtCom::new(MupExtComSubType::Unknown(0x7F), [0; 6]);
+        let ev: ExtCommunityValue = original.into();
+        assert_eq!(ev.low_type, 0x7F);
+        assert_eq!(
+            ev.as_mup().unwrap().sub_type,
+            MupExtComSubType::Unknown(0x7F)
+        );
+    }
+
+    #[test]
+    fn mup_extcom_display_renders_subtype_and_hex_value() {
+        let ev: ExtCommunityValue = MupExtCom::new(
+            MupExtComSubType::Sub00,
+            [0xab, 0xcd, 0x00, 0x11, 0x22, 0x33],
+        )
+        .into();
+        assert_eq!(format!("{ev}"), "mup-sub-0x00:abcd00112233");
+    }
+
+    #[test]
+    fn mup_extcom_wire_round_trip_through_attribute_emit() {
+        // Build an ExtCommunity attribute with one MUP value, round-
+        // trip the wire bytes through emit, then reconstruct the value.
+        let original = ExtCommunityValue {
+            high_type: 0x0c,
+            low_type: 0x03,
+            val: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
+        };
+        let ecom = ExtCommunity(vec![original.clone()]);
+        let mut buf = BytesMut::new();
+        ecom.emit(&mut buf);
+        let bytes: Vec<u8> = buf.to_vec();
+        assert_eq!(bytes.len(), 8);
+        let mut val = [0u8; 6];
+        val.copy_from_slice(&bytes[2..8]);
+        let parsed = ExtCommunityValue {
+            high_type: bytes[0],
+            low_type: bytes[1],
+            val,
+        };
+        assert_eq!(parsed, original);
+        let m = parsed.as_mup().unwrap();
+        assert_eq!(m.sub_type, MupExtComSubType::Sub03);
     }
 }
