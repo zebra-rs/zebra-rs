@@ -367,7 +367,9 @@ mod tests {
 
     #[test]
     fn mup_ipv6_unreach_round_trips() {
-        let nlri = mup_nlri(2, &[0x10]);
+        // Minimal DSD body for IPv6 outer AFI: 8 RD + 16 zero address bytes.
+        let dsd_body = vec![0u8; 8 + 16];
+        let nlri = mup_nlri(2, &dsd_body);
         let value = build(2, &nlri);
         let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
         match mp {

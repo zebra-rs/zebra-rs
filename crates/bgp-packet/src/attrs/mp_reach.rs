@@ -561,11 +561,16 @@ mod tests {
         v
     }
 
+    /// Minimal DSD body for the IPv4 outer AFI: 8 RD + 4 zero address bytes.
+    fn min_dsd_body_v4() -> Vec<u8> {
+        vec![0u8; 8 + 4]
+    }
+
     #[test]
     fn mup_ipv4_round_trip_via_parse_nlri_opt() {
         let nhop: Ipv4Addr = "192.0.2.1".parse().unwrap();
         let mut nlri = mup_nlri(1, &min_isd_body());
-        nlri.extend_from_slice(&mup_nlri(2, &[0x01, 0x02]));
+        nlri.extend_from_slice(&mup_nlri(2, &min_dsd_body_v4()));
         let value = build(1, 85, &nhop.octets(), &nlri);
         let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
         match mp {
