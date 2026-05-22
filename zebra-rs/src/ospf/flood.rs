@@ -5,6 +5,7 @@ use ospf_packet::*;
 use super::inst::Message;
 use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey, v2_lsa_key};
 use super::task::{Timer, TimerType};
+use super::version::OspfVersion;
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
 
 #[derive(Debug, PartialEq)]
@@ -164,10 +165,18 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
 
 // Retransmit list functions.
 
-pub fn ospf_retransmit_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer {
+/// Construct an LSDB key from a `V::Lsa` via the trait header
+/// accessors. Used by the retransmit-list helpers below; v2
+/// callers get the same key shape `v2_lsa_key` produces.
+fn lsa_to_key<V: OspfVersion>(lsa: &V::Lsa) -> OspfLsaKey {
+    let h = V::lsa_header(lsa);
+    (V::ls_type(h), V::ls_id(h), V::adv_router(h))
+}
+
+pub fn ospf_retransmit_timer<V: OspfVersion>(nbr: &Neighbor<V>, retransmit_interval: u16) -> Timer {
     let tx = nbr.tx.clone();
     let ifindex = nbr.ifindex;
-    let addr = nbr.ident.prefix.addr();
+    let addr = V::nbr_addr(&nbr.ident);
     Timer::new(
         Timer::second(retransmit_interval as u64),
         TimerType::Once,
@@ -180,23 +189,30 @@ pub fn ospf_retransmit_timer(nbr: &Neighbor, retransmit_interval: u16) -> Timer 
     )
 }
 
-pub fn ospf_ls_retransmit_add(nbr: &mut Neighbor, lsa: &OspfLsa, retransmit_interval: u16) {
-    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+pub fn ospf_ls_retransmit_add<V: OspfVersion>(
+    nbr: &mut Neighbor<V>,
+    lsa: &V::Lsa,
+    retransmit_interval: u16,
+) {
+    let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.insert(key, lsa.clone());
     if nbr.timer.ls_rxmt.is_none() {
         nbr.timer.ls_rxmt = Some(ospf_retransmit_timer(nbr, retransmit_interval));
     }
 }
 
-pub fn ospf_ls_retransmit_delete(nbr: &mut Neighbor, lsa: &OspfLsa) {
-    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+pub fn ospf_ls_retransmit_delete<V: OspfVersion>(nbr: &mut Neighbor<V>, lsa: &V::Lsa) {
+    let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.remove(&key);
     if nbr.ls_rxmt.is_empty() {
         nbr.timer.ls_rxmt = None;
     }
 }
 
-pub fn ospf_ls_retransmit_lookup<'a>(nbr: &'a Neighbor, lsa: &OspfLsa) -> Option<&'a OspfLsa> {
-    let key: OspfLsaKey = v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+pub fn ospf_ls_retransmit_lookup<'a, V: OspfVersion>(
+    nbr: &'a Neighbor<V>,
+    lsa: &V::Lsa,
+) -> Option<&'a V::Lsa> {
+    let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.get(&key)
 }
