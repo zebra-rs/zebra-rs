@@ -40,6 +40,8 @@ pub mod socket;
 pub mod packet;
 pub use packet::*;
 
+pub mod packet_v3;
+
 pub mod lsdb;
 pub use lsdb::*;
 
