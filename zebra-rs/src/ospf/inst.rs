@@ -1885,18 +1885,23 @@ impl Ospf<Ospfv3> {
         self.flood_self_originated_lsa(AREA0, &flood_lsa);
     }
 
-    /// Flood a self-originated v3 LSA to every Exchange-or-later
-    /// neighbor in the area. Minimal RFC 2328 §13.3 — no DR / BDR
-    /// ordering, no retransmit-list bookkeeping, no ls_req cleanup
-    /// for Exchange / Loading neighbors. Those land alongside the
-    /// §13.1 hardening of `ospfv3_ls_upd_recv`.
+    /// Flood a v3 LSA through `area_id`, optionally exempting the
+    /// source neighbor that fed it to us (RFC 2328 §13.3 Step 1c).
+    /// Mirrors v2's `flood_lsa_through_area`.
     ///
-    /// The LSU goes through the dedicated `Ospfv3Send` channel so
-    /// `network_v6::write_packet_v6` stamps the IPv6 pseudo-header
-    /// checksum. Source = the link's first link-local v6; dest =
-    /// the neighbor's link-local (the `/128` captured in
-    /// `ospfv3_hello_recv`).
-    fn flood_self_originated_lsa(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
+    /// `source = None` is the self-origination path: every
+    /// Exchange-or-later neighbor on every area link is a
+    /// recipient. `source = Some((ifindex, nbr_v6))` is the
+    /// "received LSA" path: skip the (ifindex, neighbor link-local
+    /// v6) we got the LSA from. v3 identifies the source neighbor
+    /// by link-local v6 because that's what `Message::Flood<Ospfv3>`
+    /// carries (`V::Addr = Ipv6Addr`).
+    fn flood_lsa_through_area(
+        &mut self,
+        area_id: Ipv4Addr,
+        lsa: &ospf_packet::Ospfv3Lsa,
+        source: Option<(u32, std::net::Ipv6Addr)>,
+    ) {
         use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
 
         let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
@@ -1918,13 +1923,16 @@ impl Ospf<Ospfv3> {
                 continue;
             };
 
-            // Snapshot Exchange-or-later neighbors as (router_id,
-            // link-local v6) so we can release the &link borrow
-            // before pushing into the channel.
             let recipients: Vec<(Ipv4Addr, std::net::Ipv6Addr)> = link
                 .nbrs
                 .values()
                 .filter(|n| n.state >= NfsmState::Exchange)
+                .filter(|n| match source {
+                    Some((src_if, src_v6)) => {
+                        !(ifindex == src_if && n.ident.prefix.addr() == src_v6)
+                    }
+                    None => true,
+                })
                 .map(|n| (n.ident.router_id, n.ident.prefix.addr()))
                 .collect();
 
@@ -1949,6 +1957,21 @@ impl Ospf<Ospfv3> {
                 }
             }
         }
+    }
+
+    /// Flood a self-originated v3 LSA to every Exchange-or-later
+    /// neighbor in the area. Minimal RFC 2328 §13.3 — no DR / BDR
+    /// ordering, no retransmit-list bookkeeping, no ls_req cleanup
+    /// for Exchange / Loading neighbors. Those land alongside the
+    /// §13.1 hardening of `ospfv3_ls_upd_recv`.
+    ///
+    /// The LSU goes through the dedicated `Ospfv3Send` channel so
+    /// `network_v6::write_packet_v6` stamps the IPv6 pseudo-header
+    /// checksum. Source = the link's first link-local v6; dest =
+    /// the neighbor's link-local (the `/128` captured in
+    /// `ospfv3_hello_recv`).
+    fn flood_self_originated_lsa(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
+        self.flood_lsa_through_area(area_id, lsa, None);
     }
 
     /// Run an intra-area SPF calculation for `area_id`.
@@ -2096,6 +2119,12 @@ impl Ospf<Ospfv3> {
                         let _ = self.tx.send(Message::SpfCalc(area_id));
                     }
                 }
+            }
+            Message::Flood(area_id, lsa, source_ifindex, source_nbr_addr) => {
+                // RFC 2328 §13.3: flood the LSA to every other
+                // Exchange-or-later neighbor in the area, exempting
+                // the (ifindex, router-id) pair we received it from.
+                self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
             }
             Message::Lsdb(ev, area_id, key) => {
                 // RFC 2328 §13.4: a peer flooded our own LSA back to
