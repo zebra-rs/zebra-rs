@@ -1807,9 +1807,8 @@ impl Ospf<Ospfv3> {
     /// - Install via the already-generic
     ///   `Lsdb::install_originated` (no v2-specific seq logic to
     ///   thread through `insert_self_originated`).
-    /// - Flooding to Full neighbors is deferred to a follow-up PR.
-    ///   The originated LSA lands in the local LSDB but isn't yet
-    ///   pushed out via LS Update.
+    /// - After install, flood the LSA to every Exchange-or-later
+    ///   neighbor in the area via `flood_self_originated_lsa`.
     pub fn router_lsa_originate(&mut self) {
         use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
         let mut lsa = self.build_router_lsa();
@@ -1826,8 +1825,77 @@ impl Ospf<Ospfv3> {
         }
         lsa.update();
 
+        let flood_lsa = lsa.clone();
         if let Some(area) = self.areas.get_mut(AREA0) {
             area.lsdb.install_originated(lsa, &self.tx, Some(AREA0));
+        }
+
+        self.flood_self_originated_lsa(AREA0, &flood_lsa);
+    }
+
+    /// Flood a self-originated v3 LSA to every Exchange-or-later
+    /// neighbor in the area. Minimal RFC 2328 §13.3 — no DR / BDR
+    /// ordering, no retransmit-list bookkeeping, no ls_req cleanup
+    /// for Exchange / Loading neighbors. Those land alongside the
+    /// §13.1 hardening of `ospfv3_ls_upd_recv`.
+    ///
+    /// The LSU goes through the dedicated `Ospfv3Send` channel so
+    /// `network_v6::write_packet_v6` stamps the IPv6 pseudo-header
+    /// checksum. Source = the link's first link-local v6; dest =
+    /// the neighbor's link-local (the `/128` captured in
+    /// `ospfv3_hello_recv`).
+    fn flood_self_originated_lsa(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
+        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
+
+        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
+            return;
+        };
+        let Some(area) = self.areas.get(area_id) else {
+            return;
+        };
+        let link_indices: Vec<u32> = area.links.iter().copied().collect();
+
+        for ifindex in link_indices {
+            let Some(link) = self.links.get(&ifindex) else {
+                continue;
+            };
+            let Some(src) = link.addr.iter().find_map(|a| {
+                let addr = a.prefix.addr();
+                addr.is_unicast_link_local().then_some(addr)
+            }) else {
+                continue;
+            };
+
+            // Snapshot Exchange-or-later neighbors as (router_id,
+            // link-local v6) so we can release the &link borrow
+            // before pushing into the channel.
+            let recipients: Vec<(Ipv4Addr, std::net::Ipv6Addr)> = link
+                .nbrs
+                .values()
+                .filter(|n| n.state >= NfsmState::Exchange)
+                .map(|n| (n.ident.router_id, n.ident.prefix.addr()))
+                .collect();
+
+            for (_nbr_rid, nbr_v6) in recipients {
+                let ls_upd = Ospfv3LsUpdate {
+                    lsas: vec![lsa.clone()],
+                };
+                let packet = Ospfv3Packet::new(
+                    &self.router_id,
+                    &area_id,
+                    0,
+                    Ospfv3Payload::LsUpdate(ls_upd),
+                );
+                let item = super::network_v6::Ospfv3Send {
+                    packet,
+                    ifindex,
+                    dest: Some(nbr_v6),
+                    src,
+                };
+                if let Err(e) = tx.send(item) {
+                    tracing::warn!("[v3 Flood] channel send failed: {}", e);
+                }
+            }
         }
     }
 
