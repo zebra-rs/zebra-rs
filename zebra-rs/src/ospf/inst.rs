@@ -272,7 +272,7 @@ impl Ospf<Ospfv2> {
         if link.state == IfsmState::Waiting || link.full_nbr_count == 0 {
             return false;
         }
-        if link.ident.is_declared_dr() {
+        if Ospfv2::is_declared_dr(&link.ident) {
             return true;
         }
         if let Some(dr_nbr) = link.nbrs.get(&link.ident.d_router) {
@@ -827,7 +827,7 @@ impl Ospf<Ospfv2> {
             }
             for addr in link.addr.iter() {
                 if addr.prefix.addr() == ls_id {
-                    return link.ident.is_declared_dr();
+                    return Ospfv2::is_declared_dr(&link.ident);
                 }
             }
         }
