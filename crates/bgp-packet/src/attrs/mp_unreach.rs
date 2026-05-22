@@ -330,6 +330,14 @@ mod tests {
         v
     }
 
+    /// Minimal T2ST body (AFI-agnostic at endpoint_len=0):
+    /// 8 RD + 1 ep_len=0 + 0 endpoint bytes.
+    fn min_t2st_body() -> Vec<u8> {
+        let mut v = vec![0u8; 8];
+        v.push(0);
+        v
+    }
+
     /// MUP MP_UNREACH inner value: AFI + SAFI + withdraws.
     fn build(afi: u16, withdraws: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
@@ -351,7 +359,7 @@ mod tests {
     #[test]
     fn mup_ipv4_unreach_round_trips() {
         let mut nlri = mup_nlri(1, &min_isd_body());
-        nlri.extend_from_slice(&mup_nlri(4, &[]));
+        nlri.extend_from_slice(&mup_nlri(4, &min_t2st_body()));
         let value = build(1, &nlri);
         let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(&value, None).expect("must parse");
         match mp {

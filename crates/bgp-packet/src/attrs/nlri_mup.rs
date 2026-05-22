@@ -14,18 +14,19 @@
 //! +------------------------------------+
 //! ```
 //!
-//! As of Phase 5, Type 1 (Interwork Segment Discovery, §3.1.1) and
-//! Type 2 (Direct Segment Discovery, §3.1.2) bodies are decoded into
-//! typed fields. Types 3–4 remain opaque (`Vec<u8>`) and land in
-//! Phase 6. Add-Path follows the EVPN convention used elsewhere in
-//! this crate: a non-zero `id` signals a 4-octet RFC 7911 Path
+//! All four defined route types are now decoded into typed fields:
+//! Type 1 (Interwork Segment Discovery, §3.1.1), Type 2 (Direct
+//! Segment Discovery, §3.1.2), Type 3 (Type-1 Session Transformed,
+//! §3.2.1), and Type 4 (Type-2 Session Transformed, §3.2.2).
+//! Unknown route types fall through to `MupRoute::Unknown` with an
+//! opaque body. Add-Path follows the EVPN convention used elsewhere
+//! in this crate: a non-zero `id` signals a 4-octet RFC 7911 Path
 //! Identifier on the wire.
 //!
-//! Parsing the typed ISD / DSD bodies requires the outer AFI
-//! (IPv4 ⇒ 4-octet address; IPv6 ⇒ 16-octet address), so
-//! `MupRoute::parse` is an associated function rather than a
-//! `ParseNlri` impl — that trait's signature does not carry AFI
-//! context.
+//! Parsing typed bodies requires the outer AFI (IPv4 ⇒ 4-octet
+//! address space, IPv6 ⇒ 16-octet) so `MupRoute::parse` is an
+//! associated function rather than a `ParseNlri` impl — that
+//! trait's signature does not carry AFI context.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -108,8 +109,9 @@ impl From<u16> for MupRouteType {
 
 /// MUP NLRI route. Each variant carries the Add-Path identifier
 /// (`id`, zero when Add-Path is off) and the architecture type.
-/// Types 1 (Isd), 2 (Dsd), and 3 (T1st) hold typed fields; T2st
-/// still holds opaque bytes until Phase 6b decodes it.
+/// All four defined route types (Isd, Dsd, T1st, T2st) hold typed
+/// fields; unrecognized route types arrive as `Unknown` with an
+/// opaque body so the dispatch shell never drops an UPDATE.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MupRoute {
     /// Interwork Segment Discovery Route (RFC 9833 §3.1.1).
@@ -152,10 +154,19 @@ pub enum MupRoute {
         qfi: u8,
         endpoint: IpAddr,
     },
+    /// Type 2 Session Transformed Route (RFC 9833 §3.2.2).
+    ///
+    /// Wire body: 8-octet RD + 1-octet endpoint address length in
+    /// bits + endpoint address bytes (ceil(len/8) octets). The TEID
+    /// is encoded in the lower bits of the endpoint address per
+    /// §3.2.2; this layer surfaces the address + bit-length pair as
+    /// an `IpNet`, leaving any TEID-bits extraction to upper layers.
+    /// The outer AFI selects the address family.
     T2st {
         id: u32,
         arch: MupArchitectureType,
-        body: Vec<u8>,
+        rd: RouteDistinguisher,
+        endpoint: IpNet,
     },
     Unknown {
         id: u32,
@@ -216,7 +227,8 @@ impl MupRoute {
                 };
                 8 + 1 + nlri_psize(prefix.prefix_len()) + 4 + 1 + 1 + nlri_psize(ep_bits)
             }
-            MupRoute::T2st { body, .. } | MupRoute::Unknown { body, .. } => body.len(),
+            MupRoute::T2st { endpoint, .. } => 8 + 1 + nlri_psize(endpoint.prefix_len()),
+            MupRoute::Unknown { body, .. } => body.len(),
         }
     }
 }
@@ -366,11 +378,41 @@ impl MupRoute {
                     endpoint,
                 }
             }
-            MupRouteType::T2st => MupRoute::T2st {
-                id,
-                arch,
-                body: body_slice.to_vec(),
-            },
+            MupRouteType::T2st => {
+                let (rest, rd) = RouteDistinguisher::parse_be(body_slice)?;
+                let (rest, ep_len) = be_u8(rest)?;
+                let max_addr_bits = match afi {
+                    Afi::Ip => 32u8,
+                    Afi::Ip6 => 128u8,
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
+                };
+                if ep_len > max_addr_bits {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                }
+                let ep_size = nlri_psize(ep_len);
+                if rest.len() < ep_size {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                }
+                let endpoint = match afi {
+                    Afi::Ip => {
+                        let mut octets = [0u8; 4];
+                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
+                        IpNet::V4(Ipv4Net::new(Ipv4Addr::from(octets), ep_len).unwrap())
+                    }
+                    Afi::Ip6 => {
+                        let mut octets = [0u8; 16];
+                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
+                        IpNet::V6(Ipv6Net::new(Ipv6Addr::from(octets), ep_len).unwrap())
+                    }
+                    _ => unreachable!(),
+                };
+                MupRoute::T2st {
+                    id,
+                    arch,
+                    rd,
+                    endpoint,
+                }
+            }
             MupRouteType::Unknown(rt) => MupRoute::Unknown {
                 id,
                 arch,
@@ -444,7 +486,18 @@ impl MupRoute {
                     IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
                 }
             }
-            MupRoute::T2st { body, .. } | MupRoute::Unknown { body, .. } => {
+            MupRoute::T2st { rd, endpoint, .. } => {
+                payload.put_u16(rd.typ as u16);
+                payload.put(&rd.val[..]);
+                let plen = endpoint.prefix_len();
+                payload.put_u8(plen);
+                let psize = nlri_psize(plen);
+                match endpoint {
+                    IpNet::V4(p) => payload.put(&p.addr().octets()[..psize]),
+                    IpNet::V6(p) => payload.put(&p.addr().octets()[..psize]),
+                }
+            }
+            MupRoute::Unknown { body, .. } => {
                 payload.put(&body[..]);
             }
         }
@@ -798,16 +851,85 @@ mod tests {
     }
 
     #[test]
-    fn t2st_opaque_round_trip() {
+    fn t2st_v4_round_trip() {
         round_trip(
             MupRoute::T2st {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
-                body: vec![],
+                rd: sample_rd(),
+                endpoint: "10.0.0.1/32".parse().unwrap(),
             },
             false,
             Afi::Ip,
         );
+    }
+
+    #[test]
+    fn t2st_v6_round_trip() {
+        round_trip(
+            MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "2001:db8::1/128".parse().unwrap(),
+            },
+            false,
+            Afi::Ip6,
+        );
+    }
+
+    #[test]
+    fn t2st_v6_partial_bit_length_round_trip() {
+        // TEID-encoded endpoint where only the upper 80 bits are
+        // semantically meaningful. The encoding stores ceil(80/8)=10
+        // octets and reconstructs them on parse.
+        round_trip(
+            MupRoute::T2st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "2001:db8:1:2:3::/80".parse().unwrap(),
+            },
+            false,
+            Afi::Ip6,
+        );
+    }
+
+    #[test]
+    fn t2st_add_path_round_trip() {
+        round_trip(
+            MupRoute::T2st {
+                id: 0xC0FFEE00,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                endpoint: "192.0.2.99/32".parse().unwrap(),
+            },
+            true,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t2st_rejects_endpoint_len_over_afi_max() {
+        // arch=1, route_type=4, length=14, RD(8) + ep_len=33 (> 32 for v4) + filler
+        let mut v = vec![0x01, 0x00, 0x04, 14];
+        v.extend_from_slice(&[0; 8]);
+        v.push(33);
+        v.extend_from_slice(&[0; 5]);
+        assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn t2st_body_len_matches_emitted_size() {
+        let route = MupRoute::T2st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            endpoint: "2001:db8::1/128".parse().unwrap(),
+        };
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        assert_eq!(buf.len(), 4 + route.body_len());
     }
 
     #[test]
