@@ -22,8 +22,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use ospf_packet::{
-    OspfDbDesc, OspfHello, OspfLsa, OspfLsaHeader, Ospfv2Packet, Ospfv3DbDesc, Ospfv3Hello,
-    Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Packet,
+    OspfDbDesc, OspfHello, OspfLsa, OspfLsaHeader, OspfOptions, Ospfv2Packet, Ospfv3DbDesc,
+    Ospfv3Hello, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet,
 };
 
 /// Marker / dispatch trait for an OSPF protocol version (v2 or v3).
@@ -80,6 +80,12 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone {
     /// One LSA: header + body. `OspfLsa` / `Ospfv3Lsa`. LSDB entries
     /// and LS Update packets carry the full LSA.
     type Lsa: Debug + Clone + Send + Sync + 'static;
+
+    /// Options bitfield carried in Hello / DBD / LSA headers.
+    /// `OspfOptions` is an 8-bit bitfield (RFC 2328 §A.2);
+    /// `Ospfv3Options` is 24 bits (RFC 5340 §A.2). Both derive
+    /// `Default` (= all zeros, the conventional starting state).
+    type Options: Debug + Clone + Default + Send + Sync + 'static;
 
     /// IP protocol number for OSPF packets — 89 in both versions
     /// (RFC 2328 §A and RFC 5340 §2.3).
@@ -200,6 +206,7 @@ impl OspfVersion for Ospfv2 {
     type DbDesc = OspfDbDesc;
     type LsaHeader = OspfLsaHeader;
     type Lsa = OspfLsa;
+    type Options = OspfOptions;
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
 
@@ -277,6 +284,7 @@ impl OspfVersion for Ospfv3 {
     type DbDesc = Ospfv3DbDesc;
     type LsaHeader = Ospfv3LsaHeader;
     type Lsa = Ospfv3Lsa;
+    type Options = Ospfv3Options;
     /// AllSPFRouters in v3 (RFC 5340 §A.1): `ff02::5`.
     const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
     /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.
