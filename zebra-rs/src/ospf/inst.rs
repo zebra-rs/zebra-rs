@@ -1794,6 +1794,43 @@ impl Ospf<Ospfv3> {
         lsa
     }
 
+    /// Originate this router's Router-LSA into AREA0's LSDB.
+    /// Mirrors v2's `router_lsa_originate_with_min_seq` shape with
+    /// the v3-specific differences:
+    ///
+    /// - v3 carries `ls_type` as a raw `u16` (RFC 5340 §A.4.2.1);
+    ///   the AREA0 LSDB lookup uses `lookup_by_raw_key` with the
+    ///   3-tuple `(OSPFV3_ROUTER_LSA_TYPE, link_state_id=0,
+    ///   advertising_router=self.router_id)`.
+    /// - Checksum / length are restamped via `Ospfv3Lsa::update`
+    ///   after the sequence number bump.
+    /// - Install via the already-generic
+    ///   `Lsdb::install_originated` (no v2-specific seq logic to
+    ///   thread through `insert_self_originated`).
+    /// - Flooding to Full neighbors is deferred to a follow-up PR.
+    ///   The originated LSA lands in the local LSDB but isn't yet
+    ///   pushed out via LS Update.
+    pub fn router_lsa_originate(&mut self) {
+        use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
+        let mut lsa = self.build_router_lsa();
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_ROUTER_LSA_TYPE, 0, self.router_id);
+        if let Some(area) = self.areas.get(AREA0) {
+            let current_seq = area
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number);
+            if let Some(seq) = current_seq {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+            }
+        }
+        lsa.update();
+
+        if let Some(area) = self.areas.get_mut(AREA0) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(AREA0));
+        }
+    }
+
     /// Dispatch one v3 instance-level message.
     ///
     /// Subset of v2's `process_msg` covering the IFSM-driver scope:
@@ -1817,6 +1854,7 @@ impl Ospf<Ospfv3> {
                 link.area_id = area_id;
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
+                self.router_lsa_originate();
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
@@ -1828,6 +1866,7 @@ impl Ospf<Ospfv3> {
                 link.area_id = Ipv4Addr::UNSPECIFIED;
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
+                self.router_lsa_originate();
                 let _ = self
                     .tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
