@@ -32,7 +32,10 @@ pub struct NeighborGroup {
 }
 
 /// `set router bgp neighbor-groups neighbor-group <name>` — list-key
-/// callback. Creates the entry on `Set` and removes it on `Delete`.
+/// callback. Creates the entry on `Set`; on `Delete` cascades through
+/// the sweep helper (so any peers that inherited from the group are
+/// torn down even when libyang's commit path skips the per-leaf
+/// delete callbacks) and then removes the entry.
 pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     match op {
@@ -40,6 +43,12 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
             bgp.neighbor_groups.entry(name).or_default();
         }
         ConfigOp::Delete => {
+            // Same shape as a remote-as Delete: any inherited peer
+            // resets to `remote_as = 0` and is sent `Event::Stop`.
+            // Idempotent if the per-leaf delete already ran — the
+            // second pass finds peers with `remote_as_inherited =
+            // false` and returns `SweepAction::Ignore`.
+            sweep_peers_for_group(bgp, &name, None);
             bgp.neighbor_groups.remove(&name);
         }
         _ => {}
