@@ -1376,6 +1376,98 @@ impl Ospf<Ospfv2> {
 /// builder can be reviewed and tested ahead of the spawn wiring.
 #[allow(dead_code)]
 impl Ospf<Ospfv3> {
+    /// Build the v3 Intra-Area-Prefix-LSA that references this
+    /// router's Router-LSA in `area_id` (RFC 5340 §A.4.10).
+    ///
+    /// v3 separates topology (Router-LSA / Network-LSA) from prefix
+    /// advertisement. This LSA carries the IPv6 prefixes that this
+    /// router contributes to the area, hanging them off the
+    /// Router-LSA reference triple
+    /// `(referenced_ls_type = Router-LSA,
+    ///   referenced_link_state_id = 0,
+    ///   referenced_advertising_router = self.router_id)`.
+    ///
+    /// Iterates every enabled link in `area_id`, walks each
+    /// link's configured IPv6 addresses, and emits one
+    /// `Ospfv3IntraAreaPrefix` per non-link-local prefix with the
+    /// link's `output_cost` as the metric.
+    ///
+    /// Returns `None` if there are no advertisable prefixes in
+    /// the area — there's nothing to originate.
+    ///
+    /// The DR's Network-LSA-referenced variant (which aggregates
+    /// per-segment Link-LSA prefixes into a single area-scope
+    /// LSA) lands in a follow-up; the two share the same body
+    /// shape but differ on which LSA they reference.
+    pub fn build_router_intra_area_prefix_lsa(
+        &self,
+        area_id: Ipv4Addr,
+    ) -> Option<ospf_packet::Ospfv3Lsa> {
+        use ospf_packet::{
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE, Ospfv3IntraAreaPrefix,
+            Ospfv3IntraAreaPrefixLsa, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
+            Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+        };
+
+        let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
+        for link in self.links.values() {
+            if !link.enabled || link.area != area_id {
+                continue;
+            }
+            let metric = link.output_cost as u16;
+            for a in link.addr.iter() {
+                // Skip link-local addresses — those are
+                // advertised by Link-LSAs (RFC 5340 §A.4.9), not
+                // by Intra-Area-Prefix-LSAs (§A.4.10).
+                if a.prefix.addr().segments()[0] == 0xfe80 {
+                    continue;
+                }
+                let net = &a.prefix;
+                let prefix_length = net.prefix_len();
+                let wire_len = ospfv3_prefix_wire_len(prefix_length);
+                let mut address_prefix = vec![0u8; wire_len];
+                let bytes = net.addr().octets();
+                let copy_len = prefix_length.div_ceil(8) as usize;
+                address_prefix[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                prefixes.push(Ospfv3IntraAreaPrefix {
+                    prefix_length,
+                    prefix_options: Ospfv3PrefixOptions::default(),
+                    metric,
+                    address_prefix,
+                });
+            }
+        }
+
+        if prefixes.is_empty() {
+            return None;
+        }
+
+        let body = Ospfv3IntraAreaPrefixLsa {
+            referenced_ls_type: OSPFV3_ROUTER_LSA_TYPE,
+            referenced_link_state_id: 0,
+            referenced_advertising_router: self.router_id,
+            prefixes,
+        };
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+                // First (and so far only) fragment uses LS-ID 0;
+                // a future PR that splits large prefix sets across
+                // multiple Intra-Area-Prefix-LSAs will use distinct
+                // LS-IDs per fragment.
+                link_state_id: 0,
+                advertising_router: self.router_id,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::IntraAreaPrefix(body),
+        };
+        lsa.update();
+        Some(lsa)
+    }
+
     /// Build the v3 Link-LSA for a given interface (RFC 5340 §A.4.9).
     ///
     /// Originated by every router on every active interface with
