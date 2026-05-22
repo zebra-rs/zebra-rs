@@ -8,8 +8,8 @@ use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
 use ospf_packet::{
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa,
-    Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate,
+    Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -743,4 +743,111 @@ pub fn ospfv3_ls_req_recv(
     if !lsas.is_empty() {
         ospfv3_ls_upd_send(oi, nbr, lsas);
     }
+}
+
+/// Emit an OSPFv3 LS Acknowledgement packet (RFC 5340 §A.3.6)
+/// containing the supplied LSA headers. Mirrors v2's
+/// `ospf_ls_ack_send`. Unicast to the neighbor's link-local.
+pub fn ospfv3_ls_ack_send(
+    oi: &OspfInterface<Ospfv3>,
+    nbr: &Neighbor<Ospfv3>,
+    lsa_headers: Vec<Ospfv3LsaHeader>,
+) {
+    let area = oi.area_id;
+    let ls_ack = Ospfv3LsAck { lsa_headers };
+
+    let packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsAck(ls_ack));
+
+    let Some(tx) = oi.v3_send_tx else {
+        tracing::debug!("[v3 LSAck:Send] no v3 send channel on OspfInterface");
+        return;
+    };
+    let Some(src) = interface_link_local_src(oi) else {
+        tracing::debug!("[v3 LSAck:Send] no link-local source on interface");
+        return;
+    };
+
+    let item = Ospfv3Send {
+        packet,
+        ifindex: nbr.ifindex,
+        dest: Some(nbr.ident.prefix.addr()),
+        src,
+    };
+    if let Err(e) = tx.send(item) {
+        tracing::warn!("[v3 LSAck:Send] channel send failed: {}", e);
+    }
+}
+
+/// Process one OSPFv3 LS Update packet.
+///
+/// Minimal RFC 2328 §13.1: for each LSA in the update we install
+/// it into the appropriate scope-LSDB, remove any matching entry
+/// from `nbr.ls_req`, and collect its header for the LS Ack reply.
+/// After processing all LSAs we send a single direct LS Ack and
+/// check whether `nbr.ls_req` is now empty — if so, fire NFSM
+/// `LoadingDone` so the neighbor can transition Loading → Full.
+///
+/// **Scope note:** intentionally skipped from the v2-equivalent
+/// state machine in this PR — RFC 2328 §13.1 steps 3 (area-type
+/// filter), 4-special (MaxAge cleanup), 5 (flooding +
+/// self-originated reflood), 6 (BadLSReq trigger), 7 (implied-ack
+/// via retransmit list), 8 (older-than-DB push-back). Those land
+/// alongside v3 LSA origination / flooding orchestration.
+pub fn ospfv3_ls_upd_recv(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    packet: &Ospfv3Packet,
+    src: &Ipv6Addr,
+) {
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv3Payload::LsUpdate(ref ls_upd) = packet.payload else {
+        return;
+    };
+
+    tracing::info!("[v3 LSUpd:Recv] from {} lsas={}", src, ls_upd.lsas.len());
+
+    let area_id = oi.area_id;
+    let mut ack_headers: Vec<Ospfv3LsaHeader> = Vec::new();
+
+    for lsa in ls_upd.lsas.iter() {
+        let h = &lsa.h;
+        let scope = ospfv3_ls_type_scope(h.ls_type);
+
+        // Drop the entry from nbr.ls_req if it was on the request
+        // list; the LSU we just got satisfies that request.
+        nbr.ls_req.retain(|req| {
+            !(req.ls_type == h.ls_type
+                && req.link_state_id == h.link_state_id
+                && req.advertising_router == h.advertising_router)
+        });
+
+        // Route by scope into the correct LSDB. Link-scope LSAs
+        // don't yet have a per-link LSDB in zebra-rs; drop them
+        // (matches the `None` fallthrough in `ospfv3_lsa_lookup_raw`).
+        let cloned = lsa.clone();
+        match scope {
+            Ospfv3LsaScope::Area => {
+                oi.lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+            }
+            Ospfv3LsaScope::As => {
+                oi.lsdb_as.install_lsa(cloned, oi.tx, None);
+            }
+            Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => {
+                continue;
+            }
+        }
+
+        ack_headers.push(h.clone());
+    }
+
+    if !ack_headers.is_empty() {
+        ospfv3_ls_ack_send(oi, nbr, ack_headers);
+    }
+
+    // Check whether the request list is now empty; if so the
+    // neighbor can leave Loading.
+    super::nfsm::ospf_nfsm_check_nbr_loading(nbr);
 }

@@ -1897,6 +1897,11 @@ impl Ospf<Ospfv3> {
                     super::packet_v3::ospfv3_ls_req_recv(&mut oi, nbr, &packet, &src);
                 }
             }
+            Ospfv3Payload::LsUpdate(_) => {
+                if let Some((mut oi, nbr)) = self.ospf_interface(ifindex, &nbr_router_id) {
+                    super::packet_v3::ospfv3_ls_upd_recv(&mut oi, nbr, &packet, &src);
+                }
+            }
             other => {
                 tracing::debug!(
                     "v3 process_recv: unhandled packet payload {:?}",
