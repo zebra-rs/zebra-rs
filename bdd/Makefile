@@ -48,6 +48,10 @@ bgp_community:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_community"
 
+bgp_neighbor_group:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_neighbor_group"
+
 generate:
 	rm -rf allure-report
 	allure generate
