@@ -117,6 +117,12 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub ptx: UnboundedSender<Message<V>>,
     pub config: LinkConfig,
     pub ls_ack_delayed: Vec<V::LsaHeader>,
+    /// 32-bit Interface ID advertised in v3 Hellos and Router-LSA
+    /// links (RFC 5340 §A.3.2 / §A.4.3). Unused by v2 (where the
+    /// equivalent role is filled by the interface IP). Defaulted
+    /// to 0; the v3 interface-enable path sets it.
+    #[allow(dead_code)]
+    pub interface_id: u32,
 }
 
 #[derive(Default)]
@@ -164,6 +170,7 @@ where
             ptx,
             config: LinkConfig::default(),
             ls_ack_delayed: Vec::new(),
+            interface_id: 0,
         }
     }
 }
