@@ -1376,6 +1376,95 @@ impl Ospf<Ospfv2> {
 /// builder can be reviewed and tested ahead of the spawn wiring.
 #[allow(dead_code)]
 impl Ospf<Ospfv3> {
+    /// Build the v3 Link-LSA for a given interface (RFC 5340 §A.4.9).
+    ///
+    /// Originated by every router on every active interface with
+    /// **link-local scope** — never flooded beyond the segment.
+    /// Carries:
+    ///   - our Hello priority for the link,
+    ///   - our options bits,
+    ///   - our IPv6 link-local address on the link (so other
+    ///     routers on the segment can install a usable next hop),
+    ///   - the IPv6 prefixes configured on the interface (the DR
+    ///     aggregates these into the Intra-Area-Prefix-LSA the
+    ///     Network-LSA references).
+    ///
+    /// LS-ID = the local Interface ID (RFC 5340 §A.4.9).
+    ///
+    /// Returns `None` for unknown / disabled interfaces. If no
+    /// link-local address is configured yet (interface coming up
+    /// before netlink populates addresses), the Link-LSA carries
+    /// `::` as a placeholder — the interface-enable path will
+    /// re-originate once the address lands.
+    pub fn build_link_lsa(&self, ifindex: u32) -> Option<ospf_packet::Ospfv3Lsa> {
+        use ospf_packet::{
+            OSPFV3_LINK_LSA_TYPE, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsBody, Ospfv3Lsa,
+            Ospfv3LsaHeader, Ospfv3Options, Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+        };
+        use std::net::Ipv6Addr;
+
+        let link = self.links.get(&ifindex)?;
+        if !link.enabled {
+            return None;
+        }
+
+        // Pick a link-local. v3 hellos source from the link-local
+        // and v3 Link-LSAs advertise it (RFC 5340 §A.4.9). Until
+        // netlink reports one we publish `::` as a placeholder.
+        let link_local_address: Ipv6Addr = link
+            .addr
+            .iter()
+            .map(|a| a.prefix.addr())
+            .find(|a| a.segments()[0] == 0xfe80)
+            .unwrap_or(Ipv6Addr::UNSPECIFIED);
+
+        // Every non-link-local prefix configured on the interface
+        // gets advertised. Each prefix's wire bytes are the
+        // address octets truncated to `ceil(prefix_len / 8)`,
+        // then padded to a 32-bit boundary by
+        // `ospfv3_prefix_wire_len`.
+        let prefixes: Vec<Ospfv3LinkLsaPrefix> = link
+            .addr
+            .iter()
+            .filter(|a| a.prefix.addr().segments()[0] != 0xfe80)
+            .map(|a| {
+                let net = &a.prefix;
+                let prefix_length = net.prefix_len();
+                let wire_len = ospfv3_prefix_wire_len(prefix_length);
+                let mut address_prefix = vec![0u8; wire_len];
+                let addr_bytes = net.addr().octets();
+                let copy_len = prefix_length.div_ceil(8) as usize;
+                address_prefix[..copy_len].copy_from_slice(&addr_bytes[..copy_len]);
+                Ospfv3LinkLsaPrefix {
+                    prefix_length,
+                    prefix_options: Ospfv3PrefixOptions::default(),
+                    address_prefix,
+                }
+            })
+            .collect();
+
+        let body = Ospfv3LinkLsa {
+            priority: link.priority(),
+            options: Ospfv3Options::default(),
+            link_local_address,
+            prefixes,
+        };
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_LINK_LSA_TYPE,
+                link_state_id: link.interface_id,
+                advertising_router: self.router_id,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Link(body),
+        };
+        lsa.update();
+        Some(lsa)
+    }
+
     /// Build the v3 Network-LSA for a broadcast / NBMA segment
     /// on which this router is the elected DR (RFC 5340 §A.4.4).
     ///
