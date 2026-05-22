@@ -32,7 +32,7 @@ pub fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
-pub fn ospf_ls_request_isempty(nbr: &Neighbor) -> bool {
+pub fn ospf_ls_request_isempty<V: super::version::OspfVersion>(nbr: &Neighbor<V>) -> bool {
     nbr.ls_req.is_empty()
 }
 
