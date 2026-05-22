@@ -1966,6 +1966,8 @@ impl Ospf<Ospfv3> {
             self.spf_duration = Some(end.duration_since(start));
             self.spf_last = Some(end);
 
+            apply_routing_updates_v3(self, area_id, source, &spf_result);
+
             self.spf_result = Some(spf_result);
             self.graph = Some(graph);
         }
@@ -3108,6 +3110,158 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
     }
 
     (graph, source_node)
+}
+
+/// Reconstruct an `Ipv6Net` from the v3 wire-format prefix bytes.
+/// RFC 5340 §A.4.10 packs the address into `ceil(prefix_length / 8)`
+/// octets at the front, padded out to a 32-bit boundary by the
+/// codec. To get back to a regular `Ipv6Addr`, pad the bytes back
+/// to 16 with trailing zeros.
+fn ospfv3_prefix_to_ipv6net(prefix_length: u8, address_prefix: &[u8]) -> Option<ipnet::Ipv6Net> {
+    if prefix_length > 128 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    let n = address_prefix.len().min(16);
+    bytes[..n].copy_from_slice(&address_prefix[..n]);
+    let addr = std::net::Ipv6Addr::from(bytes);
+    ipnet::Ipv6Net::new(addr, prefix_length)
+        .ok()
+        .map(|n| n.trunc())
+}
+
+/// Walk Intra-Area-Prefix-LSAs in `area_id`'s LSDB, look each
+/// LSA's `referenced_advertising_router` up in `spf_result`, and
+/// for every reachable referenced router emit `rib::Message::Ipv6Add`
+/// for each carried prefix.
+///
+/// Nexthops are resolved by walking the SPF path's `first_hop_links`,
+/// reverse-mapping the first-hop vertex id back to a router-id via
+/// `top.lsp_map.resolve`, finding that router-id in any of our links'
+/// neighbor maps, and reading the link-local v6 + ifindex stored
+/// there. If no neighbor matches (the first-hop router doesn't have
+/// an adjacency with us), the prefix is silently skipped — same
+/// shape as v2's `build_spf_nexthops` "empty nhops → skip" pattern.
+///
+/// Direct install only — no diff vs prior SPF run. The RIB layer
+/// deduplicates Ipv6Add for an already-installed prefix.
+fn apply_routing_updates_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3LsBody};
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for (_key, lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::IntraAreaPrefix(ref body) = lsa.data.body else {
+            continue;
+        };
+
+        // Locate the SPF vertex for the referenced router. The
+        // referenced_advertising_router is who owns the prefixes;
+        // it's reachable via the SPF tree (or it's us — own prefixes
+        // are already system-installed connected routes).
+        let Some(ref_vertex) = top.lsp_map.lookup(body.referenced_advertising_router) else {
+            continue;
+        };
+        if ref_vertex == source {
+            // Self-originated; system handles these via connected routes.
+            continue;
+        }
+        let Some(ref_path) = spf_result.get(&ref_vertex) else {
+            continue;
+        };
+
+        // Resolve nexthops once per LSA — every prefix in the body
+        // shares the same set of next-hops (they all sit behind the
+        // same router).
+        let nhops = collect_v3_nexthops(top, ref_path);
+        if nhops.is_empty() {
+            continue;
+        }
+
+        for prefix in &body.prefixes {
+            let Some(net) = ospfv3_prefix_to_ipv6net(prefix.prefix_length, &prefix.address_prefix)
+            else {
+                continue;
+            };
+
+            let total_metric = ref_path.cost.saturating_add(prefix.metric as u32);
+
+            let nexthop = if nhops.len() == 1 {
+                let (addr, ifindex) = nhops[0];
+                let mut uni =
+                    rib::NexthopUni::new(std::net::IpAddr::V6(addr), total_metric, vec![]);
+                uni.ifindex_origin = (ifindex != 0).then_some(ifindex);
+                rib::Nexthop::Uni(uni)
+            } else {
+                let nexthops: Vec<rib::NexthopUni> = nhops
+                    .iter()
+                    .map(|(addr, ifindex)| {
+                        let mut uni =
+                            rib::NexthopUni::new(std::net::IpAddr::V6(*addr), total_metric, vec![]);
+                        uni.ifindex_origin = (*ifindex != 0).then_some(*ifindex);
+                        uni
+                    })
+                    .collect();
+                rib::Nexthop::Multi(rib::NexthopMulti {
+                    metric: total_metric,
+                    nexthops,
+                    ..Default::default()
+                })
+            };
+
+            let mut rib_entry = rib::entry::RibEntry::new(RibType::Ospf);
+            rib_entry.distance = 110;
+            rib_entry.metric = total_metric;
+            rib_entry.nexthop = nexthop;
+
+            let msg = rib::Message::Ipv6Add {
+                prefix: net,
+                rib: rib_entry,
+            };
+            let _ = top.ctx.rib.send(msg);
+        }
+    }
+}
+
+/// Resolve a v3 SPF path's first-hop set to a `Vec<(Ipv6Addr,
+/// ifindex)>` by reverse-mapping each first-hop vertex back to its
+/// router-id and looking that router-id up as a neighbor on any of
+/// our links. Skips first-hops that don't correspond to a known
+/// neighbor (defensive — SPF only relaxes through Router-LSA links,
+/// so the absence is rare).
+fn collect_v3_nexthops(top: &Ospf<Ospfv3>, path: &spf::Path) -> Vec<(std::net::Ipv6Addr, u32)> {
+    let mut out = Vec::new();
+    for (hop_vertex, _link_id) in path.first_hop_links.iter() {
+        let Some(hop_router_id) = top.lsp_map.resolve(*hop_vertex).copied() else {
+            continue;
+        };
+        for link in top.links.values() {
+            if let Some(nbr) = link.nbrs.get(&hop_router_id) {
+                let ll = nbr.ident.prefix.addr();
+                if !ll.is_unspecified() {
+                    out.push((ll, nbr.ifindex));
+                }
+                break;
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
