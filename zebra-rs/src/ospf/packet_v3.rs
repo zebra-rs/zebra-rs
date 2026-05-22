@@ -329,3 +329,219 @@ pub fn ospfv3_db_desc_send(
         tracing::warn!("[v3 DBD:Send] channel send failed: {}", e);
     }
 }
+
+/// Schedule a v3 NFSM event on `nbr` via the instance event channel.
+/// Mirrors v2's `nbr_sched_event`. Uses `Ospfv3::nbr_addr` (router-id
+/// semantics) for the neighbor key in `Message::Nfsm`.
+fn ospfv3_nbr_sched_event(nbr: &Neighbor<Ospfv3>, ev: NfsmEvent) {
+    let _ = nbr
+        .tx
+        .send(Message::Nfsm(nbr.ifindex, nbr.ident.router_id, ev));
+}
+
+/// Duplicate-DBD predicate. Compares the three negotiation fields
+/// (options, flags, seqnum) — same definition as v2's `is_dd_dup`.
+fn ospfv3_is_dd_dup(dd: &Ospfv3DbDesc, prev: &Ospfv3DbDesc) -> bool {
+    dd.options == prev.options && dd.flags == prev.flags && dd.seqnum == prev.seqnum
+}
+
+/// Resend the DBD stored in `nbr.dd.sent`. Used by the slave on
+/// duplicate-DBD receipt (RFC 5340 §4.2.2 inheriting v2 §10.6) and
+/// by the master retransmit timer.
+fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<Ospfv3>) {
+    let Some(ref sent) = nbr.dd.sent else {
+        return;
+    };
+    let Some(tx) = oi.v3_send_tx else {
+        return;
+    };
+    let Some(src) = interface_link_local_src(oi) else {
+        return;
+    };
+
+    let packet = Ospfv3Packet::new(
+        oi.router_id,
+        &oi.area_id,
+        0,
+        Ospfv3Payload::DbDesc(sent.clone()),
+    );
+    let item = Ospfv3Send {
+        packet,
+        ifindex: nbr.ifindex,
+        dest: Some(nbr.ident.prefix.addr()),
+        src,
+    };
+    if let Err(e) = tx.send(item) {
+        tracing::warn!("[v3 DBD:Resend] channel send failed: {}", e);
+    }
+}
+
+/// Per-DBD processing once both sides have agreed on master / slave.
+/// Mirrors v2's `ospf_db_desc_proc`. **Scope note:** the per-header
+/// LSA lookup (which decides whether to queue an LS Request) is
+/// intentionally skipped in this PR — the v3 LSDB lookup helper +
+/// `V::send_ls_request` lift land in the next PR. Loading therefore
+/// completes immediately with an empty `ls_req` list.
+fn ospfv3_db_desc_proc(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    dd: &Ospfv3DbDesc,
+) {
+    nbr.dd.recv = dd.clone();
+
+    // TODO: walk `dd.lsa_headers`, call v3 LSDB lookup, add missing
+    // entries to `nbr.ls_req`, arm ls_req timer. Tracked separately.
+
+    let oident = *oi.ident;
+
+    if nbr.dd.flags.master() {
+        nbr.dd.seqnum += 1;
+
+        if !dd.flags.more() && !nbr.dd.flags.more() {
+            ospfv3_nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
+        } else {
+            ospfv3_db_desc_send(oi, nbr, &oident);
+        }
+    } else {
+        nbr.dd.seqnum = dd.seqnum;
+
+        if !dd.flags.more() && nbr.db_sum.is_empty() {
+            nbr.dd.flags.set_more(false);
+            ospfv3_nbr_sched_event(nbr, NfsmEvent::ExchangeDone);
+        }
+
+        ospfv3_db_desc_send(oi, nbr, &oident);
+    }
+
+    nbr.dd.recv = dd.clone();
+}
+
+/// Process one v3 Database Description packet received off the wire.
+///
+/// Mirrors v2's `ospf_db_desc_recv` (RFC 2328 §10.6, reused by v3
+/// per RFC 5340 §4.2.2). Differences from v2:
+///
+/// - Wire format. `Ospfv3DbDesc` instead of `OspfDbDesc`; same
+///   `DbDescFlags` bitfield is shared between versions.
+/// - `src` is `Ipv6Addr` (link-local) from `Ospfv3Recv` instead of
+///   `Ipv4Addr`.
+/// - No netmask check (v3 Hello doesn't carry one; DBD MTU check
+///   is the same).
+/// - LSA-header processing inside `ospfv3_db_desc_proc` is currently
+///   a TODO (see that function's docs).
+pub fn ospfv3_db_desc_recv(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    packet: &Ospfv3Packet,
+    src: &Ipv6Addr,
+) {
+    use NfsmState::*;
+
+    let Ospfv3Payload::DbDesc(ref dd) = packet.payload else {
+        return;
+    };
+
+    if !oi.mtu_ignore && dd.if_mtu > oi.mtu as u16 {
+        tracing::warn!(
+            "[v3 DBD:Recv] from {}: peer MTU {} > local MTU {}",
+            src,
+            dd.if_mtu,
+            oi.mtu
+        );
+        return;
+    }
+
+    *oi.db_desc_in += 1;
+
+    let oident = *oi.ident;
+
+    match nbr.state {
+        Down => {
+            return;
+        }
+        Init | TwoWay => {
+            nbr.flags.set_dd_init(true);
+            let event = match nbr.state {
+                Init => NfsmEvent::TwoWayReceived,
+                TwoWay => NfsmEvent::AdjOk,
+                _ => unreachable!(),
+            };
+            super::nfsm::ospf_nfsm(oi, nbr, event, &oident);
+            if nbr.state != ExStart {
+                nbr.flags.set_dd_init(false);
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    let our_router_id = *oi.router_id;
+    match nbr.state {
+        Down | TwoWay | Init => {}
+        ExStart => {
+            // RFC 2328 §10.6 (reused by RFC 5340 §4.2.2):
+            // - I/M/MS all set + empty DBD + peer router-id > ours
+            //   → we are Slave.
+            // - I/MS clear + seqnum matches + peer router-id < ours
+            //   → we are Master.
+            if dd.flags.is_all() && dd.lsa_headers.is_empty() && nbr.ident.router_id > our_router_id
+            {
+                nbr.dd.flags.set_master(false);
+                nbr.dd.flags.set_init(false);
+                nbr.dd.seqnum = dd.seqnum;
+                nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
+            } else if !dd.flags.init()
+                && !dd.flags.master()
+                && dd.seqnum == nbr.dd.seqnum
+                && nbr.ident.router_id < our_router_id
+            {
+                nbr.dd.flags.set_init(false);
+                nbr.options = (nbr.options.into_bits() | dd.options.into_bits()).into();
+            } else {
+                return;
+            }
+            super::nfsm::ospf_nfsm(oi, nbr, NfsmEvent::NegotiationDone, &oident);
+            ospfv3_db_desc_proc(oi, nbr, dd);
+        }
+        Exchange => {
+            if ospfv3_is_dd_dup(dd, &nbr.dd.recv) {
+                if !nbr.dd.flags.master() {
+                    // Slave: master is retransmitting; resend our
+                    // last DBD (RFC 2328 §10.6).
+                    ospfv3_db_desc_resend(oi, nbr);
+                }
+                return;
+            }
+            if dd.flags.master() && !nbr.dd.recv.flags.master() {
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+            if dd.flags.init() {
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+            if dd.options != nbr.dd.recv.options {
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+            if (nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum)
+                || (!nbr.dd.flags.master() && dd.seqnum != nbr.dd.seqnum + 1)
+            {
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+                return;
+            }
+
+            ospfv3_db_desc_proc(oi, nbr, dd);
+        }
+        Loading | Full => {
+            // RFC 2328 §10.6: the only valid DBD in Loading / Full
+            // is the peer's last DBD repeated. Slave resends; master
+            // treats anything as SeqNumberMismatch.
+            if ospfv3_is_dd_dup(dd, &nbr.dd.recv) && !nbr.dd.flags.master() {
+                ospfv3_db_desc_resend(oi, nbr);
+            } else {
+                ospfv3_nbr_sched_event(nbr, NfsmEvent::SeqNumberMismatch);
+            }
+        }
+    }
+}

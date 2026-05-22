@@ -1876,12 +1876,21 @@ impl Ospf<Ospfv3> {
             ifindex,
         } = recv;
         let our_router_id = self.router_id;
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
+        let nbr_router_id = packet.router_id;
         match &packet.payload {
             Ospfv3Payload::Hello(_) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
                 super::packet_v3::ospfv3_hello_recv(&our_router_id, link, &packet, &src);
+            }
+            Ospfv3Payload::DbDesc(_) => {
+                // v3 keys neighbors by router-id, which lives on the
+                // packet header; pass it as the nbr-key to
+                // `ospf_interface` to fetch the (link, nbr) pair.
+                if let Some((mut oi, nbr)) = self.ospf_interface(ifindex, &nbr_router_id) {
+                    super::packet_v3::ospfv3_db_desc_recv(&mut oi, nbr, &packet, &src);
+                }
             }
             other => {
                 tracing::debug!(
