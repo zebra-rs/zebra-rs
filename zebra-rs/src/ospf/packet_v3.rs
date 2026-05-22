@@ -779,21 +779,219 @@ pub fn ospfv3_ls_ack_send(
     }
 }
 
-/// Process one OSPFv3 LS Update packet.
+/// RFC 2328 §13.1 LSA-recency comparison.
 ///
-/// Minimal RFC 2328 §13.1: for each LSA in the update we install
-/// it into the appropriate scope-LSDB, remove any matching entry
-/// from `nbr.ls_req`, and collect its header for the LS Ack reply.
-/// After processing all LSAs we send a single direct LS Ack and
-/// check whether `nbr.ls_req` is now empty — if so, fire NFSM
-/// `LoadingDone` so the neighbor can transition Loading → Full.
+/// Compares two LSAs by sequence number, then raw `ls_checksum`
+/// (u16), then age (MaxAge wins, large age-difference wins).
+/// Returns `1` if `h1` is more recent than `h2`, `-1` if `h2` is
+/// more recent, `0` if same instance. Caller passes the dynamic
+/// current ages (database copies should compute `current_age`).
+fn ospfv3_lsa_more_recent(h1: &Ospfv3LsaHeader, age1: u16, h2: &Ospfv3LsaHeader, age2: u16) -> i32 {
+    use super::lsdb::OSPF_MAX_AGE;
+    const OSPF_MAX_AGE_DIFF: u16 = 900;
+
+    if h1.ls_seq_number > h2.ls_seq_number {
+        return 1;
+    }
+    if h1.ls_seq_number < h2.ls_seq_number {
+        return -1;
+    }
+    if h1.ls_checksum > h2.ls_checksum {
+        return 1;
+    }
+    if h1.ls_checksum < h2.ls_checksum {
+        return -1;
+    }
+    if age1 == OSPF_MAX_AGE && age2 != OSPF_MAX_AGE {
+        return 1;
+    }
+    if age1 != OSPF_MAX_AGE && age2 == OSPF_MAX_AGE {
+        return -1;
+    }
+    if (age1 as i32 - age2 as i32).unsigned_abs() > OSPF_MAX_AGE_DIFF as u32 {
+        if age1 < age2 {
+            return 1;
+        }
+        if age1 > age2 {
+            return -1;
+        }
+    }
+    0
+}
+
+/// Position of a matching `Ospfv3LsRequestEntry` in `nbr.ls_req`
+/// for the LSA identified by `h`, or `None` if not on the list.
+/// Mirrors v2's `ospf_ls_request_lookup`.
+fn ospfv3_ls_request_lookup(nbr: &Neighbor<Ospfv3>, h: &Ospfv3LsaHeader) -> Option<usize> {
+    nbr.ls_req.iter().position(|req| {
+        req.ls_type == h.ls_type
+            && req.link_state_id == h.link_state_id
+            && req.advertising_router == h.advertising_router
+    })
+}
+
+/// True if `lsa` was advertised by us. v3 doesn't need the v2
+/// Network-LSA "ls_id matches an interface IP" fallback — v3
+/// Network-LSAs are keyed by Interface ID, but their
+/// `advertising_router` is still our router-id when self-originated.
+fn ospfv3_is_self_originated(oi: &OspfInterface<Ospfv3>, lsa: &Ospfv3Lsa) -> bool {
+    lsa.h.advertising_router == *oi.router_id
+}
+
+/// RFC 2328 §13.1 per-LSA processing result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LsaProcessResult {
+    /// Step 5: installed; contribute header to ack reply.
+    Installed,
+    /// Step 4-special MaxAge / Step 7 same-instance: ack but
+    /// don't install.
+    AckAndDiscard,
+    /// Step 3 area-type filter / Step 7 implied-ack via retransmit
+    /// list / Step 8 MaxAge+MaxSeq: drop without acking.
+    DiscardNoAck,
+    /// Step 6: aborts the rest of the packet (NFSM `BadLSReq`).
+    BadLSReq,
+    /// Step 8: our DB copy is newer; sent it back to the peer.
+    /// No ack contributed.
+    DbCopyNewer,
+}
+
+/// Per-LSA RFC 2328 §13.1 step machine.
+fn ospfv3_ls_upd_proc(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    lsa: &Ospfv3Lsa,
+) -> LsaProcessResult {
+    use super::area::AreaType;
+    use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ};
+
+    let h = &lsa.h;
+    let scope = ospfv3_ls_type_scope(h.ls_type);
+    let area_id = oi.area_id;
+    let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
+
+    // Step 3: AS-scope LSAs aren't accepted in stub / NSSA areas.
+    if scope == Ospfv3LsaScope::As && oi.area_type != AreaType::Normal {
+        tracing::info!(
+            "[v3 LSUpd] Step 3: discarding AS-scope LSA in {:?} area",
+            oi.area_type
+        );
+        return LsaProcessResult::DiscardNoAck;
+    }
+
+    // Step 4: look up DB copy and compute recency comparison.
+    let (current_age, current_seq, cmp_result, have_current) = {
+        let lsdb_ref = match scope {
+            Ospfv3LsaScope::As => &*oi.lsdb_as,
+            Ospfv3LsaScope::Link => &*oi.link_lsdb,
+            _ => &*oi.lsdb,
+        };
+        match lsdb_ref.lookup_by_raw_key(key) {
+            None => (0u16, 0u32, 1i32, false),
+            Some(curr) => {
+                let age = curr.h.ls_age;
+                let seq = curr.h.ls_seq_number;
+                let cmp = ospfv3_lsa_more_recent(h, h.ls_age, &curr.h, age);
+                (age, seq, cmp, true)
+            }
+        }
+    };
+
+    // Step 4-special: MaxAge LSA we don't already have, with no
+    // Exchange/Loading neighbors → quietly ack so the sender stops
+    // retransmitting.
+    if h.ls_age >= OSPF_MAX_AGE && !have_current && oi.exchange_loading_count == 0 {
+        return LsaProcessResult::AckAndDiscard;
+    }
+
+    // Step 5: received LSA is newer than our copy (or we have none).
+    if !have_current || cmp_result > 0 {
+        let cloned = lsa.clone();
+        let mut area_lsa_installed = false;
+        match scope {
+            Ospfv3LsaScope::Area => {
+                oi.lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+                area_lsa_installed = true;
+            }
+            Ospfv3LsaScope::As => {
+                oi.lsdb_as.install_lsa(cloned, oi.tx, None);
+            }
+            Ospfv3LsaScope::Link => {
+                oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+            }
+            Ospfv3LsaScope::Reserved => {
+                return LsaProcessResult::DiscardNoAck;
+            }
+        }
+        if area_lsa_installed {
+            let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
+        }
+
+        // RFC 2328 §13.4: peer sent us our own LSA at a higher
+        // sequence than we know about (e.g. we restarted). Signal
+        // the instance to re-originate at an even higher seq so we
+        // reclaim ownership.
+        if ospfv3_is_self_originated(oi, lsa) {
+            let _ = oi.tx.send(Message::Lsdb(
+                super::lsdb::LsdbEvent::SelfOriginatedReceived,
+                Some(area_id),
+                key,
+            ));
+        }
+
+        // Drop matching entry from nbr.ls_req — request satisfied.
+        if let Some(idx) = ospfv3_ls_request_lookup(nbr, h) {
+            nbr.ls_req.remove(idx);
+        }
+
+        return LsaProcessResult::Installed;
+    }
+
+    // Step 6: same-or-older LSA but still on our request list →
+    // protocol violation. Fire BadLSReq, force renegotiation.
+    if ospfv3_ls_request_lookup(nbr, h).is_some() {
+        ospfv3_nbr_sched_event(nbr, NfsmEvent::BadLSReq);
+        return LsaProcessResult::BadLSReq;
+    }
+
+    // Step 7: same instance. Treat retransmit-list match as
+    // implied-ack; otherwise reply with a direct ack.
+    if cmp_result == 0 {
+        if super::flood::ospf_ls_retransmit_lookup(nbr, lsa).is_some() {
+            super::flood::ospf_ls_retransmit_delete(nbr, lsa);
+            return LsaProcessResult::DiscardNoAck;
+        }
+        return LsaProcessResult::AckAndDiscard;
+    }
+
+    // Step 8: our DB copy is more recent. Drop silently when our
+    // copy is already MaxAge+MaxSeq (the LSU storm protection
+    // case from §13.1); otherwise unicast our copy back so the
+    // peer learns the newer instance.
+    if current_age >= OSPF_MAX_AGE && current_seq == OSPF_MAX_LSA_SEQ {
+        return LsaProcessResult::DiscardNoAck;
+    }
+
+    let lsdb_ref = match scope {
+        Ospfv3LsaScope::As => &*oi.lsdb_as,
+        Ospfv3LsaScope::Link => &*oi.link_lsdb,
+        _ => &*oi.lsdb,
+    };
+    if let Some(db_lsa) = lsdb_ref.lookup_by_raw_key(key) {
+        let cloned = db_lsa.clone();
+        ospfv3_ls_upd_send(oi, nbr, vec![cloned]);
+    }
+    LsaProcessResult::DbCopyNewer
+}
+
+/// Process one OSPFv3 LS Update packet — RFC 2328 §13.1 inherited
+/// by RFC 5340 §4.2.2.
 ///
-/// **Scope note:** intentionally skipped from the v2-equivalent
-/// state machine in this PR — RFC 2328 §13.1 steps 3 (area-type
-/// filter), 4-special (MaxAge cleanup), 5 (flooding +
-/// self-originated reflood), 6 (BadLSReq trigger), 7 (implied-ack
-/// via retransmit list), 8 (older-than-DB push-back). Those land
-/// alongside v3 LSA origination / flooding orchestration.
+/// Each LSA in the packet is routed through
+/// `ospfv3_ls_upd_proc`'s step-machine; LSAs whose disposition is
+/// `Installed` or `AckAndDiscard` contribute their header to a
+/// single direct LS Ack response. A `BadLSReq` result aborts the
+/// rest of the packet without acking.
 pub fn ospfv3_ls_upd_recv(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
@@ -810,50 +1008,22 @@ pub fn ospfv3_ls_upd_recv(
 
     tracing::info!("[v3 LSUpd:Recv] from {} lsas={}", src, ls_upd.lsas.len());
 
-    let area_id = oi.area_id;
     let mut ack_headers: Vec<Ospfv3LsaHeader> = Vec::new();
 
     for lsa in ls_upd.lsas.iter() {
-        let h = &lsa.h;
-        let scope = ospfv3_ls_type_scope(h.ls_type);
-
-        // Drop the entry from nbr.ls_req if it was on the request
-        // list; the LSU we just got satisfies that request.
-        nbr.ls_req.retain(|req| {
-            !(req.ls_type == h.ls_type
-                && req.link_state_id == h.link_state_id
-                && req.advertising_router == h.advertising_router)
-        });
-
-        // Route by scope into the correct LSDB. Link-scope LSAs
-        // land in the per-link LSDB (RFC 5340 §4.5.2: link-scope
-        // flooding is bounded to one segment).
-        let cloned = lsa.clone();
-        let mut area_lsa_installed = false;
-        match scope {
-            Ospfv3LsaScope::Area => {
-                oi.lsdb.install_lsa(cloned, oi.tx, Some(area_id));
-                area_lsa_installed = true;
+        let h_for_ack = lsa.h.clone();
+        match ospfv3_ls_upd_proc(oi, nbr, lsa) {
+            LsaProcessResult::Installed | LsaProcessResult::AckAndDiscard => {
+                ack_headers.push(h_for_ack);
             }
-            Ospfv3LsaScope::As => {
-                oi.lsdb_as.install_lsa(cloned, oi.tx, None);
+            LsaProcessResult::BadLSReq => {
+                // Abort — don't process remaining LSAs, don't ack.
+                return;
             }
-            Ospfv3LsaScope::Link => {
-                oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
-            }
-            Ospfv3LsaScope::Reserved => {
-                continue;
+            LsaProcessResult::DiscardNoAck | LsaProcessResult::DbCopyNewer => {
+                // No ack contributed; continue with next LSA.
             }
         }
-        // Area-scope install changes the SPF graph; ask the
-        // instance to schedule a calculation. v3 process_msg has
-        // a `Message::SpfSchedule` arm that defers to the generic
-        // `ospf_spf_schedule_generic`.
-        if area_lsa_installed {
-            let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
-        }
-
-        ack_headers.push(h.clone());
     }
 
     if !ack_headers.is_empty() {

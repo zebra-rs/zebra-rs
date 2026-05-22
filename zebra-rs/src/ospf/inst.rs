@@ -2067,6 +2067,31 @@ impl Ospf<Ospfv3> {
                 tracing::info!("[v3 SPF] Calculation triggered for area {}", area_id);
                 self.perform_spf_calculation(area_id);
             }
+            Message::Lsdb(ev, area_id, key) => {
+                // RFC 2328 §13.4: a peer flooded our own LSA back to
+                // us at a higher sequence number (typical post-restart
+                // scenario). Re-originate at an even higher seq so
+                // we own the LSA again. Currently handles the three
+                // wired self-origination paths (Router-LSA,
+                // Network-LSA, Intra-Area-Prefix-LSA); other LSA
+                // types fall through.
+                use ospf_packet::{
+                    OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE,
+                    OSPFV3_ROUTER_LSA_TYPE,
+                };
+                if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
+                    let (ls_type, ls_id, _) = key;
+                    let area = area_id.unwrap_or(AREA0);
+                    match ls_type {
+                        t if t == OSPFV3_ROUTER_LSA_TYPE => self.router_lsa_originate(),
+                        t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),
+                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
+                            self.router_intra_area_prefix_lsa_originate(area)
+                        }
+                        _ => {}
+                    }
+                }
+            }
             other => {
                 tracing::debug!(
                     "v3 process_msg: unhandled variant {:?}",
