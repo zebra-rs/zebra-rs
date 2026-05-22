@@ -36,7 +36,7 @@ use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
-use super::version::OspfVersion;
+use super::version::{OspfVersion, Ospfv3};
 use super::{
     AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
@@ -1364,6 +1364,84 @@ impl Ospf<Ospfv2> {
                 }
             }
         }
+    }
+}
+
+/// v3-specific methods on the parameterized `Ospf` instance.
+///
+/// First piece of v3 protocol logic that walks `Ospf<Ospfv3>`
+/// state and produces a wire LSA. Currently dead code -- no caller
+/// constructs `Ospf<Ospfv3>` yet (that lands when the v3
+/// instance's `new()` is written). The method exists so the
+/// builder can be reviewed and tested ahead of the spawn wiring.
+#[allow(dead_code)]
+impl Ospf<Ospfv3> {
+    /// Build the Router-LSA for self-origination (RFC 5340 §A.4.3).
+    ///
+    /// Walks every enabled `OspfLink<Ospfv3>` and emits one
+    /// `Ospfv3RouterLsaLink` per qualifying adjacency:
+    ///
+    ///   - Broadcast network with a full-state DR adjacency
+    ///     -> TransitNetwork link naming the DR's interface_id +
+    ///     router-id (per §A.4.3 the "neighbor" fields on Transit
+    ///     links point at the DR, not at every adjacent peer).
+    ///
+    /// PointToPoint and VirtualLink emission lands when the
+    /// matching `OspfNetworkType` variants surface in zebra-rs
+    /// (currently the enum has only Broadcast and NBMA; v3 needs
+    /// PointToPoint as a network type for Router-LSA link type 1
+    /// to be emittable).
+    ///
+    /// Returns an `Ospfv3Lsa` with checksum + length stamped via
+    /// `Ospfv3Lsa::update` (PR 7i). Ready to install through
+    /// `Lsdb::install_originated` (PR 7j).
+    pub fn build_router_lsa(&self) -> ospf_packet::Ospfv3Lsa {
+        use ospf_packet::{
+            OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa,
+            Ospfv3LsaHeader, Ospfv3Options, Ospfv3RouterLsa, Ospfv3RouterLsaLink,
+        };
+
+        let mut links = Vec::new();
+        for link in self.links.values() {
+            if !link.enabled {
+                continue;
+            }
+            let cost = link.output_cost as u16;
+            let my_iid = link.interface_id;
+
+            if matches!(link.network_type, OspfNetworkType::Broadcast) {
+                let dr_router_id = link.ident.d_router;
+                if dr_router_id == Ipv4Addr::UNSPECIFIED {
+                    continue;
+                }
+                if let Some(dr_nbr) = link.nbrs.get(&dr_router_id)
+                    && dr_nbr.state == NfsmState::Full
+                {
+                    links.push(Ospfv3RouterLsaLink::transit_network(
+                        cost,
+                        my_iid,
+                        dr_nbr.interface_id,
+                        dr_router_id,
+                    ));
+                }
+            }
+        }
+
+        let body = Ospfv3RouterLsa::new(OSPFV3_ROUTER_LSA_FLAG_E, Ospfv3Options::default(), links);
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_ROUTER_LSA_TYPE,
+                link_state_id: 0,
+                advertising_router: self.router_id,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Router(body),
+        };
+        lsa.update();
+        lsa
     }
 }
 
