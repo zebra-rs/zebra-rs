@@ -242,6 +242,15 @@ module exec {
             type string;
           }
         }
+        list neighbor-group {
+          ext:help "BGP neighbor-group inheritance state";
+          ext:presence "Show every configured neighbor-group";
+          key name;
+          leaf name {
+            ext:dynamic "bgp:neighbor-group";
+            type string;
+          }
+        }
       }
 
       container ospf {
