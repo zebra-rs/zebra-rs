@@ -11,6 +11,16 @@ use super::{
     ospf_ls_req_send, ospf_ls_request_isempty, tracing::FsmType,
 };
 
+/// Neighbor state machine state — RFC 2328 §10.1.
+///
+/// **Shared across OSPFv2 and OSPFv3.** RFC 5340 §4.2.2 states that
+/// "the Neighbor state machine for OSPFv3 is exactly the same as the
+/// OSPFv2 Neighbor state machine (Section 10.3 of [OSPFV2])". This
+/// enum and its Display impl carry no version-specific data and are
+/// reused directly by `Neighbor<V>` for any `V: OspfVersion`.
+///
+/// `Attempt` from the RFC is intentionally elided — zebra-rs does
+/// not yet implement NBMA networks where it would apply.
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum NfsmState {
     Down,
@@ -38,6 +48,12 @@ impl Display for NfsmState {
     }
 }
 
+/// Neighbor state machine event — RFC 2328 §10.2.
+///
+/// **Shared across OSPFv2 and OSPFv3.** Same as `NfsmState`, the v3
+/// RFC reuses the v2 event taxonomy verbatim. `KillNbr` and
+/// `LLDown` from the RFC are folded into normal transition handling
+/// where applicable; `Start` (NBMA-only) is omitted.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmEvent {
     HelloReceived,

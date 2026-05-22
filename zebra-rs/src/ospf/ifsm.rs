@@ -6,7 +6,18 @@ use crate::ospf::socket::{ospf_join_alldrouters, ospf_join_if, ospf_leave_alldro
 use super::task::{Timer, TimerType};
 use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
 
-// Interface state machine.
+/// Interface state machine state — RFC 2328 §9.1.
+///
+/// **Shared across OSPFv2 and OSPFv3.** RFC 5340 §4.2.1 states that
+/// the OSPFv3 IFSM "is essentially the same as the OSPFv2 [Interface
+/// state machine]", reusing this exact state taxonomy. No v3-specific
+/// state variants are needed; the enum and its Display impl are
+/// version-agnostic.
+///
+/// `Loopback` and `Point-to-Point` from the RFC are intentionally
+/// elided — zebra-rs does not yet support loopback interfaces in
+/// OSPF nor non-broadcast point-to-point links; both will be added
+/// when the corresponding wiring lands.
 #[derive(Debug, Default, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum IfsmState {
     #[default]
@@ -31,6 +42,11 @@ impl Display for IfsmState {
     }
 }
 
+/// Interface state machine event — RFC 2328 §9.2.
+///
+/// **Shared across OSPFv2 and OSPFv3.** RFC 5340 §4.2.1 reuses the
+/// same event taxonomy. Loopback-related events (`LoopInd`, `UnloopInd`)
+/// are omitted along with the corresponding state (see `IfsmState`).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IfsmEvent {
     InterfaceUp,
