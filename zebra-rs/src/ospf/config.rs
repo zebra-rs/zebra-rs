@@ -26,28 +26,30 @@ impl Ospf {
 
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
-        self.ospf_add("/interface/enable", config_ospf_interface_enable);
-        self.ospf_add("/interface/area", config_ospf_interface_area);
-        self.ospf_add("/interface/priority", config_ospf_interface_priority);
+        self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
+        self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
         self.ospf_add(
-            "/interface/hello-interval",
+            "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
         );
         self.ospf_add(
-            "/interface/dead-interval",
+            "/area/interface/dead-interval",
             config_ospf_interface_dead_interval,
         );
         self.ospf_add(
-            "/interface/retransmit-interval",
+            "/area/interface/retransmit-interval",
             config_ospf_interface_retransmit_interval,
         );
-        self.ospf_add("/interface/mtu-ignore", config_ospf_interface_mtu_ignore);
         self.ospf_add(
-            "/interface/prefix-sid/index",
+            "/area/interface/mtu-ignore",
+            config_ospf_interface_mtu_ignore,
+        );
+        self.ospf_add(
+            "/area/interface/prefix-sid/index",
             config_ospf_interface_prefix_sid_index,
         );
         self.ospf_add(
-            "/interface/prefix-sid/absolute",
+            "/area/interface/prefix-sid/absolute",
             config_ospf_interface_prefix_sid_absolute,
         );
         self.ospf_add("/segment-routing", config_ospf_segment_routing);
@@ -56,11 +58,21 @@ impl Ospf {
     }
 }
 
-/// Resolve the desired (enabled, area) state for `link` from its
-/// per-interface config. IS-IS-style: there is no `network X area Y`
-/// table; the interface is in OSPF iff `enable` is set, and its area
-/// comes from the per-interface `area` leaf (defaulting to the
-/// backbone 0.0.0.0 when unspecified).
+/// Parse a YANG `union { uint32; inet:ipv4-address }` area-id arg into
+/// the 32-bit area ID. `area 0` and `area 0.0.0.0` both normalize to
+/// `0.0.0.0`. Tries dotted-quad first (more specific) so a bare digit
+/// only falls through to the decimal interpretation.
+fn parse_area_id(s: &str) -> Option<Ipv4Addr> {
+    if let Ok(addr) = s.parse::<Ipv4Addr>() {
+        return Some(addr);
+    }
+    s.parse::<u32>().ok().map(Ipv4Addr::from)
+}
+
+/// Resolve the desired (enabled, area) state for `link`. The area now
+/// comes from the parent `area` list in the YANG schema; each
+/// per-interface callback writes it into `link.config.area` so this
+/// IFSM transition helper keeps working unchanged.
 pub(super) fn link_should_enable(link: &OspfLink) -> (bool, Ipv4Addr) {
     if !link.config.enable {
         return (false, Ipv4Addr::UNSPECIFIED);
@@ -103,27 +115,17 @@ fn ospf_link_get_mut_by_name<'a>(
 }
 
 fn config_ospf_interface_enable(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let enable = args.boolean()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
 
-    link.config.enable = op.is_set() && enable;
-
-    let (next, next_id) = link_should_enable(link);
-    apply_link_enable_transition(link, next, next_id);
-
-    Some(())
-}
-
-fn config_ospf_interface_area(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let area_id_u32 = args.u32()?;
-
-    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     if op.is_set() {
-        link.config.area = Some(Ipv4Addr::from(area_id_u32));
+        link.config.enable = enable;
+        link.config.area = Some(area_id);
     } else {
+        link.config.enable = false;
         link.config.area = None;
     }
 
@@ -134,6 +136,7 @@ fn config_ospf_interface_area(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> 
 }
 
 fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let priority = args.u8()?;
 
@@ -158,6 +161,7 @@ fn config_ospf_interface_hello_interval(
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let hello_interval = args.u16()?;
 
@@ -180,6 +184,7 @@ fn config_ospf_interface_dead_interval(
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let dead_interval = args.u32()?;
 
@@ -198,6 +203,7 @@ fn config_ospf_interface_retransmit_interval(
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let retransmit_interval = args.u16()?;
 
@@ -212,6 +218,7 @@ fn config_ospf_interface_retransmit_interval(
 }
 
 fn config_ospf_interface_mtu_ignore(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let mtu_ignore = args.boolean()?;
 
@@ -226,6 +233,7 @@ fn config_ospf_interface_prefix_sid_index(
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let index = args.u32()?;
 
@@ -247,6 +255,7 @@ fn config_ospf_interface_prefix_sid_absolute(
     mut args: Args,
     op: ConfigOp,
 ) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let absolute = args.u32()?;
 
