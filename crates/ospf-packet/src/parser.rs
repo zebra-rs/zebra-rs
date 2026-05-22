@@ -262,7 +262,7 @@ impl OspfDbDesc {
     }
 }
 
-#[derive(Debug, Default, NomBE)]
+#[derive(Debug, Default, NomBE, Clone)]
 pub struct OspfLsRequest {
     pub reqs: Vec<OspfLsRequestEntry>,
 }
