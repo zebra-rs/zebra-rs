@@ -108,9 +108,8 @@ impl From<u16> for MupRouteType {
 
 /// MUP NLRI route. Each variant carries the Add-Path identifier
 /// (`id`, zero when Add-Path is off) and the architecture type.
-/// Type 1 (Isd) holds typed fields (RD + prefix); the remaining
-/// types still hold their route-type-specific payload as opaque
-/// bytes until Phases 5–6 decode them.
+/// Types 1 (Isd), 2 (Dsd), and 3 (T1st) hold typed fields; T2st
+/// still holds opaque bytes until Phase 6b decodes it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MupRoute {
     /// Interwork Segment Discovery Route (RFC 9833 §3.1.1).
@@ -135,10 +134,23 @@ pub enum MupRoute {
         rd: RouteDistinguisher,
         address: IpAddr,
     },
+    /// Type 1 Session Transformed Route (RFC 9833 §3.2.1).
+    ///
+    /// Wire body: 8-octet RD + 1-octet prefix length (bits) + prefix
+    /// bytes + 4-octet TEID + 1-octet QFI + 1-octet endpoint address
+    /// length (bits) + endpoint address bytes. Both prefix and
+    /// endpoint follow the outer AFI's address family. The optional
+    /// Source Address suffix from earlier draft revisions is not
+    /// emitted here; trailing bytes inside the NLRI length window
+    /// would surface as a parse failure.
     T1st {
         id: u32,
         arch: MupArchitectureType,
-        body: Vec<u8>,
+        rd: RouteDistinguisher,
+        prefix: IpNet,
+        teid: u32,
+        qfi: u8,
+        endpoint: IpAddr,
     },
     T2st {
         id: u32,
@@ -195,9 +207,16 @@ impl MupRoute {
                     IpAddr::V6(_) => 16,
                 }
             }
-            MupRoute::T1st { body, .. }
-            | MupRoute::T2st { body, .. }
-            | MupRoute::Unknown { body, .. } => body.len(),
+            MupRoute::T1st {
+                prefix, endpoint, ..
+            } => {
+                let ep_bits = match endpoint {
+                    IpAddr::V4(_) => 32u8,
+                    IpAddr::V6(_) => 128u8,
+                };
+                8 + 1 + nlri_psize(prefix.prefix_len()) + 4 + 1 + 1 + nlri_psize(ep_bits)
+            }
+            MupRoute::T2st { body, .. } | MupRoute::Unknown { body, .. } => body.len(),
         }
     }
 }
@@ -285,11 +304,68 @@ impl MupRoute {
                     address,
                 }
             }
-            MupRouteType::T1st => MupRoute::T1st {
-                id,
-                arch,
-                body: body_slice.to_vec(),
-            },
+            MupRouteType::T1st => {
+                let (rest, rd) = RouteDistinguisher::parse_be(body_slice)?;
+                let (rest, plen) = be_u8(rest)?;
+                let max_addr_bits = match afi {
+                    Afi::Ip => 32u8,
+                    Afi::Ip6 => 128u8,
+                    _ => return Err(nom::Err::Error(make_error(input, ErrorKind::Verify))),
+                };
+                if plen > max_addr_bits {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                }
+                let psize = nlri_psize(plen);
+                if rest.len() < psize {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                }
+                let prefix = match afi {
+                    Afi::Ip => {
+                        let mut octets = [0u8; 4];
+                        octets[..psize].copy_from_slice(&rest[..psize]);
+                        IpNet::V4(Ipv4Net::new(Ipv4Addr::from(octets), plen).unwrap())
+                    }
+                    Afi::Ip6 => {
+                        let mut octets = [0u8; 16];
+                        octets[..psize].copy_from_slice(&rest[..psize]);
+                        IpNet::V6(Ipv6Net::new(Ipv6Addr::from(octets), plen).unwrap())
+                    }
+                    _ => unreachable!(),
+                };
+                let rest = &rest[psize..];
+                let (rest, teid) = be_u32(rest)?;
+                let (rest, qfi) = be_u8(rest)?;
+                let (rest, ep_len) = be_u8(rest)?;
+                if ep_len > max_addr_bits {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Verify)));
+                }
+                let ep_size = nlri_psize(ep_len);
+                if rest.len() < ep_size {
+                    return Err(nom::Err::Error(make_error(input, ErrorKind::Eof)));
+                }
+                let endpoint = match afi {
+                    Afi::Ip => {
+                        let mut octets = [0u8; 4];
+                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
+                        IpAddr::V4(Ipv4Addr::from(octets))
+                    }
+                    Afi::Ip6 => {
+                        let mut octets = [0u8; 16];
+                        octets[..ep_size].copy_from_slice(&rest[..ep_size]);
+                        IpAddr::V6(Ipv6Addr::from(octets))
+                    }
+                    _ => unreachable!(),
+                };
+                MupRoute::T1st {
+                    id,
+                    arch,
+                    rd,
+                    prefix,
+                    teid,
+                    qfi,
+                    endpoint,
+                }
+            }
             MupRouteType::T2st => MupRoute::T2st {
                 id,
                 arch,
@@ -339,9 +415,36 @@ impl MupRoute {
                     IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
                 }
             }
-            MupRoute::T1st { body, .. }
-            | MupRoute::T2st { body, .. }
-            | MupRoute::Unknown { body, .. } => {
+            MupRoute::T1st {
+                rd,
+                prefix,
+                teid,
+                qfi,
+                endpoint,
+                ..
+            } => {
+                payload.put_u16(rd.typ as u16);
+                payload.put(&rd.val[..]);
+                let plen = prefix.prefix_len();
+                payload.put_u8(plen);
+                let psize = nlri_psize(plen);
+                match prefix {
+                    IpNet::V4(p) => payload.put(&p.addr().octets()[..psize]),
+                    IpNet::V6(p) => payload.put(&p.addr().octets()[..psize]),
+                }
+                payload.put_u32(*teid);
+                payload.put_u8(*qfi);
+                let ep_bits = match endpoint {
+                    IpAddr::V4(_) => 32u8,
+                    IpAddr::V6(_) => 128u8,
+                };
+                payload.put_u8(ep_bits);
+                match endpoint {
+                    IpAddr::V4(v4) => payload.put(&v4.octets()[..]),
+                    IpAddr::V6(v6) => payload.put(&v6.octets()[..]),
+                }
+            }
+            MupRoute::T2st { body, .. } | MupRoute::Unknown { body, .. } => {
                 payload.put(&body[..]);
             }
         }
@@ -587,16 +690,111 @@ mod tests {
     }
 
     #[test]
-    fn t1st_opaque_round_trip() {
+    fn t1st_v4_round_trip() {
         round_trip(
             MupRoute::T1st {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
-                body: vec![0; 16],
+                rd: sample_rd(),
+                prefix: "10.0.0.0/24".parse().unwrap(),
+                teid: 0x1234_5678,
+                qfi: 9,
+                endpoint: "192.0.2.1".parse().unwrap(),
+            },
+            false,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t1st_v6_round_trip() {
+        round_trip(
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "2001:db8::/64".parse().unwrap(),
+                teid: 0xAAAA_BBBB,
+                qfi: 5,
+                endpoint: "2001:db8::1".parse().unwrap(),
             },
             false,
             Afi::Ip6,
         );
+    }
+
+    #[test]
+    fn t1st_add_path_round_trip() {
+        round_trip(
+            MupRoute::T1st {
+                id: 0xFEEDFACE,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "10.1.0.0/16".parse().unwrap(),
+                teid: 0,
+                qfi: 0,
+                endpoint: "203.0.113.99".parse().unwrap(),
+            },
+            true,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t1st_zero_prefix_round_trip() {
+        round_trip(
+            MupRoute::T1st {
+                id: 0,
+                arch: MupArchitectureType::Gpp5g,
+                rd: sample_rd(),
+                prefix: "0.0.0.0/0".parse().unwrap(),
+                teid: 42,
+                qfi: 1,
+                endpoint: "192.0.2.250".parse().unwrap(),
+            },
+            false,
+            Afi::Ip,
+        );
+    }
+
+    #[test]
+    fn t1st_rejects_prefix_len_over_afi_max() {
+        // arch=1, route_type=3, length=24, RD(8) + plen=33 (> 32 for v4) + rest
+        let mut v = vec![0x01, 0x00, 0x03, 24];
+        v.extend_from_slice(&[0; 8]); // RD
+        v.push(33);
+        v.extend_from_slice(&[0; 15]); // pad to length
+        assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn t1st_rejects_endpoint_len_over_afi_max() {
+        // arch=1, route_type=3, length=20, RD(8) + plen=0 + TEID(4) + QFI(1)
+        // + ep_len=33 (> 32 for v4) + filler
+        let mut v = vec![0x01, 0x00, 0x03, 20];
+        v.extend_from_slice(&[0; 8]); // RD
+        v.push(0); // plen=0 → no prefix bytes
+        v.extend_from_slice(&[0; 4]); // TEID
+        v.push(0); // QFI
+        v.push(33); // ep_len > 32
+        v.extend_from_slice(&[0; 6]); // pad to length=20
+        assert!(MupRoute::parse(&v, false, Afi::Ip).is_err());
+    }
+
+    #[test]
+    fn t1st_body_len_matches_emitted_size() {
+        let route = MupRoute::T1st {
+            id: 0,
+            arch: MupArchitectureType::Gpp5g,
+            rd: sample_rd(),
+            prefix: "10.0.0.0/24".parse().unwrap(),
+            teid: 1,
+            qfi: 2,
+            endpoint: "192.0.2.1".parse().unwrap(),
+        };
+        let mut buf = BytesMut::new();
+        route.nlri_emit(&mut buf);
+        assert_eq!(buf.len(), 4 + route.body_len());
     }
 
     #[test]

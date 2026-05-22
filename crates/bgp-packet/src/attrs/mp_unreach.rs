@@ -408,7 +408,11 @@ mod tests {
             MupRoute::T1st {
                 id: 0,
                 arch: MupArchitectureType::Gpp5g,
-                body: vec![],
+                rd: RouteDistinguisher::from_str("65000:8").unwrap(),
+                prefix: "2001:db8:1::/48".parse().unwrap(),
+                teid: 7,
+                qfi: 4,
+                endpoint: "2001:db8::5".parse().unwrap(),
             },
         ];
         let mut buf = BytesMut::new();

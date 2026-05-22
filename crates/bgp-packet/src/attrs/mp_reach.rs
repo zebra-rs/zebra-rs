@@ -566,6 +566,17 @@ mod tests {
         vec![0u8; 8 + 4]
     }
 
+    /// Minimal T1ST body (AFI-agnostic at plen=0 and ep_len=0):
+    /// 8 RD + 1 plen=0 + 0 prefix + 4 TEID + 1 QFI + 1 ep_len=0 + 0 endpoint.
+    fn min_t1st_body() -> Vec<u8> {
+        let mut v = vec![0u8; 8]; // RD
+        v.push(0); // plen
+        v.extend_from_slice(&[0; 4]); // TEID
+        v.push(0); // QFI
+        v.push(0); // ep_len
+        v
+    }
+
     #[test]
     fn mup_ipv4_round_trip_via_parse_nlri_opt() {
         let nhop: Ipv4Addr = "192.0.2.1".parse().unwrap();
@@ -590,7 +601,7 @@ mod tests {
     #[test]
     fn mup_ipv6_round_trip_via_parse_nlri_opt() {
         let nhop: Ipv6Addr = "2001:db8::1".parse().unwrap();
-        let nlri = mup_nlri(3, &[0; 8]);
+        let nlri = mup_nlri(3, &min_t1st_body());
         let value = build(2, 85, &nhop.octets(), &nlri);
         let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None).expect("must parse");
         match mp {
