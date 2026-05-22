@@ -56,6 +56,13 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub last_progressive: Option<Instant>,
     pub last_regressive: Option<Instant>,
     pub last_regressive_reason: Option<NfsmEvent>,
+    /// 32-bit Interface ID this neighbor reported in its last
+    /// Hello (RFC 5340 §A.3.2). Used by the v3 Router-LSA builder
+    /// as the `neighbor_interface_id` field of TransitNetwork /
+    /// PointToPoint / VirtualLink records (§A.4.3). Unused by v2;
+    /// defaulted to 0.
+    #[allow(dead_code)]
+    pub interface_id: u32,
 }
 
 #[bitfield(u8, debug = true)]
@@ -144,6 +151,7 @@ where
             last_progressive: None,
             last_regressive: None,
             last_regressive_reason: None,
+            interface_id: 0,
         };
         nbr.ident.prefix = prefix;
         nbr
