@@ -112,6 +112,12 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub mtu_ignore: bool,
     pub retransmit_interval: u16,
     pub tracing: &'a OspfTracing,
+    /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
+    /// sender that the `network_v6::write_packet_v6` task consumes.
+    /// `None` on v2 (where the v2 `Message::Send` path on `tx` is used
+    /// instead). Populated by `Ospf<Ospfv3>::ospf_interface` from
+    /// `self.v3_send_tx`.
+    pub v3_send_tx: Option<&'a UnboundedSender<super::network_v6::Ospfv3Send>>,
 }
 
 // Version-agnostic helpers. These methods touch only generic-safe
@@ -150,6 +156,7 @@ impl<V: OspfVersion> Ospf<V> {
                             mtu_ignore: link.config.mtu_ignore,
                             retransmit_interval,
                             tracing: &self.tracing,
+                            v3_send_tx: self.v3_send_tx.as_ref(),
                         },
                         nbr,
                     )

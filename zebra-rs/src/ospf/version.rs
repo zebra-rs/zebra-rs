@@ -509,4 +509,12 @@ impl OspfVersion for Ospfv3 {
     fn leave_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_leave_alldrouters_v6(sock, ifindex);
     }
+
+    fn send_db_desc(
+        oi: &mut crate::ospf::inst::OspfInterface<Ospfv3>,
+        nbr: &mut crate::ospf::Neighbor<Ospfv3>,
+        oident: &crate::ospf::Identity<Ospfv3>,
+    ) {
+        crate::ospf::packet_v3::ospfv3_db_desc_send(oi, nbr, oident);
+    }
 }
