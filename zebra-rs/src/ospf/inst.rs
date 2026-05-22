@@ -1786,9 +1786,100 @@ impl Ospf<Ospfv3> {
         lsa.update();
         lsa
     }
+
+    /// Dispatch one v3 instance-level message.
+    ///
+    /// Subset of v2's `process_msg` covering the IFSM-driver scope:
+    /// `Enable` / `Disable` (toggle the link's enabled flag and emit
+    /// the IFSM transition event), `Ifsm` (drive the FSM), and
+    /// `HelloTimer` (emit a v3 Hello via the v3 send channel).
+    ///
+    /// Other `Message<Ospfv3>` variants (Recv / Nfsm / Send / Flood /
+    /// Lsdb / SpfSchedule / SpfCalc) need additional v3-side wiring
+    /// — packet recv bridging, v3 NFSM dispatch, v3 LSA flooding —
+    /// and land in subsequent PRs. They fall through to a debug log
+    /// for now so traffic that arrives early doesn't panic.
+    pub async fn process_msg(&mut self, msg: Message<Ospfv3>) {
+        match msg {
+            Message::Enable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                link.enabled = true;
+                link.area = area_id;
+                link.area_id = area_id;
+                let area = self.areas.fetch(area_id);
+                area.links.insert(ifindex);
+                let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+            }
+            Message::Disable(ifindex, area_id) => {
+                let Some(link) = self.links.get_mut(&ifindex) else {
+                    return;
+                };
+                link.enabled = false;
+                link.area = Ipv4Addr::UNSPECIFIED;
+                link.area_id = Ipv4Addr::UNSPECIFIED;
+                let area = self.areas.fetch(area_id);
+                area.links.remove(&ifindex);
+                let _ = self
+                    .tx
+                    .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
+            }
+            Message::Ifsm(index, ev) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                ospf_ifsm(link, ev);
+            }
+            Message::HelloTimer(index) => {
+                let Some(link) = self.links.get_mut(&index) else {
+                    return;
+                };
+                let Some(tx) = self.v3_send_tx.as_ref() else {
+                    return;
+                };
+                super::packet_v3::ospfv3_hello_send(link, tx);
+            }
+            other => {
+                tracing::debug!(
+                    "v3 process_msg: unhandled variant {:?}",
+                    std::mem::discriminant(&other)
+                );
+            }
+        }
+    }
+
+    /// Main event loop for the v3 instance. Mirrors v2's `event_loop`
+    /// but only `rx` (instance-level events) and `rib_rx` (RIB updates)
+    /// are wired here; `cm.rx` / `show.rx` will follow when the v3
+    /// config schema and show paths land.
+    pub async fn event_loop(&mut self) {
+        loop {
+            tokio::select! {
+                Some(msg) = self.rx.recv() => {
+                    self.process_msg(msg).await;
+                }
+                Some(_msg) = self.rib_rx.recv() => {
+                    // v3 RIB integration TBD; drain for now so the
+                    // channel doesn't back-pressure the rib client.
+                }
+            }
+        }
+    }
 }
 
 pub fn serve(mut ospf: Ospf) -> Task<()> {
+    Task::spawn(async move {
+        ospf.event_loop().await;
+    })
+}
+
+/// Spawn the v3 instance's main event loop. Symmetric with v2's
+/// `serve`. Currently unused — `main.rs` doesn't yet construct an
+/// `Ospf<Ospfv3>`; the spawn wiring lands when the v3 config schema
+/// and `spawn_ospfv3` path follow.
+#[allow(dead_code)]
+pub fn serve_v3(mut ospf: Ospf<Ospfv3>) -> Task<()> {
     Task::spawn(async move {
         ospf.event_loop().await;
     })
