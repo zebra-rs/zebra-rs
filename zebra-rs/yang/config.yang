@@ -308,39 +308,48 @@ module config {
         leaf router-id {
           type inet:ipv4-address;
         }
-        list interface {
-          key "if-name";
-          leaf if-name {
-            ext:dynamic "rib:interface";
-            type string;
+        list area {
+          // Area key accepts either a plain decimal (`area 0`) or a
+          // dotted-quad (`area 0.0.0.1`). Both normalize to a 32-bit
+          // area ID at the callback boundary.
+          key "area-id";
+          leaf area-id {
+            type union {
+              type uint32;
+              type inet:ipv4-address;
+            }
           }
-          leaf enable {
-            type boolean;
-          }
-          leaf area {
-            type uint8;
-          }
-          leaf priority {
-            type uint8;
-          }
-          leaf hello-interval {
-            type uint16;
-          }
-          leaf dead-interval {
-            type uint32;
-          }
-          leaf retransmit-interval {
-            type uint16;
-          }
-          leaf mtu-ignore {
-            type boolean;
-          }
-          container prefix-sid {
-            leaf index {
+          list interface {
+            key "if-name";
+            leaf if-name {
+              ext:dynamic "rib:interface";
+              type string;
+            }
+            leaf enable {
+              type boolean;
+            }
+            leaf priority {
+              type uint8;
+            }
+            leaf hello-interval {
+              type uint16;
+            }
+            leaf dead-interval {
               type uint32;
             }
-            leaf absolute {
-              type uint32;
+            leaf retransmit-interval {
+              type uint16;
+            }
+            leaf mtu-ignore {
+              type boolean;
+            }
+            container prefix-sid {
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
             }
           }
         }
@@ -416,6 +425,35 @@ module config {
                 enum "rib";
                 enum "all";
               }
+            }
+          }
+        }
+      }
+      container ospfv3 {
+        // Schema stub mirroring the OSPFv2 shape. No Rust wiring yet:
+        // `Ospf<Ospfv3>::new` is not implemented and there is no v3
+        // config callback registration. Present so configs can be
+        // staged and the CLI completion works once v3 lands.
+        presence "Enables configuration of OSPFv3";
+        leaf router-id {
+          type inet:ipv4-address;
+        }
+        list area {
+          key "area-id";
+          leaf area-id {
+            type union {
+              type uint32;
+              type inet:ipv4-address;
+            }
+          }
+          list interface {
+            key "if-name";
+            leaf if-name {
+              ext:dynamic "rib:interface";
+              type string;
+            }
+            leaf enable {
+              type boolean;
             }
           }
         }
