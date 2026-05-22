@@ -7,7 +7,10 @@
 use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
-use ospf_packet::{Ospfv3DbDesc, Ospfv3Hello, Ospfv3Options, Ospfv3Packet, Ospfv3Payload};
+use ospf_packet::{
+    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsRequestEntry, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options,
+    Ospfv3Packet, Ospfv3Payload,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::network_v6::Ospfv3Send;
@@ -376,12 +379,45 @@ fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<Ospfv3>) {
     }
 }
 
+/// RFC 5340 §A.4.2.1: ls_type is encoded `U | S2 | S1 | function-code`.
+/// Bits 14:13 are the scope: 00 = link-local, 01 = area, 10 = AS,
+/// 11 = reserved. Decode the scope for LSDB routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ospfv3LsaScope {
+    Link,
+    Area,
+    As,
+    Reserved,
+}
+
+fn ospfv3_ls_type_scope(ls_type: u16) -> Ospfv3LsaScope {
+    match (ls_type >> 13) & 0x3 {
+        0 => Ospfv3LsaScope::Link,
+        1 => Ospfv3LsaScope::Area,
+        2 => Ospfv3LsaScope::As,
+        _ => Ospfv3LsaScope::Reserved,
+    }
+}
+
+/// Look up an LSA in the correct LSDB for its scope. Mirrors v2's
+/// `ospf_lsa_lookup`. Link-scope LSAs aren't yet tracked in any
+/// dedicated link-LSDB; they return `None` for now (same shape as
+/// v2's Unknown-scope fallthrough).
+fn ospfv3_lsa_lookup<'a>(
+    oi: &'a OspfInterface<Ospfv3>,
+    h: &Ospfv3LsaHeader,
+) -> Option<&'a Ospfv3Lsa> {
+    let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
+    match ospfv3_ls_type_scope(h.ls_type) {
+        Ospfv3LsaScope::Area => oi.lsdb.lookup_by_raw_key(key),
+        Ospfv3LsaScope::As => oi.lsdb_as.lookup_by_raw_key(key),
+        Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => None,
+    }
+}
+
 /// Per-DBD processing once both sides have agreed on master / slave.
-/// Mirrors v2's `ospf_db_desc_proc`. **Scope note:** the per-header
-/// LSA lookup (which decides whether to queue an LS Request) is
-/// intentionally skipped in this PR — the v3 LSDB lookup helper +
-/// `V::send_ls_request` lift land in the next PR. Loading therefore
-/// completes immediately with an empty `ls_req` list.
+/// Mirrors v2's `ospf_db_desc_proc`. Walks the received LSA headers
+/// and queues an LS Request for any LSA we don't already hold.
 fn ospfv3_db_desc_proc(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
@@ -389,8 +425,23 @@ fn ospfv3_db_desc_proc(
 ) {
     nbr.dd.recv = dd.clone();
 
-    // TODO: walk `dd.lsa_headers`, call v3 LSDB lookup, add missing
-    // entries to `nbr.ls_req`, arm ls_req timer. Tracked separately.
+    // RFC 2328 §10.6 (reused by v3): for each header in the
+    // received DBD, if we don't already have the LSA, add it to
+    // the LS Request list and (re)arm the LS Request timer.
+    let mut added = false;
+    for h in dd.lsa_headers.iter() {
+        if ospfv3_lsa_lookup(oi, h).is_none() {
+            nbr.ls_req.push(Ospfv3LsRequestEntry::new(
+                h.ls_type,
+                h.link_state_id,
+                h.advertising_router,
+            ));
+            added = true;
+        }
+    }
+    if added {
+        super::nfsm::ospf_nfsm_ls_req_timer_on(nbr, oi.retransmit_interval);
+    }
 
     let oident = *oi.ident;
 

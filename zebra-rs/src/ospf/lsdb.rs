@@ -292,6 +292,15 @@ impl<V: OspfVersion> Lsdb<V> {
             .map(|lsa| &lsa.data)
     }
 
+    /// Look up an LSA by the flat 3-tuple key directly. Same as
+    /// `lookup_by_id` but without the v2-typed `OspfLsType` arg —
+    /// v3 carries `ls_type` as a raw `u16` per RFC 5340 §A.4.2.1
+    /// (U / S2 / S1 / function-code packing), so it builds the
+    /// key itself rather than going through `v2_lsa_key`.
+    pub fn lookup_by_raw_key(&self, key: OspfLsaKey) -> Option<&V::Lsa> {
+        self.tables.get(&key).map(|lsa| &lsa.data)
+    }
+
     /// Look up the full LSDB entry (including bookkeeping) by key.
     /// Now generic.
     pub fn lookup_lsa(
