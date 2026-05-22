@@ -301,6 +301,27 @@ impl<V: OspfVersion> Lsdb<V> {
         self.tables.get(&key).map(|lsa| &lsa.data)
     }
 
+    /// Flush an LSA by the flat 3-tuple key directly. Same as
+    /// `flush_lsa` but accepts the raw key — used by v3 callers
+    /// where `ls_type` is a `u16` that doesn't compress to
+    /// `OspfLsType` (e.g. `OSPFV3_NETWORK_LSA_TYPE = 0x2002`).
+    pub fn flush_lsa_by_raw_key(
+        &mut self,
+        key: OspfLsaKey,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<V::Lsa> {
+        if let Some(lsa) = self.tables.get_mut(&key) {
+            V::set_ls_age(V::lsa_header_mut(&mut lsa.data), OSPF_MAX_AGE);
+            lsa.birth_time = tokio::time::Instant::now();
+            lsa.refresh_timer = None;
+            lsa.hold_timer = Some(hold_timer(tx, area_id, key, OSPF_MAX_AGE));
+            Some(lsa.data.clone())
+        } else {
+            None
+        }
+    }
+
     /// Look up the full LSDB entry (including bookkeeping) by key.
     /// Now generic.
     pub fn lookup_lsa(

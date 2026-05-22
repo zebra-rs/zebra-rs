@@ -1955,9 +1955,25 @@ impl Ospf<Ospfv3> {
                 super::packet_v3::ospfv3_hello_send(link, tx);
             }
             Message::Nfsm(index, src, ev) => {
+                let old_state = self
+                    .links
+                    .get(&index)
+                    .and_then(|link| link.nbrs.get(&src))
+                    .map(|nbr| nbr.state);
+
                 if let Some((mut link, nbr)) = self.ospf_interface(index, &src) {
                     let ident = link.ident;
                     super::nfsm::ospf_nfsm(&mut link, nbr, ev, ident);
+                }
+
+                let new_state = self
+                    .links
+                    .get(&index)
+                    .and_then(|link| link.nbrs.get(&src))
+                    .map(|nbr| nbr.state);
+
+                if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                    self.process_neighbor_state_change(index, src, old_state, new_state);
                 }
             }
             other => {
@@ -1967,6 +1983,126 @@ impl Ospf<Ospfv3> {
                 );
             }
         }
+    }
+
+    /// Detect Full state transitions on `nbr` and re-originate the
+    /// LSAs that depend on the full-adjacency set. Mirrors v2's
+    /// `process_neighbor_state_change`:
+    ///
+    /// - Router-LSA always re-originates when Full changes (since
+    ///   transit-network link records list only Full-DR adjacencies).
+    /// - Network-LSA (DR only) re-originates / flushes based on the
+    ///   updated Full-neighbor set.
+    fn process_neighbor_state_change(
+        &mut self,
+        ifindex: u32,
+        nbr_addr: Ipv4Addr,
+        old_state: NfsmState,
+        new_state: NfsmState,
+    ) {
+        if old_state == new_state {
+            return;
+        }
+        let full_state_changed = (old_state == NfsmState::Full && new_state != NfsmState::Full)
+            || (old_state != NfsmState::Full && new_state == NfsmState::Full);
+        if !full_state_changed {
+            return;
+        }
+
+        let if_state = {
+            let Some(link) = self.links.get_mut(&ifindex) else {
+                return;
+            };
+            link.full_nbr_count = link
+                .nbrs
+                .values()
+                .filter(|nbr| nbr.state == NfsmState::Full)
+                .count();
+            link.state
+        };
+
+        tracing::info!(
+            "[v3 NFSM:FullTransition] ifindex={} nbr={} {} -> {}",
+            ifindex,
+            nbr_addr,
+            old_state,
+            new_state
+        );
+
+        self.router_lsa_originate();
+
+        if if_state == IfsmState::DR {
+            self.network_lsa_originate(ifindex);
+        }
+    }
+
+    /// Originate (or flush) the v3 Network-LSA for the broadcast
+    /// segment on `ifindex`. Mirrors v2's
+    /// `update_network_lsa_by_interface` with the v3-specific
+    /// differences:
+    ///
+    /// - LS-ID is the DR's **Interface ID** (RFC 5340 §A.4.4),
+    ///   not the DR's interface IP as in v2.
+    /// - LSA-type is `OSPFV3_NETWORK_LSA_TYPE` (0x2002) — the v3
+    ///   ls_type doesn't compress to a v2 `OspfLsType`, so the
+    ///   LSDB flush uses `flush_lsa_by_raw_key`.
+    /// - The v3 body carries no netmask (prefixes move to
+    ///   Intra-Area-Prefix-LSA in v3).
+    ///
+    /// Flushes the existing Network-LSA when this router is no
+    /// longer DR or has no Full-adjacent neighbors on the segment;
+    /// otherwise installs the fresh LSA and floods it to every
+    /// Exchange-or-later neighbor in the area.
+    pub fn network_lsa_originate(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let interface_id = link.interface_id;
+        let is_dr = link.ident.d_router == self.router_id;
+        let full_nbr_count = link
+            .nbrs
+            .values()
+            .filter(|n| n.state == NfsmState::Full)
+            .count();
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_NETWORK_LSA_TYPE, interface_id, self.router_id);
+
+        // No Full neighbors (or no longer DR): flush the LSA so
+        // receivers age it out of their LSDBs.
+        if !is_dr || full_nbr_count == 0 {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+            return;
+        }
+
+        let Some(mut lsa) = self.build_network_lsa(ifindex) else {
+            return;
+        };
+
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(prev_seq) = area
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number)
+        {
+            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
     /// Dispatch one v3 packet received off the wire (`network_v6`).
