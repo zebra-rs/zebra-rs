@@ -14,6 +14,7 @@ use super::config::{
     parse_area_id,
 };
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
+use super::link::OspfNetworkType;
 use super::version::Ospfv3;
 use super::{Message, Ospf, OspfLink};
 
@@ -30,6 +31,10 @@ impl Ospf<Ospfv3> {
         let prefix = OSPFV3;
         let entries: &[(&str, Callback<Ospfv3>)] = &[
             ("/area/interface/enable", config_ospfv3_interface_enable),
+            (
+                "/area/interface/network-type",
+                config_ospfv3_interface_network_type,
+            ),
             ("/area/interface/priority", config_ospfv3_interface_priority),
             (
                 "/area/interface/hello-interval",
@@ -85,6 +90,38 @@ fn config_ospfv3_interface_enable(
 
     let (next, next_id) = link_should_enable(link);
     apply_link_enable_transition(link, next, next_id);
+
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/network-type` — same
+/// shape as the v2 handler in `config.rs`. Stores the configured
+/// type in `LinkConfig::network_type` (shared between v2 and v3)
+/// and bounces the interface on any change so the IFSM re-enters
+/// from the correct initial state (PointToPoint vs Waiting).
+fn config_ospfv3_interface_network_type(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let network_type = args.string()?.parse::<OspfNetworkType>().ok()?;
+
+    let link: &mut OspfLink<Ospfv3> = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let old = link.config_network_type();
+    if op.is_set() {
+        link.config.network_type = Some(network_type);
+    } else {
+        link.config.network_type = None;
+    }
+    let new = link.config_network_type();
+
+    if old != new && link.enabled {
+        let area_id = link.area_id;
+        let _ = link.tx.send(Message::Disable(link.index, area_id));
+        let _ = link.tx.send(Message::Enable(link.index, area_id));
+    }
 
     Some(())
 }
