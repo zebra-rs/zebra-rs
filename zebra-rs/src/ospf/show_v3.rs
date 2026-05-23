@@ -134,9 +134,14 @@ fn show_ospfv3_interface(
     _args: Args,
     json: bool,
 ) -> Result<String, std::fmt::Error> {
+    // Only list interfaces the operator enabled v3 on — matches v2's
+    // `show_ospf_interface` filter (`if !oi.enabled { continue; }`).
+    // Without this filter every kernel link the RIB has surfaced
+    // shows up, which is noisy and inconsistent with v2.
     let entries: Vec<Ospfv3InterfaceJson> = top
         .links
         .values()
+        .filter(|link| link.enabled)
         .map(|link| Ospfv3InterfaceJson {
             name: link.name.clone(),
             ifindex: link.index,
