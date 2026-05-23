@@ -8,10 +8,20 @@
 //! JSON document instead.
 
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 
 use serde::Serialize;
 
-use super::lsdb::OSPF_MAX_AGE;
+use ospf_packet::{
+    OSPFV3_AS_EXTERNAL_FLAG_E, OSPFV3_AS_EXTERNAL_FLAG_F, OSPFV3_AS_EXTERNAL_FLAG_T,
+    OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+    OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
+    OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E,
+    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody,
+    Ospfv3Options, Ospfv3PrefixOptions, Ospfv3RouterLinkType,
+};
+
+use super::lsdb::{Lsa, OSPF_MAX_AGE};
 use super::version::Ospfv3;
 use super::{Ospf, ShowCallback};
 
@@ -350,16 +360,340 @@ fn show_ospfv3_database(
     render_or(json, &db, text)
 }
 
+/// FRR-style detail output. Walks each area / AS / per-link LSDB,
+/// groups by LS-Type, and prints the full body of every non-MaxAge
+/// LSA. JSON output reuses the summary shape (header-only) for now —
+/// per-body JSON serializers belong to a follow-up.
 fn show_ospfv3_database_detail(
     top: &Ospf<Ospfv3>,
     args: Args,
     json: bool,
 ) -> Result<String, std::fmt::Error> {
-    // For now `detail` produces the same output as the non-detail
-    // form — the v3 LSA-body printers will land alongside more
-    // detailed renderings of each scope's contents. JSON output is
-    // identical to the summary case.
-    show_ospfv3_database(top, args, json)
+    if json {
+        return show_ospfv3_database(top, args, json);
+    }
+
+    let mut out = String::new();
+    writeln!(out)?;
+    writeln!(out, "       OSPFv3 Router with ID ({})", top.router_id)?;
+    writeln!(out)?;
+
+    const AREA_TYPES: &[u16] = &[
+        OSPFV3_ROUTER_LSA_TYPE,
+        OSPFV3_NETWORK_LSA_TYPE,
+        OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+        OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+    ];
+
+    for (area_id, area) in top.areas.iter() {
+        for &ls_type in AREA_TYPES {
+            let mut section_printed = false;
+            for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(ls_type) {
+                if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                    continue;
+                }
+                if !section_printed {
+                    writeln!(
+                        out,
+                        "                {} (Area {})",
+                        ls_type_name(ls_type),
+                        area_id
+                    )?;
+                    writeln!(out)?;
+                    section_printed = true;
+                }
+                write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
+                writeln!(out)?;
+            }
+        }
+    }
+
+    let mut section_printed = false;
+    for ((ls_id, adv_router), lsa) in top.lsdb_as.iter_by_raw_type(OSPFV3_AS_EXTERNAL_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if !section_printed {
+            writeln!(
+                out,
+                "                {} (AS-Scope)",
+                ls_type_name(OSPFV3_AS_EXTERNAL_LSA_TYPE)
+            )?;
+            writeln!(out)?;
+            section_printed = true;
+        }
+        write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
+        writeln!(out)?;
+    }
+
+    for link in top.links.values() {
+        let mut section_printed = false;
+        for ((ls_id, adv_router), lsa) in link.lsdb.iter_by_raw_type(OSPFV3_LINK_LSA_TYPE) {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if !section_printed {
+                writeln!(
+                    out,
+                    "                {} (Interface {})",
+                    ls_type_name(OSPFV3_LINK_LSA_TYPE),
+                    link.name
+                )?;
+                writeln!(out)?;
+                section_printed = true;
+            }
+            write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
+            writeln!(out)?;
+        }
+    }
+
+    Ok(out)
+}
+
+fn write_lsa_detail(
+    out: &mut String,
+    lsa: &Lsa<Ospfv3>,
+    ls_id: u32,
+    adv_router: Ipv4Addr,
+) -> Result<(), std::fmt::Error> {
+    let h = &lsa.data.h;
+    writeln!(out, "  Age: {}", lsa.current_age())?;
+    writeln!(
+        out,
+        "  Type: 0x{:04x} ({})",
+        h.ls_type,
+        ls_type_name(h.ls_type)
+    )?;
+    writeln!(out, "  Link State ID: {}", ls_id)?;
+    writeln!(out, "  Advertising Router: {}", adv_router)?;
+    writeln!(out, "  LS Sequence Number: 0x{:08x}", lsa.ls_seq_number())?;
+    writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
+    writeln!(out, "  Length: {}", lsa.length())?;
+
+    match &lsa.data.body {
+        Ospfv3LsBody::Router(b) => {
+            writeln!(
+                out,
+                "  Flags: 0x{:02x} : {}",
+                b.flags,
+                format_router_flags(b.flags)
+            )?;
+            writeln!(out, "  Options: {}", format_options(b.options))?;
+            for link in &b.links {
+                writeln!(out)?;
+                writeln!(out, "    Type: {}", router_link_type_name(link.link_type))?;
+                writeln!(out, "    Metric: {}", link.metric)?;
+                writeln!(out, "    Interface ID: {}", link.interface_id)?;
+                writeln!(
+                    out,
+                    "    Neighbor Interface ID: {}",
+                    link.neighbor_interface_id
+                )?;
+                writeln!(out, "    Neighbor Router ID: {}", link.neighbor_router_id)?;
+            }
+        }
+        Ospfv3LsBody::Network(b) => {
+            writeln!(out, "  Options: {}", format_options(b.options))?;
+            for r in &b.attached_routers {
+                writeln!(out, "    Attached Router: {}", r)?;
+            }
+        }
+        Ospfv3LsBody::InterAreaPrefix(b) => {
+            writeln!(out, "  Metric: {}", b.metric)?;
+            writeln!(
+                out,
+                "  Prefix: {} (Options: {})",
+                format_v3_prefix(b.prefix_length, &b.address_prefix),
+                format_prefix_options(b.prefix_options)
+            )?;
+        }
+        Ospfv3LsBody::InterAreaRouter(b) => {
+            writeln!(out, "  Options: {}", format_options(b.options))?;
+            writeln!(out, "  Metric: {}", b.metric)?;
+            writeln!(
+                out,
+                "  Destination Router ID: {}",
+                Ipv4Addr::from(b.destination_router_id)
+            )?;
+        }
+        Ospfv3LsBody::AsExternal(b) => {
+            writeln!(
+                out,
+                "  Flags: 0x{:02x} : {}",
+                b.flags,
+                format_external_flags(b.flags)
+            )?;
+            writeln!(out, "  Metric: {}", b.metric)?;
+            writeln!(
+                out,
+                "  Prefix: {} (Options: {})",
+                format_v3_prefix(b.prefix_length, &b.address_prefix),
+                format_prefix_options(b.prefix_options)
+            )?;
+            if let Some(fwd) = b.forwarding_address {
+                writeln!(out, "  Forwarding Address: {}", fwd)?;
+            }
+            if let Some(tag) = b.external_route_tag {
+                writeln!(out, "  External Route Tag: {}", tag)?;
+            }
+            if let Some(rls_id) = b.referenced_link_state_id {
+                writeln!(
+                    out,
+                    "  Referenced LS Type: 0x{:04x} ({}), LS ID: {}",
+                    b.referenced_ls_type,
+                    ls_type_name(b.referenced_ls_type),
+                    rls_id
+                )?;
+            }
+        }
+        Ospfv3LsBody::Link(b) => {
+            writeln!(out, "  Priority: {}", b.priority)?;
+            writeln!(out, "  Options: {}", format_options(b.options))?;
+            writeln!(out, "  Link-Local Address: {}", b.link_local_address)?;
+            writeln!(out, "  Number of Prefixes: {}", b.prefixes.len())?;
+            for p in &b.prefixes {
+                writeln!(
+                    out,
+                    "    Prefix: {} (Options: {})",
+                    format_v3_prefix(p.prefix_length, &p.address_prefix),
+                    format_prefix_options(p.prefix_options)
+                )?;
+            }
+        }
+        Ospfv3LsBody::IntraAreaPrefix(b) => {
+            writeln!(out, "  Number of Prefixes: {}", b.prefixes.len())?;
+            writeln!(
+                out,
+                "  Reference: {} Id: {} Adv: {}",
+                ls_type_name(b.referenced_ls_type),
+                b.referenced_link_state_id,
+                b.referenced_advertising_router
+            )?;
+            for p in &b.prefixes {
+                writeln!(
+                    out,
+                    "    Prefix: {} (Metric: {}, Options: {})",
+                    format_v3_prefix(p.prefix_length, &p.address_prefix),
+                    p.metric,
+                    format_prefix_options(p.prefix_options)
+                )?;
+            }
+        }
+        Ospfv3LsBody::Unknown(bytes) => {
+            writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
+        }
+    }
+    Ok(())
+}
+
+fn format_options(opts: Ospfv3Options) -> String {
+    let mut flags = Vec::new();
+    if opts.v6() {
+        flags.push("V6");
+    }
+    if opts.e() {
+        flags.push("E");
+    }
+    if opts.mc() {
+        flags.push("MC");
+    }
+    if opts.n() {
+        flags.push("N");
+    }
+    if opts.r() {
+        flags.push("R");
+    }
+    if opts.dc() {
+        flags.push("DC");
+    }
+    if flags.is_empty() {
+        "-".to_string()
+    } else {
+        flags.join("|")
+    }
+}
+
+fn format_prefix_options(opts: Ospfv3PrefixOptions) -> String {
+    let mut flags = Vec::new();
+    if opts.nu() {
+        flags.push("NU");
+    }
+    if opts.la() {
+        flags.push("LA");
+    }
+    if opts.mc() {
+        flags.push("MC");
+    }
+    if opts.p() {
+        flags.push("P");
+    }
+    if flags.is_empty() {
+        "-".to_string()
+    } else {
+        flags.join("|")
+    }
+}
+
+fn format_router_flags(flags: u8) -> String {
+    let mut s = Vec::new();
+    if flags & OSPFV3_ROUTER_LSA_FLAG_W != 0 {
+        s.push("W");
+    }
+    if flags & OSPFV3_ROUTER_LSA_FLAG_V != 0 {
+        s.push("V");
+    }
+    if flags & OSPFV3_ROUTER_LSA_FLAG_E != 0 {
+        s.push("E");
+    }
+    if flags & OSPFV3_ROUTER_LSA_FLAG_B != 0 {
+        s.push("B");
+    }
+    if s.is_empty() {
+        "-".to_string()
+    } else {
+        s.join("|")
+    }
+}
+
+fn format_external_flags(flags: u8) -> String {
+    let mut s = Vec::new();
+    if flags & OSPFV3_AS_EXTERNAL_FLAG_E != 0 {
+        s.push("E");
+    }
+    if flags & OSPFV3_AS_EXTERNAL_FLAG_F != 0 {
+        s.push("F");
+    }
+    if flags & OSPFV3_AS_EXTERNAL_FLAG_T != 0 {
+        s.push("T");
+    }
+    if s.is_empty() {
+        "-".to_string()
+    } else {
+        s.join("|")
+    }
+}
+
+fn router_link_type_name(t: Ospfv3RouterLinkType) -> &'static str {
+    match t {
+        Ospfv3RouterLinkType::PointToPoint => "Point-to-Point",
+        Ospfv3RouterLinkType::Transit => "Transit Network",
+        Ospfv3RouterLinkType::VirtualLink => "Virtual Link",
+    }
+}
+
+fn format_v3_prefix(prefix_length: u8, bytes: &[u8]) -> String {
+    if prefix_length > 128 {
+        return format!("(invalid /{})", prefix_length);
+    }
+    let mut padded = [0u8; 16];
+    let n = bytes.len().min(16);
+    padded[..n].copy_from_slice(&bytes[..n]);
+    let addr = std::net::Ipv6Addr::from(padded);
+    match ipnet::Ipv6Net::new(addr, prefix_length) {
+        Ok(net) => net.trunc().to_string(),
+        Err(_) => format!("{}/{}", addr, prefix_length),
+    }
 }
 
 // ---- show ipv6 ospf route ---------------------------------------
