@@ -4,6 +4,7 @@ use std::net::Ipv4Addr;
 use super::Ospf;
 use super::OspfLink;
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
+use super::link::OspfNetworkType;
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::version::{OspfVersion, Ospfv2};
 
@@ -32,6 +33,10 @@ impl Ospf {
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
+        self.ospf_add(
+            "/area/interface/network-type",
+            config_ospf_interface_network_type,
+        );
         self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
         self.ospf_add(
             "/area/interface/hello-interval",
@@ -140,6 +145,38 @@ fn config_ospf_interface_enable(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -
 
     let (next, next_id) = link_should_enable(link);
     apply_link_enable_transition(link, next, next_id);
+
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/interface/<name>/network-type` — accepts
+/// `broadcast` or `point-to-point` (YANG enum, kebab-case). Mirrors
+/// the IS-IS `network-type` knob: bounce the interface on any change
+/// so the IFSM re-initializes from the new type's entry state (P2P
+/// skips Waiting / DR election; Broadcast goes through Waiting).
+fn config_ospf_interface_network_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let network_type = args.string()?.parse::<OspfNetworkType>().ok()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let old = link.config_network_type();
+    if op.is_set() {
+        link.config.network_type = Some(network_type);
+    } else {
+        link.config.network_type = None;
+    }
+    let new = link.config_network_type();
+
+    // Network-type change on an already-enabled interface invalidates
+    // the IFSM state (P2P shouldn't be in Waiting/DROther; broadcast
+    // shouldn't be in PointToPoint) and the cached neighbor list.
+    // Disable+Enable through the existing channel rebuilds both.
+    if old != new && link.enabled {
+        let area_id = link.area_id;
+        let _ = link.tx.send(Message::Disable(link.index, area_id));
+        let _ = link.tx.send(Message::Enable(link.index, area_id));
+    }
 
     Some(())
 }

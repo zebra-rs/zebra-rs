@@ -121,6 +121,10 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub exchange_loading_count: usize,
     pub mtu_ignore: bool,
     pub retransmit_interval: u16,
+    /// Snapshot of the parent link's resolved network type. The NFSM
+    /// keys off this to decide 2-Way -> ExStart on P2P links without
+    /// gating on DR/BDR.
+    pub network_type: OspfNetworkType,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -170,6 +174,7 @@ impl<V: OspfVersion> Ospf<V> {
                             exchange_loading_count,
                             mtu_ignore: link.config.mtu_ignore,
                             retransmit_interval,
+                            network_type: link.network_type,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -423,6 +428,38 @@ impl Ospf<Ospfv2> {
             } else {
                 link.output_cost.min(u16::MAX as u32) as u16
             };
+
+            // RFC 2328 §12.4.1.1, numbered point-to-point: one Type-1
+            // P2p link per Full neighbor (pointing at the neighbor's
+            // router-id, link_data = our interface address), plus a
+            // Type-3 Stub for the local /N. With no Full neighbor we
+            // fall through to Stub-only, which keeps the local prefix
+            // advertised even while the adjacency is still forming.
+            if link.is_pointopoint() {
+                for addr in &link.addr {
+                    if addr.prefix.addr().octets()[0] == 127 {
+                        continue;
+                    }
+                    for nbr in link.nbrs.values() {
+                        if nbr.state != NfsmState::Full {
+                            continue;
+                        }
+                        router_lsa.links.push(RouterLsaLink {
+                            link_id: nbr.ident.router_id,
+                            link_data: addr.prefix.addr(),
+                            link_type: OspfLinkType::P2p,
+                            num_tos: 0,
+                            tos_0_metric: metric,
+                            toses: vec![],
+                        });
+                    }
+                    router_lsa
+                        .links
+                        .push(Self::router_lsa_stub_link(addr.prefix, metric));
+                }
+                continue;
+            }
+
             let use_transit = matches!(
                 link.network_type,
                 OspfNetworkType::Broadcast | OspfNetworkType::NBMA
@@ -1301,6 +1338,10 @@ impl Ospf<Ospfv2> {
                 link.enabled = true;
                 link.area = area_id;
                 link.area_id = area_id;
+                // Sync the runtime network_type from config at enable
+                // time so IFSM / NFSM / Router-LSA emission key off
+                // the operator's choice (default Broadcast).
+                link.network_type = link.config_network_type();
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
