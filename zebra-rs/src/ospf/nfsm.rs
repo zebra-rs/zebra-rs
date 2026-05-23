@@ -4,7 +4,7 @@ use ospf_packet::*;
 use rand::RngExt;
 use tokio::time::Instant;
 
-use super::version::{OspfVersion, Ospfv2};
+use super::version::{OspfVersion, Ospfv2, Ospfv3};
 use super::{
     Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
     ospf_ls_request_isempty, tracing::FsmType,
@@ -362,7 +362,7 @@ pub(super) fn ospf_db_summary_add_table<'a, V: OspfVersion>(
 /// RFC 2328 §10.8: walk every LSA type that belongs in the initial
 /// DBD summary and push its header into `nbr.db_sum`. The list of
 /// types is v2-specific (v3 uses a different LSA-type taxonomy);
-/// the v3 equivalent lands when the v3 NFSM path is wired.
+/// the v3 equivalent lives in `ospfv3_populate_initial_db_summary`.
 pub fn ospfv2_populate_initial_db_summary(
     oi: &mut OspfInterface<Ospfv2>,
     nbr: &mut Neighbor<Ospfv2>,
@@ -378,6 +378,45 @@ pub fn ospfv2_populate_initial_db_summary(
     // AS-scope LSAs included only for non-stub / non-NSSA areas.
     if oi.area_type == AreaType::Normal {
         ospf_db_summary_add_table(nbr, oi.lsdb_as.values_by_type(OspfLsType::AsExternal));
+    }
+}
+
+/// v3 NFSM helper invoked from `Ospfv3::populate_initial_db_summary`.
+/// RFC 5340 §4.2.2 inheriting RFC 2328 §10.8: walk every area-scope
+/// LSA type and the AS-scope AS-External-LSA (only in Normal areas);
+/// push each non-MaxAge header into `nbr.db_sum`. Link-scope LSAs
+/// (Link-LSA, type 0x0008) are intentionally excluded — RFC 5340
+/// §4.2.2 says Link-LSAs MUST NOT be included in DBDs because they
+/// only have link scope and are already known to peers on the
+/// segment.
+pub fn ospfv3_populate_initial_db_summary(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+) {
+    use super::area::AreaType;
+    use ospf_packet::{
+        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+    };
+
+    for ls_type in [
+        OSPFV3_ROUTER_LSA_TYPE,
+        OSPFV3_NETWORK_LSA_TYPE,
+        OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+        OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+    ] {
+        ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
+    }
+
+    if oi.area_type == AreaType::Normal {
+        ospf_db_summary_add_table(
+            nbr,
+            oi.lsdb_as
+                .iter_by_raw_type(OSPFV3_AS_EXTERNAL_LSA_TYPE)
+                .map(|(_, lsa)| lsa),
+        );
     }
 }
 

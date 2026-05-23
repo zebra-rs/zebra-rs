@@ -495,8 +495,6 @@ fn ospfv3_db_desc_proc(
 ///   `Ipv4Addr`.
 /// - No netmask check (v3 Hello doesn't carry one; DBD MTU check
 ///   is the same).
-/// - LSA-header processing inside `ospfv3_db_desc_proc` is currently
-///   a TODO (see that function's docs).
 pub fn ospfv3_db_desc_recv(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
