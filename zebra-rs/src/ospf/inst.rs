@@ -1469,8 +1469,11 @@ impl Ospf<Ospfv3> {
     /// The differences from v2:
     ///
     /// - **Socket.** Uses `ospf_socket_ipv6` — same IP protocol
-    ///   number 89, but `Domain::IPV6` with `IPV6_V6ONLY`,
-    ///   `IPV6_MULTICAST_HOPS=1`, and `IPV6_RECVPKTINFO` enabled.
+    ///   number 89, but `Domain::IPV6` with `IPV6_MULTICAST_HOPS=1`
+    ///   and `IPV6_RECVPKTINFO` enabled. `IPV6_V6ONLY` is not set
+    ///   because Linux rejects it with `EINVAL` on raw sockets with
+    ///   non-TCP/UDP protocols (raw v6 sockets don't surface
+    ///   v4-mapped sources anyway).
     /// - **Router-id default.** Still 32-bit (RFC 5340 §2.1).
     /// - **No `callback_build` / `show_build`.** The v2 versions
     ///   register paths under `/router/ospf/...`; the v3 schema is

@@ -70,25 +70,21 @@ pub fn ospf_leave_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
 /// Create the raw IPv6 socket used by an OSPFv3 instance.
 ///
 /// Mirrors `ospf_socket_ipv4`'s setup but for v6: same protocol
-/// number (89; OSPFv2 and v3 share it), `IPV6_V6ONLY` so dual-stack
-/// kernels don't surface v4-mapped sources, multicast loop off,
+/// number (89; OSPFv2 and v3 share it), multicast loop off,
 /// multicast hop limit pinned to 1 (RFC 5340 §A.1 — OSPFv3 packets
-/// MUST NOT cross a router), and `IPV6_RECVPKTINFO` so the rx
-/// loop can recover the ingress ifindex and the destination v6
-/// address used for the IPv6 pseudo-header checksum.
+/// MUST NOT cross a router), and `IPV6_RECVPKTINFO` so the rx loop
+/// can recover the ingress ifindex and the destination v6 address
+/// used for the IPv6 pseudo-header checksum.
 ///
-/// The pseudo-header checksum itself (RFC 5340 §4.4) and the
-/// network read / write loop land in subsequent Phase 5 PRs; this
-/// function just constructs the socket and is not yet called by
-/// any consumer — hence the `dead_code` allow on the whole v6
-/// socket family below.
-#[allow(dead_code)]
+/// `IPV6_V6ONLY` is intentionally not set: on Linux that option is
+/// only valid on TCP / UDP sockets, and `setsockopt` on a raw v6
+/// socket (`IPPROTO_OSPF`) returns `EINVAL`. Raw v6 sockets do not
+/// surface v4-mapped sources anyway, so the option is redundant.
 pub fn ospf_socket_ipv6(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
     let socket = ctx.raw_socket(Domain::IPV6, Protocol::from(Ospfv3::IP_PROTO as i32))?;
 
     socket.set_nonblocking(true)?;
     socket.set_reuse_address(true)?;
-    socket.set_only_v6(true)?;
     socket.set_multicast_loop_v6(false)?;
     socket.set_multicast_hops_v6(1)?;
     set_ipv6_pktinfo(&socket);
