@@ -3568,7 +3568,19 @@ fn build_rib_from_spf(
                                         };
                                         (link.tos_0_metric as u32, attached_nhops(local.index))
                                     } else {
-                                        (nhops.cost, spf_nhops.clone())
+                                        // RFC 2328 §16.1.1: transit metric
+                                        // is D(V) + V's link.tos_0_metric
+                                        // to the network — *not* just D(V).
+                                        // Without the per-link term, a
+                                        // peer's transit advertisement for
+                                        // the same prefix we serve as DR
+                                        // tied at our local cost and
+                                        // ECMP-merged with the
+                                        // directly-attached entry.
+                                        (
+                                            nhops.cost.saturating_add(link.tos_0_metric as u32),
+                                            spf_nhops.clone(),
+                                        )
                                     };
 
                                     let spf_route = SpfRoute {
@@ -3600,7 +3612,13 @@ fn build_rib_from_spf(
                                 };
                                 (link.tos_0_metric as u32, attached_nhops(local.index))
                             } else {
-                                (nhops.cost, spf_nhops.clone())
+                                // RFC 2328 §16.1.1: stub metric is
+                                // D(V) + L.cost (per V's Router-LSA).
+                                // Symmetric with the transit arm above.
+                                (
+                                    nhops.cost.saturating_add(link.tos_0_metric as u32),
+                                    spf_nhops.clone(),
+                                )
                             };
 
                             let spf_route = SpfRoute {
