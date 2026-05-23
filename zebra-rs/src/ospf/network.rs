@@ -71,19 +71,25 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
 
                 // We will verify Area later.
 
-                tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr))
-                    .unwrap();
+                let _ = tx.send(Message::Recv(packet.1, src.ip(), group, ifindex, ifaddr));
 
                 Ok(())
             })
             .await;
+        // The OSPF event loop owns the receiver; once the instance
+        // is torn down (e.g. `delete router ospf`) the channel
+        // closes and there is no one left to deliver to.
+        if tx.is_closed() {
+            return;
+        }
     }
 }
 
 pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<Message>) {
-    loop {
-        let msg = rx.recv().await;
-        let Message::Send(packet, ifindex, dest) = msg.unwrap() else {
+    // Exits the loop when the event loop drops the sender on
+    // instance teardown — mirrors `network_v6::write_packet_v6`.
+    while let Some(msg) = rx.recv().await {
+        let Message::Send(packet, ifindex, dest) = msg else {
             continue;
         };
 
