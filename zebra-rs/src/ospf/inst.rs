@@ -42,7 +42,11 @@ use super::{
     ospf_ls_upd_recv,
 };
 
-pub type ShowCallback = fn(&Ospf, Args, bool) -> Result<String, std::fmt::Error>;
+/// `show <path>` dispatch handler. Parameterized over `V` so an
+/// `Ospf<Ospfv3>` instance carries its own `ShowCallback<Ospfv3>`
+/// table distinct from `Ospf<Ospfv2>`'s. Defaults to `Ospfv2` to
+/// keep existing v2 callsites resolving unchanged.
+pub type ShowCallback<V = Ospfv2> = fn(&Ospf<V>, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// OSPF protocol instance.
 ///
@@ -66,7 +70,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub links: BTreeMap<u32, OspfLink<V>>,
     pub areas: OspfAreaMap<V>,
     pub show: ShowChannel,
-    pub show_cb: HashMap<String, ShowCallback>,
+    pub show_cb: HashMap<String, ShowCallback<V>>,
     pub sock: Arc<AsyncFd<Socket>>,
     pub router_id: Ipv4Addr,
     pub lsdb_as: Lsdb<V>,
@@ -1534,6 +1538,7 @@ impl Ospf<Ospfv3> {
             v3_recv_rx: Some(v3_recv_rx),
         };
         ospf.callback_build();
+        ospf.show_build();
         ospf
     }
 
@@ -1545,6 +1550,19 @@ impl Ospf<Ospfv3> {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    /// Look up the v3 show-path handler for `msg.paths` and invoke
+    /// it. Mirrors v2's `process_show_msg`.
+    pub async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
+            msg.resp.send(output).await.unwrap();
         }
     }
 
@@ -2498,8 +2516,8 @@ impl Ospf<Ospfv3> {
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
                 }
-                Some(_msg) = self.show.rx.recv() => {
-                    // v3 show path TBD; drain for now.
+                Some(msg) = self.show.rx.recv() => {
+                    self.process_show_msg(msg).await;
                 }
                 Some(recv) = v3_recv_rx.recv() => {
                     self.process_recv(recv);
