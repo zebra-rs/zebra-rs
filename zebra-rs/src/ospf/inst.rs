@@ -78,6 +78,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub graph: Option<spf::Graph>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
+    /// v3 IPv6 RIB shadow. Populated by
+    /// `apply_routing_updates_v3` after each SPF run; diffed
+    /// against the next computation so we only emit
+    /// `rib::Message::Ipv6Add` / `Ipv6Del` for changed entries.
+    /// Empty on v2 instances (they don't compute v6 routes).
+    pub rib6: PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
     pub tracing: OspfTracing,
     pub segment_routing: super::srmpls::SegmentRoutingMode,
     pub spf_last: Option<Instant>,
@@ -251,6 +257,7 @@ impl Ospf<Ospfv2> {
             spf_result: None,
             graph: None,
             rib: PrefixMap::new(),
+            rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             spf_last: None,
@@ -1529,6 +1536,7 @@ impl Ospf<Ospfv3> {
             spf_result: None,
             graph: None,
             rib: PrefixMap::new(),
+            rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             spf_last: None,
@@ -2794,6 +2802,23 @@ pub struct SpfNexthop {
     pub router_id: Option<Ipv4Addr>,
 }
 
+/// v3 RIB entry. Simpler than the v2 `SpfRoute` shape because v3
+/// doesn't have SR-MPLS / prefix-SID wiring yet — there's just the
+/// metric and the next-hop set keyed by IPv6 link-local. Added /
+/// removed entries are computed via `spf::table_diff` between two
+/// `PrefixMap<Ipv6Net, SpfRouteV3>` snapshots, mirroring how v2
+/// diffs `top.rib`.
+#[derive(Debug, PartialEq)]
+pub struct SpfRouteV3 {
+    pub metric: u32,
+    pub nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpfNexthopV3 {
+    pub ifindex: u32,
+}
+
 fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: SpfRoute) {
     if let Some(curr) = rib.get_mut(&prefix) {
         if curr.metric > route.metric {
@@ -3266,34 +3291,29 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     top.graph = Some(graph);
 }
 
-/// Walk Intra-Area-Prefix-LSAs in `area_id`'s LSDB, look each
-/// LSA's `referenced_advertising_router` up in `spf_result`, and
-/// for every reachable referenced router emit `rib::Message::Ipv6Add`
-/// for each carried prefix.
+/// Build a `PrefixMap<Ipv6Net, SpfRouteV3>` from the area's
+/// Intra-Area-Prefix-LSAs + the SPF result. Each LSA's
+/// `referenced_advertising_router` is looked up in `spf_result`;
+/// for every reachable referenced router, the carried prefixes
+/// are entered at cost `path.cost + prefix.metric`. Nexthops are
+/// the path's `first_hop_links` resolved to our local neighbors'
+/// link-local v6 + ifindex.
 ///
-/// Nexthops are resolved by walking the SPF path's `first_hop_links`,
-/// reverse-mapping the first-hop vertex id back to a router-id via
-/// `top.lsp_map.resolve`, finding that router-id in any of our links'
-/// neighbor maps, and reading the link-local v6 + ifindex stored
-/// there. If no neighbor matches (the first-hop router doesn't have
-/// an adjacency with us), the prefix is silently skipped — same
-/// shape as v2's `build_spf_nexthops` "empty nhops → skip" pattern.
-///
-/// Direct install only — no diff vs prior SPF run. The RIB layer
-/// deduplicates Ipv6Add for an already-installed prefix. Withdrawn
-/// prefixes are not removed — pre-existing v3 RIB-diff gap, out of
-/// scope here.
-fn apply_routing_updates_v3(
+/// Self-originated prefixes are skipped — the system already has
+/// them as connected routes.
+fn build_rib6_from_spf(
     top: &Ospf<Ospfv3>,
     area_id: Ipv4Addr,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-) {
+) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
     use ospf_packet::{OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3LsBody};
 
+    let mut rib = PrefixMap::<ipnet::Ipv6Net, SpfRouteV3>::new();
+
     let Some(area) = top.areas.get(area_id) else {
-        return;
+        return rib;
     };
 
     for (_key, lsa) in area
@@ -3307,72 +3327,131 @@ fn apply_routing_updates_v3(
             continue;
         };
 
-        // Locate the SPF vertex for the referenced router. The
-        // referenced_advertising_router is who owns the prefixes;
-        // it's reachable via the SPF tree (or it's us — own prefixes
-        // are already system-installed connected routes).
         let Some(ref_vertex) = top.lsp_map.lookup(body.referenced_advertising_router) else {
             continue;
         };
         if ref_vertex == source {
-            // Self-originated; system handles these via connected routes.
             continue;
         }
         let Some(ref_path) = spf_result.get(&ref_vertex) else {
             continue;
         };
 
-        // Resolve nexthops once per LSA — every prefix in the body
-        // shares the same set of next-hops (they all sit behind the
-        // same router).
         let nhops = collect_v3_nexthops(top, ref_path);
         if nhops.is_empty() {
             continue;
         }
+        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+            .into_iter()
+            .map(|(addr, ifindex)| (addr, SpfNexthopV3 { ifindex }))
+            .collect();
 
         for prefix in &body.prefixes {
             let Some(net) = ospfv3_prefix_to_ipv6net(prefix.prefix_length, &prefix.address_prefix)
             else {
                 continue;
             };
-
             let total_metric = ref_path.cost.saturating_add(prefix.metric as u32);
-
-            let nexthop = if nhops.len() == 1 {
-                let (addr, ifindex) = nhops[0];
-                let mut uni =
-                    rib::NexthopUni::new(std::net::IpAddr::V6(addr), total_metric, vec![]);
-                uni.ifindex_origin = (ifindex != 0).then_some(ifindex);
-                rib::Nexthop::Uni(uni)
-            } else {
-                let nexthops: Vec<rib::NexthopUni> = nhops
-                    .iter()
-                    .map(|(addr, ifindex)| {
-                        let mut uni =
-                            rib::NexthopUni::new(std::net::IpAddr::V6(*addr), total_metric, vec![]);
-                        uni.ifindex_origin = (*ifindex != 0).then_some(*ifindex);
-                        uni
-                    })
-                    .collect();
-                rib::Nexthop::Multi(rib::NexthopMulti {
-                    metric: total_metric,
-                    nexthops,
-                    ..Default::default()
-                })
+            let entry = SpfRouteV3 {
+                metric: total_metric,
+                nhops: nhops_map.clone(),
             };
-
-            let mut rib_entry = rib::entry::RibEntry::new(RibType::Ospf);
-            rib_entry.distance = 110;
-            rib_entry.metric = total_metric;
-            rib_entry.nexthop = nexthop;
-
-            let msg = rib::Message::Ipv6Add {
-                prefix: net,
-                rib: rib_entry,
-            };
-            let _ = top.ctx.rib.send(msg);
+            // Equal-cost: take the lowest-metric. If equal, merge
+            // nexthop sets so we end up with ECMP at the same
+            // metric — same shape as v2's `rib_insert`.
+            match rib.get_mut(&net) {
+                None => {
+                    rib.insert(net, entry);
+                }
+                Some(curr) => {
+                    if curr.metric > entry.metric {
+                        *curr = entry;
+                    } else if curr.metric == entry.metric {
+                        for (addr, nhop) in entry.nhops {
+                            curr.nhops.insert(addr, nhop);
+                        }
+                    }
+                }
+            }
         }
     }
+
+    rib
+}
+
+/// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. The
+/// nexthop becomes `Nexthop::Uni` for single-hop routes,
+/// `Nexthop::Multi` for ECMP.
+fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
+    let nexthop = if route.nhops.len() == 1 {
+        let (addr, nhop) = route.nhops.iter().next().unwrap();
+        let mut uni = rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, vec![]);
+        uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
+        rib::Nexthop::Uni(uni)
+    } else {
+        let nexthops: Vec<rib::NexthopUni> = route
+            .nhops
+            .iter()
+            .map(|(addr, nhop)| {
+                let mut uni =
+                    rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, vec![]);
+                uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
+                uni
+            })
+            .collect();
+        rib::Nexthop::Multi(rib::NexthopMulti {
+            metric: route.metric,
+            nexthops,
+            ..Default::default()
+        })
+    };
+
+    let mut rib_entry = rib::entry::RibEntry::new(RibType::Ospf);
+    rib_entry.distance = 110;
+    rib_entry.metric = route.metric;
+    rib_entry.nexthop = nexthop;
+    rib_entry
+}
+
+/// Diff the freshly-built v3 RIB against the prior snapshot and
+/// emit `Ipv6Del` for prefixes only in the old, `Ipv6Add` for
+/// prefixes new or changed. Replaces `top.rib6` with `new_rib`
+/// so the next SPF run diffs against this new baseline.
+fn apply_routing_updates_v3(
+    top: &mut Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) {
+    let new_rib = build_rib6_from_spf(top, area_id, source, spf_result);
+    let diff = spf::table_diff(top.rib6.iter(), new_rib.iter());
+
+    // Withdrawals.
+    for (prefix, route) in diff.only_curr.iter() {
+        let entry = make_rib6_entry(route);
+        let _ = top.ctx.rib.send(rib::Message::Ipv6Del {
+            prefix: **prefix,
+            rib: entry,
+        });
+    }
+    // Changed.
+    for (prefix, _, route) in diff.different.iter() {
+        let entry = make_rib6_entry(route);
+        let _ = top.ctx.rib.send(rib::Message::Ipv6Add {
+            prefix: **prefix,
+            rib: entry,
+        });
+    }
+    // New.
+    for (prefix, route) in diff.only_next.iter() {
+        let entry = make_rib6_entry(route);
+        let _ = top.ctx.rib.send(rib::Message::Ipv6Add {
+            prefix: **prefix,
+            rib: entry,
+        });
+    }
+
+    top.rib6 = new_rib;
 }
 
 /// Resolve a v3 SPF path's first-hop set to a `Vec<(Ipv6Addr,

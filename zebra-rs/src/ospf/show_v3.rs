@@ -359,19 +359,62 @@ fn show_ospfv3_database_detail(
 
 // ---- show ipv6 ospf route ---------------------------------------
 
+#[derive(Serialize)]
+struct Ospfv3RouteNexthopJson {
+    nexthop: String,
+    ifindex: u32,
+}
+
+#[derive(Serialize)]
+struct Ospfv3RouteJson {
+    prefix: String,
+    metric: u32,
+    nexthops: Vec<Ospfv3RouteNexthopJson>,
+}
+
 fn show_ospfv3_route(
-    _top: &Ospf<Ospfv3>,
+    top: &Ospf<Ospfv3>,
     _args: Args,
     json: bool,
 ) -> Result<String, std::fmt::Error> {
-    // v3's RIB push (#797) sends IPv6 routes directly to the
-    // system rib_client without retaining a per-instance shadow;
-    // there's no `rib6: PrefixMap` to walk here yet. Render an
-    // empty placeholder until the shadow lands.
-    let empty: Vec<()> = Vec::new();
-    let text =
-        String::from("(v3 RIB shadow not yet retained; routes go straight to the system RIB)\n");
-    render_or(json, &empty, text)
+    let entries: Vec<Ospfv3RouteJson> = top
+        .rib6
+        .iter()
+        .map(|(prefix, route)| Ospfv3RouteJson {
+            prefix: prefix.to_string(),
+            metric: route.metric,
+            nexthops: route
+                .nhops
+                .iter()
+                .map(|(addr, nhop)| Ospfv3RouteNexthopJson {
+                    nexthop: addr.to_string(),
+                    ifindex: nhop.ifindex,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut text = String::new();
+    writeln!(text, "OSPFv3 routes ({})", entries.len())?;
+    for r in &entries {
+        let nhops = if r.nexthops.is_empty() {
+            String::from("(none)")
+        } else {
+            r.nexthops
+                .iter()
+                .map(|n| {
+                    if n.ifindex != 0 {
+                        format!("{}%{}", n.nexthop, n.ifindex)
+                    } else {
+                        n.nexthop.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        writeln!(text, "  {} metric {} via {}", r.prefix, r.metric, nhops)?;
+    }
+    render_or(json, &entries, text)
 }
 
 // ---- show ipv6 ospf spf -----------------------------------------
