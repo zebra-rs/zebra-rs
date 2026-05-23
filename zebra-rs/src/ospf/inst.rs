@@ -2479,7 +2479,12 @@ impl Ospf<Ospfv3> {
             Message::Ifsm(index, ev) => {
                 // Same DR-leave hook as v2: premature-age the
                 // self-originated Network-LSA when the IFSM yields
-                // DR so the LSA doesn't outlive our DR role.
+                // DR so the LSA doesn't outlive our DR role. v3
+                // additionally flushes the Network-ref
+                // Intra-Area-Prefix-LSA (RFC 5340 §A.4.10 — only
+                // the DR originates it; on yield it would otherwise
+                // dangle referencing the now-MaxAged Network-LSA's
+                // (ls_id, adv_router) until natural MaxAge).
                 let prev = self.links.get(&index).map(|l| (l.state, l.area_id));
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
@@ -2488,6 +2493,7 @@ impl Ospf<Ospfv3> {
                 if let Some((prev_state, area_id)) = prev {
                     let new_state = self.links.get(&index).map(|l| l.state);
                     if prev_state == IfsmState::DR && new_state != Some(IfsmState::DR) {
+                        self.network_intra_area_prefix_lsa_flush(index, area_id);
                         self.network_lsa_flush(index, area_id);
                     }
                 }
