@@ -3455,6 +3455,40 @@ fn add_inter_area_routes(
     }
 }
 
+/// Find the local enabled v2 link in `area_id` whose interface
+/// address equals `addr` — used for self transit-network links,
+/// where `link.link_id` is our own interface IP (we are the DR).
+fn self_link_by_addr(top: &Ospf, area_id: Ipv4Addr, addr: Ipv4Addr) -> Option<&OspfLink> {
+    top.links
+        .values()
+        .find(|l| l.enabled && l.area == area_id && l.addr.iter().any(|a| a.prefix.addr() == addr))
+}
+
+/// Find the local enabled v2 link in `area_id` whose configured
+/// prefix matches the stub `prefix` — used for self stub links
+/// (loopback /32 or segment /N from our own Router-LSA).
+fn self_link_by_prefix(top: &Ospf, area_id: Ipv4Addr, prefix: Ipv4Net) -> Option<&OspfLink> {
+    top.links.values().find(|l| {
+        l.enabled && l.area == area_id && l.addr.iter().any(|a| a.prefix.trunc() == prefix)
+    })
+}
+
+/// Build the v2 nexthop set for a directly-attached self route:
+/// single entry keyed by `Ipv4Addr::UNSPECIFIED` with the local
+/// ifindex. The show layer treats UNSPECIFIED as "directly attached".
+fn attached_nhops(ifindex: u32) -> BTreeMap<Ipv4Addr, SpfNexthop> {
+    let mut nhops = BTreeMap::new();
+    nhops.insert(
+        Ipv4Addr::UNSPECIFIED,
+        SpfNexthop {
+            ifindex,
+            adjacency: false,
+            router_id: None,
+        },
+    );
+    nhops
+}
+
 fn build_rib_from_spf(
     top: &Ospf,
     area_id: Ipv4Addr,
@@ -3468,11 +3502,14 @@ fn build_rib_from_spf(
     };
 
     // Intra-area: walk each SPF destination's Router-LSA links.
+    // Self is included so locally-attached stub prefixes (loopback /32s,
+    // p2p stubs) and transit prefixes where we are the DR install with
+    // empty (directly-attached) nexthops, mirroring v3's
+    // `build_rib6_from_spf`. The kernel's connected route (admin 0)
+    // wins over the OSPF route (admin 110) in the FIB, so this only
+    // changes `show ip ospf route` — bringing it into parity with FRR.
     for (node, nhops) in spf_result {
-        // Skip self node.
-        if *node == source {
-            continue;
-        }
+        let is_self = *node == source;
 
         // Resolve node to router-id.
         let Some(router_id) = top.lsp_map.resolve(*node) else {
@@ -3499,9 +3536,26 @@ fn build_rib_from_spf(
                                 if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                                     let prefix = prefix.trunc();
 
+                                    let (metric, route_nhops) = if is_self {
+                                        // Self transit: we are the DR.
+                                        // link.link_id is our interface
+                                        // address on the segment; find
+                                        // the local link and stamp its
+                                        // ifindex as a directly-attached
+                                        // nexthop.
+                                        let Some(local) =
+                                            self_link_by_addr(top, area_id, link.link_id)
+                                        else {
+                                            break;
+                                        };
+                                        (link.tos_0_metric as u32, attached_nhops(local.index))
+                                    } else {
+                                        (nhops.cost, spf_nhops.clone())
+                                    };
+
                                     let spf_route = SpfRoute {
-                                        metric: nhops.cost,
-                                        nhops: spf_nhops.clone(),
+                                        metric,
+                                        nhops: route_nhops,
                                         sid: None,
                                         prefix_sid: None,
                                     };
@@ -3517,9 +3571,23 @@ fn build_rib_from_spf(
                         let mask = u32::from(link.link_data).leading_ones() as u8;
                         if let Ok(prefix) = Ipv4Net::new(link.link_id, mask) {
                             let prefix = prefix.trunc();
+
+                            let (metric, route_nhops) = if is_self {
+                                // Self stub: find the local link whose
+                                // address sits inside this prefix
+                                // (loopback /32 matches itself; segment
+                                // stub matches the configured /N).
+                                let Some(local) = self_link_by_prefix(top, area_id, prefix) else {
+                                    continue;
+                                };
+                                (link.tos_0_metric as u32, attached_nhops(local.index))
+                            } else {
+                                (nhops.cost, spf_nhops.clone())
+                            };
+
                             let spf_route = SpfRoute {
-                                metric: nhops.cost,
-                                nhops: spf_nhops.clone(),
+                                metric,
+                                nhops: route_nhops,
                                 sid: None,
                                 prefix_sid: None,
                             };
