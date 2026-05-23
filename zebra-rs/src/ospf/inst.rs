@@ -943,6 +943,42 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// Premature-age (RFC 2328 §14.1) the self-originated Network-LSA
+    /// scoped to `ifindex` and re-flood it so peers drop it. Called
+    /// from `Message::Disable` (interface going away) and from the
+    /// `Message::Ifsm` DR-leave hook (we lost the DR role through
+    /// election or network-type change) — the LSA must not outlive
+    /// our DR state on the segment, otherwise peers carry a stale
+    /// pseudo-node that contradicts our current Router-LSA.
+    ///
+    /// Mirrors v3's `network_lsa_flush` (inst.rs:2847). The LSA's
+    /// `ls_id` is the primary interface address — same value used
+    /// at origination in `update_network_lsa_by_interface`.
+    pub fn network_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let Some(primary_addr) = link.addr.first() else {
+            return;
+        };
+        let ls_id = primary_addr.prefix.addr();
+
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa(
+                OspfLsType::Network,
+                ls_id,
+                self.router_id,
+                &self.tx,
+                Some(area_id),
+            )
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
     fn process_neighbor_state_change(
         &mut self,
         ifindex: u32,
@@ -1348,6 +1384,12 @@ impl Ospf<Ospfv2> {
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
+                // Flush self-originated Network-LSA *before* clearing
+                // the link's area binding so the flush helper can read
+                // through `link.addr` / `link.area` to find the LSA
+                // key. Mirrors v3's Disable handler at inst.rs:2356.
+                self.network_lsa_flush(ifindex, area_id);
+
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
@@ -1365,10 +1407,23 @@ impl Ospf<Ospfv2> {
                 self.process_recv(packet, src, from, index, dest).await;
             }
             Message::Ifsm(index, ev) => {
+                // Snapshot pre-state so we can detect a DR-leave
+                // transition after `ospf_ifsm` runs and flush the
+                // now-orphan Network-LSA. Without this, the
+                // self-originated Network-LSA outlives our DR role
+                // (election yield, network-type change, etc.) and
+                // pollutes peers' LSDBs until MaxAge.
+                let prev = self.links.get(&index).map(|l| (l.state, l.area_id));
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
                 ospf_ifsm(link, ev);
+                if let Some((prev_state, area_id)) = prev {
+                    let new_state = self.links.get(&index).map(|l| l.state);
+                    if prev_state == IfsmState::DR && new_state != Some(IfsmState::DR) {
+                        self.network_lsa_flush(index, area_id);
+                    }
+                }
             }
             Message::Nfsm(index, src, ev) => {
                 let old_state = self
@@ -2378,10 +2433,20 @@ impl Ospf<Ospfv3> {
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
             }
             Message::Ifsm(index, ev) => {
+                // Same DR-leave hook as v2: premature-age the
+                // self-originated Network-LSA when the IFSM yields
+                // DR so the LSA doesn't outlive our DR role.
+                let prev = self.links.get(&index).map(|l| (l.state, l.area_id));
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
                 ospf_ifsm(link, ev);
+                if let Some((prev_state, area_id)) = prev {
+                    let new_state = self.links.get(&index).map(|l| l.state);
+                    if prev_state == IfsmState::DR && new_state != Some(IfsmState::DR) {
+                        self.network_lsa_flush(index, area_id);
+                    }
+                }
             }
             Message::HelloTimer(index) => {
                 let Some(link) = self.links.get_mut(&index) else {
