@@ -426,6 +426,37 @@ module exec {
           }
         }
       }
+      container ospf {
+        ext:help "OSPFv3 commands";
+        presence "OSPFv3 instance";
+        leaf interface {
+          ext:help "OSPFv3 interface";
+          type empty;
+        }
+        container neighbor {
+          ext:help "OSPFv3 neighbor";
+          presence "OSPFv3 neighbor";
+          leaf detail {
+            type empty;
+          }
+        }
+        container database {
+          ext:help "OSPFv3 LSDB";
+          presence "OSPFv3 LSDB";
+          leaf detail {
+            type empty;
+          }
+        }
+        leaf route {
+          type empty;
+        }
+        leaf graph {
+          type empty;
+        }
+        leaf spf {
+          type empty;
+        }
+      }
     }
     container "policy" {
       ext:help "Show policy";

@@ -29,6 +29,8 @@ pub use area::*;
 
 pub mod show;
 
+pub mod show_v3;
+
 pub mod config;
 
 pub mod config_v3;
