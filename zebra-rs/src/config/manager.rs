@@ -765,6 +765,8 @@ impl ConfigManager {
             Message::DisplayTx(req) => {
                 let tx_option = if is_bgp(&req.paths) {
                     self.show_clients.borrow().get("bgp").cloned()
+                } else if is_ospfv3(&req.paths) {
+                    self.show_clients.borrow().get("ospfv3").cloned()
                 } else if is_ospf(&req.paths) {
                     self.show_clients.borrow().get("ospf").cloned()
                 } else if is_isis(&req.paths) {
@@ -792,6 +794,8 @@ impl ConfigManager {
                         if let Some(display_req) = fallback_rx.recv().await {
                             let protocol_name = if is_isis(&paths) {
                                 "ISIS"
+                            } else if is_ospfv3(&paths) {
+                                "OSPFv3"
                             } else if is_ospf(&paths) {
                                 "OSPF"
                             } else if is_bgp(&paths) {
@@ -884,6 +888,23 @@ fn is_bgp(paths: &[CommandPath]) -> bool {
 
 fn is_ospf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ospf")
+}
+
+/// True for `show ipv6 ospf ...` paths, routed to the `"ospfv3"`
+/// subscriber. Must be checked BEFORE [`is_ospf`] — every v3 show
+/// path also contains an `"ospf"` segment, so `is_ospf` matches as
+/// well and would otherwise win.
+fn is_ospfv3(paths: &[CommandPath]) -> bool {
+    let mut has_ipv6 = false;
+    let mut has_ospf = false;
+    for p in paths {
+        if p.name == "ipv6" {
+            has_ipv6 = true;
+        } else if p.name == "ospf" {
+            has_ospf = true;
+        }
+    }
+    has_ipv6 && has_ospf
 }
 
 fn is_isis(paths: &[CommandPath]) -> bool {
