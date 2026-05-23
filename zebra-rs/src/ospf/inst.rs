@@ -22,7 +22,7 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, LinkFlagsExt, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
-    config::{Args, ConfigChannel, ConfigRequest, path_from_command},
+    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
     context::Task,
 };
 
@@ -370,8 +370,32 @@ impl Ospf<Ospfv2> {
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
+
+        // Clear ops bypass the YANG callback table — they map
+        // straight to runtime side-effects (kick SPF, drop a peer,
+        // ...) the way `clear ip bgp` works in BGP. Other op-codes
+        // continue through the Set/Delete dispatch below.
+        if msg.op == ConfigOp::Clear {
+            if path == "/clear/ospf/spf" {
+                self.clear_spf();
+            }
+            return;
+        }
+
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    /// Force-recalculate the OSPFv2 SPF for every attached area.
+    /// Mirrors FRR's `clear ip ospf process` SPF-side effect:
+    /// useful when manual diagnosis suspects a stuck route after
+    /// an LSDB-side fix and the operator does not want to wait
+    /// for the 1-second coalescing timer.
+    fn clear_spf(&mut self) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for id in area_ids {
+            let _ = self.tx.send(Message::SpfCalc(id));
         }
     }
 
@@ -1654,8 +1678,28 @@ impl Ospf<Ospfv3> {
     /// path); more leaves land alongside the YANG schema expansion.
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
+
+        // Clear ops bypass the YANG callback table; see the v2
+        // sibling. Path-filter so the v3 instance ignores the v2
+        // `/clear/ospf/spf` broadcast (and vice versa).
+        if msg.op == ConfigOp::Clear {
+            if path == "/clear/ospfv3/spf" {
+                self.clear_spf();
+            }
+            return;
+        }
+
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    /// Force-recalculate the OSPFv3 SPF for every attached area.
+    /// v3 sibling of `Ospf<Ospfv2>::clear_spf`.
+    fn clear_spf(&mut self) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for id in area_ids {
+            let _ = self.tx.send(Message::SpfCalc(id));
         }
     }
 
