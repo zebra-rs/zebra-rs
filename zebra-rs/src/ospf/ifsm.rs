@@ -228,17 +228,27 @@ pub fn ospf_dr_election_dr<V: OspfVersion>(
     bdr: Option<Identity<V>>,
     v: Vec<Identity<V>>,
 ) -> Option<Identity<V>> {
-    let _dr_candidates: Vec<_> = v
-        .clone()
-        .into_iter()
+    // RFC 2328 §9.4 step 3: if any router has declared itself DR
+    // (i.e. its Hello lists itself in the DR field), the new DR is
+    // the declared-DR candidate with the highest priority / router-id.
+    // Only if *no* router has declared itself DR does the freshly
+    // elected BDR get promoted.
+    //
+    // The previous implementation tiebroke across **all** candidates
+    // (declared or not) and ignored the precedence rule, which caused
+    // a new joiner with a higher router-id to displace an existing
+    // DR — i.e. the split-brain we kept seeing on broadcast LANs.
+    let dr_candidates: Vec<Identity<V>> = v
+        .iter()
         .filter(|ident| V::is_declared_dr(ident))
+        .cloned()
         .collect();
 
-    let mut dr = ospf_dr_election_tiebreak(v);
-
-    if dr.is_none() {
-        dr = bdr;
-    }
+    let dr = if !dr_candidates.is_empty() {
+        ospf_dr_election_tiebreak(dr_candidates)
+    } else {
+        bdr
+    };
 
     if let Some(ident) = dr {
         oi.ident.d_router = V::ident_dr_id(&ident);
