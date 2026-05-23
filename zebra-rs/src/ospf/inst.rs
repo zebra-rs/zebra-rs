@@ -2132,6 +2132,11 @@ impl Ospf<Ospfv3> {
                 link.area_id = Ipv4Addr::UNSPECIFIED;
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
+                // Flush before re-originating the area-scope LSAs:
+                // the Link-LSA we put out is link-scoped (RFC 5340
+                // §4.4.3.8) and won't be touched by the Router-LSA
+                // / Intra-Area-Prefix-LSA refresh.
+                self.link_lsa_flush(ifindex);
                 self.router_lsa_originate();
                 self.router_intra_area_prefix_lsa_originate(area_id);
                 let _ = self
@@ -2303,6 +2308,43 @@ impl Ospf<Ospfv3> {
             link.lsdb.install_originated(lsa, &self.tx, None);
         }
         self.flood_link_scope_lsa(ifindex, &flood_lsa);
+    }
+
+    /// Flush every Link-LSA we originated on `ifindex` (RFC 2328
+    /// §14.1: re-flood the LSA at `ls_age = OSPF_MAX_AGE` so peers
+    /// remove it instead of waiting LSRefreshTime). Called from
+    /// `Message::Disable` so that disabling OSPFv3 on an interface
+    /// promptly tears down the Link-LSA peers learned about.
+    ///
+    /// `ls_age` is not part of the LSA checksum (RFC 2328 §A.4.1
+    /// — Fletcher is computed with the age field skipped), so
+    /// `flush_lsa_by_raw_key` only flips the age field and is good
+    /// to flood as-is. The hold timer it installs keeps the
+    /// MaxAge LSA around long enough for the retransmit-list cycle
+    /// to drain.
+    pub fn link_lsa_flush(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_LINK_LSA_TYPE;
+
+        let router_id = self.router_id;
+        let tx = self.tx.clone();
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let keys: Vec<super::lsdb::OspfLsaKey> = link
+            .lsdb
+            .iter_by_raw_type(OSPFV3_LINK_LSA_TYPE)
+            .filter(|(_, lsa)| lsa.data.h.advertising_router == router_id)
+            .map(|((id, adv), _)| (OSPFV3_LINK_LSA_TYPE, id, adv))
+            .collect();
+        let mut flushed: Vec<ospf_packet::Ospfv3Lsa> = Vec::new();
+        for key in keys {
+            if let Some(lsa) = link.lsdb.flush_lsa_by_raw_key(key, &tx, None) {
+                flushed.push(lsa);
+            }
+        }
+        for lsa in flushed {
+            self.flood_link_scope_lsa(ifindex, &lsa);
+        }
     }
 
     /// Flood a link-scope LSA to every Exchange-or-later neighbor
