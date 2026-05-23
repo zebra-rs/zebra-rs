@@ -19,7 +19,7 @@ use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
 use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link, RibType};
+use crate::rib::{self, Link, LinkFlagsExt, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigRequest, path_from_command},
@@ -412,7 +412,17 @@ impl Ospf<Ospfv2> {
                 continue;
             }
 
-            let metric = link.output_cost.min(u16::MAX as u32) as u16;
+            // RFC 2328 §12.4.1.1 leaves the loopback stub metric as
+            // "the configured cost of the interface", but FRR and
+            // Juniper Junos hardcode 0 by convention (Cisco uses 1).
+            // Stamping the regular `output_cost` (default 10) on a
+            // loopback /32 inflates downstream route metrics by a
+            // phantom hop. Match the FRR/Junos convention.
+            let metric = if link.link_flags.is_loopback() {
+                0
+            } else {
+                link.output_cost.min(u16::MAX as u32) as u16
+            };
             let use_transit = matches!(
                 link.network_type,
                 OspfNetworkType::Broadcast | OspfNetworkType::NBMA
@@ -1739,7 +1749,15 @@ impl Ospf<Ospfv3> {
             if transit_with_adjacencies {
                 continue;
             }
-            let metric = link.output_cost as u16;
+            // Loopback parity with v2 / FRR / Junos: stamp 0 instead
+            // of the link's output_cost so a /128 (or /N) on `lo`
+            // doesn't add a phantom hop's worth of metric to every
+            // route that traverses this router.
+            let metric = if link.link_flags.is_loopback() {
+                0
+            } else {
+                link.output_cost as u16
+            };
             for a in link.addr.iter() {
                 // Skip link-local addresses — those are
                 // advertised by Link-LSAs (RFC 5340 §A.4.9), not
