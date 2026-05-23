@@ -2727,6 +2727,20 @@ impl Ospf<Ospfv3> {
             .v3_recv_rx
             .take()
             .expect("Ospf<Ospfv3> has no v3 recv channel");
+        // Pre-roll: drain the RIB subscribe-time replay (LinkAdd,
+        // AddrAdd, RouterIdUpdate, ...) before touching `cm.rx`.
+        // Without this, a `set router ospfv3 area ... interface
+        // <name> enable true` config message can race ahead of the
+        // `LinkAdd` for that ifname; `ospf_link_get_mut_by_name`
+        // then returns `None` and the enable silently no-ops.
+        // Mirrors v2's pre-roll in `Ospf<Ospfv2>::event_loop`.
+        loop {
+            match self.rib_rx.recv().await {
+                Some(RibRx::EoR) => break,
+                Some(msg) => self.process_rib_msg(msg),
+                None => break,
+            }
+        }
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => {
