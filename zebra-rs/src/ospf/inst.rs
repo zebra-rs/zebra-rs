@@ -229,6 +229,20 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// The kernel link is gone. If OSPF was enabled on it, fire
+    /// `Disable` so the IFSM tears the adjacency down, then drop
+    /// the link from `self.links`. Shared by v2 and v3.
+    fn link_del(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        if link.enabled {
+            let area_id = link.area_id;
+            let _ = self.tx.send(Message::Disable(ifindex, area_id));
+        }
+        self.links.remove(&ifindex);
+    }
+
     /// Count Exchange/Loading neighbors across all links in the same area.
     fn count_exchange_loading_neighbors(&self, ifindex: u32) -> usize {
         let Some(link) = self.links.get(&ifindex) else {
@@ -1410,6 +1424,9 @@ impl Ospf<Ospfv2> {
             RibRx::LinkDown(ifindex) => {
                 self.link_down(ifindex);
             }
+            RibRx::LinkDel(ifindex) => {
+                self.link_del(ifindex);
+            }
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
             }
@@ -1586,6 +1603,7 @@ impl Ospf<Ospfv3> {
             RibRx::LinkAdd(link) => self.link_add(link),
             RibRx::LinkUp(ifindex) => self.link_up(ifindex),
             RibRx::LinkDown(ifindex) => self.link_down(ifindex),
+            RibRx::LinkDel(ifindex) => self.link_del(ifindex),
             _ => {}
         }
     }

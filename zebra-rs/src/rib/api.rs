@@ -81,6 +81,11 @@ pub enum RibRx {
     LinkAdd(Link),
     LinkUp(u32),
     LinkDown(u32),
+    /// The kernel link with this ifindex no longer exists. Protocol
+    /// subscribers should drop any state keyed off it. Distinct from
+    /// `LinkDown` (operational down) — `LinkDel` is permanent for
+    /// this ifindex.
+    LinkDel(u32),
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
@@ -230,6 +235,17 @@ impl Rib {
         let vrf_id = self.ifindex_vrf_id(ifindex);
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkDown(ifindex));
+        }
+    }
+
+    /// Announce that the kernel link is gone. Call this BEFORE
+    /// removing the link from `self.links`, otherwise
+    /// `ifindex_vrf_id` falls back to default VRF and the message
+    /// goes to the wrong subscribers.
+    pub fn api_link_del(&self, ifindex: u32) {
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkDel(ifindex));
         }
     }
 
