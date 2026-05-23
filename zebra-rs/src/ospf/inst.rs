@@ -181,6 +181,54 @@ impl<V: OspfVersion> Ospf<V> {
         })
     }
 
+    /// Register a kernel link in `self.links`. Idempotent: re-adding
+    /// an existing ifindex is a no-op. Shared by v2 and v3 — body is
+    /// version-agnostic (`OspfLink::from` is generic over `V`).
+    fn link_add(&mut self, link: Link)
+    where
+        V::Prefix: Default,
+    {
+        if self.links.contains_key(&link.index) {
+            return;
+        }
+        let link = OspfLink::from(
+            self.tx.clone(),
+            link,
+            self.sock.clone(),
+            self.router_id,
+            self.ptx.clone(),
+        );
+        self.links.insert(link.index, link);
+    }
+
+    /// Mark a link operationally up and, if OSPF is enabled on it,
+    /// fire `Ifsm::InterfaceUp`. Shared by v2 and v3.
+    fn link_up(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.link_flags |= LinkFlags::Up | LinkFlags::LowerUp;
+
+        if link.enabled {
+            let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+        }
+    }
+
+    /// Mark a link operationally down and, if OSPF was enabled on
+    /// it, fire `Disable` so the IFSM tears the adjacency down.
+    /// Shared by v2 and v3.
+    fn link_down(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.link_flags &= !LinkFlags::LowerUp;
+
+        if link.enabled {
+            let area_id = link.area_id;
+            let _ = self.tx.send(Message::Disable(ifindex, area_id));
+        }
+    }
+
     /// Count Exchange/Loading neighbors across all links in the same area.
     fn count_exchange_loading_neighbors(&self, ifindex: u32) -> usize {
         let Some(link) = self.links.get(&ifindex) else {
@@ -1123,22 +1171,6 @@ impl Ospf<Ospfv2> {
         self.router_lsa_originate();
     }
 
-    fn link_add(&mut self, link: Link) {
-        // println!("OSPF: LinkAdd {} {}", link.name, link.index);
-        if let Some(_link) = self.links.get_mut(&link.index) {
-            //
-        } else {
-            let link = OspfLink::from(
-                self.tx.clone(),
-                link,
-                self.sock.clone(),
-                self.router_id,
-                self.ptx.clone(),
-            );
-            self.links.insert(link.index, link);
-        }
-    }
-
     fn addr_add(&mut self, addr: LinkAddr) {
         // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
@@ -1164,31 +1196,6 @@ impl Ospf<Ospfv2> {
         // Re-evaluate enable state after address removal.
         let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
-    }
-
-    fn link_up(&mut self, ifindex: u32) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        link.link_flags |= LinkFlags::Up | LinkFlags::LowerUp;
-
-        // If OSPF is enabled on this link, bring it up.
-        if link.enabled {
-            let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
-        }
-    }
-
-    fn link_down(&mut self, ifindex: u32) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        link.link_flags &= !LinkFlags::LowerUp;
-
-        // If OSPF is enabled on this link, bring it down.
-        if link.enabled {
-            let area_id = link.area_id;
-            let _ = self.tx.send(Message::Disable(ifindex, area_id));
-        }
     }
 
     async fn process_recv(
@@ -1561,6 +1568,25 @@ impl Ospf<Ospfv3> {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    /// Handle a kernel `RibRx` event for the v3 instance: register
+    /// new interfaces in `self.links` and propagate up/down events
+    /// into the IFSM. Without this, `config_ospfv3_interface_enable`
+    /// can't find the link by name and silently no-ops; v3 never
+    /// starts.
+    ///
+    /// Subset of v2's `process_rib_msg`: covers the link-state arms
+    /// needed for v3 to come up on a configured interface. `AddrAdd`
+    /// (link-local v6) and `RouterIdUpdate` (with v3 router-LSA
+    /// re-origination) are follow-up PRs.
+    fn process_rib_msg(&mut self, msg: RibRx) {
+        match msg {
+            RibRx::LinkAdd(link) => self.link_add(link),
+            RibRx::LinkUp(ifindex) => self.link_up(ifindex),
+            RibRx::LinkDown(ifindex) => self.link_down(ifindex),
+            _ => {}
         }
     }
 
@@ -2646,9 +2672,8 @@ impl Ospf<Ospfv3> {
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg).await;
                 }
-                Some(_msg) = self.rib_rx.recv() => {
-                    // v3 RIB integration TBD; drain for now so the
-                    // channel doesn't back-pressure the rib client.
+                Some(msg) = self.rib_rx.recv() => {
+                    self.process_rib_msg(msg);
                 }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
