@@ -1453,25 +1453,29 @@ fn show_ospf_route(
             //     String::from("")
             // };
             let sid = String::from("");
+            // UNSPECIFIED nexthop is the self-attached marker stamped by
+            // `attached_nhops` in inst.rs; render it FRR-style as
+            // "directly attached to <ifname>".
+            let via = if addr.is_unspecified() {
+                format!("directly attached to {}", ospf.ifname(nhop.ifindex))
+            } else {
+                format!("via {}, {}", addr, ospf.ifname(nhop.ifindex))
+            };
             if !shown {
                 writeln!(
                     buf,
-                    "{:<20} [{}] via {}, {}{}",
+                    "{:<20} [{}] {}{}",
                     prefix.to_string(),
                     route.metric,
-                    addr,
-                    ospf.ifname(nhop.ifindex),
+                    via,
                     sid
                 )?;
                 shown = true;
             } else {
                 writeln!(
                     buf,
-                    "                     [{}] via {}, {}{}",
-                    route.metric,
-                    addr,
-                    ospf.ifname(nhop.ifindex),
-                    sid
+                    "                     [{}] {}{}",
+                    route.metric, via, sid
                 )?;
             }
         }
