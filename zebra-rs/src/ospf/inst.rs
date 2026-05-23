@@ -1589,23 +1589,67 @@ impl Ospf<Ospfv3> {
     }
 
     /// Handle a kernel `RibRx` event for the v3 instance: register
-    /// new interfaces in `self.links` and propagate up/down events
-    /// into the IFSM. Without this, `config_ospfv3_interface_enable`
-    /// can't find the link by name and silently no-ops; v3 never
-    /// starts.
+    /// new interfaces in `self.links`, propagate up/down events into
+    /// the IFSM, and track IPv6 addresses learned from netlink so
+    /// `link.addr` is populated by the time the IFSM
+    /// `InterfaceUp` event fires. Without `AddrAdd`, the IFSM bails
+    /// in `ospf_ifsm_interface_up` (it short-circuits when
+    /// `link.addr.is_empty()`), leaving every v3 interface stuck in
+    /// `Down`; no Hello timer is ever armed.
     ///
-    /// Subset of v2's `process_rib_msg`: covers the link-state arms
-    /// needed for v3 to come up on a configured interface. `AddrAdd`
-    /// (link-local v6) and `RouterIdUpdate` (with v3 router-LSA
-    /// re-origination) are follow-up PRs.
+    /// Subset of v2's `process_rib_msg`: `RouterIdUpdate` (with v3
+    /// router-LSA re-origination) is a follow-up PR.
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::LinkAdd(link) => self.link_add(link),
             RibRx::LinkUp(ifindex) => self.link_up(ifindex),
             RibRx::LinkDown(ifindex) => self.link_down(ifindex),
             RibRx::LinkDel(ifindex) => self.link_del(ifindex),
+            RibRx::AddrAdd(addr) => self.addr_add(addr),
+            RibRx::AddrDel(addr) => self.addr_del(addr),
             _ => {}
         }
+    }
+
+    /// Stash an IPv6 address learned from netlink on the matching
+    /// link's `addr` list. IPv4 addresses are dropped — v3 only
+    /// operates over IPv6 (RFC 5340 §1). If the addition makes
+    /// `link.addr` non-empty for the first time on an enabled link
+    /// that's still in IFSM `Down`, re-fire `InterfaceUp` so the
+    /// FSM can progress past the empty-`addr` short-circuit in
+    /// `ospf_ifsm_interface_up`.
+    fn addr_add(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V6(prefix) = &addr.addr else {
+            return;
+        };
+        let ospf_addr = OspfAddr::<Ospfv3>::from(&addr, prefix);
+        link.addr.push(ospf_addr);
+
+        if link.enabled && link.state == IfsmState::Down {
+            let _ = self
+                .tx
+                .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
+        }
+    }
+
+    /// Remove an IPv6 address from the matching link's `addr` list
+    /// and, if the link's enable predicate now flips, drive the
+    /// IFSM through the resulting transition (mirrors v2's
+    /// `addr_del`).
+    fn addr_del(&mut self, addr: LinkAddr) {
+        let Some(link) = self.links.get_mut(&addr.ifindex) else {
+            return;
+        };
+        let IpNet::V6(prefix) = &addr.addr else {
+            return;
+        };
+        link.addr.retain(|a| a.prefix != *prefix);
+
+        let (next, next_id) = super::config::link_should_enable(link);
+        super::config::apply_link_enable_transition(link, next, next_id);
     }
 
     /// Look up the v3 show-path handler for `msg.paths` and invoke
