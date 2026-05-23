@@ -3586,15 +3586,31 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
 }
 
 /// Build a `PrefixMap<Ipv6Net, SpfRouteV3>` from the area's
-/// Intra-Area-Prefix-LSAs + the SPF result. Each LSA's
-/// `referenced_advertising_router` is looked up in `spf_result`;
-/// for every reachable referenced router, the carried prefixes
-/// are entered at cost `path.cost + prefix.metric`. Nexthops are
-/// the path's `first_hop_links` resolved to our local neighbors'
-/// link-local v6 + ifindex.
+/// Intra-Area-Prefix-LSAs + the SPF result, per RFC 5340 §3.8.1.
 ///
-/// Self-originated prefixes are skipped — the system already has
-/// them as connected routes.
+/// For each non-MaxAge Intra-Area-Prefix-LSA:
+///   - referenced router is reachable via SPF (`ref_vertex != source`):
+///     cost = `ref_path.cost + prefix.metric`, nexthops resolved from
+///     the path's `first_hop_links`.
+///   - referenced router is self (we originated the LSA): SPF cost to
+///     self is 0 with no first-hops, so we synthesize. Two sub-cases:
+///       * Network-LSA reference (we are the DR for the segment):
+///         the prefix is on the segment whose Network-LSA we own.
+///         cost = our link's `output_cost + prefix.metric`; nexthop
+///         is directly attached via that link (mirrors how a peer-DR
+///         peer's LSA installs the same prefix at the same cost).
+///       * Router-LSA reference (stub on one of our links): cost =
+///         `prefix.metric` (== the link's `output_cost` we stamp in
+///         at origination); nexthop directly attached via the link
+///         whose `link.addr` matches the prefix.
+///
+/// The self-case install matches the strict RFC §16.1.1 / §3.8.1
+/// procedure — every Intra-Area-Prefix-LSA contributes, including
+/// our own. The FIB picks between this OSPF route (admin distance
+/// 110) and the kernel's connected route (0), so the connected
+/// route always wins for the directly-attached prefix; the OSPF
+/// route table still shows the prefix for `show ipv6 ospf route`
+/// symmetry across DR-role flips.
 fn build_rib6_from_spf(
     top: &Ospf<Ospfv3>,
     area_id: Ipv4Addr,
@@ -3602,7 +3618,7 @@ fn build_rib6_from_spf(
     spf_result: &BTreeMap<usize, spf::Path>,
 ) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3LsBody};
+    use ospf_packet::{OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3LsBody};
 
     let mut rib = PrefixMap::<ipnet::Ipv6Net, SpfRouteV3>::new();
 
@@ -3624,31 +3640,88 @@ fn build_rib6_from_spf(
         let Some(ref_vertex) = top.lsp_map.lookup(body.referenced_advertising_router) else {
             continue;
         };
-        if ref_vertex == source {
-            continue;
-        }
-        let Some(ref_path) = spf_result.get(&ref_vertex) else {
-            continue;
+
+        // Common path: referenced router is some other vertex. Pull
+        // the SPF path and nexthops once for all prefixes in this LSA.
+        let nonself = if ref_vertex != source {
+            let Some(ref_path) = spf_result.get(&ref_vertex) else {
+                continue;
+            };
+            let nhops = collect_v3_nexthops(top, ref_path);
+            if nhops.is_empty() {
+                continue;
+            }
+            let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+                .into_iter()
+                .map(|(addr, ifindex)| (addr, SpfNexthopV3 { ifindex }))
+                .collect();
+            Some((ref_path.cost, nhops_map))
+        } else {
+            None
         };
 
-        let nhops = collect_v3_nexthops(top, ref_path);
-        if nhops.is_empty() {
-            continue;
-        }
-        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
-            .into_iter()
-            .map(|(addr, ifindex)| (addr, SpfNexthopV3 { ifindex }))
-            .collect();
+        // Self / Network-LSA reference: the entire LSA shares one
+        // local link (the one whose interface_id matches the
+        // referenced LS-ID — i.e., our own segment as DR). Resolve
+        // up-front so the per-prefix loop is cheap.
+        let self_network_link = if ref_vertex == source
+            && body.referenced_ls_type == OSPFV3_NETWORK_LSA_TYPE
+        {
+            top.links.values().find(|l| {
+                l.enabled && l.area == area_id && l.interface_id == body.referenced_link_state_id
+            })
+        } else {
+            None
+        };
 
         for prefix in &body.prefixes {
             let Some(net) = ospfv3_prefix_to_ipv6net(prefix.prefix_length, &prefix.address_prefix)
             else {
                 continue;
             };
-            let total_metric = ref_path.cost.saturating_add(prefix.metric as u32);
+
+            let (total_metric, nhops_map) = if let Some((cost, ref nhops)) = nonself {
+                (cost.saturating_add(prefix.metric as u32), nhops.clone())
+            } else if let Some(link) = self_network_link {
+                // Self-DR transit-network LSA. cost is the link's
+                // output_cost (RFC 5340 §3.8.1 transit-network base)
+                // plus the prefix's per-entry metric (typically 0 for
+                // Network-LSA-referenced prefixes, RFC 5340 §A.4.10).
+                let mut nhops_map = BTreeMap::new();
+                nhops_map.insert(
+                    std::net::Ipv6Addr::UNSPECIFIED,
+                    SpfNexthopV3 {
+                        ifindex: link.index,
+                    },
+                );
+                (
+                    link.output_cost.saturating_add(prefix.metric as u32),
+                    nhops_map,
+                )
+            } else {
+                // Self / Router-LSA reference: stub prefix on one of
+                // our links. cost = 0 (SPF to self) + prefix.metric;
+                // resolve the link by matching the prefix back to
+                // `link.addr` so the route renders with the right
+                // ifindex.
+                let Some(link) = top.links.values().find(|l| {
+                    l.enabled && l.area == area_id && l.addr.iter().any(|a| a.prefix == net)
+                }) else {
+                    continue;
+                };
+                let mut nhops_map = BTreeMap::new();
+                nhops_map.insert(
+                    std::net::Ipv6Addr::UNSPECIFIED,
+                    SpfNexthopV3 {
+                        ifindex: link.index,
+                    },
+                );
+                (prefix.metric as u32, nhops_map)
+            };
+
             let entry = SpfRouteV3 {
                 metric: total_metric,
-                nhops: nhops_map.clone(),
+                nhops: nhops_map,
             };
             // Equal-cost: take the lowest-metric. If equal, merge
             // nexthop sets so we end up with ECMP at the same

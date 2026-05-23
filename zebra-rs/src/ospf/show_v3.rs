@@ -408,7 +408,18 @@ fn show_ospfv3_route(
             r.nexthops
                 .iter()
                 .map(|n| {
-                    if n.ifindex != 0 {
+                    // `::` nexthops mark directly-attached prefixes
+                    // (self-originated Intra-Area-Prefix-LSAs, per
+                    // RFC 5340 §3.8.1 self-vertex handling); render
+                    // them by interface name where we have it.
+                    if n.nexthop == "::" {
+                        let ifname = top
+                            .links
+                            .get(&n.ifindex)
+                            .map(|l| l.name.as_str())
+                            .unwrap_or("unknown");
+                        format!("directly attached via {}", ifname)
+                    } else if n.ifindex != 0 {
                         format!("{}%{}", n.nexthop, n.ifindex)
                     } else {
                         n.nexthop.clone()
