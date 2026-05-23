@@ -1990,43 +1990,6 @@ impl Ospf<Ospfv3> {
         self.flood_lsa_through_area(area_id, lsa, None);
     }
 
-    /// Run an intra-area SPF calculation for `area_id`.
-    ///
-    /// Walks the area's Router-LSAs and Network-LSAs (both
-    /// area-scope, both in `area.lsdb`), builds a `spf::Graph` with
-    /// one vertex per advertising router, runs Dijkstra via the
-    /// existing `spf::spf`, and stores the result in
-    /// `top.spf_result` / `top.graph`. No RIB push yet —
-    /// Intra-Area-Prefix-LSA prefix walk + IPv6 next-hop resolution
-    /// + RIB integration land in a follow-up PR.
-    ///
-    /// Differences from v2's `perform_spf_calculation`:
-    ///
-    /// - Router-LSA links use `(interface_id,
-    ///   neighbor_interface_id, neighbor_router_id)` per
-    ///   RFC 5340 §A.4.3 — there's no `(link_id, link_data)` pair.
-    ///   The transit-network key is the DR's
-    ///   `(router_id, interface_id)`, looked up in the
-    ///   Network-LSA table by `(ls_id, adv_router)`.
-    /// - No stub-network link type (gone in v3).
-    /// - No TOS metric column (collapsed to a single 16-bit metric).
-    pub fn perform_spf_calculation(&mut self, area_id: Ipv4Addr) {
-        let (graph, source_node) = graph_v3(self, area_id);
-
-        if let Some(source) = source_node {
-            let start = Instant::now();
-            let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
-            let end = Instant::now();
-            self.spf_duration = Some(end.duration_since(start));
-            self.spf_last = Some(end);
-
-            apply_routing_updates_v3(self, area_id, source, &spf_result);
-
-            self.spf_result = Some(spf_result);
-            self.graph = Some(graph);
-        }
-    }
-
     /// Dispatch one v3 instance-level message.
     ///
     /// Subset of v2's `process_msg` covering the IFSM-driver scope:
@@ -2126,9 +2089,24 @@ impl Ospf<Ospfv3> {
                     return;
                 }
                 area.spf_timer = None;
-                area.spf_inflight = true;
-                tracing::info!("[v3 SPF] Calculation triggered for area {}", area_id);
-                self.perform_spf_calculation(area_id);
+                // Build the SPF input on the main task; if there is
+                // no source Router-LSA yet there is nothing to do.
+                let Some(input) = build_v3_spf_input(self, area_id) else {
+                    return;
+                };
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_inflight = true;
+                }
+                let tx = self.tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let output = compute_spf(input);
+                    let _ = tx.send(Message::SpfDone(Box::new(output)));
+                });
+                tracing::info!("[v3 SPF] Calculation dispatched for area {}", area_id);
+            }
+            Message::SpfDone(output) => {
+                let area_id = output.area_id;
+                apply_v3_spf_result(self, *output);
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -3235,6 +3213,41 @@ fn ospfv3_prefix_to_ipv6net(prefix_length: u8, address_prefix: &[u8]) -> Option<
         .map(|n| n.trunc())
 }
 
+/// Main-task wrapper mirroring v2's `build_spf_input`. Assembles
+/// the v3 SPF graph from the area's LSDB and resolves the local
+/// vertex. Returns `None` when the source Router-LSA hasn't been
+/// originated yet — nothing to compute.
+fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfInput> {
+    let (graph, source_node) = graph_v3(top, area_id);
+    source_node.map(|source| SpfInput {
+        area_id,
+        graph,
+        source,
+    })
+}
+
+/// Main-task wrapper mirroring v2's `apply_spf_result`. Stamps
+/// telemetry, runs the Intra-Area-Prefix-LSA walk to push v6
+/// routes into the system RIB, then stashes the SPF result and
+/// graph on the instance.
+fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
+    let SpfOutput {
+        area_id,
+        graph,
+        source,
+        spf_result,
+        duration,
+        last,
+    } = output;
+    top.spf_duration = Some(duration);
+    top.spf_last = Some(last);
+
+    apply_routing_updates_v3(top, area_id, source, &spf_result);
+
+    top.spf_result = Some(spf_result);
+    top.graph = Some(graph);
+}
+
 /// Walk Intra-Area-Prefix-LSAs in `area_id`'s LSDB, look each
 /// LSA's `referenced_advertising_router` up in `spf_result`, and
 /// for every reachable referenced router emit `rib::Message::Ipv6Add`
@@ -3249,7 +3262,9 @@ fn ospfv3_prefix_to_ipv6net(prefix_length: u8, address_prefix: &[u8]) -> Option<
 /// shape as v2's `build_spf_nexthops` "empty nhops → skip" pattern.
 ///
 /// Direct install only — no diff vs prior SPF run. The RIB layer
-/// deduplicates Ipv6Add for an already-installed prefix.
+/// deduplicates Ipv6Add for an already-installed prefix. Withdrawn
+/// prefixes are not removed — pre-existing v3 RIB-diff gap, out of
+/// scope here.
 fn apply_routing_updates_v3(
     top: &Ospf<Ospfv3>,
     area_id: Ipv4Addr,
