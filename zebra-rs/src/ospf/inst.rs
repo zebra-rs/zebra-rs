@@ -1348,9 +1348,25 @@ impl Ospf<Ospfv2> {
                     return;
                 }
                 area.spf_timer = None;
-                area.spf_inflight = true;
-                tracing::info!("[SPF] Calculation triggered for area {}", area_id);
-                perform_spf_calculation(self, area_id);
+                // Build the SPF input (graph + source vertex) on the
+                // main task — reads the LSDB and is cheap. If there
+                // is no source node yet, there is nothing to compute.
+                let Some(input) = build_spf_input(self, area_id) else {
+                    return;
+                };
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.spf_inflight = true;
+                }
+                let tx = self.tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let output = compute_spf(input);
+                    let _ = tx.send(Message::SpfDone(Box::new(output)));
+                });
+                tracing::info!("[SPF] Calculation dispatched for area {}", area_id);
+            }
+            Message::SpfDone(output) => {
+                let area_id = output.area_id;
+                apply_spf_result(self, *output);
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -2587,6 +2603,11 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     SpfSchedule(Option<Ipv4Addr>),
     /// Timer-fired: perform SPF calculation for an area.
     SpfCalc(Ipv4Addr),
+    /// Completion of an off-task SPF run dispatched by `SpfCalc`.
+    /// Carries the owned, `Send` result that `apply_spf_result`
+    /// folds back into `Ospf` on the main task. Currently only
+    /// emitted by v2; v3 still runs SPF inline.
+    SpfDone(Box<SpfOutput>),
 }
 
 use crate::spf::{self, Path};
@@ -3361,8 +3382,9 @@ struct SpfInput {
 }
 
 /// Result of a single v2 SPF run, ready to be applied back to
-/// `Ospf` by [`apply_spf_result`] on the main task.
-struct SpfOutput {
+/// `Ospf` by [`apply_spf_result`] on the main task. Public because
+/// it is carried by the `Message::SpfDone` variant.
+pub struct SpfOutput {
     area_id: Ipv4Addr,
     graph: spf::Graph,
     source: usize,
@@ -3428,13 +3450,6 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     top.graph = Some(graph);
 
     apply_routing_updates(top, rib);
-}
-
-fn perform_spf_calculation(top: &mut Ospf, area_id: Ipv4Addr) {
-    if let Some(input) = build_spf_input(top, area_id) {
-        let output = compute_spf(input);
-        apply_spf_result(top, output);
-    }
 }
 
 pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
