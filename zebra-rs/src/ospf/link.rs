@@ -119,9 +119,10 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub ls_ack_delayed: Vec<V::LsaHeader>,
     /// 32-bit Interface ID advertised in v3 Hellos and Router-LSA
     /// links (RFC 5340 §A.3.2 / §A.4.3). Unused by v2 (where the
-    /// equivalent role is filled by the interface IP). Defaulted
-    /// to 0; the v3 interface-enable path sets it.
-    #[allow(dead_code)]
+    /// equivalent role is filled by the interface IP). Initialized
+    /// from the kernel ifindex so it's unique per interface on
+    /// this router (RFC 5340 §3.2 only requires per-router
+    /// uniqueness).
     pub interface_id: u32,
     /// Per-link LSDB (RFC 5340 §A.4.9). Holds link-scope LSAs —
     /// `Link-LSAs` — that the v3 standard restricts to flooding
@@ -176,7 +177,7 @@ where
             ptx,
             config: LinkConfig::default(),
             ls_ack_delayed: Vec::new(),
-            interface_id: 0,
+            interface_id: link.index,
             lsdb: super::lsdb::Lsdb::new(),
         }
     }
