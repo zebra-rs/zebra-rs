@@ -2038,6 +2038,27 @@ impl Ospf<Ospfv3> {
             let cost = link.output_cost as u16;
             let my_iid = link.interface_id;
 
+            // RFC 5340 §A.4.3 link type 1: PointToPoint. One link
+            // entry per Full neighbor, naming the peer's
+            // interface-id and router-id. No DR involvement — the
+            // P2P link is its own bidirectional edge. Skipped while
+            // the adjacency is still forming so the Router-LSA
+            // doesn't carry a half-built reference.
+            if link.is_pointopoint() {
+                for nbr in link.nbrs.values() {
+                    if nbr.state != NfsmState::Full {
+                        continue;
+                    }
+                    links.push(Ospfv3RouterLsaLink::point_to_point(
+                        cost,
+                        my_iid,
+                        nbr.interface_id,
+                        nbr.ident.router_id,
+                    ));
+                }
+                continue;
+            }
+
             if matches!(link.network_type, OspfNetworkType::Broadcast) {
                 let dr_router_id = link.ident.d_router;
                 if dr_router_id == Ipv4Addr::UNSPECIFIED {
@@ -2321,6 +2342,10 @@ impl Ospf<Ospfv3> {
                 link.enabled = true;
                 link.area = area_id;
                 link.area_id = area_id;
+                // Mirror the v2 Enable arm — sync runtime
+                // network_type from config so IFSM / NFSM /
+                // Router-LSA key off the operator's choice.
+                link.network_type = link.config_network_type();
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
                 self.router_lsa_originate();
