@@ -2150,6 +2150,15 @@ impl Ospf<Ospfv3> {
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
             Message::Disable(ifindex, area_id) => {
+                // Flush self-originated LSAs scoped to this link
+                // *before* tearing down the link's area binding —
+                // both `link_lsa_flush` and `network_lsa_flush` read
+                // through the link (interface_id) and the area LSDB,
+                // so the lookups must happen while both still
+                // resolve.
+                self.network_lsa_flush(ifindex, area_id);
+                self.link_lsa_flush(ifindex);
+
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
@@ -2158,11 +2167,6 @@ impl Ospf<Ospfv3> {
                 link.area_id = Ipv4Addr::UNSPECIFIED;
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
-                // Flush before re-originating the area-scope LSAs:
-                // the Link-LSA we put out is link-scoped (RFC 5340
-                // §4.4.3.8) and won't be touched by the Router-LSA
-                // / Intra-Area-Prefix-LSA refresh.
-                self.link_lsa_flush(ifindex);
                 self.router_lsa_originate();
                 self.router_intra_area_prefix_lsa_originate(area_id);
                 let _ = self
@@ -2605,6 +2609,36 @@ impl Ospf<Ospfv3> {
             Self::ospf_spf_schedule_generic(&self.tx, area);
         }
         self.flood_self_originated_lsa(area_id, &flood_lsa);
+    }
+
+    /// Unconditionally flush the Network-LSA we originated for
+    /// `ifindex` in `area_id` (RFC 2328 §14.1): if one exists in
+    /// the area LSDB at our router-id, set its age to MaxAge and
+    /// re-flood so peers remove it instead of waiting
+    /// LSRefreshTime.
+    ///
+    /// Differs from `network_lsa_originate`'s flush branch by not
+    /// gating on the live `is_dr` / `full_nbr_count` checks — those
+    /// can still be "we are DR with Full neighbors" when this is
+    /// invoked from `Message::Disable`, but the link is going away
+    /// regardless and the LSA must be torn down.
+    pub fn network_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let interface_id = link.interface_id;
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_NETWORK_LSA_TYPE, interface_id, self.router_id);
+
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
     }
 
     /// Dispatch one v3 packet received off the wire (`network_v6`).
