@@ -2351,13 +2351,18 @@ impl Ospf<Ospfv3> {
     /// on the originating link only. Counterpart to
     /// `flood_self_originated_lsa` which walks the whole area;
     /// RFC 5340 §4.5.2 bounds link-scope flooding to the segment.
+    ///
+    /// Per RFC 2328 §13.3 step 1(d), every LSA sent to a neighbor
+    /// is added to that neighbor's retransmit list so the
+    /// retransmit timer can resend it until acknowledged. Same
+    /// shape as `flood_lsa_through_area`'s bookkeeping (#808).
     fn flood_link_scope_lsa(&mut self, ifindex: u32, lsa: &ospf_packet::Ospfv3Lsa) {
         use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
 
         let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
             return;
         };
-        let Some(link) = self.links.get(&ifindex) else {
+        let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
         let area_id = link.area;
@@ -2367,15 +2372,18 @@ impl Ospf<Ospfv3> {
         }) else {
             return;
         };
+        let retransmit_interval = link.retransmit_interval();
 
-        let recipients: Vec<std::net::Ipv6Addr> = link
-            .nbrs
-            .values()
-            .filter(|n| n.state >= NfsmState::Exchange)
-            .map(|n| n.ident.prefix.addr())
-            .collect();
+        for nbr in link.nbrs.values_mut() {
+            if nbr.state < NfsmState::Exchange {
+                continue;
+            }
 
-        for nbr_v6 in recipients {
+            // RFC 2328 §13.3 step 1(d): track the LSA on this
+            // neighbor's retransmit list so the per-neighbor
+            // retransmit timer can resend it until we get an ack.
+            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+
             let ls_upd = Ospfv3LsUpdate {
                 lsas: vec![lsa.clone()],
             };
@@ -2388,7 +2396,7 @@ impl Ospf<Ospfv3> {
             let item = super::network_v6::Ospfv3Send {
                 packet,
                 ifindex,
-                dest: Some(nbr_v6),
+                dest: Some(nbr.ident.prefix.addr()),
                 src,
             };
             if let Err(e) = tx.send(item) {
