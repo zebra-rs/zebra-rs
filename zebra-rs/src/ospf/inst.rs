@@ -1948,7 +1948,29 @@ impl Ospf<Ospfv3> {
                 if dr_router_id == Ipv4Addr::UNSPECIFIED {
                     continue;
                 }
-                if let Some(dr_nbr) = link.nbrs.get(&dr_router_id)
+                if dr_router_id == self.router_id {
+                    // RFC 5340 §A.4.3: when this router is the DR
+                    // for the segment, the Transit-link's "neighbor"
+                    // fields name us — our own interface_id and
+                    // router-id. Without this branch the link is
+                    // silently dropped on the DR side (`link.nbrs`
+                    // never contains an entry keyed by our own
+                    // router-id), the Router-LSA goes out with zero
+                    // links, and SPF can never relax through the
+                    // Network-LSA pseudo-node we just originated.
+                    // Only emit when at least one neighbor reached
+                    // Full so the matching Network-LSA actually
+                    // exists in the LSDB to back-link against.
+                    let has_full_nbr = link.nbrs.values().any(|n| n.state == NfsmState::Full);
+                    if has_full_nbr {
+                        links.push(Ospfv3RouterLsaLink::transit_network(
+                            cost,
+                            my_iid,
+                            my_iid,
+                            self.router_id,
+                        ));
+                    }
+                } else if let Some(dr_nbr) = link.nbrs.get(&dr_router_id)
                     && dr_nbr.state == NfsmState::Full
                 {
                     links.push(Ospfv3RouterLsaLink::transit_network(
