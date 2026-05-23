@@ -318,14 +318,20 @@ pub fn ospf_nfsm_hello_received<V: OspfVersion>(
 }
 
 pub fn ospf_nfsm_twoway_received<V: OspfVersion>(
-    _oi: &mut OspfInterface<V>,
+    oi: &mut OspfInterface<V>,
     nbr: &mut Neighbor<V>,
     oident: &Identity<V>,
 ) -> Option<NfsmState> {
+    use super::link::OspfNetworkType;
     let mut next_state = NfsmState::TwoWay;
 
-    // If interface is pointopoint.
-    if nbr.is_pointopoint() {
+    // P2P interfaces skip DR/BDR gating entirely: any neighbor that
+    // reaches 2-Way proceeds straight to ExStart. (RFC 2328 §10.4 —
+    // "I am a DR/BDR or my neighbor is DR/BDR" doesn't apply when
+    // there is no DR election.) `nbr.is_pointopoint()` is a stub that
+    // returns false; check the parent interface's network_type
+    // directly.
+    if oi.network_type == OspfNetworkType::PointToPoint {
         next_state = NfsmState::ExStart;
     }
 

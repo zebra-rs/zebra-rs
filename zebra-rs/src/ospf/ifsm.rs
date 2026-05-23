@@ -13,15 +13,16 @@ use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
 /// state variants are needed; the enum and its Display impl are
 /// version-agnostic.
 ///
-/// `Loopback` and `Point-to-Point` from the RFC are intentionally
-/// elided — zebra-rs does not yet support loopback interfaces in
-/// OSPF nor non-broadcast point-to-point links; both will be added
-/// when the corresponding wiring lands.
+/// `Loopback` from the RFC is intentionally elided — zebra-rs does
+/// not yet support loopback interfaces in OSPF; it will be added when
+/// the corresponding wiring lands. `PointToPoint` was added once the
+/// `network-type point-to-point` knob landed.
 #[derive(Debug, Default, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum IfsmState {
     #[default]
     Down,
     Waiting,
+    PointToPoint,
     DROther,
     Backup,
     DR,
@@ -33,6 +34,7 @@ impl Display for IfsmState {
         let state = match self {
             Down => "Down",
             Waiting => "Waiting",
+            PointToPoint => "Point-To-Point",
             DROther => "DROther",
             Backup => "Backup",
             DR => "DR",
@@ -74,6 +76,16 @@ impl IfsmState {
                 WaitTimer => (ospf_ifsm_wait_timer, None),
                 BackupSeen => (ospf_ifsm_backup_seen, None),
                 NeighborChange => (ospf_ifsm_ignore, Some(Waiting)),
+                InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
+            },
+            // P2P is terminal in the IFSM — no DR/BDR election runs,
+            // no Wait timer, no NeighborChange handler (adjacency
+            // formation is driven entirely by the NFSM 2-way path).
+            PointToPoint => match ev {
+                InterfaceUp => (ospf_ifsm_ignore, Some(PointToPoint)),
+                WaitTimer => (ospf_ifsm_ignore, Some(PointToPoint)),
+                BackupSeen => (ospf_ifsm_ignore, Some(PointToPoint)),
+                NeighborChange => (ospf_ifsm_ignore, Some(PointToPoint)),
                 InterfaceDown => (ospf_ifsm_interface_down, Some(Down)),
             },
             DROther => match ev {
@@ -151,10 +163,12 @@ pub fn ospf_ifsm_interface_up<V: OspfVersion>(link: &mut OspfLink<V>) -> Option<
     V::join_if(&link.sock, link.index);
     link.multicast_memberships.set_all_routers(true);
 
-    // Comment out until we support pointopoint interface.
-    // if link.is_pointopoint() {
-    //     return IfsmState::PointToPoint;
-    // }
+    // P2P interfaces skip Waiting / DR election entirely (RFC 2328
+    // §10.3) — they go straight to PointToPoint and let the NFSM
+    // drive adjacency to Full on TwoWayReceived.
+    if link.is_pointopoint() {
+        return Some(IfsmState::PointToPoint);
+    }
 
     if link.ident.priority == 0 {
         Some(IfsmState::DROther)
@@ -346,7 +360,7 @@ fn ospf_ifsm_timer_set<V: OspfVersion>(oi: &mut OspfLink<V>) {
             oi.timer.wait.get_or_insert(ospf_wait_timer(oi));
             oi.timer.ls_ack = None;
         }
-        DROther | Backup | DR => {
+        DROther | Backup | DR | PointToPoint => {
             oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
             oi.timer.wait = None;
         }

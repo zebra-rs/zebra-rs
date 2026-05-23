@@ -332,6 +332,12 @@ module config {
             leaf enable {
               type boolean;
             }
+            leaf network-type {
+              type enumeration {
+                enum broadcast;
+                enum point-to-point;
+              }
+            }
             leaf priority {
               type uint8;
             }

@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
@@ -26,6 +27,7 @@ pub enum OspfNetworkType {
     #[default]
     Broadcast,
     NBMA,
+    PointToPoint,
 }
 
 impl Display for OspfNetworkType {
@@ -33,6 +35,22 @@ impl Display for OspfNetworkType {
         match self {
             OspfNetworkType::Broadcast => write!(f, "BROADCAST"),
             OspfNetworkType::NBMA => write!(f, "NBMA"),
+            OspfNetworkType::PointToPoint => write!(f, "POINT-TO-POINT"),
+        }
+    }
+}
+
+impl FromStr for OspfNetworkType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // YANG enum names (kebab-case) only; uppercase Display forms
+        // are output-only and not accepted back.
+        match s {
+            "broadcast" => Ok(Self::Broadcast),
+            "nbma" => Ok(Self::NBMA),
+            "point-to-point" => Ok(Self::PointToPoint),
+            _ => Err(()),
         }
     }
 }
@@ -56,6 +74,7 @@ pub struct LinkConfig {
     pub transmit_delay: Option<u16>,
     pub mtu_ignore: bool,
     pub prefix_sid: Option<PrefixSid>,
+    pub network_type: Option<OspfNetworkType>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -225,6 +244,19 @@ impl<V: OspfVersion> OspfLink<V> {
 
     pub fn is_nbma_if(&self) -> bool {
         self.network_type == OspfNetworkType::NBMA
+    }
+
+    pub fn is_pointopoint(&self) -> bool {
+        self.network_type == OspfNetworkType::PointToPoint
+    }
+
+    /// Resolve the configured network type, defaulting to Broadcast
+    /// (matches the historical zebra-rs behavior — every interface
+    /// was Broadcast unless code explicitly overrode it).
+    pub fn config_network_type(&self) -> OspfNetworkType {
+        self.config
+            .network_type
+            .unwrap_or(OspfNetworkType::Broadcast)
     }
 }
 
