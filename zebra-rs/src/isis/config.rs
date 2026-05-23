@@ -91,10 +91,6 @@ impl Isis {
         self.callback_add("/router/isis/lsp-mtu-size", config_lsp_mtu_size);
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
-        self.callback_add(
-            "/router/isis/segment-routing/mpls/block",
-            config_sr_mpls_block,
-        );
         self.callback_add("/router/isis/segment-routing/srv6", config_sr_srv6_enable);
         self.callback_add(
             "/router/isis/segment-routing/srv6/locator",
@@ -309,22 +305,17 @@ pub struct IsisConfig {
     pub distribute: IsisDistribute,
 
     /// Set when /router/isis/segment-routing/mpls is committed (the
-    /// presence-marked YANG container), even if no `block` is selected.
-    /// Drives whether IS-IS originates SR-MPLS Capability sub-TLVs.
+    /// presence-marked YANG container). Drives whether IS-IS originates
+    /// SR-MPLS Capability sub-TLVs and subscribes to the canonical
+    /// "default" block under /segment-routing/block.
     pub sr_mpls_enabled: bool,
-
-    /// Optional name of a block defined under the global
-    /// /segment-routing/block list. The actual SRGB / SRLB values are
-    /// looked up by name from RIB::blocks; left as a string here so the
-    /// IS-IS config can be staged before the global block is committed.
-    pub sr_mpls_block: Option<String>,
 
     /// Set when /router/isis/segment-routing/srv6 is committed.
     pub sr_srv6_enabled: bool,
 
     /// Optional name of a locator defined under the global
-    /// /segment-routing/locator list. Same staging-friendly rationale
-    /// as sr_mpls_block.
+    /// /segment-routing/locator list. Held as a string so the IS-IS
+    /// config can be staged before the global locator is committed.
     pub sr_srv6_locator: Option<String>,
 
     /// Per-Flex-Algorithm SRv6 locator bindings, from the YANG list at
@@ -681,23 +672,11 @@ fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
         }
     } else {
         isis.config.sr_mpls_enabled = false;
-        isis.config.sr_mpls_block = None;
         // Drop the pool. Any labels still cached on neighbor addr4
         // entries become orphaned but stop short of producing fresh
         // MPLS installs — `nbr_hello_interpret` and `lsp_generate`
         // both gate on `local_pool`/`value.label` being present.
         isis.local_pool = None;
-    }
-    isis.reconcile_block_watch();
-    Some(())
-}
-
-fn config_sr_mpls_block(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    if op.is_set() {
-        let name = args.string()?;
-        isis.config.sr_mpls_block = Some(name);
-    } else {
-        isis.config.sr_mpls_block = None;
     }
     isis.reconcile_block_watch();
     Some(())

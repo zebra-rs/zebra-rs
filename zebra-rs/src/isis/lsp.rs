@@ -71,18 +71,14 @@ use super::nfsm::NfsmState;
 
 /// Decide which block this IS-IS instance should subscribe to.
 ///
-/// `segment-routing mpls` enabled with no explicit `block` falls back to
-/// the canonical "default" block seeded by the RIB; an explicit name takes
-/// precedence. When SR-MPLS is disabled we want no subscription at all.
+/// `segment-routing mpls` enabled subscribes to the canonical "default"
+/// block seeded by the RIB. When SR-MPLS is disabled there is no
+/// subscription.
 pub(super) fn target_block_name(cfg: &IsisConfig) -> Option<String> {
     if !cfg.sr_mpls_enabled {
         return None;
     }
-    Some(
-        cfg.sr_mpls_block
-            .clone()
-            .unwrap_or_else(|| DEFAULT_BLOCK_NAME.to_string()),
-    )
+    Some(DEFAULT_BLOCK_NAME.to_string())
 }
 
 /// Decide which locator this IS-IS instance should subscribe to.
@@ -1524,9 +1520,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_block_falls_back_to_default_when_unset() {
-        // SR-MPLS enabled but no explicit block configured: should
-        // subscribe to the canonical "default" block.
+    fn target_block_is_default_when_enabled() {
+        // SR-MPLS enabled subscribes to the canonical "default" block.
         let cfg = IsisConfig {
             sr_mpls_enabled: true,
             ..Default::default()
@@ -1535,24 +1530,8 @@ mod tests {
     }
 
     #[test]
-    fn target_block_uses_explicit_name_when_set() {
-        let cfg = IsisConfig {
-            sr_mpls_enabled: true,
-            sr_mpls_block: Some("custom".into()),
-            ..Default::default()
-        };
-        assert_eq!(target_block_name(&cfg), Some("custom".to_string()));
-    }
-
-    #[test]
     fn target_block_returns_none_when_mpls_disabled() {
-        // The block name on its own should never produce a watch when
-        // SR-MPLS isn't enabled — otherwise we'd subscribe to stale
-        // config left behind after disabling the container.
-        let cfg = IsisConfig {
-            sr_mpls_block: Some("custom".into()),
-            ..Default::default()
-        };
+        let cfg = IsisConfig::default();
         assert_eq!(target_block_name(&cfg), None);
     }
 
