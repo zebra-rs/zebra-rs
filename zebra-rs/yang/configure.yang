@@ -102,5 +102,21 @@ module configure {
         type empty;
       }
     }
+    container ospf {
+      // Force-recalculate the OSPFv2 SPF for every attached area
+      // instead of waiting for the next LSDB event or the 1-second
+      // coalescing timer. Mirrors FRR's `clear ip ospf process`
+      // SPF-side effect.
+      leaf spf {
+        type empty;
+      }
+    }
+    container ospfv3 {
+      // Force-recalculate the OSPFv3 SPF for every attached area.
+      // Sibling of `clear ospf spf` for the v3 instance.
+      leaf spf {
+        type empty;
+      }
+    }
   }
 }
