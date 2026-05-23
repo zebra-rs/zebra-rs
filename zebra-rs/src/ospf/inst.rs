@@ -1723,6 +1723,22 @@ impl Ospf<Ospfv3> {
             if !link.enabled || link.area != area_id {
                 continue;
             }
+            // RFC 5340 §A.4.10: prefixes on a broadcast / NBMA transit
+            // segment with at least one Full adjacency are advertised
+            // by the DR's Network-LSA-referenced Intra-Area-Prefix-LSA,
+            // not by each attached router's Router-LSA-referenced one.
+            // Without this filter, both LSAs carry the segment prefix
+            // and `build_rib6_from_spf` ECMP-merges them — the route
+            // ends up with the directly-attached path *and* a
+            // redundant via-peer path at the same cost.
+            let transit_with_adjacencies =
+                matches!(
+                    link.network_type,
+                    OspfNetworkType::Broadcast | OspfNetworkType::NBMA
+                ) && link.nbrs.values().any(|n| n.state == NfsmState::Full);
+            if transit_with_adjacencies {
+                continue;
+            }
             let metric = link.output_cost as u16;
             for a in link.addr.iter() {
                 // Skip link-local addresses — those are
@@ -2256,10 +2272,10 @@ impl Ospf<Ospfv3> {
             Message::Disable(ifindex, area_id) => {
                 // Flush self-originated LSAs scoped to this link
                 // *before* tearing down the link's area binding —
-                // both `link_lsa_flush` and `network_lsa_flush` read
-                // through the link (interface_id) and the area LSDB,
-                // so the lookups must happen while both still
-                // resolve.
+                // the flushes read through the link (interface_id)
+                // and the area LSDB, so the lookups must happen
+                // while both still resolve.
+                self.network_intra_area_prefix_lsa_flush(ifindex, area_id);
                 self.network_lsa_flush(ifindex, area_id);
                 self.link_lsa_flush(ifindex);
 
@@ -2618,7 +2634,7 @@ impl Ospf<Ospfv3> {
             return;
         }
 
-        let if_state = {
+        let (if_state, area_id) = {
             let Some(link) = self.links.get_mut(&ifindex) else {
                 return;
             };
@@ -2627,7 +2643,7 @@ impl Ospf<Ospfv3> {
                 .values()
                 .filter(|nbr| nbr.state == NfsmState::Full)
                 .count();
-            link.state
+            (link.state, link.area)
         };
 
         tracing::info!(
@@ -2639,9 +2655,27 @@ impl Ospf<Ospfv3> {
         );
 
         self.router_lsa_originate();
+        // Re-originate the Router-LSA-referenced Intra-Area-Prefix-LSA
+        // so its transit-segment filter (RFC 5340 §A.4.10) re-evaluates
+        // against the new Full-adjacency count: a segment that just
+        // gained its first Full nbr drops out of the LSA (the DR's
+        // Network-LSA-referenced LSA owns it now); a segment that just
+        // lost its last Full nbr re-appears.
+        self.router_intra_area_prefix_lsa_originate(area_id);
 
         if if_state == IfsmState::DR {
             self.network_lsa_originate(ifindex);
+            // The Network-LSA-referenced companion LSA carries the
+            // segment's prefixes — originate it alongside the
+            // Network-LSA so peers learn the segment prefix exactly
+            // once, via the DR.
+            self.network_intra_area_prefix_lsa_originate(ifindex);
+        } else {
+            // We lost (or never had) DR. Flush any prior copy of the
+            // Network-referenced Intra-Area-Prefix-LSA we owned.
+            // `network_intra_area_prefix_lsa_originate`'s self-flush
+            // branch handles the gate, but it needs the call.
+            self.network_intra_area_prefix_lsa_originate(ifindex);
         }
     }
 
@@ -2734,6 +2768,175 @@ impl Ospf<Ospfv3> {
         };
         let interface_id = link.interface_id;
         let key: super::lsdb::OspfLsaKey = (OSPFV3_NETWORK_LSA_TYPE, interface_id, self.router_id);
+
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// Build the v3 Network-LSA-referenced Intra-Area-Prefix-LSA for
+    /// the broadcast segment on `ifindex` (RFC 5340 §A.4.10). Only
+    /// the DR originates this LSA; it carries the non-link-local
+    /// prefixes attached to the segment with `prefix.metric = 0`
+    /// (the network-pseudo-node-to-prefix cost is zero in v3 —
+    /// the router-to-pseudo-node cost is the interface
+    /// `output_cost`).
+    ///
+    /// Returns `None` unless this router is the DR on a Broadcast
+    /// link with at least one non-link-local prefix configured. The
+    /// LSA's `link_state_id` is the same Interface ID as the
+    /// Network-LSA we own for the segment — the two LSAs share an
+    /// identifier so receivers can correlate them.
+    pub fn build_network_intra_area_prefix_lsa(
+        &self,
+        ifindex: u32,
+    ) -> Option<ospf_packet::Ospfv3Lsa> {
+        use ospf_packet::{
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3IntraAreaPrefix,
+            Ospfv3IntraAreaPrefixLsa, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
+            Ospfv3PrefixOptions, ospfv3_prefix_wire_len,
+        };
+
+        let link = self.links.get(&ifindex)?;
+        if !link.enabled {
+            return None;
+        }
+        if !matches!(link.network_type, OspfNetworkType::Broadcast) {
+            return None;
+        }
+        if link.ident.d_router != self.router_id {
+            return None;
+        }
+
+        let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
+        for a in link.addr.iter() {
+            if a.prefix.addr().segments()[0] == 0xfe80 {
+                continue;
+            }
+            let net = &a.prefix;
+            let prefix_length = net.prefix_len();
+            let wire_len = ospfv3_prefix_wire_len(prefix_length);
+            let mut address_prefix = vec![0u8; wire_len];
+            let bytes = net.addr().octets();
+            let copy_len = prefix_length.div_ceil(8) as usize;
+            address_prefix[..copy_len].copy_from_slice(&bytes[..copy_len]);
+            prefixes.push(Ospfv3IntraAreaPrefix {
+                prefix_length,
+                prefix_options: Ospfv3PrefixOptions::default(),
+                metric: 0,
+                address_prefix,
+            });
+        }
+        if prefixes.is_empty() {
+            return None;
+        }
+
+        let body = Ospfv3IntraAreaPrefixLsa {
+            referenced_ls_type: OSPFV3_NETWORK_LSA_TYPE,
+            referenced_link_state_id: link.interface_id,
+            referenced_advertising_router: self.router_id,
+            prefixes,
+        };
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 0,
+                ls_type: OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+                link_state_id: link.interface_id,
+                advertising_router: self.router_id,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::IntraAreaPrefix(body),
+        };
+        lsa.update();
+        Some(lsa)
+    }
+
+    /// Originate (or flush) the v3 Network-LSA-referenced
+    /// Intra-Area-Prefix-LSA for `ifindex`. Mirrors
+    /// `network_lsa_originate`'s shape: self-contained, gates on
+    /// "we are DR on a Broadcast segment with ≥1 Full adjacency".
+    /// When the gate fails (we lost DR, dropped to zero Fulls, etc.)
+    /// flushes any prior copy from the area LSDB so peers age it
+    /// out, mirroring `network_lsa_originate`'s flush branch.
+    pub fn network_intra_area_prefix_lsa_originate(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let interface_id = link.interface_id;
+        let is_dr = link.ident.d_router == self.router_id;
+        let full_nbr_count = link
+            .nbrs
+            .values()
+            .filter(|n| n.state == NfsmState::Full)
+            .count();
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+            interface_id,
+            self.router_id,
+        );
+
+        if !is_dr || full_nbr_count == 0 {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+            return;
+        }
+
+        let Some(mut lsa) = self.build_network_intra_area_prefix_lsa(ifindex) else {
+            return;
+        };
+
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(prev_seq) = area
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number)
+        {
+            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            Self::ospf_spf_schedule_generic(&self.tx, area);
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
+    }
+
+    /// Unconditional MaxAge-flush of the Network-LSA-referenced
+    /// Intra-Area-Prefix-LSA we originated on `ifindex` in `area_id`.
+    /// Counterpart to `network_lsa_flush`; called from
+    /// `Message::Disable` before clearing the link's area binding
+    /// so peers age out the LSA without waiting LSRefreshTime.
+    pub fn network_intra_area_prefix_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE;
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let interface_id = link.interface_id;
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+            interface_id,
+            self.router_id,
+        );
 
         let flushed = if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
