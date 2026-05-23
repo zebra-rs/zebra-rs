@@ -99,10 +99,10 @@ pub const L2_ISS: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x15];
 pub const P2P_ISS: [u8; 6] = [0x09, 0x00, 0x2B, 0x00, 0x00, 0x05];
 
 pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<PacketMessage>) {
-    loop {
-        let msg = rx.recv().await;
-        let PacketMessage::Send(packet, ifindex, level, dest) = msg.unwrap();
-
+    // Exits the loop when the event loop drops the sender on
+    // instance teardown — same pattern as `ospf::network` and
+    // `ospf::network_v6`.
+    while let Some(PacketMessage::Send(packet, ifindex, level, dest)) = rx.recv().await {
         let buf = match packet {
             Packet::Packet(packet) => {
                 let mut buf = BytesMut::new();
