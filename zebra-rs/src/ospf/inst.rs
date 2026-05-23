@@ -203,11 +203,31 @@ impl<V: OspfVersion> Ospf<V> {
 
     /// Mark a link operationally up and, if OSPF is enabled on it,
     /// fire `Ifsm::InterfaceUp`. Shared by v2 and v3.
+    ///
+    /// A kernel-driven `LinkDown` queues a `Message::Disable` that
+    /// clears `link.enabled` / `link.area` — but the operator's
+    /// YANG config (`link.config.enable`, `link.config.area`) stays
+    /// intact. When the kernel link comes back up, the runtime
+    /// state is stale and a bare `if link.enabled` check would skip
+    /// `InterfaceUp`, leaving the IFSM in `Down` with no Hellos
+    /// flowing. Peer Hellos still arrive on the still-joined
+    /// multicast socket, so the neighbor lands in `Init` and never
+    /// progresses — that's the symptom. Re-fire `Enable` from the
+    /// config to repair the runtime state; the `Enable` arm
+    /// re-originates LSAs and fires `InterfaceUp` itself.
     fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
         link.link_flags |= LinkFlags::Up | LinkFlags::LowerUp;
+
+        if !link.enabled
+            && link.config.enable
+            && let Some(area) = link.config.area
+        {
+            let _ = self.tx.send(Message::Enable(ifindex, area));
+            return;
+        }
 
         if link.enabled {
             let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
