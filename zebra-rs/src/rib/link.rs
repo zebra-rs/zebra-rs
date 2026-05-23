@@ -577,6 +577,10 @@ impl Rib {
         if let Some(vni) = oslink.vni {
             self.fib_handle.unregister_vxlan_ifindex(vni);
         }
+        // Notify subscribers BEFORE removing the link entry, so the
+        // VRF lookup in `api_link_del` still resolves to the right
+        // subscribers instead of falling through to default VRF.
+        self.api_link_del(oslink.index);
         self.links.remove(&oslink.index);
     }
 
