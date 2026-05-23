@@ -1941,6 +1941,12 @@ impl Ospf<Ospfv3> {
     /// v6) we got the LSA from. v3 identifies the source neighbor
     /// by link-local v6 because that's what `Message::Flood<Ospfv3>`
     /// carries (`V::Addr = Ipv6Addr`).
+    ///
+    /// Per RFC 2328 §13.3 step 1(d), every LSA sent to a neighbor
+    /// is added to that neighbor's retransmit list and re-sent
+    /// at RxmtInterval until acknowledged (either explicitly via
+    /// LSAck or implicitly via §13.1 step 7 — see
+    /// `ospfv3_ls_upd_proc`).
     fn flood_lsa_through_area(
         &mut self,
         area_id: Ipv4Addr,
@@ -1958,7 +1964,7 @@ impl Ospf<Ospfv3> {
         let link_indices: Vec<u32> = area.links.iter().copied().collect();
 
         for ifindex in link_indices {
-            let Some(link) = self.links.get(&ifindex) else {
+            let Some(link) = self.links.get_mut(&ifindex) else {
                 continue;
             };
             let Some(src) = link.addr.iter().find_map(|a| {
@@ -1967,21 +1973,25 @@ impl Ospf<Ospfv3> {
             }) else {
                 continue;
             };
+            let retransmit_interval = link.retransmit_interval();
 
-            let recipients: Vec<(Ipv4Addr, std::net::Ipv6Addr)> = link
-                .nbrs
-                .values()
-                .filter(|n| n.state >= NfsmState::Exchange)
-                .filter(|n| match source {
-                    Some((src_if, src_v6)) => {
-                        !(ifindex == src_if && n.ident.prefix.addr() == src_v6)
-                    }
-                    None => true,
-                })
-                .map(|n| (n.ident.router_id, n.ident.prefix.addr()))
-                .collect();
+            for nbr in link.nbrs.values_mut() {
+                if nbr.state < NfsmState::Exchange {
+                    continue;
+                }
+                if let Some((src_if, src_v6)) = source
+                    && ifindex == src_if
+                    && nbr.ident.prefix.addr() == src_v6
+                {
+                    continue;
+                }
 
-            for (_nbr_rid, nbr_v6) in recipients {
+                // RFC 2328 §13.3 step 1(d): track the LSA on this
+                // neighbor's retransmit list so the per-neighbor
+                // retransmit timer can resend it until we get an
+                // ack.
+                super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+
                 let ls_upd = Ospfv3LsUpdate {
                     lsas: vec![lsa.clone()],
                 };
@@ -1994,7 +2004,7 @@ impl Ospf<Ospfv3> {
                 let item = super::network_v6::Ospfv3Send {
                     packet,
                     ifindex,
-                    dest: Some(nbr_v6),
+                    dest: Some(nbr.ident.prefix.addr()),
                     src,
                 };
                 if let Err(e) = tx.send(item) {
@@ -2006,9 +2016,10 @@ impl Ospf<Ospfv3> {
 
     /// Flood a self-originated v3 LSA to every Exchange-or-later
     /// neighbor in the area. Minimal RFC 2328 §13.3 — no DR / BDR
-    /// ordering, no retransmit-list bookkeeping, no ls_req cleanup
-    /// for Exchange / Loading neighbors. Those land alongside the
-    /// §13.1 hardening of `ospfv3_ls_upd_recv`.
+    /// ordering, no ls_req cleanup for Exchange / Loading neighbors.
+    /// Those land alongside the §13.1 hardening of
+    /// `ospfv3_ls_upd_recv`. Retransmit-list bookkeeping happens
+    /// in `flood_lsa_through_area`.
     ///
     /// The LSU goes through the dedicated `Ospfv3Send` channel so
     /// `network_v6::write_packet_v6` stamps the IPv6 pseudo-header
@@ -2017,6 +2028,71 @@ impl Ospf<Ospfv3> {
     /// `ospfv3_hello_recv`).
     fn flood_self_originated_lsa(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
         self.flood_lsa_through_area(area_id, lsa, None);
+    }
+
+    /// Handle the retransmit timer firing for a v3 neighbor.
+    /// Mirrors v2's `process_retransmit`: walk the neighbor's
+    /// `ls_rxmt` map, resend every LSA still on it in a single
+    /// LSU, and restart the timer. Empty `ls_rxmt` simply clears
+    /// the timer slot.
+    ///
+    /// `router_id` is the neighbor key in `OspfLink::nbrs` for v3
+    /// (the `Ipv4Addr` passed through `Message::Retransmit` is the
+    /// neighbor's router-id, set up by `ospf_retransmit_timer` via
+    /// `V::nbr_addr`).
+    fn process_retransmit(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
+
+        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
+            return;
+        };
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let retransmit_interval = link.retransmit_interval();
+        let Some(src) = link.addr.iter().find_map(|a| {
+            let addr = a.prefix.addr();
+            addr.is_unicast_link_local().then_some(addr)
+        }) else {
+            return;
+        };
+        let Some(nbr) = link.nbrs.get_mut(&router_id) else {
+            return;
+        };
+        if nbr.ls_rxmt.is_empty() {
+            nbr.timer.ls_rxmt = None;
+            return;
+        }
+
+        let lsas: Vec<ospf_packet::Ospfv3Lsa> = nbr.ls_rxmt.values().cloned().collect();
+        tracing::info!(
+            "[v3 Retransmit] Sending {} LSAs to {}",
+            lsas.len(),
+            router_id
+        );
+        let dest = nbr.ident.prefix.addr();
+        let ls_upd = Ospfv3LsUpdate { lsas };
+        let packet = Ospfv3Packet::new(
+            &self.router_id,
+            &area_id,
+            0,
+            Ospfv3Payload::LsUpdate(ls_upd),
+        );
+        let item = super::network_v6::Ospfv3Send {
+            packet,
+            ifindex,
+            dest: Some(dest),
+            src,
+        };
+        if let Err(e) = tx.send(item) {
+            tracing::warn!("[v3 Retransmit] channel send failed: {}", e);
+        }
+
+        nbr.timer.ls_rxmt = Some(super::flood::ospf_retransmit_timer(
+            nbr,
+            retransmit_interval,
+        ));
     }
 
     /// Dispatch one v3 instance-level message.
@@ -2148,6 +2224,9 @@ impl Ospf<Ospfv3> {
                 // Exchange-or-later neighbor in the area, exempting
                 // the (ifindex, router-id) pair we received it from.
                 self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
+            }
+            Message::Retransmit(ifindex, router_id) => {
+                self.process_retransmit(ifindex, router_id);
             }
             Message::Lsdb(ev, area_id, key) => {
                 // RFC 2328 §13.4: a peer flooded our own LSA back to
@@ -2490,6 +2569,11 @@ impl Ospf<Ospfv3> {
             Ospfv3Payload::LsUpdate(_) => {
                 if let Some((mut oi, nbr)) = self.ospf_interface(ifindex, &nbr_router_id) {
                     super::packet_v3::ospfv3_ls_upd_recv(&mut oi, nbr, &packet, &src);
+                }
+            }
+            Ospfv3Payload::LsAck(_) => {
+                if let Some((mut oi, nbr)) = self.ospf_interface(ifindex, &nbr_router_id) {
+                    super::packet_v3::ospfv3_ls_ack_recv(&mut oi, nbr, &packet, &src);
                 }
             }
             other => {

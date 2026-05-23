@@ -779,6 +779,45 @@ pub fn ospfv3_ls_ack_send(
     }
 }
 
+/// Process one OSPFv3 LS Acknowledgement packet — RFC 5340 §4.2.2
+/// inheriting RFC 2328 §13.7. For each acknowledged header, look up
+/// the matching LSA in the neighbor's retransmit list and remove
+/// it iff the ack's sequence number and checksum match what we
+/// hold. Mirrors v2's `ospf_ls_ack_recv`.
+pub fn ospfv3_ls_ack_recv(
+    _oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    packet: &Ospfv3Packet,
+    src: &Ipv6Addr,
+) {
+    if nbr.state < NfsmState::Exchange {
+        return;
+    }
+
+    let Ospfv3Payload::LsAck(ref ls_ack) = packet.payload else {
+        return;
+    };
+
+    tracing::info!(
+        "[v3 LSAck:Recv] from {} headers={}",
+        src,
+        ls_ack.lsa_headers.len()
+    );
+
+    for h in ls_ack.lsa_headers.iter() {
+        let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
+        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key)
+            && rxmt_lsa.h.ls_seq_number == h.ls_seq_number
+            && rxmt_lsa.h.ls_checksum == h.ls_checksum
+        {
+            nbr.ls_rxmt.remove(&key);
+        }
+    }
+    if nbr.ls_rxmt.is_empty() {
+        nbr.timer.ls_rxmt = None;
+    }
+}
+
 /// RFC 2328 §13.1 LSA-recency comparison.
 ///
 /// Compares two LSAs by sequence number, then raw `ls_checksum`
