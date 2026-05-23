@@ -3704,8 +3704,14 @@ fn build_rib6_from_spf(
                 // resolve the link by matching the prefix back to
                 // `link.addr` so the route renders with the right
                 // ifindex.
+                //
+                // `link.addr` carries the kernel-reported address
+                // *with host bits* (e.g. `2001:db8::1/64`), but the
+                // LSA-derived `net` is truncated to the network
+                // (e.g. `2001:db8::/64`) by `ospfv3_prefix_to_ipv6net`.
+                // Truncate both sides or the find never matches.
                 let Some(link) = top.links.values().find(|l| {
-                    l.enabled && l.area == area_id && l.addr.iter().any(|a| a.prefix == net)
+                    l.enabled && l.area == area_id && l.addr.iter().any(|a| a.prefix.trunc() == net)
                 }) else {
                     continue;
                 };
