@@ -1637,22 +1637,40 @@ fn show_ospf_segment_routing(
                     for tlv in &ep.tlvs {
                         for sub in &tlv.subs {
                             if let ExtPrefixSubTlv::PrefixSid(sid) = sub {
-                                let sid_str = match sid.sid {
-                                    SidLabelTlv::Index(idx) => {
-                                        format!("SR Pfx (idx {})", idx)
-                                    }
+                                let (sid_str, resolved_label) = match sid.sid {
+                                    SidLabelTlv::Index(idx) => (
+                                        format!("SR Pfx (idx {})", idx),
+                                        srgb.start.checked_add(idx),
+                                    ),
                                     SidLabelTlv::Label(label) => {
-                                        format!("SR Pfx (lbl {})", label)
+                                        (format!("SR Pfx (lbl {})", label), Some(label))
                                     }
                                 };
+                                let label_op = match resolved_label {
+                                    Some(label) => format!("Push {}", label),
+                                    None => String::new(),
+                                };
+                                let (iface, nh_addr) = ospf
+                                    .rib
+                                    .get(&tlv.prefix)
+                                    .and_then(|r| r.nhops.iter().next())
+                                    .map(|(addr, nh)| {
+                                        let nh_str = if addr.is_unspecified() {
+                                            String::new()
+                                        } else {
+                                            addr.to_string()
+                                        };
+                                        (ospf.ifname(nh.ifindex), nh_str)
+                                    })
+                                    .unwrap_or_default();
                                 writeln!(
                                     buf,
                                     "    {:>14}  {:>21}  {:>20}  {:>9}  {:>15}",
                                     format!("{}", tlv.prefix),
                                     sid_str,
-                                    "",
-                                    "",
-                                    ""
+                                    label_op,
+                                    iface,
+                                    nh_addr
                                 )?;
                             }
                         }

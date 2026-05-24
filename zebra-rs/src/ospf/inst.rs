@@ -3827,7 +3827,67 @@ fn build_rib_from_spf(
     // pick the best per-area SPF cost when this lands.
     add_as_external_routes(top, spf_result, &mut rib);
 
+    // SR-MPLS: walk Extended-Prefix Opaque LSAs and attach the
+    // advertised Prefix-SID to matching installed prefixes. No FIB
+    // change here -- this only populates `SpfRoute.prefix_sid` so the
+    // show command and a follow-up ILM-install pass can consume it.
+    add_prefix_sids(top, area_id, &mut rib);
+
     rib
+}
+
+/// Walk Extended-Prefix Opaque LSAs (type 10 / opaque-type 7,
+/// RFC 7684 + RFC 8665) and attach the advertised Prefix-SID to any
+/// route already in `rib` whose prefix matches an Ext-Prefix TLV.
+///
+/// For Index-form SIDs we resolve to the absolute label via the
+/// advertising router's SRGB held in `Lsdb::label_map` (populated
+/// from received Router Information LSAs). Label-form SIDs are
+/// stored as-is. MaxAge'd LSAs are skipped, same as the AS-external
+/// pass above.
+///
+/// This is a data-population step only: no MPLS routes are installed
+/// here, and `SpfRoute.metric` / `SpfRoute.nhops` are left untouched.
+fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, SpfRoute>) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp else {
+            continue;
+        };
+        let adv_router = lsa.data.h.adv_router;
+        let Some(label_config) = area.lsdb.label_map.get(&adv_router) else {
+            // No SRGB known for this advertiser yet -- the matching
+            // Router Information LSA has not arrived (or carried no
+            // SidLabelRange). The Index-form Prefix-SID would be
+            // unresolvable in that case, so skip and let a later SPF
+            // pick it up once the SRGB lands.
+            continue;
+        };
+        for tlv in &ep.tlvs {
+            let Some(route) = rib.get_mut(&tlv.prefix) else {
+                continue;
+            };
+            for sub in &tlv.subs {
+                let ExtPrefixSubTlv::PrefixSid(ps) = sub else {
+                    continue;
+                };
+                let value = match ps.sid {
+                    SidLabelTlv::Label(v) => SidLabelValue::Label(v),
+                    SidLabelTlv::Index(v) => SidLabelValue::Index(v),
+                };
+                route.prefix_sid = Some((value, label_config.clone()));
+                break;
+            }
+        }
+    }
 }
 
 /// Walk Type 5 (AS-External) LSAs in the AS-scoped LSDB and install
