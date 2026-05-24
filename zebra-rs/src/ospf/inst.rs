@@ -18,8 +18,9 @@ use crate::ospf::Ospfv2;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
 use crate::rib::api::RibRx;
+use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
-use crate::rib::{self, Link, LinkFlagsExt, RibType};
+use crate::rib::{self, Link, LinkFlagsExt, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
@@ -78,6 +79,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub graph: Option<spf::Graph>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
+    /// MPLS LFIB shadow. Keyed by absolute incoming label, value
+    /// carries the swap/pop action + the nexthops where the kernel
+    /// should forward labeled traffic. Diffed against the freshly
+    /// rebuilt ILM after each SPF run to emit `rib::Message::IlmAdd`
+    /// / `IlmDel` so the kernel MPLS table tracks the SR-MPLS state.
+    pub ilm: BTreeMap<u32, SpfIlm>,
     /// v3 IPv6 RIB shadow. Populated by
     /// `apply_routing_updates_v3` after each SPF run; diffed
     /// against the next computation so we only emit
@@ -344,6 +351,7 @@ impl Ospf<Ospfv2> {
             spf_result: None,
             graph: None,
             rib: PrefixMap::new(),
+            ilm: BTreeMap::new(),
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
@@ -1713,6 +1721,7 @@ impl Ospf<Ospfv3> {
             spf_result: None,
             graph: None,
             rib: PrefixMap::new(),
+            ilm: BTreeMap::new(),
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
@@ -3511,6 +3520,15 @@ pub struct SpfRoute {
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
 }
 
+/// One entry in the SR-MPLS LFIB shadow held on `Ospf::ilm`.
+/// Mirrors the IS-IS `SpfIlm` shape so `mpls_route()` and
+/// `make_ilm_entry()` can stay structurally parallel.
+#[derive(Debug, PartialEq)]
+pub struct SpfIlm {
+    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub ilm_type: IlmType,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthop {
     pub ifindex: u32,
@@ -3863,6 +3881,14 @@ fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, S
             continue;
         };
         let adv_router = lsa.data.h.adv_router;
+        // Skip self-originated Ext-Prefix LSAs. Resolving and installing
+        // our own Prefix-SID would push an egress label onto a directly-
+        // attached loopback route and seed an ILM entry against our own
+        // /32 -- both nonsensical. The local Node-SID's "label X -> pop"
+        // semantics belong to a follow-up dedicated to self-SID install.
+        if adv_router == top.router_id {
+            continue;
+        }
         let Some(label_config) = area.lsdb.label_map.get(&adv_router) else {
             // No SRGB known for this advertiser yet -- the matching
             // Router Information LSA has not arrived (or carried no
@@ -3879,11 +3905,18 @@ fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, S
                 let ExtPrefixSubTlv::PrefixSid(ps) = sub else {
                     continue;
                 };
-                let value = match ps.sid {
-                    SidLabelTlv::Label(v) => SidLabelValue::Label(v),
-                    SidLabelTlv::Index(v) => SidLabelValue::Index(v),
+                let (value, sid_label) = match ps.sid {
+                    SidLabelTlv::Label(v) => (SidLabelValue::Label(v), Some(v)),
+                    SidLabelTlv::Index(v) => (
+                        SidLabelValue::Index(v),
+                        label_config.global.start.checked_add(v),
+                    ),
                 };
                 route.prefix_sid = Some((value, label_config.clone()));
+                // Resolved absolute label feeds nhop_to_nexthop_uni
+                // (egress label imposition on the IPv4 route) and
+                // mpls_route() below (ILM entry on the local LFIB).
+                route.sid = sid_label;
                 break;
             }
         }
@@ -4588,9 +4621,120 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
     }
 }
 
+pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
+
+/// Render an `(incoming_label, SpfIlm)` pair into the `rib::IlmEntry`
+/// shape the RIB subsystem expects. Mirrors IS-IS's `make_ilm_entry`
+/// in `isis/rib.rs`: an `adjacency` nexthop carries the implicit-null
+/// (PHP) marker via an empty outgoing label stack; non-adjacency
+/// nexthops push the incoming label as the swap label.
+fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
+    let build_uni = |addr: &Ipv4Addr, nhop: &SpfNexthop| -> NexthopUni {
+        let mut uni = NexthopUni {
+            addr: std::net::IpAddr::V4(*addr),
+            ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
+            ..Default::default()
+        };
+        if !nhop.adjacency {
+            uni.mpls_label.push(label);
+        }
+        uni
+    };
+
+    let nexthop = if ilm.nhops.len() == 1
+        && let Some((addr, nhop)) = ilm.nhops.iter().next()
+    {
+        Nexthop::Uni(build_uni(addr, nhop))
+    } else {
+        let mut multi = NexthopMulti::default();
+        for (addr, nhop) in ilm.nhops.iter() {
+            multi.nexthops.push(build_uni(addr, nhop));
+        }
+        Nexthop::Multi(multi)
+    };
+
+    IlmEntry {
+        rtype: RibType::Ospf,
+        ilm_type: ilm.ilm_type.clone(),
+        nexthop,
+    }
+}
+
+pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResult) {
+    for (label, ilm) in diff.only_curr.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmDel {
+                label: **label,
+                ilm: make_ilm_entry(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+    for (label, _, ilm) in diff.different.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: make_ilm_entry(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+    for (label, ilm) in diff.only_next.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: make_ilm_entry(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+}
+
+/// Walk a freshly-built IPv4 RIB and emit one ILM entry per
+/// labeled prefix. The incoming-label key is the absolute label
+/// (`SpfRoute::sid`), which `add_prefix_sids` already resolved
+/// against the advertising router's SRGB. The `pfx_index` carried
+/// on `IlmType::Node` is only used by show-side rendering; it is
+/// derived from the route's `prefix_sid` so an Index-form SID
+/// renders symmetrically with its on-the-wire value.
+fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>) -> BTreeMap<u32, SpfIlm> {
+    let mut ilm = BTreeMap::new();
+    for (_prefix, route) in rib.iter() {
+        let Some(label) = route.sid else {
+            continue;
+        };
+        if route.nhops.is_empty() {
+            continue;
+        }
+        let pfx_index = match route.prefix_sid {
+            Some((SidLabelValue::Index(idx), _)) => idx,
+            Some((SidLabelValue::Label(lbl), ref cfg)) => lbl.saturating_sub(cfg.global.start),
+            None => 0,
+        };
+        ilm.insert(
+            label,
+            SpfIlm {
+                nhops: route.nhops.clone(),
+                ilm_type: IlmType::Node(pfx_index),
+            },
+        );
+    }
+    ilm
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
-    // Update RIB
+    // Build the SR-MPLS LFIB from labeled routes in the freshly
+    // computed RIB, then diff against the previous snapshot so the
+    // RIB subsystem sees only the IlmAdd / IlmDel deltas.
+    let ilm = build_ilm_from_rib(&rib);
+    let ilm_diff = spf::table_diff(top.ilm.iter(), ilm.iter());
+    diff_ilm_apply(&top.ctx.rib, &ilm_diff);
+    top.ilm = ilm;
+
+    // Update IPv4 RIB. Egress label imposition for labeled routes
+    // is already wired through `nhop_to_nexthop_uni` reading
+    // `SpfRoute::sid` -- no extra plumbing here.
     let diff = spf::table_diff(top.rib.iter(), rib.iter());
     diff_apply(&top.ctx.rib, &diff);
 
