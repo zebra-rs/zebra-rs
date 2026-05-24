@@ -62,7 +62,7 @@ impl Ospf {
             "/area/interface/prefix-sid/absolute",
             config_ospf_interface_prefix_sid_absolute,
         );
-        self.ospf_add("/segment-routing", config_ospf_segment_routing);
+        self.ospf_add("/segment-routing/mpls", config_ospf_sr_mpls);
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
@@ -318,18 +318,13 @@ fn config_ospf_interface_prefix_sid_absolute(
     Some(())
 }
 
-fn config_ospf_segment_routing(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
-    let mode = args.string()?;
-
+fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
     use super::srmpls::SegmentRoutingMode;
-    if op.is_set() {
-        ospf.segment_routing = match mode.as_str() {
-            "mpls" => SegmentRoutingMode::Mpls,
-            _ => SegmentRoutingMode::None,
-        };
+    ospf.segment_routing = if op.is_set() {
+        SegmentRoutingMode::Mpls
     } else {
-        ospf.segment_routing = SegmentRoutingMode::None;
-    }
+        SegmentRoutingMode::None
+    };
 
     ospf.router_info_lsa_originate();
 
