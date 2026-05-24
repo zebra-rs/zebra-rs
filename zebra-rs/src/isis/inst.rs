@@ -183,9 +183,9 @@ pub struct Isis {
     /// the watched block / locator and any subsequent updates.
     pub sr_rx: UnboundedReceiver<RibSrRx>,
 
-    /// Currently-watched block name on the RIB side. Tracked separately
-    /// from sr_mpls_block so the reconcile helper can compute Watch /
-    /// Unwatch transitions correctly.
+    /// Currently-watched block name on the RIB side. Used by the
+    /// reconcile helper to compute Watch / Unwatch transitions when
+    /// `sr_mpls_enabled` toggles.
     pub watched_block: Option<String>,
     pub watched_locator: Option<String>,
 
