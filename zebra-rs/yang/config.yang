@@ -363,9 +363,13 @@ module config {
             }
           }
         }
-        leaf segment-routing {
-          type enumeration {
-            enum mpls;
+        container segment-routing {
+          // Mirrors `router isis / segment-routing` (config.yang L516).
+          // OSPFv2 carries SR over MPLS only — there is no OSPFv2 SRv6
+          // (OSPFv2 is IPv4-only on the wire); the SRv6 sibling lives
+          // under `router ospfv3 / segment-routing` instead.
+          container mpls {
+            presence "Enable Segment Routing over MPLS dataplane";
           }
         }
         container tracing {
