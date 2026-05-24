@@ -52,6 +52,15 @@ impl Ospf<Ospfv3> {
                 "/area/interface/mtu-ignore",
                 config_ospfv3_interface_mtu_ignore,
             ),
+            (
+                "/area/interface/prefix-sid/index",
+                config_ospfv3_interface_prefix_sid_index,
+            ),
+            (
+                "/area/interface/prefix-sid/absolute",
+                config_ospfv3_interface_prefix_sid_absolute,
+            ),
+            ("/segment-routing/mpls", config_ospfv3_sr_mpls),
         ];
         for (path, cb) in entries {
             self.callbacks.insert(format!("{}{}", prefix, path), *cb);
@@ -224,5 +233,62 @@ fn config_ospfv3_interface_mtu_ignore(
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     link.config.mtu_ignore = op.is_set() && mtu_ignore;
 
+    Some(())
+}
+
+/// Record the per-interface Prefix-SID index. Mirrors v2's
+/// `config_ospf_interface_prefix_sid_index` but stops at storing the
+/// value in `link.config.prefix_sid` — v3 has no Extended Prefix
+/// Opaque LSA equivalent yet (RFC 8666 E-LSAs are not implemented),
+/// so there is no LSA to re-originate here.
+fn config_ospfv3_interface_prefix_sid_index(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.prefix_sid = Some(super::link::PrefixSid::Index(index));
+    } else {
+        link.config.prefix_sid = None;
+    }
+
+    Some(())
+}
+
+fn config_ospfv3_interface_prefix_sid_absolute(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.prefix_sid = Some(super::link::PrefixSid::Absolute(absolute));
+    } else {
+        link.config.prefix_sid = None;
+    }
+
+    Some(())
+}
+
+/// Toggle the v3 SR-MPLS enable bit. Mirrors v2's `config_ospf_sr_mpls`
+/// but stops at flipping `segment_routing` — v3 has no Router-Info /
+/// Extended-Prefix Opaque LSA origination yet, so there is nothing
+/// downstream to re-originate.
+fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
+    use super::srmpls::SegmentRoutingMode;
+    ospf.segment_routing = if op.is_set() {
+        SegmentRoutingMode::Mpls
+    } else {
+        SegmentRoutingMode::None
+    };
     Some(())
 }

@@ -492,6 +492,35 @@ module config {
             leaf mtu-ignore {
               type boolean;
             }
+            container prefix-sid {
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
+          }
+        }
+        container segment-routing {
+          // Mirrors `router isis / segment-routing` (config.yang L516).
+          // OSPFv3 carries SR over both dataplanes: MPLS (RFC 8666 via
+          // E-LSAs) and SRv6 (RFC 9513). The `mpls` and `srv6` sibling
+          // containers match the IS-IS shape so operators see a uniform
+          // CLI surface across protocols.
+          container mpls {
+            presence "Enable Segment Routing over MPLS dataplane";
+          }
+          container srv6 {
+            presence "Enable Segment Routing over IPv6 dataplane";
+            leaf locator {
+              // Name of a locator defined under the global
+              // /segment-routing/locator list. Held as a string (not a
+              // leafref) so an OSPFv3 config can be staged before the
+              // global locator is committed — matches the IS-IS
+              // staging convention (config.yang L524).
+              type string;
+            }
           }
         }
       }
