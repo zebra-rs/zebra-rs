@@ -328,3 +328,61 @@ pub fn ext_link_lsa_round_trip() {
         other => panic!("expected LanAdjSid, got {:?}", other),
     }
 }
+
+/// Decode the FRR-flavored Extended-Link LSA from the field: a P2P
+/// Adj-SID pair plus the Cisco-experimental Remote-Interface-Address
+/// (sub-TLV type 32768). Also asserts that we still decode the
+/// IETF-standard type 5 carrier and that both encodings round-trip
+/// their wire-level code points (so a re-emit doesn't silently swap
+/// 32768 for 5 or vice versa).
+#[test]
+pub fn ext_link_lsa_remote_itf_addr_round_trip() {
+    let adj_sid = ExtLinkSubTlv::AdjSid(AdjSidSubTlv {
+        flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        mt_id: 0,
+        weight: 0,
+        sid: SidLabelTlv::Label(15000),
+    });
+    let rmt_std = ExtLinkSubTlv::RemoteItfAddr(Ipv4Addr::new(192, 168, 10, 1));
+    let rmt_cisco = ExtLinkSubTlv::RemoteItfAddrCisco(Ipv4Addr::new(192, 168, 10, 1));
+    let tlv = ExtLinkTlv {
+        link_type: 1,
+        link_id: Ipv4Addr::new(10, 0, 0, 1),
+        link_data: Ipv4Addr::new(192, 168, 10, 2),
+        subs: vec![adj_sid, rmt_std, rmt_cisco],
+    };
+    let body = ExtLinkLsa { tlvs: vec![tlv] };
+
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::EXT_LINK as u32) << 24);
+    let mut h = OspfLsaHeader::new(
+        OspfLsType::OpaqueAreaLocal,
+        ls_id,
+        Ipv4Addr::new(10, 0, 0, 2),
+    );
+    h.options = 0x42;
+    let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueAreaExtLink(body));
+    lsa.update();
+
+    let mut buf = BytesMut::new();
+    lsa.h.emit(&mut buf);
+    lsa.emit_lsp(&mut buf);
+
+    let (rem, parsed) = OspfLsa::parse_be(&buf).expect("parse should succeed");
+    assert!(rem.is_empty());
+    let OspfLsp::OpaqueAreaExtLink(ref parsed_body) = parsed.lsp else {
+        panic!("expected OpaqueAreaExtLink");
+    };
+    let parsed_tlv = &parsed_body.tlvs[0];
+    assert_eq!(parsed_tlv.subs.len(), 3);
+    assert!(matches!(parsed_tlv.subs[0], ExtLinkSubTlv::AdjSid(_)));
+    match &parsed_tlv.subs[1] {
+        ExtLinkSubTlv::RemoteItfAddr(addr) => assert_eq!(*addr, Ipv4Addr::new(192, 168, 10, 1)),
+        other => panic!("expected RemoteItfAddr, got {:?}", other),
+    }
+    match &parsed_tlv.subs[2] {
+        ExtLinkSubTlv::RemoteItfAddrCisco(addr) => {
+            assert_eq!(*addr, Ipv4Addr::new(192, 168, 10, 1));
+        }
+        other => panic!("expected RemoteItfAddrCisco, got {:?}", other),
+    }
+}

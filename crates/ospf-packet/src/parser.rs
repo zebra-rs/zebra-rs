@@ -1517,6 +1517,9 @@ impl ExtLinkSubTlv {
         match self {
             ExtLinkSubTlv::AdjSid(s) => s.value_len(),
             ExtLinkSubTlv::LanAdjSid(s) => s.value_len(),
+            // Both Remote-Interface-Address variants carry a single
+            // IPv4 address in the value.
+            ExtLinkSubTlv::RemoteItfAddr(_) | ExtLinkSubTlv::RemoteItfAddrCisco(_) => 4,
             ExtLinkSubTlv::Unknown(u) => u.len,
         }
     }
@@ -1525,6 +1528,8 @@ impl ExtLinkSubTlv {
         let (typ, len) = match self {
             ExtLinkSubTlv::AdjSid(_) => (2u16, self.value_len()),
             ExtLinkSubTlv::LanAdjSid(_) => (3u16, self.value_len()),
+            ExtLinkSubTlv::RemoteItfAddr(_) => (5u16, self.value_len()),
+            ExtLinkSubTlv::RemoteItfAddrCisco(_) => (32768u16, self.value_len()),
             ExtLinkSubTlv::Unknown(u) => (u.typ, u.len),
         };
         buf.put_u16(typ);
@@ -1532,6 +1537,9 @@ impl ExtLinkSubTlv {
         match self {
             ExtLinkSubTlv::AdjSid(s) => s.emit(buf),
             ExtLinkSubTlv::LanAdjSid(s) => s.emit(buf),
+            ExtLinkSubTlv::RemoteItfAddr(addr) | ExtLinkSubTlv::RemoteItfAddrCisco(addr) => {
+                buf.put(&addr.octets()[..]);
+            }
             ExtLinkSubTlv::Unknown(u) => buf.put(&u.values[..]),
         }
         // Pad to 4-byte alignment.
@@ -1655,12 +1663,22 @@ impl ExtLinkTlv {
 }
 
 // Extended Link Sub-TLV types.
+//
+// Type 5 is the IETF-registered "Remote Interface Address" sub-TLV
+// (RFC 8379 §3); type 32768 is the Cisco-experimental predecessor that
+// FRR's ospfd emits (`EXT_SUBTLV_RMT_ITF_ADDR` in `ospfd/ospf_ext.h`).
+// Both carry the peer's IPv4 address on the link, in identical wire
+// shape. Decoding both keeps interop with mixed FRR / vendor topologies
+// without changing the on-the-wire emission (we still emit the standard
+// type 5 only).
 #[repr(u16)]
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum ExtLinkSubTlvType {
     #[default]
     AdjSid = 2,
     LanAdjSid = 3,
+    RemoteItfAddr = 5,
+    RemoteItfAddrCisco = 32768,
     Unknown(u16),
 }
 
@@ -1669,6 +1687,8 @@ impl From<u16> for ExtLinkSubTlvType {
         match typ {
             2 => ExtLinkSubTlvType::AdjSid,
             3 => ExtLinkSubTlvType::LanAdjSid,
+            5 => ExtLinkSubTlvType::RemoteItfAddr,
+            32768 => ExtLinkSubTlvType::RemoteItfAddrCisco,
             x => ExtLinkSubTlvType::Unknown(x),
         }
     }
@@ -1679,6 +1699,14 @@ impl From<u16> for ExtLinkSubTlvType {
 pub enum ExtLinkSubTlv {
     AdjSid(AdjSidSubTlv),
     LanAdjSid(LanAdjSidSubTlv),
+    /// Remote Interface Address (RFC 8379 §3, sub-TLV type 5). Carries
+    /// the peer's IPv4 address on the link, used by SR-TE head-ends to
+    /// disambiguate parallel links when steering through an Adj-SID.
+    RemoteItfAddr(Ipv4Addr),
+    /// Cisco-experimental predecessor of the RFC 8379 sub-TLV (type
+    /// 32768). Same semantics, different code point. Round-tripped so a
+    /// re-emit preserves the wire-level type the peer originally sent.
+    RemoteItfAddrCisco(Ipv4Addr),
     Unknown(RouterInfoTlvUnknown),
 }
 
@@ -1697,6 +1725,14 @@ impl ExtLinkSubTlv {
             ExtLinkSubTlvType::LanAdjSid => {
                 let (_, lan) = LanAdjSidSubTlv::parse_be(sub_data)?;
                 ExtLinkSubTlv::LanAdjSid(lan)
+            }
+            ExtLinkSubTlvType::RemoteItfAddr => {
+                let (_, addr) = Ipv4Addr::parse_be(sub_data)?;
+                ExtLinkSubTlv::RemoteItfAddr(addr)
+            }
+            ExtLinkSubTlvType::RemoteItfAddrCisco => {
+                let (_, addr) = Ipv4Addr::parse_be(sub_data)?;
+                ExtLinkSubTlv::RemoteItfAddrCisco(addr)
             }
             ExtLinkSubTlvType::Unknown(_) => ExtLinkSubTlv::Unknown(RouterInfoTlvUnknown {
                 typ: tl.typ,
