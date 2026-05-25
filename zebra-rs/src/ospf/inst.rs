@@ -4545,6 +4545,17 @@ pub struct SpfNexthop {
 pub struct SpfRouteV3 {
     pub metric: u32,
     pub nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3>,
+    /// Resolved absolute MPLS label for this prefix's SR Prefix-SID,
+    /// or `None` if no E-Intra-Area-Prefix-LSA covers this prefix or
+    /// the advertising router's SRGB isn't yet known (Index-form SID
+    /// needs `label_map[adv_router]` to resolve). Populated by
+    /// `add_prefix_sids_v3` after `build_rib6_from_spf`; mirror of
+    /// v2's `SpfRoute::sid`.
+    pub sid: Option<u32>,
+    /// Raw `(SidLabelValue, LabelConfig)` pair preserved so the show
+    /// path can surface the on-the-wire SID encoding alongside the
+    /// resolved label. Mirror of v2's `SpfRoute::prefix_sid`.
+    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5424,6 +5435,8 @@ fn build_rib6_from_spf(
             let entry = SpfRouteV3 {
                 metric: total_metric,
                 nhops: nhops_map,
+                sid: None,
+                prefix_sid: None,
             };
             // Equal-cost: take the lowest-metric. If equal, merge
             // nexthop sets so we end up with ECMP at the same
@@ -5482,6 +5495,104 @@ fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
     rib_entry
 }
 
+/// Walk every area's E-Intra-Area-Prefix-LSAs (RFC 8362 §3.7) and
+/// attach each advertised Prefix-SID (RFC 8666 §5) to the matching
+/// route already in `rib`. Mirrors v2's `add_prefix_sids`.
+///
+/// For Index-form SIDs we resolve to the absolute label via the
+/// advertising router's SRGB (`Lsdb::label_map`, populated from
+/// Router Information LSAs); Label-form SIDs are stored verbatim.
+/// MaxAge'd LSAs are skipped. Self-originated LSAs are skipped --
+/// pushing a label onto our own loopback /128 route is nonsensical
+/// (mirrors the v2 add_prefix_sids self-skip).
+///
+/// Data-population only; no FIB change here. The MPLS install lands
+/// in the D4b follow-up.
+fn add_prefix_sids_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+) {
+    use ipnet::Ipv6Net;
+    use ospf_packet::{
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv,
+        ospfv3_prefix_wire_len,
+    };
+
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for ((_ls_id, adv_router), lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.advertising_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
+            continue;
+        };
+        let Some(label_config) = area.lsdb.label_map.get(&adv_router) else {
+            // No SRGB known for this advertiser yet -- the matching
+            // Router Information LSA has not arrived (or carried no
+            // SidLabelRange). Index-form Prefix-SIDs would be
+            // unresolvable; Label-form would still work, but skipping
+            // here matches the v2 behavior of waiting for the SRGB.
+            continue;
+        };
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
+                continue;
+            };
+            // Reconstruct the IPv6 prefix from the wire bytes. The
+            // address_prefix vec is padded to a 4-byte boundary per
+            // RFC 5340 §A.4.1.1; rebuild a 16-byte buffer for
+            // `Ipv6Addr::from`.
+            let wire_len = ospfv3_prefix_wire_len(prefix_tlv.prefix_length);
+            if prefix_tlv.address_prefix.len() < wire_len {
+                continue;
+            }
+            let mut bytes = [0u8; 16];
+            let copy = wire_len.min(16);
+            bytes[..copy].copy_from_slice(&prefix_tlv.address_prefix[..copy]);
+            let addr = std::net::Ipv6Addr::from(bytes);
+            let Ok(prefix) = Ipv6Net::new(addr, prefix_tlv.prefix_length) else {
+                continue;
+            };
+            let prefix = prefix.trunc();
+            let Some(route) = rib.get_mut(&prefix) else {
+                continue;
+            };
+            for sub in &prefix_tlv.subs {
+                let Ospfv3SubTlv::PrefixSid(ps) = sub else {
+                    continue;
+                };
+                // `Ospfv3PrefixSidSubTlv::sid` is a `SidLabelTlv`
+                // (the wire-side enum from `packet_utils`); the
+                // `SpfRouteV3::prefix_sid` field carries the
+                // protocol-neutral `SidLabelValue`. Same trivial
+                // conversion v2's add_prefix_sids does.
+                let (value, sid_label) = match ps.sid {
+                    SidLabelTlv::Label(v) => (SidLabelValue::Label(v), Some(v)),
+                    SidLabelTlv::Index(v) => (
+                        SidLabelValue::Index(v),
+                        label_config.global.start.checked_add(v),
+                    ),
+                };
+                route.prefix_sid = Some((value, label_config.clone()));
+                route.sid = sid_label;
+                break;
+            }
+        }
+    }
+}
+
 /// Diff the freshly-built v3 RIB against the prior snapshot and
 /// emit `Ipv6Del` for prefixes only in the old, `Ipv6Add` for
 /// prefixes new or changed. Replaces `top.rib6` with `new_rib`
@@ -5492,7 +5603,11 @@ fn apply_routing_updates_v3(
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
 ) {
-    let new_rib = build_rib6_from_spf(top, area_id, source, spf_result);
+    let mut new_rib = build_rib6_from_spf(top, area_id, source, spf_result);
+    // Attach SR Prefix-SIDs to matching routes. No FIB change here --
+    // `make_rib6_entry` does not yet read these fields; D4b wires
+    // the MPLS install on top.
+    add_prefix_sids_v3(top, area_id, &mut new_rib);
     let diff = spf::table_diff(top.rib6.iter(), new_rib.iter());
 
     // Withdrawals.
