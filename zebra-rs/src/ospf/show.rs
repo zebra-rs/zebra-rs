@@ -1424,6 +1424,17 @@ fn show_ext_link_detail(
                     };
                     writeln!(out, "      SID/Label: {}", sid_val)?;
                 }
+                ExtLinkSubTlv::RemoteItfAddr(addr) => {
+                    writeln!(out, "    Remote Interface Address Sub-TLV:")?;
+                    writeln!(out, "      Address: {}", addr)?;
+                }
+                ExtLinkSubTlv::RemoteItfAddrCisco(addr) => {
+                    writeln!(
+                        out,
+                        "    Remote Interface Address Sub-TLV (Cisco experimental):"
+                    )?;
+                    writeln!(out, "      Address: {}", addr)?;
+                }
                 ExtLinkSubTlv::Unknown(u) => {
                     writeln!(out, "    Unknown Sub-TLV: type={} len={}", u.typ, u.len)?;
                 }
