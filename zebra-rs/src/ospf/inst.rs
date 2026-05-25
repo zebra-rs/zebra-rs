@@ -629,13 +629,15 @@ impl Ospf<Ospfv2> {
 
     /// Originate (or flush) the Extended-Link Opaque LSA for `ifindex`.
     ///
-    /// Originates when:
-    ///   * SR-MPLS is enabled (`segment_routing == Mpls`)
-    ///   * the link is enabled and has an `adjacency_sid` configured
-    ///   * the link is point-to-point with at least one Full neighbor
+    /// Originates when SR-MPLS is enabled, the link is enabled, has at
+    /// least one Full neighbor, and either of:
+    ///   * P2P link with an `adjacency_sid` configured — one
+    ///     `AdjSidSubTlv` carrying the configured value.
+    ///   * Broadcast / NBMA link with a known DR and at least one
+    ///     entry in `lan_adj_sids` — one `LanAdjSidSubTlv` per Full
+    ///     neighbor that has a label allocated, per RFC 8665 §6.
     ///
-    /// Flushes (MaxAge) otherwise. Broadcast / NBMA support requires
-    /// LAN-Adj-SID (RFC 8665 §6) and is deferred to a follow-up.
+    /// Flushes (MaxAge) otherwise.
     ///
     /// The opaque-id is derived from the ifindex (same convention as
     /// `ext_prefix_lsa_originate`) so the per-link LSA gets a stable
@@ -647,31 +649,71 @@ impl Ospf<Ospfv2> {
         let opaque_id = ifindex & 0x00FF_FFFF;
         let ls_id = Ipv4Addr::from(((OpaqueLsaType::EXT_LINK as u32) << 24) | opaque_id);
 
-        let link = self.links.get(&ifindex);
-        let should_originate = self.segment_routing == SegmentRoutingMode::Mpls
-            && link.is_some_and(|l| {
-                l.enabled
-                    && l.config.adjacency_sid.is_some()
-                    && l.network_type == OspfNetworkType::PointToPoint
-                    && l.nbrs.values().any(|nbr| nbr.state == NfsmState::Full)
-            });
+        // Build the (link_type, link_id, link_data, subs) tuple if
+        // origination is warranted, otherwise fall through to the
+        // flush path. Returning `Option` keeps the borrow on `self`
+        // confined to this block so the install / flood code below can
+        // mutate `self.areas`.
+        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
+            && let Some(link) = self.links.get(&ifindex)
+            && link.enabled
+            && link.nbrs.values().any(|n| n.state == NfsmState::Full)
+            && let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback())
+        {
+            let our_addr = addr.prefix.addr();
+            match link.network_type {
+                OspfNetworkType::PointToPoint => {
+                    if let Some(adjacency_sid) = link.config.adjacency_sid
+                        && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
+                    {
+                        Some((
+                            1u8,
+                            nbr.ident.router_id,
+                            our_addr,
+                            vec![super::srmpls::build_p2p_adj_sub(&adjacency_sid)],
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                OspfNetworkType::Broadcast | OspfNetworkType::NBMA => {
+                    let dr = link.ident.d_router;
+                    if dr.is_unspecified() {
+                        // DR election not yet settled. Fall through to
+                        // the flush path so we don't keep a stale LSA
+                        // pointing at a `link_id` we can no longer name.
+                        None
+                    } else {
+                        let subs: Vec<_> = link
+                            .nbrs
+                            .values()
+                            .filter(|n| n.state == NfsmState::Full)
+                            .filter_map(|nbr| {
+                                let label =
+                                    *self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))?;
+                                Some(super::srmpls::build_lan_adj_sub(nbr.ident.router_id, label))
+                            })
+                            .collect();
+                        if subs.is_empty() {
+                            // No Full neighbor has a label allocated yet.
+                            None
+                        } else {
+                            Some((2u8, dr, our_addr, subs))
+                        }
+                    }
+                }
+            }
+        } else {
+            None
+        };
 
-        if should_originate {
-            let link = link.unwrap();
-            let adjacency_sid = link.config.adjacency_sid.unwrap();
-            let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback()) else {
-                return;
-            };
-            let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) else {
-                return;
-            };
-
+        if let Some((link_type, link_id, link_data, subs)) = build_inputs {
             let mut lsa = super::srmpls::ext_link_lsa_build(
                 self.router_id,
-                1, // P2P -- matches RouterLsaLinkType encoding.
-                nbr.ident.router_id,
-                addr.prefix.addr(),
-                &adjacency_sid,
+                link_type,
+                link_id,
+                link_data,
+                subs,
                 opaque_id,
             );
 
@@ -1582,6 +1624,16 @@ impl Ospf<Ospfv2> {
                     let new_state = self.links.get(&index).map(|l| l.state);
                     if prev_state == IfsmState::DR && new_state != Some(IfsmState::DR) {
                         self.network_lsa_flush(index, area_id);
+                    }
+                    // Re-originate the per-link Extended-Link Opaque LSA
+                    // on any IFSM state change. For broadcast / NBMA the
+                    // `link_id` is the DR's interface address (RFC 7684
+                    // §3) so a DR election outcome must trigger a
+                    // refresh; the originator gates on its own
+                    // preconditions and flushes when they no longer
+                    // hold. P2P sees no semantic change here.
+                    if new_state.is_some_and(|s| s != prev_state) {
+                        self.ext_link_lsa_originate(index);
                     }
                 }
             }

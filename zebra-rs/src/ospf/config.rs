@@ -395,6 +395,33 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
                 Some((SRLB_START + SRLB_RANGE - 1) as usize),
             ));
         }
+        // Sweep existing Full neighbors and allocate labels for any
+        // that don't have one. Necessary when SR-MPLS is enabled after
+        // adjacencies have already reached Full -- the NFSM-driven
+        // allocation only fires on the Full transition itself, so those
+        // pre-existing adjacencies would otherwise be missing from
+        // `lan_adj_sids` and excluded from LAN Adj-SID origination.
+        let pending: Vec<(u32, std::net::Ipv4Addr)> = ospf
+            .links
+            .iter()
+            .flat_map(|(ifindex, link)| {
+                link.nbrs.values().filter_map(move |nbr| {
+                    if nbr.state == super::nfsm::NfsmState::Full {
+                        Some((*ifindex, nbr.ident.prefix.addr()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .filter(|key| !ospf.lan_adj_sids.contains_key(key))
+            .collect();
+        for key in pending {
+            if let Some(pool) = ospf.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                ospf.lan_adj_sids.insert(key, label as u32);
+            }
+        }
     } else {
         ospf.local_pool = None;
         ospf.lan_adj_sids.clear();
