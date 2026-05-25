@@ -389,6 +389,13 @@ pub fn ospfv2_populate_initial_db_summary(
         ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
     }
 
+    // RFC 3101 §2.5: Type-7 NSSA-AS-External LSAs flood with area
+    // scope inside an NSSA, so they belong in the per-area DBD
+    // summary — but only when this area is NSSA.
+    if oi.area_type.is_nssa() {
+        ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::NssaAsExternal));
+    }
+
     // AS-scope LSAs included only for non-stub / non-NSSA areas.
     if oi.area_type.accepts_as_external() {
         ospf_db_summary_add_table(nbr, oi.lsdb_as.values_by_type(OspfLsType::AsExternal));

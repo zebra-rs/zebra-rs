@@ -811,6 +811,92 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// RFC 3101 §2.3 NSSA default-LSA origination. Builds a Type-7
+    /// NSSA-AS-External LSA for the default route 0.0.0.0/0 and
+    /// installs it in `area_id`'s LSDB. P-bit stays clear so the
+    /// NSSA's ABR does not translate the default into Type-5 across
+    /// the backbone — the area-internal default is the only purpose
+    /// of this LSA. Metric type 2 (E2), cost 1 by default.
+    ///
+    /// Gates on: `area_id` exists, area is NSSA, and the area's
+    /// `nssa_default_originate` knob is true. Otherwise calls
+    /// `nssa_default_lsa_flush` to clear any stale self-originated
+    /// copy.
+    pub fn nssa_default_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        let area_type = match self.areas.get(area_id) {
+            Some(area) => area.area_type,
+            None => return,
+        };
+        if !area_type.is_nssa() || !area_type.nssa_default_originate {
+            self.nssa_default_lsa_flush(area_id);
+            return;
+        }
+
+        let ls_id = Ipv4Addr::UNSPECIFIED;
+        let mut lsa_header = OspfLsaHeader::new(OspfLsType::NssaAsExternal, ls_id, self.router_id);
+        // RFC 3101 §2.4 LSA header Options on Type-7: E bit MUST be
+        // clear (NSSA areas can't accept Type-5); N bit set; P bit
+        // clear for ABR-originated default per §2.3.
+        let mut options = OspfOptions::default();
+        options.set_nssa(true);
+        options.set_o(true);
+        lsa_header.options = u8::from(options);
+
+        // E1/E2 + metric. 0x80 = E2 (type-2 metric, dominant over
+        // SPF cost). Cost defaults to 1 — there's no separate YANG
+        // knob yet; a `nssa-default-originate-cost` leaf can be
+        // added later without changing this code path.
+        let body = NssaAsExternalLsa {
+            netmask: Ipv4Addr::UNSPECIFIED,
+            ext_and_tos: 0x80,
+            metric: 1,
+            forwarding_address: Ipv4Addr::UNSPECIFIED,
+            external_route_tag: 0,
+            tos_list: Vec::new(),
+        };
+        let mut lsa = OspfLsa::from(lsa_header, OspfLsp::NssaAsExternal(body));
+
+        // Preserve sequence number if re-originating.
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(existing) =
+                area.lsdb
+                    .lookup_by_id(OspfLsType::NssaAsExternal, ls_id, self.router_id)
+        {
+            lsa.h.ls_seq_number = lsa
+                .h
+                .ls_seq_number
+                .max(existing.h.ls_seq_number.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb
+                .insert_self_originated(lsa, &self.tx, Some(area_id));
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
+    }
+
+    /// Flush our self-originated Type-7 default LSA from `area_id`.
+    /// No-op if the area or LSA doesn't exist.
+    pub fn nssa_default_lsa_flush(&mut self, area_id: Ipv4Addr) {
+        let ls_id = Ipv4Addr::UNSPECIFIED;
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa(
+                OspfLsType::NssaAsExternal,
+                ls_id,
+                self.router_id,
+                &self.tx,
+                Some(area_id),
+            )
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
         // Unpack the widened key back into v2-typed components for the
         // v2-bound match arms / method calls below.
@@ -1000,6 +1086,40 @@ impl Ospf<Ospfv2> {
                             area.lsdb
                                 .flush_lsa(ls_type, ls_id, adv_router, &self.tx, Some(area_id))
                         };
+                        if let Some(lsa) = flushed {
+                            self.flood_self_originated_lsa(area_id, &lsa);
+                        }
+                    }
+                }
+            }
+            OspfLsType::NssaAsExternal => {
+                // The only Type-7 we self-originate today is the
+                // NSSA default-LSA (ls_id 0.0.0.0). Re-originate via
+                // the same builder used at config time — it inspects
+                // the area-type + nssa_default_originate knob and
+                // either re-emits with seq# = received+1, or flushes
+                // if we no longer own it. Other ls_ids (future
+                // redistributed Type-7s) fall through to the generic
+                // flush until phase 2c lands.
+                if ls_id.is_unspecified()
+                    && let Some(area_id) = area_id
+                {
+                    tracing::info!(
+                        "[Self-Originated] Re-originating NSSA default Type-7 id={} seq={:#x}",
+                        ls_id,
+                        received_seq
+                    );
+                    self.nssa_default_lsa_originate(area_id);
+                } else {
+                    tracing::info!(
+                        "[Self-Originated] Flushing Type-7 LSA id={} (no owner)",
+                        ls_id
+                    );
+                    if let Some(area_id) = area_id {
+                        let flushed = self.areas.get_mut(area_id).and_then(|area| {
+                            area.lsdb
+                                .flush_lsa(ls_type, ls_id, adv_router, &self.tx, Some(area_id))
+                        });
                         if let Some(lsa) = flushed {
                             self.flood_self_originated_lsa(area_id, &lsa);
                         }
