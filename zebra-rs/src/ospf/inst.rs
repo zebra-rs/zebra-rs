@@ -5674,11 +5674,12 @@ fn apply_routing_updates_v3(
 
     // SR-MPLS LFIB shadow: build a fresh ILM from labeled routes in
     // the new RIB, diff against `top.ilm6`, emit IlmAdd / IlmDel so
-    // the kernel MPLS table tracks our SR-MPLS state. Self-pop lands
-    // here via add_self_prefix_sids_to_ilm_v3; self-Adj-SID install
-    // arrives in D4d.
+    // the kernel MPLS table tracks our SR-MPLS state. Self-Prefix-SID
+    // pop and self-Adj-SID / LAN-Adj-SID pop entries are layered in
+    // here, mirroring the v2 ordering.
     let mut new_ilm = build_ilm_from_rib6(&new_rib);
     add_self_prefix_sids_to_ilm_v3(top, &mut new_ilm);
+    add_self_adj_sids_to_ilm_v3(top, &mut new_ilm);
     let ilm_diff = spf::table_diff(top.ilm6.iter(), new_ilm.iter());
     diff_ilm_apply_v6(&top.ctx.rib, &ilm_diff);
     top.ilm6 = new_ilm;
@@ -6282,6 +6283,149 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                         },
                     );
                     break;
+                }
+            }
+        }
+    }
+}
+
+/// v3 sibling of `add_self_adj_sids_to_ilm`. Walks every area's
+/// self-originated E-Router-LSAs (LS Type 0xA021, RFC 8362 §3.2)
+/// and, for each Router-Link TLV, emits an ILM entry that pops the
+/// local Adjacency-SID label and forwards over the specific
+/// adjacency the SID identifies (RFC 8666 §6).
+///
+/// `srmpls::e_router_v3_lsa_build` sets `link_state_id` to the
+/// owning interface's ifindex, so the link-LSDB key maps straight
+/// back to a local `OspfLink`. Each LSA carries exactly one
+/// Router-Link TLV (the originator's per-link iteration); its
+/// sub-TLVs are:
+///   * `AdjSid` (P2P): one sub-TLV; resolve the neighbor by
+///     `link.neighbor_router_id` from `link.nbrs` (v3 keys by
+///     router-id, RFC 5340 §10).
+///   * `LanAdjSid` (transit, broadcast/NBMA): one sub-TLV per Full
+///     neighbor; each carries its own `neighbor_router_id`.
+///
+/// The emitted nexthop carries the neighbor's link-local IPv6 as
+/// the via, the link's ifindex as the oif, and `adjacency: true`
+/// so `make_ilm_entry_v6` omits the swap label -- Via + Oif only,
+/// matching the implicit-null / PHP path the v3 Prefix-SID pop
+/// uses.
+fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIlmV3>) {
+    use ospf_packet::{
+        OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3RouterLinkType, Ospfv3SubTlv,
+    };
+
+    use super::srmpls::SRGB_START;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Resolve `(link, neighbor_router_id)` -> `(ifindex, link-local v6 addr)`.
+    // Returns `None` when the named neighbor has aged out of `link.nbrs`
+    // or carries no usable link-local address yet.
+    fn resolve_nbr(
+        link: &OspfLink<Ospfv3>,
+        neighbor_router_id: Ipv4Addr,
+    ) -> Option<(u32, std::net::Ipv6Addr)> {
+        let nbr = link.nbrs.get(&neighbor_router_id)?;
+        let addr = nbr.ident.prefix.addr();
+        if addr.is_unspecified() {
+            return None;
+        }
+        Some((link.index, addr))
+    }
+
+    // Install one neighbor-keyed SID. `label` is the absolute label
+    // on the wire (Index→SRGB resolution for P2P, raw Label for LAN
+    // since LAN-Adj-SID is always allocated out of the local SRLB).
+    fn install(
+        ilm: &mut BTreeMap<u32, SpfIlmV3>,
+        label: u32,
+        adj_index: u32,
+        ifindex: u32,
+        nbr_addr: std::net::Ipv6Addr,
+    ) {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            nbr_addr,
+            SpfNexthopV3 {
+                ifindex,
+                adjacency: true,
+            },
+        );
+        ilm.insert(
+            label,
+            SpfIlmV3 {
+                nhops,
+                ilm_type: IlmType::Adjacency(adj_index),
+            },
+        );
+    }
+
+    for (_area_id, area) in top.areas.iter() {
+        for ((link_state_id, _adv_router), lsa) in
+            area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE)
+        {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if lsa.data.h.advertising_router != top.router_id {
+                continue;
+            }
+            let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+                continue;
+            };
+            // `link_state_id` is the originating interface's ifindex
+            // by construction (see `e_router_v3_lsa_build` callers).
+            let Some(link) = top.links.get(&link_state_id) else {
+                continue;
+            };
+            for tlv in &body.tlvs {
+                let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
+                    continue;
+                };
+                match rl.link.link_type {
+                    Ospfv3RouterLinkType::PointToPoint => {
+                        let Some((ifindex, nbr_addr)) =
+                            resolve_nbr(link, rl.link.neighbor_router_id)
+                        else {
+                            continue;
+                        };
+                        for sub in &rl.subs {
+                            let Ospfv3SubTlv::AdjSid(adj) = sub else {
+                                continue;
+                            };
+                            let (label, adj_index) = match adj.sid {
+                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                                    Some(v) => (v, idx),
+                                    None => continue,
+                                },
+                            };
+                            install(ilm, label, adj_index, ifindex, nbr_addr);
+                            break;
+                        }
+                    }
+                    Ospfv3RouterLinkType::Transit => {
+                        for sub in &rl.subs {
+                            let Ospfv3SubTlv::LanAdjSid(lan) = sub else {
+                                continue;
+                            };
+                            let Some((ifindex, nbr_addr)) =
+                                resolve_nbr(link, lan.neighbor_router_id)
+                            else {
+                                continue;
+                            };
+                            let (label, adj_index) = match lan.sid {
+                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                                    Some(v) => (v, idx),
+                                    None => continue,
+                                },
+                            };
+                            install(ilm, label, adj_index, ifindex, nbr_addr);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
