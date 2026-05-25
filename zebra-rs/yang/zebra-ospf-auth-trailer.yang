@@ -1,0 +1,156 @@
+module zebra-ospf-auth-trailer {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospf-auth-trailer";
+  prefix "zoat";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR / IOS style per-interface OSPFv2 HMAC-SHA cryptographic
+     authentication (RFC 5709, with the anti-replay handling of
+     RFC 7474). Sits alongside zebra-ospf-auth-md5.yang and
+     zebra-ospf-auth-simple.yang.
+
+     RFC 5709 reuses RFC 2328 §D.4's Type 2 on-wire shape: the
+     `auth_data_len` field grows from 16 (MD5) to whatever the
+     algorithm dictates (20 for HMAC-SHA-1, 32 for HMAC-SHA-256,
+     etc.). The trailer carries the keyed-MAC over the OSPF
+     header + body, computed as
+     `HMAC( key, packet )` per RFC 5709 §3.3 — different from the
+     simple `MD5( packet || key )` construction used for legacy
+     keyed-MD5.
+
+       router ospf {
+         area 0 {
+           interface eth0 {
+             authentication message-digest;
+             crypto-key 1 {
+               hmac-sha-256 SECRET;
+             }
+           }
+         }
+       }
+
+     Operators using legacy keyed-MD5 keep using
+     `message-digest-key <id> md5 <key>` from
+     zebra-ospf-auth-md5.yang. The runtime merges entries from
+     both lists into a single keyring keyed by key-id; using the
+     same key-id in both lists is a configuration error.
+
+     Key-chains (RFC 8177) with send/accept lifetimes and
+     rollover land in a follow-up phase under the IETF
+     `interface/authentication` container.";
+
+  revision 2026-05-25 {
+    description "Initial revision: OSPFv2 HMAC-SHA Auth Trailer.";
+    reference "RFC 5709; RFC 7474.";
+  }
+
+  grouping ospf-interface-crypto-key-extension {
+    description
+      "FRR-style per-interface HMAC-SHA key list. Each key-id is
+       configured with exactly one of the per-algorithm leaves;
+       the leaf name selects the algorithm and the leaf value
+       carries the shared secret. Mirrors the `md5` leaf pattern
+       under `message-digest-key` so callbacks stay single-leaf
+       and incremental commits don't need to stitch
+       `algo`+`key` together.";
+
+    list crypto-key {
+      ext:help "HMAC-SHA key keyed by 1..255 key-id";
+      key "key-id";
+      description
+        "One HMAC-SHA key per key-id. The active sending key is
+         the lowest configured key-id across both this list and
+         `message-digest-key` (Phase 2 MD5 keys); received
+         packets are validated against whichever key-id the
+         sender stamped in the cryptographic-auth header
+         (RFC 2328 §D.4.2).";
+
+      leaf key-id {
+        type uint8 {
+          range "1..255";
+        }
+        description
+          "Cryptographic-auth key identifier carried in the
+           packet's auth header (RFC 2328 §D.3 figure 17). Zero
+           is reserved and rejected. Must be unique across this
+           list and the sibling `message-digest-key` list.";
+      }
+
+      leaf hmac-sha-1 {
+        ext:help "HMAC-SHA-1 secret (1..20 octets)";
+        type string {
+          length "1..20";
+        }
+        description
+          "HMAC-SHA-1 shared secret (RFC 5709 §2). Trailer
+           length on the wire = 20 octets.";
+      }
+
+      leaf hmac-sha-256 {
+        ext:help "HMAC-SHA-256 secret (1..32 octets)";
+        type string {
+          length "1..32";
+        }
+        description
+          "HMAC-SHA-256 shared secret (RFC 5709 §2). Trailer
+           length on the wire = 32 octets.";
+      }
+
+      leaf hmac-sha-384 {
+        ext:help "HMAC-SHA-384 secret (1..48 octets)";
+        type string {
+          length "1..48";
+        }
+        description
+          "HMAC-SHA-384 shared secret (RFC 5709 §2). Trailer
+           length on the wire = 48 octets.";
+      }
+
+      leaf hmac-sha-512 {
+        ext:help "HMAC-SHA-512 secret (1..64 octets)";
+        type string {
+          length "1..64";
+        }
+        description
+          "HMAC-SHA-512 shared secret (RFC 5709 §2). Trailer
+           length on the wire = 64 octets.";
+      }
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Attach the crypto-key list to each OSPF interface in the
+       candidate-set subtree.";
+    uses ospf-interface-crypto-key-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Same attachment in the delete subtree so
+       `delete router ospf area X interface Y crypto-key Z` is
+       path-valid.";
+    uses ospf-interface-crypto-key-extension;
+  }
+}

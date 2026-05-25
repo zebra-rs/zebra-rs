@@ -91,6 +91,22 @@ impl Ospf {
             config_ospf_interface_md5_key,
         );
         self.ospf_add(
+            "/area/interface/crypto-key/hmac-sha-1",
+            config_ospf_interface_crypto_key_hmac_sha_1,
+        );
+        self.ospf_add(
+            "/area/interface/crypto-key/hmac-sha-256",
+            config_ospf_interface_crypto_key_hmac_sha_256,
+        );
+        self.ospf_add(
+            "/area/interface/crypto-key/hmac-sha-384",
+            config_ospf_interface_crypto_key_hmac_sha_384,
+        );
+        self.ospf_add(
+            "/area/interface/crypto-key/hmac-sha-512",
+            config_ospf_interface_crypto_key_hmac_sha_512,
+        );
+        self.ospf_add(
             "/area/interface/prefix-sid/index",
             config_ospf_interface_prefix_sid_index,
         );
@@ -640,6 +656,8 @@ fn config_ospf_interface_authentication_key(
 }
 
 fn config_ospf_interface_md5_key(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    use super::link::{AuthKey, OspfCryptoAlgo};
+
     let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
     let key_id: u8 = args.string()?.parse().ok()?;
@@ -657,14 +675,92 @@ fn config_ospf_interface_md5_key(ospf: &mut Ospf, mut args: Args, op: ConfigOp) 
         if bytes.is_empty() || bytes.len() > 16 {
             return None;
         }
-        let mut padded = [0u8; 16];
+        let mut padded = vec![0u8; 16];
         padded[..bytes.len()].copy_from_slice(bytes);
-        link.config.md5_keys.insert(key_id, padded);
+        link.config.crypto_keys.insert(
+            key_id,
+            AuthKey {
+                algo: OspfCryptoAlgo::Md5,
+                raw: padded,
+            },
+        );
     } else {
-        link.config.md5_keys.remove(&key_id);
+        link.config.crypto_keys.remove(&key_id);
     }
 
     Some(())
+}
+
+/// Shared body for the four `/area/interface/crypto-key/hmac-sha-*`
+/// callbacks. The leaf name selects the algorithm (each leaf
+/// registers a distinct closure that fixes `algo` and calls in).
+fn install_crypto_hmac_key(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+    algo: super::link::OspfCryptoAlgo,
+) -> Option<()> {
+    use super::link::AuthKey;
+
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let key_id: u8 = args.string()?.parse().ok()?;
+    if key_id == 0 {
+        return None;
+    }
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        let key = args.string()?;
+        let bytes = key.as_bytes();
+        // RFC 5709 §3.4 caps each algorithm at its block size.
+        if bytes.is_empty() || bytes.len() > algo.digest_len() {
+            return None;
+        }
+        link.config.crypto_keys.insert(
+            key_id,
+            AuthKey {
+                algo,
+                raw: bytes.to_vec(),
+            },
+        );
+    } else {
+        link.config.crypto_keys.remove(&key_id);
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_crypto_key_hmac_sha_1(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha1)
+}
+
+fn config_ospf_interface_crypto_key_hmac_sha_256(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha256)
+}
+
+fn config_ospf_interface_crypto_key_hmac_sha_384(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha384)
+}
+
+fn config_ospf_interface_crypto_key_hmac_sha_512(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    install_crypto_hmac_key(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha512)
 }
 
 fn config_ospf_interface_prefix_sid_index(
