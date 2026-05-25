@@ -323,6 +323,53 @@ module config {
               type inet:ipv4-address;
             }
           }
+          // RFC 2328 §3.6 / RFC 3101 §2: per-area type. `normal`
+          // (default) carries the full LSDB; `stub` drops Type-5
+          // AS-External; `nssa` drops Type-5 but accepts Type-7
+          // (NSSA-AS-External). The N-bit (NSSA) and E-bit
+          // (External) in Hello/DBD options follow this knob and a
+          // mismatch with a neighbor causes Hello rejection per
+          // RFC 3101 §2.5 / RFC 2328 §10.5.
+          leaf area-type {
+            type enumeration {
+              enum normal;
+              enum stub;
+              enum nssa;
+            }
+            default normal;
+          }
+          // Totally-stubby / totally-NSSA: also drop Type-3 Summary
+          // entering this area. Only meaningful when area-type is
+          // `stub` or `nssa`.
+          leaf no-summary {
+            type boolean;
+            default false;
+          }
+          // NSSA ABR originates a default Type-7 LSA into the area
+          // (RFC 3101 §2.3). Ignored unless area-type is `nssa`.
+          leaf nssa-default-originate {
+            type boolean;
+            default false;
+          }
+          // RFC 3101 §2.6: when translating Type-7 to Type-5, zero
+          // the forwarding address. Ignored unless area-type is
+          // `nssa`.
+          leaf nssa-suppress-fa {
+            type boolean;
+            default false;
+          }
+          // RFC 3101 §2.2 translator-role for this NSSA ABR.
+          // `candidate` (default) participates in Nt-bit election;
+          // `always` translates unconditionally; `never` disables.
+          // Ignored unless area-type is `nssa`.
+          leaf nssa-translator-role {
+            type enumeration {
+              enum candidate;
+              enum always;
+              enum never;
+            }
+            default candidate;
+          }
           list interface {
             key "if-name";
             leaf if-name {
@@ -474,6 +521,38 @@ module config {
               type uint32;
               type inet:ipv4-address;
             }
+          }
+          // Per-area type. Same semantics as the v2 sibling above —
+          // see that leaf's description. Phase 1 wires the option-bit
+          // negotiation only; v3 Type-7 (0x2007) codec + handling
+          // arrives in phases 5/6.
+          leaf area-type {
+            type enumeration {
+              enum normal;
+              enum stub;
+              enum nssa;
+            }
+            default normal;
+          }
+          leaf no-summary {
+            type boolean;
+            default false;
+          }
+          leaf nssa-default-originate {
+            type boolean;
+            default false;
+          }
+          leaf nssa-suppress-fa {
+            type boolean;
+            default false;
+          }
+          leaf nssa-translator-role {
+            type enumeration {
+              enum candidate;
+              enum always;
+              enum never;
+            }
+            default candidate;
           }
           list interface {
             key "if-name";

@@ -7,10 +7,110 @@ use super::version::{OspfVersion, Ospfv2};
 
 pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
+/// RFC 3101 §2.2 NSSA translator-role configuration knob for an
+/// NSSA ABR. `Candidate` is the default and triggers election among
+/// the area's ABRs via the Nt-bit. `Always` forces translation
+/// unconditionally; `Never` disables it. Storage-only in phase 1.
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
-pub enum AreaType {
+pub enum NssaTranslatorRole {
+    #[default]
+    Candidate,
+    Always,
+    Never,
+}
+
+impl NssaTranslatorRole {
+    pub fn from_yang(s: &str) -> Option<Self> {
+        match s {
+            "candidate" => Some(Self::Candidate),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+}
+
+/// Discriminant for [`AreaType`]. Drives the option-bit (N/E)
+/// behavior on Hello/DBD; the sub-knobs in [`AreaType`] only matter
+/// for `Stub` and `Nssa`.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum AreaTypeKind {
     #[default]
     Normal,
+    Stub,
+    Nssa,
+}
+
+impl AreaTypeKind {
+    pub fn from_yang(s: &str) -> Option<Self> {
+        match s {
+            "normal" => Some(Self::Normal),
+            "stub" => Some(Self::Stub),
+            "nssa" => Some(Self::Nssa),
+            _ => None,
+        }
+    }
+}
+
+/// Per-area type with its sub-knobs.
+///
+/// `kind` selects the area flavor; the remaining fields are
+/// configuration leaves that only take effect for matching flavors:
+/// - `no_summary` — totally-stubby / totally-NSSA: drop Type-3
+///   Summary at the ABR. Applies to `Stub` and `Nssa`.
+/// - `nssa_default_originate` — ABR originates a default Type-7
+///   into the NSSA area. Applies to `Nssa` only.
+/// - `nssa_suppress_fa` — zero the forwarding address when
+///   translating Type-7 to Type-5 (RFC 3101 §2.6). Applies to
+///   `Nssa` only.
+/// - `nssa_translator_role` — RFC 3101 §2.2 election behavior.
+///   Applies to `Nssa` only.
+///
+/// Phase 1 wires `kind` + the N-bit / E-bit negotiation; the
+/// remaining knobs are stored but not yet acted on.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub struct AreaType {
+    pub kind: AreaTypeKind,
+    pub no_summary: bool,
+    pub nssa_default_originate: bool,
+    pub nssa_suppress_fa: bool,
+    pub nssa_translator_role: NssaTranslatorRole,
+}
+
+impl AreaType {
+    /// True for any flavor of stub or NSSA — AS-External LSAs are
+    /// dropped at the area boundary.
+    pub fn is_stub_or_nssa(self) -> bool {
+        !matches!(self.kind, AreaTypeKind::Normal)
+    }
+
+    /// True only for NSSA-flavored areas.
+    pub fn is_nssa(self) -> bool {
+        matches!(self.kind, AreaTypeKind::Nssa)
+    }
+
+    /// True when this area accepts and floods Type-5 AS-External
+    /// LSAs (RFC 2328 §3.6). False for stub and NSSA.
+    pub fn accepts_as_external(self) -> bool {
+        matches!(self.kind, AreaTypeKind::Normal)
+    }
+
+    /// E-bit value advertised in the OSPF Options field. Per
+    /// RFC 2328 §A.2 / RFC 3101 §2.5 the E-bit must be clear on
+    /// stub and NSSA links and set on normal links. Hello/DBD
+    /// emit reads this; recv compares against the neighbor's bit
+    /// and drops mismatches.
+    pub fn e_bit(self) -> bool {
+        self.accepts_as_external()
+    }
+
+    /// N-bit value advertised in the OSPF Options field. Per
+    /// RFC 3101 §2.5 the N-bit must be set on NSSA links and
+    /// clear elsewhere. Mismatch with a neighbor's bit on Hello
+    /// receipt drops the packet.
+    pub fn n_bit(self) -> bool {
+        self.is_nssa()
+    }
 }
 
 /// Map of OSPF area-id → `OspfArea<V>`.
@@ -56,7 +156,7 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     // OSPF area id.  This value may be treated as IPv4 address.
     pub id: Ipv4Addr,
 
-    // Area type (Normal, Stub, NSSA).
+    // Area type (Normal, Stub, NSSA) and its sub-knobs.
     pub area_type: AreaType,
 
     // Set of interfaces belongs to this area.

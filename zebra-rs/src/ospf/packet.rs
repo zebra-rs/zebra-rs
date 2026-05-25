@@ -29,7 +29,11 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
         router_dead_interval: oi.dead_interval(),
         ..Default::default()
     };
-    hello.options.set_external(true);
+    // RFC 2328 §A.2 / RFC 3101 §2.5: E-bit clear on stub/NSSA,
+    // N-bit set on NSSA. Drives the per-area negotiation — a
+    // neighbor whose bits differ is rejected by `ospf_hello_recv`.
+    hello.options.set_external(oi.area_type.e_bit());
+    hello.options.set_nssa(oi.area_type.n_bit());
     hello.options.set_o(true);
     for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
@@ -104,6 +108,23 @@ pub fn ospf_hello_recv(
             "prefixlen mismatch hello {} ifaddr {}",
             prefixlen,
             addr.prefix.prefix_len()
+        );
+        return;
+    }
+
+    // RFC 2328 §10.5 / RFC 3101 §2.5: the E-bit and N-bit in the
+    // Hello Options MUST match our local area-type, else drop the
+    // packet. An NSSA neighbor seen on a normal link (or vice
+    // versa) cannot form an adjacency.
+    if hello.options.external() != oi.area_type.e_bit()
+        || hello.options.nssa() != oi.area_type.n_bit()
+    {
+        tracing::info!(
+            "[Hello:Recv] dropping {}: option mismatch (peer E={} N={}, area {:?})",
+            src,
+            hello.options.external(),
+            hello.options.nssa(),
+            oi.area_type,
         );
         return;
     }
@@ -195,7 +216,11 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     dd.flags = nbr.dd.flags;
     dd.seqnum = nbr.dd.seqnum;
-    dd.options.set_external(true);
+    // Mirror the per-area Hello option bits — RFC 2328 §10.6 says
+    // the DBD Options must match the area's capabilities so the
+    // negotiation done in Hello holds through the exchange.
+    dd.options.set_external(link.area_type.e_bit());
+    dd.options.set_nssa(link.area_type.n_bit());
     dd.options.set_o(true);
 
     ospf_packet_db_desc_set(nbr, &mut dd);
@@ -619,11 +644,10 @@ enum LsaProcessResult {
 
 fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -> LsaProcessResult {
     // Step 3: Discard AS-External LSAs in stub/NSSA areas.
-    use super::area::AreaType;
     if matches!(
         lsa.h.ls_type,
         OspfLsType::AsExternal | OspfLsType::SummaryAsbr
-    ) && oi.area_type != AreaType::Normal
+    ) && oi.area_type.is_stub_or_nssa()
     {
         tracing::info!(
             "[LS Update] Step 3: Discarding {:?} LSA in {:?} area: id={} adv={}",
