@@ -286,6 +286,10 @@ module exec {
         leaf segment-routing {
           type empty;
         }
+        leaf graceful-restart {
+          ext:help "OSPF graceful-restart helper status";
+          type empty;
+        }
       }
     }
 

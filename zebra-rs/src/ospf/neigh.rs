@@ -12,6 +12,36 @@ use super::task::Timer;
 use super::version::{OspfVersion, Ospfv2};
 use super::{Identity, Message, NfsmEvent, NfsmState};
 
+/// Per-instance graceful-restart helper policy. Mirrors the YANG
+/// `router/ospf/graceful-restart` container; defaults match the
+/// IETF model (`ietf-ospf@2022-10-19.yang`).
+#[derive(Debug, Clone, Copy)]
+pub struct GracefulRestartConfig {
+    /// When false, the Grace-LSA receive path rejects every Grace
+    /// LSA — helper mode is never entered.
+    pub helper_enabled: bool,
+    /// Upper bound on the grace period we will honour (seconds).
+    /// RFC 3623 §3.1 leaves the bound to the helper.
+    pub max_grace_period: u32,
+    /// When true, any topology-affecting LSA from a non-restarter
+    /// that floods through the helper's area exits helper
+    /// immediately (RFC 3623 §3.2). When false, only the
+    /// restarter's own LSAs trigger exit — useful for noisy
+    /// environments where transient changes shouldn't cut the
+    /// restart short.
+    pub helper_strict_lsa_checking: bool,
+}
+
+impl Default for GracefulRestartConfig {
+    fn default() -> Self {
+        Self {
+            helper_enabled: true,
+            max_grace_period: 1800,
+            helper_strict_lsa_checking: true,
+        }
+    }
+}
+
 /// Graceful-restart helper bookkeeping (RFC 3623 §3.1). Populated
 /// when we accept a Grace LSA from this neighbor; absent the rest
 /// of the time. While `Some`, the inactivity timer is suppressed

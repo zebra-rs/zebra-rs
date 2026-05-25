@@ -107,6 +107,18 @@ impl Ospf {
             config_ospf_interface_adjacency_sid_absolute,
         );
         self.ospf_add("/segment-routing/mpls", config_ospf_sr_mpls);
+        self.ospf_add(
+            "/graceful-restart/helper-enabled",
+            config_ospf_gr_helper_enabled,
+        );
+        self.ospf_add(
+            "/graceful-restart/max-grace-period",
+            config_ospf_gr_max_grace_period,
+        );
+        self.ospf_add(
+            "/graceful-restart/helper-strict-lsa-checking",
+            config_ospf_gr_helper_strict_lsa_checking,
+        );
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
     }
@@ -824,5 +836,37 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
         ospf.ext_link_lsa_originate(ifindex);
     }
 
+    Some(())
+}
+
+/// `router ospf / graceful-restart / helper-enabled`. Toggles
+/// whether `gr_maybe_enter_helper` accepts inbound Grace LSAs.
+/// On disable, existing helpers are left intact — they'll exit on
+/// grace-period expiry or topology change as normal.
+fn config_ospf_gr_helper_enabled(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    ospf.gr_config.helper_enabled = value;
+    Some(())
+}
+
+/// `router ospf / graceful-restart / max-grace-period`. RFC 3623
+/// §3.1 leaves the bound to the helper's policy; we enforce it at
+/// helper-entry validation.
+fn config_ospf_gr_max_grace_period(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() { args.u32()? } else { 1800 };
+    ospf.gr_config.max_grace_period = value;
+    Some(())
+}
+
+/// `router ospf / graceful-restart / helper-strict-lsa-checking`.
+/// When false, only the restarter's own LSAs trigger
+/// topology-change exit (RFC 3623 §3.2 relaxation).
+fn config_ospf_gr_helper_strict_lsa_checking(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    ospf.gr_config.helper_strict_lsa_checking = value;
     Some(())
 }
