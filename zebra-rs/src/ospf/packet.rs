@@ -20,13 +20,6 @@ use super::{
     ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
 };
 
-/// Maximum grace period (seconds) we will honour as helper. RFC 3623
-/// §3.1 leaves the bound up to the helper; this matches the IETF
-/// YANG default (`max-grace-period`) and FRR's `ip ospf
-/// graceful-restart helper grace-period` default. Phase 4 exposes
-/// this as a per-instance config knob.
-const MAX_GRACE_PERIOD_SECS: u32 = 1800;
-
 /// Resolved authentication state for a single outbound packet.
 /// Built by `OspfLink::auth_send_ctx()` and
 /// `OspfInterface::auth_send_ctx()` — both pre-bump the link's
@@ -1033,6 +1026,13 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
     if lsa.h.adv_router != nbr.ident.router_id {
         return;
     }
+    if !oi.gr_config.helper_enabled {
+        tracing::info!(
+            "[GR Helper] reject Grace LSA from nbr {} (helper-enabled is false)",
+            nbr.ident.router_id
+        );
+        return;
+    }
     if nbr.state != NfsmState::Full {
         tracing::info!(
             "[GR Helper] reject Grace LSA from non-Full nbr {} (state={:?})",
@@ -1041,14 +1041,15 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
         );
         return;
     }
+    let max_grace = oi.gr_config.max_grace_period;
     let grace_period = match body.grace_period() {
-        Some(p) if p > 0 && p <= MAX_GRACE_PERIOD_SECS => p,
+        Some(p) if p > 0 && p <= max_grace => p,
         Some(p) => {
             tracing::info!(
                 "[GR Helper] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
                 nbr.ident.router_id,
                 p,
-                MAX_GRACE_PERIOD_SECS
+                max_grace
             );
             return;
         }

@@ -116,6 +116,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub rib6: PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
     pub tracing: OspfTracing,
     pub segment_routing: super::srmpls::SegmentRoutingMode,
+    /// Per-instance graceful-restart helper policy (RFC 3623 §3.1).
+    /// Defaults: helper enabled, max grace 1800s, strict LSA
+    /// checking on — same as the YANG model's defaults.
+    pub gr_config: super::neigh::GracefulRestartConfig,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
     /// Cached snapshot of v4 routes the RIB is pushing via
@@ -181,6 +185,10 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// so every send path can `fetch_add(1)` without taking `&mut`
     /// on the surrounding `OspfLink`.
     pub md5_seq: &'a std::sync::atomic::AtomicU32,
+    /// Snapshot of the per-instance graceful-restart helper
+    /// policy. Read by `gr_maybe_enter_helper` to gate Grace-LSA
+    /// acceptance against `helper_enabled` and `max_grace_period`.
+    pub gr_config: super::neigh::GracefulRestartConfig,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -255,6 +263,7 @@ impl<V: OspfVersion> Ospf<V> {
                             auth_key,
                             md5_key,
                             md5_seq: &link.md5_seq,
+                            gr_config: self.gr_config,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -430,6 +439,7 @@ impl Ospf<Ospfv2> {
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
+            gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
@@ -1651,8 +1661,12 @@ impl Ospf<Ospfv2> {
                         }
                         _ => "restarter LSA changed from snapshot",
                     }
-                } else {
+                } else if self.gr_config.helper_strict_lsa_checking {
                     "non-restarter topology change in area"
+                } else {
+                    // Strict-LSA-checking disabled — ignore non-restarter
+                    // topology changes per `helper-strict-lsa-checking false`.
+                    continue;
                 };
                 exits.push((ifindex, nbr.ident.router_id, exit_reason));
             }
@@ -2429,6 +2443,7 @@ impl Ospf<Ospfv3> {
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
+            gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),

@@ -181,6 +181,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/spf", show_ospf_spf);
         self.show_add("/show/ip/ospf/graph", show_ospf_graph);
         self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
+        self.show_add("/show/ip/ospf/graceful-restart", show_ospf_graceful_restart);
     }
 }
 
@@ -1726,4 +1727,58 @@ fn show_ospf_graph(
         }
         Ok(buf)
     }
+}
+
+/// `show ip ospf graceful-restart` (RFC 3623 helper status).
+/// Renders the instance-wide policy followed by a per-neighbor
+/// table of currently-active helper sessions. Plain-text only
+/// for now — the JSON shape can land in 2c-iii alongside
+/// helper-history.
+fn show_ospf_graceful_restart(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut buf = String::new();
+    let cfg = &ospf.gr_config;
+
+    writeln!(buf, "Graceful-restart helper configuration:")?;
+    writeln!(buf, "  Helper enabled: {}", cfg.helper_enabled)?;
+    writeln!(buf, "  Max grace period: {}s", cfg.max_grace_period)?;
+    writeln!(
+        buf,
+        "  Strict LSA checking: {}",
+        cfg.helper_strict_lsa_checking
+    )?;
+    writeln!(buf)?;
+
+    let mut any = false;
+    writeln!(
+        buf,
+        "{:<15} {:<10} {:<22} {:<14} {:<10}",
+        "Neighbor ID", "Interface", "Restart Reason", "Grace Period", "Remaining"
+    )?;
+    for (ifindex, link) in ospf.links.iter() {
+        for nbr in link.nbrs.values() {
+            let Some(helper) = nbr.gr_helper.as_ref() else {
+                continue;
+            };
+            any = true;
+            let elapsed = helper.entered_at.elapsed().as_secs() as u32;
+            let remaining = helper.grace_period.saturating_sub(elapsed);
+            writeln!(
+                buf,
+                "{:<15} {:<10} {:<22} {:<14} {:<10}",
+                nbr.ident.router_id.to_string(),
+                format!("if{}", ifindex),
+                format!("{:?}", helper.reason),
+                format!("{}s", helper.grace_period),
+                format!("{}s", remaining),
+            )?;
+        }
+    }
+    if !any {
+        writeln!(buf, "  (no active helpers)")?;
+    }
+    Ok(buf)
 }

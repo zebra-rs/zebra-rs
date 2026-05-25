@@ -460,6 +460,42 @@ module config {
             presence "Enable Segment Routing over MPLS dataplane";
           }
         }
+        container graceful-restart {
+          // RFC 3623 helper-side configuration. zebra-rs is
+          // helper-only today (Phase 5 restarter mode is deferred).
+          // Defaults match the IETF YANG model
+          // (ietf-ospf@2022-10-19.yang) and FRR's helper defaults.
+          leaf helper-enabled {
+            type boolean;
+            default true;
+            description
+              "Accept Grace LSAs and enter helper mode. When false,
+               the Grace-LSA receive path drops every Grace LSA
+               regardless of grace-period / strict-lsa-checking
+               state.";
+          }
+          leaf max-grace-period {
+            type uint32;
+            units seconds;
+            default 1800;
+            description
+              "Upper bound on the grace period we will honour. A
+               Grace LSA requesting more than this value is
+               rejected (RFC 3623 §3.1 leaves the bound to the
+               helper's policy).";
+          }
+          leaf helper-strict-lsa-checking {
+            type boolean;
+            default true;
+            description
+              "When true, any topology-affecting LSA from a
+               non-restarter that floods through the helper's area
+               exits helper immediately (RFC 3623 §3.2). When
+               false, only the restarter's own LSAs trigger exit —
+               useful when transient changes elsewhere shouldn't
+               cut the restart short.";
+          }
+        }
         container tracing {
           leaf all {
             type boolean;
