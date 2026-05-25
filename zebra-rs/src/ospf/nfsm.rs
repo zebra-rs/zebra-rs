@@ -379,7 +379,17 @@ pub fn ospfv2_populate_initial_db_summary(
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Network));
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Summary));
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::SummaryAsbr));
-    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
+
+    // RFC 5250 §2.1: Opaque LSAs MUST NOT be flooded to a neighbor
+    // that did not advertise Opaque capability (the O-bit in the DD
+    // options). Including type-10 LSA headers in our initial DD
+    // summary to a non-Opaque peer makes the peer reject the DBD
+    // (peer marks our reply as malformed and bounces back to
+    // ExStart), which manifests as a persistent ExStart loop with
+    // SeqNumberMismatch on both sides.
+    if nbr.dd.recv.options.o() {
+        ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
+    }
 
     // AS-scope LSAs included only for non-stub / non-NSSA areas.
     if oi.area_type == AreaType::Normal {
