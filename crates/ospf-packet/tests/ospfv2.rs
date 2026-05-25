@@ -386,3 +386,139 @@ pub fn ext_link_lsa_remote_itf_addr_round_trip() {
         other => panic!("expected RemoteItfAddrCisco, got {:?}", other),
     }
 }
+
+/// RFC 3623 §A.1: a Grace LSA carries Grace Period (type 1),
+/// Restart Reason (type 2), and IP Interface Address (type 3) sub-TLVs
+/// under an opaque-link-local (LSA type 9) LSA with opaque type 3.
+/// The reason TLV has a 1-octet value padded to 4-byte alignment.
+#[test]
+pub fn grace_lsa_round_trip() {
+    let body = GraceLsa {
+        tlvs: vec![
+            GraceTlv::GracePeriod(120),
+            GraceTlv::Reason(GraceRestartReason::SoftwareReload),
+            GraceTlv::IpInterfaceAddress(Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+    };
+
+    // Opaque type 3 lives in the top byte of ls_id.
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24);
+    let mut h = OspfLsaHeader::new(
+        OspfLsType::OpaqueLinkLocal,
+        ls_id,
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    h.options = 0x42;
+    let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueLinkLocalGrace(body));
+    lsa.update();
+
+    // Body wire length: 8 (GracePeriod) + 8 (Reason value 1 + 3 pad)
+    // + 8 (IpInterfaceAddress) = 24. Plus 20-octet LSA header.
+    assert_eq!(lsa.h.length, 20 + 24);
+    assert!(
+        lsa.verify_checksum(),
+        "Fletcher checksum must verify on emitter's own output"
+    );
+
+    let mut buf = BytesMut::new();
+    lsa.h.emit(&mut buf);
+    lsa.emit_lsp(&mut buf);
+    assert_eq!(buf.len(), lsa.h.length as usize);
+
+    let (rem, parsed) = OspfLsa::parse_be(&buf).expect("parse should succeed");
+    assert!(rem.is_empty(), "trailing bytes after Grace LSA");
+    let OspfLsp::OpaqueLinkLocalGrace(ref parsed_body) = parsed.lsp else {
+        panic!("expected OpaqueLinkLocalGrace, got {:?}", parsed.lsp);
+    };
+    assert_eq!(parsed_body.tlvs.len(), 3);
+    assert_eq!(parsed_body.grace_period(), Some(120));
+    assert_eq!(
+        parsed_body.reason(),
+        Some(GraceRestartReason::SoftwareReload)
+    );
+    match parsed_body.tlvs[2] {
+        GraceTlv::IpInterfaceAddress(a) => assert_eq!(a, Ipv4Addr::new(10, 0, 0, 1)),
+        ref other => panic!("expected IpInterfaceAddress, got {:?}", other),
+    }
+}
+
+/// Unknown reason codes (e.g. 7) must round-trip through the
+/// `GraceRestartReason::Other` variant. Unknown sub-TLV types
+/// (here, type 99 with a 4-byte payload) must round-trip through
+/// `GraceTlv::Unknown` with the bytes preserved.
+#[test]
+pub fn grace_lsa_unknown_codepoints_round_trip() {
+    let unknown = GraceTlv::Unknown(GraceTlvUnknown {
+        typ: 99,
+        bytes: vec![0xde, 0xad, 0xbe, 0xef],
+    });
+    let body = GraceLsa {
+        tlvs: vec![
+            GraceTlv::GracePeriod(60),
+            GraceTlv::Reason(GraceRestartReason::Other(7)),
+            unknown,
+        ],
+    };
+
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24);
+    let mut h = OspfLsaHeader::new(
+        OspfLsType::OpaqueLinkLocal,
+        ls_id,
+        Ipv4Addr::new(10, 0, 0, 2),
+    );
+    h.options = 0x42;
+    let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueLinkLocalGrace(body));
+    lsa.update();
+
+    let mut buf = BytesMut::new();
+    lsa.h.emit(&mut buf);
+    lsa.emit_lsp(&mut buf);
+
+    let (_, parsed) = OspfLsa::parse_be(&buf).expect("parse should succeed");
+    let OspfLsp::OpaqueLinkLocalGrace(ref parsed_body) = parsed.lsp else {
+        panic!("expected OpaqueLinkLocalGrace");
+    };
+    assert_eq!(parsed_body.tlvs.len(), 3);
+    assert_eq!(parsed_body.reason(), Some(GraceRestartReason::Other(7)));
+    match &parsed_body.tlvs[2] {
+        GraceTlv::Unknown(u) => {
+            assert_eq!(u.typ, 99);
+            assert_eq!(u.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+        }
+        other => panic!("expected Unknown TLV, got {:?}", other),
+    }
+}
+
+/// Decode a hand-built FRR-style v2 Grace LSA from raw bytes (no
+/// originator on our side yet). Locks the wire shape so a later
+/// helper-mode PR sees the exact bytes FRR's ospfd emits.
+#[test]
+pub fn grace_lsa_decode_from_bytes() {
+    // 20-byte LSA header + Grace LSA body.
+    //   ls_age = 0
+    //   options = 0x02 (E-bit)
+    //   ls_type = 9 (Opaque Link-Local)
+    //   ls_id = 0x03_00_00_00 (opaque type 3, opaque id 0)
+    //   adv_router = 10.0.0.1
+    //   ls_seq = 0x80000001
+    //   ls_checksum = 0x0000 (placeholder — verified after rebuild)
+    //   length = 36 (20 hdr + 16 body)
+    // Body:
+    //   type=1 len=4 value=180 (3-minute grace)
+    //   type=2 len=1 value=1 (SoftwareRestart) + 3 bytes padding
+    const BYTES: &[u8] = &hex!(
+        "
+        00 00 02 09 03 00 00 00 0a 00 00 01 80 00 00 01
+        00 00 00 24 00 01 00 04 00 00 00 b4 00 02 00 01
+        01 00 00 00
+        "
+    );
+    let (rem, lsa) = OspfLsa::parse_be(BYTES).expect("decode Grace LSA");
+    assert!(rem.is_empty());
+    assert_eq!(lsa.h.ls_type, OspfLsType::OpaqueLinkLocal);
+    let OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
+        panic!("expected OpaqueLinkLocalGrace, got {:?}", lsa.lsp);
+    };
+    assert_eq!(body.grace_period(), Some(180));
+    assert_eq!(body.reason(), Some(GraceRestartReason::SoftwareRestart));
+}

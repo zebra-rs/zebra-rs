@@ -459,6 +459,7 @@ impl OspfLsa {
             OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.emit(buf),
             OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.emit(buf),
             OspfLsp::OpaqueAreaExtLink(lsp) => lsp.emit(buf),
+            OspfLsp::OpaqueLinkLocalGrace(lsp) => lsp.emit(buf),
             OspfLsp::Unknown(lsp) => lsp.emit(buf),
         }
     }
@@ -492,6 +493,7 @@ impl OspfLsa {
             OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.lsa_len(),
             OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.lsa_len(),
             OspfLsp::OpaqueAreaExtLink(lsp) => lsp.lsa_len(),
+            OspfLsp::OpaqueLinkLocalGrace(lsp) => lsp.lsa_len(),
             OspfLsp::Unknown(lsp) => lsp.lsa_len(),
         };
         let length = lsp_len + LSA_HEADER_LEN;
@@ -544,7 +546,8 @@ pub(crate) fn lsa_checksum_calc(data: &[u8], cksum_offset: usize) -> u16 {
 
 /// Selector for OspfLsp parsing that carries both the LS type and opaque type.
 /// For non-opaque LSA types, the opaque_type field is ignored in comparison.
-/// For OpaqueAreaLocal, the opaque_type (first octet of ls_id) is also compared.
+/// For OpaqueAreaLocal / OpaqueLinkLocal, the opaque_type (first octet of
+/// ls_id) is also compared.
 struct LspSelector(OspfLsType, u8);
 
 impl PartialEq for LspSelector {
@@ -552,7 +555,7 @@ impl PartialEq for LspSelector {
         if self.0 != other.0 {
             return false;
         }
-        if self.0 == OspfLsType::OpaqueAreaLocal {
+        if self.0 == OspfLsType::OpaqueAreaLocal || self.0 == OspfLsType::OpaqueLinkLocal {
             return self.1 == other.1;
         }
         true
@@ -582,6 +585,11 @@ pub enum OspfLsp {
     #[nom(Selector = "LspSelector(OspfLsType::OpaqueAreaLocal, OpaqueLsaType::EXT_LINK)")]
     #[nom(Parse = "ExtLinkLsa::parse_be")]
     OpaqueAreaExtLink(ExtLinkLsa),
+    // RFC 3623 §A.1: Grace LSA — opaque type 3 under the link-local
+    // (LSA type 9) flooding scope.
+    #[nom(Selector = "LspSelector(OspfLsType::OpaqueLinkLocal, OpaqueLsaType::GRACE)")]
+    #[nom(Parse = "GraceLsa::parse_be")]
+    OpaqueLinkLocalGrace(GraceLsa),
     #[nom(Selector = "_")]
     Unknown(UnknownLsa),
 }
@@ -596,11 +604,12 @@ impl OspfLsp {
         let payload_length = total_length.saturating_sub(20) as usize;
         let (remaining_input, payload_input) = take(payload_length)(input)?;
 
-        let opaque_type = if typ == OspfLsType::OpaqueAreaLocal {
-            ls_id.octets()[0]
-        } else {
-            0
-        };
+        let opaque_type =
+            if typ == OspfLsType::OpaqueAreaLocal || typ == OspfLsType::OpaqueLinkLocal {
+                ls_id.octets()[0]
+            } else {
+                0
+            };
         let selector = LspSelector(typ, opaque_type);
 
         match OspfLsp::parse_be(payload_input, selector) {
@@ -916,12 +925,15 @@ impl NssaAsExternalLsa {
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum OpaqueLsaType {
+    // RFC 3623 §A.1. Carried under OspfLsType::OpaqueLinkLocal (LSA type 9).
+    Grace = 3,
     RouterInfo = 4,
     ExtPrefix = 7,
     ExtLink = 8,
 }
 
 impl OpaqueLsaType {
+    pub const GRACE: u8 = 3;
     pub const ROUTER_INFO: u8 = 4;
     pub const EXT_PREFIX: u8 = 7;
     pub const EXT_LINK: u8 = 8;
@@ -1924,6 +1936,192 @@ impl UnknownLsa {
 
     pub fn emit(&self, buf: &mut BytesMut) {
         buf.put(&self.data[..]);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Grace LSA — RFC 3623 §A (OSPFv2) and RFC 5187 §3 (OSPFv3).
+//
+// The body is a stream of 4-byte-aligned TLVs. Three types are
+// defined; only types 1 and 2 are common to both protocol versions.
+// Type 3 (IP Interface Address) is OSPFv2-only — OSPFv3 identifies the
+// sending interface via the LSA header's Link State ID, so the IP
+// address is redundant. Emitters MUST NOT include type 3 in v3 Grace
+// LSAs; the decoder accepts it as `Unknown` to stay tolerant.
+
+/// RFC 3623 §A.1 / RFC 5187 §3 Graceful Restart Reason. One octet
+/// carried in the type-2 sub-TLV value. Unrecognised codes are
+/// preserved verbatim so a re-emit round-trips the byte exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraceRestartReason {
+    /// 0 — unknown / unspecified.
+    Unknown,
+    /// 1 — software restart.
+    SoftwareRestart,
+    /// 2 — software reload / upgrade.
+    SoftwareReload,
+    /// 3 — switch to redundant control processor.
+    SwitchRedundant,
+    /// Reserved / vendor-specific.
+    Other(u8),
+}
+
+impl From<u8> for GraceRestartReason {
+    fn from(v: u8) -> Self {
+        use GraceRestartReason::*;
+        match v {
+            0 => Unknown,
+            1 => SoftwareRestart,
+            2 => SoftwareReload,
+            3 => SwitchRedundant,
+            x => Other(x),
+        }
+    }
+}
+
+impl From<GraceRestartReason> for u8 {
+    fn from(v: GraceRestartReason) -> Self {
+        use GraceRestartReason::*;
+        match v {
+            Unknown => 0,
+            SoftwareRestart => 1,
+            SoftwareReload => 2,
+            SwitchRedundant => 3,
+            Other(x) => x,
+        }
+    }
+}
+
+/// An unrecognised Grace-LSA sub-TLV. Bytes are preserved so a
+/// captured Grace LSA round-trips on emit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraceTlvUnknown {
+    pub typ: u16,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraceTlv {
+    /// Type 1, length 4 — grace period in seconds.
+    GracePeriod(u32),
+    /// Type 2, length 1 — restart reason. Padded to 4-byte alignment
+    /// on the wire.
+    Reason(GraceRestartReason),
+    /// Type 3, length 4 — sending interface's IPv4 address. OSPFv2
+    /// only (RFC 3623 §A.1). v3 emitters MUST NOT produce this.
+    IpInterfaceAddress(Ipv4Addr),
+    Unknown(GraceTlvUnknown),
+}
+
+impl GraceTlv {
+    fn tlv_type(&self) -> u16 {
+        match self {
+            GraceTlv::GracePeriod(_) => 1,
+            GraceTlv::Reason(_) => 2,
+            GraceTlv::IpInterfaceAddress(_) => 3,
+            GraceTlv::Unknown(u) => u.typ,
+        }
+    }
+
+    fn value_len(&self) -> u16 {
+        match self {
+            GraceTlv::GracePeriod(_) => 4,
+            GraceTlv::Reason(_) => 1,
+            GraceTlv::IpInterfaceAddress(_) => 4,
+            GraceTlv::Unknown(u) => u.bytes.len() as u16,
+        }
+    }
+
+    /// Wire length including the 4-byte TLV header and padding to
+    /// the next 4-byte boundary.
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    pub fn parse_tlv(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, value) = packet_utils::safe_split_at(input, len)?;
+        let tlv = match tl.typ {
+            1 if len == 4 => {
+                let (_, secs) = be_u32(value)?;
+                GraceTlv::GracePeriod(secs)
+            }
+            2 if len == 1 => {
+                let (_, byte) = be_u8(value)?;
+                GraceTlv::Reason(byte.into())
+            }
+            3 if len == 4 => {
+                let (_, addr) = be_u32(value)?;
+                GraceTlv::IpInterfaceAddress(Ipv4Addr::from(addr))
+            }
+            _ => GraceTlv::Unknown(GraceTlvUnknown {
+                typ: tl.typ,
+                bytes: value.to_vec(),
+            }),
+        };
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, tlv))
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        let typ = self.tlv_type();
+        let len = self.value_len();
+        buf.put_u16(typ);
+        buf.put_u16(len);
+        match self {
+            GraceTlv::GracePeriod(secs) => buf.put_u32(*secs),
+            GraceTlv::Reason(reason) => buf.put_u8((*reason).into()),
+            GraceTlv::IpInterfaceAddress(addr) => buf.put(&addr.octets()[..]),
+            GraceTlv::Unknown(u) => buf.put(&u.bytes[..]),
+        }
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraceLsa {
+    pub tlvs: Vec<GraceTlv>,
+}
+
+impl GraceLsa {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tlvs) = many0_complete(GraceTlv::parse_tlv).parse(input)?;
+        Ok((input, Self { tlvs }))
+    }
+
+    pub fn lsa_len(&self) -> u16 {
+        self.tlvs.iter().map(|t| t.wire_len()).sum()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+
+    /// Convenience: pull the grace period out of the TLV stream if
+    /// present. Returns the first GracePeriod TLV's value.
+    pub fn grace_period(&self) -> Option<u32> {
+        self.tlvs.iter().find_map(|t| match t {
+            GraceTlv::GracePeriod(s) => Some(*s),
+            _ => None,
+        })
+    }
+
+    /// Convenience: pull the restart reason out of the TLV stream
+    /// if present.
+    pub fn reason(&self) -> Option<GraceRestartReason> {
+        self.tlvs.iter().find_map(|t| match t {
+            GraceTlv::Reason(r) => Some(*r),
+            _ => None,
+        })
     }
 }
 
