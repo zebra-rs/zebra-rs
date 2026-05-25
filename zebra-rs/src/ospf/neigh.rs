@@ -18,24 +18,48 @@ use super::{Identity, Message, NfsmEvent, NfsmState};
 /// (`ospf_nfsm_inactivity_timer` rearms instead of killing) so the
 /// neighbor's adjacency stays Full across the restart window.
 ///
-/// Phase 2a wires entry, suppression, and grace-period-expiry exit.
-/// `reason` / `grace_period` / `entered_at` are populated here but
-/// only consumed in 2b (Router-LSA preservation) and 2c (show +
-/// strict LSDB-consistency check); the `dead_code` allow on the
-/// struct documents that.
-#[allow(dead_code)]
+/// Exit paths (RFC 3623 §3.2):
+///   - Grace-period expiry (Phase 2a — `expire_timer` fires
+///     `Message::GrHelperExpire`).
+///   - Topology change (Phase 2c-i — `gr_helper_check_exit` runs
+///     on every LSA flooded through the area; see `lsdb_snapshot`).
+///
+/// `reason`, `grace_period`, `entered_at` are populated for the
+/// show output (Phase 2c-ii) but not yet read in code, hence the
+/// field-level `dead_code` allows. `expire_timer` holds the
+/// drop-handle for the grace-period timer; Tokio's runtime is the
+/// only consumer.
 #[derive(Debug)]
 pub struct HelperState {
     /// Restart reason carried in the Grace LSA's type-2 sub-TLV.
+    #[allow(dead_code)]
     pub reason: ospf_packet::GraceRestartReason,
     /// Grace period (seconds) the restarter requested.
+    #[allow(dead_code)]
     pub grace_period: u32,
     /// When we entered helper mode.
+    #[allow(dead_code)]
     pub entered_at: Instant,
     /// Pending grace-period-expiry timer. Dropping clears it; we
     /// keep an explicit handle so re-entry (extended grace period)
     /// cancels the prior expiry cleanly.
+    #[allow(dead_code)]
     pub expire_timer: Option<Timer>,
+    /// RFC 3623 §3.2 pre-restart LSDB snapshot — for every LSA in
+    /// the helper's area whose `adv_router` is the restarting
+    /// router, we record the `(ls_seq_number, ls_checksum)` tuple
+    /// observed at the moment we entered helper. On each new LSA
+    /// install (via `flood_lsa_through_area`) we compare:
+    ///
+    ///   - A topology-affecting LSA from the restarter whose
+    ///     tuple differs from the snapshot → exit helper.
+    ///   - A topology-affecting LSA from any non-restarter →
+    ///     exit helper (some other router's adjacency / prefix
+    ///     changed in the area).
+    ///
+    /// Non-topology-affecting LSAs (Opaque, AS-External, etc.) are
+    /// ignored.
+    pub lsdb_snapshot: BTreeMap<OspfLsaKey, (u32, u16)>,
 }
 
 /// Per-neighbor protocol state.
