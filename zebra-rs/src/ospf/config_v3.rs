@@ -244,11 +244,11 @@ fn config_ospfv3_interface_mtu_ignore(
     Some(())
 }
 
-/// Record the per-interface Prefix-SID index. Mirrors v2's
-/// `config_ospf_interface_prefix_sid_index` but stops at storing the
-/// value in `link.config.prefix_sid` — v3 has no Extended Prefix
-/// Opaque LSA equivalent yet (RFC 8666 E-LSAs are not implemented),
-/// so there is no LSA to re-originate here.
+/// Record the per-interface Prefix-SID index and re-originate the
+/// matching E-Intra-Area-Prefix-LSA. Mirrors v2's
+/// `config_ospf_interface_prefix_sid_index`. The originator gates
+/// on SR-MPLS enabled + the link being up with the Prefix-SID set,
+/// so the LSA is flushed automatically if any precondition fails.
 fn config_ospfv3_interface_prefix_sid_index(
     ospf: &mut Ospf<Ospfv3>,
     mut args: Args,
@@ -264,6 +264,9 @@ fn config_ospfv3_interface_prefix_sid_index(
     } else {
         link.config.prefix_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
 
     Some(())
 }
@@ -283,6 +286,9 @@ fn config_ospfv3_interface_prefix_sid_absolute(
     } else {
         link.config.prefix_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
 
     Some(())
 }
@@ -328,10 +334,10 @@ fn config_ospfv3_interface_adjacency_sid_absolute(
     Some(())
 }
 
-/// Toggle the v3 SR-MPLS enable bit. Mirrors v2's `config_ospf_sr_mpls`
-/// but stops at flipping `segment_routing` — v3 has no Router-Info /
-/// Extended-Prefix Opaque LSA origination yet, so there is nothing
-/// downstream to re-originate.
+/// Toggle the v3 SR-MPLS enable bit and fan out to every link with
+/// a configured Prefix-SID so the matching E-Intra-Area-Prefix-LSA
+/// is originated (on enable) or flushed (on disable). Router-Info /
+/// Adj-SID origination wires onto the same toggle in follow-up PRs.
 fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
     use super::srmpls::SegmentRoutingMode;
     ospf.segment_routing = if op.is_set() {
@@ -339,5 +345,19 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
     } else {
         SegmentRoutingMode::None
     };
+
+    // Re-originate / flush E-Intra-Area-Prefix-LSAs for every link
+    // with a Prefix-SID. The originator gates on the mode, so on
+    // disable each call lands in the flush path.
+    let ifindexes: Vec<u32> = ospf
+        .links
+        .iter()
+        .filter(|(_, link)| link.config.prefix_sid.is_some())
+        .map(|(ifindex, _)| *ifindex)
+        .collect();
+    for ifindex in ifindexes {
+        ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+    }
+
     Some(())
 }
