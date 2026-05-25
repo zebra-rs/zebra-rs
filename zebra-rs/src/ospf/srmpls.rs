@@ -178,6 +178,70 @@ pub fn build_lan_adj_sub(neighbor_id: Ipv4Addr, label: u32) -> ExtLinkSubTlv {
     })
 }
 
+/// Build an OSPFv3 E-Router-LSA (RFC 8362 §3.1) carrying one
+/// Router-Link TLV (P2P) whose sub-TLV is an Adj-SID (RFC 8666
+/// §6.1) for a single Full neighbor.
+///
+/// Flag semantics mirror the v2 path: Index form leaves V + L
+/// clear (the index resolves against the peer's SRGB); Absolute
+/// Label sets V + L per RFC 8666 §6.1. `link_state_id` is the
+/// caller-supplied per-LSA key (ifindex by convention).
+pub fn e_router_v3_lsa_build(
+    router_id: Ipv4Addr,
+    metric: u16,
+    our_interface_id: u32,
+    neighbor_interface_id: u32,
+    neighbor_router_id: Ipv4Addr,
+    adjacency_sid: &AdjacencySid,
+    link_state_id: u32,
+) -> Ospfv3Lsa {
+    let (sid, flags) = match adjacency_sid {
+        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
+        AdjacencySid::Absolute(label) => (
+            SidLabelTlv::Label(*label),
+            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        ),
+    };
+
+    let adj_sub = Ospfv3SubTlv::AdjSid(Ospfv3AdjSidSubTlv {
+        flags,
+        weight: 0,
+        sid,
+    });
+
+    let link = Ospfv3RouterLsaLink::new(
+        Ospfv3RouterLinkType::PointToPoint,
+        metric,
+        our_interface_id,
+        neighbor_interface_id,
+        neighbor_router_id,
+    );
+
+    let router_link_tlv = Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv {
+        link,
+        subs: vec![adj_sub],
+    });
+
+    let body = Ospfv3ELsaBody {
+        tlvs: vec![router_link_tlv],
+    };
+
+    let mut lsa = Ospfv3Lsa {
+        h: Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_E_ROUTER_LSA_TYPE,
+            link_state_id,
+            advertising_router: router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: Ospfv3LsBody::ERouter(body),
+    };
+    lsa.update();
+    lsa
+}
+
 /// Build an OSPFv3 E-Intra-Area-Prefix-LSA (RFC 8362 §3.7) carrying
 /// one Intra-Area-Prefix TLV whose sub-TLV is a Prefix-SID (RFC 8666
 /// §5) for the given IPv6 prefix.
