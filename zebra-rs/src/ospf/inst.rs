@@ -4976,8 +4976,8 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
     }
 }
 
-/// For every self-originated Extended-Link Opaque LSA, emit an ILM
-/// entry that pops the local Adjacency-SID label and forwards over
+/// For every self-originated Extended-Link Opaque LSA, emit ILM
+/// entries that pop the local Adjacency-SID label and forward over
 /// the specific adjacency the SID identifies.
 ///
 /// Per RFC 8402 §3.4.1 the Adj-SID is locally significant -- only
@@ -4989,11 +4989,59 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
 /// wire, matching the implicit-null/PHP path the Prefix-SID pop
 /// uses).
 ///
-/// Only P2P (link_type=1) Ext-Link LSAs are handled here.
-/// LAN-Adj-SID (RFC 8665 §6) is a follow-up.
+/// Handles both link types:
+///   * link_type=1 (P2P, RFC 8665 §5): one `AdjSid` sub-TLV; the
+///     TLV's `link_id` is the neighbor's router-id, used to resolve
+///     the neighbor's interface address on `link.nbrs`.
+///   * link_type=2 (broadcast / NBMA, RFC 8665 §6): one
+///     `LanAdjSid` sub-TLV per Full neighbor; each sub-TLV carries
+///     the neighbor's router-id in its `neighbor_id` field, which
+///     is resolved the same way.
 fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
     use super::srmpls::SRGB_START;
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Resolve (link, neighbor_router_id) -> (link.index, nbr_addr).
+    // Returns None when either side is missing -- the LSA may name a
+    // neighbor that has already aged out of `link.nbrs`.
+    fn resolve_nbr(link: &OspfLink, neighbor_router_id: Ipv4Addr) -> Option<(u32, Ipv4Addr)> {
+        let addr = link
+            .nbrs
+            .values()
+            .find(|n| n.ident.router_id == neighbor_router_id)
+            .map(|n| n.ident.prefix.addr())?;
+        Some((link.index, addr))
+    }
+
+    // Build the ILM entry for one neighbor-keyed SID and insert it.
+    // `label_value` is the absolute label on the wire (Index→SRGB
+    // resolution for P2P, raw Label for LAN since LAN-Adj-SID is
+    // always allocated out of the local SRLB).
+    fn install(
+        ilm: &mut BTreeMap<u32, SpfIlm>,
+        label: u32,
+        adj_index: u32,
+        ifindex: u32,
+        nbr_addr: Ipv4Addr,
+        neighbor_router_id: Ipv4Addr,
+    ) {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            nbr_addr,
+            SpfNexthop {
+                ifindex,
+                adjacency: true,
+                router_id: Some(neighbor_router_id),
+            },
+        );
+        ilm.insert(
+            label,
+            SpfIlm {
+                nhops,
+                ilm_type: IlmType::Adjacency(adj_index),
+            },
+        );
+    }
 
     for (area_id, area) in top.areas.iter() {
         let area_id = *area_id;
@@ -5008,53 +5056,52 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                 continue;
             };
             for tlv in &el.tlvs {
-                // P2P only -- broadcast/NBMA needs LAN-Adj-SID handling.
-                if tlv.link_type != 1 {
-                    continue;
-                }
                 let Some(link) = self_link_by_addr(top, area_id, tlv.link_data) else {
                     continue;
                 };
-                // Find the neighbor whose router-id matches the
-                // Ext-Link TLV's link_id (P2P encoding). The neighbor
-                // is keyed in `link.nbrs` by its OSPF interface
-                // address, not by router-id, so iterate.
-                let Some(nbr_addr) = link
-                    .nbrs
-                    .values()
-                    .find(|n| n.ident.router_id == tlv.link_id)
-                    .map(|n| n.ident.prefix.addr())
-                else {
-                    continue;
-                };
-                for sub in &tlv.subs {
-                    let ExtLinkSubTlv::AdjSid(adj) = sub else {
-                        continue;
-                    };
-                    let (label, adj_index) = match adj.sid {
-                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                            Some(v) => (v, idx),
-                            None => continue,
-                        },
-                    };
-                    let mut nhops = BTreeMap::new();
-                    nhops.insert(
-                        nbr_addr,
-                        SpfNexthop {
-                            ifindex: link.index,
-                            adjacency: true,
-                            router_id: Some(tlv.link_id),
-                        },
-                    );
-                    ilm.insert(
-                        label,
-                        SpfIlm {
-                            nhops,
-                            ilm_type: IlmType::Adjacency(adj_index),
-                        },
-                    );
-                    break;
+                match tlv.link_type {
+                    // P2P: tlv.link_id is the neighbor's router-id.
+                    1 => {
+                        let Some((ifindex, nbr_addr)) = resolve_nbr(link, tlv.link_id) else {
+                            continue;
+                        };
+                        for sub in &tlv.subs {
+                            let ExtLinkSubTlv::AdjSid(adj) = sub else {
+                                continue;
+                            };
+                            let (label, adj_index) = match adj.sid {
+                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                                    Some(v) => (v, idx),
+                                    None => continue,
+                                },
+                            };
+                            install(ilm, label, adj_index, ifindex, nbr_addr, tlv.link_id);
+                            break;
+                        }
+                    }
+                    // Broadcast / NBMA: one LanAdjSid sub-TLV per
+                    // Full neighbor; each carries its own neighbor_id.
+                    2 => {
+                        for sub in &tlv.subs {
+                            let ExtLinkSubTlv::LanAdjSid(lan) = sub else {
+                                continue;
+                            };
+                            let Some((ifindex, nbr_addr)) = resolve_nbr(link, lan.neighbor_id)
+                            else {
+                                continue;
+                            };
+                            let (label, adj_index) = match lan.sid {
+                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                                    Some(v) => (v, idx),
+                                    None => continue,
+                                },
+                            };
+                            install(ilm, label, adj_index, ifindex, nbr_addr, lan.neighbor_id);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
