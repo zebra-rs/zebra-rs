@@ -43,10 +43,12 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
     // RFC 5340 §A.2 options bits:
     // - V6 (bit 0): IPv6 routing capability.
     // - E  (bit 1): accept AS-external LSAs (normal area).
+    // - N  (bit 3): NSSA capability (RFC 3101 §2.5 inherited by v3).
     // - R  (bit 4): active router (we participate in routing).
     let mut options = Ospfv3Options::default();
     options.set_v6(true);
-    options.set_e(true);
+    options.set_e(link.area_type.e_bit());
+    options.set_n(link.area_type.n_bit());
     options.set_r(true);
 
     let mut neighbors = Vec::new();
@@ -158,6 +160,19 @@ pub fn ospfv3_hello_recv(
     let Ospfv3Payload::Hello(ref hello) = packet.payload else {
         return;
     };
+
+    // RFC 5340 inherits RFC 2328 §10.5 / RFC 3101 §2.5: drop the
+    // Hello when the peer's E or N bit disagrees with our area type.
+    if hello.options.e() != oi.area_type.e_bit() || hello.options.n() != oi.area_type.n_bit() {
+        tracing::info!(
+            "[v3 Hello:Recv] dropping {}: option mismatch (peer E={} N={}, area {:?})",
+            src,
+            hello.options.e(),
+            hello.options.n(),
+            oi.area_type,
+        );
+        return;
+    }
 
     let nbr_router_id = packet.router_id;
 
@@ -285,7 +300,10 @@ pub fn ospfv3_db_desc_send(
         ..Default::default()
     };
     dd.options.set_v6(true);
-    dd.options.set_e(true);
+    // Mirror the per-area Hello option bits — RFC 5340 inherits
+    // RFC 2328 §10.6 requiring DBD Options to match the area.
+    dd.options.set_e(oi.area_type.e_bit());
+    dd.options.set_n(oi.area_type.n_bit());
     dd.options.set_r(true);
 
     db_desc_pack(nbr, &mut dd);
@@ -904,7 +922,6 @@ fn ospfv3_ls_upd_proc(
     lsa: &Ospfv3Lsa,
     src: &Ipv6Addr,
 ) -> LsaProcessResult {
-    use super::area::AreaType;
     use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ};
 
     let h = &lsa.h;
@@ -913,7 +930,7 @@ fn ospfv3_ls_upd_proc(
     let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
 
     // Step 3: AS-scope LSAs aren't accepted in stub / NSSA areas.
-    if scope == Ospfv3LsaScope::As && oi.area_type != AreaType::Normal {
+    if scope == Ospfv3LsaScope::As && oi.area_type.is_stub_or_nssa() {
         tracing::info!(
             "[v3 LSUpd] Step 3: discarding AS-scope LSA in {:?} area",
             oi.area_type

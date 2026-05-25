@@ -130,6 +130,12 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub addr: Vec<OspfAddr<V>>,
     pub area: Ipv4Addr,
     pub area_id: Ipv4Addr,
+    /// Cached copy of the parent area's `area_type`. Synced when the
+    /// link joins an area and whenever the area's type or sub-knobs
+    /// change (via `config::area_type_set` and siblings). Hello/DBD
+    /// emit and recv read this directly without re-borrowing
+    /// `Ospf::areas`. Default `AreaType::default()` = Normal.
+    pub area_type: super::area::AreaType,
     pub state: IfsmState,
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
@@ -190,6 +196,7 @@ where
             addr: Vec::new(),
             area: Ipv4Addr::UNSPECIFIED,
             area_id: Ipv4Addr::UNSPECIFIED,
+            area_type: super::area::AreaType::default(),
             state: IfsmState::Down,
             ostate: IfsmState::Down,
             sock,

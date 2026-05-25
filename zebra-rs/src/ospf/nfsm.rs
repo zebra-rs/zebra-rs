@@ -373,8 +373,6 @@ pub fn ospfv2_populate_initial_db_summary(
     oi: &mut OspfInterface<Ospfv2>,
     nbr: &mut Neighbor<Ospfv2>,
 ) {
-    use super::area::AreaType;
-
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Router));
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Network));
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Summary));
@@ -382,7 +380,7 @@ pub fn ospfv2_populate_initial_db_summary(
     ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
 
     // AS-scope LSAs included only for non-stub / non-NSSA areas.
-    if oi.area_type == AreaType::Normal {
+    if oi.area_type.accepts_as_external() {
         ospf_db_summary_add_table(nbr, oi.lsdb_as.values_by_type(OspfLsType::AsExternal));
     }
 }
@@ -399,7 +397,6 @@ pub fn ospfv3_populate_initial_db_summary(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
 ) {
-    use super::area::AreaType;
     use ospf_packet::{
         OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
@@ -416,7 +413,7 @@ pub fn ospfv3_populate_initial_db_summary(
         ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
     }
 
-    if oi.area_type == AreaType::Normal {
+    if oi.area_type.accepts_as_external() {
         ospf_db_summary_add_table(
             nbr,
             oi.lsdb_as

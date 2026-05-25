@@ -1266,7 +1266,7 @@ impl Ospf<Ospfv2> {
             .map(|(&id, area)| (id, area.area_type))
             .collect();
         for (area_id, area_type) in area_ids {
-            if area_type != super::area::AreaType::Normal {
+            if area_type.is_stub_or_nssa() {
                 continue;
             }
             self.flood_lsa_through_area(area_id, lsa, source);
@@ -1500,6 +1500,10 @@ impl Ospf<Ospfv2> {
                 link.network_type = link.config_network_type();
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
+                let area_type = area.area_type;
+                if let Some(link) = self.links.get_mut(&ifindex) {
+                    link.area_type = area_type;
+                }
                 self.router_lsa_originate();
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
             }
@@ -1516,6 +1520,7 @@ impl Ospf<Ospfv2> {
                 link.enabled = false;
                 link.area = Ipv4Addr::UNSPECIFIED;
                 link.area_id = Ipv4Addr::UNSPECIFIED;
+                link.area_type = super::area::AreaType::default();
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 self.router_lsa_originate();
@@ -2544,6 +2549,10 @@ impl Ospf<Ospfv3> {
                 link.network_type = link.config_network_type();
                 let area = self.areas.fetch(area_id);
                 area.links.insert(ifindex);
+                let area_type = area.area_type;
+                if let Some(link) = self.links.get_mut(&ifindex) {
+                    link.area_type = area_type;
+                }
                 self.router_lsa_originate();
                 self.router_intra_area_prefix_lsa_originate(area_id);
                 self.link_lsa_originate(ifindex);
@@ -2565,6 +2574,7 @@ impl Ospf<Ospfv3> {
                 link.enabled = false;
                 link.area = Ipv4Addr::UNSPECIFIED;
                 link.area_id = Ipv4Addr::UNSPECIFIED;
+                link.area_type = super::area::AreaType::default();
                 let area = self.areas.fetch(area_id);
                 area.links.remove(&ifindex);
                 self.router_lsa_originate();

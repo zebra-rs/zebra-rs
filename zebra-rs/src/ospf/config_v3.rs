@@ -9,9 +9,11 @@
 //! `ospf_link_get_mut_by_name`, `parse_area_id`, `ospf_hello_timer`)
 //! make this possible without duplication.
 
+use super::area::{AreaTypeKind, NssaTranslatorRole};
 use super::config::{
-    Callback, apply_link_enable_transition, link_should_enable, ospf_link_get_mut_by_name,
-    parse_area_id,
+    Callback, apply_link_enable_transition, area_no_summary_set, area_nssa_default_originate_set,
+    area_nssa_suppress_fa_set, area_nssa_translator_role_set, area_type_set, link_should_enable,
+    ospf_link_get_mut_by_name, parse_area_id,
 };
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::link::OspfNetworkType;
@@ -30,6 +32,20 @@ impl Ospf<Ospfv3> {
     pub fn callback_build(&mut self) {
         let prefix = OSPFV3;
         let entries: &[(&str, Callback<Ospfv3>)] = &[
+            ("/area/area-type", config_ospfv3_area_type),
+            ("/area/no-summary", config_ospfv3_area_no_summary),
+            (
+                "/area/nssa-default-originate",
+                config_ospfv3_area_nssa_default_originate,
+            ),
+            (
+                "/area/nssa-suppress-fa",
+                config_ospfv3_area_nssa_suppress_fa,
+            ),
+            (
+                "/area/nssa-translator-role",
+                config_ospfv3_area_nssa_translator_role,
+            ),
             ("/area/interface/enable", config_ospfv3_interface_enable),
             (
                 "/area/interface/network-type",
@@ -74,6 +90,68 @@ impl Ospf<Ospfv3> {
             self.callbacks.insert(format!("{}{}", prefix, path), *cb);
         }
     }
+}
+
+/// `/router/ospfv3/area/<id>/area-type` — same shape as the v2
+/// sibling in `config.rs`; delegates to the shared
+/// `area_type_set` helper.
+fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let kind = if op.is_set() {
+        AreaTypeKind::from_yang(&args.string()?)?
+    } else {
+        AreaTypeKind::default()
+    };
+    area_type_set(ospf, area_id, kind);
+    Some(())
+}
+
+fn config_ospfv3_area_no_summary(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_no_summary_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospfv3_area_nssa_default_originate(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_nssa_default_originate_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospfv3_area_nssa_suppress_fa(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_nssa_suppress_fa_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospfv3_area_nssa_translator_role(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let role = if op.is_set() {
+        NssaTranslatorRole::from_yang(&args.string()?)?
+    } else {
+        NssaTranslatorRole::default()
+    };
+    area_nssa_translator_role_set(ospf, area_id, role);
+    Some(())
 }
 
 /// Toggle the link's `enabled` state and re-evaluate the IFSM

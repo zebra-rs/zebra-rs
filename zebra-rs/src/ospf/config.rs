@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 
 use super::Ospf;
 use super::OspfLink;
+use super::area::{AreaTypeKind, NssaTranslatorRole};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::link::OspfNetworkType;
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
@@ -32,6 +33,17 @@ impl Ospf {
 
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
+        self.ospf_add("/area/area-type", config_ospf_area_type);
+        self.ospf_add("/area/no-summary", config_ospf_area_no_summary);
+        self.ospf_add(
+            "/area/nssa-default-originate",
+            config_ospf_area_nssa_default_originate,
+        );
+        self.ospf_add("/area/nssa-suppress-fa", config_ospf_area_nssa_suppress_fa);
+        self.ospf_add(
+            "/area/nssa-translator-role",
+            config_ospf_area_nssa_translator_role,
+        );
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
         self.ospf_add(
             "/area/interface/network-type",
@@ -127,6 +139,126 @@ pub(super) fn apply_link_enable_transition<V: OspfVersion>(
 fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
     let _router_id = args.v4addr()?;
     None
+}
+
+/// After mutating `ospf.areas[area_id].area_type`, push the new
+/// value into every link's cached `area_type` so packet emit /
+/// recv can read it directly without re-borrowing `ospf.areas`.
+fn sync_area_type_to_links<V: OspfVersion>(ospf: &mut Ospf<V>, area_id: Ipv4Addr) {
+    let Some(area) = ospf.areas.get(area_id) else {
+        return;
+    };
+    let new_area_type = area.area_type;
+    let ifindexes: Vec<u32> = area.links.iter().copied().collect();
+    for ifindex in ifindexes {
+        if let Some(link) = ospf.links.get_mut(&ifindex) {
+            link.area_type = new_area_type;
+        }
+    }
+}
+
+/// Generic per-area `area-type` writer shared by v2 and v3 callbacks.
+/// Looks up (or creates) the area, updates its `area_type.kind`
+/// in-place, and leaves the sub-knobs alone — those have their own
+/// callbacks. Hello/DBD pick up the new option bits on next emit;
+/// existing neighbors with mismatched N/E bits drop out when the
+/// next Hello arrives.
+pub(super) fn area_type_set<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    area_id: Ipv4Addr,
+    kind: AreaTypeKind,
+) {
+    ospf.areas.fetch(area_id).area_type.kind = kind;
+    sync_area_type_to_links(ospf, area_id);
+}
+
+pub(super) fn area_no_summary_set<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    area_id: Ipv4Addr,
+    value: bool,
+) {
+    ospf.areas.fetch(area_id).area_type.no_summary = value;
+    sync_area_type_to_links(ospf, area_id);
+}
+
+pub(super) fn area_nssa_default_originate_set<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    area_id: Ipv4Addr,
+    value: bool,
+) {
+    ospf.areas.fetch(area_id).area_type.nssa_default_originate = value;
+    sync_area_type_to_links(ospf, area_id);
+}
+
+pub(super) fn area_nssa_suppress_fa_set<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    area_id: Ipv4Addr,
+    value: bool,
+) {
+    ospf.areas.fetch(area_id).area_type.nssa_suppress_fa = value;
+    sync_area_type_to_links(ospf, area_id);
+}
+
+pub(super) fn area_nssa_translator_role_set<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    area_id: Ipv4Addr,
+    role: NssaTranslatorRole,
+) {
+    ospf.areas.fetch(area_id).area_type.nssa_translator_role = role;
+    sync_area_type_to_links(ospf, area_id);
+}
+
+/// `/router/ospf/area/<id>/area-type` — `normal | stub | nssa`.
+/// Delete reverts to the default (`normal`).
+fn config_ospf_area_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let kind = if op.is_set() {
+        AreaTypeKind::from_yang(&args.string()?)?
+    } else {
+        AreaTypeKind::default()
+    };
+    area_type_set(ospf, area_id, kind);
+    Some(())
+}
+
+fn config_ospf_area_no_summary(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_no_summary_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospf_area_nssa_default_originate(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_nssa_default_originate_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospf_area_nssa_suppress_fa(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let value = op.is_set() && args.boolean()?;
+    area_nssa_suppress_fa_set(ospf, area_id, value);
+    Some(())
+}
+
+fn config_ospf_area_nssa_translator_role(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let role = if op.is_set() {
+        NssaTranslatorRole::from_yang(&args.string()?)?
+    } else {
+        NssaTranslatorRole::default()
+    };
+    area_nssa_translator_role_set(ospf, area_id, role);
+    Some(())
 }
 
 pub(super) fn ospf_link_get_mut_by_name<'a, V: OspfVersion>(
