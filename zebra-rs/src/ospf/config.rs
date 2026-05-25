@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use super::Ospf;
 use super::OspfLink;
-use super::area::{AreaTypeKind, NssaTranslatorRole};
+use super::area::{AreaTypeKind, ExternalMetricType, NssaTranslatorRole, RedistEntry};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::link::{OspfAuthMode, OspfNetworkType};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
@@ -43,6 +43,18 @@ impl Ospf {
         self.ospf_add(
             "/area/nssa-translator-role",
             config_ospf_area_nssa_translator_role,
+        );
+        self.ospf_add(
+            "/area/redistribute/connected",
+            config_ospf_area_redist_connected,
+        );
+        self.ospf_add(
+            "/area/redistribute/connected/metric",
+            config_ospf_area_redist_connected_metric,
+        );
+        self.ospf_add(
+            "/area/redistribute/connected/metric-type",
+            config_ospf_area_redist_connected_metric_type,
         );
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
         self.ospf_add(
@@ -233,6 +245,10 @@ fn config_ospf_area_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Optio
     };
     area_type_set(ospf, area_id, kind);
     ospf.nssa_default_lsa_originate(area_id);
+    // Area-type transition flips whether redistributed Type-7s
+    // are legal in this area — resync (originate fresh on
+    // entry-to-NSSA, flush on exit).
+    ospf.nssa_redist_connected_resync(area_id);
     Some(())
 }
 
@@ -277,6 +293,128 @@ fn config_ospf_area_nssa_translator_role(
         NssaTranslatorRole::default()
     };
     area_nssa_translator_role_set(ospf, area_id, role);
+    Some(())
+}
+
+/// Send the appropriate RIB Redist message for the current state
+/// of this area's `connected` redistribute knob. Mirrors IS-IS's
+/// `send_redist` (`isis/config.rs:887`):
+///   - knob removed from any NSSA area on this router → RedistDel
+///   - knob present, first time across all NSSA areas → RedistAdd
+///   - knob present, subsequent edit → RedistUpdate (no-op for
+///     connected since subtypes are wildcard, but kept for
+///     symmetry with future static / bgp sources)
+///
+/// RIB subscription is keyed by `(proto, afi, rtype)` — not per
+/// area — so multiple NSSA areas with `redistribute connected`
+/// share a single subscription. `any_connected_enabled` decides
+/// whether the subscription should exist at all.
+fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
+    use crate::rib::{Message as RibMsg, RedistAfi, RibType};
+    let proto = "ospf".to_string();
+    let afi = RedistAfi::Ipv4;
+    let rtype = RibType::Connected;
+
+    let any_enabled = ospf
+        .areas
+        .iter()
+        .any(|(_, area)| area.redistribute.connected.is_some());
+
+    let msg = if !any_enabled {
+        RibMsg::RedistDel { proto, afi, rtype }
+    } else if first_time {
+        RibMsg::RedistAdd {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    } else {
+        RibMsg::RedistUpdate {
+            proto,
+            afi,
+            rtype,
+            subtypes: std::collections::BTreeSet::new(),
+        }
+    };
+    let _ = ospf.ctx.rib.send(msg);
+}
+
+/// `/router/ospf/area/<id>/redistribute/connected` — presence
+/// container. On Set: create the area's `RedistEntry` with
+/// defaults (metric 20, E2) and (re)originate Type-7 LSAs for
+/// every connected route the RIB has already pushed. On Delete:
+/// drop the entry and flush our self-originated Type-7s that
+/// belong to this area.
+fn config_ospf_area_redist_connected(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+
+    // Was this the only NSSA area subscribed (or none yet)?
+    let first_time = !ospf
+        .areas
+        .iter()
+        .any(|(_, area)| area.redistribute.connected.is_some());
+
+    if op.is_set() {
+        ospf.areas.fetch(area_id).redistribute.connected = Some(RedistEntry {
+            metric: RedistEntry::DEFAULT_METRIC,
+            ..Default::default()
+        });
+    } else if let Some(area) = ospf.areas.get_mut(area_id) {
+        area.redistribute.connected = None;
+    }
+
+    ospf_send_redist_connected(ospf, first_time && op.is_set());
+    ospf.nssa_redist_connected_resync(area_id);
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/redistribute/connected/metric`.
+/// Consumer-side override; no RIB resubscribe needed.
+fn config_ospf_area_redist_connected_metric(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let metric = if op.is_set() {
+        args.u32()?
+    } else {
+        RedistEntry::DEFAULT_METRIC
+    };
+    let entry = ospf
+        .areas
+        .fetch(area_id)
+        .redistribute
+        .connected
+        .get_or_insert_with(RedistEntry::default);
+    entry.metric = metric;
+    ospf.nssa_redist_connected_resync(area_id);
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/redistribute/connected/metric-type` —
+/// `type-1` / `type-2`. Re-originates all Type-7s for the area
+/// since the E-bit changes per-LSA.
+fn config_ospf_area_redist_connected_metric_type(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let area_id = parse_area_id(&args.string()?)?;
+    let metric_type = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    let entry = ospf
+        .areas
+        .fetch(area_id)
+        .redistribute
+        .connected
+        .get_or_insert_with(RedistEntry::default);
+    entry.metric_type = metric_type;
+    ospf.nssa_redist_connected_resync(area_id);
     Some(())
 }
 
