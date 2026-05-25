@@ -4722,12 +4722,85 @@ fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>) -> BTreeMap<u32, SpfIl
     ilm
 }
 
+/// For every self-originated Extended-Prefix LSA in any area, emit
+/// an ILM entry that pops the local Prefix-SID label and delivers
+/// to the owning interface.
+///
+/// Needed because `srmpls.rs::ext_prefix_lsa_build` sets the NP
+/// (No-PHP) flag on Index-form Prefix-SIDs we originate. With NP=1
+/// the penultimate hop does not pop the label per RFC 8665 §5, so
+/// labeled packets reach the local kernel MPLS layer and require
+/// an explicit pop entry; without it the kernel drops them.
+///
+/// The emitted nexthop carries `adjacency: true` so `make_ilm_entry`
+/// builds an `IlmEntry` with no swap label — Via + Oif only. The
+/// kernel pops the label and forwards to the via address on the
+/// owning interface; since the via address is one of our own
+/// interface addresses, the inner packet is delivered locally.
+fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
+    use super::srmpls::SRGB_START;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    for (area_id, area) in top.areas.iter() {
+        let area_id = *area_id;
+        for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if lsa.data.h.adv_router != top.router_id {
+                continue;
+            }
+            let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp else {
+                continue;
+            };
+            for tlv in &ep.tlvs {
+                let Some(link) = self_link_by_prefix(top, area_id, tlv.prefix) else {
+                    continue;
+                };
+                let Some(addr) = link.addr.first().map(|a| a.prefix.addr()) else {
+                    continue;
+                };
+                for sub in &tlv.subs {
+                    let ExtPrefixSubTlv::PrefixSid(ps) = sub else {
+                        continue;
+                    };
+                    let (label, pfx_index) = match ps.sid {
+                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                            Some(v) => (v, idx),
+                            None => continue,
+                        },
+                    };
+                    let mut nhops = BTreeMap::new();
+                    nhops.insert(
+                        addr,
+                        SpfNexthop {
+                            ifindex: link.index,
+                            adjacency: true,
+                            router_id: None,
+                        },
+                    );
+                    ilm.insert(
+                        label,
+                        SpfIlm {
+                            nhops,
+                            ilm_type: IlmType::Node(pfx_index),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // Build the SR-MPLS LFIB from labeled routes in the freshly
     // computed RIB, then diff against the previous snapshot so the
     // RIB subsystem sees only the IlmAdd / IlmDel deltas.
-    let ilm = build_ilm_from_rib(&rib);
+    let mut ilm = build_ilm_from_rib(&rib);
+    add_self_prefix_sids_to_ilm(top, &mut ilm);
     let ilm_diff = spf::table_diff(top.ilm.iter(), ilm.iter());
     diff_ilm_apply(&top.ctx.rib, &ilm_diff);
     top.ilm = ilm;
