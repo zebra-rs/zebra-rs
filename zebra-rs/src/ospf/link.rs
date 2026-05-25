@@ -83,17 +83,18 @@ pub struct LinkConfig {
     /// Simple-password key, already zero-padded to the 8-octet
     /// on-wire field. Only consulted when `auth_mode == Simple`.
     pub auth_key: Option<[u8; 8]>,
-    /// MD5 cryptographic-auth keys keyed by key-id (RFC 2328
-    /// §D.4). Each value is the 1..16-octet ASCII key
-    /// zero-padded to 16 bytes — the on-wire format expected by
-    /// the digest computation. Only consulted when
-    /// `auth_mode == MessageDigest`.
-    pub md5_keys: BTreeMap<u8, [u8; 16]>,
+    /// Cryptographic-auth keys keyed by key-id (RFC 2328 §D.4
+    /// for keyed-MD5, RFC 5709 for HMAC-SHA). Each entry carries
+    /// the algorithm and the raw secret. Only consulted when
+    /// `auth_mode == MessageDigest`. Populated by either the
+    /// `message-digest-key` callback (MD5 entries) or the
+    /// `crypto-key` callback (HMAC-SHA entries) — the two paths
+    /// share this single keyring and using the same key-id from
+    /// both is a config error.
+    pub crypto_keys: BTreeMap<u8, AuthKey>,
 }
 
 /// OSPFv2 per-interface authentication mode.
-/// RFC 5709 HMAC-SHA modes will appear as additional variants in a
-/// follow-up phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OspfAuthMode {
     /// RFC 2328 §D.2 — AuType 0, header auth field ignored.
@@ -101,10 +102,53 @@ pub enum OspfAuthMode {
     /// RFC 2328 §D.3 — AuType 1, header auth field carries the
     /// plain key zero-padded to 8 bytes.
     Simple,
-    /// RFC 2328 §D.4 — AuType 2, header overlay carries (key-id,
-    /// digest-length, seq) and the body is followed by a 16-byte
-    /// MD5 trailer.
+    /// RFC 2328 §D.4 / RFC 5709 — AuType 2, header overlay carries
+    /// (key-id, digest-length, seq) and the body is followed by
+    /// an algorithm-sized digest trailer. The trailer's algorithm
+    /// is determined by the configured key for the key-id (MD5,
+    /// HMAC-SHA-{1,256,384,512}).
     MessageDigest,
+}
+
+/// One cryptographic-auth key entry. The raw bytes are stored
+/// at the length the operator configured; padding/truncation
+/// for the on-wire digest happens at the apply/verify boundary.
+#[derive(Debug, Clone)]
+pub struct AuthKey {
+    pub algo: OspfCryptoAlgo,
+    pub raw: Vec<u8>,
+}
+
+/// Cryptographic-auth algorithms covered by Phase 2 (MD5) and
+/// Phase 3 (HMAC-SHA family per RFC 5709).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OspfCryptoAlgo {
+    /// RFC 2328 §D.4 — keyed-MD5 `MD5(packet || key padded to 16)`.
+    /// Trailer length = 16.
+    Md5,
+    /// RFC 5709 §2 — `HMAC-SHA-1(key, packet)`. Trailer length = 20.
+    HmacSha1,
+    /// RFC 5709 §2 — `HMAC-SHA-256(key, packet)`. Trailer length = 32.
+    HmacSha256,
+    /// RFC 5709 §2 — `HMAC-SHA-384(key, packet)`. Trailer length = 48.
+    HmacSha384,
+    /// RFC 5709 §2 — `HMAC-SHA-512(key, packet)`. Trailer length = 64.
+    HmacSha512,
+}
+
+impl OspfCryptoAlgo {
+    /// On-wire digest length for this algorithm — what the
+    /// sender stamps into the header `auth_data_len` field and
+    /// what the receiver expects in the trailer.
+    pub fn digest_len(self) -> usize {
+        match self {
+            Self::Md5 => 16,
+            Self::HmacSha1 => 20,
+            Self::HmacSha256 => 32,
+            Self::HmacSha384 => 48,
+            Self::HmacSha512 => 64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -333,18 +377,23 @@ impl<V: OspfVersion> OspfLink<V> {
         self.config.auth_mode.unwrap_or(OspfAuthMode::Null)
     }
 
-    /// Return the active MD5 send key (lowest configured key-id)
-    /// alongside its key-id, or `None` if no keys are configured.
-    /// Key rollover (per-key send/accept lifetimes) lives in the
-    /// Phase 4 key-chain plumbing.
-    pub fn active_md5_key(&self) -> Option<(u8, [u8; 16])> {
-        self.config.md5_keys.iter().next().map(|(&id, &k)| (id, k))
+    /// Return the active crypto-auth send key (lowest configured
+    /// key-id across both MD5 and HMAC-SHA entries) alongside its
+    /// key-id, or `None` if no keys are configured. Key rollover
+    /// (per-key send/accept lifetimes) lives in the Phase 4
+    /// key-chain plumbing.
+    pub fn active_crypto_key(&self) -> Option<(u8, AuthKey)> {
+        self.config
+            .crypto_keys
+            .iter()
+            .next()
+            .map(|(&id, k)| (id, k.clone()))
     }
 
     /// Read and increment the per-interface cryptographic-auth
-    /// sequence number. Each outbound MD5 packet consumes one
-    /// value; wrap is u32 (the on-wire field width) so the
-    /// counter is allowed to roll over after ~136 years.
+    /// sequence number. Each outbound cryptographic-auth packet
+    /// consumes one value; wrap is u32 (the on-wire field width)
+    /// so the counter is allowed to roll over after ~136 years.
     pub fn next_md5_seq(&self) -> u32 {
         self.md5_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -357,7 +406,7 @@ impl<V: OspfVersion> OspfLink<V> {
         super::packet::AuthSendCtx {
             mode: self.auth_mode(),
             simple_key: self.config.auth_key,
-            md5_key: self.active_md5_key(),
+            crypto_key: self.active_crypto_key(),
             md5_seq: self.next_md5_seq(),
         }
     }

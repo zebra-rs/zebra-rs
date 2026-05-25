@@ -36,8 +36,10 @@ pub(crate) struct AuthSendCtx {
     pub mode: OspfAuthMode,
     /// Simple-password key, zero-padded to 8 bytes.
     pub simple_key: Option<[u8; 8]>,
-    /// Active MD5 send key as `(key-id, padded-key)`.
-    pub md5_key: Option<(u8, [u8; 16])>,
+    /// Active cryptographic-auth send key as `(key-id, key)`.
+    /// Carries the algorithm + raw secret; apply dispatches on
+    /// `key.algo` to produce the right digest.
+    pub crypto_key: Option<(u8, super::link::AuthKey)>,
     /// Cryptographic-auth sequence number to stamp into the
     /// outbound packet. Already drawn from the link's counter.
     pub md5_seq: u32,
@@ -47,32 +49,34 @@ pub(crate) struct AuthSendCtx {
 /// borrow of the seq atomic. Used by flood loops where calling
 /// `OspfLink::auth_send_ctx()` would conflict with the
 /// `nbrs.iter_mut()` borrow held over the loop body — the
-/// snapshot grabs `mode`/`simple_key`/`md5_key` once before the
-/// loop and the atomic lets us bump the seq per packet without
-/// ever reborrowing `link` for a method call.
+/// snapshot grabs `mode`/`simple_key`/`crypto_key` once before
+/// the loop and the atomic lets us bump the seq per packet
+/// without ever reborrowing `link` for a method call.
 pub(super) fn build_auth_ctx(
     mode: OspfAuthMode,
     simple_key: Option<[u8; 8]>,
-    md5_key: Option<(u8, [u8; 16])>,
+    crypto_key: Option<(u8, super::link::AuthKey)>,
     seq: &std::sync::atomic::AtomicU32,
 ) -> AuthSendCtx {
     AuthSendCtx {
         mode,
         simple_key,
-        md5_key,
+        crypto_key,
         md5_seq: seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     }
 }
 
 /// Stamp the configured authentication state into an outgoing
 /// OSPFv2 packet. For MessageDigest, also computes and appends
-/// the 16-byte MD5 trailer per RFC 2328 §D.4.3 (the digest
-/// covers the entire header+body with the key zero-padded to 16
-/// bytes appended in the hash, but those padded bytes are not
-/// transmitted on the wire).
+/// the algorithm-sized trailer:
+///
+/// - keyed-MD5 (RFC 2328 §D.4.3): `MD5(packet || key padded to 16)`.
+/// - HMAC-SHA-* (RFC 5709 §3.3): `HMAC-SHA-x(key, packet)`.
+///
+/// `auth_data_len` in the header overlay reflects the digest size
+/// so the receiver can validate the trailer length before hashing.
 pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, ctx: &AuthSendCtx) {
     use bytes::BytesMut;
-    use md5::{Digest, Md5};
     use ospf_packet::Ospfv2AuthCrypto;
 
     match ctx.mode {
@@ -87,26 +91,81 @@ pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, ctx: &AuthSendCtx) {
             packet.auth_trailer.clear();
         }
         OspfAuthMode::MessageDigest => {
-            let (key_id, padded_key) = ctx.md5_key.unwrap_or((0, [0; 16]));
-            // Stamp the crypto header overlay (RFC 2328 §D.3).
+            // No key configured: stamp a zero-length trailer with
+            // key-id 0. The peer will reject — clearer signal than
+            // silently sending a digest computed over a zero key.
+            let Some((key_id, key)) = ctx.crypto_key.as_ref() else {
+                packet.auth_type = 2;
+                packet.auth = Ospfv2Auth::Crypto(Ospfv2AuthCrypto {
+                    key_id: 0,
+                    auth_data_len: 0,
+                    seq: ctx.md5_seq,
+                });
+                packet.auth_trailer.clear();
+                return;
+            };
+            let digest_len = key.algo.digest_len() as u8;
             packet.auth_type = 2;
             packet.auth = Ospfv2Auth::Crypto(Ospfv2AuthCrypto {
-                key_id,
-                auth_data_len: 16,
+                key_id: *key_id,
+                auth_data_len: digest_len,
                 seq: ctx.md5_seq,
             });
-            // Scratch-emit the body so we can hash (body + key).
+            // Scratch-emit the body so we can hash (body || key).
             // The real serialization at network::write_packet does
             // a second emit of the same bytes, plus the trailer.
             packet.auth_trailer.clear();
             let mut scratch = BytesMut::new();
             packet.emit(&mut scratch);
-            // RFC 2328 §D.4.3: MD5( OSPF packet || key padded to 16 ).
+            packet.auth_trailer = compute_crypto_trailer(key, &scratch);
+        }
+    }
+}
+
+/// Compute the cryptographic-auth digest trailer for an outgoing
+/// packet. Centralizes the algorithm dispatch so apply / verify
+/// produce the same bytes from the same inputs.
+fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use md5::{Digest, Md5};
+    use sha1::Sha1;
+    use sha2::{Sha256, Sha384, Sha512};
+
+    use super::link::OspfCryptoAlgo;
+
+    match key.algo {
+        OspfCryptoAlgo::Md5 => {
+            // RFC 2328 §D.4.3 keyed-MD5: hash(packet || key padded
+            // to 16 octets). `raw` is already padded by the config
+            // callback.
             let mut h = Md5::new();
-            h.update(&scratch);
-            h.update(padded_key);
-            let digest = h.finalize();
-            packet.auth_trailer = digest.as_slice().to_vec();
+            h.update(packet_bytes);
+            h.update(&key.raw);
+            h.finalize().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha1 => {
+            let mut m =
+                <Hmac<Sha1> as Mac>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
+            m.update(packet_bytes);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha256 => {
+            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(packet_bytes);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha384 => {
+            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(packet_bytes);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha512 => {
+            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(packet_bytes);
+            m.finalize().into_bytes().to_vec()
         }
     }
 }
@@ -115,16 +174,14 @@ pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, ctx: &AuthSendCtx) {
 /// interface's configured authentication. Returns `true` when
 /// the packet is acceptable. The caller must update the per-
 /// neighbor `auth_md5_last_seq` via `record_md5_seq()` afterward
-/// to enforce replay protection (RFC 2328 §D.5).
+/// to enforce replay protection (RFC 2328 §D.5 / RFC 7474).
 pub(super) fn verify_link_auth(
     packet: &Ospfv2Packet,
     mode: OspfAuthMode,
     simple_key: Option<[u8; 8]>,
-    md5_keys: &std::collections::BTreeMap<u8, [u8; 16]>,
+    crypto_keys: &std::collections::BTreeMap<u8, super::link::AuthKey>,
     nbr_last_seq: u32,
 ) -> bool {
-    use md5::{Digest, Md5};
-
     match mode {
         OspfAuthMode::Null => packet.auth_type == 0,
         OspfAuthMode::Simple => match (&packet.auth_type, &packet.auth) {
@@ -139,31 +196,33 @@ pub(super) fn verify_link_auth(
                 (2, Ospfv2Auth::Crypto(c)) => c,
                 _ => return false,
             };
-            // RFC 2328 §D.5 replay protection — sequence number
+            // RFC 2328 §D.5 / RFC 7474 replay protection — seq
             // must be ≥ the highest we've already accepted. `>=`
-            // is what FRR uses (allows duplicate-ack via
-            // resends); strict `>` would also be defensible.
+            // is what FRR uses (allows duplicate-ack via resends);
+            // strict `>` would also be defensible.
             if crypto.seq < nbr_last_seq {
                 return false;
             }
             // Look up the key by id; reject if the sender used
             // a key we don't know.
-            let Some(padded_key) = md5_keys.get(&crypto.key_id) else {
+            let Some(key) = crypto_keys.get(&crypto.key_id) else {
                 return false;
             };
-            // Length must match what we expect for MD5.
-            if crypto.auth_data_len != 16 || packet.auth_trailer.len() != 16 {
+            // The on-wire trailer length must match what our
+            // configured algorithm expects — both the header
+            // advertisement (`auth_data_len`) and the actual
+            // bytes that arrived in the trailer.
+            let expect_len = key.algo.digest_len();
+            if crypto.auth_data_len as usize != expect_len
+                || packet.auth_trailer.len() != expect_len
+            {
                 return false;
             }
             // Recompute the digest over raw_body (the bytes the
-            // sender hashed) plus the padded key.
-            let mut h = Md5::new();
-            h.update(&packet.raw_body);
-            h.update(padded_key);
-            let expected = h.finalize();
-            // Constant-time compare — MD5 broken aside, leaking
-            // first-mismatch position to a remote sender via
-            // timing is bad form.
+            // sender hashed) using our configured key + algo.
+            let expected = compute_crypto_trailer(key, &packet.raw_body);
+            // Constant-time compare — leaking first-mismatch
+            // position to a remote sender via timing is bad form.
             constant_time_eq(&expected, &packet.auth_trailer)
         }
     }
@@ -1192,7 +1251,7 @@ mod auth_tests {
         AuthSendCtx {
             mode: OspfAuthMode::Null,
             simple_key: None,
-            md5_key: None,
+            crypto_key: None,
             md5_seq: 0,
         }
     }
@@ -1201,22 +1260,41 @@ mod auth_tests {
         AuthSendCtx {
             mode: OspfAuthMode::Simple,
             simple_key: Some(key),
-            md5_key: None,
+            crypto_key: None,
             md5_seq: 0,
         }
     }
 
-    fn md5_ctx(key_id: u8, padded: [u8; 16], seq: u32) -> AuthSendCtx {
+    fn crypto_ctx(key_id: u8, key: super::super::link::AuthKey, seq: u32) -> AuthSendCtx {
         AuthSendCtx {
             mode: OspfAuthMode::MessageDigest,
             simple_key: None,
-            md5_key: Some((key_id, padded)),
+            crypto_key: Some((key_id, key)),
             md5_seq: seq,
         }
     }
 
-    fn empty_md5_keys() -> std::collections::BTreeMap<u8, [u8; 16]> {
+    fn empty_keys() -> std::collections::BTreeMap<u8, super::super::link::AuthKey> {
         std::collections::BTreeMap::new()
+    }
+
+    fn md5_key(material: &[u8]) -> super::super::link::AuthKey {
+        let mut padded = vec![0u8; 16];
+        padded[..material.len()].copy_from_slice(material);
+        super::super::link::AuthKey {
+            algo: super::super::link::OspfCryptoAlgo::Md5,
+            raw: padded,
+        }
+    }
+
+    fn hmac_key(
+        algo: super::super::link::OspfCryptoAlgo,
+        material: &[u8],
+    ) -> super::super::link::AuthKey {
+        super::super::link::AuthKey {
+            algo,
+            raw: material.to_vec(),
+        }
     }
 
     #[test]
@@ -1247,7 +1325,7 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_md5_keys(),
+            &empty_keys(),
             0
         ));
 
@@ -1256,7 +1334,7 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_md5_keys(),
+            &empty_keys(),
             0
         ));
     }
@@ -1271,14 +1349,14 @@ mod auth_tests {
             &p,
             OspfAuthMode::Simple,
             Some(key),
-            &empty_md5_keys(),
+            &empty_keys(),
             0
         ));
         assert!(!verify_link_auth(
             &p,
             OspfAuthMode::Simple,
             Some(*b"other\0\0\0"),
-            &empty_md5_keys(),
+            &empty_keys(),
             0
         ));
         // Wrong mode on the receiving side — drop.
@@ -1286,41 +1364,45 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_md5_keys(),
+            &empty_keys(),
             0
         ));
     }
 
-    #[test]
-    fn md5_emit_then_parse_verifies() {
+    /// Round-trip apply → emit → parse → verify for every supported
+    /// cryptographic-auth algorithm. The trailer length, replay
+    /// reject, unknown-key reject, and wrong-material reject all
+    /// follow the same shape across algorithms, so one parameterized
+    /// helper covers them.
+    fn crypto_roundtrip_for(key: super::super::link::AuthKey) {
         use bytes::BytesMut;
         use ospf_packet::parse;
 
-        let mut p = hello_packet();
-        let mut padded = [0u8; 16];
-        padded[..6].copy_from_slice(b"secret");
-        apply_link_auth(&mut p, &md5_ctx(7, padded, 0xCAFE_BABE));
+        let expected_len = key.algo.digest_len();
+        let key_id: u8 = 7;
+        let seq: u32 = 0xCAFE_BABE;
 
-        // Crypto overlay must be set on the packet.
+        let mut p = hello_packet();
+        apply_link_auth(&mut p, &crypto_ctx(key_id, key.clone(), seq));
+
         match &p.auth {
             Ospfv2Auth::Crypto(c) => {
-                assert_eq!(c.key_id, 7);
-                assert_eq!(c.auth_data_len, 16);
-                assert_eq!(c.seq, 0xCAFE_BABE);
+                assert_eq!(c.key_id, key_id);
+                assert_eq!(c.auth_data_len as usize, expected_len);
+                assert_eq!(c.seq, seq);
             }
             other => panic!("expected Crypto, got {:?}", other),
         }
-        assert_eq!(p.auth_trailer.len(), 16);
+        assert_eq!(p.auth_trailer.len(), expected_len);
 
-        // Serialize + reparse to exercise the receive path.
         let mut buf = BytesMut::new();
         p.emit(&mut buf);
         let (rest, parsed) = parse(&buf).expect("parse must succeed");
         assert!(rest.is_empty());
-        assert_eq!(parsed.auth_trailer.len(), 16);
+        assert_eq!(parsed.auth_trailer.len(), expected_len);
 
         let mut keys = std::collections::BTreeMap::new();
-        keys.insert(7u8, padded);
+        keys.insert(key_id, key.clone());
         // Accept with matching key + fresh seq.
         assert!(verify_link_auth(
             &parsed,
@@ -1335,11 +1417,11 @@ mod auth_tests {
             OspfAuthMode::MessageDigest,
             None,
             &keys,
-            0xCAFE_BABE + 1
+            seq + 1
         ));
         // Unknown key-id → reject.
         let mut wrong_keys = std::collections::BTreeMap::new();
-        wrong_keys.insert(9u8, padded);
+        wrong_keys.insert(9u8, key.clone());
         assert!(!verify_link_auth(
             &parsed,
             OspfAuthMode::MessageDigest,
@@ -1348,13 +1430,93 @@ mod auth_tests {
             0
         ));
         // Same key-id, wrong material → reject.
-        let mut bad_keys = std::collections::BTreeMap::new();
-        bad_keys.insert(7u8, [0u8; 16]);
+        let mut bad = std::collections::BTreeMap::new();
+        bad.insert(
+            key_id,
+            super::super::link::AuthKey {
+                algo: key.algo,
+                raw: vec![0u8; expected_len],
+            },
+        );
         assert!(!verify_link_auth(
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &bad_keys,
+            &bad,
+            0
+        ));
+    }
+
+    #[test]
+    fn md5_roundtrip() {
+        crypto_roundtrip_for(md5_key(b"secret"));
+    }
+
+    #[test]
+    fn hmac_sha1_roundtrip() {
+        crypto_roundtrip_for(hmac_key(
+            super::super::link::OspfCryptoAlgo::HmacSha1,
+            b"sha1-secret-bytes",
+        ));
+    }
+
+    #[test]
+    fn hmac_sha256_roundtrip() {
+        crypto_roundtrip_for(hmac_key(
+            super::super::link::OspfCryptoAlgo::HmacSha256,
+            b"sha256-shared-secret",
+        ));
+    }
+
+    #[test]
+    fn hmac_sha384_roundtrip() {
+        crypto_roundtrip_for(hmac_key(
+            super::super::link::OspfCryptoAlgo::HmacSha384,
+            b"sha384-shared-secret",
+        ));
+    }
+
+    #[test]
+    fn hmac_sha512_roundtrip() {
+        crypto_roundtrip_for(hmac_key(
+            super::super::link::OspfCryptoAlgo::HmacSha512,
+            b"sha512-shared-secret",
+        ));
+    }
+
+    /// If we apply with one algorithm and the receiver configured a
+    /// different algorithm for the same key-id, verify must reject —
+    /// both because the wire trailer length won't match and as a
+    /// belt-and-suspenders against algorithm confusion.
+    #[test]
+    fn algo_mismatch_rejected() {
+        use bytes::BytesMut;
+        use ospf_packet::parse;
+
+        let sent = hmac_key(
+            super::super::link::OspfCryptoAlgo::HmacSha256,
+            b"shared-secret",
+        );
+        let mut p = hello_packet();
+        apply_link_auth(&mut p, &crypto_ctx(1, sent, 1));
+        let mut buf = BytesMut::new();
+        p.emit(&mut buf);
+        let (_, parsed) = parse(&buf).expect("parse must succeed");
+
+        // Receiver thinks key-id 1 is SHA-1 (different digest len).
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert(
+            1u8,
+            hmac_key(
+                super::super::link::OspfCryptoAlgo::HmacSha1,
+                b"shared-secret",
+            ),
+        );
+        assert!(!verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &keys,
             0
         ));
     }

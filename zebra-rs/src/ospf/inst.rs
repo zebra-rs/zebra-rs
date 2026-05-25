@@ -172,10 +172,11 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// Snapshot of the configured simple-password key, if any.
     /// Only consulted when `auth_mode == Simple`.
     pub auth_key: Option<[u8; 8]>,
-    /// Snapshot of the active MD5 send key (lowest configured
-    /// key-id). `None` when `MessageDigest` is configured but no
-    /// key has been added yet.
-    pub md5_key: Option<(u8, [u8; 16])>,
+    /// Snapshot of the active cryptographic-auth send key (lowest
+    /// configured key-id across MD5 + HMAC-SHA entries). `None`
+    /// when `MessageDigest` is configured but no key has been
+    /// added yet.
+    pub crypto_key: Option<(u8, super::link::AuthKey)>,
     /// Borrow of the parent link's cryptographic-auth send
     /// counter. `AtomicU32` allows mutation through an `&` borrow
     /// so every send path can `fetch_add(1)` without taking `&mut`
@@ -206,7 +207,7 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
         crate::ospf::packet::AuthSendCtx {
             mode: self.auth_mode,
             simple_key: self.auth_key,
-            md5_key: self.md5_key,
+            crypto_key: self.crypto_key.clone(),
             md5_seq: s,
         }
     }
@@ -231,7 +232,7 @@ impl<V: OspfVersion> Ospf<V> {
             let retransmit_interval = link.retransmit_interval();
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
-            let md5_key = link.active_md5_key();
+            let crypto_key = link.active_crypto_key();
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -253,7 +254,7 @@ impl<V: OspfVersion> Ospf<V> {
                             network_type: link.network_type,
                             auth_mode,
                             auth_key,
-                            md5_key,
+                            crypto_key,
                             md5_seq: &link.md5_seq,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
@@ -1707,7 +1708,7 @@ impl Ospf<Ospfv2> {
             let link_state = link.state;
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
-            let md5_key = link.active_md5_key();
+            let crypto_key = link.active_crypto_key();
             let md5_seq_cell = &link.md5_seq;
 
             // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
@@ -1766,7 +1767,7 @@ impl Ospf<Ospfv2> {
                     Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
                 apply_link_auth(
                     &mut packet,
-                    &build_auth_ctx(auth_mode, auth_key, md5_key, md5_seq_cell),
+                    &build_auth_ctx(auth_mode, auth_key, crypto_key.clone(), md5_seq_cell),
                 );
                 tracing::info!(
                     "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
@@ -1814,7 +1815,7 @@ impl Ospf<Ospfv2> {
         let area_id = link.area;
         let auth_mode = link.auth_mode();
         let auth_key = link.config.auth_key;
-        let md5_key = link.active_md5_key();
+        let crypto_key = link.active_crypto_key();
         let md5_seq_cell = &link.md5_seq;
         let Some(nbr) = link.nbrs.get_mut(&addr) else {
             return;
@@ -1833,7 +1834,7 @@ impl Ospf<Ospfv2> {
             Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
         apply_link_auth(
             &mut packet,
-            &build_auth_ctx(auth_mode, auth_key, md5_key, md5_seq_cell),
+            &build_auth_ctx(auth_mode, auth_key, crypto_key.clone(), md5_seq_cell),
         );
         let _ = nbr.ptx.send(Message::Send(
             packet,
@@ -2009,7 +2010,7 @@ impl Ospf<Ospfv2> {
                 &packet,
                 link.auth_mode(),
                 link.config.auth_key,
-                &link.config.md5_keys,
+                &link.config.crypto_keys,
                 last_seq,
             ) {
                 tracing::debug!(
