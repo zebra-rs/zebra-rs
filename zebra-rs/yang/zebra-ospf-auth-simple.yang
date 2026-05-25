@@ -1,0 +1,112 @@
+module zebra-ospf-auth-simple {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospf-auth-simple";
+  prefix "zoas";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR / IOS style per-interface OSPFv2 authentication. The IETF
+     `ietf-ospf` model only describes the post-RFC 5709 cryptographic
+     authentication trailer (HMAC-SHA / key-chains); it has no leaf
+     for RFC 2328 §D Type 0 (Null) or Type 1 (Simple Password).
+
+     This module fills the gap with the flat FRR-style commands:
+
+       router ospf {
+         area 0 {
+           interface eth0 {
+             authentication simple;
+             authentication-key MYPASS;
+           }
+         }
+       }
+
+     Cryptographic auth (Type 2 / RFC 5709 trailer) will land in a
+     follow-up phase under the IETF `interface/authentication`
+     container; this module covers only Types 0 and 1.";
+
+  revision 2026-05-25 {
+    description "Initial revision: OSPFv2 Null / Simple-password.";
+    reference
+      "RFC 2328 §D.2/§D.3; FRR `ip ospf authentication [null|simple]`
+       and `ip ospf authentication-key`.";
+  }
+
+  typedef ospfv2-simple-auth-mode {
+    type enumeration {
+      enum "null" {
+        description "Null authentication (RFC 2328 §D.2, AuType=0).";
+      }
+      enum "simple" {
+        description
+          "Simple-password authentication (RFC 2328 §D.3, AuType=1).
+           Key is configured via the sibling `authentication-key`
+           leaf and zero-padded to 8 bytes on the wire.";
+      }
+    }
+    description
+      "OSPFv2 authentication mode covered by this module. Type 2
+       (cryptographic) is handled by the IETF model.";
+  }
+
+  grouping ospf-interface-auth-simple-extension {
+    description
+      "FRR-style flat authentication leaves on an OSPF interface.";
+
+    leaf authentication {
+      ext:help "OSPFv2 authentication mode (null|simple)";
+      type ospfv2-simple-auth-mode;
+      description
+        "Per-interface OSPFv2 authentication mode. When absent the
+         interface inherits the area / instance default (currently
+         always Null until area-level auth lands).";
+    }
+
+    leaf authentication-key {
+      ext:help "Simple-password key (1..8 chars)";
+      type string {
+        length "1..8";
+      }
+      description
+        "Simple-password key, plain text. RFC 2328 §D.3 caps the
+         on-wire field at 8 octets; longer keys are rejected at
+         commit time rather than silently truncated.";
+      reference "RFC 2328 §D.3";
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Attach the flat authentication leaves to each OSPF interface
+       in the candidate-set subtree.";
+    uses ospf-interface-auth-simple-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Same attachment in the delete subtree so
+       `delete router ospf area X interface Y authentication[-key]`
+       is path-valid.";
+    uses ospf-interface-auth-simple-extension;
+  }
+}

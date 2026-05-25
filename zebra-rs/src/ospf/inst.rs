@@ -16,7 +16,9 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::Ospfv2;
 use crate::ospf::addr::OspfAddr;
-use crate::ospf::packet::{ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send};
+use crate::ospf::packet::{
+    apply_link_auth, ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, verify_link_auth,
+};
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
@@ -152,6 +154,14 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// keys off this to decide 2-Way -> ExStart on P2P links without
     /// gating on DR/BDR.
     pub network_type: OspfNetworkType,
+    /// Snapshot of the parent link's resolved RFC 2328 §D
+    /// authentication mode. Cached here so packet builders that
+    /// only borrow `OspfInterface` (not `OspfLink`) can stamp
+    /// outbound packets without a second `links` lookup.
+    pub auth_mode: super::link::OspfAuthMode,
+    /// Snapshot of the configured simple-password key, if any.
+    /// Only consulted when `auth_mode == Simple`.
+    pub auth_key: Option<[u8; 8]>,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -183,6 +193,8 @@ impl<V: OspfVersion> Ospf<V> {
         self.links.get_mut(&ifindex).and_then(|link| {
             let link_area = link.area;
             let retransmit_interval = link.retransmit_interval();
+            let auth_mode = link.auth_mode();
+            let auth_key = link.config.auth_key;
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -202,6 +214,8 @@ impl<V: OspfVersion> Ospf<V> {
                             mtu_ignore: link.config.mtu_ignore,
                             retransmit_interval,
                             network_type: link.network_type,
+                            auth_mode,
+                            auth_key,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -1263,6 +1277,8 @@ impl Ospf<Ospfv2> {
             };
             let retransmit_interval = link.retransmit_interval();
             let link_state = link.state;
+            let auth_mode = link.auth_mode();
+            let auth_key = link.config.auth_key;
 
             // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
             let is_source_iface = source.is_some_and(|(src_if, _)| src_if == ifindex);
@@ -1316,8 +1332,9 @@ impl Ospf<Ospfv2> {
                     num_adv: 1,
                     lsas: vec![lsa.clone()],
                 };
-                let packet =
+                let mut packet =
                     Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
+                apply_link_auth(&mut packet, auth_mode, auth_key);
                 tracing::info!(
                     "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
                     lsa.h.ls_type,
@@ -1362,6 +1379,8 @@ impl Ospf<Ospfv2> {
         };
         let retransmit_interval = link.retransmit_interval();
         let area_id = link.area;
+        let auth_mode = link.auth_mode();
+        let auth_key = link.config.auth_key;
         let Some(nbr) = link.nbrs.get_mut(&addr) else {
             return;
         };
@@ -1375,7 +1394,9 @@ impl Ospf<Ospfv2> {
             num_adv: lsas.len() as u32,
             lsas,
         };
-        let packet = Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
+        let mut packet =
+            Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
+        apply_link_auth(&mut packet, auth_mode, auth_key);
         let _ = nbr.ptx.send(Message::Send(
             packet,
             nbr.ifindex,
@@ -1406,11 +1427,12 @@ impl Ospf<Ospfv2> {
         let Some(ref sent) = nbr.dd.sent else {
             return;
         };
-        let packet = Ospfv2Packet::new(
+        let mut packet = Ospfv2Packet::new(
             link.router_id,
             &link.area_id,
             Ospfv2Payload::DbDesc(sent.clone()),
         );
+        apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
         tracing::info!("[DB Desc:Retransmit] to {} seq={:#x}", addr, sent.seqnum);
         let _ = nbr.ptx.send(Message::Send(
             packet,
@@ -1455,7 +1477,9 @@ impl Ospf<Ospfv2> {
         let ls_ack = OspfLsAck {
             lsa_headers: ack_headers,
         };
-        let packet = Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
+        let mut packet =
+            Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
+        apply_link_auth(&mut packet, link.auth_mode(), link.config.auth_key);
         // Send to AllSPFRouters multicast.
         let _ = link.ptx.send(Message::Send(packet, ifindex, None));
     }
@@ -1528,6 +1552,26 @@ impl Ospf<Ospfv2> {
         // Drop self-originated packets (e.g. received on loopback interface).
         if packet.router_id == self.router_id {
             return;
+        }
+
+        // RFC 2328 §D.4: AuType + auth field must match the
+        // receiving interface's configured authentication. Snapshot
+        // the link's auth state in a short borrow scope so the
+        // per-type `links.get_mut` lookups below can proceed.
+        {
+            let Some(link) = self.links.get(&index) else {
+                return;
+            };
+            if !verify_link_auth(&packet, link.auth_mode(), link.config.auth_key) {
+                tracing::debug!(
+                    "OSPFv2 auth drop on {} from {}: type={} expected={:?}",
+                    link.name,
+                    src,
+                    packet.auth_type,
+                    link.auth_mode(),
+                );
+                return;
+            }
         }
 
         match packet.typ {
