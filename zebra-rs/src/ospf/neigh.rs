@@ -116,6 +116,11 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     /// Graceful-restart helper state. `Some` while we are helping
     /// this neighbor restart; `None` otherwise. See [`HelperState`].
     pub gr_helper: Option<HelperState>,
+    /// RFC 2328 §D.5 anti-replay state: highest cryptographic-auth
+    /// sequence number we've accepted from this neighbor. Inbound
+    /// packets must carry a seq ≥ this value; smaller values are
+    /// dropped as replays. Reset to 0 when the neighbor is created.
+    pub auth_md5_last_seq: u32,
 }
 
 #[bitfield(u8, debug = true)]
@@ -206,6 +211,7 @@ where
             last_regressive_reason: None,
             interface_id: 0,
             gr_helper: None,
+            auth_md5_last_seq: 0,
         };
         nbr.ident.prefix = prefix;
         nbr

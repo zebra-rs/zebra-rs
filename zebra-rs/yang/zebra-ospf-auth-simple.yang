@@ -61,10 +61,18 @@ module zebra-ospf-auth-simple {
            Key is configured via the sibling `authentication-key`
            leaf and zero-padded to 8 bytes on the wire.";
       }
+      enum "message-digest" {
+        description
+          "Cryptographic (MD5) authentication (RFC 2328 §D.4,
+           AuType=2). Per-key material is configured via the
+           sibling `message-digest-key` list from
+           zebra-ospf-auth-md5.yang.";
+      }
     }
     description
-      "OSPFv2 authentication mode covered by this module. Type 2
-       (cryptographic) is handled by the IETF model.";
+      "OSPFv2 authentication mode. RFC 5709 HMAC-SHA modes will
+       appear under the IETF cryptographic-auth container in a
+       later phase.";
   }
 
   grouping ospf-interface-auth-simple-extension {

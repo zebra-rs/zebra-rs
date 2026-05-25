@@ -27,48 +27,168 @@ use super::{
 /// this as a per-instance config knob.
 const MAX_GRACE_PERIOD_SECS: u32 = 1800;
 
+/// Resolved authentication state for a single outbound packet.
+/// Built by `OspfLink::auth_send_ctx()` and
+/// `OspfInterface::auth_send_ctx()` — both pre-bump the link's
+/// cryptographic-auth seq when applicable so the caller doesn't
+/// need a `&mut` on the link.
+pub(crate) struct AuthSendCtx {
+    pub mode: OspfAuthMode,
+    /// Simple-password key, zero-padded to 8 bytes.
+    pub simple_key: Option<[u8; 8]>,
+    /// Active MD5 send key as `(key-id, padded-key)`.
+    pub md5_key: Option<(u8, [u8; 16])>,
+    /// Cryptographic-auth sequence number to stamp into the
+    /// outbound packet. Already drawn from the link's counter.
+    pub md5_seq: u32,
+}
+
+/// Build an `AuthSendCtx` from already-snapshotted fields and a
+/// borrow of the seq atomic. Used by flood loops where calling
+/// `OspfLink::auth_send_ctx()` would conflict with the
+/// `nbrs.iter_mut()` borrow held over the loop body — the
+/// snapshot grabs `mode`/`simple_key`/`md5_key` once before the
+/// loop and the atomic lets us bump the seq per packet without
+/// ever reborrowing `link` for a method call.
+pub(super) fn build_auth_ctx(
+    mode: OspfAuthMode,
+    simple_key: Option<[u8; 8]>,
+    md5_key: Option<(u8, [u8; 16])>,
+    seq: &std::sync::atomic::AtomicU32,
+) -> AuthSendCtx {
+    AuthSendCtx {
+        mode,
+        simple_key,
+        md5_key,
+        md5_seq: seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    }
+}
+
 /// Stamp the configured authentication state into an outgoing
-/// OSPFv2 packet. `mode` and `key` come from the sending
-/// interface; callers thread them in via `OspfLink::auth_mode()` /
-/// `OspfInterface::auth_mode`. Called by every
-/// `Ospfv2Packet::new(...)` site so emit produces the right
-/// `auth_type` / `auth` shape.
-pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, mode: OspfAuthMode, key: Option<[u8; 8]>) {
-    match mode {
+/// OSPFv2 packet. For MessageDigest, also computes and appends
+/// the 16-byte MD5 trailer per RFC 2328 §D.4.3 (the digest
+/// covers the entire header+body with the key zero-padded to 16
+/// bytes appended in the hash, but those padded bytes are not
+/// transmitted on the wire).
+pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, ctx: &AuthSendCtx) {
+    use bytes::BytesMut;
+    use md5::{Digest, Md5};
+    use ospf_packet::Ospfv2AuthCrypto;
+
+    match ctx.mode {
         OspfAuthMode::Null => {
             packet.auth_type = 0;
             packet.auth = Ospfv2Auth::Null([0; 8]);
+            packet.auth_trailer.clear();
         }
         OspfAuthMode::Simple => {
             packet.auth_type = 1;
-            packet.auth = Ospfv2Auth::Simple(key.unwrap_or([0; 8]));
+            packet.auth = Ospfv2Auth::Simple(ctx.simple_key.unwrap_or([0; 8]));
+            packet.auth_trailer.clear();
+        }
+        OspfAuthMode::MessageDigest => {
+            let (key_id, padded_key) = ctx.md5_key.unwrap_or((0, [0; 16]));
+            // Stamp the crypto header overlay (RFC 2328 §D.3).
+            packet.auth_type = 2;
+            packet.auth = Ospfv2Auth::Crypto(Ospfv2AuthCrypto {
+                key_id,
+                auth_data_len: 16,
+                seq: ctx.md5_seq,
+            });
+            // Scratch-emit the body so we can hash (body + key).
+            // The real serialization at network::write_packet does
+            // a second emit of the same bytes, plus the trailer.
+            packet.auth_trailer.clear();
+            let mut scratch = BytesMut::new();
+            packet.emit(&mut scratch);
+            // RFC 2328 §D.4.3: MD5( OSPF packet || key padded to 16 ).
+            let mut h = Md5::new();
+            h.update(&scratch);
+            h.update(padded_key);
+            let digest = h.finalize();
+            packet.auth_trailer = digest.as_slice().to_vec();
         }
     }
 }
 
 /// Validate an inbound OSPFv2 packet against the receiving
-/// interface's configured authentication. RFC 2328 §D.4 requires
-/// AuType to match and, for Type 1, the simple-password to be
-/// identical. Returns `true` when the packet is acceptable; on
-/// `false` the caller drops it.
+/// interface's configured authentication. Returns `true` when
+/// the packet is acceptable. The caller must update the per-
+/// neighbor `auth_md5_last_seq` via `record_md5_seq()` afterward
+/// to enforce replay protection (RFC 2328 §D.5).
 pub(super) fn verify_link_auth(
     packet: &Ospfv2Packet,
     mode: OspfAuthMode,
-    key: Option<[u8; 8]>,
+    simple_key: Option<[u8; 8]>,
+    md5_keys: &std::collections::BTreeMap<u8, [u8; 16]>,
+    nbr_last_seq: u32,
 ) -> bool {
+    use md5::{Digest, Md5};
+
     match mode {
         OspfAuthMode::Null => packet.auth_type == 0,
         OspfAuthMode::Simple => match (&packet.auth_type, &packet.auth) {
             (1, Ospfv2Auth::Simple(rx)) => {
-                let expected = key.unwrap_or([0; 8]);
-                // Plain key bytes — constant-time compare is overkill
-                // for a password that already authenticates only the
-                // outer SYN-equivalent; FRR / IOS use plain compare.
+                let expected = simple_key.unwrap_or([0; 8]);
                 rx == &expected
             }
             _ => false,
         },
+        OspfAuthMode::MessageDigest => {
+            let crypto = match (&packet.auth_type, &packet.auth) {
+                (2, Ospfv2Auth::Crypto(c)) => c,
+                _ => return false,
+            };
+            // RFC 2328 §D.5 replay protection — sequence number
+            // must be ≥ the highest we've already accepted. `>=`
+            // is what FRR uses (allows duplicate-ack via
+            // resends); strict `>` would also be defensible.
+            if crypto.seq < nbr_last_seq {
+                return false;
+            }
+            // Look up the key by id; reject if the sender used
+            // a key we don't know.
+            let Some(padded_key) = md5_keys.get(&crypto.key_id) else {
+                return false;
+            };
+            // Length must match what we expect for MD5.
+            if crypto.auth_data_len != 16 || packet.auth_trailer.len() != 16 {
+                return false;
+            }
+            // Recompute the digest over raw_body (the bytes the
+            // sender hashed) plus the padded key.
+            let mut h = Md5::new();
+            h.update(&packet.raw_body);
+            h.update(padded_key);
+            let expected = h.finalize();
+            // Constant-time compare — MD5 broken aside, leaking
+            // first-mismatch position to a remote sender via
+            // timing is bad form.
+            constant_time_eq(&expected, &packet.auth_trailer)
+        }
     }
+}
+
+/// Record the cryptographic-auth sequence on a neighbor after a
+/// packet has been accepted. No-op for Null / Simple packets.
+pub(super) fn record_md5_seq<V: super::version::OspfVersion>(
+    packet: &Ospfv2Packet,
+    nbr: &mut Neighbor<V>,
+) {
+    if let Ospfv2Auth::Crypto(ref c) = packet.auth {
+        nbr.auth_md5_last_seq = c.seq;
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
 }
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
@@ -94,7 +214,7 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     }
 
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
-    apply_link_auth(&mut packet, oi.auth_mode(), oi.config.auth_key);
+    apply_link_auth(&mut packet, &oi.auth_send_ctx());
 
     Some(packet)
 }
@@ -296,7 +416,7 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
     }
 
     let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
-    apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
+    apply_link_auth(&mut packet, &link.auth_send_ctx());
     tracing::info!("DB_DESC: Send");
     // tracing::info!("{}", packet);
     let _ = nbr.ptx.send(Message::Send(
@@ -319,7 +439,7 @@ pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &I
     ospf_packet_ls_req_set(nbr, &mut ls_req);
 
     let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::LsRequest(ls_req));
-    apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
+    apply_link_auth(&mut packet, &link.auth_send_ctx());
     tracing::info!("[DB Desc:Send]");
     tracing::info!("{}", packet);
     nbr.ptx
@@ -565,7 +685,7 @@ fn ospf_db_desc_resend(oi: &OspfInterface, nbr: &Neighbor) {
         &oi.area_id,
         Ospfv2Payload::DbDesc(sent.clone()),
     );
-    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
+    apply_link_auth(&mut packet, &oi.auth_send_ctx());
     let _ = nbr.ptx.send(Message::Send(
         packet,
         nbr.ifindex,
@@ -580,7 +700,7 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
         lsas,
     };
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
-    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
+    apply_link_auth(&mut packet, &oi.auth_send_ctx());
     tracing::info!("[LS Update:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
@@ -595,7 +715,7 @@ pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<Osp
     let area = oi.area_id;
     let ls_ack = OspfLsAck { lsa_headers };
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
-    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
+    apply_link_auth(&mut packet, &oi.auth_send_ctx());
     tracing::info!("[LS Ack:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
@@ -1068,10 +1188,41 @@ mod auth_tests {
         )
     }
 
+    fn null_ctx() -> AuthSendCtx {
+        AuthSendCtx {
+            mode: OspfAuthMode::Null,
+            simple_key: None,
+            md5_key: None,
+            md5_seq: 0,
+        }
+    }
+
+    fn simple_ctx(key: [u8; 8]) -> AuthSendCtx {
+        AuthSendCtx {
+            mode: OspfAuthMode::Simple,
+            simple_key: Some(key),
+            md5_key: None,
+            md5_seq: 0,
+        }
+    }
+
+    fn md5_ctx(key_id: u8, padded: [u8; 16], seq: u32) -> AuthSendCtx {
+        AuthSendCtx {
+            mode: OspfAuthMode::MessageDigest,
+            simple_key: None,
+            md5_key: Some((key_id, padded)),
+            md5_seq: seq,
+        }
+    }
+
+    fn empty_md5_keys() -> std::collections::BTreeMap<u8, [u8; 16]> {
+        std::collections::BTreeMap::new()
+    }
+
     #[test]
     fn apply_null_stamps_type_zero() {
         let mut p = hello_packet();
-        apply_link_auth(&mut p, OspfAuthMode::Null, None);
+        apply_link_auth(&mut p, &null_ctx());
         assert_eq!(p.auth_type, 0);
         assert!(matches!(p.auth, Ospfv2Auth::Null(_)));
     }
@@ -1080,7 +1231,7 @@ mod auth_tests {
     fn apply_simple_pads_short_key() {
         let mut p = hello_packet();
         let key = *b"abc\0\0\0\0\0";
-        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(key));
+        apply_link_auth(&mut p, &simple_ctx(key));
         assert_eq!(p.auth_type, 1);
         match p.auth {
             Ospfv2Auth::Simple(rx) => assert_eq!(&rx, &key),
@@ -1091,26 +1242,120 @@ mod auth_tests {
     #[test]
     fn verify_null_accepts_type_zero_only() {
         let mut p = hello_packet();
-        apply_link_auth(&mut p, OspfAuthMode::Null, None);
-        assert!(verify_link_auth(&p, OspfAuthMode::Null, None));
+        apply_link_auth(&mut p, &null_ctx());
+        assert!(verify_link_auth(
+            &p,
+            OspfAuthMode::Null,
+            None,
+            &empty_md5_keys(),
+            0
+        ));
 
-        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(*b"x\0\0\0\0\0\0\0"));
-        assert!(!verify_link_auth(&p, OspfAuthMode::Null, None));
+        apply_link_auth(&mut p, &simple_ctx(*b"x\0\0\0\0\0\0\0"));
+        assert!(!verify_link_auth(
+            &p,
+            OspfAuthMode::Null,
+            None,
+            &empty_md5_keys(),
+            0
+        ));
     }
 
     #[test]
     fn verify_simple_requires_key_match() {
         let mut p = hello_packet();
         let key = *b"secret\0\0";
-        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(key));
+        apply_link_auth(&mut p, &simple_ctx(key));
 
-        assert!(verify_link_auth(&p, OspfAuthMode::Simple, Some(key)));
+        assert!(verify_link_auth(
+            &p,
+            OspfAuthMode::Simple,
+            Some(key),
+            &empty_md5_keys(),
+            0
+        ));
         assert!(!verify_link_auth(
             &p,
             OspfAuthMode::Simple,
-            Some(*b"other\0\0\0")
+            Some(*b"other\0\0\0"),
+            &empty_md5_keys(),
+            0
         ));
         // Wrong mode on the receiving side — drop.
-        assert!(!verify_link_auth(&p, OspfAuthMode::Null, None));
+        assert!(!verify_link_auth(
+            &p,
+            OspfAuthMode::Null,
+            None,
+            &empty_md5_keys(),
+            0
+        ));
+    }
+
+    #[test]
+    fn md5_emit_then_parse_verifies() {
+        use bytes::BytesMut;
+        use ospf_packet::parse;
+
+        let mut p = hello_packet();
+        let mut padded = [0u8; 16];
+        padded[..6].copy_from_slice(b"secret");
+        apply_link_auth(&mut p, &md5_ctx(7, padded, 0xCAFE_BABE));
+
+        // Crypto overlay must be set on the packet.
+        match &p.auth {
+            Ospfv2Auth::Crypto(c) => {
+                assert_eq!(c.key_id, 7);
+                assert_eq!(c.auth_data_len, 16);
+                assert_eq!(c.seq, 0xCAFE_BABE);
+            }
+            other => panic!("expected Crypto, got {:?}", other),
+        }
+        assert_eq!(p.auth_trailer.len(), 16);
+
+        // Serialize + reparse to exercise the receive path.
+        let mut buf = BytesMut::new();
+        p.emit(&mut buf);
+        let (rest, parsed) = parse(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.auth_trailer.len(), 16);
+
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert(7u8, padded);
+        // Accept with matching key + fresh seq.
+        assert!(verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &keys,
+            0
+        ));
+        // Replay: seq below high-watermark → reject.
+        assert!(!verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &keys,
+            0xCAFE_BABE + 1
+        ));
+        // Unknown key-id → reject.
+        let mut wrong_keys = std::collections::BTreeMap::new();
+        wrong_keys.insert(9u8, padded);
+        assert!(!verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &wrong_keys,
+            0
+        ));
+        // Same key-id, wrong material → reject.
+        let mut bad_keys = std::collections::BTreeMap::new();
+        bad_keys.insert(7u8, [0u8; 16]);
+        assert!(!verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &bad_keys,
+            0
+        ));
     }
 }
