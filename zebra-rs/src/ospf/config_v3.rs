@@ -60,6 +60,14 @@ impl Ospf<Ospfv3> {
                 "/area/interface/prefix-sid/absolute",
                 config_ospfv3_interface_prefix_sid_absolute,
             ),
+            (
+                "/area/interface/adjacency-sid/index",
+                config_ospfv3_interface_adjacency_sid_index,
+            ),
+            (
+                "/area/interface/adjacency-sid/absolute",
+                config_ospfv3_interface_adjacency_sid_absolute,
+            ),
             ("/segment-routing/mpls", config_ospfv3_sr_mpls),
         ];
         for (path, cb) in entries {
@@ -274,6 +282,47 @@ fn config_ospfv3_interface_prefix_sid_absolute(
         link.config.prefix_sid = Some(super::link::PrefixSid::Absolute(absolute));
     } else {
         link.config.prefix_sid = None;
+    }
+
+    Some(())
+}
+
+/// Storage-only Adjacency-SID config callbacks. Mirror the v2
+/// pair above; LSA origination lands once OSPFv3 grows its
+/// Extended-Link Opaque-LSA equivalent (RFC 8666 E-LSA work).
+fn config_ospfv3_interface_adjacency_sid_index(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.adjacency_sid = Some(super::link::AdjacencySid::Index(index));
+    } else {
+        link.config.adjacency_sid = None;
+    }
+
+    Some(())
+}
+
+fn config_ospfv3_interface_adjacency_sid_absolute(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.adjacency_sid = Some(super::link::AdjacencySid::Absolute(absolute));
+    } else {
+        link.config.adjacency_sid = None;
     }
 
     Some(())
