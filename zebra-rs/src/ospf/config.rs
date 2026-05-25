@@ -75,6 +75,10 @@ impl Ospf {
             config_ospf_interface_authentication_key,
         );
         self.ospf_add(
+            "/area/interface/message-digest-key/md5",
+            config_ospf_interface_md5_key,
+        );
+        self.ospf_add(
             "/area/interface/prefix-sid/index",
             config_ospf_interface_prefix_sid_index,
         );
@@ -447,6 +451,7 @@ fn config_ospf_interface_authentication(
         link.config.auth_mode = Some(match mode.as_str() {
             "null" => OspfAuthMode::Null,
             "simple" => OspfAuthMode::Simple,
+            "message-digest" => OspfAuthMode::MessageDigest,
             _ => return None,
         });
     } else {
@@ -479,6 +484,34 @@ fn config_ospf_interface_authentication_key(
         link.config.auth_key = Some(padded);
     } else {
         link.config.auth_key = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_md5_key(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let key_id: u8 = args.string()?.parse().ok()?;
+    if key_id == 0 {
+        return None;
+    }
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        let key = args.string()?;
+        let bytes = key.as_bytes();
+        // RFC 2328 §D.4 caps the simple MD5 key at 16 octets (the
+        // block size for the `MD5(packet || key)` construction).
+        // YANG also enforces `length 1..16`.
+        if bytes.is_empty() || bytes.len() > 16 {
+            return None;
+        }
+        let mut padded = [0u8; 16];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        link.config.md5_keys.insert(key_id, padded);
+    } else {
+        link.config.md5_keys.remove(&key_id);
     }
 
     Some(())

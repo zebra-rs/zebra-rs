@@ -17,7 +17,8 @@ use crate::config::{DisplayRequest, ShowChannel};
 use crate::ospf::Ospfv2;
 use crate::ospf::addr::OspfAddr;
 use crate::ospf::packet::{
-    apply_link_auth, ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send, verify_link_auth,
+    apply_link_auth, build_auth_ctx, ospf_db_desc_recv, ospf_hello_recv, ospf_hello_send,
+    record_md5_seq, verify_link_auth,
 };
 use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
@@ -162,6 +163,15 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// Snapshot of the configured simple-password key, if any.
     /// Only consulted when `auth_mode == Simple`.
     pub auth_key: Option<[u8; 8]>,
+    /// Snapshot of the active MD5 send key (lowest configured
+    /// key-id). `None` when `MessageDigest` is configured but no
+    /// key has been added yet.
+    pub md5_key: Option<(u8, [u8; 16])>,
+    /// Borrow of the parent link's cryptographic-auth send
+    /// counter. `AtomicU32` allows mutation through an `&` borrow
+    /// so every send path can `fetch_add(1)` without taking `&mut`
+    /// on the surrounding `OspfLink`.
+    pub md5_seq: &'a std::sync::atomic::AtomicU32,
     pub tracing: &'a OspfTracing,
     /// v3-only outbound packet channel borrow. Carries the `Ospfv3Send`
     /// sender that the `network_v6::write_packet_v6` task consumes.
@@ -174,6 +184,23 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// borrowed from `OspfLink::lsdb`; on v2 it's empty (no
     /// link-scope LSA types in RFC 2328).
     pub link_lsdb: &'a mut Lsdb<V>,
+}
+
+impl<'a, V: OspfVersion> OspfInterface<'a, V> {
+    /// Bundle the auth state needed to stamp one outbound packet.
+    /// Bumps the borrowed cryptographic-auth seq as a side effect
+    /// — mirrors `OspfLink::auth_send_ctx`.
+    pub fn auth_send_ctx(&self) -> crate::ospf::packet::AuthSendCtx {
+        let s = self
+            .md5_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::ospf::packet::AuthSendCtx {
+            mode: self.auth_mode,
+            simple_key: self.auth_key,
+            md5_key: self.md5_key,
+            md5_seq: s,
+        }
+    }
 }
 
 // Version-agnostic helpers. These methods touch only generic-safe
@@ -195,6 +222,7 @@ impl<V: OspfVersion> Ospf<V> {
             let retransmit_interval = link.retransmit_interval();
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
+            let md5_key = link.active_md5_key();
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -216,6 +244,8 @@ impl<V: OspfVersion> Ospf<V> {
                             network_type: link.network_type,
                             auth_mode,
                             auth_key,
+                            md5_key,
+                            md5_seq: &link.md5_seq,
                             tracing: &self.tracing,
                             v3_send_tx: self.v3_send_tx.as_ref(),
                             link_lsdb: &mut link.lsdb,
@@ -1528,6 +1558,8 @@ impl Ospf<Ospfv2> {
             let link_state = link.state;
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
+            let md5_key = link.active_md5_key();
+            let md5_seq_cell = &link.md5_seq;
 
             // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
             let is_source_iface = source.is_some_and(|(src_if, _)| src_if == ifindex);
@@ -1583,7 +1615,10 @@ impl Ospf<Ospfv2> {
                 };
                 let mut packet =
                     Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
-                apply_link_auth(&mut packet, auth_mode, auth_key);
+                apply_link_auth(
+                    &mut packet,
+                    &build_auth_ctx(auth_mode, auth_key, md5_key, md5_seq_cell),
+                );
                 tracing::info!(
                     "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
                     lsa.h.ls_type,
@@ -1630,6 +1665,8 @@ impl Ospf<Ospfv2> {
         let area_id = link.area;
         let auth_mode = link.auth_mode();
         let auth_key = link.config.auth_key;
+        let md5_key = link.active_md5_key();
+        let md5_seq_cell = &link.md5_seq;
         let Some(nbr) = link.nbrs.get_mut(&addr) else {
             return;
         };
@@ -1645,7 +1682,10 @@ impl Ospf<Ospfv2> {
         };
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
-        apply_link_auth(&mut packet, auth_mode, auth_key);
+        apply_link_auth(
+            &mut packet,
+            &build_auth_ctx(auth_mode, auth_key, md5_key, md5_seq_cell),
+        );
         let _ = nbr.ptx.send(Message::Send(
             packet,
             nbr.ifindex,
@@ -1681,7 +1721,7 @@ impl Ospf<Ospfv2> {
             &link.area_id,
             Ospfv2Payload::DbDesc(sent.clone()),
         );
-        apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
+        apply_link_auth(&mut packet, &link.auth_send_ctx());
         tracing::info!("[DB Desc:Retransmit] to {} seq={:#x}", addr, sent.seqnum);
         let _ = nbr.ptx.send(Message::Send(
             packet,
@@ -1728,7 +1768,7 @@ impl Ospf<Ospfv2> {
         };
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
-        apply_link_auth(&mut packet, link.auth_mode(), link.config.auth_key);
+        apply_link_auth(&mut packet, &link.auth_send_ctx());
         // Send to AllSPFRouters multicast.
         let _ = link.ptx.send(Message::Send(packet, ifindex, None));
     }
@@ -1804,14 +1844,25 @@ impl Ospf<Ospfv2> {
         }
 
         // RFC 2328 §D.4: AuType + auth field must match the
-        // receiving interface's configured authentication. Snapshot
-        // the link's auth state in a short borrow scope so the
-        // per-type `links.get_mut` lookups below can proceed.
+        // receiving interface's configured authentication. RFC §D.5
+        // adds anti-replay for Type 2 — packets with a seq below
+        // the per-neighbor high-watermark are dropped.
         {
             let Some(link) = self.links.get(&index) else {
                 return;
             };
-            if !verify_link_auth(&packet, link.auth_mode(), link.config.auth_key) {
+            let last_seq = link
+                .nbrs
+                .get(&src)
+                .map(|n| n.auth_md5_last_seq)
+                .unwrap_or(0);
+            if !verify_link_auth(
+                &packet,
+                link.auth_mode(),
+                link.config.auth_key,
+                &link.config.md5_keys,
+                last_seq,
+            ) {
                 tracing::debug!(
                     "OSPFv2 auth drop on {} from {}: type={} expected={:?}",
                     link.name,
@@ -1829,29 +1880,39 @@ impl Ospf<Ospfv2> {
                     return;
                 };
                 ospf_hello_recv(&self.router_id, link, &packet, &src, &self.tracing);
+                // Hello creates the neighbor on first sight; stamp
+                // the accepted seq after the create so subsequent
+                // packets from this peer enforce monotonicity.
+                if let Some(nbr) = link.nbrs.get_mut(&src) {
+                    record_md5_seq(&packet, nbr);
+                }
             }
             OspfType::DbDesc => {
                 let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
                     return;
                 };
+                record_md5_seq(&packet, nbr);
                 ospf_db_desc_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::LsRequest => {
                 let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
                     return;
                 };
+                record_md5_seq(&packet, nbr);
                 ospf_ls_req_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::LsUpdate => {
                 let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
                     return;
                 };
+                record_md5_seq(&packet, nbr);
                 ospf_ls_upd_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::LsAck => {
                 let Some((mut link, nbr)) = self.ospf_interface(index, &src) else {
                     return;
                 };
+                record_md5_seq(&packet, nbr);
                 ospf_ls_ack_recv(&mut link, nbr, &packet, &src);
             }
             OspfType::Unknown(_typ) => {

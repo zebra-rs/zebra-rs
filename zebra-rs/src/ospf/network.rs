@@ -51,8 +51,21 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 // RFC 2328: Header verification.
 
                 // RFC 2328: Authentication and checksum verification.
+                // For Type 2 (cryptographic) packets the on-wire
+                // form is (header + body) followed by a digest
+                // trailer; the OSPF header `len` field excludes the
+                // trailer. Slice to that length before checksumming
+                // — otherwise trailer bytes would corrupt the
+                // 1's-complement sum on any Type 2 ingress.
                 let ospf_input = &input[IPV4_HEADER_LEN..];
-                if ospf_packet::validate_checksum(ospf_input).is_err() {
+                if ospf_input.len() < 4 {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                }
+                let pkt_len = u16::from_be_bytes([ospf_input[2], ospf_input[3]]) as usize;
+                if pkt_len < 24 || ospf_input.len() < pkt_len {
+                    return Err(ErrorKind::InvalidData.into());
+                }
+                if ospf_packet::validate_checksum(&ospf_input[..pkt_len]).is_err() {
                     return Err(ErrorKind::InvalidData.into());
                 }
 

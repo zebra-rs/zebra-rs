@@ -37,6 +37,13 @@ pub struct Ospfv2Packet {
     /// `parse()` when `auth_type == 2`; empty otherwise.
     #[nom(Ignore)]
     pub auth_trailer: Vec<u8>,
+    /// On-wire bytes covered by the cryptographic-auth digest:
+    /// header (with the Crypto auth overlay) + body, i.e.
+    /// `input[..pkt_len]`. Populated by `parse()` for every packet
+    /// so receive-side verification can re-hash exactly what the
+    /// sender hashed. Empty for packets built via `new()`.
+    #[nom(Ignore)]
+    pub raw_body: Vec<u8>,
 }
 
 impl Ospfv2Packet {
@@ -52,6 +59,7 @@ impl Ospfv2Packet {
             auth: Ospfv2Auth::default(),
             payload,
             auth_trailer: Vec::new(),
+            raw_body: Vec::new(),
         }
     }
 
@@ -2155,6 +2163,10 @@ pub fn parse(input: &[u8]) -> IResult<&[u8], Ospfv2Packet> {
         return Err(Err::Error(make_error(input, ErrorKind::Verify)));
     }
     let (_, mut packet) = Ospfv2Packet::parse_be(&input[..pkt_len])?;
+    // Cache the on-wire bytes covered by the cryptographic-auth
+    // digest — receive-side verification recomputes MD5 over this
+    // exact slice + the padded key (RFC 2328 §D.4.3).
+    packet.raw_body = input[..pkt_len].to_vec();
 
     // RFC 2328 §D.4: a cryptographic-auth (type 2) packet carries
     // the digest as a trailer after the OSPF body; `auth_data_len`
@@ -2250,6 +2262,9 @@ mod tests {
             other => panic!("expected Crypto, got {:?}", other),
         }
         assert_eq!(parsed.auth_trailer, vec![0xAB; 16]);
+        // raw_body must hold the bytes that were hashed (header +
+        // body, no trailer) so verifiers can recompute the digest.
+        assert_eq!(parsed.raw_body, buf[..hdr_len].to_vec());
     }
 
     #[test]

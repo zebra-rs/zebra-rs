@@ -1,0 +1,111 @@
+module zebra-ospf-auth-md5 {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospf-auth-md5";
+  prefix "zoam";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR / IOS style per-interface OSPFv2 cryptographic (MD5)
+     authentication (RFC 2328 §D.4). Sits alongside
+     zebra-ospf-auth-simple.yang, which covers Null and Simple
+     password (RFC 2328 §D.2 / §D.3).
+
+     The `authentication` enum from -auth-simple is repurposed:
+     `message-digest` selects MD5 cryptographic authentication, and
+     the per-key material is configured under the
+     `message-digest-key` list keyed by 8-bit key-id.
+
+       router ospf {
+         area 0 {
+           interface eth0 {
+             authentication message-digest;
+             message-digest-key 1 {
+               md5 SECRET;
+             }
+           }
+         }
+       }
+
+     HMAC-SHA generalization (RFC 5709 / 7474) and key-chains
+     (RFC 8177) land in follow-up phases under the IETF
+     `interface/authentication` container.";
+
+  revision 2026-05-25 {
+    description "Initial revision: OSPFv2 MD5 cryptographic auth.";
+    reference "RFC 2328 §D.4; FRR `ip ospf message-digest-key`.";
+  }
+
+  grouping ospf-interface-md5-extension {
+    description
+      "FRR-style cryptographic-auth leaves on an OSPF interface.";
+
+    list message-digest-key {
+      ext:help "MD5 key keyed by 1..255 key-id";
+      key "key-id";
+      description
+        "One MD5 key per key-id. The active sending key is the
+         lowest configured key-id; received packets are validated
+         against whichever key-id the sender stamped in the
+         cryptographic-auth header overlay (RFC 2328 §D.4.2).";
+
+      leaf key-id {
+        type uint8 {
+          range "1..255";
+        }
+        description
+          "MD5 key identifier carried in the packet's
+           cryptographic-auth header (RFC 2328 §D.3 figure 17).
+           Zero is reserved and rejected.";
+      }
+
+      leaf md5 {
+        ext:help "MD5 secret (1..16 octets, plain text)";
+        type string {
+          length "1..16";
+        }
+        mandatory true;
+        description
+          "MD5 shared secret in plain text. RFC 2328 §D.4 caps the
+           key at 16 octets (the MD5 block size for the simple
+           `MD5(packet || key)` construction). HMAC-SHA-flavored
+           longer keys land in a later phase under the IETF
+           cryptographic-auth container.";
+      }
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Attach the message-digest-key list to each OSPF interface
+       in the candidate-set subtree.";
+    uses ospf-interface-md5-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description
+      "Same attachment in the delete subtree so
+       `delete router ospf area X interface Y message-digest-key Z`
+       is path-valid.";
+    uses ospf-interface-md5-extension;
+  }
+}

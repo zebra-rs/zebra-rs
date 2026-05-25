@@ -78,18 +78,22 @@ pub struct LinkConfig {
     pub network_type: Option<OspfNetworkType>,
     /// RFC 2328 §D authentication mode. `None` = inherit (Null
     /// today, until area/instance defaults land); `Some(Null)` is
-    /// an explicit override. Cryptographic auth (Type 2) lands in
-    /// a later phase under the IETF `interface/authentication`
-    /// container.
+    /// an explicit override.
     pub auth_mode: Option<OspfAuthMode>,
     /// Simple-password key, already zero-padded to the 8-octet
     /// on-wire field. Only consulted when `auth_mode == Simple`.
     pub auth_key: Option<[u8; 8]>,
+    /// MD5 cryptographic-auth keys keyed by key-id (RFC 2328
+    /// §D.4). Each value is the 1..16-octet ASCII key
+    /// zero-padded to 16 bytes — the on-wire format expected by
+    /// the digest computation. Only consulted when
+    /// `auth_mode == MessageDigest`.
+    pub md5_keys: BTreeMap<u8, [u8; 16]>,
 }
 
-/// OSPFv2 per-interface authentication mode covered by this phase.
-/// Cryptographic auth (Type 2, RFC 2328 §D.4 / RFC 5709) will
-/// appear as an additional variant in a follow-up phase.
+/// OSPFv2 per-interface authentication mode.
+/// RFC 5709 HMAC-SHA modes will appear as additional variants in a
+/// follow-up phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OspfAuthMode {
     /// RFC 2328 §D.2 — AuType 0, header auth field ignored.
@@ -97,6 +101,10 @@ pub enum OspfAuthMode {
     /// RFC 2328 §D.3 — AuType 1, header auth field carries the
     /// plain key zero-padded to 8 bytes.
     Simple,
+    /// RFC 2328 §D.4 — AuType 2, header overlay carries (key-id,
+    /// digest-length, seq) and the body is followed by a 16-byte
+    /// MD5 trailer.
+    MessageDigest,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +182,17 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub full_nbr_count: usize,
     pub ptx: UnboundedSender<Message<V>>,
     pub config: LinkConfig,
+    /// Outbound RFC 2328 §D.4 cryptographic-auth sequence number.
+    /// Monotonically increasing per interface across the link's
+    /// lifetime; initialized to wall-clock seconds at link create
+    /// so a daemon restart still produces a strictly larger value
+    /// than the previous instance was using (RFC §D.4.3). Atomic
+    /// so `&OspfLink` send paths can `fetch_add(1)` without an
+    /// `&mut` borrow that would conflict with the surrounding
+    /// `link.nbrs.iter_mut()` flood loops, while staying `Sync`
+    /// (the show-info path borrows the parent `Ospf<V>` across
+    /// `.await`).
+    pub md5_seq: std::sync::atomic::AtomicU32,
     pub ls_ack_delayed: Vec<V::LsaHeader>,
     /// 32-bit Interface ID advertised in v3 Hellos and Router-LSA
     /// links (RFC 5340 §A.3.2 / §A.4.3). Unused by v2 (where the
@@ -235,6 +254,15 @@ where
             full_nbr_count: 0,
             ptx,
             config: LinkConfig::default(),
+            // RFC 2328 §D.4.3: seed the cryptographic-auth seq with
+            // wall-clock seconds so a daemon restart still produces
+            // a strictly larger value than the previous instance.
+            md5_seq: std::sync::atomic::AtomicU32::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0),
+            ),
             ls_ack_delayed: Vec::new(),
             interface_id: link.index,
             lsdb: super::lsdb::Lsdb::new(),
@@ -303,6 +331,35 @@ impl<V: OspfVersion> OspfLink<V> {
     /// to Null when no mode is configured — RFC 2328 §D.2.
     pub fn auth_mode(&self) -> OspfAuthMode {
         self.config.auth_mode.unwrap_or(OspfAuthMode::Null)
+    }
+
+    /// Return the active MD5 send key (lowest configured key-id)
+    /// alongside its key-id, or `None` if no keys are configured.
+    /// Key rollover (per-key send/accept lifetimes) lives in the
+    /// Phase 4 key-chain plumbing.
+    pub fn active_md5_key(&self) -> Option<(u8, [u8; 16])> {
+        self.config.md5_keys.iter().next().map(|(&id, &k)| (id, k))
+    }
+
+    /// Read and increment the per-interface cryptographic-auth
+    /// sequence number. Each outbound MD5 packet consumes one
+    /// value; wrap is u32 (the on-wire field width) so the
+    /// counter is allowed to roll over after ~136 years.
+    pub fn next_md5_seq(&self) -> u32 {
+        self.md5_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bundle the auth state needed to stamp one outbound packet.
+    /// Bumps the cryptographic-auth seq as a side effect — call
+    /// once per packet, not once per buffer reuse.
+    pub fn auth_send_ctx(&self) -> super::packet::AuthSendCtx {
+        super::packet::AuthSendCtx {
+            mode: self.auth_mode(),
+            simple_key: self.config.auth_key,
+            md5_key: self.active_md5_key(),
+            md5_seq: self.next_md5_seq(),
+        }
     }
 }
 
