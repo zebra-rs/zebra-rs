@@ -76,6 +76,27 @@ pub struct LinkConfig {
     pub prefix_sid: Option<PrefixSid>,
     pub adjacency_sid: Option<AdjacencySid>,
     pub network_type: Option<OspfNetworkType>,
+    /// RFC 2328 §D authentication mode. `None` = inherit (Null
+    /// today, until area/instance defaults land); `Some(Null)` is
+    /// an explicit override. Cryptographic auth (Type 2) lands in
+    /// a later phase under the IETF `interface/authentication`
+    /// container.
+    pub auth_mode: Option<OspfAuthMode>,
+    /// Simple-password key, already zero-padded to the 8-octet
+    /// on-wire field. Only consulted when `auth_mode == Simple`.
+    pub auth_key: Option<[u8; 8]>,
+}
+
+/// OSPFv2 per-interface authentication mode covered by this phase.
+/// Cryptographic auth (Type 2, RFC 2328 §D.4 / RFC 5709) will
+/// appear as an additional variant in a follow-up phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OspfAuthMode {
+    /// RFC 2328 §D.2 — AuType 0, header auth field ignored.
+    Null,
+    /// RFC 2328 §D.3 — AuType 1, header auth field carries the
+    /// plain key zero-padded to 8 bytes.
+    Simple,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -276,6 +297,12 @@ impl<V: OspfVersion> OspfLink<V> {
         self.config
             .network_type
             .unwrap_or(OspfNetworkType::Broadcast)
+    }
+
+    /// Effective authentication mode for this interface. Defaults
+    /// to Null when no mode is configured — RFC 2328 §D.2.
+    pub fn auth_mode(&self) -> OspfAuthMode {
+        self.config.auth_mode.unwrap_or(OspfAuthMode::Null)
     }
 }
 

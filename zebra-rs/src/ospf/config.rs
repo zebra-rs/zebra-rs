@@ -5,7 +5,7 @@ use super::Ospf;
 use super::OspfLink;
 use super::area::{AreaTypeKind, NssaTranslatorRole};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
-use super::link::OspfNetworkType;
+use super::link::{OspfAuthMode, OspfNetworkType};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::version::{OspfVersion, Ospfv2};
 
@@ -65,6 +65,14 @@ impl Ospf {
         self.ospf_add(
             "/area/interface/mtu-ignore",
             config_ospf_interface_mtu_ignore,
+        );
+        self.ospf_add(
+            "/area/interface/authentication",
+            config_ospf_interface_authentication,
+        );
+        self.ospf_add(
+            "/area/interface/authentication-key",
+            config_ospf_interface_authentication_key,
         );
         self.ospf_add(
             "/area/interface/prefix-sid/index",
@@ -410,6 +418,57 @@ fn config_ospf_interface_mtu_ignore(ospf: &mut Ospf, mut args: Args, op: ConfigO
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     link.config.mtu_ignore = op.is_set() && mtu_ignore;
+
+    Some(())
+}
+
+fn config_ospf_interface_authentication(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let mode = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.auth_mode = Some(match mode.as_str() {
+            "null" => OspfAuthMode::Null,
+            "simple" => OspfAuthMode::Simple,
+            _ => return None,
+        });
+    } else {
+        link.config.auth_mode = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_authentication_key(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let key = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        // RFC 2328 §D.3 caps the simple-password at 8 octets. YANG
+        // also enforces `length 1..8`; this is a belt-and-suspenders
+        // truncation in case the schema isn't loaded.
+        let bytes = key.as_bytes();
+        if bytes.is_empty() || bytes.len() > 8 {
+            return None;
+        }
+        let mut padded = [0u8; 8];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        link.config.auth_key = Some(padded);
+    } else {
+        link.config.auth_key = None;
+    }
 
     Some(())
 }

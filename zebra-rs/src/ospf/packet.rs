@@ -15,10 +15,54 @@ use crate::{
 
 use super::{
     FloodScope, Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, lsa_flood_scope, lsdb::OSPF_MAX_AGE, lsdb::OSPF_MAX_AGE_DIFF,
-    lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa, ospf_is_self_originated,
-    ospf_ls_request_lookup, tracing::OspfTracing,
+    inst::OspfInterface, link::OspfAuthMode, lsa_flood_scope, lsdb::OSPF_MAX_AGE,
+    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa,
+    ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
 };
+
+/// Stamp the configured authentication state into an outgoing
+/// OSPFv2 packet. `mode` and `key` come from the sending
+/// interface; callers thread them in via `OspfLink::auth_mode()` /
+/// `OspfInterface::auth_mode`. Called by every
+/// `Ospfv2Packet::new(...)` site so emit produces the right
+/// `auth_type` / `auth` shape.
+pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, mode: OspfAuthMode, key: Option<[u8; 8]>) {
+    match mode {
+        OspfAuthMode::Null => {
+            packet.auth_type = 0;
+            packet.auth = Ospfv2Auth::Null([0; 8]);
+        }
+        OspfAuthMode::Simple => {
+            packet.auth_type = 1;
+            packet.auth = Ospfv2Auth::Simple(key.unwrap_or([0; 8]));
+        }
+    }
+}
+
+/// Validate an inbound OSPFv2 packet against the receiving
+/// interface's configured authentication. RFC 2328 §D.4 requires
+/// AuType to match and, for Type 1, the simple-password to be
+/// identical. Returns `true` when the packet is acceptable; on
+/// `false` the caller drops it.
+pub(super) fn verify_link_auth(
+    packet: &Ospfv2Packet,
+    mode: OspfAuthMode,
+    key: Option<[u8; 8]>,
+) -> bool {
+    match mode {
+        OspfAuthMode::Null => packet.auth_type == 0,
+        OspfAuthMode::Simple => match (&packet.auth_type, &packet.auth) {
+            (1, Ospfv2Auth::Simple(rx)) => {
+                let expected = key.unwrap_or([0; 8]);
+                // Plain key bytes — constant-time compare is overkill
+                // for a password that already authenticates only the
+                // outer SYN-equivalent; FRR / IOS use plain compare.
+                rx == &expected
+            }
+            _ => false,
+        },
+    }
+}
 
 pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     let addr = oi.addr.first()?;
@@ -42,7 +86,8 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
         hello.neighbors.push(nbr.ident.router_id);
     }
 
-    let packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
+    let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
+    apply_link_auth(&mut packet, oi.auth_mode(), oi.config.auth_key);
 
     Some(packet)
 }
@@ -243,7 +288,8 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
         nbr.timer.db_desc = None;
     }
 
-    let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
+    let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
+    apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
     tracing::info!("DB_DESC: Send");
     // tracing::info!("{}", packet);
     let _ = nbr.ptx.send(Message::Send(
@@ -265,7 +311,8 @@ pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &I
 
     ospf_packet_ls_req_set(nbr, &mut ls_req);
 
-    let packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::LsRequest(ls_req));
+    let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::LsRequest(ls_req));
+    apply_link_auth(&mut packet, link.auth_mode, link.auth_key);
     tracing::info!("[DB Desc:Send]");
     tracing::info!("{}", packet);
     nbr.ptx
@@ -506,11 +553,12 @@ fn ospf_db_desc_resend(oi: &OspfInterface, nbr: &Neighbor) {
     let Some(ref sent) = nbr.dd.sent else {
         return;
     };
-    let packet = Ospfv2Packet::new(
+    let mut packet = Ospfv2Packet::new(
         &oi.ident.router_id,
         &oi.area_id,
         Ospfv2Payload::DbDesc(sent.clone()),
     );
+    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
     let _ = nbr.ptx.send(Message::Send(
         packet,
         nbr.ifindex,
@@ -524,7 +572,8 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
         num_adv: lsas.len() as u32,
         lsas,
     };
-    let packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
+    let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
+    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
     tracing::info!("[LS Update:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
@@ -538,7 +587,8 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
 pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<OspfLsaHeader>) {
     let area = oi.area_id;
     let ls_ack = OspfLsAck { lsa_headers };
-    let packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
+    let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
+    apply_link_auth(&mut packet, oi.auth_mode, oi.auth_key);
     tracing::info!("[LS Ack:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
@@ -862,5 +912,75 @@ pub fn ospf_ls_ack_recv(
     }
     if nbr.ls_rxmt.is_empty() {
         nbr.timer.ls_rxmt = None;
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use ospf_packet::{OspfHello, OspfOptions, Ospfv2Packet, Ospfv2Payload};
+
+    fn hello_packet() -> Ospfv2Packet {
+        let hello = OspfHello {
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            hello_interval: 10,
+            options: OspfOptions::new().with_external(true),
+            priority: 1,
+            router_dead_interval: 40,
+            d_router: Ipv4Addr::UNSPECIFIED,
+            bd_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: Vec::new(),
+        };
+        Ospfv2Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::UNSPECIFIED,
+            Ospfv2Payload::Hello(hello),
+        )
+    }
+
+    #[test]
+    fn apply_null_stamps_type_zero() {
+        let mut p = hello_packet();
+        apply_link_auth(&mut p, OspfAuthMode::Null, None);
+        assert_eq!(p.auth_type, 0);
+        assert!(matches!(p.auth, Ospfv2Auth::Null(_)));
+    }
+
+    #[test]
+    fn apply_simple_pads_short_key() {
+        let mut p = hello_packet();
+        let key = *b"abc\0\0\0\0\0";
+        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(key));
+        assert_eq!(p.auth_type, 1);
+        match p.auth {
+            Ospfv2Auth::Simple(rx) => assert_eq!(&rx, &key),
+            other => panic!("expected Simple, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn verify_null_accepts_type_zero_only() {
+        let mut p = hello_packet();
+        apply_link_auth(&mut p, OspfAuthMode::Null, None);
+        assert!(verify_link_auth(&p, OspfAuthMode::Null, None));
+
+        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(*b"x\0\0\0\0\0\0\0"));
+        assert!(!verify_link_auth(&p, OspfAuthMode::Null, None));
+    }
+
+    #[test]
+    fn verify_simple_requires_key_match() {
+        let mut p = hello_packet();
+        let key = *b"secret\0\0";
+        apply_link_auth(&mut p, OspfAuthMode::Simple, Some(key));
+
+        assert!(verify_link_auth(&p, OspfAuthMode::Simple, Some(key)));
+        assert!(!verify_link_auth(
+            &p,
+            OspfAuthMode::Simple,
+            Some(*b"other\0\0\0")
+        ));
+        // Wrong mode on the receiving side — drop.
+        assert!(!verify_link_auth(&p, OspfAuthMode::Null, None));
     }
 }
