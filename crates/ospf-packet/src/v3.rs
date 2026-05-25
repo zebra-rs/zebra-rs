@@ -45,7 +45,9 @@ use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::{ParseBe, many0_complete};
 
+use super::parser::AdjSidFlags;
 use super::{DbDescFlags, OspfType};
+use packet_utils::SidLabelTlv;
 
 /// OSPFv3 protocol version (header octet 0).
 pub const OSPFV3_VERSION: u8 = 3;
@@ -574,7 +576,7 @@ impl ParseBe<Ospfv3RouterLinkType> for Ospfv3RouterLinkType {
 ///   - v2's `num_tos / tos_0_metric` pattern collapses to a fixed
 ///     16-bit `metric` (v3 drops the TOS-routing carry-over);
 ///   - the v2 stub-network link type (3) is gone.
-#[derive(Debug, Clone, NomBE)]
+#[derive(Debug, Clone, PartialEq, NomBE)]
 pub struct Ospfv3RouterLsaLink {
     pub link_type: Ospfv3RouterLinkType,
     pub reserved: u8,
@@ -1397,15 +1399,270 @@ pub const OSPFV3_E_LINK_LSA_TYPE: u16 = 0x8028;
 /// E-Intra-Area-Prefix-LSA (RFC 8362 §4): U=1, S=01 (area), fc=41.
 pub const OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE: u16 = 0xA029;
 
+// ---------------------------------------------------------------------
+// RFC 8362 §4 top-level TLV type codes (subset implemented here).
+//
+// IANA "OSPFv3 Extended-LSA TLV Types" registry — PR-D2 adds typed
+// Router-Link TLV; the remaining type codes (Attached-Routers,
+// Inter-Area-Prefix, External-Prefix, Intra-Area-Prefix, …) fall back
+// to `Ospfv3ExtTlv::Unknown` until later PRs decode them.
+/// Router-Link TLV inside an E-Router-LSA (RFC 8362 §5.1).
+pub const OSPFV3_EXT_TLV_ROUTER_LINK: u16 = 1;
+
+// ---------------------------------------------------------------------
+// RFC 8666 OSPFv3 SR sub-TLV type codes.
+//
+// IANA "OSPFv3 Extended-LSA Sub-TLV Types" registry. Same bit
+// assignments as their RFC 8665 OSPFv2 counterparts, but the on-the-
+// wire layout inside the sub-TLV value differs (wider Weight field,
+// no MT-ID) so the Rust shapes are distinct.
+/// Adj-SID Sub-TLV (RFC 8666 §6.1) carried inside a Router-Link TLV.
+pub const OSPFV3_SUB_TLV_ADJ_SID: u16 = 6;
+/// LAN-Adj-SID Sub-TLV (RFC 8666 §6.2) carried inside a Router-Link TLV.
+pub const OSPFV3_SUB_TLV_LAN_ADJ_SID: u16 = 7;
+
+/// Adj-SID Sub-TLV (RFC 8666 §6.1).
+///
+/// Wire layout: flags(1) + reserved(1) + weight(2) + SID(3 or 4).
+/// `AdjSidFlags` reused verbatim — the same B / V / L / G / P bit
+/// assignments as the OSPFv2 Adj-SID Sub-TLV (RFC 8665 §5); only the
+/// surrounding wire layout (16-bit Weight, no MT-ID) differs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3AdjSidSubTlv {
+    pub flags: AdjSidFlags,
+    pub weight: u16,
+    pub sid: SidLabelTlv,
+}
+
+impl Ospfv3AdjSidSubTlv {
+    fn value_len(&self) -> u16 {
+        // flags(1) + reserved(1) + weight(2) + sid(3 or 4)
+        4 + match &self.sid {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(0); // reserved
+        buf.put_u16(self.weight);
+        match &self.sid {
+            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
+            SidLabelTlv::Index(v) => buf.put_u32(*v),
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, weight) = be_u16(input)?;
+        let sid_len = input.len();
+        let (input, sid) = match sid_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => {
+                return Err(nom::Err::Incomplete(nom::Needed::new(sid_len)));
+            }
+        };
+        Ok((
+            input,
+            Self {
+                flags: flags.into(),
+                weight,
+                sid,
+            },
+        ))
+    }
+}
+
+/// LAN-Adj-SID Sub-TLV (RFC 8666 §6.2).
+///
+/// Same shape as `Ospfv3AdjSidSubTlv` plus a 32-bit Neighbor Router ID
+/// (the router-id that uniquely identifies the neighbor on the
+/// broadcast / NBMA segment this Adj-SID points at).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3LanAdjSidSubTlv {
+    pub flags: AdjSidFlags,
+    pub weight: u16,
+    pub neighbor_router_id: Ipv4Addr,
+    pub sid: SidLabelTlv,
+}
+
+impl Ospfv3LanAdjSidSubTlv {
+    fn value_len(&self) -> u16 {
+        // flags(1) + reserved(1) + weight(2) + neighbor_router_id(4) + sid(3 or 4)
+        8 + match &self.sid {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(0); // reserved
+        buf.put_u16(self.weight);
+        buf.put(&self.neighbor_router_id.octets()[..]);
+        match &self.sid {
+            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
+            SidLabelTlv::Index(v) => buf.put_u32(*v),
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, weight) = be_u16(input)?;
+        let (input, neighbor_router_id) = Ipv4Addr::parse_be(input)?;
+        let sid_len = input.len();
+        let (input, sid) = match sid_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => {
+                return Err(nom::Err::Incomplete(nom::Needed::new(sid_len)));
+            }
+        };
+        Ok((
+            input,
+            Self {
+                flags: flags.into(),
+                weight,
+                neighbor_router_id,
+                sid,
+            },
+        ))
+    }
+}
+
+/// A sub-TLV inside a top-level Extended-LSA TLV (RFC 8362 §3
+/// nesting; RFC 8666 SR sub-TLV registry). Decoded variants surface
+/// the typed shape; everything else round-trips through `Unknown`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ospfv3SubTlv {
+    AdjSid(Ospfv3AdjSidSubTlv),
+    LanAdjSid(Ospfv3LanAdjSidSubTlv),
+    Unknown { typ: u16, value: Vec<u8> },
+}
+
+impl Ospfv3SubTlv {
+    fn wire_len(&self) -> usize {
+        let value_len = match self {
+            Ospfv3SubTlv::AdjSid(s) => s.value_len() as usize,
+            Ospfv3SubTlv::LanAdjSid(s) => s.value_len() as usize,
+            Ospfv3SubTlv::Unknown { value, .. } => value.len(),
+        };
+        4 + ((value_len + 3) & !3)
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, value_len) = match self {
+            Ospfv3SubTlv::AdjSid(s) => (OSPFV3_SUB_TLV_ADJ_SID, s.value_len()),
+            Ospfv3SubTlv::LanAdjSid(s) => (OSPFV3_SUB_TLV_LAN_ADJ_SID, s.value_len()),
+            Ospfv3SubTlv::Unknown { typ, value } => (*typ, value.len() as u16),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(value_len);
+        match self {
+            Ospfv3SubTlv::AdjSid(s) => s.emit(buf),
+            Ospfv3SubTlv::LanAdjSid(s) => s.emit(buf),
+            Ospfv3SubTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
+        let value_len = value_len as usize;
+        let pad = ((value_len + 3) & !3) - value_len;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        let parsed = match typ {
+            OSPFV3_SUB_TLV_ADJ_SID => {
+                let (_, s) = Ospfv3AdjSidSubTlv::parse_be(value)?;
+                Ospfv3SubTlv::AdjSid(s)
+            }
+            OSPFV3_SUB_TLV_LAN_ADJ_SID => {
+                let (_, s) = Ospfv3LanAdjSidSubTlv::parse_be(value)?;
+                Ospfv3SubTlv::LanAdjSid(s)
+            }
+            _ => Ospfv3SubTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            },
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
+    }
+}
+
+/// Router-Link TLV (RFC 8362 §5.1) — top-level TLV inside an
+/// E-Router-LSA. The fixed prefix (16 octets) is the same shape as
+/// the per-link entry used in the standard Router-LSA, plus a
+/// variable-length sub-TLV stream (where SR Adj-SID and LAN-Adj-SID
+/// live per RFC 8666 §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3RouterLinkTlv {
+    pub link: Ospfv3RouterLsaLink,
+    pub subs: Vec<Ospfv3SubTlv>,
+}
+
+impl Ospfv3RouterLinkTlv {
+    /// Length of the TLV value (Router-Link fixed prefix + sub-TLVs).
+    fn value_len(&self) -> usize {
+        // Ospfv3RouterLsaLink is exactly 16 octets on the wire.
+        let sub_len: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        16 + sub_len
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.link.link_type.into());
+        buf.put_u8(0); // reserved
+        buf.put_u16(self.link.metric);
+        buf.put_u32(self.link.interface_id);
+        buf.put_u32(self.link.neighbor_interface_id);
+        buf.put(&self.link.neighbor_router_id.octets()[..]);
+        for s in &self.subs {
+            s.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, link) = Ospfv3RouterLsaLink::parse_be(input)?;
+        let mut subs = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (r, s) = Ospfv3SubTlv::parse_be(rest)?;
+            subs.push(s);
+            rest = r;
+        }
+        Ok((rest, Self { link, subs }))
+    }
+}
+
 /// One top-level TLV inside an Extended LSA body (RFC 8362 §3).
 ///
-/// PR-D1 keeps every TLV as `Unknown` — the body parser preserves the
-/// wire bytes verbatim so any LSA round-trips through the codec
-/// without dropping data. PR-D2 will introduce typed variants
-/// (Router-Link TLV, Intra-Area-Prefix TLV, External-Prefix TLV, …)
-/// once the matching origination / consumption paths need them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Typed variants surface the structured shape; everything else
+/// round-trips through `Unknown` so a foreign extension we don't yet
+/// understand still survives the codec.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ospfv3ExtTlv {
+    RouterLink(Ospfv3RouterLinkTlv),
     Unknown { typ: u16, value: Vec<u8> },
 }
 
@@ -1415,20 +1672,25 @@ impl Ospfv3ExtTlv {
     #[allow(dead_code)] // consumed by typed TLV decoders (PR-D2+).
     fn wire_len(&self) -> usize {
         let value_len = match self {
+            Ospfv3ExtTlv::RouterLink(t) => t.value_len(),
             Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
     }
 
     fn emit(&self, buf: &mut BytesMut) {
-        let (typ, value) = match self {
-            Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.as_slice()),
+        let (typ, value_len) = match self {
+            Ospfv3ExtTlv::RouterLink(t) => (OSPFV3_EXT_TLV_ROUTER_LINK, t.value_len()),
+            Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.len()),
         };
         buf.put_u16(typ);
-        buf.put_u16(value.len() as u16);
-        buf.put_slice(value);
+        buf.put_u16(value_len as u16);
+        match self {
+            Ospfv3ExtTlv::RouterLink(t) => t.emit(buf),
+            Ospfv3ExtTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
         // Pad to 4-byte alignment.
-        let pad = ((value.len() + 3) & !3) - value.len();
+        let pad = ((value_len + 3) & !3) - value_len;
         for _ in 0..pad {
             buf.put_u8(0);
         }
@@ -1439,16 +1701,20 @@ impl Ospfv3ExtTlv {
         let (input, len) = be_u16(input)?;
         let len = len as usize;
         let (input, value) = take(len)(input)?;
-        // Skip pad to next 4-byte boundary.
-        let padded = (len + 3) & !3;
-        let (input, _) = take(padded - len)(input)?;
-        Ok((
-            input,
-            Ospfv3ExtTlv::Unknown {
+        let parsed = match typ {
+            OSPFV3_EXT_TLV_ROUTER_LINK => {
+                let (_, t) = Ospfv3RouterLinkTlv::parse_be(value)?;
+                Ospfv3ExtTlv::RouterLink(t)
+            }
+            _ => Ospfv3ExtTlv::Unknown {
                 typ,
                 value: value.to_vec(),
             },
-        ))
+        };
+        // Skip pad to next 4-byte boundary.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
     }
 }
 
@@ -1456,7 +1722,7 @@ impl Ospfv3ExtTlv {
 /// share the same wire shape — a stream of top-level TLVs (RFC 8362
 /// §3) — so a single struct represents all of them; the LS Type
 /// distinguishes which top-level TLVs are semantically expected.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Ospfv3ELsaBody {
     pub tlvs: Vec<Ospfv3ExtTlv>,
 }
@@ -3046,6 +3312,72 @@ mod tests {
                 ls_type,
                 parsed
             );
+        }
+    }
+
+    /// Build an E-Router-LSA body carrying one Router-Link TLV whose
+    /// sub-TLVs include both Adj-SID and LAN-Adj-SID (RFC 8666 §6),
+    /// emit through the LS-body dispatch, parse back, and assert each
+    /// nested value survives byte-for-byte.
+    #[test]
+    fn ospfv3_e_router_lsa_router_link_with_sr_sub_tlvs() {
+        use crate::parser::AdjSidFlags;
+        use packet_utils::SidLabelTlv;
+
+        let adj = Ospfv3SubTlv::AdjSid(Ospfv3AdjSidSubTlv {
+            flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+            weight: 0,
+            sid: SidLabelTlv::Label(15001),
+        });
+        let lan_adj = Ospfv3SubTlv::LanAdjSid(Ospfv3LanAdjSidSubTlv {
+            flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+            weight: 0,
+            neighbor_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            sid: SidLabelTlv::Label(15002),
+        });
+
+        let link = Ospfv3RouterLsaLink::new(
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            42,
+            7,
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        let router_link_tlv = Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv {
+            link: link.clone(),
+            subs: vec![adj.clone(), lan_adj.clone()],
+        });
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![router_link_tlv],
+        };
+
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::ERouter(body).emit(&mut buf);
+
+        let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_E_ROUTER_LSA_TYPE).unwrap();
+        assert!(rest.is_empty(), "trailing bytes after E-Router body");
+        let Ospfv3LsBody::ERouter(parsed_body) = parsed else {
+            panic!("expected ERouter variant");
+        };
+        assert_eq!(parsed_body.tlvs.len(), 1);
+        let Ospfv3ExtTlv::RouterLink(parsed_rl) = &parsed_body.tlvs[0] else {
+            panic!("expected RouterLink top-level TLV");
+        };
+        assert_eq!(parsed_rl.link, link);
+        assert_eq!(parsed_rl.subs.len(), 2);
+        match &parsed_rl.subs[0] {
+            Ospfv3SubTlv::AdjSid(s) => {
+                assert!(matches!(s.sid, SidLabelTlv::Label(15001)));
+                assert_eq!(s.weight, 0);
+            }
+            other => panic!("expected AdjSid, got {:?}", other),
+        }
+        match &parsed_rl.subs[1] {
+            Ospfv3SubTlv::LanAdjSid(s) => {
+                assert_eq!(s.neighbor_router_id, Ipv4Addr::new(10, 0, 0, 2));
+                assert!(matches!(s.sid, SidLabelTlv::Label(15002)));
+            }
+            other => panic!("expected LanAdjSid, got {:?}", other),
         }
     }
 
