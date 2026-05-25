@@ -281,6 +281,11 @@ fn config_ospf_area_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Optio
     // are legal in this area — resync (originate fresh on
     // entry-to-NSSA, flush on exit).
     ospf.nssa_redist_connected_resync(area_id);
+    // Area-type also flips whether we should be translating
+    // Type-7→Type-5 for this area. Resync clears stale Type-5s on
+    // exit and seeds fresh ones on entry (if we are an ABR with
+    // translator-role = Always).
+    ospf.nssa_translate_resync(area_id);
     Some(())
 }
 
@@ -325,6 +330,9 @@ fn config_ospf_area_nssa_translator_role(
         NssaTranslatorRole::default()
     };
     area_nssa_translator_role_set(ospf, area_id, role);
+    // Role flip (e.g. Candidate → Always) directly changes
+    // whether translation should be happening on this router.
+    ospf.nssa_translate_resync(area_id);
     Some(())
 }
 

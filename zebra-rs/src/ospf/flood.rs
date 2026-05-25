@@ -125,11 +125,25 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     lsdb.insert_received(lsa.clone(), oi.tx, area_id);
     if matches!(
         lsa.h.ls_type,
-        OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary | OspfLsType::AsExternal
+        OspfLsType::Router
+            | OspfLsType::Network
+            | OspfLsType::Summary
+            | OspfLsType::AsExternal
+            | OspfLsType::NssaAsExternal
     ) {
         // For AS-scoped LSAs `area_id` is None; the dispatcher treats
-        // that as "schedule SPF on all areas".
+        // that as "schedule SPF on all areas". Type-7 floods with
+        // area scope; SPF needs to rerun so `add_nssa_routes` (phase
+        // 3) installs the route. RFC 3101 §2.5.
         let _ = oi.tx.send(Message::SpfSchedule(area_id));
+    }
+    // RFC 3101 §3: a freshly-installed Type-7 may need to be
+    // translated by an NSSA ABR. Resync is idempotent and gates on
+    // ABR + translator-role internally.
+    if lsa.h.ls_type == OspfLsType::NssaAsExternal
+        && let Some(area_id) = area_id
+    {
+        let _ = oi.tx.send(Message::NssaTranslateResync(area_id));
     }
     tracing::info!(
         "[Flood] Installed LSA type={:?} id={} adv={}",
