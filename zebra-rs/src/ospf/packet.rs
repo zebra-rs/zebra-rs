@@ -20,6 +20,13 @@ use super::{
     ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
 };
 
+/// Maximum grace period (seconds) we will honour as helper. RFC 3623
+/// §3.1 leaves the bound up to the helper; this matches the IETF
+/// YANG default (`max-grace-period`) and FRR's `ip ospf
+/// graceful-restart helper grace-period` default. Phase 4 exposes
+/// this as a per-instance config knob.
+const MAX_GRACE_PERIOD_SECS: u32 = 1800;
+
 /// Stamp the configured authentication state into an outgoing
 /// OSPFv2 packet. `mode` and `key` come from the sending
 /// interface; callers thread them in via `OspfLink::auth_mode()` /
@@ -762,6 +769,13 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         );
         ospf_flood(oi, nbr, lsa);
 
+        // RFC 3623 §3.1: a Grace LSA from a Full neighbor advertising
+        // its own router-id is the trigger to enter helper mode. Run
+        // this check after flooding so the LSA itself still propagates
+        // (RFC 3623 §A.3); helper-policy gating + strict LSDB checks
+        // land in Phase 2c.
+        gr_maybe_enter_helper(oi, nbr, lsa);
+
         // RFC 2328 Section 13.4: Self-originated LSA check.
         if ospf_is_self_originated(oi, lsa) {
             tracing::info!(
@@ -872,6 +886,93 @@ pub fn ospf_ls_upd_validate_proc(
         let msg = Message::DelayedAckQueue(nbr.ifindex, delayed_ack_headers);
         let _ = oi.tx.send(msg);
     }
+}
+
+/// RFC 3623 §3.1 helper-entry gate. Called from `ospf_ls_upd_proc`
+/// after a newer LSA is flooded — if that LSA is a Grace LSA
+/// advertised by the sender (a Full neighbor), set the per-neighbor
+/// `gr_helper` state and arm the grace-period expiry timer.
+///
+/// Phase 2a does the minimum-viable check: the sender must be Full,
+/// the LSA's advertising-router must match the neighbor (i.e. the
+/// neighbor is announcing its own restart), and the grace period
+/// must be within [1, `MAX_GRACE_PERIOD_SECS`]. Strict-LSA-checking
+/// (RFC 3623 §3.2 bullets 2-3 / LSDB snapshot) lands in Phase 2c.
+fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+    use super::neigh::HelperState;
+    use super::task::{Timer, TimerType};
+
+    if lsa.h.ls_type != OspfLsType::OpaqueLinkLocal {
+        return;
+    }
+    let OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
+        return;
+    };
+    if lsa.h.adv_router != nbr.ident.router_id {
+        return;
+    }
+    if nbr.state != NfsmState::Full {
+        tracing::info!(
+            "[GR Helper] reject Grace LSA from non-Full nbr {} (state={:?})",
+            nbr.ident.router_id,
+            nbr.state
+        );
+        return;
+    }
+    let grace_period = match body.grace_period() {
+        Some(p) if p > 0 && p <= MAX_GRACE_PERIOD_SECS => p,
+        Some(p) => {
+            tracing::info!(
+                "[GR Helper] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
+                nbr.ident.router_id,
+                p,
+                MAX_GRACE_PERIOD_SECS
+            );
+            return;
+        }
+        None => {
+            tracing::info!(
+                "[GR Helper] reject Grace LSA from nbr {} (no GracePeriod TLV)",
+                nbr.ident.router_id
+            );
+            return;
+        }
+    };
+    let reason = body.reason().unwrap_or(GraceRestartReason::Unknown);
+
+    let ifindex = nbr.ifindex;
+    let router_id = nbr.ident.router_id;
+    let tx = oi.tx.clone();
+    let expire_timer = Timer::new(
+        Timer::second(grace_period as u64),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
+            }
+        },
+    );
+
+    let previously_helping = nbr.gr_helper.is_some();
+    nbr.gr_helper = Some(HelperState {
+        reason,
+        grace_period,
+        entered_at: tokio::time::Instant::now(),
+        expire_timer: Some(expire_timer),
+    });
+    tracing::info!(
+        "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
+        if previously_helping {
+            "extend"
+        } else {
+            "enter"
+        },
+        router_id,
+        ifindex,
+        grace_period,
+        reason
+    );
 }
 
 pub fn ospf_ls_upd_recv(

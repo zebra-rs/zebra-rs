@@ -12,6 +12,32 @@ use super::task::Timer;
 use super::version::{OspfVersion, Ospfv2};
 use super::{Identity, Message, NfsmEvent, NfsmState};
 
+/// Graceful-restart helper bookkeeping (RFC 3623 §3.1). Populated
+/// when we accept a Grace LSA from this neighbor; absent the rest
+/// of the time. While `Some`, the inactivity timer is suppressed
+/// (`ospf_nfsm_inactivity_timer` rearms instead of killing) so the
+/// neighbor's adjacency stays Full across the restart window.
+///
+/// Phase 2a wires entry, suppression, and grace-period-expiry exit.
+/// `reason` / `grace_period` / `entered_at` are populated here but
+/// only consumed in 2b (Router-LSA preservation) and 2c (show +
+/// strict LSDB-consistency check); the `dead_code` allow on the
+/// struct documents that.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct HelperState {
+    /// Restart reason carried in the Grace LSA's type-2 sub-TLV.
+    pub reason: ospf_packet::GraceRestartReason,
+    /// Grace period (seconds) the restarter requested.
+    pub grace_period: u32,
+    /// When we entered helper mode.
+    pub entered_at: Instant,
+    /// Pending grace-period-expiry timer. Dropping clears it; we
+    /// keep an explicit handle so re-entry (extended grace period)
+    /// cancels the prior expiry cleanly.
+    pub expire_timer: Option<Timer>,
+}
+
 /// Per-neighbor protocol state.
 ///
 /// Parameterized over `V: OspfVersion` so the wire-type-carrying
@@ -63,6 +89,9 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     /// defaulted to 0.
     #[allow(dead_code)]
     pub interface_id: u32,
+    /// Graceful-restart helper state. `Some` while we are helping
+    /// this neighbor restart; `None` otherwise. See [`HelperState`].
+    pub gr_helper: Option<HelperState>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -152,6 +181,7 @@ where
             last_regressive: None,
             last_regressive_reason: None,
             interface_id: 0,
+            gr_helper: None,
         };
         nbr.ident.prefix = prefix;
         nbr
