@@ -893,6 +893,127 @@ fn ospfv3_is_self_originated(oi: &OspfInterface<Ospfv3>, lsa: &Ospfv3Lsa) -> boo
     lsa.h.advertising_router == *oi.router_id
 }
 
+/// RFC 5187 §3.1 helper-entry gate (v3 mirror of v2's
+/// `gr_maybe_enter_helper` in packet.rs). Called from
+/// `ospfv3_ls_upd_proc` after a Grace LSA from this neighbor has
+/// been installed in the link-scope LSDB.
+///
+/// Same checks as v2: the LSA must be the v3 Grace-LSA type
+/// (`OSPFV3_GRACE_LSA_TYPE = 0x000B`), `advertising_router` must
+/// match the neighbor, helper-mode must be enabled by config, the
+/// neighbor must currently be Full, and the grace period must be
+/// within `[1, gr_config.max_grace_period]`.
+///
+/// On accept: arm the one-shot expiry timer, snapshot the
+/// restarter's pre-restart LSAs from the area LSDB (so
+/// `gr_helper_check_exit` in `impl Ospf<Ospfv3>` can run the
+/// topology-change exit), and stash the resulting `HelperState`
+/// on the neighbor.
+fn gr_maybe_enter_helper_v3(
+    oi: &mut OspfInterface<Ospfv3>,
+    nbr: &mut Neighbor<Ospfv3>,
+    lsa: &Ospfv3Lsa,
+) {
+    use std::collections::BTreeMap;
+
+    use ospf_packet::{GraceRestartReason, OSPFV3_GRACE_LSA_TYPE, Ospfv3LsBody};
+
+    use super::neigh::HelperState;
+    use super::task::{Timer, TimerType};
+
+    if lsa.h.ls_type != OSPFV3_GRACE_LSA_TYPE {
+        return;
+    }
+    let Ospfv3LsBody::Grace(ref body) = lsa.body else {
+        return;
+    };
+    if lsa.h.advertising_router != nbr.ident.router_id {
+        return;
+    }
+    if !oi.gr_config.helper_enabled {
+        tracing::info!(
+            "[GR Helper v3] reject Grace LSA from nbr {} (helper-enabled is false)",
+            nbr.ident.router_id
+        );
+        return;
+    }
+    if nbr.state != NfsmState::Full {
+        tracing::info!(
+            "[GR Helper v3] reject Grace LSA from non-Full nbr {} (state={:?})",
+            nbr.ident.router_id,
+            nbr.state
+        );
+        return;
+    }
+    let max_grace = oi.gr_config.max_grace_period;
+    let grace_period = match body.grace_period() {
+        Some(p) if p > 0 && p <= max_grace => p,
+        Some(p) => {
+            tracing::info!(
+                "[GR Helper v3] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
+                nbr.ident.router_id,
+                p,
+                max_grace
+            );
+            return;
+        }
+        None => {
+            tracing::info!(
+                "[GR Helper v3] reject Grace LSA from nbr {} (no GracePeriod TLV)",
+                nbr.ident.router_id
+            );
+            return;
+        }
+    };
+    let reason = body.reason().unwrap_or(GraceRestartReason::Unknown);
+
+    let ifindex = nbr.ifindex;
+    let router_id = nbr.ident.router_id;
+    let tx = oi.tx.clone();
+    let expire_timer = Timer::new(
+        Timer::second(grace_period as u64),
+        TimerType::Once,
+        move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
+            }
+        },
+    );
+
+    // RFC 5187 §3.2 snapshot — same shape as v2. Captures the
+    // `(ls_seq_number, ls_checksum)` of every restarter-originated
+    // LSA in the area LSDB at helper entry, so the v3
+    // `gr_helper_check_exit` can diff later installs.
+    let mut lsdb_snapshot = BTreeMap::new();
+    for (key, lsa) in oi.lsdb.tables.iter() {
+        if lsa.data.h.advertising_router == router_id {
+            lsdb_snapshot.insert(*key, (lsa.data.h.ls_seq_number, lsa.data.h.ls_checksum));
+        }
+    }
+
+    let previously_helping = nbr.gr_helper.is_some();
+    nbr.gr_helper = Some(HelperState {
+        reason,
+        grace_period,
+        entered_at: tokio::time::Instant::now(),
+        expire_timer: Some(expire_timer),
+        lsdb_snapshot,
+    });
+    tracing::info!(
+        "[GR Helper v3] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
+        if previously_helping {
+            "extend"
+        } else {
+            "enter"
+        },
+        router_id,
+        ifindex,
+        grace_period,
+        reason
+    );
+}
+
 /// RFC 2328 §13.1 per-LSA processing result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LsaProcessResult {
@@ -985,6 +1106,13 @@ fn ospfv3_ls_upd_proc(
         if area_lsa_installed {
             let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
         }
+
+        // RFC 5187 §3.1: a Grace LSA from a Full neighbor advertising
+        // its own router-id is the trigger to enter helper mode. Like
+        // v2's `gr_maybe_enter_helper`, this runs after the LSA has
+        // been installed so the standard flood machinery still
+        // propagates it on the link.
+        gr_maybe_enter_helper_v3(oi, nbr, lsa);
 
         // RFC 2328 §13.3: re-flood the LSA to every other
         // Exchange-or-later neighbor in the area, exempting the

@@ -2993,6 +2993,106 @@ impl Ospf<Ospfv3> {
 
     /// Flood a v3 LSA through `area_id`, optionally exempting the
     /// source neighbor that fed it to us (RFC 2328 §13.3 Step 1c).
+    /// RFC 5187 §3.2 bullets 2-3 — v3 mirror of
+    /// `Ospf<Ospfv2>::gr_helper_check_exit`. Called from
+    /// `flood_lsa_through_area` after each area-LSA install. For
+    /// each helper-mode neighbor in the area, decide whether the
+    /// install warrants exit:
+    ///
+    ///   - `advertising_router != restarter`: any topology-affecting
+    ///     LSA is an exit trigger when `helper_strict_lsa_checking`.
+    ///     When that knob is off (relaxed mode), non-restarter
+    ///     LSAs are ignored.
+    ///   - `advertising_router == restarter`: compare against the
+    ///     `(seq, checksum)` we snapshotted at helper entry. Exact
+    ///     match → quiescent re-flood (no exit). Differs → exit.
+    ///
+    /// Topology-affecting v3 LS Types: Router (0x2001), Network
+    /// (0x2002), Inter-Area-Prefix (0x2003), Inter-Area-Router
+    /// (0x2004), Intra-Area-Prefix (0x2009). All other LSAs (Link,
+    /// AS-External, Grace, the RFC 8362 E-LSAs) are ignored
+    /// because they don't change intra-area routing.
+    fn gr_helper_check_exit(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
+        use ospf_packet::{
+            OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        };
+
+        let topology_affecting = matches!(
+            lsa.h.ls_type,
+            OSPFV3_ROUTER_LSA_TYPE
+                | OSPFV3_NETWORK_LSA_TYPE
+                | OSPFV3_INTER_AREA_PREFIX_LSA_TYPE
+                | OSPFV3_INTER_AREA_ROUTER_LSA_TYPE
+                | OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE
+        );
+        if !topology_affecting {
+            return;
+        }
+        // v3 LSDB key shape: `(ls_type: u16, link_state_id: u32,
+        // advertising_router: Ipv4Addr)`. No conversion needed —
+        // these fields are already in their key-native form.
+        let key: super::lsdb::OspfLsaKey =
+            (lsa.h.ls_type, lsa.h.link_state_id, lsa.h.advertising_router);
+
+        let Some(area) = self.areas.get(area_id) else {
+            return;
+        };
+        let link_indices: Vec<u32> = area.links.iter().copied().collect();
+
+        let mut exits: Vec<(u32, Ipv4Addr, &'static str)> = Vec::new();
+        for ifindex in link_indices {
+            let Some(link) = self.links.get(&ifindex) else {
+                continue;
+            };
+            for nbr in link.nbrs.values() {
+                let Some(helper) = nbr.gr_helper.as_ref() else {
+                    continue;
+                };
+                let exit_reason = if lsa.h.advertising_router == nbr.ident.router_id {
+                    match helper.lsdb_snapshot.get(&key) {
+                        Some(&(seq, csum))
+                            if seq == lsa.h.ls_seq_number && csum == lsa.h.ls_checksum =>
+                        {
+                            continue;
+                        }
+                        _ => "restarter LSA changed from snapshot",
+                    }
+                } else if self.gr_config.helper_strict_lsa_checking {
+                    "non-restarter topology change in area"
+                } else {
+                    continue;
+                };
+                exits.push((ifindex, nbr.ident.router_id, exit_reason));
+            }
+        }
+        for (ifindex, router_id, reason) in exits {
+            // v3 reuses v2's gr_helper_exit body verbatim — clear
+            // helper state, fire `InactivityTimer` event so the
+            // shared NFSM kill path runs.
+            let Some(link) = self.links.get_mut(&ifindex) else {
+                continue;
+            };
+            let Some(nbr) = link.nbrs.get_mut(&router_id) else {
+                continue;
+            };
+            if nbr.gr_helper.take().is_none() {
+                continue;
+            }
+            tracing::info!(
+                "[GR Helper v3] exit for nbr {} on ifindex={} (reason: {})",
+                router_id,
+                ifindex,
+                reason
+            );
+            let _ = self.tx.send(Message::Nfsm(
+                ifindex,
+                router_id,
+                super::nfsm::NfsmEvent::InactivityTimer,
+            ));
+        }
+    }
+
     /// Mirrors v2's `flood_lsa_through_area`.
     ///
     /// `source = None` is the self-origination path: every
@@ -3015,6 +3115,14 @@ impl Ospf<Ospfv3> {
         source: Option<(u32, std::net::Ipv6Addr)>,
     ) {
         use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
+
+        // RFC 5187 §3.2 — every LSA flooded here was just installed
+        // in the area LSDB, so this is the v3 choke point for the
+        // topology-change helper exit (mirror of v2's hook in
+        // `Ospf<Ospfv2>::flood_lsa_through_area`). Runs before the
+        // fanout iteration so an exit can deconstruct any state
+        // we'd otherwise loop over.
+        self.gr_helper_check_exit(area_id, lsa);
 
         let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
             return;
@@ -3358,6 +3466,9 @@ impl Ospf<Ospfv3> {
                     }
                 }
             }
+            Message::GrHelperExpire(ifindex, router_id) => {
+                self.gr_helper_expire(ifindex, router_id);
+            }
             other => {
                 tracing::debug!(
                     "v3 process_msg: unhandled variant {:?}",
@@ -3365,6 +3476,31 @@ impl Ospf<Ospfv3> {
                 );
             }
         }
+    }
+
+    /// v3 mirror of `Ospf<Ospfv2>::gr_helper_expire`. Same body —
+    /// clear `gr_helper` and re-fire `InactivityTimer` so the
+    /// shared NFSM kill path runs.
+    fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let Some(nbr) = link.nbrs.get_mut(&router_id) else {
+            return;
+        };
+        if nbr.gr_helper.take().is_none() {
+            return;
+        }
+        tracing::info!(
+            "[GR Helper v3] grace-period expired for nbr {} on ifindex={}, killing neighbor",
+            router_id,
+            ifindex
+        );
+        let _ = self.tx.send(Message::Nfsm(
+            ifindex,
+            router_id,
+            super::nfsm::NfsmEvent::InactivityTimer,
+        ));
     }
 
     /// Originate this router's Link-LSA for `ifindex` into the
