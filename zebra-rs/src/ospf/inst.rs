@@ -4519,6 +4519,14 @@ fn build_rib_from_spf(
     // pick the best per-area SPF cost when this lands.
     add_as_external_routes(top, spf_result, &mut rib);
 
+    // NSSA Type-7: walk this area's Type 7 LSAs when the area is
+    // NSSA. Type-7s flood with area scope (RFC 3101 §2.5), so the
+    // walk reads from `area.lsdb` and resolves the originator via
+    // this area's SPF.
+    if area.area_type.is_nssa() {
+        add_nssa_routes(top, area_id, spf_result, &mut rib);
+    }
+
     // SR-MPLS: walk Extended-Prefix Opaque LSAs and attach the
     // advertised Prefix-SID to matching installed prefixes. No FIB
     // change here -- this only populates `SpfRoute.prefix_sid` so the
@@ -4659,6 +4667,94 @@ fn add_as_external_routes(
         let prefix = prefix.trunc();
 
         let nhops = build_spf_nexthops(top, asbr_vertex, asbr_path);
+        if nhops.is_empty() {
+            continue;
+        }
+
+        let spf_route = SpfRoute {
+            metric,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+        };
+        rib_insert(rib, prefix, spf_route);
+    }
+}
+
+/// Walk Type 7 (NSSA-AS-External) LSAs in the area LSDB and install
+/// NSSA external routes per RFC 3101 §2.5.
+///
+/// Mirrors `add_as_external_routes` but scoped to a single area:
+/// Type-7 LSAs flood only within an NSSA, so the walk reads from
+/// `area.lsdb` (not `top.lsdb_as`). The originating router
+/// reachability is also resolved against this area's SPF.
+///
+/// Metric handling matches Type-5:
+///   - E1 (E-bit clear): SPF(originator) + LSA.metric
+///   - E2 (E-bit set):    LSA.metric only
+///
+/// P-bit is intentionally not consulted here — it controls
+/// Type-7→Type-5 translation at the ABR (phase 4), not SPF
+/// installation on the receiver. Non-zero forwarding-address LSAs
+/// are skipped (RFC 3101 §2.5 step 5 FA resolution deferred to a
+/// follow-up); MaxAge'd LSAs and self-originated LSAs are skipped
+/// for the same reasons as Type-5.
+fn add_nssa_routes(
+    top: &Ospf,
+    area_id: Ipv4Addr,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    const LS_INFINITY: u32 = 0x00FF_FFFF;
+    const E_FLAG: u8 = 0x80;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for ((ls_id, _key_adv), lsa) in area.lsdb.iter_by_type(OspfLsType::NssaAsExternal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.adv_router == top.router_id {
+            continue;
+        }
+        let OspfLsp::NssaAsExternal(ref ext) = lsa.data.lsp else {
+            continue;
+        };
+        if ext.metric >= LS_INFINITY {
+            continue;
+        }
+        // RFC 3101 §2.5 step 5: non-zero FA resolves the route via
+        // an intra-area path to the FA, not to the originator. The
+        // resolver lands in a follow-up — same shape that Type-5
+        // is missing today.
+        if !ext.forwarding_address.is_unspecified() {
+            continue;
+        }
+
+        let Some(originator_vertex) = top.lsp_map.lookup(lsa.data.h.adv_router) else {
+            continue;
+        };
+        let Some(originator_path) = spf_result.get(&originator_vertex) else {
+            continue;
+        };
+
+        let is_e2 = (ext.ext_and_tos & E_FLAG) != 0;
+        let metric = if is_e2 {
+            ext.metric
+        } else {
+            originator_path.cost.saturating_add(ext.metric)
+        };
+
+        let mask = u32::from(ext.netmask).leading_ones() as u8;
+        let Ok(prefix) = Ipv4Net::new(ls_id, mask) else {
+            continue;
+        };
+        let prefix = prefix.trunc();
+
+        let nhops = build_spf_nexthops(top, originator_vertex, originator_path);
         if nhops.is_empty() {
             continue;
         }
