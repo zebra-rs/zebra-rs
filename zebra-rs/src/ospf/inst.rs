@@ -3000,6 +3000,98 @@ impl Ospf<Ospfv3> {
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
+    /// Originate (or flush) the OSPFv3 E-Intra-Area-Prefix-LSA
+    /// (RFC 8362 §3.7) carrying a Prefix-SID (RFC 8666 §5) for
+    /// `ifindex`. v3 analogue of `Ospf<Ospfv2>::ext_prefix_lsa_originate`.
+    ///
+    /// Originates when:
+    ///   * SR-MPLS is enabled (`segment_routing == Mpls`).
+    ///   * The link is enabled and has a `prefix_sid` configured.
+    ///   * The link has at least one non-link-local IPv6 address
+    ///     (origination targets the first such address as a /128
+    ///     host prefix; mirrors the v2 path's first-non-loopback
+    ///     choice).
+    ///
+    /// Flushes (MaxAge) otherwise. The `link_state_id` is the
+    /// interface ifindex so the per-link LSA gets a stable key
+    /// across re-originations -- same convention as the v2 opaque-id.
+    pub fn ext_intra_area_prefix_v3_lsa_originate(&mut self, ifindex: u32) {
+        use ipnet::Ipv6Net;
+        use ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE;
+
+        use super::srmpls::SegmentRoutingMode;
+
+        let link_state_id = ifindex;
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+            link_state_id,
+            self.router_id,
+        );
+
+        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
+            && let Some(link) = self.links.get(&ifindex)
+            && link.enabled
+            && let Some(prefix_sid) = link.config.prefix_sid
+            && let Some(addr) = link
+                .addr
+                .iter()
+                .find(|a| a.prefix.addr().segments()[0] != 0xfe80)
+        {
+            let host = Ipv6Net::new(addr.prefix.addr(), 128).unwrap_or(addr.prefix);
+            // Loopback parity with v2 / FRR / Junos: stamp 0 instead
+            // of the link's output_cost so a /128 on `lo` doesn't add
+            // a phantom hop's worth of metric to every SR path.
+            let metric = if link.link_flags.is_loopback() {
+                0
+            } else {
+                link.output_cost as u16
+            };
+            Some((link.area, prefix_sid, host, metric))
+        } else {
+            None
+        };
+
+        if let Some((area_id, prefix_sid, host, metric)) = build_inputs {
+            let mut lsa = super::srmpls::ext_intra_area_prefix_v3_lsa_build(
+                self.router_id,
+                host,
+                &prefix_sid,
+                link_state_id,
+                metric,
+            );
+
+            if let Some(area) = self.areas.get(area_id)
+                && let Some(prev_seq) = area
+                    .lsdb
+                    .lookup_by_raw_key(key)
+                    .map(|prev| prev.h.ls_seq_number)
+            {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            }
+            self.flood_self_originated_lsa(area_id, &flood_lsa);
+        } else {
+            // Walk every area in case the link's area moved between
+            // calls -- a stale LSA must be flushed wherever it lives.
+            let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+            for area_id in area_ids {
+                let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                    area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+        }
+    }
+
     /// Detect Full state transitions on `nbr` and re-originate the
     /// LSAs that depend on the full-adjacency set. Mirrors v2's
     /// `process_neighbor_state_change`:

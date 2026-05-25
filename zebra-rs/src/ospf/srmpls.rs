@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use ospf_packet::*;
 
 use super::link::{AdjacencySid, PrefixSid};
@@ -176,4 +176,83 @@ pub fn build_lan_adj_sub(neighbor_id: Ipv4Addr, label: u32) -> ExtLinkSubTlv {
         neighbor_id,
         sid: SidLabelTlv::Label(label),
     })
+}
+
+/// Build an OSPFv3 E-Intra-Area-Prefix-LSA (RFC 8362 §3.7) carrying
+/// one Intra-Area-Prefix TLV whose sub-TLV is a Prefix-SID (RFC 8666
+/// §5) for the given IPv6 prefix.
+///
+/// `link_state_id` is the LSA's per-router ID -- mirrors the v2
+/// opaque-id convention of deriving from the interface ifindex so a
+/// per-link LSA gets a stable key across re-originations.
+///
+/// Flag semantics mirror the v2 path: Index-form SID carries the NP
+/// (No-PHP) flag so the upstream does not pop; Absolute-Label SID
+/// carries V (Value) + L (Local) per RFC 8666 §5.
+pub fn ext_intra_area_prefix_v3_lsa_build(
+    router_id: Ipv4Addr,
+    prefix: Ipv6Net,
+    prefix_sid: &PrefixSid,
+    link_state_id: u32,
+    metric: u16,
+) -> Ospfv3Lsa {
+    let (sid, flags) = match prefix_sid {
+        PrefixSid::Index(idx) => (
+            SidLabelTlv::Index(*idx),
+            PrefixSidFlags::new().with_np_flag(true),
+        ),
+        PrefixSid::Absolute(label) => (
+            SidLabelTlv::Label(*label),
+            PrefixSidFlags::new().with_v_flag(true).with_l_flag(true),
+        ),
+    };
+
+    let prefix_sid_sub = Ospfv3SubTlv::PrefixSid(Ospfv3PrefixSidSubTlv {
+        flags,
+        algo: Algo::Spf,
+        sid,
+    });
+
+    // Encode the prefix bytes padded to a 4-byte boundary per
+    // RFC 5340 §A.4.1.1, matching the existing v3 codec convention.
+    let prefix_length = prefix.prefix_len();
+    let wire_len = ospfv3_prefix_wire_len(prefix_length);
+    let mut address_prefix = vec![0u8; wire_len];
+    let bytes = prefix.addr().octets();
+    let copy_len = (prefix_length as usize).div_ceil(8);
+    address_prefix[..copy_len].copy_from_slice(&bytes[..copy_len]);
+
+    let prefix_tlv = Ospfv3ExtTlv::IntraAreaPrefix(Ospfv3IntraAreaPrefixTlv {
+        metric,
+        prefix_length,
+        prefix_options: Ospfv3PrefixOptions::default(),
+        // Reference our own Router-LSA -- this is a self-originated
+        // Router-LSA-referenced Intra-Area-Prefix per RFC 5340 §A.4.10
+        // (mirroring the standard LSA's convention). Network-LSA-
+        // referenced variants land alongside the DR-only flow.
+        referenced_ls_type: OSPFV3_ROUTER_LSA_TYPE as u32,
+        referenced_link_state_id: 0,
+        referenced_advertising_router: router_id,
+        address_prefix,
+        subs: vec![prefix_sid_sub],
+    });
+
+    let body = Ospfv3ELsaBody {
+        tlvs: vec![prefix_tlv],
+    };
+
+    let mut lsa = Ospfv3Lsa {
+        h: Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+            link_state_id,
+            advertising_router: router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: Ospfv3LsBody::EIntraAreaPrefix(body),
+    };
+    lsa.update();
+    lsa
 }
