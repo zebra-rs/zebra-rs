@@ -40,6 +40,7 @@ use byteorder::{BigEndian, ByteOrder};
 use bytes::{BufMut, BytesMut};
 use internet_checksum::Checksum;
 use nom::IResult;
+use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::{ParseBe, many0_complete};
@@ -1368,6 +1369,117 @@ impl ParseBe<Ospfv3LinkLsa> for Ospfv3LinkLsa {
 /// else (NSSA-AS-External 0x2007, opaque flavours, future allocations)
 /// lands in `Unknown(Vec<u8>)` so captures roundtrip without loss.
 ///
+// ---------------------------------------------------------------------
+// RFC 8362 Extended LSA (E-LSA) LS Types.
+//
+// RFC 8362 §4 assigns a parallel set of LS Types whose bodies are a
+// stream of top-level TLVs (rather than the fixed wire shape used by
+// RFC 5340 LSAs). The U-bit is set so legacy routers flood unknown
+// E-LSAs as if understood; the scope bits mirror the standard LSA's
+// flooding scope. The function codes (33-41) carve out the IANA range
+// reserved for the extendability work.
+//
+// PR-D1 (this PR) provides the body shell — actual top-level-TLV
+// decoders (Router-Link, Intra-Area-Prefix, etc., RFC 8362 §5-6) and
+// RFC 8666 SR sub-TLVs land in follow-up PRs.
+/// E-Router-LSA (RFC 8362 §4): U=1, S=01 (area), fc=33.
+pub const OSPFV3_E_ROUTER_LSA_TYPE: u16 = 0xA021;
+/// E-Network-LSA (RFC 8362 §4): U=1, S=01 (area), fc=34.
+pub const OSPFV3_E_NETWORK_LSA_TYPE: u16 = 0xA022;
+/// E-Inter-Area-Prefix-LSA (RFC 8362 §4): U=1, S=01 (area), fc=35.
+pub const OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE: u16 = 0xA023;
+/// E-Inter-Area-Router-LSA (RFC 8362 §4): U=1, S=01 (area), fc=36.
+pub const OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE: u16 = 0xA024;
+/// E-AS-External-LSA (RFC 8362 §4): U=1, S=10 (AS), fc=37.
+pub const OSPFV3_E_AS_EXTERNAL_LSA_TYPE: u16 = 0xC025;
+/// E-Link-LSA (RFC 8362 §4): U=1, S=00 (link-local), fc=40.
+pub const OSPFV3_E_LINK_LSA_TYPE: u16 = 0x8028;
+/// E-Intra-Area-Prefix-LSA (RFC 8362 §4): U=1, S=01 (area), fc=41.
+pub const OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE: u16 = 0xA029;
+
+/// One top-level TLV inside an Extended LSA body (RFC 8362 §3).
+///
+/// PR-D1 keeps every TLV as `Unknown` — the body parser preserves the
+/// wire bytes verbatim so any LSA round-trips through the codec
+/// without dropping data. PR-D2 will introduce typed variants
+/// (Router-Link TLV, Intra-Area-Prefix TLV, External-Prefix TLV, …)
+/// once the matching origination / consumption paths need them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ospfv3ExtTlv {
+    Unknown { typ: u16, value: Vec<u8> },
+}
+
+impl Ospfv3ExtTlv {
+    /// Wire length including the 4-byte TLV header, padded to the
+    /// next 4-byte boundary per RFC 8362 §3.
+    #[allow(dead_code)] // consumed by typed TLV decoders (PR-D2+).
+    fn wire_len(&self) -> usize {
+        let value_len = match self {
+            Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
+        };
+        4 + ((value_len + 3) & !3)
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, value) = match self {
+            Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.as_slice()),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(value.len() as u16);
+        buf.put_slice(value);
+        // Pad to 4-byte alignment.
+        let pad = ((value.len() + 3) & !3) - value.len();
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3ExtTlv> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        // Skip pad to next 4-byte boundary.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((
+            input,
+            Ospfv3ExtTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            },
+        ))
+    }
+}
+
+/// Body of any of the seven RFC 8362 Extended LSA types. All seven
+/// share the same wire shape — a stream of top-level TLVs (RFC 8362
+/// §3) — so a single struct represents all of them; the LS Type
+/// distinguishes which top-level TLVs are semantically expected.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ospfv3ELsaBody {
+    pub tlvs: Vec<Ospfv3ExtTlv>,
+}
+
+impl Ospfv3ELsaBody {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Ospfv3ELsaBody> {
+        let mut tlvs = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (r, tlv) = Ospfv3ExtTlv::parse_be(rest)?;
+            tlvs.push(tlv);
+            rest = r;
+        }
+        Ok((rest, Ospfv3ELsaBody { tlvs }))
+    }
+}
+
 /// Each variant carries the body alone — the 20-octet `Ospfv3LsaHeader`
 /// is held separately in `Ospfv3Lsa::h`, mirroring the v2 codec's
 /// `OspfLsa { h, lsp }` shape.
@@ -1380,6 +1492,17 @@ pub enum Ospfv3LsBody {
     AsExternal(Ospfv3AsExternalLsa),
     Link(Ospfv3LinkLsa),
     IntraAreaPrefix(Ospfv3IntraAreaPrefixLsa),
+    /// RFC 8362 §4 Extended LSAs. All seven share the same TLV-stream
+    /// wire shape (`Ospfv3ELsaBody`); the variant only carries the
+    /// LS-Type-specific identity so origination / consumption can
+    /// dispatch on it.
+    ERouter(Ospfv3ELsaBody),
+    ENetwork(Ospfv3ELsaBody),
+    EInterAreaPrefix(Ospfv3ELsaBody),
+    EInterAreaRouter(Ospfv3ELsaBody),
+    EAsExternal(Ospfv3ELsaBody),
+    ELink(Ospfv3ELsaBody),
+    EIntraAreaPrefix(Ospfv3ELsaBody),
     /// Unrecognised LS Type — bytes preserved verbatim.
     Unknown(Vec<u8>),
 }
@@ -1394,6 +1517,13 @@ impl Ospfv3LsBody {
             Ospfv3LsBody::AsExternal(b) => b.emit(buf),
             Ospfv3LsBody::Link(b) => b.emit(buf),
             Ospfv3LsBody::IntraAreaPrefix(b) => b.emit(buf),
+            Ospfv3LsBody::ERouter(b)
+            | Ospfv3LsBody::ENetwork(b)
+            | Ospfv3LsBody::EInterAreaPrefix(b)
+            | Ospfv3LsBody::EInterAreaRouter(b)
+            | Ospfv3LsBody::EAsExternal(b)
+            | Ospfv3LsBody::ELink(b)
+            | Ospfv3LsBody::EIntraAreaPrefix(b) => b.emit(buf),
             Ospfv3LsBody::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -1432,6 +1562,34 @@ impl Ospfv3LsBody {
             OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
                 let (rest, b) = Ospfv3IntraAreaPrefixLsa::parse_be(input)?;
                 Ok((rest, Ospfv3LsBody::IntraAreaPrefix(b)))
+            }
+            OSPFV3_E_ROUTER_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::ERouter(b)))
+            }
+            OSPFV3_E_NETWORK_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::ENetwork(b)))
+            }
+            OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::EInterAreaPrefix(b)))
+            }
+            OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::EInterAreaRouter(b)))
+            }
+            OSPFV3_E_AS_EXTERNAL_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::EAsExternal(b)))
+            }
+            OSPFV3_E_LINK_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::ELink(b)))
+            }
+            OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => {
+                let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::EIntraAreaPrefix(b)))
             }
             _ => Ok((&[][..], Ospfv3LsBody::Unknown(input.to_vec()))),
         }
@@ -2801,6 +2959,94 @@ mod tests {
         assert!(rest.is_empty());
         assert!(parsed.prefixes.is_empty());
         assert_eq!(parsed.link_local_address, Ipv6Addr::UNSPECIFIED);
+    }
+
+    /// Build an Extended LSA body with two synthetic top-level TLVs,
+    /// emit + parse back, and assert structural equality. Covers TLV
+    /// header layout, 4-byte alignment padding, and the body's
+    /// LS-Type-keyed dispatch into the right `Ospfv3LsBody` variant.
+    #[test]
+    fn ospfv3_e_lsa_body_round_trip() {
+        // TLV value of length 6 (forces 2 bytes of pad).
+        let tlv_a = Ospfv3ExtTlv::Unknown {
+            typ: 0x1001,
+            value: vec![0xde, 0xad, 0xbe, 0xef, 0xfe, 0xed],
+        };
+        // TLV value of length 4 (no pad).
+        let tlv_b = Ospfv3ExtTlv::Unknown {
+            typ: 0x1002,
+            value: vec![0x11, 0x22, 0x33, 0x44],
+        };
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![tlv_a.clone(), tlv_b.clone()],
+        };
+
+        // Emit through the same dispatch the wire path uses.
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::EIntraAreaPrefix(body.clone()).emit(&mut buf);
+        // Two TLVs: (4 header + 6 value + 2 pad) + (4 header + 4 value).
+        assert_eq!(buf.len(), 4 + 6 + 2 + 4 + 4);
+
+        let (rest, parsed) =
+            Ospfv3LsBody::parse_be(&buf, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE).unwrap();
+        assert!(rest.is_empty());
+        let Ospfv3LsBody::EIntraAreaPrefix(parsed_body) = parsed else {
+            panic!("expected EIntraAreaPrefix variant, got {:?}", parsed);
+        };
+        assert_eq!(parsed_body.tlvs.len(), 2);
+        assert_eq!(parsed_body.tlvs[0], tlv_a);
+        assert_eq!(parsed_body.tlvs[1], tlv_b);
+    }
+
+    /// Each of the seven RFC 8362 LS Types dispatches to a distinct
+    /// `Ospfv3LsBody` variant and round-trips its body bytes intact.
+    #[test]
+    fn ospfv3_e_lsa_all_types_dispatch() {
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![Ospfv3ExtTlv::Unknown {
+                typ: 0x0007,
+                value: vec![0xaa; 8],
+            }],
+        };
+        let cases: &[(u16, fn(&Ospfv3LsBody) -> bool)] = &[
+            (OSPFV3_E_ROUTER_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::ERouter(_))
+            }),
+            (OSPFV3_E_NETWORK_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::ENetwork(_))
+            }),
+            (OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::EInterAreaPrefix(_))
+            }),
+            (OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::EInterAreaRouter(_))
+            }),
+            (OSPFV3_E_AS_EXTERNAL_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::EAsExternal(_))
+            }),
+            (OSPFV3_E_LINK_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::ELink(_))
+            }),
+            (OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, |b| {
+                matches!(b, Ospfv3LsBody::EIntraAreaPrefix(_))
+            }),
+        ];
+        for (ls_type, expected_variant) in cases {
+            let mut buf = BytesMut::new();
+            body.emit(&mut buf);
+            let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, *ls_type).unwrap();
+            assert!(
+                rest.is_empty(),
+                "trailing bytes for ls_type 0x{:04x}",
+                ls_type
+            );
+            assert!(
+                expected_variant(&parsed),
+                "wrong variant for ls_type 0x{:04x}: got {:?}",
+                ls_type,
+                parsed
+            );
+        }
     }
 
     /// Unknown link-type bytes parse permissively to PointToPoint

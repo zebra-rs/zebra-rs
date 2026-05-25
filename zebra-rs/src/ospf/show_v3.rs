@@ -580,6 +580,23 @@ fn write_lsa_detail(
                 )?;
             }
         }
+        // RFC 8362 Extended LSAs — for now we only know the TLV
+        // count. Top-level TLV decoders (Router-Link, Intra-Area-Prefix,
+        // …) land in the SR-MPLS consumption follow-up; render a brief
+        // summary until then.
+        Ospfv3LsBody::ERouter(b)
+        | Ospfv3LsBody::ENetwork(b)
+        | Ospfv3LsBody::EInterAreaPrefix(b)
+        | Ospfv3LsBody::EInterAreaRouter(b)
+        | Ospfv3LsBody::EAsExternal(b)
+        | Ospfv3LsBody::ELink(b)
+        | Ospfv3LsBody::EIntraAreaPrefix(b) => {
+            writeln!(
+                out,
+                "  Extended LSA body, {} top-level TLV(s)",
+                b.tlvs.len()
+            )?;
+        }
         Ospfv3LsBody::Unknown(bytes) => {
             writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
         }
