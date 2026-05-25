@@ -87,6 +87,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// rebuilt ILM after each SPF run to emit `rib::Message::IlmAdd`
     /// / `IlmDel` so the kernel MPLS table tracks the SR-MPLS state.
     pub ilm: BTreeMap<u32, SpfIlm>,
+    /// v3 sibling of `ilm`. Same key (absolute label) and same role
+    /// (MPLS LFIB shadow), but the value carries v6-keyed nexthops
+    /// matching `SpfRouteV3`. Populated by `apply_routing_updates_v3`
+    /// from the v3 SR-MPLS RIB; empty on v2 instances.
+    pub ilm6: BTreeMap<u32, SpfIlmV3>,
     /// First-fit Adjacency-SID label allocator backed by the local SRLB
     /// (`srmpls::SRLB_START` .. `SRLB_START + SRLB_RANGE - 1`). Created
     /// when `segment-routing mpls` is enabled, dropped when it's
@@ -386,6 +391,7 @@ impl Ospf<Ospfv2> {
             graph: None,
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
+            ilm6: BTreeMap::new(),
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
@@ -2100,6 +2106,7 @@ impl Ospf<Ospfv3> {
             graph: None,
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
+            ilm6: BTreeMap::new(),
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             rib6: PrefixMap::new(),
@@ -4238,6 +4245,16 @@ pub struct SpfNexthopV3 {
     pub ifindex: u32,
 }
 
+/// v3 sibling of `SpfIlm`. Same role -- one entry in the SR-MPLS
+/// LFIB shadow -- but the nexthop set is keyed by IPv6 link-local
+/// (matching `SpfRouteV3::nhops`) so kernel installs go out with v6
+/// `Via` and the right outgoing interface.
+#[derive(Debug, PartialEq)]
+pub struct SpfIlmV3 {
+    pub nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3>,
+    pub ilm_type: IlmType,
+}
+
 fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: SpfRoute) {
     if let Some(curr) = rib.get_mut(&prefix) {
         if curr.metric > route.metric {
@@ -5140,9 +5157,23 @@ fn build_rib6_from_spf(
 /// nexthop becomes `Nexthop::Uni` for single-hop routes,
 /// `Nexthop::Multi` for ECMP.
 fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
+    // SR-MPLS egress imposition: if the prefix has a resolved
+    // Prefix-SID label, push it onto every nexthop as an Explicit
+    // swap label. v2's `nhop_to_nexthop_uni` additionally tags
+    // adjacency-directly-attached nexthops as `Label::Implicit`
+    // (PHP), keyed off `SpfNexthop::adjacency`. `SpfNexthopV3`
+    // doesn't carry that flag yet, so we always push Explicit --
+    // functionally correct (swap to same label) just with no PHP
+    // optimization. Adding the adjacency flag to the v3 SPF
+    // nexthop builder is a follow-up.
+    let labels: Vec<rib::Label> = match route.sid {
+        Some(sid) => vec![rib::Label::Explicit(sid)],
+        None => vec![],
+    };
     let nexthop = if route.nhops.len() == 1 {
         let (addr, nhop) = route.nhops.iter().next().unwrap();
-        let mut uni = rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, vec![]);
+        let mut uni =
+            rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, labels.clone());
         uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
         rib::Nexthop::Uni(uni)
     } else {
@@ -5151,7 +5182,7 @@ fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
             .iter()
             .map(|(addr, nhop)| {
                 let mut uni =
-                    rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, vec![]);
+                    rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, labels.clone());
                 uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
                 uni
             })
@@ -5279,10 +5310,19 @@ fn apply_routing_updates_v3(
     spf_result: &BTreeMap<usize, spf::Path>,
 ) {
     let mut new_rib = build_rib6_from_spf(top, area_id, source, spf_result);
-    // Attach SR Prefix-SIDs to matching routes. No FIB change here --
-    // `make_rib6_entry` does not yet read these fields; D4b wires
-    // the MPLS install on top.
+    // Attach SR Prefix-SIDs to matching routes so `make_rib6_entry`
+    // pushes the label onto each nexthop (egress imposition).
     add_prefix_sids_v3(top, area_id, &mut new_rib);
+
+    // SR-MPLS LFIB shadow: build a fresh ILM from labeled routes in
+    // the new RIB, diff against `top.ilm6`, emit IlmAdd / IlmDel so
+    // the kernel MPLS table tracks our SR-MPLS state. Self-pop and
+    // self-Adj-SID install land in D4c / D4d.
+    let new_ilm = build_ilm_from_rib6(&new_rib);
+    let ilm_diff = spf::table_diff(top.ilm6.iter(), new_ilm.iter());
+    diff_ilm_apply_v6(&top.ctx.rib, &ilm_diff);
+    top.ilm6 = new_ilm;
+
     let diff = spf::table_diff(top.rib6.iter(), new_rib.iter());
 
     // Withdrawals.
@@ -5599,6 +5639,106 @@ fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>) -> BTreeMap<u32, SpfIl
         ilm.insert(
             label,
             SpfIlm {
+                nhops: route.nhops.clone(),
+                ilm_type: IlmType::Node(pfx_index),
+            },
+        );
+    }
+    ilm
+}
+
+pub type DiffIlmResultV3<'a> = spf::TableDiffResult<'a, u32, SpfIlmV3>;
+
+/// v3 sibling of `make_ilm_entry`. Same role -- render an
+/// `(incoming_label, SpfIlmV3)` pair into the `rib::IlmEntry` shape
+/// the RIB subsystem expects -- but the nexthop is v6 (matching
+/// `SpfRouteV3`). No PHP optimization yet (SpfNexthopV3 doesn't
+/// carry an adjacency flag); every nexthop pushes the incoming
+/// label as a swap label.
+fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
+    let build_uni = |addr: &std::net::Ipv6Addr, nhop: &SpfNexthopV3| -> NexthopUni {
+        let mut uni = NexthopUni {
+            addr: std::net::IpAddr::V6(*addr),
+            ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
+            ..Default::default()
+        };
+        uni.mpls_label.push(label);
+        uni
+    };
+
+    let nexthop = if ilm.nhops.len() == 1
+        && let Some((addr, nhop)) = ilm.nhops.iter().next()
+    {
+        Nexthop::Uni(build_uni(addr, nhop))
+    } else {
+        let mut multi = NexthopMulti::default();
+        for (addr, nhop) in ilm.nhops.iter() {
+            multi.nexthops.push(build_uni(addr, nhop));
+        }
+        Nexthop::Multi(multi)
+    };
+
+    IlmEntry {
+        rtype: RibType::Ospf,
+        ilm_type: ilm.ilm_type.clone(),
+        nexthop,
+    }
+}
+
+pub fn diff_ilm_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResultV3) {
+    for (label, ilm) in diff.only_curr.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmDel {
+                label: **label,
+                ilm: make_ilm_entry_v6(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+    for (label, _, ilm) in diff.different.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: make_ilm_entry_v6(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+    for (label, ilm) in diff.only_next.iter() {
+        if !ilm.nhops.is_empty() {
+            let msg = rib::Message::IlmAdd {
+                label: **label,
+                ilm: make_ilm_entry_v6(**label, ilm),
+            };
+            rib_client.send(msg).unwrap();
+        }
+    }
+}
+
+/// v3 sibling of `build_ilm_from_rib`. Walks the freshly-built v6
+/// RIB, emits one ILM entry per labeled prefix. Incoming-label key
+/// is `SpfRouteV3::sid` (resolved against the advertising router's
+/// SRGB by `add_prefix_sids_v3`). `IlmType::Node(pfx_index)` is
+/// only used by show-side rendering; derived from `prefix_sid` so
+/// an Index-form SID renders symmetrically with its on-the-wire
+/// value.
+fn build_ilm_from_rib6(rib: &PrefixMap<ipnet::Ipv6Net, SpfRouteV3>) -> BTreeMap<u32, SpfIlmV3> {
+    let mut ilm = BTreeMap::new();
+    for (_prefix, route) in rib.iter() {
+        let Some(label) = route.sid else {
+            continue;
+        };
+        if route.nhops.is_empty() {
+            continue;
+        }
+        let pfx_index = match route.prefix_sid {
+            Some((SidLabelValue::Index(idx), _)) => idx,
+            Some((SidLabelValue::Label(lbl), ref cfg)) => lbl.saturating_sub(cfg.global.start),
+            None => 0,
+        };
+        ilm.insert(
+            label,
+            SpfIlmV3 {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
             },
