@@ -370,6 +370,34 @@ module config {
             }
             default candidate;
           }
+          // Per-NSSA-area redistribute knobs. Type-7 LSAs are
+          // area-scoped, so the source proto is selected per area
+          // (an operator may inject `connected` into one NSSA and
+          // not another). Each sibling container is a presence node
+          // — its existence enables redistribution of that source.
+          // Ignored unless area-type is `nssa`. The metric and
+          // metric-type leaves are consumer-side overrides: metric
+          // defaults to 20 (matching FRR), metric-type defaults to
+          // 2 (E2). Type-1 (E1) lifts the SPF cost to the originator
+          // and adds the LSA metric; Type-2 uses LSA metric alone.
+          container redistribute {
+            container connected {
+              presence "Redistribute connected routes into Type-7";
+              leaf metric {
+                type uint32 {
+                  range "0..16777214";
+                }
+                default 20;
+              }
+              leaf metric-type {
+                type enumeration {
+                  enum type-1;
+                  enum type-2;
+                }
+                default type-2;
+              }
+            }
+          }
           list interface {
             key "if-name";
             leaf if-name {
@@ -553,6 +581,28 @@ module config {
               enum never;
             }
             default candidate;
+          }
+          // Same shape as the v2 sibling above. Storage-only on v3
+          // until phase 5/6 lights up Type-0x2007 origination — the
+          // schema lives here today so v3 callers don't see a
+          // schema drift between v2 and v3 NSSA config surfaces.
+          container redistribute {
+            container connected {
+              presence "Redistribute connected routes into Type-7";
+              leaf metric {
+                type uint32 {
+                  range "0..16777214";
+                }
+                default 20;
+              }
+              leaf metric-type {
+                type enumeration {
+                  enum type-1;
+                  enum type-2;
+                }
+                default type-2;
+              }
+            }
           }
           list interface {
             key "if-name";

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
+use ipnet::Ipv4Net;
+
 use super::Lsdb;
 use super::task::Timer;
 use super::version::{OspfVersion, Ospfv2};
@@ -75,6 +77,57 @@ pub struct AreaType {
     pub nssa_default_originate: bool,
     pub nssa_suppress_fa: bool,
     pub nssa_translator_role: NssaTranslatorRole,
+}
+
+/// E1 vs E2 metric-type for AS-External / NSSA-AS-External LSAs.
+/// E1 (Type 1): the receiver adds SPF(originator) cost to LSA metric.
+/// E2 (Type 2, default): receiver uses LSA metric alone (SPF cost is
+/// the tiebreak only). Encoded on the wire as the E-bit (0x80) of the
+/// LSA body's `ext_and_resvd` / `ext_and_tos` byte.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum ExternalMetricType {
+    Type1,
+    #[default]
+    Type2,
+}
+
+impl ExternalMetricType {
+    /// `"type-1"` / `"type-2"` from the YANG enum.
+    pub fn from_yang(s: &str) -> Option<Self> {
+        match s {
+            "type-1" => Some(Self::Type1),
+            "type-2" => Some(Self::Type2),
+            _ => None,
+        }
+    }
+
+    pub fn is_type_2(self) -> bool {
+        matches!(self, Self::Type2)
+    }
+}
+
+/// Per-source-proto redistribution knobs. Today only `connected`
+/// is wired (RIB subscription lives in `inst.rs`); extending to
+/// `static` is just adding another `Option<RedistEntry>` field
+/// here plus a matching YANG container + callback.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RedistEntry {
+    /// External metric to advertise. Default 20 (matches FRR).
+    pub metric: u32,
+    /// E1 (Type 1) vs E2 (Type 2). Default E2.
+    pub metric_type: ExternalMetricType,
+}
+
+impl RedistEntry {
+    pub const DEFAULT_METRIC: u32 = 20;
+}
+
+/// Per-area redistribute configuration. Sibling per source proto.
+/// `Some(entry)` = redistribute that source into this area's
+/// Type-7 LSAs; `None` = don't.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AreaRedistribute {
+    pub connected: Option<RedistEntry>,
 }
 
 impl AreaType {
@@ -174,6 +227,21 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     // SPF; the completion path re-fires exactly one follow-up.
     pub spf_inflight: bool,
     pub spf_pending: bool,
+
+    /// Per-area redistribute config (NSSA Type-7 source toggles).
+    /// Only consulted when `area_type` is NSSA; storage is
+    /// area-typeless because operators may toggle the redistribute
+    /// knob before flipping `area-type` and the value should
+    /// survive the order swap.
+    pub redistribute: AreaRedistribute,
+
+    /// Prefixes of redistributed connected routes that this router
+    /// has originated as Type-7 LSAs into this area. Keyed by
+    /// `prefix.network()`. Used to flush the matching Type-7s when
+    /// the redistribute knob is removed or the area leaves NSSA.
+    /// Populated/maintained by the RIB RouteAdd / RouteDel handlers
+    /// in `inst.rs`.
+    pub redist_connected_originated: BTreeSet<Ipv4Net>,
 }
 
 impl<V: OspfVersion> OspfArea<V> {
@@ -186,6 +254,8 @@ impl<V: OspfVersion> OspfArea<V> {
             spf_timer: None,
             spf_inflight: false,
             spf_pending: false,
+            redistribute: AreaRedistribute::default(),
+            redist_connected_originated: BTreeSet::new(),
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -117,6 +117,15 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub segment_routing: super::srmpls::SegmentRoutingMode,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
+    /// Cached snapshot of v4 routes the RIB is pushing via
+    /// `RedistAdd` subscriptions. Keyed by `(rtype, prefix)`. Today
+    /// only `RibType::Connected` is subscribed (per-area
+    /// `redistribute connected` under NSSA); future static / bgp
+    /// sources add their rtype to the same map. Updated by
+    /// `process_rib_msg`'s `RouteAdd` / `RouteDel` handlers and
+    /// consumed by `nssa_redist_connected_resync` when origination
+    /// state needs to be rebuilt (config change, area-type flip).
+    pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     /// v3-only outbound packet channel. `Ospf<Ospfv3>::new` spawns
     /// `network_v6::write_packet_v6` consuming the matching receiver;
     /// producers of v3 outgoing packets (the v3 IFSM/NFSM, once they
@@ -393,6 +402,7 @@ impl Ospf<Ospfv2> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             spf_last: None,
             spf_duration: None,
+            redist_v4: BTreeMap::new(),
             sock,
             v3_send_tx: None,
             v3_recv_rx: None,
@@ -836,46 +846,47 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    /// RFC 3101 §2.3 NSSA default-LSA origination. Builds a Type-7
-    /// NSSA-AS-External LSA for the default route 0.0.0.0/0 and
-    /// installs it in `area_id`'s LSDB. P-bit stays clear so the
-    /// NSSA's ABR does not translate the default into Type-5 across
-    /// the backbone — the area-internal default is the only purpose
-    /// of this LSA. Metric type 2 (E2), cost 1 by default.
+    /// Generic Type-7 NSSA-AS-External originator. Builds a Type-7
+    /// LSA for `prefix` and installs it in `area_id`'s LSDB.
     ///
-    /// Gates on: `area_id` exists, area is NSSA, and the area's
-    /// `nssa_default_originate` knob is true. Otherwise calls
-    /// `nssa_default_lsa_flush` to clear any stale self-originated
-    /// copy.
-    pub fn nssa_default_lsa_originate(&mut self, area_id: Ipv4Addr) {
-        let area_type = match self.areas.get(area_id) {
-            Some(area) => area.area_type,
-            None => return,
-        };
-        if !area_type.is_nssa() || !area_type.nssa_default_originate {
-            self.nssa_default_lsa_flush(area_id);
-            return;
-        }
-
-        let ls_id = Ipv4Addr::UNSPECIFIED;
+    /// `prefix` carries both the network address and mask; ls_id is
+    /// the prefix's network address (RFC 2328 §12.4.4 inherited by
+    /// RFC 3101). `metric_type_2 = true` sets the E-bit (E2 — metric
+    /// dominant over SPF cost); false = E1 (added to SPF cost on the
+    /// receiver). `fwd_addr = 0.0.0.0` defers FA-based path
+    /// selection on the receiver; RFC 3101 §2.5 step 5 FA
+    /// resolution lands in a follow-up.
+    ///
+    /// Caller is responsible for gating on area type / config; this
+    /// helper does not check whether origination is appropriate. The
+    /// per-prefix entry points
+    /// (`nssa_default_lsa_originate`,
+    ///  `nssa_redist_connected_originate_one`) own the policy
+    /// decision before invoking this builder.
+    fn nssa_lsa_originate_for_prefix(
+        &mut self,
+        area_id: Ipv4Addr,
+        prefix: Ipv4Net,
+        metric: u32,
+        metric_type_2: bool,
+        fwd_addr: Ipv4Addr,
+    ) {
+        let ls_id = prefix.network();
         let mut lsa_header = OspfLsaHeader::new(OspfLsType::NssaAsExternal, ls_id, self.router_id);
         // RFC 3101 §2.4 LSA header Options on Type-7: E bit MUST be
         // clear (NSSA areas can't accept Type-5); N bit set; P bit
-        // clear for ABR-originated default per §2.3.
+        // clear for ABR-originated LSAs (translation knob lands in
+        // phase 4).
         let mut options = OspfOptions::default();
         options.set_nssa(true);
         options.set_o(true);
         lsa_header.options = u8::from(options);
 
-        // E1/E2 + metric. 0x80 = E2 (type-2 metric, dominant over
-        // SPF cost). Cost defaults to 1 — there's no separate YANG
-        // knob yet; a `nssa-default-originate-cost` leaf can be
-        // added later without changing this code path.
         let body = NssaAsExternalLsa {
-            netmask: Ipv4Addr::UNSPECIFIED,
-            ext_and_tos: 0x80,
-            metric: 1,
-            forwarding_address: Ipv4Addr::UNSPECIFIED,
+            netmask: prefix.netmask(),
+            ext_and_tos: if metric_type_2 { 0x80 } else { 0x00 },
+            metric,
+            forwarding_address: fwd_addr,
             external_route_tag: 0,
             tos_list: Vec::new(),
         };
@@ -902,10 +913,11 @@ impl Ospf<Ospfv2> {
         self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
-    /// Flush our self-originated Type-7 default LSA from `area_id`.
-    /// No-op if the area or LSA doesn't exist.
-    pub fn nssa_default_lsa_flush(&mut self, area_id: Ipv4Addr) {
-        let ls_id = Ipv4Addr::UNSPECIFIED;
+    /// Flush a single self-originated Type-7 LSA from `area_id`
+    /// keyed by `prefix.network()` as ls_id. No-op if the area or
+    /// LSA doesn't exist.
+    fn nssa_lsa_flush_for_prefix(&mut self, area_id: Ipv4Addr, prefix: Ipv4Net) {
+        let ls_id = prefix.network();
         let flushed = if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.flush_lsa(
                 OspfLsType::NssaAsExternal,
@@ -919,6 +931,143 @@ impl Ospf<Ospfv2> {
         };
         if let Some(lsa) = flushed {
             self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// RFC 3101 §2.3 NSSA default-LSA origination. Thin wrapper
+    /// around `nssa_lsa_originate_for_prefix` that gates on area
+    /// type + `nssa_default_originate` knob and calls the generic
+    /// builder with prefix=0.0.0.0/0, metric=1, E2, fwd=0.
+    pub fn nssa_default_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        let area_type = match self.areas.get(area_id) {
+            Some(area) => area.area_type,
+            None => return,
+        };
+        if !area_type.is_nssa() || !area_type.nssa_default_originate {
+            self.nssa_default_lsa_flush(area_id);
+            return;
+        }
+        let default = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("0.0.0.0/0 is valid");
+        self.nssa_lsa_originate_for_prefix(
+            area_id,
+            default,
+            /* metric */ 1,
+            /* metric_type_2 */ true,
+            /* fwd_addr */ Ipv4Addr::UNSPECIFIED,
+        );
+    }
+
+    /// Flush our self-originated Type-7 default LSA from `area_id`.
+    pub fn nssa_default_lsa_flush(&mut self, area_id: Ipv4Addr) {
+        let default = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("0.0.0.0/0 is valid");
+        self.nssa_lsa_flush_for_prefix(area_id, default);
+    }
+
+    /// Rebuild this area's self-originated Type-7 LSAs for
+    /// redistribute-connected from the cached RIB-known v4 connected
+    /// routes (`self.redist_v4`).
+    ///
+    /// Idempotent: walks the cache and the previously-originated set,
+    /// originates any missing Type-7s (or refreshes them — metric /
+    /// metric-type may have changed) and flushes any stale ones.
+    /// Called by:
+    ///   - `RouteAdd` / `RouteDel` event from RIB (cache changed)
+    ///   - redistribute-connected presence / metric / metric-type
+    ///     config change
+    ///   - area-type set (entering or leaving NSSA)
+    pub fn nssa_redist_connected_resync(&mut self, area_id: Ipv4Addr) {
+        use crate::rib::RibType;
+
+        // Snapshot inputs to avoid holding a borrow across the
+        // originate / flush calls (both take `&mut self`).
+        let (entry, area_type, prev_originated) = {
+            let Some(area) = self.areas.get(area_id) else {
+                return;
+            };
+            (
+                area.redistribute.connected,
+                area.area_type,
+                area.redist_connected_originated.clone(),
+            )
+        };
+
+        // Compute the desired set of prefixes we should be
+        // originating right now.
+        let desired: BTreeSet<Ipv4Net> = if area_type.is_nssa()
+            && let Some(_e) = entry
+        {
+            self.redist_v4
+                .iter()
+                .filter(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
+                .map(|((_, prefix), _)| *prefix)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
+        // Flush previously-originated prefixes that are no longer
+        // desired.
+        for prefix in prev_originated
+            .difference(&desired)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.nssa_lsa_flush_for_prefix(area_id, prefix);
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.redist_connected_originated.remove(&prefix);
+            }
+        }
+
+        // Re-originate all currently desired prefixes — covers
+        // both first-time origination and refresh after a metric /
+        // metric-type change.
+        if let Some(redist_entry) = entry
+            && area_type.is_nssa()
+        {
+            for prefix in &desired {
+                self.nssa_lsa_originate_for_prefix(
+                    area_id,
+                    *prefix,
+                    redist_entry.metric,
+                    redist_entry.metric_type.is_type_2(),
+                    Ipv4Addr::UNSPECIFIED,
+                );
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.redist_connected_originated.insert(*prefix);
+                }
+            }
+        }
+    }
+
+    /// `RibRx::RouteAdd` handler. Update the cache, then nudge
+    /// every NSSA area to resync. Per-area filtering happens inside
+    /// `nssa_redist_connected_resync`.
+    fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V4(entries) = batch {
+            for e in entries {
+                self.redist_v4.insert((rtype, e.prefix), e);
+            }
+        }
+        // v6 batches arrive only for v3 subscriptions, which this
+        // v2 instance doesn't issue today.
+
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
+        for area_id in area_ids {
+            self.nssa_redist_connected_resync(area_id);
+        }
+    }
+
+    /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
+    fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V4(entries) = batch {
+            for e in entries {
+                self.redist_v4.remove(&(rtype, e.prefix));
+            }
+        }
+
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
+        for area_id in area_ids {
+            self.nssa_redist_connected_resync(area_id);
         }
     }
 
@@ -1993,6 +2142,17 @@ impl Ospf<Ospfv2> {
             RibRx::AddrDel(addr) => {
                 self.addr_del(addr);
             }
+            // Redistribute delivery. Today only `Connected` is
+            // subscribed (per-area NSSA redistribute connected); the
+            // handler updates the cache and resyncs Type-7 LSAs in
+            // every NSSA area whose `redistribute connected` knob
+            // is set.
+            RibRx::RouteAdd { rtype, routes, .. } => {
+                self.route_redist_add(rtype, routes);
+            }
+            RibRx::RouteDel { rtype, routes, .. } => {
+                self.route_redist_del(rtype, routes);
+            }
             _ => {
                 //
             }
@@ -2131,6 +2291,7 @@ impl Ospf<Ospfv3> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             spf_last: None,
             spf_duration: None,
+            redist_v4: BTreeMap::new(),
             sock,
             v3_send_tx: Some(v3_send_tx),
             v3_recv_rx: Some(v3_recv_rx),
