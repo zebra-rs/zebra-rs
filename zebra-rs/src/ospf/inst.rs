@@ -4583,6 +4583,14 @@ pub struct SpfRouteV3 {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpfNexthopV3 {
     pub ifindex: u32,
+    /// When true the destination is one hop away (or is us, in the
+    /// self-Prefix-SID-pop case). `make_ilm_entry_v6` keys off this
+    /// to omit the swap label so the kernel install becomes
+    /// Via + Oif with no `NewDestination` (implicit-null / PHP /
+    /// local pop). Default `false` for transit nexthops produced by
+    /// the SPF builder, which then triggers the standard swap
+    /// (push the incoming label as the outgoing label).
+    pub adjacency: bool,
 }
 
 /// v3 sibling of `SpfIlm`. Same role -- one entry in the SR-MPLS
@@ -5392,7 +5400,15 @@ fn build_rib6_from_spf(
             }
             let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
                 .into_iter()
-                .map(|(addr, ifindex)| (addr, SpfNexthopV3 { ifindex }))
+                .map(|(addr, ifindex)| {
+                    (
+                        addr,
+                        SpfNexthopV3 {
+                            ifindex,
+                            adjacency: false,
+                        },
+                    )
+                })
                 .collect();
             Some((ref_path.cost, nhops_map))
         } else {
@@ -5431,6 +5447,7 @@ fn build_rib6_from_spf(
                     std::net::Ipv6Addr::UNSPECIFIED,
                     SpfNexthopV3 {
                         ifindex: link.index,
+                        adjacency: false,
                     },
                 );
                 (
@@ -5459,6 +5476,7 @@ fn build_rib6_from_spf(
                     std::net::Ipv6Addr::UNSPECIFIED,
                     SpfNexthopV3 {
                         ifindex: link.index,
+                        adjacency: false,
                     },
                 );
                 (prefix.metric as u32, nhops_map)
@@ -5656,9 +5674,11 @@ fn apply_routing_updates_v3(
 
     // SR-MPLS LFIB shadow: build a fresh ILM from labeled routes in
     // the new RIB, diff against `top.ilm6`, emit IlmAdd / IlmDel so
-    // the kernel MPLS table tracks our SR-MPLS state. Self-pop and
-    // self-Adj-SID install land in D4c / D4d.
-    let new_ilm = build_ilm_from_rib6(&new_rib);
+    // the kernel MPLS table tracks our SR-MPLS state. Self-pop lands
+    // here via add_self_prefix_sids_to_ilm_v3; self-Adj-SID install
+    // arrives in D4d.
+    let mut new_ilm = build_ilm_from_rib6(&new_rib);
+    add_self_prefix_sids_to_ilm_v3(top, &mut new_ilm);
     let ilm_diff = spf::table_diff(top.ilm6.iter(), new_ilm.iter());
     diff_ilm_apply_v6(&top.ctx.rib, &ilm_diff);
     top.ilm6 = new_ilm;
@@ -6002,7 +6022,9 @@ fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
-        uni.mpls_label.push(label);
+        if !nhop.adjacency {
+            uni.mpls_label.push(label);
+        }
         uni
     };
 
@@ -6148,6 +6170,113 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                     ilm.insert(
                         label,
                         SpfIlm {
+                            nhops,
+                            ilm_type: IlmType::Node(pfx_index),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// v3 sibling of `add_self_prefix_sids_to_ilm`. Walks every area's
+/// self-originated E-Intra-Area-Prefix-LSAs (LS Type 0xA029,
+/// RFC 8362 §3.7) and emits an ILM entry that pops the local
+/// Prefix-SID label and delivers to the owning link.
+///
+/// Needed because `srmpls::ext_intra_area_prefix_v3_lsa_build` sets
+/// the NP (No-PHP) flag on Index-form Prefix-SIDs we originate; per
+/// RFC 8666 §5 the upstream MUST NOT pop, so labeled packets reach
+/// our kernel MPLS layer and require an explicit pop entry.
+///
+/// The emitted nexthop carries `adjacency: true` so
+/// `make_ilm_entry_v6` omits the swap label -- Via + Oif only. With
+/// Via set to one of our own IPv6 addresses on the owning interface
+/// the kernel pops the label and routes the inner packet locally.
+fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIlmV3>) {
+    use ipnet::Ipv6Net;
+    use ospf_packet::{
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv,
+        ospfv3_prefix_wire_len,
+    };
+
+    use super::srmpls::SRGB_START;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    for (area_id, area) in top.areas.iter() {
+        let area_id = *area_id;
+        for ((_ls_id, _adv_router), lsa) in area
+            .lsdb
+            .iter_by_raw_type(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE)
+        {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if lsa.data.h.advertising_router != top.router_id {
+                continue;
+            }
+            let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
+                continue;
+            };
+            for tlv in &body.tlvs {
+                let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
+                    continue;
+                };
+                // Reconstruct the IPv6 prefix from the wire bytes
+                // (same logic as `add_prefix_sids_v3`).
+                let wire_len = ospfv3_prefix_wire_len(prefix_tlv.prefix_length);
+                if prefix_tlv.address_prefix.len() < wire_len {
+                    continue;
+                }
+                let mut bytes = [0u8; 16];
+                let copy = wire_len.min(16);
+                bytes[..copy].copy_from_slice(&prefix_tlv.address_prefix[..copy]);
+                let addr = std::net::Ipv6Addr::from(bytes);
+                let Ok(prefix) = Ipv6Net::new(addr, prefix_tlv.prefix_length) else {
+                    continue;
+                };
+                let prefix = prefix.trunc();
+                // Find the local link owning this prefix so the ILM
+                // entry can name a real interface for the pop's Oif.
+                let Some(link) = top.links.values().find(|l| {
+                    l.enabled
+                        && l.area == area_id
+                        && l.addr.iter().any(|a| a.prefix.trunc() == prefix)
+                }) else {
+                    continue;
+                };
+                let Some(our_addr) = link
+                    .addr
+                    .iter()
+                    .find(|a| a.prefix.addr().segments()[0] != 0xfe80)
+                    .map(|a| a.prefix.addr())
+                else {
+                    continue;
+                };
+                for sub in &prefix_tlv.subs {
+                    let Ospfv3SubTlv::PrefixSid(ps) = sub else {
+                        continue;
+                    };
+                    let (label, pfx_index) = match ps.sid {
+                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                            Some(v) => (v, idx),
+                            None => continue,
+                        },
+                    };
+                    let mut nhops = BTreeMap::new();
+                    nhops.insert(
+                        our_addr,
+                        SpfNexthopV3 {
+                            ifindex: link.index,
+                            adjacency: true,
+                        },
+                    );
+                    ilm.insert(
+                        label,
+                        SpfIlmV3 {
                             nhops,
                             ilm_type: IlmType::Node(pfx_index),
                         },
