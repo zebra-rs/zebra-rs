@@ -536,6 +536,20 @@ pub fn ospf_nfsm_inactivity_timer<V: OspfVersion>(
     nbr: &mut Neighbor<V>,
     oident: &Identity<V>,
 ) -> Option<NfsmState> {
+    // RFC 3623 §3.2 — while in helper mode we treat the neighbor as
+    // if Hellos were still arriving, suppressing the dead-interval
+    // kill. Rearm the inactivity timer so we keep ticking; the
+    // grace-period expiry timer (`Message::GrHelperExpire`) is the
+    // bound that actually exits helper mode in Phase 2a.
+    // Topology-change exit conditions land in 2c.
+    if nbr.gr_helper.is_some() {
+        tracing::info!(
+            "[GR Helper] suppress inactivity-timer kill for nbr {} (still helping)",
+            nbr.ident.router_id
+        );
+        nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
+        return None;
+    }
     ospf_nfsm_kill_nbr(oi, nbr, oident)
 }
 

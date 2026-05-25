@@ -1241,6 +1241,32 @@ impl Ospf<Ospfv2> {
         self.ext_link_lsa_originate(ifindex);
     }
 
+    /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1). Clears
+    /// `nbr.gr_helper` and re-fires the inactivity-timer event so
+    /// the normal `ospf_nfsm_kill_nbr` path runs — by now the
+    /// neighbor really is gone.
+    fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let Some(nbr) = link.nbrs.get_mut(&router_id) else {
+            return;
+        };
+        if nbr.gr_helper.take().is_none() {
+            return;
+        }
+        tracing::info!(
+            "[GR Helper] grace-period expired for nbr {} on ifindex={}, killing neighbor",
+            router_id,
+            ifindex
+        );
+        let _ = self.tx.send(Message::Nfsm(
+            ifindex,
+            router_id,
+            super::nfsm::NfsmEvent::InactivityTimer,
+        ));
+    }
+
     /// Check if we are currently the DR for the network identified by ls_id.
     fn is_dr_for_network_lsa(&self, ls_id: Ipv4Addr) -> bool {
         for (_, link) in self.links.iter() {
@@ -1792,6 +1818,9 @@ impl Ospf<Ospfv2> {
                         let _ = self.tx.send(Message::SpfCalc(area_id));
                     }
                 }
+            }
+            Message::GrHelperExpire(ifindex, router_id) => {
+                self.gr_helper_expire(ifindex, router_id);
             }
             _ => {}
         }
@@ -3751,6 +3780,11 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// folds back into `Ospf` on the main task. Currently only
     /// emitted by v2; v3 still runs SPF inline.
     SpfDone(Box<SpfOutput>),
+    /// Graceful-restart helper-mode grace-period expiry for
+    /// `(ifindex, nbr_router_id)`. RFC 3623 §3.2 bullet 1 — the
+    /// restarter exceeded its grace window. Exit helper and let the
+    /// normal `InactivityTimer` path tear the neighbor down.
+    GrHelperExpire(u32, Ipv4Addr),
 }
 
 use crate::spf::{self, Path};
