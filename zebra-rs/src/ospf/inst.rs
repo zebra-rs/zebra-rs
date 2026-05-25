@@ -3146,6 +3146,86 @@ impl Ospf<Ospfv3> {
         }
     }
 
+    /// Originate (or flush) the OSPFv3 E-Router-LSA (RFC 8362 §3.1)
+    /// carrying an Adj-SID (RFC 8666 §6.1) for `ifindex`. v3
+    /// analogue of `Ospf<Ospfv2>::ext_link_lsa_originate`.
+    ///
+    /// Originates when SR-MPLS is on, the link is enabled, has an
+    /// `adjacency_sid` configured, network type is point-to-point,
+    /// and at least one neighbor reached Full. Flushes otherwise.
+    /// LAN-Adj-SID (broadcast / NBMA) origination lands in a
+    /// follow-up; this slice covers P2P only.
+    pub fn e_router_v3_lsa_originate(&mut self, ifindex: u32) {
+        use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
+
+        use super::srmpls::SegmentRoutingMode;
+
+        let link_state_id = ifindex;
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_E_ROUTER_LSA_TYPE, link_state_id, self.router_id);
+
+        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
+            && let Some(link) = self.links.get(&ifindex)
+            && link.enabled
+            && link.is_pointopoint()
+            && let Some(adjacency_sid) = link.config.adjacency_sid
+            && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
+        {
+            Some((
+                link.area,
+                link.output_cost as u16,
+                link.interface_id,
+                nbr.interface_id,
+                nbr.ident.router_id,
+                adjacency_sid,
+            ))
+        } else {
+            None
+        };
+
+        if let Some((area_id, metric, my_iid, peer_iid, peer_rid, adjacency_sid)) = build_inputs {
+            let mut lsa = super::srmpls::e_router_v3_lsa_build(
+                self.router_id,
+                metric,
+                my_iid,
+                peer_iid,
+                peer_rid,
+                &adjacency_sid,
+                link_state_id,
+            );
+
+            if let Some(area) = self.areas.get(area_id)
+                && let Some(prev_seq) = area
+                    .lsdb
+                    .lookup_by_raw_key(key)
+                    .map(|prev| prev.h.ls_seq_number)
+            {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            }
+            self.flood_self_originated_lsa(area_id, &flood_lsa);
+        } else {
+            // Walk every area in case the link's area moved between
+            // calls -- a stale LSA must be flushed wherever it lives.
+            let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+            for area_id in area_ids {
+                let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                    area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+                } else {
+                    None
+                };
+                if let Some(lsa) = flushed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+        }
+    }
+
     /// Detect Full state transitions on `nbr` and re-originate the
     /// LSAs that depend on the full-adjacency set. Mirrors v2's
     /// `process_neighbor_state_change`:
@@ -3213,6 +3293,12 @@ impl Ospf<Ospfv3> {
             // branch handles the gate, but it needs the call.
             self.network_intra_area_prefix_lsa_originate(ifindex);
         }
+
+        // SR-MPLS E-Router-LSA tracks the per-link P2P Adj-SID, which
+        // is only meaningful while the link has a Full neighbor.
+        // `e_router_v3_lsa_originate` flushes when no Full neighbor
+        // remains; the call is a no-op on non-P2P links.
+        self.e_router_v3_lsa_originate(ifindex);
     }
 
     /// Originate (or flush) the v3 Network-LSA for the broadcast

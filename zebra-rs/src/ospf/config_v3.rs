@@ -371,9 +371,11 @@ fn config_ospfv3_interface_prefix_sid_absolute(
     Some(())
 }
 
-/// Storage-only Adjacency-SID config callbacks. Mirror the v2
-/// pair above; LSA origination lands once OSPFv3 grows its
-/// Extended-Link Opaque-LSA equivalent (RFC 8666 E-LSA work).
+/// Store the per-interface Adjacency-SID and re-originate the
+/// matching E-Router-LSA. Mirrors v2's
+/// `config_ospf_interface_adjacency_sid_index`. The originator
+/// gates on its own preconditions (SR-MPLS + P2P + Full neighbor),
+/// so the LSA is flushed automatically when any are unmet.
 fn config_ospfv3_interface_adjacency_sid_index(
     ospf: &mut Ospf<Ospfv3>,
     mut args: Args,
@@ -389,6 +391,9 @@ fn config_ospfv3_interface_adjacency_sid_index(
     } else {
         link.config.adjacency_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.e_router_v3_lsa_originate(ifindex);
 
     Some(())
 }
@@ -408,6 +413,9 @@ fn config_ospfv3_interface_adjacency_sid_absolute(
     } else {
         link.config.adjacency_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.e_router_v3_lsa_originate(ifindex);
 
     Some(())
 }
@@ -435,6 +443,17 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
         .collect();
     for ifindex in ifindexes {
         ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+    }
+
+    // Same for E-Router-LSAs (Adj-SID).
+    let ifindexes: Vec<u32> = ospf
+        .links
+        .iter()
+        .filter(|(_, link)| link.config.adjacency_sid.is_some())
+        .map(|(ifindex, _)| *ifindex)
+        .collect();
+    for ifindex in ifindexes {
+        ospf.e_router_v3_lsa_originate(ifindex);
     }
 
     Some(())
