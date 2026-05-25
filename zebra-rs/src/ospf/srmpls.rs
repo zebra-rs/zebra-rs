@@ -103,45 +103,31 @@ pub fn ext_prefix_lsa_build(
     lsa
 }
 
-/// Build an Extended Link Opaque LSA (RFC 7684 §3 + RFC 8665 §5)
-/// for a single link, carrying one Adjacency-SID sub-TLV.
+/// Build an Extended Link Opaque LSA (RFC 7684 §3) for a single link
+/// with caller-supplied sub-TLVs.
 ///
 /// `link_type` matches the OSPFv2 Router-LSA link_type encoding (1 =
-/// P2P, 2 = Transit broadcast/NBMA, 4 = Virtual). PR3 only originates
-/// for P2P links; broadcast / NBMA support arrives with LAN-Adj-SID.
+/// P2P, 2 = Transit broadcast / NBMA, 4 = Virtual). `subs` is the
+/// full sub-TLV list to embed: one `AdjSidSubTlv` for P2P, or one
+/// `LanAdjSidSubTlv` per Full neighbor on broadcast / NBMA per
+/// RFC 8665 §6.
 ///
-/// Flag semantics mirror the Prefix-SID build: an Index-form SID
-/// carries no value/local flags (the index is resolved against the
-/// peer's SRGB); an Absolute Label SID sets V (Value) + L (Local) to
-/// indicate a raw label per RFC 8665 §5.
+/// The `_build_p2p_adj_sub` / `_build_lan_adj_sub` helpers below
+/// take the more common Adj-SID flag conventions off the caller's
+/// hands.
 pub fn ext_link_lsa_build(
     router_id: Ipv4Addr,
     link_type: u8,
     link_id: Ipv4Addr,
     link_data: Ipv4Addr,
-    adjacency_sid: &AdjacencySid,
+    subs: Vec<ExtLinkSubTlv>,
     opaque_id: u32,
 ) -> OspfLsa {
-    let (sid, flags) = match adjacency_sid {
-        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
-        AdjacencySid::Absolute(label) => (
-            SidLabelTlv::Label(*label),
-            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
-        ),
-    };
-
-    let adj_sub = AdjSidSubTlv {
-        flags,
-        mt_id: 0,
-        weight: 0,
-        sid,
-    };
-
     let tlv = ExtLinkTlv {
         link_type,
         link_id,
         link_data,
-        subs: vec![ExtLinkSubTlv::AdjSid(adj_sub)],
+        subs,
     };
 
     let el_lsa = ExtLinkLsa { tlvs: vec![tlv] };
@@ -154,4 +140,40 @@ pub fn ext_link_lsa_build(
     let mut lsa = OspfLsa::from(lsah, OspfLsp::OpaqueAreaExtLink(el_lsa));
     lsa.update();
     lsa
+}
+
+/// Construct an `AdjSidSubTlv` from a configured Adjacency-SID (P2P
+/// case). Flag semantics mirror the Prefix-SID build: Index-form
+/// carries no value/local flags (the index is resolved against the
+/// peer's SRGB); Absolute Label sets V (Value) + L (Local) per
+/// RFC 8665 §5.
+pub fn build_p2p_adj_sub(adjacency_sid: &AdjacencySid) -> ExtLinkSubTlv {
+    let (sid, flags) = match adjacency_sid {
+        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
+        AdjacencySid::Absolute(label) => (
+            SidLabelTlv::Label(*label),
+            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        ),
+    };
+    ExtLinkSubTlv::AdjSid(AdjSidSubTlv {
+        flags,
+        mt_id: 0,
+        weight: 0,
+        sid,
+    })
+}
+
+/// Construct a `LanAdjSidSubTlv` (RFC 8665 §6) for a single Full
+/// neighbor on a broadcast / NBMA segment. `label` is the absolute
+/// SRLB-allocated value held in `Ospf::lan_adj_sids`. V + L flags
+/// are set unconditionally — LAN Adj-SIDs we originate are always
+/// in raw-Label form (drawn from our local SRLB).
+pub fn build_lan_adj_sub(neighbor_id: Ipv4Addr, label: u32) -> ExtLinkSubTlv {
+    ExtLinkSubTlv::LanAdjSid(LanAdjSidSubTlv {
+        flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        mt_id: 0,
+        weight: 0,
+        neighbor_id,
+        sid: SidLabelTlv::Label(label),
+    })
 }
