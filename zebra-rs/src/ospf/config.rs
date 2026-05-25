@@ -326,10 +326,10 @@ fn config_ospf_interface_prefix_sid_absolute(
     Some(())
 }
 
-/// Store the Index-form Adjacency-SID for this interface. No
-/// origination here -- Extended-Link LSA emission lands in a
-/// follow-up PR; this callback is storage-only so a YANG commit
-/// validates and persists the value into `LinkConfig`.
+/// Store the Index-form Adjacency-SID for this interface and re-
+/// originate the per-link Extended-Link Opaque LSA. The originator
+/// gates on SR-MPLS enabled + a Full neighbor on a P2P link, so the
+/// LSA is flushed automatically if any precondition is unmet.
 fn config_ospf_interface_adjacency_sid_index(
     ospf: &mut Ospf,
     mut args: Args,
@@ -345,6 +345,9 @@ fn config_ospf_interface_adjacency_sid_index(
     } else {
         link.config.adjacency_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_link_lsa_originate(ifindex);
 
     Some(())
 }
@@ -364,6 +367,9 @@ fn config_ospf_interface_adjacency_sid_absolute(
     } else {
         link.config.adjacency_sid = None;
     }
+    let ifindex = link.index;
+
+    ospf.ext_link_lsa_originate(ifindex);
 
     Some(())
 }
@@ -387,6 +393,17 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
         .collect();
     for ifindex in ifindexes {
         ospf.ext_prefix_lsa_originate(ifindex);
+    }
+
+    // Same for Extended Link LSAs (Adj-SID).
+    let ifindexes: Vec<u32> = ospf
+        .links
+        .iter()
+        .filter(|(_, link)| link.config.adjacency_sid.is_some())
+        .map(|(ifindex, _)| *ifindex)
+        .collect();
+    for ifindex in ifindexes {
+        ospf.ext_link_lsa_originate(ifindex);
     }
 
     Some(())

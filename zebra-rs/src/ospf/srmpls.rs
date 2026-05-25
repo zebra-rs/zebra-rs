@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use ospf_packet::*;
 
-use super::link::PrefixSid;
+use super::link::{AdjacencySid, PrefixSid};
 
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub enum SegmentRoutingMode {
@@ -99,6 +99,59 @@ pub fn ext_prefix_lsa_build(
     lsah.options = 0x42; // O-bit + E-bit.
 
     let mut lsa = OspfLsa::from(lsah, OspfLsp::OpaqueAreaExtPrefix(ep_lsa));
+    lsa.update();
+    lsa
+}
+
+/// Build an Extended Link Opaque LSA (RFC 7684 §3 + RFC 8665 §5)
+/// for a single link, carrying one Adjacency-SID sub-TLV.
+///
+/// `link_type` matches the OSPFv2 Router-LSA link_type encoding (1 =
+/// P2P, 2 = Transit broadcast/NBMA, 4 = Virtual). PR3 only originates
+/// for P2P links; broadcast / NBMA support arrives with LAN-Adj-SID.
+///
+/// Flag semantics mirror the Prefix-SID build: an Index-form SID
+/// carries no value/local flags (the index is resolved against the
+/// peer's SRGB); an Absolute Label SID sets V (Value) + L (Local) to
+/// indicate a raw label per RFC 8665 §5.
+pub fn ext_link_lsa_build(
+    router_id: Ipv4Addr,
+    link_type: u8,
+    link_id: Ipv4Addr,
+    link_data: Ipv4Addr,
+    adjacency_sid: &AdjacencySid,
+    opaque_id: u32,
+) -> OspfLsa {
+    let (sid, flags) = match adjacency_sid {
+        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
+        AdjacencySid::Absolute(label) => (
+            SidLabelTlv::Label(*label),
+            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        ),
+    };
+
+    let adj_sub = AdjSidSubTlv {
+        flags,
+        mt_id: 0,
+        weight: 0,
+        sid,
+    };
+
+    let tlv = ExtLinkTlv {
+        link_type,
+        link_id,
+        link_data,
+        subs: vec![ExtLinkSubTlv::AdjSid(adj_sub)],
+    };
+
+    let el_lsa = ExtLinkLsa { tlvs: vec![tlv] };
+
+    let ls_id =
+        Ipv4Addr::from(((OpaqueLsaType::EXT_LINK as u32) << 24) | (opaque_id & 0x00FF_FFFF));
+    let mut lsah = OspfLsaHeader::new(OspfLsType::OpaqueAreaLocal, ls_id, router_id);
+    lsah.options = 0x42; // O-bit + E-bit.
+
+    let mut lsa = OspfLsa::from(lsah, OspfLsp::OpaqueAreaExtLink(el_lsa));
     lsa.update();
     lsa
 }
