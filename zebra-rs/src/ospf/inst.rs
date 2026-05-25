@@ -4882,6 +4882,91 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
     }
 }
 
+/// For every self-originated Extended-Link Opaque LSA, emit an ILM
+/// entry that pops the local Adjacency-SID label and forwards over
+/// the specific adjacency the SID identifies.
+///
+/// Per RFC 8402 §3.4.1 the Adj-SID is locally significant -- only
+/// the advertiser installs forwarding state for it. The kernel-
+/// level action is "pop and forward to neighbor on this link", so
+/// the emitted nexthop carries the neighbor's address as the via,
+/// the link's ifindex as the oif, and `adjacency: true` so
+/// `make_ilm_entry` omits the swap label (Via + Oif only on the
+/// wire, matching the implicit-null/PHP path the Prefix-SID pop
+/// uses).
+///
+/// Only P2P (link_type=1) Ext-Link LSAs are handled here.
+/// LAN-Adj-SID (RFC 8665 §6) is a follow-up.
+fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
+    use super::srmpls::SRGB_START;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    for (area_id, area) in top.areas.iter() {
+        let area_id = *area_id;
+        for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if lsa.data.h.adv_router != top.router_id {
+                continue;
+            }
+            let OspfLsp::OpaqueAreaExtLink(ref el) = lsa.data.lsp else {
+                continue;
+            };
+            for tlv in &el.tlvs {
+                // P2P only -- broadcast/NBMA needs LAN-Adj-SID handling.
+                if tlv.link_type != 1 {
+                    continue;
+                }
+                let Some(link) = self_link_by_addr(top, area_id, tlv.link_data) else {
+                    continue;
+                };
+                // Find the neighbor whose router-id matches the
+                // Ext-Link TLV's link_id (P2P encoding). The neighbor
+                // is keyed in `link.nbrs` by its OSPF interface
+                // address, not by router-id, so iterate.
+                let Some(nbr_addr) = link
+                    .nbrs
+                    .values()
+                    .find(|n| n.ident.router_id == tlv.link_id)
+                    .map(|n| n.ident.prefix.addr())
+                else {
+                    continue;
+                };
+                for sub in &tlv.subs {
+                    let ExtLinkSubTlv::AdjSid(adj) = sub else {
+                        continue;
+                    };
+                    let (label, adj_index) = match adj.sid {
+                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
+                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
+                            Some(v) => (v, idx),
+                            None => continue,
+                        },
+                    };
+                    let mut nhops = BTreeMap::new();
+                    nhops.insert(
+                        nbr_addr,
+                        SpfNexthop {
+                            ifindex: link.index,
+                            adjacency: true,
+                            router_id: Some(tlv.link_id),
+                        },
+                    );
+                    ilm.insert(
+                        label,
+                        SpfIlm {
+                            nhops,
+                            ilm_type: IlmType::Adjacency(adj_index),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // Build the SR-MPLS LFIB from labeled routes in the freshly
@@ -4889,6 +4974,7 @@ fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // RIB subsystem sees only the IlmAdd / IlmDel deltas.
     let mut ilm = build_ilm_from_rib(&rib);
     add_self_prefix_sids_to_ilm(top, &mut ilm);
+    add_self_adj_sids_to_ilm(top, &mut ilm);
     let ilm_diff = spf::table_diff(top.ilm.iter(), ilm.iter());
     diff_ilm_apply(&top.ctx.rib, &ilm_diff);
     top.ilm = ilm;
