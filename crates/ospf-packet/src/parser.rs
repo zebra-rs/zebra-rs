@@ -8,7 +8,7 @@ use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
 use nom::error::{ErrorKind, make_error};
-use nom::number::complete::{be_u8, be_u24, be_u32, be_u64};
+use nom::number::complete::{be_u8, be_u24, be_u32};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use packet_utils::{Algo, SidLabelTlv};
@@ -32,6 +32,11 @@ pub struct Ospfv2Packet {
     pub auth: Ospfv2Auth,
     #[nom(Parse = "{ |x| Ospfv2Payload::parse_enum(x, typ) }")]
     pub payload: Ospfv2Payload,
+    /// RFC 2328 §D.4 / RFC 5709 cryptographic-auth digest. Lives
+    /// after the OSPF body and is excluded from `len`. Populated by
+    /// `parse()` when `auth_type == 2`; empty otherwise.
+    #[nom(Ignore)]
+    pub auth_trailer: Vec<u8>,
 }
 
 impl Ospfv2Packet {
@@ -46,6 +51,7 @@ impl Ospfv2Packet {
             auth_type: 0,
             auth: Ospfv2Auth::default(),
             payload,
+            auth_trailer: Vec::new(),
         }
     }
 
@@ -67,7 +73,10 @@ impl Ospfv2Packet {
             LsAck(v) => v.emit(buf),
             _ => {}
         }
-        // OSPF packet length.
+        // OSPF packet length — header + body, RFC 2328 §A.3.1.
+        // RFC 2328 §D.4: the cryptographic-auth digest follows the
+        // body but is not counted in this length, so finalize the
+        // length and checksum before appending the trailer.
         let len = buf.len() as u16;
         BigEndian::write_u16(&mut buf[2..4], len);
 
@@ -76,27 +85,78 @@ impl Ospfv2Packet {
         let mut cksum = Checksum::new();
         cksum.add_bytes(buf);
         buf[CHECKSUM_RANGE].copy_from_slice(&cksum.checksum());
+
+        if !self.auth_trailer.is_empty() {
+            buf.put(&self.auth_trailer[..]);
+        }
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Ospfv2Auth {
-    pub auth: u64,
+/// OSPFv2 header authentication field (8 octets), shape determined
+/// by the preceding `auth_type` (RFC 2328 Appendix D):
+/// - 0 Null — bytes are undefined; preserved for round-trip.
+/// - 1 Simple — ASCII password, zero-padded to 8 bytes.
+/// - 2 Crypto — 8-byte overlay with key-id / digest-length / seq;
+///   the digest itself follows the OSPF body as a trailer
+///   (`Ospfv2Packet::auth_trailer`).
+#[derive(Debug, Clone)]
+pub enum Ospfv2Auth {
+    Null([u8; 8]),
+    Simple([u8; 8]),
+    Crypto(Ospfv2AuthCrypto),
+}
+
+impl Default for Ospfv2Auth {
+    fn default() -> Self {
+        Self::Null([0; 8])
+    }
+}
+
+/// RFC 2328 §D.3 cryptographic-auth header overlay (8 octets):
+/// `0x0000` reserved | key_id (8b) | auth_data_len (8b) | seq (32b).
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv2AuthCrypto {
+    pub key_id: u8,
+    pub auth_data_len: u8,
+    pub seq: u32,
 }
 
 impl Ospfv2Auth {
     pub fn parse_be(input: &[u8], auth_type: u16) -> IResult<&[u8], Self> {
-        if auth_type != 0 {
-            return Err(Err::Error(make_error(input, ErrorKind::Tag)));
+        let (rest, raw) = take(8usize)(input)?;
+        let bytes: [u8; 8] = raw.try_into().unwrap();
+        match auth_type {
+            0 => Ok((rest, Self::Null(bytes))),
+            1 => Ok((rest, Self::Simple(bytes))),
+            2 => {
+                let key_id = bytes[2];
+                let auth_data_len = bytes[3];
+                let seq = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                Ok((
+                    rest,
+                    Self::Crypto(Ospfv2AuthCrypto {
+                        key_id,
+                        auth_data_len,
+                        seq,
+                    }),
+                ))
+            }
+            _ => Err(Err::Error(make_error(input, ErrorKind::Tag))),
         }
-        let (input, auth) = be_u64(input)?;
-        Ok((input, Self { auth }))
     }
 }
 
 impl Emit for Ospfv2Auth {
     fn emit(&self, buf: &mut BytesMut) {
-        buf.put_u64(self.auth);
+        match self {
+            Self::Null(b) | Self::Simple(b) => buf.put(&b[..]),
+            Self::Crypto(c) => {
+                buf.put_u16(0);
+                buf.put_u8(c.key_id);
+                buf.put_u8(c.auth_data_len);
+                buf.put_u32(c.seq);
+            }
+        }
     }
 }
 
@@ -1884,7 +1944,130 @@ pub fn validate_checksum(input: &[u8]) -> IResult<&[u8], ()> {
 }
 
 pub fn parse(input: &[u8]) -> IResult<&[u8], Ospfv2Packet> {
-    // validate_checksum(input)?;
-    let (input, packet) = Ospfv2Packet::parse_be(input)?;
-    Ok((input, packet))
+    // Header checksum is validated by the caller (see
+    // `zebra-rs/src/ospf/network.rs::read_packet`). Re-running it
+    // here would double-cost every packet.
+    const HEADER_LEN: usize = 24;
+    const LEN_RANGE: std::ops::Range<usize> = 2..4;
+    if input.len() < HEADER_LEN {
+        return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+    }
+    let pkt_len = BigEndian::read_u16(&input[LEN_RANGE]) as usize;
+    if pkt_len < HEADER_LEN || input.len() < pkt_len {
+        return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+    }
+    let (_, mut packet) = Ospfv2Packet::parse_be(&input[..pkt_len])?;
+
+    // RFC 2328 §D.4: a cryptographic-auth (type 2) packet carries
+    // the digest as a trailer after the OSPF body; `auth_data_len`
+    // in the header overlay says how many bytes to consume.
+    let mut consumed = pkt_len;
+    if let Ospfv2Auth::Crypto(ref c) = packet.auth {
+        let trailer_len = c.auth_data_len as usize;
+        let trailer_end = pkt_len + trailer_len;
+        if input.len() < trailer_end {
+            return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+        }
+        packet.auth_trailer = input[pkt_len..trailer_end].to_vec();
+        consumed = trailer_end;
+    }
+    Ok((&input[consumed..], packet))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn null_hello_packet() -> Ospfv2Packet {
+        let hello = OspfHello {
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            hello_interval: 10,
+            options: OspfOptions(0).with_external(true),
+            priority: 1,
+            router_dead_interval: 40,
+            d_router: Ipv4Addr::UNSPECIFIED,
+            bd_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: Vec::new(),
+        };
+        Ospfv2Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            Ospfv2Payload::Hello(hello),
+        )
+    }
+
+    #[test]
+    fn null_auth_roundtrip() {
+        let pkt = null_hello_packet();
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        validate_checksum(&buf).expect("emitted checksum must verify");
+        let (rest, parsed) = parse(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.auth_type, 0);
+        assert!(matches!(parsed.auth, Ospfv2Auth::Null(_)));
+        assert!(parsed.auth_trailer.is_empty());
+    }
+
+    #[test]
+    fn simple_password_parses_bytes() {
+        let mut pkt = null_hello_packet();
+        pkt.auth_type = 1;
+        pkt.auth = Ospfv2Auth::Simple(*b"secret\0\0");
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        let (_, parsed) = parse(&buf).expect("parse must succeed");
+        match parsed.auth {
+            Ospfv2Auth::Simple(b) => assert_eq!(&b, b"secret\0\0"),
+            other => panic!("expected Simple, got {:?}", other),
+        }
+        assert!(parsed.auth_trailer.is_empty());
+    }
+
+    #[test]
+    fn crypto_auth_consumes_trailer() {
+        let mut pkt = null_hello_packet();
+        pkt.auth_type = 2;
+        pkt.auth = Ospfv2Auth::Crypto(Ospfv2AuthCrypto {
+            key_id: 7,
+            auth_data_len: 16,
+            seq: 0x1234_5678,
+        });
+        pkt.auth_trailer = vec![0xAB; 16];
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+
+        // The header `len` covers header+body only, trailer follows.
+        let hdr_len = BigEndian::read_u16(&buf[2..4]) as usize;
+        assert_eq!(hdr_len + 16, buf.len());
+
+        let (rest, parsed) = parse(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        match parsed.auth {
+            Ospfv2Auth::Crypto(c) => {
+                assert_eq!(c.key_id, 7);
+                assert_eq!(c.auth_data_len, 16);
+                assert_eq!(c.seq, 0x1234_5678);
+            }
+            other => panic!("expected Crypto, got {:?}", other),
+        }
+        assert_eq!(parsed.auth_trailer, vec![0xAB; 16]);
+    }
+
+    #[test]
+    fn parse_rejects_short_input() {
+        let buf = [0u8; 10];
+        assert!(parse(&buf).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_bogus_length() {
+        let pkt = null_hello_packet();
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+        // Lie about length — claim more than the buffer holds.
+        let bogus = (buf.len() + 1) as u16;
+        BigEndian::write_u16(&mut buf[2..4], bogus);
+        assert!(parse(&buf).is_err());
+    }
 }

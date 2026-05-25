@@ -31,7 +31,18 @@ impl Display for Ospfv2Packet {
 
 impl Display for Ospfv2Auth {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "{:x}", self.auth)
+        match self {
+            Self::Null(b) | Self::Simple(b) => write!(
+                f,
+                "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+            ),
+            Self::Crypto(c) => write!(
+                f,
+                "key-id={} digest-len={} seq={}",
+                c.key_id, c.auth_data_len, c.seq
+            ),
+        }
     }
 }
 
