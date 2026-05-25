@@ -24,8 +24,16 @@ pub(super) const SRLB_RANGE: u32 = 1000;
 pub fn router_info_lsa_build(router_id: Ipv4Addr) -> OspfLsa {
     let mut tlvs = Vec::new();
 
-    // Router Capabilities TLV (type 1): TE support (bit 3).
-    let caps = RouterCapability::new().with_te(true);
+    // Router Capabilities TLV (type 1, RFC 7770 §2.1):
+    //   - bit 3 (te)         — Traffic Engineering support.
+    //   - bit 4 (gr_helper)  — Graceful Restart helper-mode capable
+    //                          (RFC 3623). zebra-rs supports helper
+    //                          unconditionally today; Phase 4 will
+    //                          gate this on the YANG knob
+    //                          `graceful-restart/helper-enabled`.
+    // `gr_capable` (bit 5) stays clear — we do not yet originate
+    // Grace LSAs as a restarter (Phase 5 deferred).
+    let caps = RouterCapability::new().with_te(true).with_gr_helper(true);
     tlvs.push(RouterInfoTlv::RouterInfo(RouterInfoTlvCap { caps }));
 
     // SR Algorithm TLV (type 8): SPF (algorithm 0).
@@ -338,4 +346,33 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
     };
     lsa.update();
     lsa
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 7770 §2.1 capability bits in the originated Router-Info
+    /// Opaque LSA: TE (bit 3) and GR-helper (bit 4) set;
+    /// GR-capable (bit 5) clear because zebra-rs is helper-only
+    /// (Phase 5 deferred).
+    #[test]
+    fn router_info_lsa_advertises_te_and_gr_helper() {
+        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1));
+        let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.lsp else {
+            panic!("expected OpaqueAreaRouterInfo, got {:?}", lsa.lsp);
+        };
+        let cap = ri
+            .tlvs
+            .iter()
+            .find_map(|t| match t {
+                RouterInfoTlv::RouterInfo(c) => Some(c.caps),
+                _ => None,
+            })
+            .expect("Router Capabilities TLV must be present");
+        assert!(cap.te(), "TE bit must be set");
+        assert!(cap.gr_helper(), "GR helper bit must be set");
+        assert!(!cap.gr_capable(), "GR restarter bit must remain clear");
+        assert!(!cap.stub(), "stub bit must remain clear");
+    }
 }

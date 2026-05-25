@@ -477,6 +477,17 @@ impl Ospf<Ospfv2> {
         false
     }
 
+    /// Build the v2 Router-LSA body from current interface + neighbor
+    /// state.
+    ///
+    /// GR-helper invariant (RFC 3623 §3.1): adjacencies to neighbors
+    /// in helper mode must keep appearing in this LSA exactly as
+    /// they did when the link was Full. Phase 2a's
+    /// `ospf_nfsm_inactivity_timer` suppression keeps `nbr.state`
+    /// stuck at `Full` while we're helping, so the `state ==
+    /// NfsmState::Full` filters below honour the invariant
+    /// implicitly — do not switch them to a tighter "still receiving
+    /// Hellos" check without re-establishing equivalence here.
     fn router_lsa_build(&self) -> RouterLsa {
         let mut router_lsa = RouterLsa::default();
 
@@ -1173,6 +1184,19 @@ impl Ospf<Ospfv2> {
         self.router_lsa_originate_with_min_seq(Some(min_seq));
     }
 
+    /// Re-originate or flush the v2 Network-LSA for the broadcast
+    /// segment on `ifindex` (DR-only origination).
+    ///
+    /// GR-helper invariant (RFC 3623 §3.1): when we are DR and a
+    /// neighbor on this segment is in helper mode, that neighbor
+    /// must continue appearing in the `attached_routers` list, and
+    /// the segment's `full_nbr_count` must continue counting it.
+    /// Phase 2a's inactivity-timer suppression keeps `nbr.state` at
+    /// `Full` throughout helper, so the `state == Full` filter
+    /// below honours both invariants implicitly; in particular the
+    /// `full_nbr_count == 0` branch (which would flush the
+    /// Network-LSA per RFC 2328 §14.1) does not fire while a
+    /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
         let (area_id, ls_id, netmask, attached_routers, full_nbr_count) = {
             let Some(link) = self.links.get_mut(&ifindex) else {
