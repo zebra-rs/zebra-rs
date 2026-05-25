@@ -416,6 +416,13 @@ pub fn ospf_db_desc_recv(
             } else {
                 return;
             }
+            // Stash the peer's initial DD before NegotiationDone fires so
+            // that `populate_initial_db_summary` can read the peer's
+            // option flags (notably the O-bit) when deciding which LSA
+            // types to push into `db_sum`. Without this the populate
+            // call sees a default `nbr.dd.recv`, which is only filled
+            // later by `ospf_db_desc_proc`.
+            nbr.dd.recv = dd.clone();
             ospf_nfsm(oi, nbr, NfsmEvent::NegotiationDone, oi.ident);
 
             ospf_db_desc_proc(oi, nbr, dd);
