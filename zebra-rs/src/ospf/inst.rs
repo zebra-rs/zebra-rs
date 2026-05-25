@@ -2741,6 +2741,16 @@ impl Ospf<Ospfv3> {
                         self.network_intra_area_prefix_lsa_flush(index, area_id);
                         self.network_lsa_flush(index, area_id);
                     }
+                    // Re-originate the per-link SR-MPLS E-Router-LSA
+                    // on any IFSM state change. Broadcast / NBMA
+                    // links carry the DR's interface_id in the
+                    // Router-Link TLV, so a DR election outcome must
+                    // refresh the LSA; the originator's own gating
+                    // makes the call a no-op when the preconditions
+                    // don't hold (P2P sees no semantic change).
+                    if new_state.is_some_and(|s| s != prev_state) {
+                        self.e_router_v3_lsa_originate(index);
+                    }
                 }
             }
             Message::HelloTimer(index) => {
@@ -3147,50 +3157,129 @@ impl Ospf<Ospfv3> {
     }
 
     /// Originate (or flush) the OSPFv3 E-Router-LSA (RFC 8362 §3.1)
-    /// carrying an Adj-SID (RFC 8666 §6.1) for `ifindex`. v3
-    /// analogue of `Ospf<Ospfv2>::ext_link_lsa_originate`.
+    /// carrying an Adj-SID (RFC 8666 §6) for `ifindex`. v3 analogue
+    /// of `Ospf<Ospfv2>::ext_link_lsa_originate`.
     ///
-    /// Originates when SR-MPLS is on, the link is enabled, has an
-    /// `adjacency_sid` configured, network type is point-to-point,
-    /// and at least one neighbor reached Full. Flushes otherwise.
-    /// LAN-Adj-SID (broadcast / NBMA) origination lands in a
-    /// follow-up; this slice covers P2P only.
+    /// Originates when SR-MPLS is on, the link is enabled, has at
+    /// least one Full neighbor, and either of:
+    ///   * P2P link with an `adjacency_sid` configured -- one
+    ///     `AdjSid` sub-TLV with the configured value.
+    ///   * Broadcast / NBMA link with a known DR and at least one
+    ///     entry in `lan_adj_sids` -- one `LanAdjSid` sub-TLV per
+    ///     Full neighbor that has a label allocated (RFC 8666 §6.2).
+    ///
+    /// Flushes (MaxAge) otherwise. `link_state_id` is the ifindex
+    /// so the per-link LSA gets a stable key across re-originations.
     pub fn e_router_v3_lsa_originate(&mut self, ifindex: u32) {
-        use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
+        use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3RouterLinkType};
 
+        use super::link::OspfNetworkType;
         use super::srmpls::SegmentRoutingMode;
 
         let link_state_id = ifindex;
         let key: super::lsdb::OspfLsaKey =
             (OSPFV3_E_ROUTER_LSA_TYPE, link_state_id, self.router_id);
 
+        // Build the (area, link_type, metric, my_iid, peer_iid,
+        // peer_rid, subs) tuple if origination is warranted, else
+        // fall through to the flush path.
         let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
-            && link.is_pointopoint()
-            && let Some(adjacency_sid) = link.config.adjacency_sid
-            && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
+            && link.nbrs.values().any(|n| n.state == NfsmState::Full)
         {
-            Some((
-                link.area,
-                link.output_cost as u16,
-                link.interface_id,
-                nbr.interface_id,
-                nbr.ident.router_id,
-                adjacency_sid,
-            ))
+            let metric = link.output_cost as u16;
+            let my_iid = link.interface_id;
+            match link.network_type {
+                OspfNetworkType::PointToPoint => {
+                    if let Some(adjacency_sid) = link.config.adjacency_sid
+                        && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
+                    {
+                        Some((
+                            link.area,
+                            Ospfv3RouterLinkType::PointToPoint,
+                            metric,
+                            my_iid,
+                            nbr.interface_id,
+                            nbr.ident.router_id,
+                            vec![super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid)],
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                OspfNetworkType::Broadcast | OspfNetworkType::NBMA => {
+                    let dr_router_id = link.ident.d_router;
+                    if dr_router_id == Ipv4Addr::UNSPECIFIED {
+                        // DR election not yet settled. Fall through
+                        // to the flush path so we don't keep a stale
+                        // LSA naming a `link_id` we can no longer
+                        // resolve.
+                        None
+                    } else {
+                        // The DR's interface_id is taken from its
+                        // entry in `link.nbrs` (which carries the
+                        // peer's Hello-advertised interface ID). When
+                        // we are the DR the peer-id lookup misses;
+                        // fall back to our own interface ID, mirroring
+                        // the convention in `build_router_lsa`.
+                        let dr_peer_iid = if dr_router_id == self.router_id {
+                            my_iid
+                        } else {
+                            link.nbrs
+                                .get(&dr_router_id)
+                                .map(|n| n.interface_id)
+                                .unwrap_or(my_iid)
+                        };
+                        // `lan_adj_sids` is keyed by `(ifindex, nbr_key)`
+                        // where `nbr_key` is whatever the NFSM hook
+                        // received as its `nbr_addr` argument. For v3
+                        // that's the neighbor's router-id (same key
+                        // used to index `link.nbrs`), not the v6
+                        // interface address — RFC 5340 keys v3
+                        // neighbor state machines by router-id.
+                        let subs: Vec<_> = link
+                            .nbrs
+                            .values()
+                            .filter(|n| n.state == NfsmState::Full)
+                            .filter_map(|nbr| {
+                                let label =
+                                    *self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))?;
+                                Some(super::srmpls::build_v3_lan_adj_sub(
+                                    nbr.ident.router_id,
+                                    label,
+                                ))
+                            })
+                            .collect();
+                        if subs.is_empty() {
+                            None
+                        } else {
+                            Some((
+                                link.area,
+                                Ospfv3RouterLinkType::Transit,
+                                metric,
+                                my_iid,
+                                dr_peer_iid,
+                                dr_router_id,
+                                subs,
+                            ))
+                        }
+                    }
+                }
+            }
         } else {
             None
         };
 
-        if let Some((area_id, metric, my_iid, peer_iid, peer_rid, adjacency_sid)) = build_inputs {
+        if let Some((area_id, link_type, metric, my_iid, peer_iid, peer_rid, subs)) = build_inputs {
             let mut lsa = super::srmpls::e_router_v3_lsa_build(
                 self.router_id,
+                link_type,
                 metric,
                 my_iid,
                 peer_iid,
                 peer_rid,
-                &adjacency_sid,
+                subs,
                 link_state_id,
             );
 
@@ -3269,6 +3358,23 @@ impl Ospf<Ospfv3> {
             old_state,
             new_state
         );
+
+        // Adjacency-SID label allocation. Mirrors v2 (#850): each Full
+        // adjacency claims one label out of the SRLB on transition
+        // into Full and releases it on regression. Consumed by the
+        // LAN-Adj-SID origination path (broadcast / NBMA links).
+        // No-op when SR-MPLS is disabled (no pool present).
+        if new_state == NfsmState::Full
+            && let Some(pool) = self.local_pool.as_mut()
+            && let Some(label) = pool.allocate()
+        {
+            self.lan_adj_sids.insert((ifindex, nbr_addr), label as u32);
+        } else if old_state == NfsmState::Full
+            && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
+            && let Some(pool) = self.local_pool.as_mut()
+        {
+            pool.release(label as usize);
+        }
 
         self.router_lsa_originate();
         // Re-originate the Router-LSA-referenced Intra-Area-Prefix-LSA
