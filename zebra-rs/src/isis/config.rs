@@ -668,7 +668,7 @@ fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
         // re-enabling without a prior disable keeps any previously
         // handed-out labels intact.
         if isis.local_pool.is_none() {
-            isis.local_pool = Some(super::LabelPool::new(15000, Some(16000)));
+            isis.local_pool = Some(crate::spf::label_pool::LabelPool::new(15000, Some(16000)));
         }
     } else {
         isis.config.sr_mpls_enabled = false;

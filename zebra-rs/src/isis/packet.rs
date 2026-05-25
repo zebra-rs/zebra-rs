@@ -48,12 +48,13 @@ fn bfd_nfsm_dispatch(
     }
 }
 
+use super::Level;
 use super::flood;
 use super::ifsm::has_level;
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
-use super::{LabelPool, Level};
+use crate::spf::label_pool::LabelPool;
 
 #[derive(Debug)]
 pub struct NeighborAddr4 {

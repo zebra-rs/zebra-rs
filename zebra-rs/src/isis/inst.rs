@@ -43,7 +43,8 @@ use super::throttle::Throttle;
 use super::{
     Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, NfsmState, csnp_send, srm_set_for_all_lsp,
 };
-use super::{LabelPool, Level, Levels, process_packet};
+use super::{Level, Levels, process_packet};
+use crate::spf::label_pool::LabelPool;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
 pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std::fmt::Error>;
