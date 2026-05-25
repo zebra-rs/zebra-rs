@@ -28,7 +28,8 @@ use super::network::{read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::IsisLabelMap;
 use super::tracing::IsisTracing;
-use super::{Hostname, IfsmEvent, Isis, LabelPool, Level, Levels, Lsdb, Message};
+use super::{Hostname, IfsmEvent, Isis, Level, Levels, Lsdb, Message};
+use crate::spf::label_pool::LabelPool;
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {

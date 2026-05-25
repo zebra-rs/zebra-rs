@@ -375,12 +375,30 @@ fn config_ospf_interface_adjacency_sid_absolute(
 }
 
 fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
-    use super::srmpls::SegmentRoutingMode;
+    use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
+    use crate::spf::label_pool::LabelPool;
     ospf.segment_routing = if op.is_set() {
         SegmentRoutingMode::Mpls
     } else {
         SegmentRoutingMode::None
     };
+
+    // Manage the per-instance Adjacency-SID label pool alongside the
+    // mode toggle, mirroring IS-IS (`isis/config.rs::config_sr_mpls_enable`).
+    // The pool is bounded by the SRLB (15000..16000 by default) so any
+    // re-enable that happens before existing adjacencies regress will
+    // simply hand out fresh labels without colliding with stale ones.
+    if op.is_set() {
+        if ospf.local_pool.is_none() {
+            ospf.local_pool = Some(LabelPool::new(
+                SRLB_START as usize,
+                Some((SRLB_START + SRLB_RANGE - 1) as usize),
+            ));
+        }
+    } else {
+        ospf.local_pool = None;
+        ospf.lan_adj_sids.clear();
+    }
 
     ospf.router_info_lsa_originate();
 

@@ -1,5 +1,13 @@
 use bit_vec::BitVec;
 
+/// First-fit allocator for an inclusive label range `[begin, end]`.
+///
+/// Backs the per-instance Adjacency-SID label allocator for both IS-IS
+/// and OSPF SR-MPLS: each Full adjacency claims one label out of the
+/// SRLB on transition into Full and releases it on regression. Freed
+/// indices land in `free_list` so the next allocation reuses the
+/// lowest-numbered slot — keeps labels visually close to `begin`
+/// even after churn.
 pub struct LabelPool {
     begin: usize,
     end: Option<usize>,

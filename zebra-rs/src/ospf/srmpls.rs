@@ -17,8 +17,8 @@ pub(super) const SRGB_START: u32 = 16000;
 const SRGB_RANGE: u32 = 2001;
 
 /// Default SRLB (Segment Routing Local Block).
-const SRLB_START: u32 = 15000;
-const SRLB_RANGE: u32 = 1000;
+pub(super) const SRLB_START: u32 = 15000;
+pub(super) const SRLB_RANGE: u32 = 1000;
 
 /// Build a Router Information Opaque LSA for SR-MPLS.
 pub fn router_info_lsa_build(router_id: Ipv4Addr) -> OspfLsa {
