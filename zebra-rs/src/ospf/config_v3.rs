@@ -420,17 +420,58 @@ fn config_ospfv3_interface_adjacency_sid_absolute(
     Some(())
 }
 
-/// Toggle the v3 SR-MPLS enable bit and fan out to every link with
-/// a configured Prefix-SID so the matching E-Intra-Area-Prefix-LSA
-/// is originated (on enable) or flushed (on disable). Router-Info /
-/// Adj-SID origination wires onto the same toggle in follow-up PRs.
+/// Toggle the v3 SR-MPLS enable bit, manage the per-instance
+/// Adjacency-SID label pool, and fan out to every link with a
+/// configured SR-MPLS attribute so the matching E-LSAs are
+/// originated (on enable) or flushed (on disable). Mirrors v2's
+/// `config_ospf_sr_mpls`.
 fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
-    use super::srmpls::SegmentRoutingMode;
+    use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
+    use crate::spf::label_pool::LabelPool;
     ospf.segment_routing = if op.is_set() {
         SegmentRoutingMode::Mpls
     } else {
         SegmentRoutingMode::None
     };
+
+    // Manage the per-instance Adjacency-SID label pool alongside the
+    // mode toggle. The pool is bounded by the SRLB
+    // (`srmpls::SRLB_START`..`+ SRLB_RANGE - 1`); on enable, sweep
+    // current Full neighbors and allocate labels for any not yet in
+    // `lan_adj_sids` so an SR-MPLS enable after adjacencies have
+    // already settled still produces the LAN Adj-SID LSAs.
+    if op.is_set() {
+        if ospf.local_pool.is_none() {
+            ospf.local_pool = Some(LabelPool::new(
+                SRLB_START as usize,
+                Some((SRLB_START + SRLB_RANGE - 1) as usize),
+            ));
+        }
+        let pending: Vec<(u32, std::net::Ipv4Addr)> = ospf
+            .links
+            .iter()
+            .flat_map(|(ifindex, link)| {
+                link.nbrs.iter().filter_map(move |(nbr_key, nbr)| {
+                    if nbr.state == super::nfsm::NfsmState::Full {
+                        Some((*ifindex, *nbr_key))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .filter(|key| !ospf.lan_adj_sids.contains_key(key))
+            .collect();
+        for key in pending {
+            if let Some(pool) = ospf.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                ospf.lan_adj_sids.insert(key, label as u32);
+            }
+        }
+    } else {
+        ospf.local_pool = None;
+        ospf.lan_adj_sids.clear();
+    }
 
     // Re-originate / flush E-Intra-Area-Prefix-LSAs for every link
     // with a Prefix-SID. The originator gates on the mode, so on
@@ -445,11 +486,21 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
         ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
     }
 
-    // Same for E-Router-LSAs (Adj-SID).
+    // Re-originate / flush E-Router-LSAs for every link with either
+    // a configured P2P adjacency-SID or any LAN Adj-SID labels just
+    // allocated above. Using both criteria covers static-config P2P
+    // and dynamic-allocation broadcast in one pass.
     let ifindexes: Vec<u32> = ospf
         .links
         .iter()
-        .filter(|(_, link)| link.config.adjacency_sid.is_some())
+        .filter(|(ifindex, link)| {
+            link.config.adjacency_sid.is_some()
+                || ospf
+                    .lan_adj_sids
+                    .range((**ifindex, std::net::Ipv4Addr::UNSPECIFIED)..)
+                    .next()
+                    .is_some_and(|((idx, _), _)| idx == *ifindex)
+        })
         .map(|(ifindex, _)| *ifindex)
         .collect();
     for ifindex in ifindexes {

@@ -179,48 +179,34 @@ pub fn build_lan_adj_sub(neighbor_id: Ipv4Addr, label: u32) -> ExtLinkSubTlv {
 }
 
 /// Build an OSPFv3 E-Router-LSA (RFC 8362 §3.1) carrying one
-/// Router-Link TLV (P2P) whose sub-TLV is an Adj-SID (RFC 8666
-/// §6.1) for a single Full neighbor.
+/// Router-Link TLV with caller-supplied sub-TLVs.
 ///
-/// Flag semantics mirror the v2 path: Index form leaves V + L
-/// clear (the index resolves against the peer's SRGB); Absolute
-/// Label sets V + L per RFC 8666 §6.1. `link_state_id` is the
-/// caller-supplied per-LSA key (ifindex by convention).
+/// `link_type` matches the v3 Router-LSA link encoding
+/// (PointToPoint, Transit, VirtualLink). `subs` is the full sub-TLV
+/// list to embed: one `AdjSid` for P2P, or one `LanAdjSid` per Full
+/// neighbor on broadcast / NBMA per RFC 8666 §6.
+///
+/// `link_state_id` is the caller-supplied per-LSA key (ifindex by
+/// convention).
 pub fn e_router_v3_lsa_build(
     router_id: Ipv4Addr,
+    link_type: Ospfv3RouterLinkType,
     metric: u16,
     our_interface_id: u32,
     neighbor_interface_id: u32,
     neighbor_router_id: Ipv4Addr,
-    adjacency_sid: &AdjacencySid,
+    subs: Vec<Ospfv3SubTlv>,
     link_state_id: u32,
 ) -> Ospfv3Lsa {
-    let (sid, flags) = match adjacency_sid {
-        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
-        AdjacencySid::Absolute(label) => (
-            SidLabelTlv::Label(*label),
-            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
-        ),
-    };
-
-    let adj_sub = Ospfv3SubTlv::AdjSid(Ospfv3AdjSidSubTlv {
-        flags,
-        weight: 0,
-        sid,
-    });
-
     let link = Ospfv3RouterLsaLink::new(
-        Ospfv3RouterLinkType::PointToPoint,
+        link_type,
         metric,
         our_interface_id,
         neighbor_interface_id,
         neighbor_router_id,
     );
 
-    let router_link_tlv = Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv {
-        link,
-        subs: vec![adj_sub],
-    });
+    let router_link_tlv = Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv { link, subs });
 
     let body = Ospfv3ELsaBody {
         tlvs: vec![router_link_tlv],
@@ -240,6 +226,39 @@ pub fn e_router_v3_lsa_build(
     };
     lsa.update();
     lsa
+}
+
+/// Construct an OSPFv3 `Ospfv3AdjSidSubTlv` from a configured
+/// Adjacency-SID (P2P case). Flag semantics mirror the v2 path's
+/// `build_p2p_adj_sub`: Index form leaves V + L clear; Absolute
+/// Label sets V + L per RFC 8666 §6.1.
+pub fn build_v3_p2p_adj_sub(adjacency_sid: &AdjacencySid) -> Ospfv3SubTlv {
+    let (sid, flags) = match adjacency_sid {
+        AdjacencySid::Index(idx) => (SidLabelTlv::Index(*idx), AdjSidFlags::new()),
+        AdjacencySid::Absolute(label) => (
+            SidLabelTlv::Label(*label),
+            AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        ),
+    };
+    Ospfv3SubTlv::AdjSid(Ospfv3AdjSidSubTlv {
+        flags,
+        weight: 0,
+        sid,
+    })
+}
+
+/// Construct an OSPFv3 `Ospfv3LanAdjSidSubTlv` (RFC 8666 §6.2) for
+/// a single Full neighbor on a broadcast / NBMA segment. `label` is
+/// the absolute SRLB-allocated value held in `Ospf::lan_adj_sids`.
+/// V + L flags are set unconditionally — LAN Adj-SIDs we originate
+/// are always raw labels from the local SRLB.
+pub fn build_v3_lan_adj_sub(neighbor_router_id: Ipv4Addr, label: u32) -> Ospfv3SubTlv {
+    Ospfv3SubTlv::LanAdjSid(Ospfv3LanAdjSidSubTlv {
+        flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        weight: 0,
+        neighbor_router_id,
+        sid: SidLabelTlv::Label(label),
+    })
 }
 
 /// Build an OSPFv3 E-Intra-Area-Prefix-LSA (RFC 8362 §3.7) carrying
