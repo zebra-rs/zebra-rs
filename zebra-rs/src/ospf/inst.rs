@@ -1385,11 +1385,17 @@ impl Ospf<Ospfv2> {
         self.ext_link_lsa_originate(ifindex);
     }
 
-    /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1). Clears
-    /// `nbr.gr_helper` and re-fires the inactivity-timer event so
-    /// the normal `ospf_nfsm_kill_nbr` path runs — by now the
-    /// neighbor really is gone.
+    /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1).
     fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        self.gr_helper_exit(ifindex, router_id, "grace period expired");
+    }
+
+    /// Shared helper-exit path. Clears `nbr.gr_helper` and re-fires
+    /// the inactivity-timer event so the normal
+    /// `ospf_nfsm_kill_nbr` path runs — by now the neighbor really
+    /// should be gone (or about to re-adjacency-form fresh).
+    /// `reason` is a free-form string for the tracing log.
+    fn gr_helper_exit(&mut self, ifindex: u32, router_id: Ipv4Addr, reason: &str) {
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -1400,15 +1406,81 @@ impl Ospf<Ospfv2> {
             return;
         }
         tracing::info!(
-            "[GR Helper] grace-period expired for nbr {} on ifindex={}, killing neighbor",
+            "[GR Helper] exit for nbr {} on ifindex={} (reason: {})",
             router_id,
-            ifindex
+            ifindex,
+            reason
         );
         let _ = self.tx.send(Message::Nfsm(
             ifindex,
             router_id,
             super::nfsm::NfsmEvent::InactivityTimer,
         ));
+    }
+
+    /// RFC 3623 §3.2 bullets 2-3 — topology-change exit. Called
+    /// from `flood_lsa_through_area` after `ospf_flood` has just
+    /// installed `lsa` into the area LSDB. For every helper-mode
+    /// neighbor in this area, decide whether the install warrants
+    /// exit:
+    ///
+    ///   - If `lsa.adv_router != restarter`: any topology-affecting
+    ///     LSA represents a change to the area outside the
+    ///     restarter, so exit.
+    ///   - If `lsa.adv_router == restarter`: compare against the
+    ///     `(seq, checksum)` we snapshotted at helper entry. Exact
+    ///     match → quiescent re-flood (no exit). Differs → the
+    ///     restarter's content / sequence changed (restart finished
+    ///     or content drifted), so exit.
+    ///
+    /// Non-topology-affecting LSAs (Opaque, AS-External, Link-LSA)
+    /// are ignored — they don't change intra-area routing.
+    fn gr_helper_check_exit(&mut self, area_id: Ipv4Addr, lsa: &OspfLsa) {
+        let topology_affecting = matches!(
+            lsa.h.ls_type,
+            OspfLsType::Router
+                | OspfLsType::Network
+                | OspfLsType::Summary
+                | OspfLsType::SummaryAsbr
+        );
+        if !topology_affecting {
+            return;
+        }
+        let key = super::lsdb::v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+
+        let Some(area) = self.areas.get(area_id) else {
+            return;
+        };
+        let link_indices: Vec<u32> = area.links.iter().copied().collect();
+
+        let mut exits: Vec<(u32, Ipv4Addr, &'static str)> = Vec::new();
+        for ifindex in link_indices {
+            let Some(link) = self.links.get(&ifindex) else {
+                continue;
+            };
+            for (_nbr_addr, nbr) in link.nbrs.iter() {
+                let Some(helper) = nbr.gr_helper.as_ref() else {
+                    continue;
+                };
+                let exit_reason = if lsa.h.adv_router == nbr.ident.router_id {
+                    match helper.lsdb_snapshot.get(&key) {
+                        Some(&(seq, csum))
+                            if seq == lsa.h.ls_seq_number && csum == lsa.h.ls_checksum =>
+                        {
+                            // Identical re-flood — quiescent.
+                            continue;
+                        }
+                        _ => "restarter LSA changed from snapshot",
+                    }
+                } else {
+                    "non-restarter topology change in area"
+                };
+                exits.push((ifindex, nbr.ident.router_id, exit_reason));
+            }
+        }
+        for (ifindex, router_id, reason) in exits {
+            self.gr_helper_exit(ifindex, router_id, reason);
+        }
     }
 
     /// Check if we are currently the DR for the network identified by ls_id.
@@ -1437,6 +1509,13 @@ impl Ospf<Ospfv2> {
         lsa: &OspfLsa,
         source: Option<(u32, Ipv4Addr)>,
     ) {
+        // RFC 3623 §3.2 bullets 2-3 — every LSA that reaches the
+        // flood-out path was just installed in the area LSDB, so
+        // this is the choke point for the topology-change exit
+        // check. Runs before the fanout iteration so a helper exit
+        // can deconstruct any state we'd otherwise loop over.
+        self.gr_helper_check_exit(area_id, lsa);
+
         let Some(area) = self.areas.get(area_id) else {
             return;
         };

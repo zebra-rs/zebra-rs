@@ -899,6 +899,8 @@ pub fn ospf_ls_upd_validate_proc(
 /// must be within [1, `MAX_GRACE_PERIOD_SECS`]. Strict-LSA-checking
 /// (RFC 3623 §3.2 bullets 2-3 / LSDB snapshot) lands in Phase 2c.
 fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+    use std::collections::BTreeMap;
+
     use super::neigh::HelperState;
     use super::task::{Timer, TimerType};
 
@@ -954,12 +956,25 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
         },
     );
 
+    // RFC 3623 §3.2 — snapshot the restarter's LSAs in the area
+    // LSDB at the moment we enter helper. `gr_helper_check_exit`
+    // diffs newly-installed LSAs against these (seq, checksum)
+    // tuples to distinguish quiescent self-refresh from a real
+    // post-restart re-origination.
+    let mut lsdb_snapshot = BTreeMap::new();
+    for (key, lsa) in oi.lsdb.tables.iter() {
+        if lsa.data.h.adv_router == router_id {
+            lsdb_snapshot.insert(*key, (lsa.data.h.ls_seq_number, lsa.data.h.ls_checksum));
+        }
+    }
+
     let previously_helping = nbr.gr_helper.is_some();
     nbr.gr_helper = Some(HelperState {
         reason,
         grace_period,
         entered_at: tokio::time::Instant::now(),
         expire_timer: Some(expire_timer),
+        lsdb_snapshot,
     });
     tracing::info!(
         "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
