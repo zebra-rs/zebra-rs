@@ -708,6 +708,20 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         );
         return LsaProcessResult::DiscardNoAck;
     }
+    // RFC 3101 §2.5: Type-7 NSSA-AS-External LSAs are accepted only
+    // in NSSA areas. Drop them on Normal / Stub links — the peer
+    // shouldn't be sending them in the first place (option-bit
+    // negotiation should have prevented the adjacency), but defend
+    // against misconfigured neighbors that slip through.
+    if matches!(lsa.h.ls_type, OspfLsType::NssaAsExternal) && !oi.area_type.is_nssa() {
+        tracing::info!(
+            "[LS Update] Step 3: Discarding Type-7 LSA in {:?} area: id={} adv={}",
+            oi.area_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router
+        );
+        return LsaProcessResult::DiscardNoAck;
+    }
 
     // Step 4: Look up current database copy, compute comparison result.
     // Use lookup_lsa() to get the Lsa wrapper so we can compute current_age().

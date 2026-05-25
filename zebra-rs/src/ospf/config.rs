@@ -218,6 +218,12 @@ pub(super) fn area_nssa_translator_role_set<V: OspfVersion>(
 
 /// `/router/ospf/area/<id>/area-type` — `normal | stub | nssa`.
 /// Delete reverts to the default (`normal`).
+///
+/// Triggers `nssa_default_lsa_originate` after the area type change
+/// so the Type-7 default-LSA appears when transitioning into NSSA
+/// with `nssa-default-originate=true`, and is flushed when leaving
+/// NSSA (the helper short-circuits to flush when the area is no
+/// longer NSSA).
 fn config_ospf_area_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let area_id = parse_area_id(&args.string()?)?;
     let kind = if op.is_set() {
@@ -226,6 +232,7 @@ fn config_ospf_area_type(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Optio
         AreaTypeKind::default()
     };
     area_type_set(ospf, area_id, kind);
+    ospf.nssa_default_lsa_originate(area_id);
     Some(())
 }
 
@@ -236,6 +243,9 @@ fn config_ospf_area_no_summary(ospf: &mut Ospf, mut args: Args, op: ConfigOp) ->
     Some(())
 }
 
+/// `/router/ospf/area/<id>/nssa-default-originate`. Trigger the
+/// originator (or flush) — the helper inspects the current area
+/// type + knob value and picks the right action.
 fn config_ospf_area_nssa_default_originate(
     ospf: &mut Ospf,
     mut args: Args,
@@ -244,6 +254,7 @@ fn config_ospf_area_nssa_default_originate(
     let area_id = parse_area_id(&args.string()?)?;
     let value = op.is_set() && args.boolean()?;
     area_nssa_default_originate_set(ospf, area_id, value);
+    ospf.nssa_default_lsa_originate(area_id);
     Some(())
 }
 
