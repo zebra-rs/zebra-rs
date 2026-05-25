@@ -45,6 +45,8 @@ use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::{ParseBe, many0_complete};
 
+use crate::parser::GraceLsa;
+
 use super::parser::{AdjSidFlags, PrefixSidFlags};
 use super::{DbDescFlags, OspfType};
 use packet_utils::{Algo, SidLabelTlv};
@@ -1234,6 +1236,12 @@ impl ParseBe<Ospfv3AsExternalLsa> for Ospfv3AsExternalLsa {
 /// U=0, S2=0, S1=0 (link-local scope), function code = 8.
 pub const OSPFV3_LINK_LSA_TYPE: u16 = 0x0008;
 
+/// v3 Grace-LSA LS Type (RFC 5187 §3): U=0, S2=0, S1=0 (link-local
+/// scope), function code = 11. Body is the same TLV stream as the
+/// v2 Grace LSA but the IP Interface Address TLV (type 3) is unused
+/// — v3 carries that information in the LSA header's link-state ID.
+pub const OSPFV3_GRACE_LSA_TYPE: u16 = 0x000B;
+
 /// One prefix entry inside an `Ospfv3LinkLsa`.
 ///
 /// Wire layout (RFC 5340 §A.4.9):
@@ -1937,6 +1945,9 @@ pub enum Ospfv3LsBody {
     AsExternal(Ospfv3AsExternalLsa),
     Link(Ospfv3LinkLsa),
     IntraAreaPrefix(Ospfv3IntraAreaPrefixLsa),
+    /// RFC 5187 Grace-LSA — link-local scope, function code 11. Body
+    /// is the same TLV stream as the v2 Grace LSA (`GraceLsa`).
+    Grace(GraceLsa),
     /// RFC 8362 §4 Extended LSAs. All seven share the same TLV-stream
     /// wire shape (`Ospfv3ELsaBody`); the variant only carries the
     /// LS-Type-specific identity so origination / consumption can
@@ -1962,6 +1973,7 @@ impl Ospfv3LsBody {
             Ospfv3LsBody::AsExternal(b) => b.emit(buf),
             Ospfv3LsBody::Link(b) => b.emit(buf),
             Ospfv3LsBody::IntraAreaPrefix(b) => b.emit(buf),
+            Ospfv3LsBody::Grace(b) => b.emit(buf),
             Ospfv3LsBody::ERouter(b)
             | Ospfv3LsBody::ENetwork(b)
             | Ospfv3LsBody::EInterAreaPrefix(b)
@@ -2007,6 +2019,10 @@ impl Ospfv3LsBody {
             OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
                 let (rest, b) = Ospfv3IntraAreaPrefixLsa::parse_be(input)?;
                 Ok((rest, Ospfv3LsBody::IntraAreaPrefix(b)))
+            }
+            OSPFV3_GRACE_LSA_TYPE => {
+                let (rest, b) = GraceLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Grace(b)))
             }
             OSPFV3_E_ROUTER_LSA_TYPE => {
                 let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
@@ -3655,5 +3671,69 @@ mod tests {
         assert_eq!(link.link_type, Ospfv3RouterLinkType::PointToPoint);
         assert_eq!(link.metric, 99);
         assert_eq!(link.interface_id, 0xAABB_CCDD);
+    }
+
+    /// RFC 5187 §3: v3 Grace-LSA = LS Type 0x000B (link-local scope,
+    /// function code 11). Body is the same TLV stream as v2 (`GraceLsa`),
+    /// without the IP Interface Address TLV — v3 carries that via the
+    /// LSA header's link-state ID.
+    #[test]
+    fn ospfv3_grace_lsa_roundtrip() {
+        use crate::parser::{GraceRestartReason, GraceTlv};
+
+        let body = GraceLsa {
+            tlvs: vec![
+                GraceTlv::GracePeriod(240),
+                GraceTlv::Reason(GraceRestartReason::SwitchRedundant),
+            ],
+        };
+
+        let mut body_buf = BytesMut::new();
+        body.emit(&mut body_buf);
+        // Wire body: 8 (GracePeriod) + 8 (Reason value 1 + 3 pad) = 16.
+        assert_eq!(body_buf.len(), 16);
+
+        let h = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_GRACE_LSA_TYPE,
+            link_state_id: 0,
+            advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: OSPFV3_LSA_HEADER_LEN + body_buf.len() as u16,
+        };
+
+        let lsa = Ospfv3Lsa {
+            h: h.clone(),
+            body: Ospfv3LsBody::Grace(body),
+        };
+
+        let lsu = Ospfv3LsUpdate { lsas: vec![lsa] };
+        let pkt = Ospfv3Packet::new(
+            &Ipv4Addr::new(10, 0, 0, 1),
+            &Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            Ospfv3Payload::LsUpdate(lsu),
+        );
+
+        let mut buf = BytesMut::new();
+        pkt.emit(&mut buf);
+
+        let (rest, parsed) = Ospfv3Packet::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        match parsed.payload {
+            Ospfv3Payload::LsUpdate(u) => {
+                assert_eq!(u.lsas.len(), 1);
+                assert_eq!(u.lsas[0].h.ls_type, OSPFV3_GRACE_LSA_TYPE);
+                match &u.lsas[0].body {
+                    Ospfv3LsBody::Grace(g) => {
+                        assert_eq!(g.grace_period(), Some(240));
+                        assert_eq!(g.reason(), Some(GraceRestartReason::SwitchRedundant));
+                    }
+                    other => panic!("expected Grace body, got {:?}", other),
+                }
+            }
+            other => panic!("expected LsUpdate payload, got {:?}", other),
+        }
     }
 }

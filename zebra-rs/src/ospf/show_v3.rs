@@ -597,6 +597,14 @@ fn write_lsa_detail(
                 b.tlvs.len()
             )?;
         }
+        Ospfv3LsBody::Grace(b) => {
+            if let Some(secs) = b.grace_period() {
+                writeln!(out, "  Grace Period: {}s", secs)?;
+            }
+            if let Some(reason) = b.reason() {
+                writeln!(out, "  Restart Reason: {:?}", reason)?;
+            }
+        }
         Ospfv3LsBody::Unknown(bytes) => {
             writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
         }
