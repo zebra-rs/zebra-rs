@@ -62,6 +62,14 @@ impl Ospf {
             "/area/interface/prefix-sid/absolute",
             config_ospf_interface_prefix_sid_absolute,
         );
+        self.ospf_add(
+            "/area/interface/adjacency-sid/index",
+            config_ospf_interface_adjacency_sid_index,
+        );
+        self.ospf_add(
+            "/area/interface/adjacency-sid/absolute",
+            config_ospf_interface_adjacency_sid_absolute,
+        );
         self.ospf_add("/segment-routing/mpls", config_ospf_sr_mpls);
         self.tracing_add("/fsm", config_tracing_fsm);
         self.tracing_add("/packet", config_tracing_packet);
@@ -314,6 +322,48 @@ fn config_ospf_interface_prefix_sid_absolute(
     let ifindex = link.index;
 
     ospf.ext_prefix_lsa_originate(ifindex);
+
+    Some(())
+}
+
+/// Store the Index-form Adjacency-SID for this interface. No
+/// origination here -- Extended-Link LSA emission lands in a
+/// follow-up PR; this callback is storage-only so a YANG commit
+/// validates and persists the value into `LinkConfig`.
+fn config_ospf_interface_adjacency_sid_index(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.adjacency_sid = Some(super::link::AdjacencySid::Index(index));
+    } else {
+        link.config.adjacency_sid = None;
+    }
+
+    Some(())
+}
+
+fn config_ospf_interface_adjacency_sid_absolute(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.adjacency_sid = Some(super::link::AdjacencySid::Absolute(absolute));
+    } else {
+        link.config.adjacency_sid = None;
+    }
 
     Some(())
 }

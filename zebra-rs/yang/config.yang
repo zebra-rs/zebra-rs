@@ -361,6 +361,19 @@ module config {
                 type uint32;
               }
             }
+            container adjacency-sid {
+              // Per-link Adjacency-SID (RFC 8665 §6). Originated in
+              // the Extended-Link Opaque LSA (type 10 / opaque-type 8)
+              // as an AdjSid sub-TLV. Either form is allowed; the
+              // origination side picks the wire encoding from whichever
+              // leaf is set.
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
           }
         }
         container segment-routing {
@@ -493,6 +506,18 @@ module config {
               type boolean;
             }
             container prefix-sid {
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
+            container adjacency-sid {
+              // Per-link Adjacency-SID. OSPFv3 SR-MPLS carries it in
+              // the RFC 8666 Extended-Link LSA; storage-only here.
+              // Either form is allowed; the origination side picks
+              // the wire encoding from whichever leaf is set.
               leaf index {
                 type uint32;
               }
