@@ -1069,6 +1069,238 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// True when this router has interfaces in two or more OSPF
+    /// areas (RFC 2328 §3.3 ABR test). Areas with zero attached
+    /// links don't count — the area exists only in the LSDB-map
+    /// shape, not on this router.
+    pub fn is_abr(&self) -> bool {
+        self.areas
+            .iter()
+            .filter(|(_, area)| !area.links.is_empty())
+            .count()
+            >= 2
+    }
+
+    /// True when this router should translate Type-7 → Type-5 for
+    /// `area_id`. Phase 4a only honors `translator-role = Always`
+    /// (with the ABR gate). `Candidate` (the RFC default) returns
+    /// false until phase 4b adds Nt-bit election; `Never` is also
+    /// false by construction.
+    pub fn is_nssa_translator_for(&self, area_id: Ipv4Addr) -> bool {
+        let Some(area) = self.areas.get(area_id) else {
+            return false;
+        };
+        if !area.area_type.is_nssa() {
+            return false;
+        }
+        if !self.is_abr() {
+            return false;
+        }
+        matches!(
+            area.area_type.nssa_translator_role,
+            super::area::NssaTranslatorRole::Always
+        )
+    }
+
+    /// Translate a single Type-7 NSSA-AS-External LSA into a Type-5
+    /// AS-External LSA, install it in `lsdb_as`, and flood to all
+    /// non-stub / non-NSSA areas (RFC 3101 §3.2).
+    ///
+    /// Gates (all must hold for translation to happen):
+    /// - source LSA body is `NssaAsExternal` (defensive)
+    /// - not MaxAge — flushed Type-7s shouldn't seed translations
+    /// - not self-originated — re-translating our own Type-7 would
+    ///   double state for no gain
+    /// - P-bit set in the source — RFC 3101 §3.2.1
+    /// - forwarding-address non-zero — FA=0 receive semantics
+    ///   aren't wired yet (phase 3 also skips FA!=0 on receive);
+    ///   defer FA resolution to a later cleanup that covers both
+    ///   paths together
+    fn nssa_translate_one(&mut self, type7: &OspfLsa) -> bool {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        const P_BIT: u8 = 0x08;
+
+        let OspfLsp::NssaAsExternal(ref body) = type7.lsp else {
+            return false;
+        };
+        if type7.h.ls_age >= OSPF_MAX_AGE {
+            return false;
+        }
+        if type7.h.adv_router == self.router_id {
+            return false;
+        }
+        if (type7.h.options & P_BIT) == 0 {
+            return false;
+        }
+        if body.forwarding_address.is_unspecified() {
+            return false;
+        }
+
+        let ls_id = type7.h.ls_id;
+        let mut header = OspfLsaHeader::new(OspfLsType::AsExternal, ls_id, self.router_id);
+        // Options on a translated Type-5: E-bit set (Type-5 belongs
+        // to normal areas which accept External), O-bit set, N/P
+        // cleared.
+        let mut options = OspfOptions::default();
+        options.set_external(true);
+        options.set_o(true);
+        header.options = u8::from(options);
+
+        let new_body = AsExternalLsa {
+            netmask: body.netmask,
+            // RFC 3101 §3.2: preserve E-bit + TOS byte verbatim.
+            ext_and_resvd: body.ext_and_tos,
+            metric: body.metric,
+            forwarding_address: body.forwarding_address,
+            external_route_tag: body.external_route_tag,
+            tos_list: body.tos_list.clone(),
+        };
+        let mut new_lsa = OspfLsa::from(header, OspfLsp::AsExternal(new_body));
+
+        // Preserve sequence number on refresh (re-translation of a
+        // changed source Type-7).
+        if let Some(existing) =
+            self.lsdb_as
+                .lookup_by_id(OspfLsType::AsExternal, ls_id, self.router_id)
+        {
+            new_lsa.h.ls_seq_number = new_lsa
+                .h
+                .ls_seq_number
+                .max(existing.h.ls_seq_number.saturating_add(1));
+        }
+        new_lsa.update();
+
+        let flood_lsa = new_lsa.clone();
+        self.lsdb_as.insert_self_originated(new_lsa, &self.tx, None);
+        self.flood_lsa_through_as(&flood_lsa, None);
+        true
+    }
+
+    /// Compute the set of Type-7 ls_ids in `area_id` that we
+    /// SHOULD currently be translating (applies the same gates as
+    /// `nssa_translate_one`). Used by `nssa_translate_resync` to
+    /// diff against the previously-translated set.
+    fn nssa_translatable_ls_ids(&self, area_id: Ipv4Addr) -> BTreeSet<Ipv4Addr> {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        const P_BIT: u8 = 0x08;
+        let mut out = BTreeSet::new();
+        let Some(area) = self.areas.get(area_id) else {
+            return out;
+        };
+        for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::NssaAsExternal) {
+            let d = &lsa.data;
+            if d.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if d.h.adv_router == self.router_id {
+                continue;
+            }
+            if (d.h.options & P_BIT) == 0 {
+                continue;
+            }
+            let OspfLsp::NssaAsExternal(ref body) = d.lsp else {
+                continue;
+            };
+            if body.forwarding_address.is_unspecified() {
+                continue;
+            }
+            out.insert(d.h.ls_id);
+        }
+        out
+    }
+
+    /// Rebuild this area's translated Type-5 LSA set from the
+    /// current NSSA LSDB contents. Walks the area's Type-7s,
+    /// re-translates any that match the gates, and flushes any
+    /// previously-translated Type-5s whose source Type-7 is gone or
+    /// no longer eligible. Idempotent.
+    ///
+    /// Called from:
+    /// - `Message::NssaTranslateResync` (flood path on Type-7 arrival)
+    /// - `area-type` config change
+    /// - `nssa-translator-role` config change
+    /// - `Message::Enable` / `Message::Disable` (link bindings flip
+    ///   ABR status)
+    pub fn nssa_translate_resync(&mut self, area_id: Ipv4Addr) {
+        let translating = self.is_nssa_translator_for(area_id);
+        let desired = if translating {
+            self.nssa_translatable_ls_ids(area_id)
+        } else {
+            BTreeSet::new()
+        };
+        let prev: BTreeSet<Ipv4Addr> = self
+            .areas
+            .get(area_id)
+            .map(|a| a.nssa_translated.clone())
+            .unwrap_or_default();
+
+        // Flush translations that should no longer exist.
+        for ls_id in prev.difference(&desired).copied().collect::<Vec<_>>() {
+            let flushed = self.lsdb_as.flush_lsa(
+                OspfLsType::AsExternal,
+                ls_id,
+                self.router_id,
+                &self.tx,
+                None,
+            );
+            if let Some(lsa) = flushed {
+                self.flood_lsa_through_as(&lsa, None);
+            }
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.nssa_translated.remove(&ls_id);
+            }
+        }
+
+        if !translating {
+            return;
+        }
+
+        // Translate / refresh all desired Type-7s. Snapshot the
+        // source LSAs first to release the area borrow before
+        // calling `nssa_translate_one` (which takes `&mut self`).
+        let sources: Vec<OspfLsa> = self
+            .areas
+            .get(area_id)
+            .map(|a| {
+                a.lsdb
+                    .iter_by_type(OspfLsType::NssaAsExternal)
+                    .filter(|(_, lsa)| desired.contains(&lsa.data.h.ls_id))
+                    .map(|(_, lsa)| lsa.data.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // RFC 3101 §3.2.3 says the ABR should prefer the lowest-
+        // metric Type-7 when several share an ls_id; the BTreeMap
+        // key in the LSDB already collapses by `(LS-Type, LS-ID,
+        // Adv-Router)`, so iteration here yields at most one
+        // source per ls_id — fine until cross-NSSA collision
+        // becomes a real shape worth handling (deferred).
+        for source in &sources {
+            if self.nssa_translate_one(source)
+                && let Some(area) = self.areas.get_mut(area_id)
+            {
+                area.nssa_translated.insert(source.h.ls_id);
+            }
+        }
+    }
+
+    /// Resync NSSA translator state for every NSSA area on this
+    /// router. Use when a router-wide property changed (e.g., ABR
+    /// status due to a link join / leave); a per-area call would
+    /// miss areas whose translator status changed indirectly.
+    pub fn nssa_translate_resync_all(&mut self) {
+        let nssa_area_ids: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, area)| area.area_type.is_nssa())
+            .map(|(&id, _)| id)
+            .collect();
+        for area_id in nssa_area_ids {
+            self.nssa_translate_resync(area_id);
+        }
+    }
+
     /// `RibRx::RouteAdd` handler. Update the cache, then nudge
     /// every NSSA area to resync. Per-area filtering happens inside
     /// `nssa_redist_connected_resync`.
@@ -1297,41 +1529,87 @@ impl Ospf<Ospfv2> {
                 }
             }
             OspfLsType::NssaAsExternal => {
-                // The only Type-7 we self-originate today is the
-                // NSSA default-LSA (ls_id 0.0.0.0). Re-originate via
-                // the same builder used at config time — it inspects
-                // the area-type + nssa_default_originate knob and
-                // either re-emits with seq# = received+1, or flushes
-                // if we no longer own it. Other ls_ids (future
-                // redistributed Type-7s) fall through to the generic
-                // flush until phase 2c lands.
-                if ls_id.is_unspecified()
-                    && let Some(area_id) = area_id
-                {
+                // Three self-origination paths today:
+                //   1. NSSA default-LSA (ls_id 0.0.0.0) — phase 2.
+                //   2. Redistributed connected (ls_id ∈ area's
+                //      `redist_connected_originated`) — phase 2c.
+                //   3. Other — no owner; flush.
+                let Some(area_id) = area_id else {
+                    return;
+                };
+                if ls_id.is_unspecified() {
                     tracing::info!(
                         "[Self-Originated] Re-originating NSSA default Type-7 id={} seq={:#x}",
                         ls_id,
                         received_seq
                     );
                     self.nssa_default_lsa_originate(area_id);
+                    return;
+                }
+                let owned_redist = self
+                    .areas
+                    .get(area_id)
+                    .map(|a| {
+                        a.redist_connected_originated
+                            .iter()
+                            .any(|p| p.network() == ls_id)
+                    })
+                    .unwrap_or(false);
+                if owned_redist {
+                    tracing::info!(
+                        "[Self-Originated] Re-originating NSSA redistribute Type-7 id={} seq={:#x}",
+                        ls_id,
+                        received_seq
+                    );
+                    self.nssa_redist_connected_resync(area_id);
+                    return;
+                }
+                tracing::info!(
+                    "[Self-Originated] Flushing Type-7 LSA id={} (no owner)",
+                    ls_id
+                );
+                let flushed = self.areas.get_mut(area_id).and_then(|area| {
+                    area.lsdb
+                        .flush_lsa(ls_type, ls_id, adv_router, &self.tx, Some(area_id))
+                });
+                if let Some(lsa) = flushed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+            OspfLsType::AsExternal => {
+                // The only Type-5s we self-originate today are NSSA
+                // Type-7→Type-5 translations (phase 4). If `ls_id`
+                // matches an entry in any NSSA area's
+                // `nssa_translated`, that area's resync re-translates
+                // (bumps seq# in the process). Otherwise flush.
+                let owning_area = self
+                    .areas
+                    .iter()
+                    .find(|(_, area)| area.nssa_translated.contains(&ls_id))
+                    .map(|(&id, _)| id);
+                if let Some(area_id) = owning_area {
+                    tracing::info!(
+                        "[Self-Originated] Re-translating Type-5 from NSSA area {} id={} seq={:#x}",
+                        area_id,
+                        ls_id,
+                        received_seq
+                    );
+                    self.nssa_translate_resync(area_id);
                 } else {
                     tracing::info!(
-                        "[Self-Originated] Flushing Type-7 LSA id={} (no owner)",
+                        "[Self-Originated] Flushing AS-External LSA id={} (no owner)",
                         ls_id
                     );
-                    if let Some(area_id) = area_id {
-                        let flushed = self.areas.get_mut(area_id).and_then(|area| {
-                            area.lsdb
-                                .flush_lsa(ls_type, ls_id, adv_router, &self.tx, Some(area_id))
-                        });
-                        if let Some(lsa) = flushed {
-                            self.flood_self_originated_lsa(area_id, &lsa);
-                        }
+                    let flushed = self
+                        .lsdb_as
+                        .flush_lsa(ls_type, ls_id, adv_router, &self.tx, None);
+                    if let Some(lsa) = flushed {
+                        self.flood_lsa_through_as(&lsa, None);
                     }
                 }
             }
             _ => {
-                // Summary/AS-External origination not yet implemented; flush with MaxAge.
+                // Summary origination not yet implemented; flush with MaxAge.
                 tracing::info!(
                     "[Self-Originated] Flushing LSA type={:?} id={} (not re-originable)",
                     ls_type,
@@ -2091,6 +2369,11 @@ impl Ospf<Ospfv2> {
                 }
                 self.router_lsa_originate();
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+                // Adding a link to an area may turn this router into
+                // an ABR (gained interface in a 2nd area). Resync
+                // every NSSA area's translator state — the helper
+                // gates on `is_abr()` internally.
+                self.nssa_translate_resync_all();
             }
             Message::Disable(ifindex, area_id) => {
                 // Flush self-originated Network-LSA *before* clearing
@@ -2112,6 +2395,10 @@ impl Ospf<Ospfv2> {
                 let _ = self
                     .tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
+                // Dropping a link may turn this router back into a
+                // non-ABR (lost interface in the area). Flush any
+                // translated Type-5s if we no longer qualify.
+                self.nssa_translate_resync_all();
             }
             Message::Recv(packet, src, from, index, dest) => {
                 self.process_recv(packet, src, from, index, dest).await;
@@ -2254,6 +2541,9 @@ impl Ospf<Ospfv2> {
             }
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
+            }
+            Message::NssaTranslateResync(area_id) => {
+                self.nssa_translate_resync(area_id);
             }
             _ => {}
         }
@@ -4336,6 +4626,12 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// restarter exceeded its grace window. Exit helper and let the
     /// normal `InactivityTimer` path tear the neighbor down.
     GrHelperExpire(u32, Ipv4Addr),
+    /// RFC 3101 NSSA Type-7→Type-5 translator resync request for
+    /// `area_id`. Fired when a Type-7 LSA arrived in this NSSA, or
+    /// when config (area-type / translator-role / ABR status)
+    /// changed. The handler is idempotent; multiple coalescing
+    /// triggers in flight is fine.
+    NssaTranslateResync(Ipv4Addr),
 }
 
 use crate::spf::{self, Path};

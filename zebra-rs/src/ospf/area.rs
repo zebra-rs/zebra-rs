@@ -242,6 +242,14 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     /// Populated/maintained by the RIB RouteAdd / RouteDel handlers
     /// in `inst.rs`.
     pub redist_connected_originated: BTreeSet<Ipv4Net>,
+
+    /// RFC 3101 §3 NSSA Type-7→Type-5 translator state. ls_ids of
+    /// Type-7 LSAs in this area for which we have translated a
+    /// Type-5 into `lsdb_as`. The translated Type-5's adv_router is
+    /// our router-id by construction, so ls_id alone is enough to
+    /// identify the pair. Maintained by
+    /// `Ospf::nssa_translate_resync` in `inst.rs`.
+    pub nssa_translated: BTreeSet<Ipv4Addr>,
 }
 
 impl<V: OspfVersion> OspfArea<V> {
@@ -256,6 +264,7 @@ impl<V: OspfVersion> OspfArea<V> {
             spf_pending: false,
             redistribute: AreaRedistribute::default(),
             redist_connected_originated: BTreeSet::new(),
+            nssa_translated: BTreeSet::new(),
         }
     }
 }
