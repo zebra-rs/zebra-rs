@@ -386,8 +386,10 @@ impl OspfLsa {
         Self { h, lsp }
     }
 
-    /// Emit the LSA payload to a buffer.
-    fn emit_lsp(&self, buf: &mut BytesMut) {
+    /// Emit the LSA payload (body only) to a buffer. Public so tests
+    /// can round-trip a constructed LSA without depending on the
+    /// crate-private `Emit` trait.
+    pub fn emit_lsp(&self, buf: &mut BytesMut) {
         match &self.lsp {
             OspfLsp::Router(lsp) => lsp.emit(buf),
             OspfLsp::Network(lsp) => lsp.emit(buf),
@@ -396,7 +398,7 @@ impl OspfLsa {
             OspfLsp::NssaAsExternal(lsp) => lsp.emit(buf),
             OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.emit(buf),
             OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.emit(buf),
-            OspfLsp::OpaqueAreaExtLink(_) => {}
+            OspfLsp::OpaqueAreaExtLink(lsp) => lsp.emit(buf),
             OspfLsp::Unknown(lsp) => lsp.emit(buf),
         }
     }
@@ -429,7 +431,7 @@ impl OspfLsa {
             OspfLsp::NssaAsExternal(lsp) => lsp.lsa_len(),
             OspfLsp::OpaqueAreaRouterInfo(lsp) => lsp.lsa_len(),
             OspfLsp::OpaqueAreaExtPrefix(lsp) => lsp.lsa_len(),
-            OspfLsp::OpaqueAreaExtLink(_) => 0,
+            OspfLsp::OpaqueAreaExtLink(lsp) => lsp.lsa_len(),
             OspfLsp::Unknown(lsp) => lsp.lsa_len(),
         };
         let length = lsp_len + LSA_HEADER_LEN;
@@ -1444,6 +1446,138 @@ impl ExtPrefixSidSubTlv {
         buf.put_u8(0); // reserved
         buf.put_u8(self.mt_id);
         buf.put_u8(self.algo.into());
+        match &self.sid {
+            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
+            SidLabelTlv::Index(v) => buf.put_u32(*v),
+        }
+    }
+}
+
+// ExtLinkLsa / ExtLinkTlv / ExtLinkSubTlv / AdjSidSubTlv / LanAdjSidSubTlv
+// emit + wire-length impls. Parallel to the ExtPrefix* family above; without
+// these the top-level `Lsa::emit_lsp` / `Lsa::update` dispatchers serialize
+// an empty body for `OpaqueAreaExtLink`, so any RFC 8665 Adj-SID
+// origination would go on the wire with a zero-length payload.
+
+impl ExtLinkLsa {
+    pub fn lsa_len(&self) -> u16 {
+        self.tlvs.iter().map(|tlv| tlv.wire_len()).sum()
+    }
+
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+}
+
+impl ExtLinkTlv {
+    /// Total wire length including the 4-byte TLV header.
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn value_len(&self) -> u16 {
+        // link_type(1) + reserved(3) + link_id(4) + link_data(4) = 12
+        let sub_len: u16 = self.subs.iter().map(|s| s.wire_len()).sum();
+        12 + sub_len
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let len = self.value_len();
+        buf.put_u16(1); // Extended Link TLV type.
+        buf.put_u16(len);
+        buf.put_u8(self.link_type);
+        // 3 reserved bytes.
+        buf.put_u8(0);
+        buf.put_u16(0);
+        buf.put(&self.link_id.octets()[..]);
+        buf.put(&self.link_data.octets()[..]);
+
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+
+        // Pad TLV value to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+impl ExtLinkSubTlv {
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn value_len(&self) -> u16 {
+        match self {
+            ExtLinkSubTlv::AdjSid(s) => s.value_len(),
+            ExtLinkSubTlv::LanAdjSid(s) => s.value_len(),
+            ExtLinkSubTlv::Unknown(u) => u.len,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, len) = match self {
+            ExtLinkSubTlv::AdjSid(_) => (2u16, self.value_len()),
+            ExtLinkSubTlv::LanAdjSid(_) => (3u16, self.value_len()),
+            ExtLinkSubTlv::Unknown(u) => (u.typ, u.len),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(len);
+        match self {
+            ExtLinkSubTlv::AdjSid(s) => s.emit(buf),
+            ExtLinkSubTlv::LanAdjSid(s) => s.emit(buf),
+            ExtLinkSubTlv::Unknown(u) => buf.put(&u.values[..]),
+        }
+        // Pad to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+impl AdjSidSubTlv {
+    fn value_len(&self) -> u16 {
+        // flags(1) + reserved(1) + mt_id(1) + weight(1) + sid(3 or 4)
+        4 + match &self.sid {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(0); // reserved
+        buf.put_u8(self.mt_id);
+        buf.put_u8(self.weight);
+        match &self.sid {
+            SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
+            SidLabelTlv::Index(v) => buf.put_u32(*v),
+        }
+    }
+}
+
+impl LanAdjSidSubTlv {
+    fn value_len(&self) -> u16 {
+        // flags(1) + reserved(1) + mt_id(1) + weight(1) + neighbor_id(4) + sid(3 or 4)
+        8 + match &self.sid {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags.into());
+        buf.put_u8(0); // reserved
+        buf.put_u8(self.mt_id);
+        buf.put_u8(self.weight);
+        buf.put(&self.neighbor_id.octets()[..]);
         match &self.sid {
             SidLabelTlv::Label(v) => buf.put(&packet_utils::u32_u8_3(*v)[..]),
             SidLabelTlv::Index(v) => buf.put_u32(*v),

@@ -2,6 +2,7 @@ use bytes::BytesMut;
 use hex_literal::hex;
 use nom_derive::Parse;
 use ospf_packet::*;
+use std::net::Ipv4Addr;
 
 fn parse_emit(buf: &[u8]) {
     let packet = parse(buf);
@@ -252,4 +253,78 @@ pub fn parse_unknown2() {
     assert!(rem.is_empty());
     println!("{:?}", packet);
     println!("rem len: {:?}", rem.len());
+}
+
+/// Build an Extended-Link Opaque LSA carrying both an Adj-SID and a
+/// LAN-Adj-SID sub-TLV (RFC 7684 §3, RFC 8665 §5/§6), emit it through
+/// the top-level `OspfLsa::emit` dispatch, parse the bytes back, and
+/// assert structural equality. Guards against regression on the
+/// emit/lsa_len plumbing that was previously stubbed out.
+#[test]
+pub fn ext_link_lsa_round_trip() {
+    let adj_sid = ExtLinkSubTlv::AdjSid(AdjSidSubTlv {
+        flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        mt_id: 0,
+        weight: 0,
+        sid: SidLabelTlv::Label(24001),
+    });
+    let lan_adj_sid = ExtLinkSubTlv::LanAdjSid(LanAdjSidSubTlv {
+        flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
+        mt_id: 0,
+        weight: 0,
+        neighbor_id: Ipv4Addr::new(10, 0, 0, 2),
+        sid: SidLabelTlv::Label(24002),
+    });
+    let tlv = ExtLinkTlv {
+        link_type: 1, // P2P
+        link_id: Ipv4Addr::new(10, 0, 0, 2),
+        link_data: Ipv4Addr::new(192, 168, 1, 1),
+        subs: vec![adj_sid, lan_adj_sid],
+    };
+    let body = ExtLinkLsa { tlvs: vec![tlv] };
+
+    // OpaqueLsaType::EXT_LINK = 8; place in the top byte of ls_id.
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::EXT_LINK as u32) << 24);
+    let mut h = OspfLsaHeader::new(
+        OspfLsType::OpaqueAreaLocal,
+        ls_id,
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    h.options = 0x42;
+    let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueAreaExtLink(body));
+    lsa.update();
+
+    assert!(lsa.h.length > 20, "header length must include body");
+    assert!(
+        lsa.verify_checksum(),
+        "Fletcher checksum must verify on the emitter's own output"
+    );
+
+    let mut buf = BytesMut::new();
+    lsa.h.emit(&mut buf);
+    lsa.emit_lsp(&mut buf);
+    assert_eq!(buf.len(), lsa.h.length as usize);
+
+    let (rem, parsed) = OspfLsa::parse_be(&buf).expect("parse should succeed");
+    assert!(rem.is_empty(), "trailing bytes after Ext-Link LSA");
+    let OspfLsp::OpaqueAreaExtLink(ref parsed_body) = parsed.lsp else {
+        panic!("expected OpaqueAreaExtLink, got {:?}", parsed.lsp);
+    };
+    assert_eq!(parsed_body.tlvs.len(), 1);
+    let parsed_tlv = &parsed_body.tlvs[0];
+    assert_eq!(parsed_tlv.link_type, 1);
+    assert_eq!(parsed_tlv.link_id, Ipv4Addr::new(10, 0, 0, 2));
+    assert_eq!(parsed_tlv.link_data, Ipv4Addr::new(192, 168, 1, 1));
+    assert_eq!(parsed_tlv.subs.len(), 2);
+    match &parsed_tlv.subs[0] {
+        ExtLinkSubTlv::AdjSid(s) => assert!(matches!(s.sid, SidLabelTlv::Label(24001))),
+        other => panic!("expected AdjSid, got {:?}", other),
+    }
+    match &parsed_tlv.subs[1] {
+        ExtLinkSubTlv::LanAdjSid(s) => {
+            assert_eq!(s.neighbor_id, Ipv4Addr::new(10, 0, 0, 2));
+            assert!(matches!(s.sid, SidLabelTlv::Label(24002)));
+        }
+        other => panic!("expected LanAdjSid, got {:?}", other),
+    }
 }
