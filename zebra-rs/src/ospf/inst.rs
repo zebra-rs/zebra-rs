@@ -605,6 +605,89 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// Originate (or flush) the Extended-Link Opaque LSA for `ifindex`.
+    ///
+    /// Originates when:
+    ///   * SR-MPLS is enabled (`segment_routing == Mpls`)
+    ///   * the link is enabled and has an `adjacency_sid` configured
+    ///   * the link is point-to-point with at least one Full neighbor
+    ///
+    /// Flushes (MaxAge) otherwise. Broadcast / NBMA support requires
+    /// LAN-Adj-SID (RFC 8665 §6) and is deferred to a follow-up.
+    ///
+    /// The opaque-id is derived from the ifindex (same convention as
+    /// `ext_prefix_lsa_originate`) so the per-link LSA gets a stable
+    /// `ls_id` across re-originations.
+    pub fn ext_link_lsa_originate(&mut self, ifindex: u32) {
+        use super::link::OspfNetworkType;
+        use super::srmpls::SegmentRoutingMode;
+
+        let opaque_id = ifindex & 0x00FF_FFFF;
+        let ls_id = Ipv4Addr::from(((OpaqueLsaType::EXT_LINK as u32) << 24) | opaque_id);
+
+        let link = self.links.get(&ifindex);
+        let should_originate = self.segment_routing == SegmentRoutingMode::Mpls
+            && link.is_some_and(|l| {
+                l.enabled
+                    && l.config.adjacency_sid.is_some()
+                    && l.network_type == OspfNetworkType::PointToPoint
+                    && l.nbrs.values().any(|nbr| nbr.state == NfsmState::Full)
+            });
+
+        if should_originate {
+            let link = link.unwrap();
+            let adjacency_sid = link.config.adjacency_sid.unwrap();
+            let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback()) else {
+                return;
+            };
+            let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) else {
+                return;
+            };
+
+            let mut lsa = super::srmpls::ext_link_lsa_build(
+                self.router_id,
+                1, // P2P -- matches RouterLsaLinkType encoding.
+                nbr.ident.router_id,
+                addr.prefix.addr(),
+                &adjacency_sid,
+                opaque_id,
+            );
+
+            if let Some(area) = self.areas.get(AREA0)
+                && let Some(existing) =
+                    area.lsdb
+                        .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
+            {
+                lsa.h.ls_seq_number = lsa
+                    .h
+                    .ls_seq_number
+                    .max(existing.h.ls_seq_number.saturating_add(1));
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
+            }
+            self.flood_self_originated_lsa(AREA0, &flood_lsa);
+        } else {
+            let flushed = if let Some(area) = self.areas.get_mut(AREA0) {
+                area.lsdb.flush_lsa(
+                    OspfLsType::OpaqueAreaLocal,
+                    ls_id,
+                    self.router_id,
+                    &self.tx,
+                    Some(AREA0),
+                )
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(AREA0, &lsa);
+            }
+        }
+    }
+
     pub fn ext_prefix_lsa_originate(&mut self, ifindex: u32) {
         use super::srmpls::SegmentRoutingMode;
 
@@ -1055,6 +1138,11 @@ impl Ospf<Ospfv2> {
         if if_state == IfsmState::DR {
             self.update_network_lsa_by_interface(ifindex);
         }
+
+        // Extended-Link Opaque LSA tracks the per-link Adj-SID, which
+        // is only meaningful while the link has a Full neighbor.
+        // `ext_link_lsa_originate` flushes when no Full neighbor remains.
+        self.ext_link_lsa_originate(ifindex);
     }
 
     /// Check if we are currently the DR for the network identified by ls_id.

@@ -88,8 +88,7 @@ pub enum PrefixSid {
 /// the YANG `adjacency-sid` container; origination picks the wire
 /// encoding (Index vs. Label sub-TLV) from whichever variant is set.
 /// Kept distinct from `PrefixSid` because Adj-SIDs grow flags/weight
-/// once Phase B origination lands, while Prefix-SIDs do not.
-#[allow(dead_code)] // value read once Phase B origination lands.
+/// once Phase B consumption lands, while Prefix-SIDs do not.
 #[derive(Debug, Clone, Copy)]
 pub enum AdjacencySid {
     Index(u32),
