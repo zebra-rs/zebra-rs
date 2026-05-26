@@ -44,6 +44,11 @@ declare -a _cli_array_completions
 declare -A _cli_array_helps
 declare -A _cli_array_pre
 
+# 1 once the daemon answered with at least one first-level command,
+# 0 otherwise. Used to retry registration on the next TAB / command
+# when vty started while the zebra-rs daemon was still down.
+declare -i _cli_first_level_registered=0
+
 COMP_WORDBREAKS=${COMP_WORDBREAKS//:/}
 
 _cli_prompt_setup ()
@@ -184,6 +189,11 @@ _cli_set_completions ()
 
 _cli_completion ()
 {
+  # Retry first-level registration if it never succeeded (daemon was
+  # down at startup). Doing it here means TAB on an empty line or any
+  # partial command transparently recovers once the daemon is up.
+  _cli_maybe_register
+
   compopt -o nospace
 
   local restore_shopts=$(shopt -p extglob nullglob | tr \\n \;)
@@ -275,20 +285,57 @@ _cli_exec ()
   esac
 }
 
+# bash calls this when a typed word matches no alias / function /
+# builtin / PATH executable. If first-level registration never
+# succeeded (daemon was down at startup), retry it now and — if the
+# typed word turns out to be a freshly-registered first-level command
+# — dispatch it through _cli_exec so the user doesn't have to retype.
+command_not_found_handle ()
+{
+  if (( _cli_first_level_registered == 0 )); then
+    _cli_register_first_level_command
+    if (( _cli_first_level_registered == 1 )) && alias "$1" >/dev/null 2>&1; then
+      _cli_exec "$@"
+      return $?
+    fi
+  fi
+  echo "$1: command not found" >&2
+  return 127
+}
+
 _cli_register_first_level_command ()
 {
   shopt -s expand_aliases
   unalias -a
   OOIFS=${IFS}
   IFS=''  input=$(${cli_command} -f -m ${CLI_MODE})
+  local -i registered=0
   while read cmd; do
+    [[ -z "${cmd}" ]] && continue
     IFS='' seq_input=$(seq 1 ${#cmd})
     while read pos; do
       complete -F _cli_completion ${cmd:0:$pos}
       eval alias ${cmd:0:$pos}=\'_cli_exec ${cmd:0:$pos}\'
     done <<<${seq_input}
+    (( registered++ ))
   done <<<${input}
   IFS=${OOIFS}
+  if (( registered > 0 )); then
+    _cli_first_level_registered=1
+  else
+    _cli_first_level_registered=0
+  fi
+}
+
+# Re-attempt first-level registration if the initial attempt at vty
+# startup ran while the daemon was down. Called from the completion
+# handler and the command-not-found handler so the next TAB or typed
+# command picks up commands once the daemon becomes reachable.
+_cli_maybe_register ()
+{
+  if (( _cli_first_level_registered == 0 )); then
+    _cli_register_first_level_command
+  fi
 }
 
 _cli_ctrl_caret ()

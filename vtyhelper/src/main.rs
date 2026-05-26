@@ -339,10 +339,12 @@ async fn main() -> Result<()> {
 
     let logout_mode = cli.logout;
     if let Err(_err) = run(cli).await {
-        // Logout runs from the bash EXIT trap; staying silent on failure
-        // keeps a tidy shell-exit experience even if the daemon is gone.
+        // Stay silent: no fallback output, so the bash side can detect
+        // failure (empty stdout / non-zero exit) and retry registration
+        // on the next command or completion. Logout runs from the bash
+        // EXIT trap (`|| true`), so a non-zero exit is harmless there.
         if !logout_mode {
-            println!("dummy\ncommands\n\n");
+            std::process::exit(1);
         }
     }
     Ok(())
