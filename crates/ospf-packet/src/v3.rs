@@ -1232,6 +1232,15 @@ impl ParseBe<Ospfv3AsExternalLsa> for Ospfv3AsExternalLsa {
     }
 }
 
+/// v3 NSSA-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
+/// U=0, S2=0, S1=1 (area scope), function code = 7.
+///
+/// RFC 5340 §A.4.9: the NSSA-LSA body is identical to the
+/// AS-External-LSA body (§A.4.7); only the LS Type discriminates
+/// them. The codec reuses [`Ospfv3AsExternalLsa`] as the body of
+/// the [`Ospfv3LsBody::Nssa`] variant accordingly.
+pub const OSPFV3_NSSA_LSA_TYPE: u16 = 0x2007;
+
 /// v3 Link-LSA LS Type (RFC 5340 §A.4.2.1 encoding):
 /// U=0, S2=0, S1=0 (link-local scope), function code = 8.
 pub const OSPFV3_LINK_LSA_TYPE: u16 = 0x0008;
@@ -1943,6 +1952,12 @@ pub enum Ospfv3LsBody {
     InterAreaPrefix(Ospfv3InterAreaPrefixLsa),
     InterAreaRouter(Ospfv3InterAreaRouterLsa),
     AsExternal(Ospfv3AsExternalLsa),
+    /// NSSA-LSA — RFC 5340 §A.4.9. Wire body identical to
+    /// AS-External-LSA; the variant tag carries the LS-Type
+    /// distinction so receive-side logic can apply NSSA rules
+    /// (RFC 3101, P-bit in `prefix_options`, etc.) instead of the
+    /// AS-scope rules.
+    Nssa(Ospfv3AsExternalLsa),
     Link(Ospfv3LinkLsa),
     IntraAreaPrefix(Ospfv3IntraAreaPrefixLsa),
     /// RFC 5187 Grace-LSA — link-local scope, function code 11. Body
@@ -1971,6 +1986,7 @@ impl Ospfv3LsBody {
             Ospfv3LsBody::InterAreaPrefix(b) => b.emit(buf),
             Ospfv3LsBody::InterAreaRouter(b) => b.emit(buf),
             Ospfv3LsBody::AsExternal(b) => b.emit(buf),
+            Ospfv3LsBody::Nssa(b) => b.emit(buf),
             Ospfv3LsBody::Link(b) => b.emit(buf),
             Ospfv3LsBody::IntraAreaPrefix(b) => b.emit(buf),
             Ospfv3LsBody::Grace(b) => b.emit(buf),
@@ -2011,6 +2027,10 @@ impl Ospfv3LsBody {
             OSPFV3_AS_EXTERNAL_LSA_TYPE => {
                 let (rest, b) = Ospfv3AsExternalLsa::parse_be(input)?;
                 Ok((rest, Ospfv3LsBody::AsExternal(b)))
+            }
+            OSPFV3_NSSA_LSA_TYPE => {
+                let (rest, b) = Ospfv3AsExternalLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Nssa(b)))
             }
             OSPFV3_LINK_LSA_TYPE => {
                 let (rest, b) = Ospfv3LinkLsa::parse_be(input)?;
@@ -3349,6 +3369,45 @@ mod tests {
         assert!(rest.is_empty());
         assert_eq!(parsed.prefix_length, 0);
         assert_eq!(parsed.forwarding_address, Some(fwd));
+    }
+
+    /// NSSA-LSA (LS Type 0x2007) flows through the `Ospfv3LsBody`
+    /// parse dispatcher into the `Nssa` variant rather than the
+    /// `AsExternal` variant — even though the on-wire body is byte-
+    /// identical (RFC 5340 §A.4.9). Round-trips the body through
+    /// `Ospfv3LsBody::emit` + `Ospfv3LsBody::parse_be`.
+    #[test]
+    fn ospfv3_nssa_lsa_dispatch_roundtrip() {
+        let fwd = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x42);
+        let body = Ospfv3AsExternalLsa {
+            flags: OSPFV3_AS_EXTERNAL_FLAG_E | OSPFV3_AS_EXTERNAL_FLAG_F,
+            metric: 30,
+            prefix_length: 64,
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0,
+            address_prefix: vec![0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0],
+            forwarding_address: Some(fwd),
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        };
+
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::Nssa(body).emit(&mut buf);
+
+        let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_NSSA_LSA_TYPE).unwrap();
+        assert!(rest.is_empty());
+        match parsed {
+            Ospfv3LsBody::Nssa(p) => {
+                assert_eq!(
+                    p.flags,
+                    OSPFV3_AS_EXTERNAL_FLAG_E | OSPFV3_AS_EXTERNAL_FLAG_F
+                );
+                assert_eq!(p.metric, 30);
+                assert_eq!(p.prefix_length, 64);
+                assert_eq!(p.forwarding_address, Some(fwd));
+            }
+            other => panic!("expected Nssa variant, got {:?}", other),
+        }
     }
 
     /// Link-LSA with priority, options, link-local v6 address, and
