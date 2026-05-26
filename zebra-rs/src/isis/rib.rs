@@ -20,7 +20,7 @@ use isis_packet::srv6::EncapType;
 
 use super::config::MtId;
 use super::flex_algo::FlexAlgoEntry;
-use super::graph::{graph, graph_flex_algo, graph_mt2};
+use super::graph::{LspMap, graph, graph_flex_algo, graph_mt2};
 use super::inst::{IsisTop, Message};
 use super::level::Level;
 use super::link::{Afi, LinkTop};
@@ -1010,130 +1010,306 @@ fn apply_routing_updates(
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
 
-/// Perform SPF calculation and update routing tables.
+/// Owned, `Send`-able inputs to a single IS-IS SPF run for one level.
 ///
-/// Always runs the legacy single-topology SPF (used for IPv4 RIB and
-/// the IPv6 RIB in non-MT mode). When MT 2 (IPv6 unicast) is locally
-/// enabled, additionally builds an MT 2 graph from TLV 222 entries
-/// (filtered to MT-2-capable peers via `mt_membership`) and uses
-/// that SPF + `mt2_reach_map_v6` for the IPv6 RIB instead of the
-/// legacy result. RFC 5120 §3.4 strict-MT semantics — peers that
-/// didn't advertise MT 2 don't appear in the IPv6 forwarding table.
-pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
-    // Turn off SPF calculation timer.
-    *top.spf_timer.get_mut(&level) = None;
-    // Stamp completion time so spf_schedule can tell whether the next
-    // scheduling event lands inside or outside the burst window.
-    top.spf_throttle.get_mut(&level).mark_run();
+/// Built on the main task by [`build_spf_input`], which reads
+/// `IsisTop` to construct the legacy + optional MT 2 + per-algo SPF
+/// graphs. The resulting value carries no borrow on `IsisTop`, so
+/// [`compute_spf`] can later be dispatched onto
+/// `tokio::task::spawn_blocking` without touching shared state.
+pub(super) struct SpfInput {
+    level: Level,
+    graph: spf::Graph,
+    source: usize,
+    adjacency_sids: BTreeMap<u32, IsisSysId>,
+    /// Snapshot of `top.lsp_map[level]` taken after every graph build
+    /// has completed for this cycle. TI-LFA looks up pseudonode-ness
+    /// and sys-id resolution against this; cloning it lets the worker
+    /// run without borrowing `IsisTop`.
+    lsp_map: LspMap,
+    ti_lfa_enabled: bool,
+    mt2: Option<Mt2Input>,
+    flex_algos: Vec<FlexAlgoInput>,
+}
 
+struct Mt2Input {
+    graph: spf::Graph,
+    source: Option<usize>,
+}
+
+struct FlexAlgoInput {
+    algo: u8,
+    graph: spf::Graph,
+    source: Option<usize>,
+}
+
+/// Result of a single IS-IS SPF run, ready to be applied back to
+/// `IsisTop` by [`apply_spf_result`] on the main task.
+pub(super) struct SpfOutput {
+    level: Level,
+    source: usize,
+    adjacency_sids: BTreeMap<u32, IsisSysId>,
+    spf_result: BTreeMap<usize, spf::Path>,
+    tilfa_result: BTreeMap<usize, Vec<spf::RepairPath>>,
+    mt2: Option<Mt2Output>,
+    flex_algos: Vec<FlexAlgoOutput>,
+}
+
+struct Mt2Output {
+    source: Option<usize>,
+    spf: Option<BTreeMap<usize, spf::Path>>,
+    tilfa: BTreeMap<usize, Vec<spf::RepairPath>>,
+}
+
+struct FlexAlgoOutput {
+    algo: u8,
+    graph: spf::Graph,
+    source: Option<usize>,
+    spf: Option<BTreeMap<usize, spf::Path>>,
+}
+
+/// Build the SPF graphs for `level` and snapshot the data the worker
+/// needs to run Dijkstra + TI-LFA off the main task.
+///
+/// Always builds the legacy single-topology graph (drives IPv4 RIB
+/// and IPv6 RIB in non-MT mode). When MT 2 (IPv6 unicast) is locally
+/// enabled, additionally builds an MT 2 graph from TLV 222 entries
+/// (filtered to MT-2-capable peers via `mt_membership`) per RFC 5120
+/// §3.4 strict-MT semantics. Also builds one graph per configured
+/// Flex-Algo (RFC 9350).
+///
+/// Returns `None` if the legacy graph has no source node — matches
+/// the previous early-return in `perform_spf_calculation`.
+///
+/// Side effects on `top` (preserved verbatim from the pre-refactor
+/// code so behavior is unchanged):
+///   - `top.graph[level]` is replaced with the new legacy graph.
+///   - `top.mt2_graph[level]` is replaced with the new MT 2 graph if
+///     MT 2 is enabled, otherwise cleared (and `top.mt2_spf_result`
+///     also cleared).
+pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInput> {
     // Legacy graph + SPF — drives IPv4 RIB and IPv6 in non-MT mode.
-    let (graph, source_node, adjacency_sids) = graph(top, level);
-    *top.graph.get_mut(&level) = Some(graph.clone());
+    let (legacy_graph, source_node, adjacency_sids) = graph(top, level);
+    *top.graph.get_mut(&level) = Some(legacy_graph.clone());
 
     // Source node check and early return.
-    let Some(source) = source_node else {
-        return;
-    };
-
-    // Build Adjacency ILM from
-    let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
-
-    // Full-path mode so the legacy v6 builder can apply RFC 1195
-    // §5 strict NLPID gating across every transit node.
-    let spf_result = spf::spf(&graph, source, &spf::SpfOpt::full_path());
-
-    // TI-LFA repair path. Gated on `fast-reroute ti-lfa` — when the
-    // knob is off we still install the primary RIB built from
-    // `spf_result`, just without the per-destination repair list.
-    let tilfa_result = if top.config.ti_lfa_enabled {
-        tilfa_repair_path(&graph, top.lsp_map.get(&level), source, &spf_result)
-    } else {
-        BTreeMap::new()
-    };
-
-    // Build RIB.
-    let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+    let source = source_node?;
 
     let mt2_enabled =
         top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast);
-
-    let rib_v6 = if mt2_enabled {
-        // Separate MT 2 graph + SPF, fed into the v6 RIB build via
-        // mt2_reach_map_v6 (TLV 237 entries). MT 2 needs its own
-        // TI-LFA result driven off the MT 2 graph.
+    let mt2 = if mt2_enabled {
+        // Separate MT 2 graph, fed into the v6 RIB build via
+        // mt2_reach_map_v6 (TLV 237 entries) once SPF returns.
         let (mt2_graph, mt2_source, _) = graph_mt2(top, level);
         *top.mt2_graph.get_mut(&level) = Some(mt2_graph.clone());
-        if let Some(mt2_src) = mt2_source {
-            let mt2_spf = spf::spf(&mt2_graph, mt2_src, &spf::SpfOpt::full_path());
-            let mt2_tilfa = if top.config.ti_lfa_enabled {
-                tilfa_repair_path(&mt2_graph, top.lsp_map.get(&level), mt2_src, &mt2_spf)
-            } else {
-                BTreeMap::new()
-            };
-            let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, &mt2_tilfa, true);
-            *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
-            rib_v6
-        } else {
-            *top.mt2_spf_result.get_mut(&level) = None;
-            PrefixMap::new()
-        }
+        Some(Mt2Input {
+            graph: mt2_graph,
+            source: mt2_source,
+        })
     } else {
-        // No MT 2: clear any stale MT 2 caches and use the legacy
-        // graph + reach_map_v6 (and the legacy TI-LFA result) for IPv6.
+        // No MT 2: clear any stale MT 2 caches so the v6 RIB build
+        // falls back to the legacy graph + reach_map_v6.
         *top.mt2_graph.get_mut(&level) = None;
         *top.mt2_spf_result.get_mut(&level) = None;
-        build_rib_from_spf_v6(top, level, source, &spf_result, &tilfa_result, false)
+        None
     };
 
-    // Per-algorithm SPF + RIB build (RFC 9350). For every algo in
-    // `flex_algo.config`:
-    //   1. Build the FAD-filtered graph and run Dijkstra.
-    //   2. Walk the SPF result against `peer_algo_sid` to produce a
-    //      per-algo IPv4 RIB snapshot (in-memory only — see
-    //      `Isis::rib_flex_algo`).
-    //   3. Fold the per-algo Prefix-SID labels into the combined
-    //      `ilm` map. Labels are globally unique, so per-algo entries
-    //      coexist with algo-0 entries in the kernel MPLS LFIB
-    //      without an algorithm dimension at the RIB API layer.
-    //
-    // Algos no longer in config are purged from every level snapshot
-    // so stale graphs / SPFs / RIBs don't survive a delete.
-    //
-    // Entries are cloned out of `top.flex_algo.config` because
-    // `graph_flex_algo` takes `&mut top` and we'd otherwise hold a
-    // read borrow on `top.flex_algo` across the call.
+    // Per-algorithm graphs (RFC 9350). Entries are cloned out of
+    // `top.flex_algo.config` because `graph_flex_algo` takes
+    // `&mut top` and we'd otherwise hold a read borrow on
+    // `top.flex_algo` across the call.
     let configured_algos: Vec<(u8, FlexAlgoEntry)> = top
         .flex_algo
         .config
         .iter()
         .map(|(k, v)| (*k, v.clone()))
         .collect();
-    // Build the new per-algo state into fresh maps; we diff against
-    // the previous `top.rib_flex_algo[level]` before swapping so the
-    // RIB-side shadow stays consistent with this cycle.
+    let mut flex_algos = Vec::with_capacity(configured_algos.len());
+    for (algo, entry) in &configured_algos {
+        let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
+        flex_algos.push(FlexAlgoInput {
+            algo: *algo,
+            graph: algo_graph,
+            source: algo_source,
+        });
+    }
+
+    // Snapshot lsp_map after every graph build so the worker can run
+    // TI-LFA without borrowing `top`. LspMap is monotonically growing
+    // and the legacy `graph()` already iterates every LSDB entry, so
+    // this snapshot matches what TI-LFA reads in the pre-refactor code.
+    let lsp_map = top.lsp_map.get(&level).clone();
+
+    Some(SpfInput {
+        level,
+        graph: legacy_graph,
+        source,
+        adjacency_sids,
+        lsp_map,
+        ti_lfa_enabled: top.config.ti_lfa_enabled,
+        mt2,
+        flex_algos,
+    })
+}
+
+/// Pure compute: runs Dijkstra (legacy + optional MT 2 + per
+/// Flex-Algo) and TI-LFA. Holds no reference to `IsisTop` so it can
+/// move to a blocking worker without touching shared state.
+pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
+    let SpfInput {
+        level,
+        graph: legacy_graph,
+        source,
+        adjacency_sids,
+        lsp_map,
+        ti_lfa_enabled,
+        mt2,
+        flex_algos,
+    } = input;
+
+    // Legacy SPF. Full-path mode so the legacy v6 builder can apply
+    // RFC 1195 §5 strict NLPID gating across every transit node.
+    let spf_result = spf::spf(&legacy_graph, source, &spf::SpfOpt::full_path());
+
+    // TI-LFA repair path. Gated on `fast-reroute ti-lfa` — when the
+    // knob is off we still install the primary RIB built from
+    // `spf_result`, just without the per-destination repair list.
+    let tilfa_result = if ti_lfa_enabled {
+        tilfa_repair_path(&legacy_graph, &lsp_map, source, &spf_result)
+    } else {
+        BTreeMap::new()
+    };
+
+    // MT 2 SPF + TI-LFA.
+    let mt2 = mt2.map(|Mt2Input { graph, source }| {
+        let (spf, tilfa) = match source {
+            Some(src) => {
+                let mt2_spf = spf::spf(&graph, src, &spf::SpfOpt::full_path());
+                let mt2_tilfa = if ti_lfa_enabled {
+                    tilfa_repair_path(&graph, &lsp_map, src, &mt2_spf)
+                } else {
+                    BTreeMap::new()
+                };
+                (Some(mt2_spf), mt2_tilfa)
+            }
+            None => (None, BTreeMap::new()),
+        };
+        Mt2Output { source, spf, tilfa }
+    });
+
+    // Per-algo SPF. No TI-LFA for Flex-Algo (the FAD topology may
+    // not admit the algo-0 repair anyway — deferred).
+    let flex_algos = flex_algos
+        .into_iter()
+        .map(
+            |FlexAlgoInput {
+                 algo,
+                 graph,
+                 source,
+             }| {
+                let spf = source.map(|src| spf::spf(&graph, src, &spf::SpfOpt::full_path()));
+                FlexAlgoOutput {
+                    algo,
+                    graph,
+                    source,
+                    spf,
+                }
+            },
+        )
+        .collect();
+
+    SpfOutput {
+        level,
+        source,
+        adjacency_sids,
+        spf_result,
+        tilfa_result,
+        mt2,
+        flex_algos,
+    }
+}
+
+/// Apply a completed SPF run: build the IPv4/IPv6/per-algo RIBs and
+/// the ILM table, diff against the previous cycle, and publish to
+/// the RIB subsystem. Must run on the main task — every helper
+/// called from here borrows `IsisTop` and emits on `top.rib_client`.
+pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
+    let SpfOutput {
+        level,
+        source,
+        adjacency_sids,
+        spf_result,
+        tilfa_result,
+        mt2,
+        flex_algos,
+    } = output;
+
+    // Build Adjacency ILM seed from the SIDs collected during graph build.
+    let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
+
+    // IPv4 RIB.
+    let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+
+    // IPv6 RIB — either MT 2 (when enabled) or the legacy single-topology path.
+    let rib_v6 = match mt2 {
+        Some(Mt2Output {
+            source: Some(mt2_src),
+            spf: Some(mt2_spf),
+            tilfa: mt2_tilfa,
+        }) => {
+            let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, &mt2_tilfa, true);
+            *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
+            rib_v6
+        }
+        Some(_) => {
+            // MT 2 enabled but no source — clear and install nothing.
+            *top.mt2_spf_result.get_mut(&level) = None;
+            PrefixMap::new()
+        }
+        None => {
+            // No MT 2: fall back to legacy graph + reach_map_v6 (and
+            // the legacy TI-LFA result) for IPv6.
+            build_rib_from_spf_v6(top, level, source, &spf_result, &tilfa_result, false)
+        }
+    };
+
+    // Per-algorithm RIB build (RFC 9350). For every algo:
+    //   1. Walk the per-algo SPF result against `peer_algo_sid` to
+    //      produce a per-algo IPv4 RIB snapshot (in-memory only — see
+    //      `Isis::rib_flex_algo`).
+    //   2. Fold the per-algo Prefix-SID labels into the combined
+    //      `ilm` map. Labels are globally unique, so per-algo entries
+    //      coexist with algo-0 entries in the kernel MPLS LFIB
+    //      without an algorithm dimension at the RIB API layer.
+    //
+    // Algos no longer in config are purged from every level snapshot
+    // so stale graphs / SPFs / RIBs don't survive a delete.
     let mut new_flex_algo_graphs: BTreeMap<u8, Option<spf::Graph>> = BTreeMap::new();
     let mut new_flex_algo_spfs: BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>> = BTreeMap::new();
     let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
-    for (algo, entry) in &configured_algos {
-        let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
-        let algo_spf = algo_source.map(|src| spf::spf(&algo_graph, src, &spf::SpfOpt::full_path()));
-
+    for FlexAlgoOutput {
+        algo,
+        graph: algo_graph,
+        source: algo_source,
+        spf: algo_spf,
+    } in flex_algos
+    {
         // Build the per-algo IPv4 RIB iff we have both a source and
         // an SPF result. Empty PrefixMap for the algo otherwise so
         // the show command and downstream consumers still see a
         // well-formed (if empty) snapshot.
         let algo_rib = match (algo_source, algo_spf.as_ref()) {
             (Some(src), Some(spf_res)) => {
-                let r = build_rib_from_flex_algo(top, level, *algo, src, spf_res);
+                let r = build_rib_from_flex_algo(top, level, algo, src, spf_res);
                 mpls_route(&r, &mut ilm);
                 r
             }
             _ => PrefixMap::<Ipv4Net, SpfRoute>::new(),
         };
 
-        new_flex_algo_graphs.insert(*algo, Some(algo_graph));
-        new_flex_algo_spfs.insert(*algo, algo_spf);
-        new_flex_algo_rib.insert(*algo, algo_rib);
+        new_flex_algo_graphs.insert(algo, Some(algo_graph));
+        new_flex_algo_spfs.insert(algo, algo_spf);
+        new_flex_algo_rib.insert(algo, algo_rib);
     }
     // Per-algo route diff → RIB publish (Phase 3). The shadow on
     // `Rib::flex_algo_routes` is the colour-aware nexthop resolver's
@@ -1158,6 +1334,34 @@ pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
     mpls_route(&rib, &mut ilm);
     apply_routing_updates(top, level, rib, rib_v6, ilm);
+}
+
+/// Perform SPF calculation and update routing tables.
+///
+/// Orchestrates the three-phase pipeline:
+///
+///   1. [`build_spf_input`] — main task. Builds the legacy graph,
+///      the optional MT 2 graph, and per Flex-Algo graphs; snapshots
+///      `lsp_map[level]`. Returns `None` if the legacy graph has no
+///      source.
+///   2. [`compute_spf`] — pure compute. Runs Dijkstra + TI-LFA on
+///      all graphs. Today this is called inline; PR-2 moves it to
+///      `tokio::task::spawn_blocking`.
+///   3. [`apply_spf_result`] — main task. Builds the RIBs, diffs
+///      against the previous cycle, and publishes to the RIB
+///      subsystem.
+pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
+    // Turn off SPF calculation timer.
+    *top.spf_timer.get_mut(&level) = None;
+    // Stamp completion time so spf_schedule can tell whether the next
+    // scheduling event lands inside or outside the burst window.
+    top.spf_throttle.get_mut(&level).mark_run();
+
+    let Some(input) = build_spf_input(top, level) else {
+        return;
+    };
+    let output = compute_spf(input);
+    apply_spf_result(top, output);
 }
 
 /// Build the per-algorithm IPv4 RIB from a Flex-Algo SPF result.
