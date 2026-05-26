@@ -1760,7 +1760,7 @@ fn show_ospf_graceful_restart(
     let mut buf = String::new();
     let cfg = &ospf.gr_config;
 
-    writeln!(buf, "Graceful-restart helper configuration:")?;
+    writeln!(buf, "Graceful-restart configuration:")?;
     writeln!(buf, "  Helper enabled: {}", cfg.helper_enabled)?;
     writeln!(buf, "  Max grace period: {}s", cfg.max_grace_period)?;
     writeln!(
@@ -1768,6 +1768,16 @@ fn show_ospf_graceful_restart(
         "  Strict LSA checking: {}",
         cfg.helper_strict_lsa_checking
     )?;
+    writeln!(buf, "  Drain time: {}ms", cfg.drain_time_ms)?;
+    if let Some(ref state) = ospf.restarting {
+        writeln!(
+            buf,
+            "  Restart staged: grace={}s, reason={:?}, age={:?}",
+            state.grace_period,
+            state.reason,
+            state.entered_at.elapsed()
+        )?;
+    }
     writeln!(buf)?;
 
     let mut any = false;

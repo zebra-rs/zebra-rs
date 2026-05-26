@@ -30,6 +30,12 @@ pub struct GracefulRestartConfig {
     /// environments where transient changes shouldn't cut the
     /// restart short.
     pub helper_strict_lsa_checking: bool,
+    /// Drain window (ms) between writing the restart checkpoint
+    /// and exiting the process during `clear ip ospf
+    /// graceful-restart commit`. Lets the Grace LSAs reach the
+    /// wire before the raw socket closes. Range 50-2000;
+    /// default 200ms (high end of imperceptible).
+    pub drain_time_ms: u32,
 }
 
 impl Default for GracefulRestartConfig {
@@ -38,6 +44,7 @@ impl Default for GracefulRestartConfig {
             helper_enabled: true,
             max_grace_period: 1800,
             helper_strict_lsa_checking: true,
+            drain_time_ms: 200,
         }
     }
 }

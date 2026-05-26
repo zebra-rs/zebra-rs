@@ -495,6 +495,20 @@ module config {
                useful when transient changes elsewhere shouldn't
                cut the restart short.";
           }
+          leaf drain-time-ms {
+            type uint32 {
+              range "50..2000";
+            }
+            units milliseconds;
+            default 200;
+            description
+              "Window between writing the restart checkpoint and
+               exiting the process during `clear ip ospf
+               graceful-restart commit`. Picked so the Grace LSAs
+               reach the wire before the raw socket closes; 200ms
+               is the high end of imperceptible on LAN, absorbs
+               tunnel RTTs up to ~100ms.";
+          }
         }
         container tracing {
           leaf all {
