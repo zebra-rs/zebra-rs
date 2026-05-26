@@ -88,12 +88,24 @@ fn ls_type_name(ls_type: u16) -> &'static str {
 // ---- show ipv6 ospf (instance summary) --------------------------
 
 #[derive(Serialize)]
+struct Ospfv3AreaGateJson {
+    area_id: String,
+    spf_inflight: bool,
+    spf_pending: bool,
+}
+
+#[derive(Serialize)]
 struct Ospfv3SummaryJson {
     router_id: String,
     area_count: usize,
     link_count: usize,
     spf_last_ms_ago: Option<u128>,
     spf_duration_us: Option<u128>,
+    /// Per-area SPF-offload gates. The instance-level
+    /// `spf_last_ms_ago` / `spf_duration_us` reflect the most-recent
+    /// area's run; these tell automation which area's worker is still
+    /// in `spawn_blocking` and which has a coalesced follow-up.
+    spf_offload_gates: Vec<Ospfv3AreaGateJson>,
 }
 
 fn show_ospfv3_summary(
@@ -101,12 +113,22 @@ fn show_ospfv3_summary(
     _args: Args,
     json: bool,
 ) -> Result<String, std::fmt::Error> {
+    let spf_offload_gates: Vec<_> = top
+        .areas
+        .iter()
+        .map(|(area_id, area)| Ospfv3AreaGateJson {
+            area_id: area_id.to_string(),
+            spf_inflight: area.spf_inflight,
+            spf_pending: area.spf_pending,
+        })
+        .collect();
     let summary = Ospfv3SummaryJson {
         router_id: top.router_id.to_string(),
         area_count: top.areas.iter().count(),
         link_count: top.links.len(),
         spf_last_ms_ago: top.spf_last.map(|t| t.elapsed().as_millis()),
         spf_duration_us: top.spf_duration.map(|d| d.as_micros()),
+        spf_offload_gates,
     };
     let mut text = String::new();
     writeln!(text, "OSPFv3 Routing Process")?;
@@ -118,6 +140,16 @@ fn show_ospfv3_summary(
     }
     if let Some(us) = summary.spf_duration_us {
         writeln!(text, "  SPF duration: {} us", us)?;
+    }
+    if !summary.spf_offload_gates.is_empty() {
+        writeln!(text, "  SPF offload gates:")?;
+        for gate in &summary.spf_offload_gates {
+            writeln!(
+                text,
+                "    area {}: inflight={}, pending={}",
+                gate.area_id, gate.spf_inflight, gate.spf_pending,
+            )?;
+        }
     }
     render_or(json, &summary, text)
 }
