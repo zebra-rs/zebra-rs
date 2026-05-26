@@ -938,9 +938,15 @@ pub async fn ipv4_route_sync(
     table_id: u32,
     ifdown: bool,
 ) {
-    for (p, entries) in table.iter_mut() {
+    // Collect prefixes first so we don't hold the !Send `IterMut`
+    // across the `ipv4_entry_selection` await.
+    let prefixes: Vec<Ipv4Net> = table.iter().map(|(p, _)| p).collect();
+    for p in prefixes {
+        let Some(entries) = table.get_mut(&p) else {
+            continue;
+        };
         ipv4_entry_resolve(entries, nmap, ifdown);
-        ipv4_entry_selection(p, entries, None, nmap, fib, table_id, ifdown).await;
+        ipv4_entry_selection(&p, entries, None, nmap, fib, table_id, ifdown).await;
     }
 }
 
@@ -1527,9 +1533,15 @@ pub async fn ipv6_route_sync(
     fib: &FibHandle,
     table_id: u32,
 ) {
-    for (p, entries) in table.iter_mut() {
+    // Collect prefixes first so we don't hold the !Send `IterMut`
+    // across the `ipv6_entry_selection` await.
+    let prefixes: Vec<Ipv6Net> = table.iter().map(|(p, _)| p).collect();
+    for p in prefixes {
+        let Some(entries) = table.get_mut(&p) else {
+            continue;
+        };
         ipv6_entry_resolve(entries, nmap);
-        ipv6_entry_selection(p, entries, None, nmap, fib, table_id).await;
+        ipv6_entry_selection(&p, entries, None, nmap, fib, table_id).await;
     }
 }
 

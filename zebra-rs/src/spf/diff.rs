@@ -1,18 +1,22 @@
 /// Generic result for table diff operations
 #[derive(Debug)]
 pub struct TableDiffResult<'a, K, V> {
-    pub only_curr: Vec<(&'a K, &'a V)>,
-    pub only_next: Vec<(&'a K, &'a V)>,
-    pub different: Vec<(&'a K, &'a V, &'a V)>,
-    pub identical: Vec<(&'a K, &'a V)>,
+    pub only_curr: Vec<(K, &'a V)>,
+    pub only_next: Vec<(K, &'a V)>,
+    pub different: Vec<(K, &'a V, &'a V)>,
+    pub identical: Vec<(K, &'a V)>,
 }
 
-/// Generic table diff implementation using sorted iterators
-pub fn table_diff<'a, K, V, I>(curr_iter: I, next_iter: I) -> TableDiffResult<'a, K, V>
+/// Generic table diff implementation using sorted iterators.
+/// Keys are taken by value because `prefix-trie` 0.9 yields owned
+/// prefixes (which are `Copy`), and `BTreeMap` callers can adapt
+/// with `.iter().map(|(&k, v)| (k, v))`.
+pub fn table_diff<'a, K, V, I1, I2>(curr_iter: I1, next_iter: I2) -> TableDiffResult<'a, K, V>
 where
-    K: Ord,
+    K: Ord + Copy,
     V: PartialEq,
-    I: Iterator<Item = (&'a K, &'a V)>,
+    I1: Iterator<Item = (K, &'a V)>,
+    I2: Iterator<Item = (K, &'a V)>,
 {
     let mut res = TableDiffResult {
         only_curr: vec![],
@@ -27,7 +31,7 @@ where
     while let (Some(&(curr_key, curr_value)), Some(&(next_key, next_value))) =
         (curr_iter.peek(), next_iter.peek())
     {
-        match curr_key.cmp(next_key) {
+        match curr_key.cmp(&next_key) {
             std::cmp::Ordering::Less => {
                 // curr_key is only in curr
                 res.only_curr.push((curr_key, curr_value));

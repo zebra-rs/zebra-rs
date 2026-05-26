@@ -119,7 +119,7 @@ pub(super) fn apply_link_auth(packet: &mut Ospfv2Packet, ctx: &AuthSendCtx) {
 /// packet. Centralizes the algorithm dispatch so apply / verify
 /// produce the same bytes from the same inputs.
 fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use md5::{Digest, Md5};
     use sha1::Sha1;
     use sha2::{Sha256, Sha384, Sha512};
@@ -138,25 +138,25 @@ fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Ve
         }
         OspfCryptoAlgo::HmacSha1 => {
             let mut m =
-                <Hmac<Sha1> as Mac>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
+                Hmac::<Sha1>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(packet_bytes);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha256 => {
-            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha256>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(packet_bytes);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha384 => {
-            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha384>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(packet_bytes);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha512 => {
-            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha512>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(packet_bytes);
             m.finalize().into_bytes().to_vec()
         }

@@ -1237,7 +1237,7 @@ fn write_rib_v4_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt
     };
 
     let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| **p);
+    entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
         writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
@@ -1259,7 +1259,7 @@ fn write_rib_v6_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt
     };
 
     let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| **p);
+    entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
         writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
@@ -1333,7 +1333,7 @@ fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
     writeln!(buf, " {}", "-".repeat(total - 2))?;
 
     let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| **p);
+    entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
         if route.nhops.is_empty() {
@@ -1407,7 +1407,7 @@ fn write_rib_v6(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
     writeln!(buf, " {}", "-".repeat(total - 2))?;
 
     let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| **p);
+    entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
         if route.nhops.is_empty() {
