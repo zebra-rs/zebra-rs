@@ -70,7 +70,7 @@ impl ReachMapV6 {
 /// sys-id portion mirrored at the same index. Pseudonode-aware
 /// consumers should use `resolve_neighbor` to see the full
 /// `IsisNeighborId` (sys_id + pseudo_id).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LspMap {
     map: BTreeMap<IsisNeighborId, usize>,
     val: Vec<IsisNeighborId>,
