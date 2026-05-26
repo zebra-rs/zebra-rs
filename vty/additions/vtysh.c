@@ -1,6 +1,6 @@
 /* vtysh.c -- zebra shell extension for bash. */
 
-/* Copyright (C) 2024 Zebra Project.
+/* Copyright (C) 2026 zebra-rs project.
 
    This file is part of GNU Bash, the Bourne Again SHell.
 

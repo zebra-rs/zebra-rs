@@ -1,4 +1,4 @@
-# Copyright (C) 2025 zebra-rs project.
+# Copyright (C) 2026 zebra-rs project.
 #
 # This software is free software: you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
