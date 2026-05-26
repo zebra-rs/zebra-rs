@@ -110,8 +110,138 @@ pub fn ospfv3_verify_checksum(src: &Ipv6Addr, dst: &Ipv6Addr, packet_bytes: &[u8
 /// point for callers (the network rx loop) that don't want to bring
 /// the `nom_derive` / `ParseBe` traits into scope explicitly —
 /// mirrors v2's `ospf_packet::parse`.
+///
+/// Slices to the header `len` before parsing so a RFC 7166 trailer
+/// (when present) is read out separately into `auth_trailer`
+/// rather than feeding into the payload parser. `raw_body` is
+/// populated with the exact slice covered by the cryptographic
+/// digest so receive-side verification can re-hash without
+/// re-emitting.
 pub fn parse_v3(input: &[u8]) -> IResult<&[u8], Ospfv3Packet> {
-    Ospfv3Packet::parse_be(input)
+    use nom::Err;
+    use nom::error::{ErrorKind, make_error};
+
+    const HEADER_LEN: usize = 16;
+    if input.len() < HEADER_LEN {
+        return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+    }
+    let pkt_len = BigEndian::read_u16(&input[2..4]) as usize;
+    if pkt_len < HEADER_LEN || input.len() < pkt_len {
+        return Err(Err::Error(make_error(input, ErrorKind::Verify)));
+    }
+    let (_, mut packet) = Ospfv3Packet::parse_be(&input[..pkt_len])?;
+    packet.raw_body = input[..pkt_len].to_vec();
+
+    // RFC 7166: the trailer follows the OSPF body when the AT-bit
+    // is set in the packet's Options. The trailer's own
+    // `auth_data_len` field (first 4 octets at offset 2..4 of the
+    // trailer) gives its total length. We probe rather than parse
+    // the full struct here so an unknown auth_type still consumes
+    // the right number of bytes.
+    let mut consumed = pkt_len;
+    if packet_has_at_bit(&packet) && input.len() >= pkt_len + 4 {
+        let trailer_len = BigEndian::read_u16(&input[pkt_len + 2..pkt_len + 4]) as usize;
+        // Minimum sanity bound: 16-byte fixed prefix; reject
+        // obviously-bogus lengths so we don't allocate gigabytes.
+        if (16..=1024).contains(&trailer_len) && input.len() >= pkt_len + trailer_len {
+            packet.auth_trailer = input[pkt_len..pkt_len + trailer_len].to_vec();
+            consumed = pkt_len + trailer_len;
+        }
+    }
+    Ok((&input[consumed..], packet))
+}
+
+/// Peek at a parsed v3 packet's Options field for the AT-bit.
+/// Only Hello and DBD carry Options on the wire; LSReq / LSUpd /
+/// LSAck don't, so the trailer is signaled by the adjacency's
+/// negotiated state (out of scope for the parser — we still
+/// consume a trailer if one happens to be present, but the
+/// AT-bit probe is the cheap check).
+fn packet_has_at_bit(packet: &Ospfv3Packet) -> bool {
+    match &packet.payload {
+        Ospfv3Payload::Hello(h) => h.options.at(),
+        Ospfv3Payload::DbDesc(d) => d.options.at(),
+        _ => false,
+    }
+}
+
+/// RFC 7166 §4.1 Authentication Trailer header. Sits between the
+/// OSPF body and the variable-length digest. Total trailer length
+/// on the wire is `16 + digest_len` and is reflected in
+/// `auth_data_len`.
+#[derive(Debug, Clone, Default)]
+pub struct Ospfv3AuthTrailer {
+    /// RFC 7166 §4.1: 1 = HMAC-Cryptographic-Authentication.
+    /// Currently the only defined value.
+    pub auth_type: u16,
+    /// Total trailer length in octets, including this header
+    /// (16 + digest length).
+    pub auth_data_len: u16,
+    /// MBZ per RFC 7166.
+    pub reserved: u16,
+    /// Security Association ID — analogous to v2's `key-id`.
+    pub sa_id: u16,
+    /// Cryptographic Sequence Number, high half.
+    pub seq_high: u32,
+    /// Cryptographic Sequence Number, low half.
+    pub seq_low: u32,
+    /// Authentication Data — algorithm-specific digest. Length =
+    /// `auth_data_len - 16`.
+    pub digest: Vec<u8>,
+}
+
+impl Ospfv3AuthTrailer {
+    /// Auth Type value for HMAC-Cryptographic-Authentication.
+    pub const AUTH_TYPE_HMAC: u16 = 1;
+
+    /// Fixed-prefix length in octets (everything before `digest`).
+    pub const PREFIX_LEN: usize = 16;
+
+    /// Emit the full trailer (prefix + digest). The digest is
+    /// emitted verbatim; callers that need RFC 7166 §4.5
+    /// "Apad-during-hash" semantics must swap the digest bytes
+    /// between hash computation and final emit.
+    pub fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.auth_type);
+        buf.put_u16(self.auth_data_len);
+        buf.put_u16(self.reserved);
+        buf.put_u16(self.sa_id);
+        buf.put_u32(self.seq_high);
+        buf.put_u32(self.seq_low);
+        buf.put(&self.digest[..]);
+    }
+
+    /// Parse a trailer from its on-wire bytes.
+    pub fn parse(input: &[u8]) -> Option<Self> {
+        if input.len() < Self::PREFIX_LEN {
+            return None;
+        }
+        let auth_type = BigEndian::read_u16(&input[0..2]);
+        let auth_data_len = BigEndian::read_u16(&input[2..4]);
+        let reserved = BigEndian::read_u16(&input[4..6]);
+        let sa_id = BigEndian::read_u16(&input[6..8]);
+        let seq_high = BigEndian::read_u32(&input[8..12]);
+        let seq_low = BigEndian::read_u32(&input[12..16]);
+        if (auth_data_len as usize) < Self::PREFIX_LEN || (auth_data_len as usize) > input.len() {
+            return None;
+        }
+        let digest = input[Self::PREFIX_LEN..auth_data_len as usize].to_vec();
+        Some(Self {
+            auth_type,
+            auth_data_len,
+            reserved,
+            sa_id,
+            seq_high,
+            seq_low,
+            digest,
+        })
+    }
+
+    /// 64-bit sequence number reassembled from the two on-wire
+    /// halves, for monotonic-replay comparisons.
+    pub fn seq(&self) -> u64 {
+        ((self.seq_high as u64) << 32) | (self.seq_low as u64)
+    }
 }
 
 /// OSPFv3 packet header (RFC 5340 §A.3.1).
@@ -127,6 +257,21 @@ pub struct Ospfv3Packet {
     pub reserved: u8,
     #[nom(Parse = "{ |x| Ospfv3Payload::parse_enum(x, typ) }")]
     pub payload: Ospfv3Payload,
+    /// RFC 7166 Authentication Trailer bytes (full trailer: 16-byte
+    /// fixed prefix + algorithm-sized digest). Lives after the
+    /// OSPFv3 body and is excluded from `len`. Populated by
+    /// `parse_v3()` when the inbound packet's Options carry the
+    /// AT-bit; empty otherwise.
+    #[nom(Ignore)]
+    pub auth_trailer: Vec<u8>,
+    /// On-wire bytes covered by the cryptographic-auth digest —
+    /// the OSPF header (with AT-bit set) + body, i.e.
+    /// `input[..pkt_len]`. Populated by `parse_v3()` for every
+    /// packet so receive-side verification can re-hash exactly
+    /// what the sender hashed. Empty for packets built via
+    /// `new()`.
+    #[nom(Ignore)]
+    pub raw_body: Vec<u8>,
 }
 
 impl Ospfv3Packet {
@@ -146,6 +291,8 @@ impl Ospfv3Packet {
             instance_id,
             reserved: 0,
             payload,
+            auth_trailer: Vec::new(),
+            raw_body: Vec::new(),
         }
     }
 
@@ -346,10 +493,21 @@ pub struct Ospfv3Options {
     pub r: bool,
     /// DC — Demand Circuit support.
     pub dc: bool,
+    /// Bits 6 and 7 (per RFC 5340 §A.2). Reserved between DC and
+    /// AT; held as a named gap to keep the next field at the right
+    /// bit position.
+    #[bits(7)]
+    pub _reserved_6_12: u32,
+    /// AT — Authentication Trailer present (RFC 7166 §2.2,
+    /// bit position 13 in the 24-bit Options field, counting from
+    /// the LSB). Sender signals that an OSPFv3 Authentication
+    /// Trailer follows the packet body; receivers configured with
+    /// authentication require this bit on every accepted packet.
+    pub at: bool,
     /// Remaining reserved bits, including the high 8 bits that are
     /// the priority octet on the wire (which is owned by a separate
     /// `priority: u8` field on `Ospfv3Hello`).
-    #[bits(26)]
+    #[bits(18)]
     pub reserved: u32,
 }
 

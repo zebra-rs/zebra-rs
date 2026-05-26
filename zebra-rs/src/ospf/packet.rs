@@ -179,7 +179,7 @@ pub(super) enum KeySource<'a> {
 }
 
 impl<'a> KeySource<'a> {
-    fn lookup(&self, key_id: u8) -> Option<super::link::AuthKey> {
+    pub(super) fn lookup(&self, key_id: u8) -> Option<super::link::AuthKey> {
         match self {
             Self::PerIface(m) => m.get(&key_id).cloned(),
             Self::Chain { chain, now } => {
@@ -256,6 +256,10 @@ pub(super) fn record_md5_seq<V: super::version::OspfVersion>(
     if let Ospfv2Auth::Crypto(ref c) = packet.auth {
         nbr.auth_md5_last_seq = c.seq;
     }
+}
+
+pub(super) fn constant_time_eq_pub(a: &[u8], b: &[u8]) -> bool {
+    constant_time_eq(a, b)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

@@ -3753,13 +3753,15 @@ impl Ospf<Ospfv3> {
                 }
             }
             Message::HelloTimer(index) => {
+                let now = chrono::Utc::now();
+                let chains = &self.key_chains;
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
                 let Some(tx) = self.v3_send_tx.as_ref() else {
                     return;
                 };
-                super::packet_v3::ospfv3_hello_send(link, tx);
+                super::packet_v3::ospfv3_hello_send(link, tx, chains, now);
             }
             Message::Nfsm(index, src, ev) => {
                 let old_state = self
@@ -4718,6 +4720,70 @@ impl Ospf<Ospfv3> {
         } = recv;
         let our_router_id = self.router_id;
         let nbr_router_id = packet.router_id;
+
+        // RFC 7166 Authentication Trailer verification — chain-
+        // aware via `KeySource`, mirrors the v2 path in
+        // `Ospf<Ospfv2>::process_recv`. The 64-bit replay seq is
+        // stored alongside v2's 32-bit `auth_md5_last_seq` —
+        // both fit in the same neighbor field by taking the
+        // low 32 bits of the 64-bit seq (acceptable until the v3
+        // counter actually exceeds 2^32, which is decades at any
+        // realistic packet rate).
+        {
+            let chains = &self.key_chains;
+            let now = chrono::Utc::now();
+            let Some(link) = self.links.get(&ifindex) else {
+                return;
+            };
+            if link.auth_mode() == super::link::OspfAuthMode::MessageDigest {
+                let last_seq = link
+                    .nbrs
+                    .get(&nbr_router_id)
+                    .map(|n| u64::from(n.auth_md5_last_seq))
+                    .unwrap_or(0);
+                let key_source = match link.config.key_chain.as_deref() {
+                    Some(name) => match chains.get(name) {
+                        Some(c) => crate::ospf::packet::KeySource::Chain { chain: c, now },
+                        None => {
+                            tracing::debug!(
+                                "OSPFv3 auth drop on {} from {}: chain `{}` not configured",
+                                link.name,
+                                src,
+                                name
+                            );
+                            return;
+                        }
+                    },
+                    None => crate::ospf::packet::KeySource::PerIface(&link.config.crypto_keys),
+                };
+                let accepted = super::packet_v3::verify_v3_auth_trailer(
+                    &packet,
+                    &src,
+                    link.auth_mode(),
+                    &key_source,
+                    last_seq,
+                );
+                let Some(new_seq) = accepted else {
+                    tracing::debug!(
+                        "OSPFv3 auth drop on {} from {} ({})",
+                        link.name,
+                        src,
+                        nbr_router_id
+                    );
+                    return;
+                };
+                // Stash the accepted seq for replay protection on
+                // subsequent packets from this neighbor. v3 has a
+                // 64-bit seq on the wire but our `auth_md5_last_seq`
+                // is u32; truncate.
+                if let Some(link_mut) = self.links.get_mut(&ifindex)
+                    && let Some(nbr_mut) = link_mut.nbrs.get_mut(&nbr_router_id)
+                {
+                    nbr_mut.auth_md5_last_seq = new_seq as u32;
+                }
+            }
+        }
+
         match &packet.payload {
             Ospfv3Payload::Hello(_) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {

@@ -145,6 +145,15 @@ pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiv
         // 12..14, folding in (src, dst).
         packet.emit_with_checksum(&mut buf, &src, &dest);
 
+        // RFC 7166: when the upper-layer builder pre-computed an
+        // Authentication Trailer (see `apply_v3_auth_trailer`),
+        // append it after the body. The trailer is excluded from
+        // both the OSPF `len` field and the pseudo-header
+        // checksum, so it's a pure tail append here.
+        if !packet.auth_trailer.is_empty() {
+            buf.extend_from_slice(&packet.auth_trailer);
+        }
+
         let iov = [IoSlice::new(&buf)];
         let sockaddr: SockaddrIn6 = std::net::SocketAddrV6::new(dest, 0, 0, 0).into();
         // On send, `ipi6_addr` carries the *source* address (the
