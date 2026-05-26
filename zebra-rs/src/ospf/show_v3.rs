@@ -931,6 +931,17 @@ struct Ospfv3SrIlmJson {
 }
 
 #[derive(Serialize)]
+struct Ospfv3SrRemotePrefixJson {
+    advertising_router: String,
+    area: String,
+    prefix: String,
+    sid_form: String,
+    label_op: String,
+    interface: String,
+    nexthop: String,
+}
+
+#[derive(Serialize)]
 struct Ospfv3SegmentRoutingJson {
     enabled: bool,
     router_id: String,
@@ -940,6 +951,7 @@ struct Ospfv3SegmentRoutingJson {
     srlb_end: u32,
     interfaces: Vec<Ospfv3SrInterfaceJson>,
     ilm: Vec<Ospfv3SrIlmJson>,
+    remote_prefix_sids: Vec<Ospfv3SrRemotePrefixJson>,
 }
 
 fn fmt_prefix_sid(p: &super::link::PrefixSid) -> String {
@@ -1030,6 +1042,15 @@ fn show_ospfv3_segment_routing(
         })
         .collect();
 
+    // Remote Prefix-SIDs: walk every area's E-Intra-Area-Prefix-LSAs
+    // (LS Type 0xA029, RFC 8362 §3.7) advertised by *other* routers,
+    // pulling out each `PrefixSid` sub-TLV (RFC 8666 §5). Nexthop /
+    // interface come from the resolved RIB so the operator sees what
+    // forwarding will actually use; the resolved label comes from
+    // `SpfRouteV3.sid` populated by `add_prefix_sids_v3` -- single
+    // source of truth shared with the install path.
+    let remote_prefix_sids = collect_remote_prefix_sids(top);
+
     let summary = Ospfv3SegmentRoutingJson {
         enabled,
         router_id: top.router_id.to_string(),
@@ -1039,6 +1060,7 @@ fn show_ospfv3_segment_routing(
         srlb_end: SRLB_START + SRLB_RANGE - 1,
         interfaces,
         ilm,
+        remote_prefix_sids,
     };
 
     let mut text = String::new();
@@ -1098,7 +1120,133 @@ fn show_ospfv3_segment_routing(
             e.label, e.ilm_type, e.via, e.interface
         )?;
     }
+
+    if !summary.remote_prefix_sids.is_empty() {
+        // Group consecutive entries by advertising_router; the
+        // collector already sorts by (adv_router, prefix), so a
+        // running header is enough.
+        writeln!(text)?;
+        writeln!(text, "  Remote Prefix-SIDs:")?;
+        let mut current_router: Option<&str> = None;
+        for r in &summary.remote_prefix_sids {
+            if current_router != Some(r.advertising_router.as_str()) {
+                writeln!(text)?;
+                writeln!(
+                    text,
+                    "  SR-Node: {}    Area: {}",
+                    r.advertising_router, r.area
+                )?;
+                writeln!(
+                    text,
+                    "    {:<32}  {:<18}  {:<14}  {:<9}  Nexthop",
+                    "Prefix", "Prefix-SID", "Label Op", "Iface"
+                )?;
+                writeln!(text, "    {}", "-".repeat(82))?;
+                current_router = Some(r.advertising_router.as_str());
+            }
+            writeln!(
+                text,
+                "    {:<32}  {:<18}  {:<14}  {:<9}  {}",
+                r.prefix, r.sid_form, r.label_op, r.interface, r.nexthop
+            )?;
+        }
+    }
     writeln!(text)?;
 
     render_or(json, &summary, text)
+}
+
+/// Walk every area's E-Intra-Area-Prefix-LSAs advertised by *other*
+/// routers and return one entry per `PrefixSid` sub-TLV. Filters out
+/// MaxAge LSAs and self-originated ones (those are already in the
+/// local section). Sorted by `(advertising_router, prefix)` so the
+/// render path can detect router-block boundaries with a single
+/// running cursor.
+fn collect_remote_prefix_sids(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemotePrefixJson> {
+    use ipnet::Ipv6Net;
+    use ospf_packet::{
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv, SidLabelTlv,
+        ospfv3_prefix_wire_len,
+    };
+
+    let mut out: Vec<Ospfv3SrRemotePrefixJson> = Vec::new();
+    for (area_id, area) in top.areas.iter() {
+        for ((_ls_id, _adv), lsa) in area
+            .lsdb
+            .iter_by_raw_type(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE)
+        {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            let advertising = lsa.data.h.advertising_router;
+            if advertising == top.router_id {
+                continue;
+            }
+            let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
+                continue;
+            };
+            for tlv in &body.tlvs {
+                let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
+                    continue;
+                };
+                let wire_len = ospfv3_prefix_wire_len(prefix_tlv.prefix_length);
+                if prefix_tlv.address_prefix.len() < wire_len {
+                    continue;
+                }
+                let mut bytes = [0u8; 16];
+                let copy = wire_len.min(16);
+                bytes[..copy].copy_from_slice(&prefix_tlv.address_prefix[..copy]);
+                let addr = std::net::Ipv6Addr::from(bytes);
+                let Ok(prefix) = Ipv6Net::new(addr, prefix_tlv.prefix_length) else {
+                    continue;
+                };
+                let prefix = prefix.trunc();
+                for sub in &prefix_tlv.subs {
+                    let Ospfv3SubTlv::PrefixSid(ps) = sub else {
+                        continue;
+                    };
+                    let sid_form = match ps.sid {
+                        SidLabelTlv::Index(idx) => format!("SR Pfx (idx {})", idx),
+                        SidLabelTlv::Label(lbl) => format!("SR Pfx (lbl {})", lbl),
+                    };
+                    let (label_op, interface, nexthop) = match top.rib6.get(&prefix) {
+                        Some(route) => {
+                            let label_op =
+                                route.sid.map(|l| format!("Push {}", l)).unwrap_or_default();
+                            let (ifname, nh) = route
+                                .nhops
+                                .iter()
+                                .next()
+                                .map(|(via, nh)| {
+                                    let via_s = if via.is_unspecified() {
+                                        String::new()
+                                    } else {
+                                        via.to_string()
+                                    };
+                                    (top.ifname(nh.ifindex), via_s)
+                                })
+                                .unwrap_or_default();
+                            (label_op, ifname, nh)
+                        }
+                        None => (String::new(), String::new(), String::new()),
+                    };
+                    out.push(Ospfv3SrRemotePrefixJson {
+                        advertising_router: advertising.to_string(),
+                        area: area_id.to_string(),
+                        prefix: prefix.to_string(),
+                        sid_form,
+                        label_op,
+                        interface,
+                        nexthop,
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.advertising_router
+            .cmp(&b.advertising_router)
+            .then_with(|| a.prefix.cmp(&b.prefix))
+    });
+    out
 }
