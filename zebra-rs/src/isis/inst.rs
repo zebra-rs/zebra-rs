@@ -1367,6 +1367,41 @@ impl Isis {
         }
     }
 
+    /// Reconcile `local_pool` against the current SR-MPLS gate and the
+    /// watched block's SRLB. Creates the pool when SR-MPLS is enabled
+    /// and the RIB has handed us an SRLB; drops it otherwise.
+    ///
+    /// Idempotent: a pool that already exists is kept (alloc/release
+    /// state stays intact) even if the SRLB snapshot is re-delivered
+    /// with the same bounds. A change in SRLB bounds while SR-MPLS
+    /// stays enabled is not reflected — operators changing the block
+    /// mid-life is a follow-up concern and would invalidate every
+    /// adjacency-SID label already handed out.
+    pub fn reconcile_local_pool(&mut self) {
+        let srlb = self.sr_block.as_ref().and_then(|b| b.local.as_ref());
+        match (self.config.sr_mpls_enabled, srlb) {
+            (true, Some(srlb)) => {
+                if self.local_pool.is_none() {
+                    // LabelBlock is half-open `[start, end)`; LabelPool's
+                    // `end` is inclusive (last allocable label), hence
+                    // the `- 1`.
+                    self.local_pool = Some(LabelPool::new(
+                        srlb.start as usize,
+                        Some(srlb.end.saturating_sub(1) as usize),
+                    ));
+                }
+            }
+            _ => {
+                // Drop the pool. Any labels still cached on neighbor
+                // addr4 entries become orphaned but stop short of
+                // producing fresh MPLS installs — `nbr_hello_interpret`
+                // and `lsp_generate` both gate on `local_pool` /
+                // `value.label` being present.
+                self.local_pool = None;
+            }
+        }
+    }
+
     /// Mirror of `reconcile_block_watch` for the SRv6 locator name.
     pub fn reconcile_locator_watch(&mut self) {
         let desired = target_locator_name(&self.config);
@@ -1484,6 +1519,10 @@ impl Isis {
                     return;
                 }
                 self.sr_block = block;
+                // Pool depends on `sr_block.local`; a fresh snapshot can
+                // unlock pool creation (first-time arrival) or drop it
+                // (block went away on the RIB side).
+                self.reconcile_local_pool();
             }
             RibSrRx::Locator { name, locator } => {
                 if self.watched_locator.as_deref() != Some(name.as_str()) {
