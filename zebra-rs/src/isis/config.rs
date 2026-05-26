@@ -328,7 +328,7 @@ pub struct IsisConfig {
 
     /// Set when /router/isis/fast-reroute/ti-lfa is committed (the
     /// presence-marked YANG container). Gates the per-destination
-    /// `tilfa_repair_path` calls in `perform_spf_calculation` and the
+    /// `tilfa_repair_path` calls in `compute_spf` and the
     /// Adj-SID B-flag (RFC 8667 §2.2.1) emitted in TLV 22 sub-TLVs.
     pub ti_lfa_enabled: bool,
 

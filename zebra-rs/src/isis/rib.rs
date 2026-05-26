@@ -591,7 +591,7 @@ fn build_rib_from_spf(
         };
 
         // Build nexthop map. SPF runs in full-path mode (see
-        // perform_spf_calculation), so each `p` is the full path
+        // compute_spf), so each `p` is the full path
         // [first_hop, ..., destination]. With pseudonodes in the graph,
         // p[0] may be a PN whose sys-id resolves to the DIS — skip
         // leading PN hops to land on the actual nexthop *router* before
@@ -1044,9 +1044,10 @@ struct FlexAlgoInput {
 }
 
 /// Result of a single IS-IS SPF run, ready to be applied back to
-/// `IsisTop` by [`apply_spf_result`] on the main task.
-pub(super) struct SpfOutput {
-    level: Level,
+/// `IsisTop` by [`apply_spf_result`] on the main task. Public so it
+/// can ride on `Message::SpfDone` through the channel.
+pub struct SpfOutput {
+    pub(super) level: Level,
     source: usize,
     adjacency_sids: BTreeMap<u32, IsisSysId>,
     spf_result: BTreeMap<usize, spf::Path>,
@@ -1078,8 +1079,9 @@ struct FlexAlgoOutput {
 /// §3.4 strict-MT semantics. Also builds one graph per configured
 /// Flex-Algo (RFC 9350).
 ///
-/// Returns `None` if the legacy graph has no source node — matches
-/// the previous early-return in `perform_spf_calculation`.
+/// Returns `None` if the legacy graph has no source node — the
+/// `Message::SpfCalc` handler treats this as a no-op cycle (no
+/// worker is dispatched and `spf_inflight` is not set).
 ///
 /// Side effects on `top` (preserved verbatim from the pre-refactor
 /// code so behavior is unchanged):
@@ -1334,34 +1336,6 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
     mpls_route(&rib, &mut ilm);
     apply_routing_updates(top, level, rib, rib_v6, ilm);
-}
-
-/// Perform SPF calculation and update routing tables.
-///
-/// Orchestrates the three-phase pipeline:
-///
-///   1. [`build_spf_input`] — main task. Builds the legacy graph,
-///      the optional MT 2 graph, and per Flex-Algo graphs; snapshots
-///      `lsp_map[level]`. Returns `None` if the legacy graph has no
-///      source.
-///   2. [`compute_spf`] — pure compute. Runs Dijkstra + TI-LFA on
-///      all graphs. Today this is called inline; PR-2 moves it to
-///      `tokio::task::spawn_blocking`.
-///   3. [`apply_spf_result`] — main task. Builds the RIBs, diffs
-///      against the previous cycle, and publishes to the RIB
-///      subsystem.
-pub(super) fn perform_spf_calculation(top: &mut IsisTop, level: Level) {
-    // Turn off SPF calculation timer.
-    *top.spf_timer.get_mut(&level) = None;
-    // Stamp completion time so spf_schedule can tell whether the next
-    // scheduling event lands inside or outside the burst window.
-    top.spf_throttle.get_mut(&level).mark_run();
-
-    let Some(input) = build_spf_input(top, level) else {
-        return;
-    };
-    let output = compute_spf(input);
-    apply_spf_result(top, output);
 }
 
 /// Build the per-algorithm IPv4 RIB from a Flex-Algo SPF result.
