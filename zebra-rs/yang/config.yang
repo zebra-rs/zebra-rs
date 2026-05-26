@@ -499,7 +499,7 @@ module config {
             type uint32 {
               range "50..2000";
             }
-            units milliseconds;
+            units "milliseconds";
             default 200;
             description
               "Window between writing the restart checkpoint and
