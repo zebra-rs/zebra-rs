@@ -107,6 +107,12 @@ fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp
     };
     area_type_set(ospf, area_id, kind);
     ospf.nssa_default_lsa_originate(area_id);
+    // Area-type also flips whether we should be translating
+    // Type-7→Type-5 for this area (phase 6d). Resync clears
+    // stale Type-5s on exit and seeds fresh ones on entry (if
+    // we are an ABR with translator-role = Always or are the
+    // Candidate-elected winner).
+    ospf.nssa_translate_resync(area_id);
     Some(())
 }
 
@@ -159,6 +165,9 @@ fn config_ospfv3_area_nssa_translator_role(
         NssaTranslatorRole::default()
     };
     area_nssa_translator_role_set(ospf, area_id, role);
+    // Role flip directly changes whether translation should be
+    // happening on this router.
+    ospf.nssa_translate_resync(area_id);
     Some(())
 }
 
