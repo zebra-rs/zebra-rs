@@ -519,6 +519,8 @@ pub enum IsisTlv {
     Padding(IsisTlvPadding),
     #[nom(Selector = "IsisTlvType::LspEntries")]
     LspEntries(IsisTlvLspEntries),
+    #[nom(Selector = "IsisTlvType::Auth")]
+    Auth(IsisTlvAuth),
     #[nom(Selector = "IsisTlvType::LspBufferSize")]
     LspBufferSize(IsisTlvLspBufferSize),
     #[nom(Selector = "IsisTlvType::ExtIsReach")]
@@ -588,6 +590,7 @@ impl IsisTlv {
             IsNeighbor(v) => v.tlv_emit(buf),
             Padding(v) => v.tlv_emit(buf),
             LspEntries(v) => v.tlv_emit(buf),
+            Auth(v) => v.tlv_emit(buf),
             LspBufferSize(v) => v.tlv_emit(buf),
             ExtIsReach(v) => v.tlv_emit(buf),
             MtIsReach(v) => v.tlv_emit(buf),
@@ -754,6 +757,67 @@ impl TlvEmitter for IsisTlvLspEntries {
 impl From<IsisTlvLspEntries> for IsisTlv {
     fn from(tlv: IsisTlvLspEntries) -> Self {
         IsisTlv::LspEntries(tlv)
+    }
+}
+
+/// Authentication Information TLV (type 10).
+///
+/// ISO 10589 §9.5 (cleartext, auth_type=1), RFC 5304 (HMAC-MD5,
+/// auth_type=54), and RFC 5310 (generic crypto, auth_type=3 with a
+/// 2-byte Key ID prefix on the value). The value layout is intentionally
+/// modeled as `auth_type` + opaque `value` so all three forms share one
+/// struct; callers interpret `value` per the auth-type registry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisTlvAuth {
+    pub auth_type: u8,
+    pub value: Vec<u8>,
+}
+
+pub const ISIS_AUTH_TYPE_CLEARTEXT: u8 = 1;
+pub const ISIS_AUTH_TYPE_HMAC_MD5: u8 = 54;
+pub const ISIS_AUTH_TYPE_GENERIC: u8 = 3;
+pub const ISIS_AUTH_HMAC_MD5_LEN: usize = 16;
+
+impl IsisTlvAuth {
+    /// Build a placeholder Auth TLV with the digest area zero-filled.
+    /// The signer (Phase 4) emits this into the PDU first, then computes
+    /// the HMAC over the serialized PDU and patches the digest bytes in
+    /// place — RFC 5304 §3 / RFC 5310 §3.
+    pub fn placeholder(auth_type: u8, value_len: usize) -> Self {
+        Self {
+            auth_type,
+            value: vec![0u8; value_len],
+        }
+    }
+}
+
+impl TlvEmitter for IsisTlvAuth {
+    fn typ(&self) -> u8 {
+        IsisTlvType::Auth.into()
+    }
+
+    fn len(&self) -> u8 {
+        (1 + self.value.len()).min(255) as u8
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.auth_type);
+        let max = self.value.len().min(254);
+        buf.put(&self.value[..max]);
+    }
+}
+
+impl ParseBe<IsisTlvAuth> for IsisTlvAuth {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, auth_type) = be_u8(input)?;
+        let value = input.to_vec();
+        Ok((&input[input.len()..], Self { auth_type, value }))
+    }
+}
+
+impl From<IsisTlvAuth> for IsisTlv {
+    fn from(tlv: IsisTlvAuth) -> Self {
+        IsisTlv::Auth(tlv)
     }
 }
 
@@ -1357,5 +1421,124 @@ mod tests {
         let mut buf = BytesMut::new();
         long.emit(&mut buf);
         assert_eq!(buf.len(), 255);
+    }
+
+    /// HMAC-MD5 Auth TLV (RFC 5304 §2): on-wire shape is
+    /// type=10, length=17 (1-byte auth-type + 16-byte digest),
+    /// auth-type=54. Round-trip through tlv_emit + parse_tlvs.
+    #[test]
+    fn auth_hmac_md5_round_trip() {
+        let digest: Vec<u8> = (0u8..16).collect();
+        let original = IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_HMAC_MD5,
+            value: digest.clone(),
+        };
+        let mut buf = BytesMut::new();
+        original.tlv_emit(&mut buf);
+
+        assert_eq!(buf[0], u8::from(IsisTlvType::Auth));
+        assert_eq!(buf[1], 1 + ISIS_AUTH_HMAC_MD5_LEN as u8);
+        assert_eq!(buf[2], ISIS_AUTH_TYPE_HMAC_MD5);
+        assert_eq!(&buf[3..], &digest[..]);
+
+        let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        match &tlvs[0] {
+            IsisTlv::Auth(v) => {
+                assert_eq!(v.auth_type, ISIS_AUTH_TYPE_HMAC_MD5);
+                assert_eq!(v.value, digest);
+            }
+            other => panic!("expected Auth, got {:?}", other),
+        }
+    }
+
+    /// Cleartext Auth TLV (ISO 10589, auth-type 1): the value is the
+    /// raw password bytes after the auth-type byte.
+    #[test]
+    fn auth_cleartext_round_trip() {
+        let original = IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_CLEARTEXT,
+            value: b"hunter2".to_vec(),
+        };
+        let mut buf = BytesMut::new();
+        original.tlv_emit(&mut buf);
+
+        let (_, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        match &tlvs[0] {
+            IsisTlv::Auth(v) => {
+                assert_eq!(v.auth_type, ISIS_AUTH_TYPE_CLEARTEXT);
+                assert_eq!(v.value, b"hunter2");
+            }
+            other => panic!("expected Auth, got {:?}", other),
+        }
+    }
+
+    /// RFC 5310 generic crypto: auth-type 3, value = 2-byte Key ID +
+    /// variable-length digest. The TLV layer treats the value as
+    /// opaque bytes, so the round-trip must preserve the Key ID and
+    /// digest byte-for-byte.
+    #[test]
+    fn auth_generic_crypto_round_trip() {
+        let mut value = Vec::new();
+        value.extend_from_slice(&7u16.to_be_bytes()); // Key ID = 7
+        value.extend(0u8..20); // HMAC-SHA1 digest (20 bytes)
+        let original = IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_GENERIC,
+            value: value.clone(),
+        };
+        let mut buf = BytesMut::new();
+        original.tlv_emit(&mut buf);
+
+        // type(1) + len(1) + auth-type(1) + key-id(2) + digest(20) = 25
+        assert_eq!(buf.len(), 25);
+        assert_eq!(buf[1], 23);
+
+        let (_, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        match &tlvs[0] {
+            IsisTlv::Auth(v) => {
+                assert_eq!(v.auth_type, ISIS_AUTH_TYPE_GENERIC);
+                assert_eq!(v.value, value);
+            }
+            other => panic!("expected Auth, got {:?}", other),
+        }
+    }
+
+    /// Phase 4 LSP signer builds the PDU with a zero-filled placeholder,
+    /// then patches the digest in. Verify placeholder() shape and that
+    /// the emitted bytes match `[type, len, auth_type, 0x00 * N]`.
+    #[test]
+    fn auth_placeholder_is_zero_filled() {
+        let tlv = IsisTlvAuth::placeholder(ISIS_AUTH_TYPE_HMAC_MD5, ISIS_AUTH_HMAC_MD5_LEN);
+        assert_eq!(tlv.auth_type, ISIS_AUTH_TYPE_HMAC_MD5);
+        assert_eq!(tlv.value.len(), ISIS_AUTH_HMAC_MD5_LEN);
+        assert!(tlv.value.iter().all(|b| *b == 0));
+
+        let mut buf = BytesMut::new();
+        tlv.tlv_emit(&mut buf);
+        assert_eq!(buf[0], u8::from(IsisTlvType::Auth));
+        assert_eq!(buf[1], 1 + ISIS_AUTH_HMAC_MD5_LEN as u8);
+        assert_eq!(buf[2], ISIS_AUTH_TYPE_HMAC_MD5);
+        assert!(buf[3..].iter().all(|b| *b == 0));
+    }
+
+    /// An auth-type value that this crate does not recognize must
+    /// still survive parse+emit unchanged — the runtime layer is the
+    /// one that decides whether to drop the PDU.
+    #[test]
+    fn auth_unknown_auth_type_preserved() {
+        let original = IsisTlvAuth {
+            auth_type: 42, // not in the IS-IS TLV-10 registry
+            value: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        };
+        let mut buf = BytesMut::new();
+        original.tlv_emit(&mut buf);
+        let (_, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        match &tlvs[0] {
+            IsisTlv::Auth(v) => {
+                assert_eq!(v.auth_type, 42);
+                assert_eq!(v.value, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+            }
+            other => panic!("expected Auth, got {:?}", other),
+        }
     }
 }

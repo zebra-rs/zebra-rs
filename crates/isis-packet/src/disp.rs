@@ -3,8 +3,9 @@ use std::fmt::{Display, Formatter, Result};
 use itertools::Itertools;
 
 use crate::{
-    IsLevel, IsisCsnp, IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId, IsisP2pHello,
-    IsisPacket, IsisPdu, IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvHostname,
+    ISIS_AUTH_TYPE_CLEARTEXT, ISIS_AUTH_TYPE_GENERIC, ISIS_AUTH_TYPE_HMAC_MD5, IsLevel, IsisCsnp,
+    IsisHello, IsisLsp, IsisLspEntry, IsisLspId, IsisNeighborId, IsisP2pHello, IsisPacket, IsisPdu,
+    IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvAuth, IsisTlvHostname,
     IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr, IsisTlvIpv6TeRouterId,
     IsisTlvIsNeighbor, IsisTlvLspBufferSize, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding,
     IsisTlvProtoSupported, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
@@ -181,6 +182,7 @@ impl Display for IsisTlv {
             IsNeighbor(v) => write!(f, "{}", v),
             Padding(v) => write!(f, "{}", v),
             LspEntries(v) => write!(f, "{}", v),
+            Auth(v) => write!(f, "{}", v),
             LspBufferSize(v) => write!(f, "{}", v),
             ExtIsReach(v) => write!(f, "{}", v),
             MtIsReach(v) => write!(f, "{}", v),
@@ -315,6 +317,24 @@ impl Display for IsisTlvLspEntries {
             write!(f, "\n{}", entry)?;
         }
         Ok(())
+    }
+}
+
+impl Display for IsisTlvAuth {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        let name = match self.auth_type {
+            ISIS_AUTH_TYPE_CLEARTEXT => "cleartext",
+            ISIS_AUTH_TYPE_GENERIC => "generic-crypto",
+            ISIS_AUTH_TYPE_HMAC_MD5 => "hmac-md5",
+            _ => "unknown",
+        };
+        write!(
+            f,
+            "  Auth: type {} ({}) len {}",
+            self.auth_type,
+            name,
+            self.value.len()
+        )
     }
 }
 

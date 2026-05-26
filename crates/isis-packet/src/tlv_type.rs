@@ -12,6 +12,11 @@ pub enum IsisTlvType {
     IsNeighbor = 6,
     Padding = 8,
     LspEntries = 9,
+    /// Authentication Information (ISO 10589 §9.5 / RFC 5304 / RFC 5310).
+    /// Carries an Authentication Type byte followed by an algorithm-
+    /// specific value (cleartext password, HMAC-MD5 digest, or RFC 5310
+    /// generic-crypto Key ID + digest).
+    Auth = 10,
     LspBufferSize = 14,
     ExtIsReach = 22,
     MtIsReach = 222,
@@ -54,6 +59,7 @@ impl IsisTlvType {
                 | IsNeighbor
                 | Padding
                 | LspEntries
+                | Auth
                 | LspBufferSize
                 | ExtIsReach
                 | MtIsReach
@@ -86,6 +92,7 @@ impl From<IsisTlvType> for u8 {
             IsNeighbor => 6,
             Padding => 8,
             LspEntries => 9,
+            Auth => 10,
             LspBufferSize => 14,
             ExtIsReach => 22,
             MtIsReach => 222,
@@ -119,6 +126,7 @@ impl From<u8> for IsisTlvType {
             6 => IsNeighbor,
             8 => Padding,
             9 => LspEntries,
+            10 => Auth,
             14 => LspBufferSize,
             22 => ExtIsReach,
             222 => MtIsReach,
