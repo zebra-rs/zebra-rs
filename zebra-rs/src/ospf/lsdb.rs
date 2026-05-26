@@ -394,16 +394,14 @@ impl<V: OspfVersion> Lsdb<V> {
         self.tables.insert(lsa_key, lsa);
     }
 
-    /// Return the install timestamp of an LSA, if present. Now
-    /// generic.
-    pub fn lookup_install_time(
-        &self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
-    ) -> Option<tokio::time::Instant> {
-        self.lookup_lsa(ls_type, ls_id, adv_router)
-            .map(|lsa| lsa.install_time)
+    /// Return the install timestamp of an LSA, if present.
+    /// Used by `ospf_ls_upd_proc` / `ospfv3_ls_upd_proc` step 5(a)
+    /// to enforce MinLSArrival (RFC 2328 §13 / RFC 5340 §4.5).
+    /// Both versions key off `OspfLsaKey` directly because v3's
+    /// `ls_type` is a raw `u16` (RFC 5340 §A.4.2.1) that doesn't
+    /// fit the v2-typed `OspfLsType` enum.
+    pub fn lookup_install_time_by_raw_key(&self, key: OspfLsaKey) -> Option<tokio::time::Instant> {
+        self.tables.get(&key).map(|lsa| lsa.install_time)
     }
 
     /// Re-originate an existing LSA with a bumped sequence number.

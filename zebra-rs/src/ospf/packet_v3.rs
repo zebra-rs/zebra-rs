@@ -1265,7 +1265,7 @@ fn ospfv3_ls_upd_proc(
     lsa: &Ospfv3Lsa,
     src: &Ipv6Addr,
 ) -> LsaProcessResult {
-    use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ};
+    use super::lsdb::{OSPF_MAX_AGE, OSPF_MAX_LSA_SEQ, OSPF_MIN_LS_ARRIVAL};
 
     let h = &lsa.h;
     let scope = ospfv3_ls_type_scope(h.ls_type);
@@ -1293,19 +1293,20 @@ fn ospfv3_ls_upd_proc(
     }
 
     // Step 4: look up DB copy and compute recency comparison.
-    let (current_age, current_seq, cmp_result, have_current) = {
+    let (current_age, current_seq, current_install_time, cmp_result, have_current) = {
         let lsdb_ref = match scope {
             Ospfv3LsaScope::As => &*oi.lsdb_as,
             Ospfv3LsaScope::Link => &*oi.link_lsdb,
             _ => &*oi.lsdb,
         };
         match lsdb_ref.lookup_by_raw_key(key) {
-            None => (0u16, 0u32, 1i32, false),
+            None => (0u16, 0u32, None, 1i32, false),
             Some(curr) => {
                 let age = curr.h.ls_age;
                 let seq = curr.h.ls_seq_number;
                 let cmp = ospfv3_lsa_more_recent(h, h.ls_age, &curr.h, age);
-                (age, seq, cmp, true)
+                let install_time = lsdb_ref.lookup_install_time_by_raw_key(key);
+                (age, seq, install_time, cmp, true)
             }
         }
     };
@@ -1319,6 +1320,25 @@ fn ospfv3_ls_upd_proc(
 
     // Step 5: received LSA is newer than our copy (or we have none).
     if !have_current || cmp_result > 0 {
+        // Step 5(a): if the DB copy was received via flooding less
+        // than MinLSArrival ago, discard the new instance WITHOUT
+        // acknowledging — the peer's retransmit timer is what makes
+        // sure we eventually pick the genuinely-newer LSA up. If we
+        // acked here the peer would prune its `ls_rxmt` and we'd
+        // hold the stale copy until the next refresh. Mirror of
+        // v2's `ospf_ls_upd_proc` step 5(a).
+        if let Some(install_time) = current_install_time
+            && install_time.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+        {
+            tracing::info!(
+                "[v3 LSUpd] Step 5(a) MinLSArrival: discarding (no ack) LSA type={:#x} id={} adv={} seq={:#x}",
+                h.ls_type,
+                h.link_state_id,
+                h.advertising_router,
+                h.ls_seq_number
+            );
+            return LsaProcessResult::DiscardNoAck;
+        }
         let cloned = lsa.clone();
         let mut area_lsa_installed = false;
         match scope {
