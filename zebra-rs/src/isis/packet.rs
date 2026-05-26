@@ -8,6 +8,8 @@ use isis_packet::*;
 
 use crate::bfd::session::SessionKey;
 use crate::fmt::DisplayOpt;
+use crate::isis::auth;
+use crate::isis::config::IsisAuthType;
 use crate::isis::link::DisStatus;
 use crate::isis::lsp::csnp_generate;
 use crate::isis::neigh::Neighbor;
@@ -859,6 +861,109 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
     ));
 }
 
+/// Return the (auth_type, value) of the first Authentication TLV in
+/// the parsed Hello PDU, if any. Used by verify_hello_auth — the
+/// raw bytes are reached separately via `packet.bytes`.
+fn hello_pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
+    let tlvs: &[IsisTlv] = match pdu {
+        IsisPdu::L1Hello(h) | IsisPdu::L2Hello(h) => &h.tlvs,
+        IsisPdu::P2pHello(h) => &h.tlvs,
+        _ => return None,
+    };
+    tlvs.iter().find_map(|tlv| match tlv {
+        IsisTlv::Auth(a) => Some(a),
+        _ => None,
+    })
+}
+
+/// Validate the Authentication TLV on an inbound Hello PDU against
+/// the per-link `hello-authentication` config. Returns `true` to
+/// accept the PDU, `false` to drop it (and bumps the relevant
+/// counter on the link).
+///
+/// Decision matrix:
+/// - link auth not configured → accept (peer may still send auth;
+///   the TLV stays in the parsed PDU as data).
+/// - link auth configured, `send-only` true → accept regardless of
+///   inbound content (RFC 5304 §1 rollover hatch).
+/// - link auth configured, no inbound Auth TLV → drop, bump
+///   `auth_rx_no_auth`.
+/// - link auth configured, type mismatch → drop, bump `auth_rx_bad`.
+/// - cleartext (type 1) → byte-compare value against configured
+///   password; match → accept + `auth_rx_good`, else drop +
+///   `auth_rx_bad`.
+/// - HMAC-MD5 (type 54) → zero the digest in a copy of the raw
+///   bytes, recompute HMAC, constant-time compare → accept +
+///   `auth_rx_good`, else drop + `auth_rx_bad`.
+fn verify_hello_auth(
+    link: &mut super::link::LinkTop<'_>,
+    tlvs_start: usize,
+    pdu_bytes: &[u8],
+    packet: &IsisPacket,
+) -> bool {
+    let cfg = &link.config.hello_auth;
+    let Some(key) = cfg.password.as_deref() else {
+        return true; // no auth configured — accept anything
+    };
+    if cfg.send_only {
+        return true; // sign-only-on-tx rollover mode
+    }
+    let Some(auth_tlv) = hello_pdu_auth_tlv(&packet.pdu) else {
+        link.state.auth_rx_no_auth += 1;
+        tracing::warn!(
+            proto = "isis",
+            link = %link.state.name,
+            "[Hello:AuthDrop] no auth TLV from peer"
+        );
+        return false;
+    };
+
+    let accepted = match cfg.auth_type {
+        IsisAuthType::Text => {
+            auth_tlv.auth_type == ISIS_AUTH_TYPE_CLEARTEXT
+                && auth::digest_eq(&auth_tlv.value, key.as_bytes())
+        }
+        IsisAuthType::Md5 => {
+            if auth_tlv.auth_type != ISIS_AUTH_TYPE_HMAC_MD5
+                || auth_tlv.value.len() != ISIS_AUTH_HMAC_MD5_LEN
+            {
+                false
+            } else if let Some(value_range) = auth::locate_auth_tlv(pdu_bytes, tlvs_start) {
+                let digest_start = value_range.start + 1;
+                let digest_end = value_range.end;
+                if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
+                    false
+                } else {
+                    let mut scratch = pdu_bytes.to_vec();
+                    for b in &mut scratch[digest_start..digest_end] {
+                        *b = 0;
+                    }
+                    let computed = auth::hmac_md5(key.as_bytes(), &scratch);
+                    auth::digest_eq(&computed, &auth_tlv.value)
+                }
+            } else {
+                // Parsed TLV exists but raw bytes don't carry it —
+                // network.rs preserves the buffer for every PDU, so
+                // this is a hard inconsistency: reject.
+                false
+            }
+        }
+    };
+
+    if accepted {
+        link.state.auth_rx_good += 1;
+        true
+    } else {
+        link.state.auth_rx_bad += 1;
+        tracing::warn!(
+            proto = "isis",
+            link = %link.state.name,
+            "[Hello:AuthDrop] auth verification failed"
+        );
+        false
+    }
+}
+
 pub fn process_packet(
     link: &mut LinkTop,
     packet: IsisPacket,
@@ -879,6 +984,20 @@ pub fn process_packet(
     }
 
     if !link.config.enabled() {
+        return Ok(());
+    }
+
+    // Hello authentication (Phase 3a). Validated before the PDU is
+    // handed to the adjacency FSM so a mismatching peer never gets
+    // to mutate neighbor state. SNP/LSP auth lands in Phase 3b/4.
+    if packet.pdu_type.is_hello()
+        && !verify_hello_auth(
+            link,
+            packet.length_indicator as usize,
+            &packet.bytes,
+            &packet,
+        )
+    {
         return Ok(());
     }
 

@@ -59,3 +59,5 @@ pub mod throttle;
 pub mod affinity_map;
 
 pub mod flex_algo;
+
+pub mod auth;
