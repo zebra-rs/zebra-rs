@@ -3293,8 +3293,9 @@ impl Ospf<Ospfv3> {
     /// `Lsdb::install_originated` (PR 7j).
     pub fn build_router_lsa(&self) -> ospf_packet::Ospfv3Lsa {
         use ospf_packet::{
-            OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa,
-            Ospfv3LsaHeader, Ospfv3Options, Ospfv3RouterLsa, Ospfv3RouterLsaLink,
+            OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE,
+            Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3RouterLsa,
+            Ospfv3RouterLsaLink,
         };
 
         let mut links = Vec::new();
@@ -3366,7 +3367,18 @@ impl Ospf<Ospfv3> {
             }
         }
 
-        let body = Ospfv3RouterLsa::new(OSPFV3_ROUTER_LSA_FLAG_E, Ospfv3Options::default(), links);
+        // RFC 5340 §A.4.3 Router-LSA flags: B (Border / ABR), E
+        // (ASBR), V (virtual-link endpoint), W (wild-card multicast).
+        // B-bit is set when this router attaches to two or more
+        // areas — both peers (and our own NSSA Candidate election in
+        // `is_nssa_translator_for`) read it to identify ABRs. The
+        // pre-existing E-bit is kept for parity with the v2 build
+        // (ASBR tracking lands later for both versions).
+        let mut router_flags = OSPFV3_ROUTER_LSA_FLAG_E;
+        if self.is_abr() {
+            router_flags |= OSPFV3_ROUTER_LSA_FLAG_B;
+        }
+        let body = Ospfv3RouterLsa::new(router_flags, Ospfv3Options::default(), links);
         let mut lsa = Ospfv3Lsa {
             h: Ospfv3LsaHeader {
                 ls_age: 0,
@@ -3576,6 +3588,270 @@ impl Ospf<Ospfv3> {
         let default =
             ipnet::Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 0).expect("::/0 is valid");
         self.nssa_lsa_flush_for_prefix_v3(area_id, default);
+    }
+
+    /// v3 mirror of v2's `is_abr`. True when this router has
+    /// interfaces in two or more OSPF areas (RFC 2328 §3.3 ABR
+    /// test). Areas with zero attached links don't count.
+    pub fn is_abr(&self) -> bool {
+        self.areas
+            .iter()
+            .filter(|(_, area)| !area.links.is_empty())
+            .count()
+            >= 2
+    }
+
+    /// v3 mirror of v2's `is_nssa_translator_for`. RFC 3101 §3.1
+    /// translator-role evaluation:
+    /// - `Never`: never translate.
+    /// - `Always`: translate unconditionally.
+    /// - `Candidate`: translate iff our router-id is the highest
+    ///   among NSSA Router-LSAs with B-bit set
+    ///   (`OSPFV3_ROUTER_LSA_FLAG_B = 0x01`).
+    ///
+    /// Election is locally computed. The Nt-bit equivalent in our
+    /// Router-LSA is not emitted (same reason as v2: per-area
+    /// Router-LSA emission is a wider refactor). All known
+    /// implementations elect locally so interop is unaffected.
+    pub fn is_nssa_translator_for(&self, area_id: Ipv4Addr) -> bool {
+        use super::area::NssaTranslatorRole;
+        use ospf_packet::{OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody};
+        let Some(area) = self.areas.get(area_id) else {
+            return false;
+        };
+        if !area.area_type.is_nssa() {
+            return false;
+        }
+        if !self.is_abr() {
+            return false;
+        }
+        match area.area_type.nssa_translator_role {
+            NssaTranslatorRole::Never => false,
+            NssaTranslatorRole::Always => true,
+            NssaTranslatorRole::Candidate => {
+                let highest_other = area
+                    .lsdb
+                    .iter_by_raw_type(OSPFV3_ROUTER_LSA_TYPE)
+                    .filter_map(|(_, lsa)| {
+                        let Ospfv3LsBody::Router(ref body) = lsa.data.body else {
+                            return None;
+                        };
+                        if (body.flags & OSPFV3_ROUTER_LSA_FLAG_B) == 0 {
+                            return None;
+                        }
+                        if lsa.data.h.advertising_router == self.router_id {
+                            return None;
+                        }
+                        Some(lsa.data.h.advertising_router)
+                    })
+                    .max();
+                match highest_other {
+                    None => true,
+                    Some(other) => self.router_id >= other,
+                }
+            }
+        }
+    }
+
+    /// Translate a single v3 Type-7 NSSA-LSA into a Type-5
+    /// AS-External-LSA, install in `lsdb_as`, and flood AS-wide.
+    /// RFC 3101 §3.2 (inherited by v3 via RFC 5340 §A.4.9). Same
+    /// gate semantics as v2's `nssa_translate_one`:
+    ///
+    /// - source body is `Ospfv3LsBody::Nssa(_)` (defensive)
+    /// - not MaxAge — flushed Type-7s shouldn't seed translations
+    /// - not self-originated
+    /// - P-bit set in the source's `prefix_options` per RFC 3101
+    ///   §2.4 (in v3 the P-bit lives in prefix_options, not in
+    ///   the LSA header as in v2)
+    /// - forwarding-address present — FA=None mirrors v2's
+    ///   FA=0.0.0.0 skip (defer FA-resolution symmetrically)
+    fn nssa_translate_one_v3(&mut self, type7: &ospf_packet::Ospfv3Lsa) -> bool {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        use ospf_packet::{OSPFV3_AS_EXTERNAL_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader};
+
+        let Ospfv3LsBody::Nssa(ref body) = type7.body else {
+            return false;
+        };
+        if type7.h.ls_age >= OSPF_MAX_AGE {
+            return false;
+        }
+        if type7.h.advertising_router == self.router_id {
+            return false;
+        }
+        if !body.prefix_options.p() {
+            return false;
+        }
+        if body.forwarding_address.is_none() {
+            return false;
+        }
+
+        let link_state_id = type7.h.link_state_id;
+        // Build a Type-5 wrapping the same body — RFC 5340 §A.4.9
+        // says NSSA-LSA and AS-External-LSA share the wire body.
+        let translated_body = body.clone();
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_AS_EXTERNAL_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut new_lsa = Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::AsExternal(translated_body),
+        };
+
+        // Preserve sequence number on refresh.
+        let key: super::lsdb::OspfLsaKey =
+            (OSPFV3_AS_EXTERNAL_LSA_TYPE, link_state_id, self.router_id);
+        if let Some(existing) = self.lsdb_as.lookup_by_raw_key(key) {
+            new_lsa.h.ls_seq_number = new_lsa
+                .h
+                .ls_seq_number
+                .max(existing.h.ls_seq_number.saturating_add(1));
+        }
+        new_lsa.update();
+
+        let flood_lsa = new_lsa.clone();
+        self.lsdb_as.install_originated(new_lsa, &self.tx, None);
+        self.flood_lsa_through_as_v3(&flood_lsa, None);
+        true
+    }
+
+    /// Compute the set of v3 Type-7 link_state_ids in `area_id`
+    /// that we SHOULD currently be translating. Mirror of v2's
+    /// `nssa_translatable_ls_ids`. Stored as `Ipv4Addr` for shape
+    /// parity with the existing `OspfArea::nssa_translated`
+    /// bookkeeping (a v3 link_state_id is just a u32 and round-
+    /// trips through `Ipv4Addr::from(u32)` losslessly).
+    fn nssa_translatable_link_state_ids_v3(&self, area_id: Ipv4Addr) -> BTreeSet<Ipv4Addr> {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+        use ospf_packet::{OSPFV3_NSSA_LSA_TYPE, Ospfv3LsBody};
+        let mut out = BTreeSet::new();
+        let Some(area) = self.areas.get(area_id) else {
+            return out;
+        };
+        for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE) {
+            let d = &lsa.data;
+            if d.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if d.h.advertising_router == self.router_id {
+                continue;
+            }
+            let Ospfv3LsBody::Nssa(ref body) = d.body else {
+                continue;
+            };
+            if !body.prefix_options.p() {
+                continue;
+            }
+            if body.forwarding_address.is_none() {
+                continue;
+            }
+            out.insert(Ipv4Addr::from(d.h.link_state_id));
+        }
+        out
+    }
+
+    /// Rebuild this NSSA area's translated Type-5 set from the
+    /// current Type-7 LSDB contents. Mirror of v2's
+    /// `nssa_translate_resync`.
+    pub fn nssa_translate_resync(&mut self, area_id: Ipv4Addr) {
+        use ospf_packet::{OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE};
+
+        let translating = self.is_nssa_translator_for(area_id);
+        let desired = if translating {
+            self.nssa_translatable_link_state_ids_v3(area_id)
+        } else {
+            BTreeSet::new()
+        };
+        let prev: BTreeSet<Ipv4Addr> = self
+            .areas
+            .get(area_id)
+            .map(|a| a.nssa_translated.clone())
+            .unwrap_or_default();
+
+        // Flush translations that should no longer exist.
+        for ls_id in prev.difference(&desired).copied().collect::<Vec<_>>() {
+            let key: super::lsdb::OspfLsaKey = (
+                OSPFV3_AS_EXTERNAL_LSA_TYPE,
+                u32::from(ls_id),
+                self.router_id,
+            );
+            let flushed = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None);
+            if let Some(lsa) = flushed {
+                self.flood_lsa_through_as_v3(&lsa, None);
+            }
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.nssa_translated.remove(&ls_id);
+            }
+        }
+
+        if !translating {
+            return;
+        }
+
+        // Snapshot source Type-7 LSAs before calling
+        // `nssa_translate_one_v3` (which takes &mut self).
+        let sources: Vec<ospf_packet::Ospfv3Lsa> = self
+            .areas
+            .get(area_id)
+            .map(|a| {
+                a.lsdb
+                    .iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE)
+                    .filter(|(_, lsa)| desired.contains(&Ipv4Addr::from(lsa.data.h.link_state_id)))
+                    .map(|(_, lsa)| lsa.data.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for source in &sources {
+            if self.nssa_translate_one_v3(source)
+                && let Some(area) = self.areas.get_mut(area_id)
+            {
+                area.nssa_translated
+                    .insert(Ipv4Addr::from(source.h.link_state_id));
+            }
+        }
+    }
+
+    /// Resync NSSA translator state for every NSSA area on this
+    /// v3 router. Use when a router-wide property changed (ABR
+    /// status flip via link join/leave). Mirror of v2.
+    pub fn nssa_translate_resync_all(&mut self) {
+        let nssa_area_ids: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, area)| area.area_type.is_nssa())
+            .map(|(&id, _)| id)
+            .collect();
+        for area_id in nssa_area_ids {
+            self.nssa_translate_resync(area_id);
+        }
+    }
+
+    /// AS-scope flood for v3. Walks every non-stub / non-NSSA
+    /// area attached to this router and re-floods the LSA on each
+    /// using the existing per-area flood path.
+    fn flood_lsa_through_as_v3(
+        &mut self,
+        lsa: &ospf_packet::Ospfv3Lsa,
+        source: Option<(u32, std::net::Ipv6Addr)>,
+    ) {
+        let area_ids: Vec<(Ipv4Addr, super::area::AreaType)> = self
+            .areas
+            .iter()
+            .map(|(&id, area)| (id, area.area_type))
+            .collect();
+        for (area_id, area_type) in area_ids {
+            if area_type.is_stub_or_nssa() {
+                continue;
+            }
+            self.flood_lsa_through_area(area_id, lsa, source);
+        }
     }
 
     /// Flood a v3 LSA through `area_id`, optionally exempting the
@@ -3886,6 +4162,11 @@ impl Ospf<Ospfv3> {
                 self.router_intra_area_prefix_lsa_originate(area_id);
                 self.link_lsa_originate(ifindex);
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
+                // ABR status may have flipped (gained interface
+                // in a 2nd area) — resync NSSA translator state
+                // across all NSSA areas; the helper gates on
+                // `is_abr()` internally.
+                self.nssa_translate_resync_all();
             }
             Message::Disable(ifindex, area_id) => {
                 // Flush self-originated LSAs scoped to this link
@@ -3911,6 +4192,10 @@ impl Ospf<Ospfv3> {
                 let _ = self
                     .tx
                     .send(Message::Ifsm(ifindex, IfsmEvent::InterfaceDown));
+                // Dropping a link may turn this router back into a
+                // non-ABR; flush any translated Type-5s if we no
+                // longer qualify.
+                self.nssa_translate_resync_all();
             }
             Message::Ifsm(index, ev) => {
                 // Same DR-leave hook as v2: premature-age the
@@ -4036,11 +4321,11 @@ impl Ospf<Ospfv3> {
                 // scenario). Re-originate at an even higher seq so
                 // we own the LSA again. Currently handles the wired
                 // self-origination paths (Router-LSA, Network-LSA,
-                // Intra-Area-Prefix-LSA, NSSA-LSA default); other
-                // LSA types fall through.
+                // Intra-Area-Prefix-LSA, NSSA-LSA default, translated
+                // AS-External); other LSA types fall through.
                 use ospf_packet::{
-                    OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE,
-                    OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+                    OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+                    OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
                 };
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
                     let (ls_type, ls_id, _) = key;
@@ -4060,12 +4345,31 @@ impl Ospf<Ospfv3> {
                         t if t == OSPFV3_NSSA_LSA_TYPE && ls_id == 0 => {
                             self.nssa_default_lsa_originate(area)
                         }
+                        // Translated Type-5 (RFC 3101 §3.2). If
+                        // `ls_id` matches an entry in any NSSA
+                        // area's `nssa_translated`, re-translate
+                        // (the resync bumps seq#); otherwise it's
+                        // a stray Type-5 we don't own — fall
+                        // through to flush.
+                        t if t == OSPFV3_AS_EXTERNAL_LSA_TYPE => {
+                            let owning_area = self
+                                .areas
+                                .iter()
+                                .find(|(_, a)| a.nssa_translated.contains(&Ipv4Addr::from(ls_id)))
+                                .map(|(&id, _)| id);
+                            if let Some(a) = owning_area {
+                                self.nssa_translate_resync(a);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
+            }
+            Message::NssaTranslateResync(area_id) => {
+                self.nssa_translate_resync(area_id);
             }
             other => {
                 tracing::debug!(

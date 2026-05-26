@@ -1344,6 +1344,19 @@ fn ospfv3_ls_upd_proc(
             let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
         }
 
+        // RFC 3101 §3 (v3 mirror of v2's phase 4a/4b hook):
+        // a fresh Type-7 may need translation, and a fresh
+        // Router-LSA inside the NSSA can flip our Candidate
+        // election. Trigger resync in both cases; the handler
+        // gates on ABR + translator-role + area-type internally.
+        use ospf_packet::{OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE};
+        if area_lsa_installed
+            && matches!(h.ls_type, OSPFV3_NSSA_LSA_TYPE | OSPFV3_ROUTER_LSA_TYPE)
+            && oi.area_type.is_nssa()
+        {
+            let _ = oi.tx.send(Message::NssaTranslateResync(area_id));
+        }
+
         // RFC 5187 §3.1: a Grace LSA from a Full neighbor advertising
         // its own router-id is the trigger to enter helper mode. Like
         // v2's `gr_maybe_enter_helper`, this runs after the LSA has
