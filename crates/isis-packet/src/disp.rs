@@ -8,7 +8,8 @@ use crate::{
     IsisProto, IsisPsnp, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisTlvAuth, IsisTlvHostname,
     IsisTlvIpv4IfAddr, IsisTlvIpv6GlobalIfAddr, IsisTlvIpv6IfAddr, IsisTlvIpv6TeRouterId,
     IsisTlvIsNeighbor, IsisTlvLspBufferSize, IsisTlvLspEntries, IsisTlvP2p3Way, IsisTlvPadding,
-    IsisTlvProtoSupported, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr, SidLabelValue,
+    IsisTlvProtoSupported, IsisTlvRestart, IsisTlvSrv6, IsisTlvTeRouterId, NeighborAddr,
+    SidLabelValue,
 };
 
 impl Display for IsisPacket {
@@ -203,6 +204,7 @@ impl Display for IsisTlv {
             MtIpReach(v) => write!(f, "{}", v),
             MtIpv6Reach(v) => write!(f, "{}", v),
             P2p3Way(v) => write!(f, "{}", v),
+            Restart(v) => write!(f, "{}", v),
             Unknown(v) => {
                 write!(f, "  {:?}", v.typ)
             }
@@ -438,5 +440,25 @@ impl Display for IsisTlvP2p3Way {
                 "".to_string()
             }
         )
+    }
+}
+
+impl Display for IsisTlvRestart {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "  Restart: flags=0x{:02x} (RR={} RA={} SA={})",
+            self.flags,
+            self.rr() as u8,
+            self.ra() as u8,
+            self.sa() as u8,
+        )?;
+        if let Some(t) = self.remaining_time {
+            write!(f, " remaining={}s", t)?;
+        }
+        if let Some(id) = &self.restarting_neighbor {
+            write!(f, " neighbor={}", id)?;
+        }
+        Ok(())
     }
 }

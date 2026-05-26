@@ -15,8 +15,8 @@ use super::error::{IsisIResult, IsisParseError};
 use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
     IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvIpv6Srlg, IsisTlvMtIpReach,
-    IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRouterCap, IsisTlvSrlg,
-    IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
+    IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRestart, IsisTlvRouterCap,
+    IsisTlvSrlg, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
 };
 
 // IS-IS discriminator.
@@ -561,6 +561,8 @@ pub enum IsisTlv {
     P2p3Way(IsisTlvP2p3Way),
     #[nom(Selector = "IsisTlvType::RouterCap")]
     RouterCap(IsisTlvRouterCap),
+    #[nom(Selector = "IsisTlvType::Restart")]
+    Restart(IsisTlvRestart),
     #[nom(Selector = "_")]
     Unknown(IsisTlvUnknown),
 }
@@ -611,6 +613,7 @@ impl IsisTlv {
             MtIpv6Reach(v) => v.tlv_emit(buf),
             P2p3Way(v) => v.tlv_emit(buf),
             RouterCap(v) => v.tlv_emit(buf),
+            Restart(v) => v.tlv_emit(buf),
             Unknown(v) => v.emit(buf),
         }
     }
@@ -1136,6 +1139,12 @@ impl From<IsisTlvP2p3Way> for IsisTlv {
     }
 }
 
+impl From<IsisTlvRestart> for IsisTlv {
+    fn from(tlv: IsisTlvRestart) -> Self {
+        IsisTlv::Restart(tlv)
+    }
+}
+
 #[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisTlvUnknown {
     pub typ: IsisTlvType,
@@ -1289,6 +1298,46 @@ mod tests {
         .into();
         // 2 header + 8 chars of "router-7".
         assert_eq!(host.wire_len(), 10);
+    }
+
+    /// Round-trip the Restart TLV (type 211, RFC 5306) through the
+    /// `IsisTlv` dispatcher: emit via tlv_emit, re-parse via parse_tlvs,
+    /// verify the variant comes back with flags + RA-paired fields
+    /// intact. Guards the `#[nom(Selector = "IsisTlvType::Restart")]`
+    /// wiring on the enum.
+    #[test]
+    fn restart_tlv_dispatches_through_isis_tlv() {
+        let original: IsisTlv = IsisTlvRestart {
+            flags: 0x02, // RA only
+            remaining_time: Some(42),
+            restarting_neighbor: Some(IsisSysId {
+                id: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+            }),
+        }
+        .into();
+        let mut buf = BytesMut::new();
+        original.emit(&mut buf);
+        // T(1) + L(1) + Flags(1) + RemainingTime(2) + SysId(6) = 11.
+        assert_eq!(buf.len(), 11);
+        assert_eq!(buf[0], u8::from(IsisTlvType::Restart));
+        assert_eq!(buf[1], 9);
+
+        let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert_eq!(tlvs.len(), 1);
+        match &tlvs[0] {
+            IsisTlv::Restart(v) => {
+                assert!(v.ra());
+                assert!(!v.rr());
+                assert!(!v.sa());
+                assert_eq!(v.remaining_time, Some(42));
+                assert_eq!(
+                    v.restarting_neighbor.as_ref().map(|s| s.id),
+                    Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01])
+                );
+            }
+            other => panic!("expected Restart, got {:?}", other),
+        }
     }
 
     /// Round-trip a TLV 14 LSP Buffer Size: emit through tlv_emit,

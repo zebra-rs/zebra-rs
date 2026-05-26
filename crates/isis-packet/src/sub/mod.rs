@@ -43,5 +43,10 @@ pub mod prefix_disp;
 pub mod srv6;
 pub use srv6::Behavior;
 
+pub mod restart;
+pub use restart::{
+    ISIS_RESTART_FLAG_RA, ISIS_RESTART_FLAG_RR, ISIS_RESTART_FLAG_SA, IsisTlvRestart,
+};
+
 pub mod unknown;
 pub use unknown::IsisSubTlvUnknown;
