@@ -6275,7 +6275,141 @@ fn build_rib6_from_spf(
         }
     }
 
+    // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs flood with
+    // area scope, so the walk reads from `area.lsdb` and resolves
+    // the originator via this area's SPF. Gated on area being NSSA;
+    // a no-op for Normal / Stub areas.
+    if let Some(area) = top.areas.get(area_id)
+        && area.area_type.is_nssa()
+    {
+        add_nssa_routes_v3(top, area_id, spf_result, &mut rib);
+    }
+
     rib
+}
+
+/// Walk v3 Type-7 (NSSA-LSA, 0x2007) entries in the area LSDB and
+/// install routes — RFC 3101 §2.5 mirror for v3, modelled on v2's
+/// `add_nssa_routes`.
+///
+/// v3 differences from the v2 walker:
+///   - LSDB lookup uses `iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE)`
+///     (v3 LS-Types are u16, not the v2 `OspfLsType` enum).
+///   - Body decode is via `Ospfv3LsBody::Nssa(Ospfv3AsExternalLsa)`
+///     (phase 5 codec).
+///   - Prefix comes from `(prefix_length, address_prefix)` per
+///     RFC 5340 §A.4.1.1, not v2's `(netmask, ls_id)`.
+///   - E-bit lives in `flags & OSPFV3_AS_EXTERNAL_FLAG_E` per
+///     RFC 5340 §A.4.7.
+///   - Forwarding address is `Option<Ipv6Addr>` gated by F-flag.
+///   - Nexthop construction uses `collect_v3_nexthops` /
+///     `SpfNexthopV3` instead of v2's `SpfNexthop`.
+///
+/// Skip conditions match v2:
+///   - MaxAge'd or self-originated source — same hygiene.
+///   - Metric == OSPFV3_LS_INFINITY — unreachable per RFC 5340 §A.4.7.
+///   - Non-zero forwarding address — FA-resolution lands in a
+///     follow-up symmetric with the v3 AS-External walker (none
+///     exists yet) and v2's same skip.
+///
+/// P-bit (RFC 3101 §2.4, carried in `prefix_options`) is
+/// intentionally NOT consulted here — it controls Type-7→Type-5
+/// translation at the ABR (phase 6d on v3), not SPF installation
+/// on the receiver.
+fn add_nssa_routes_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{
+        OSPFV3_AS_EXTERNAL_FLAG_E, OSPFV3_LS_INFINITY, OSPFV3_NSSA_LSA_TYPE, Ospfv3LsBody,
+    };
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+
+    for (_key, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.advertising_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::Nssa(ref ext) = lsa.data.body else {
+            continue;
+        };
+        if ext.metric >= OSPFV3_LS_INFINITY {
+            continue;
+        }
+        // RFC 3101 §2.5 step 5: non-zero FA resolves the route via
+        // an intra-area path to the FA, not to the originator. The
+        // resolver lands in a follow-up (same shape as v2 and the
+        // not-yet-written v3 AS-External walker).
+        if ext.forwarding_address.is_some() {
+            continue;
+        }
+
+        let Some(originator_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
+            continue;
+        };
+        let Some(originator_path) = spf_result.get(&originator_vertex) else {
+            continue;
+        };
+
+        let is_e2 = (ext.flags & OSPFV3_AS_EXTERNAL_FLAG_E) != 0;
+        let metric = if is_e2 {
+            ext.metric
+        } else {
+            originator_path.cost.saturating_add(ext.metric)
+        };
+
+        let Some(net) = ospfv3_prefix_to_ipv6net(ext.prefix_length, &ext.address_prefix) else {
+            continue;
+        };
+
+        let nhops = collect_v3_nexthops(top, originator_path);
+        if nhops.is_empty() {
+            continue;
+        }
+        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+            .into_iter()
+            .map(|(addr, ifindex)| {
+                (
+                    addr,
+                    SpfNexthopV3 {
+                        ifindex,
+                        adjacency: false,
+                    },
+                )
+            })
+            .collect();
+
+        let entry = SpfRouteV3 {
+            metric,
+            nhops: nhops_map,
+            sid: None,
+            prefix_sid: None,
+        };
+        // Equal-cost merge — same shape as the intra-area insert
+        // above in `build_rib6_from_spf`.
+        match rib.get_mut(&net) {
+            None => {
+                rib.insert(net, entry);
+            }
+            Some(curr) => {
+                if curr.metric > entry.metric {
+                    *curr = entry;
+                } else if curr.metric == entry.metric {
+                    for (addr, nhop) in entry.nhops {
+                        curr.nhops.insert(addr, nhop);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. The
