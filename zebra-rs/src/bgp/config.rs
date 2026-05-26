@@ -10,7 +10,7 @@ use crate::policy;
 use crate::policy::com_list::*;
 use crate::rib::api::FdbEntry;
 
-use super::auth::{AoConfig, CryptoAlgorithm, Key};
+use super::auth::AoConfig;
 use super::peer::BgpTop;
 use super::route_clean;
 use super::{
@@ -1257,7 +1257,7 @@ fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 ///
 /// Called from every TCP-AO callback (peer-side and key-chain-side)
 /// after the change has been absorbed into `Bgp`.
-fn apply_ao_refresh_all(bgp: &mut Bgp) {
+pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
     let fd_v4 = bgp.listen_fd_v4;
     let fd_v6 = bgp.listen_fd_v6;
     // Snapshot key_chains to release the immutable borrow before
@@ -1340,8 +1340,16 @@ fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         return None;
     };
 
-    {
+    let (peer_ident, prior, new) = {
         let peer = bgp.peers.get_mut(&addr)?;
+        let ident = peer.ident;
+        let prior = peer
+            .config
+            .transport
+            .ao_config
+            .as_ref()
+            .map(|ao| ao.key_chain.clone())
+            .filter(|s| !s.is_empty());
         if op == ConfigOp::Set {
             let chain_name = args.string()?;
             let ao = peer
@@ -1349,12 +1357,26 @@ fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
                 .transport
                 .ao_config
                 .get_or_insert_with(AoConfig::default);
-            ao.key_chain = chain_name;
+            ao.key_chain = chain_name.clone();
+            (ident, prior, Some(chain_name))
         } else {
             peer.config.transport.ao_config = None;
             peer.config.transport.resolved_ao_key = None;
+            (ident, prior, None)
         }
-    }
+    };
+    // Subscribe (or rebind) the peer's interest in the chain so the
+    // policy actor pushes future `PolicyRx::KeyChain` updates for it;
+    // `apply_ao_refresh_all` reconciles the live listener entries
+    // using the snapshot we already have for `Set` cases and for
+    // `Delete`s that need to del a stale MKT.
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        peer_ident,
+        policy::PolicyType::KeyChain(policy::KeyChainScope::BgpNeighbor),
+        prior,
+        new,
+    );
     apply_ao_refresh_all(bgp);
     Some(())
 }
@@ -1383,136 +1405,6 @@ fn config_peer_tcp_ao_include_tcp_options(
             ao.include_tcp_options = args.boolean()?;
         } else {
             ao.include_tcp_options = true;
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-// ---------- Key-chain callbacks ----------
-
-fn config_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    if op == ConfigOp::Set {
-        bgp.key_chains.entry(name).or_default();
-    } else {
-        bgp.key_chains.remove(&name);
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_description(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let chain = bgp.key_chains.get_mut(&name)?;
-    chain.description = if op == ConfigOp::Set {
-        Some(args.string()?)
-    } else {
-        None
-    };
-    Some(())
-}
-
-fn config_key_chain_key(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        if op == ConfigOp::Set {
-            chain.keys.entry(key_id).or_insert_with(Key::new);
-        } else {
-            chain.keys.remove(&key_id);
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_key_crypto_algorithm(
-    bgp: &mut Bgp,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        let key = chain.keys.get_mut(&key_id)?;
-        if op == ConfigOp::Set {
-            let algo = args.string()?;
-            key.crypto_algorithm = CryptoAlgorithm::from_identity(&algo);
-        } else {
-            key.crypto_algorithm = None;
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_key_keystring(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        let key = chain.keys.get_mut(&key_id)?;
-        if op == ConfigOp::Set {
-            key.key_material = args.string()?.into_bytes();
-        } else {
-            key.key_material.clear();
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_key_hex_string(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        let key = chain.keys.get_mut(&key_id)?;
-        if op == ConfigOp::Set {
-            let hex = args.string()?;
-            let cleaned: String = hex
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != ':')
-                .collect();
-            let decoded = hex::decode(&cleaned).ok()?;
-            key.key_material = decoded;
-        } else {
-            key.key_material.clear();
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_key_send_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        let key = chain.keys.get_mut(&key_id)?;
-        if op == ConfigOp::Set {
-            key.send_id = Some(args.u8()?);
-        } else {
-            key.send_id = None;
-        }
-    }
-    apply_ao_refresh_all(bgp);
-    Some(())
-}
-
-fn config_key_chain_key_recv_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let chain_name = args.string()?;
-    let key_id = args.u64()?;
-    {
-        let chain = bgp.key_chains.get_mut(&chain_name)?;
-        let key = chain.keys.get_mut(&key_id)?;
-        if op == ConfigOp::Set {
-            key.recv_id = Some(args.u8()?);
-        } else {
-            key.recv_id = None;
         }
     }
     apply_ao_refresh_all(bgp);
@@ -1701,33 +1593,6 @@ impl Bgp {
             config_peer_tcp_ao_include_tcp_options,
         );
 
-        // Key-chains (RFC 8177) for TCP-AO.
-        self.callback_add("/key-chains/key-chain", config_key_chain);
-        self.callback_add(
-            "/key-chains/key-chain/description",
-            config_key_chain_description,
-        );
-        self.callback_add("/key-chains/key-chain/key", config_key_chain_key);
-        self.callback_add(
-            "/key-chains/key-chain/key/crypto-algorithm",
-            config_key_chain_key_crypto_algorithm,
-        );
-        self.callback_add(
-            "/key-chains/key-chain/key/key-string/keystring",
-            config_key_chain_key_keystring,
-        );
-        self.callback_add(
-            "/key-chains/key-chain/key/key-string/hexadecimal-string",
-            config_key_chain_key_hex_string,
-        );
-        self.callback_add(
-            "/key-chains/key-chain/key/send-id",
-            config_key_chain_key_send_id,
-        );
-        self.callback_add(
-            "/key-chains/key-chain/key/recv-id",
-            config_key_chain_key_recv_id,
-        );
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);

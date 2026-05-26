@@ -274,10 +274,13 @@ pub struct Bgp {
     // "Passive vs active side placement".
     pub listen_fd_v4: Option<std::os::fd::RawFd>,
     pub listen_fd_v6: Option<std::os::fd::RawFd>,
-    // RFC 8177 key-chain registry, indexed by chain name. Populated
-    // by config callbacks for /key-chains/... and referenced from a
-    // peer's AoConfig.key_chain leafref.
-    pub key_chains: HashMap<String, super::auth::KeyChain>,
+    /// Snapshot of `/key-chains/key-chain <name>` entries pushed
+    /// here by the policy actor via `PolicyRx::KeyChain`. The
+    /// canonical map lives in `policy::Policy`; this is the
+    /// per-neighbor-subscribed view BGP consults when resolving a
+    /// peer's `tcp-ao/key-chain <name>` leafref. Updated by
+    /// `process_policy_msg`.
+    pub key_chains: BTreeMap<String, crate::policy::KeyChain>,
 
     /// IOS-XR-style `neighbor-group` definitions
     /// (zebra-bgp-neighbor-group.yang). Phase-1 storage: each entry
@@ -506,7 +509,7 @@ impl Bgp {
             listen_err: None,
             listen_fd_v4: None,
             listen_fd_v6: None,
-            key_chains: HashMap::new(),
+            key_chains: BTreeMap::new(),
             neighbor_groups: super::neighbor_group::empty_map(),
             color_policy: super::color_policy::ColorPolicy::new(),
             flex_algo_routes: BTreeMap::new(),
@@ -1343,13 +1346,21 @@ impl Bgp {
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
-            // PR 1 skeleton: BGP doesn't subscribe to PolicyType::KeyChain
-            // yet (the per-peer `/.../tcp-ao/key-chain` callback still
-            // mutates `Bgp::key_chains` directly). Once PR 3 lands the
-            // Register/Unregister + snapshot path, this arm gains a real
-            // handler. Until then ignoring the variant keeps the match
-            // exhaustive without affecting behavior.
-            policy::PolicyRx::KeyChain { .. } => {}
+            policy::PolicyRx::KeyChain {
+                name, key_chain, ..
+            } => {
+                // Apply the snapshot delta first so any downstream
+                // resolve() sees the new state. Then reconcile the
+                // TCP-AO MKTs installed on the listening sockets so
+                // a key edit lands on the kernel before the peer's
+                // next SYN arrives.
+                if let Some(kc) = key_chain {
+                    self.key_chains.insert(name, kc);
+                } else {
+                    self.key_chains.remove(&name);
+                }
+                super::config::apply_ao_refresh_all(self);
+            }
         }
     }
 

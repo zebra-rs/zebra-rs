@@ -6,7 +6,6 @@
 // configuration with MD5 / AO still parses but does not enforce
 // authentication. This matches zebra-rs's Linux-primary posture.
 
-use std::collections::BTreeMap;
 use std::io;
 use std::net::IpAddr;
 
@@ -270,91 +269,29 @@ pub fn del_tcp_ao_key(_fd: i32, _peer_ip: IpAddr, _send_id: u8, _recv_id: u8) ->
 }
 
 // =========================================================
-// RFC 8177 key-chain data model used by TCP-AO (zebra-bgp-auth
-// YANG `key-chains` container).
+// TCP-AO key-chain resolution.
+//
+// The on-disk `/key-chains/...` data model lives in
+// `policy::keychain` and is pushed to BGP as `PolicyRx::KeyChain`
+// snapshots. The types below are just the BGP-side bindings that
+// translate one of those policy keys into the kernel
+// setsockopt struct.
 // =========================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CryptoAlgorithm {
-    /// RFC 5926 MUST-implement: HMAC-SHA-1-96. Linux alg name
-    /// "hmac(sha1)".
-    HmacSha1,
-    /// RFC 5926 MUST-implement: AES-128-CMAC-96. Linux alg name
-    /// "cmac(aes128)".
-    AesCmacPrf128,
-    /// Other RFC 8177 identities we recognize but may not implement
-    /// in the kernel path (e.g. md5 belongs to MD5's key-chain flow
-    /// which zebra-rs does not use — tcp-md5 takes a flat password).
-    Md5,
-    HmacSha256,
-    HmacSha384,
-    HmacSha512,
-}
-
-impl CryptoAlgorithm {
-    pub fn from_identity(name: &str) -> Option<Self> {
-        // Accept both bare and prefixed forms
-        // (e.g. "hmac-sha-1" and "ietf-key-chain:hmac-sha-1").
-        let bare = name.rsplit(':').next().unwrap_or(name);
-        match bare {
-            "hmac-sha-1" => Some(Self::HmacSha1),
-            "aes-cmac-prf-128" => Some(Self::AesCmacPrf128),
-            "md5" => Some(Self::Md5),
-            "hmac-sha-256" => Some(Self::HmacSha256),
-            "hmac-sha-384" => Some(Self::HmacSha384),
-            "hmac-sha-512" => Some(Self::HmacSha512),
-            _ => None,
-        }
-    }
-
-    /// Linux kernel crypto API name passed in `tcp_ao_add.alg_name`.
-    /// Returns `None` for algorithms the kernel path does not
-    /// implement in this module.
-    pub fn linux_alg_name(&self) -> Option<&'static str> {
-        match self {
-            Self::HmacSha1 => Some("hmac(sha1)"),
-            Self::AesCmacPrf128 => Some("cmac(aes128)"),
-            Self::HmacSha256 => Some("hmac(sha256)"),
-            Self::HmacSha384 => Some("hmac(sha384)"),
-            Self::HmacSha512 => Some("hmac(sha512)"),
-            Self::Md5 => None,
-        }
-    }
-}
-
-/// One RFC 8177 key within a chain. Fields mirror zebra-bgp-auth.yang:
-/// `crypto-algorithm`, `key-string/{keystring | hexadecimal-string}`,
-/// `send-id`, `recv-id`.
-#[derive(Debug, Default, Clone)]
-pub struct Key {
-    pub crypto_algorithm: Option<CryptoAlgorithm>,
-    /// Raw key bytes. When the CLI leaf is `keystring`, this holds
-    /// the ASCII bytes; when `hexadecimal-string`, the decoded hex
-    /// bytes. Empty until set.
-    pub key_material: Vec<u8>,
-    pub send_id: Option<u8>,
-    pub recv_id: Option<u8>,
-}
-
-impl Key {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-/// Named RFC 8177 key chain. Keys are ordered by key-id.
-#[derive(Debug, Default, Clone)]
-pub struct KeyChain {
-    pub description: Option<String>,
-    pub keys: BTreeMap<u64, Key>,
-}
-
-impl KeyChain {
-    /// Pick the key to use for new connections. For this initial
-    /// implementation we take the lowest key-id. Lifetime-based
-    /// selection and in-band rollover via RNextKeyID are follow-ups.
-    pub fn active_key(&self) -> Option<&Key> {
-        self.keys.values().next()
+/// Project the shared policy algorithm enum onto the Linux crypto
+/// API name passed in `tcp_ao_add.alg_name`. Returns `None` for
+/// algorithms the kernel path doesn't implement here — `Md5` in
+/// particular belongs to TCP-MD5's flat-password flow (RFC 2385),
+/// not TCP-AO's key-chain flow, so the resolve falls through.
+pub fn tcp_ao_alg_from_policy(a: crate::policy::CryptoAlgorithm) -> Option<&'static str> {
+    use crate::policy::CryptoAlgorithm as P;
+    match a {
+        P::HmacSha1 => Some("hmac(sha1)"),
+        P::AesCmacPrf128 => Some("cmac(aes128)"),
+        P::HmacSha256 => Some("hmac(sha256)"),
+        P::HmacSha384 => Some("hmac(sha384)"),
+        P::HmacSha512 => Some("hmac(sha512)"),
+        P::Md5 => None,
     }
 }
 
@@ -393,16 +330,18 @@ pub struct ResolvedAoKey {
 
 impl AoConfig {
     /// Resolve `(key-chain name, include-tcp-options)` against the
-    /// daemon's key-chain registry. Returns `None` if the chain is
-    /// missing, has no key, or the active key lacks an algorithm,
+    /// policy-driven snapshot. Picks the lowest key-id (lifetime-
+    /// based selection + in-band rollover via RNextKeyID are
+    /// follow-ups). Returns `None` if the chain is missing, has no
+    /// key, or the chosen key lacks an algorithm BGP can speak,
     /// SendID, RecvID, or has a zero-length material.
     pub fn resolve(
         &self,
-        key_chains: &std::collections::HashMap<String, KeyChain>,
+        key_chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     ) -> Option<ResolvedAoKey> {
         let chain = key_chains.get(&self.key_chain)?;
-        let key = chain.active_key()?;
-        let alg_name = key.crypto_algorithm?.linux_alg_name()?;
+        let (_, key) = chain.keys.iter().next()?;
+        let alg_name = tcp_ao_alg_from_policy(key.algo?)?;
         let send_id = key.send_id?;
         let recv_id = key.recv_id?;
         if key.key_material.is_empty() {
