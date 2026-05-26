@@ -902,8 +902,9 @@ impl Isis {
             );
         }
 
+        let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
         for mut frag in fragments {
-            let buf = lsp_emit(&mut frag, level);
+            let buf = lsp_emit(&mut frag, level, &auth_cfg);
             let lsp_id = frag.lsp_id;
             insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
             top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -997,8 +998,11 @@ impl Isis {
             ..Default::default()
         };
 
-        // Emit and flood the purged LSP
-        let _buf = lsp_emit(&mut purged_lsp, level);
+        // Emit and flood the purged LSP. Purge auth follows
+        // RFC 6232: the zero-lifetime LSP still carries the
+        // per-level Auth TLV so receivers can verify it.
+        let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
+        let _buf = lsp_emit(&mut purged_lsp, level, &auth_cfg);
         insert_self_originate(&mut top, level, purged_lsp, None);
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -1065,8 +1069,9 @@ impl Isis {
             .max()
             .unwrap_or(0);
 
+        let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
         for mut frag in fragments {
-            let buf = lsp_emit(&mut frag, level);
+            let buf = lsp_emit(&mut frag, level, &auth_cfg);
             let lsp_id = frag.lsp_id;
             insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
             top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);

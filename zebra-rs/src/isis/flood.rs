@@ -200,7 +200,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
     // PSNPs are signed per RFC 5304 §3 with the level's area or
     // domain password; the Auth TLV is appended after the LspEntries
     // TLV and so eats into the per-fragment entry budget.
-    let auth_cfg = super::lsp::snp_auth_cfg(link.up_config, level);
+    let auth_cfg = super::lsp::level_auth_cfg(link.up_config, level);
     let auth_size = auth::auth_tlv_wire_size(auth_cfg);
 
     let available_len = {
