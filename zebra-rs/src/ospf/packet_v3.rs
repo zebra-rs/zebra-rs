@@ -8,8 +8,9 @@ use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
 use ospf_packet::{
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate,
-    Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+    OSPFV3_NSSA_LSA_TYPE, Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck, Ospfv3LsRequest,
+    Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet,
+    Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -1054,6 +1055,17 @@ fn ospfv3_ls_upd_proc(
     if scope == Ospfv3LsaScope::As && oi.area_type.is_stub_or_nssa() {
         tracing::info!(
             "[v3 LSUpd] Step 3: discarding AS-scope LSA in {:?} area",
+            oi.area_type
+        );
+        return LsaProcessResult::DiscardNoAck;
+    }
+    // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs (0x2007)
+    // are accepted only in NSSA areas. Option-bit negotiation
+    // (phase 1) usually prevents the adjacency in the first
+    // place, but defend against misconfigured peers.
+    if h.ls_type == OSPFV3_NSSA_LSA_TYPE && !oi.area_type.is_nssa() {
+        tracing::info!(
+            "[v3 LSUpd] Step 3: discarding Type-7 NSSA-LSA in {:?} area",
             oi.area_type
         );
         return LsaProcessResult::DiscardNoAck;

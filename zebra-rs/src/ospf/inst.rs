@@ -3386,6 +3386,161 @@ impl Ospf<Ospfv3> {
         self.flood_self_originated_lsa(AREA0, &flood_lsa);
     }
 
+    /// v3 generic Type-7 NSSA-LSA originator. Builds an
+    /// `Ospfv3LsBody::Nssa(Ospfv3AsExternalLsa)` body for the
+    /// given v6 prefix and installs it into `area_id`'s LSDB.
+    /// `metric_type_2 = true` sets the E-bit; `fwd_addr` is
+    /// optional (encoded with the F-flag when `Some`).
+    ///
+    /// Mirror of v2's `nssa_lsa_originate_for_prefix`. Caller is
+    /// responsible for gating on area type / config; the v3
+    /// equivalents of v2's policy wrappers
+    /// (`nssa_default_lsa_originate`) sit just below.
+    ///
+    /// RFC 5340 §A.4.9: NSSA-LSA body is identical to AS-External
+    /// (§A.4.7). RFC 3101 §2.4 P-bit lives in the prefix-options
+    /// field (not the LSA header as in v2); the default-LSA
+    /// originator leaves it clear per §2.3.
+    fn nssa_lsa_originate_for_prefix_v3(
+        &mut self,
+        area_id: Ipv4Addr,
+        prefix: ipnet::Ipv6Net,
+        metric: u32,
+        metric_type_2: bool,
+        fwd_addr: Option<std::net::Ipv6Addr>,
+    ) {
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_FLAG_E, OSPFV3_AS_EXTERNAL_FLAG_F, OSPFV3_NSSA_LSA_TYPE,
+            Ospfv3AsExternalLsa, Ospfv3LsBody, Ospfv3LsaHeader, Ospfv3PrefixOptions,
+            ospfv3_prefix_wire_len,
+        };
+
+        // v3 LSA header: link_state_id is a 32-bit opaque value
+        // selected by the originator; for the NSSA default-LSA we
+        // use 0 (matches v2 ls_id == 0.0.0.0). For redistributed
+        // prefixes a future caller will pick something stable per
+        // RFC 5340 §A.4.7 conventions.
+        let link_state_id: u32 = if prefix.prefix_len() == 0 {
+            0
+        } else {
+            // Hash-style stable per-prefix LS-ID picker is a phase
+            // 6e concern; for now reuse the high 4 bytes of the
+            // prefix. Collisions are tolerated in this phase since
+            // only the default originator (ls_id=0) is wired here.
+            u32::from_be_bytes(prefix.network().octets()[0..4].try_into().unwrap_or([0; 4]))
+        };
+
+        let mut flags = 0u8;
+        if metric_type_2 {
+            flags |= OSPFV3_AS_EXTERNAL_FLAG_E;
+        }
+        if fwd_addr.is_some() {
+            flags |= OSPFV3_AS_EXTERNAL_FLAG_F;
+        }
+
+        // Address prefix bytes, padded to the next 4-octet boundary
+        // per RFC 5340 §A.4.1.1. `ospfv3_prefix_wire_len` gives the
+        // padded length; truncate the network bytes to that.
+        let wire_len = ospfv3_prefix_wire_len(prefix.prefix_len());
+        let mut address_prefix = vec![0u8; wire_len];
+        let net_bytes = prefix.network().octets();
+        let copy_len = wire_len.min(net_bytes.len());
+        address_prefix[..copy_len].copy_from_slice(&net_bytes[..copy_len]);
+
+        let body = Ospfv3AsExternalLsa {
+            flags,
+            metric,
+            prefix_length: prefix.prefix_len(),
+            prefix_options: Ospfv3PrefixOptions::new(),
+            referenced_ls_type: 0,
+            address_prefix,
+            forwarding_address: fwd_addr,
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        };
+
+        let header = Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_NSSA_LSA_TYPE,
+            link_state_id,
+            advertising_router: self.router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        };
+        let mut lsa = ospf_packet::Ospfv3Lsa {
+            h: header,
+            body: Ospfv3LsBody::Nssa(body),
+        };
+
+        // Preserve sequence number on refresh.
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_NSSA_LSA_TYPE, link_state_id, self.router_id);
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(existing) = area.lsdb.lookup_by_raw_key(key)
+        {
+            lsa.h.ls_seq_number = lsa
+                .h
+                .ls_seq_number
+                .max(existing.h.ls_seq_number.saturating_add(1));
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
+    }
+
+    /// Flush a single self-originated v3 Type-7 LSA from
+    /// `area_id` keyed by the prefix-derived ls-id (0 for default).
+    fn nssa_lsa_flush_for_prefix_v3(&mut self, area_id: Ipv4Addr, prefix: ipnet::Ipv6Net) {
+        use ospf_packet::OSPFV3_NSSA_LSA_TYPE;
+        let link_state_id: u32 = if prefix.prefix_len() == 0 {
+            0
+        } else {
+            u32::from_be_bytes(prefix.network().octets()[0..4].try_into().unwrap_or([0; 4]))
+        };
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_NSSA_LSA_TYPE, link_state_id, self.router_id);
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// RFC 3101 §2.3 v3 NSSA default-LSA origination. Thin
+    /// wrapper around `nssa_lsa_originate_for_prefix_v3`: gates
+    /// on area type + `nssa_default_originate` knob, then
+    /// originates `::/0` with metric 1, E2, no FA.
+    pub fn nssa_default_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        let area_type = match self.areas.get(area_id) {
+            Some(area) => area.area_type,
+            None => return,
+        };
+        if !area_type.is_nssa() || !area_type.nssa_default_originate {
+            self.nssa_default_lsa_flush(area_id);
+            return;
+        }
+        let default =
+            ipnet::Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 0).expect("::/0 is valid");
+        self.nssa_lsa_originate_for_prefix_v3(
+            area_id, default, /* metric */ 1, /* metric_type_2 */ true,
+            /* fwd_addr */ None,
+        );
+    }
+
+    /// Flush our self-originated v3 Type-7 default LSA from
+    /// `area_id`.
+    pub fn nssa_default_lsa_flush(&mut self, area_id: Ipv4Addr) {
+        let default =
+            ipnet::Ipv6Net::new(std::net::Ipv6Addr::UNSPECIFIED, 0).expect("::/0 is valid");
+        self.nssa_lsa_flush_for_prefix_v3(area_id, default);
+    }
+
     /// Flood a v3 LSA through `area_id`, optionally exempting the
     /// source neighbor that fed it to us (RFC 2328 §13.3 Step 1c).
     /// RFC 5187 §3.2 bullets 2-3 — v3 mirror of
@@ -3840,13 +3995,13 @@ impl Ospf<Ospfv3> {
                 // RFC 2328 §13.4: a peer flooded our own LSA back to
                 // us at a higher sequence number (typical post-restart
                 // scenario). Re-originate at an even higher seq so
-                // we own the LSA again. Currently handles the three
-                // wired self-origination paths (Router-LSA,
-                // Network-LSA, Intra-Area-Prefix-LSA); other LSA
-                // types fall through.
+                // we own the LSA again. Currently handles the wired
+                // self-origination paths (Router-LSA, Network-LSA,
+                // Intra-Area-Prefix-LSA, NSSA-LSA default); other
+                // LSA types fall through.
                 use ospf_packet::{
                     OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE,
-                    OSPFV3_ROUTER_LSA_TYPE,
+                    OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
                 };
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
                     let (ls_type, ls_id, _) = key;
@@ -3856,6 +4011,15 @@ impl Ospf<Ospfv3> {
                         t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),
                         t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
                             self.router_intra_area_prefix_lsa_originate(area)
+                        }
+                        // Only the default NSSA-LSA (link_state_id
+                        // == 0) is self-originated today. Other
+                        // ls-ids will land here once redistribute
+                        // is wired on v3 (phase 6 follow-on); for
+                        // now they're treated as no-owner and the
+                        // generic flush path handles them.
+                        t if t == OSPFV3_NSSA_LSA_TYPE && ls_id == 0 => {
+                            self.nssa_default_lsa_originate(area)
                         }
                         _ => {}
                     }

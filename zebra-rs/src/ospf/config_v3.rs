@@ -94,7 +94,10 @@ impl Ospf<Ospfv3> {
 
 /// `/router/ospfv3/area/<id>/area-type` — same shape as the v2
 /// sibling in `config.rs`; delegates to the shared
-/// `area_type_set` helper.
+/// `area_type_set` helper, then triggers v3 NSSA default Type-7
+/// origination so the LSA appears on entry to NSSA and is flushed
+/// on exit (the helper short-circuits to flush when area is no
+/// longer NSSA).
 fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
     let area_id = parse_area_id(&args.string()?)?;
     let kind = if op.is_set() {
@@ -103,6 +106,7 @@ fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp
         AreaTypeKind::default()
     };
     area_type_set(ospf, area_id, kind);
+    ospf.nssa_default_lsa_originate(area_id);
     Some(())
 }
 
@@ -125,6 +129,10 @@ fn config_ospfv3_area_nssa_default_originate(
     let area_id = parse_area_id(&args.string()?)?;
     let value = op.is_set() && args.boolean()?;
     area_nssa_default_originate_set(ospf, area_id, value);
+    // Trigger the v3 originator (or flush) — the helper inspects
+    // the current area type + knob value and picks the right
+    // action.
+    ospf.nssa_default_lsa_originate(area_id);
     Some(())
 }
 
