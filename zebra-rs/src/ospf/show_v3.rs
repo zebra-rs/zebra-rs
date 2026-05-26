@@ -937,14 +937,27 @@ struct Ospfv3SrIlmJson {
 }
 
 #[derive(Serialize)]
-struct Ospfv3SrRemotePrefixJson {
-    advertising_router: String,
-    area: String,
+struct Ospfv3SrRemotePrefixRowJson {
     prefix: String,
     sid_form: String,
     label_op: String,
     interface: String,
     nexthop: String,
+}
+
+#[derive(Serialize)]
+struct Ospfv3SrRemoteRouterJson {
+    advertising_router: String,
+    area: String,
+    /// Peer's SRGB block as `[start/end]`, formatted from the
+    /// `Ospfv3` LSDB's `label_map` (populated by the SR-info ingest
+    /// path -- see `Lsdb<Ospfv3>::update_lsa_v3`). `None` when the
+    /// peer's SR-info LSA has not arrived yet or carried no
+    /// SID/Label Range TLV; in that case Index-form Prefix-SIDs are
+    /// not resolved into absolute labels and `label_op` stays empty.
+    srgb: Option<String>,
+    srlb: Option<String>,
+    prefixes: Vec<Ospfv3SrRemotePrefixRowJson>,
 }
 
 #[derive(Serialize)]
@@ -957,7 +970,7 @@ struct Ospfv3SegmentRoutingJson {
     srlb_end: u32,
     interfaces: Vec<Ospfv3SrInterfaceJson>,
     ilm: Vec<Ospfv3SrIlmJson>,
-    remote_prefix_sids: Vec<Ospfv3SrRemotePrefixJson>,
+    remote_routers: Vec<Ospfv3SrRemoteRouterJson>,
 }
 
 fn fmt_prefix_sid(p: &super::link::PrefixSid) -> String {
@@ -1048,14 +1061,16 @@ fn show_ospfv3_segment_routing(
         })
         .collect();
 
-    // Remote Prefix-SIDs: walk every area's E-Intra-Area-Prefix-LSAs
+    // Remote SR view: walk every area's E-Intra-Area-Prefix-LSAs
     // (LS Type 0xA029, RFC 8362 §3.7) advertised by *other* routers,
     // pulling out each `PrefixSid` sub-TLV (RFC 8666 §5). Nexthop /
     // interface come from the resolved RIB so the operator sees what
     // forwarding will actually use; the resolved label comes from
     // `SpfRouteV3.sid` populated by `add_prefix_sids_v3` -- single
-    // source of truth shared with the install path.
-    let remote_prefix_sids = collect_remote_prefix_sids(top);
+    // source of truth shared with the install path. Per-router SRGB
+    // / SRLB metadata comes from the LSDB's `label_map`, populated
+    // by `Lsdb<Ospfv3>::update_lsa_v3`.
+    let remote_routers = collect_remote_routers(top);
 
     let summary = Ospfv3SegmentRoutingJson {
         enabled,
@@ -1066,7 +1081,7 @@ fn show_ospfv3_segment_routing(
         srlb_end: SRLB_START + SRLB_RANGE - 1,
         interfaces,
         ilm,
-        remote_prefix_sids,
+        remote_routers,
     };
 
     let mut text = String::new();
@@ -1127,34 +1142,32 @@ fn show_ospfv3_segment_routing(
         )?;
     }
 
-    if !summary.remote_prefix_sids.is_empty() {
-        // Group consecutive entries by advertising_router; the
-        // collector already sorts by (adv_router, prefix), so a
-        // running header is enough.
+    if !summary.remote_routers.is_empty() {
         writeln!(text)?;
         writeln!(text, "  Remote Prefix-SIDs:")?;
-        let mut current_router: Option<&str> = None;
-        for r in &summary.remote_prefix_sids {
-            if current_router != Some(r.advertising_router.as_str()) {
-                writeln!(text)?;
-                writeln!(
-                    text,
-                    "  SR-Node: {}    Area: {}",
-                    r.advertising_router, r.area
-                )?;
-                writeln!(
-                    text,
-                    "    {:<32}  {:<18}  {:<14}  {:<9}  Nexthop",
-                    "Prefix", "Prefix-SID", "Label Op", "Iface"
-                )?;
-                writeln!(text, "    {}", "-".repeat(82))?;
-                current_router = Some(r.advertising_router.as_str());
-            }
+        for router in &summary.remote_routers {
+            writeln!(text)?;
             writeln!(
                 text,
-                "    {:<32}  {:<18}  {:<14}  {:<9}  {}",
-                r.prefix, r.sid_form, r.label_op, r.interface, r.nexthop
+                "  SR-Node: {}    Area: {}    SRGB: {}    SRLB: {}",
+                router.advertising_router,
+                router.area,
+                router.srgb.as_deref().unwrap_or("(unknown)"),
+                router.srlb.as_deref().unwrap_or("(unknown)"),
             )?;
+            writeln!(
+                text,
+                "    {:<32}  {:<18}  {:<14}  {:<9}  Nexthop",
+                "Prefix", "Prefix-SID", "Label Op", "Iface"
+            )?;
+            writeln!(text, "    {}", "-".repeat(82))?;
+            for row in &router.prefixes {
+                writeln!(
+                    text,
+                    "    {:<32}  {:<18}  {:<14}  {:<9}  {}",
+                    row.prefix, row.sid_form, row.label_op, row.interface, row.nexthop
+                )?;
+            }
         }
     }
     writeln!(text)?;
@@ -1165,17 +1178,29 @@ fn show_ospfv3_segment_routing(
 /// Walk every area's E-Intra-Area-Prefix-LSAs advertised by *other*
 /// routers and return one entry per `PrefixSid` sub-TLV. Filters out
 /// MaxAge LSAs and self-originated ones (those are already in the
-/// local section). Sorted by `(advertising_router, prefix)` so the
-/// render path can detect router-block boundaries with a single
-/// running cursor.
-fn collect_remote_prefix_sids(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemotePrefixJson> {
+/// local section). Grouped by `(area_id, advertising_router)` so the
+/// per-router header (SRGB / SRLB from `label_map`) can render once.
+/// Within a group, prefixes are sorted lexicographically by string
+/// form (good enough for human-readable display).
+fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
+    use std::collections::BTreeMap;
+
     use ipnet::Ipv6Net;
     use ospf_packet::{
         OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv, SidLabelTlv,
         ospfv3_prefix_wire_len,
     };
 
-    let mut out: Vec<Ospfv3SrRemotePrefixJson> = Vec::new();
+    type RouterKey = (Ipv4Addr, Ipv4Addr); // (area_id, advertising_router)
+    let mut buckets: BTreeMap<RouterKey, Vec<Ospfv3SrRemotePrefixRowJson>> = BTreeMap::new();
+    // Track the LSDB instance per area so we can resolve SRGB/SRLB
+    // for each router after the prefix loop completes.
+    let mut srgb_lookup: BTreeMap<RouterKey, (Option<String>, Option<String>)> = BTreeMap::new();
+
+    let fmt_block = |b: &crate::spf::label_block::LabelBlock| -> String {
+        format!("[{}/{}]", b.start, b.end.saturating_sub(1))
+    };
+
     for (area_id, area) in top.areas.iter() {
         for ((_ls_id, _adv), lsa) in area
             .lsdb
@@ -1191,6 +1216,22 @@ fn collect_remote_prefix_sids(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemotePrefixJso
             let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
                 continue;
             };
+
+            // Resolve peer's SRGB / SRLB from the LSDB's label_map.
+            // Populated by `Lsdb<Ospfv3>::update_lsa_v3` (PR-3c) when
+            // the peer's SR-info E-Router-LSA arrives. Same key used
+            // by `add_prefix_sids_v3` for Index→Label resolution.
+            let key = (*area_id, advertising);
+            srgb_lookup.entry(key).or_insert_with(|| {
+                if let Some(cfg) = area.lsdb.label_map.get(&advertising) {
+                    let srgb = fmt_block(&cfg.global);
+                    let srlb = cfg.local.as_ref().map(&fmt_block);
+                    (Some(srgb), srlb)
+                } else {
+                    (None, None)
+                }
+            });
+
             for tlv in &body.tlvs {
                 let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
                     continue;
@@ -1236,23 +1277,42 @@ fn collect_remote_prefix_sids(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemotePrefixJso
                         }
                         None => (String::new(), String::new(), String::new()),
                     };
-                    out.push(Ospfv3SrRemotePrefixJson {
-                        advertising_router: advertising.to_string(),
-                        area: area_id.to_string(),
-                        prefix: prefix.to_string(),
-                        sid_form,
-                        label_op,
-                        interface,
-                        nexthop,
-                    });
+                    buckets
+                        .entry(key)
+                        .or_default()
+                        .push(Ospfv3SrRemotePrefixRowJson {
+                            prefix: prefix.to_string(),
+                            sid_form,
+                            label_op,
+                            interface,
+                            nexthop,
+                        });
                 }
             }
         }
     }
+
+    let mut out: Vec<Ospfv3SrRemoteRouterJson> = buckets
+        .into_iter()
+        .map(|((area_id, adv), mut prefixes)| {
+            prefixes.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            let (srgb, srlb) = srgb_lookup
+                .get(&(area_id, adv))
+                .cloned()
+                .unwrap_or((None, None));
+            Ospfv3SrRemoteRouterJson {
+                advertising_router: adv.to_string(),
+                area: area_id.to_string(),
+                srgb,
+                srlb,
+                prefixes,
+            }
+        })
+        .collect();
     out.sort_by(|a, b| {
         a.advertising_router
             .cmp(&b.advertising_router)
-            .then_with(|| a.prefix.cmp(&b.prefix))
+            .then_with(|| a.area.cmp(&b.area))
     });
     out
 }
