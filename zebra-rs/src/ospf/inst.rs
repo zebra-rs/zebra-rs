@@ -471,6 +471,12 @@ impl Ospf<Ospfv2> {
         ospf.callback_build();
         ospf.show_build();
 
+        // Phase 5e-i: if a fresh graceful-restart checkpoint is on
+        // disk, replay the saved state into this instance + enter
+        // restarting mode so we don't cold-start over a planned
+        // restart.
+        ospf.gr_restart_load_checkpoint();
+
         let tx = ospf.tx.clone();
         let sock = ospf.sock.clone();
         tokio::spawn(async move {
@@ -708,6 +714,15 @@ impl Ospf<Ospfv2> {
     }
 
     fn router_lsa_originate_with_min_seq(&mut self, min_seq: Option<u32>) {
+        // Phase 5e — while restarting, the checkpoint-loaded
+        // Router-LSA must stay verbatim (helpers snapshotted its
+        // seq+checksum). Fresh re-origination here would clobber
+        // it and trip `gr_helper_check_exit`. Skip; the
+        // exit-restart path (5e-ii) re-originates at seq+1 once
+        // we declare the restart complete.
+        if self.in_restart() {
+            return;
+        }
         let router_lsa = self.router_lsa_build();
         let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
             let current_seq = area
@@ -1800,6 +1815,13 @@ impl Ospf<Ospfv2> {
     /// Network-LSA per RFC 2328 §14.1) does not fire while a
     /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
+        // Phase 5e — Network-LSA is topology-affecting, so the
+        // checkpoint-loaded copy stays verbatim during restart.
+        // 5e-ii's exit path re-emits at seq+1 once adjacencies
+        // re-converge.
+        if self.in_restart() {
+            return;
+        }
         let (area_id, ls_id, netmask, attached_routers, full_nbr_count) = {
             let Some(link) = self.links.get_mut(&ifindex) else {
                 return;
@@ -1894,6 +1916,12 @@ impl Ospf<Ospfv2> {
     /// `ls_id` is the primary interface address — same value used
     /// at origination in `update_network_lsa_by_interface`.
     pub fn network_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
+        // Phase 5e — premature-aging our Network-LSA mid-restart
+        // would tear down helpers' view of this segment. Skip
+        // until exit-restart (5e-ii).
+        if self.in_restart() {
+            return;
+        }
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -2185,6 +2213,145 @@ impl Ospf<Ospfv2> {
     /// `self.restarting`, and re-originates the Router-Info LSA
     /// without `gr_capable`. Idempotent — no-op when no restart
     /// is staged.
+    /// `true` while we're in the middle of a graceful restart —
+    /// either because the operator just typed `… begin` (Phase 5c)
+    /// or because we booted with a fresh checkpoint on disk
+    /// (Phase 5e). Self-LSA origination paths check this and
+    /// skip seq-number bumps so the helpers' snapshot
+    /// (PR #869) keeps matching across the restart window.
+    pub fn in_restart(&self) -> bool {
+        self.restarting.is_some()
+    }
+
+    /// Phase 5e-i — replay an on-disk checkpoint into a freshly
+    /// constructed `Ospf<Ospfv2>` instance.
+    ///
+    /// Called from `Ospf::new()` after the default-construction.
+    /// If `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
+    /// `ZEBRA_OSPF_CHECKPOINT_DIR` override) is present AND fresh
+    /// (within `1.5 × grace_period_secs` of `written_at` per the
+    /// locked design), the daemon comes up in restarting mode:
+    ///
+    ///   - `self.router_id` restored from the checkpoint.
+    ///   - Each area's LSDB pre-populated from the saved LSA
+    ///     bodies (verbatim, so re-flood on adjacency recovery
+    ///     produces byte-identical content to what helpers
+    ///     snapshotted).
+    ///   - `lan_adj_sids` restored so SR-MPLS labels stay stable.
+    ///   - `self.restarting = Some(...)` so origination methods
+    ///     short-circuit and the show output reflects the mode.
+    ///   - Auto-abort timer armed for the remaining grace
+    ///     window; 5e-ii will replace it with the exit-restart
+    ///     drive.
+    ///
+    /// The checkpoint file is deleted immediately after a
+    /// successful load — a second restart MUST NOT replay the
+    /// same stale state. Re-checkpointing is the next restart's
+    /// responsibility (5d's commit handler).
+    fn gr_restart_load_checkpoint(&mut self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        use super::neigh::RestartingState;
+        use super::task::{Timer, TimerType};
+        use std::time::{Duration, SystemTime};
+
+        let path = default_path("ospf");
+        let cp = match OspfCheckpoint::read_from_path(&path) {
+            Ok(cp) => cp,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(
+                    "[GR Restart] checkpoint at {} unreadable, cold-starting: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        // Freshness: written_at must be within 1.5x grace_period
+        // ago, per the locked design (wall clock + slack).
+        let max_age = Duration::from_secs((cp.grace_period_secs as u64).saturating_mul(3) / 2);
+        let age = SystemTime::now()
+            .duration_since(cp.written_at)
+            .unwrap_or(Duration::ZERO);
+        if age > max_age {
+            tracing::warn!(
+                "[GR Restart] checkpoint at {} stale (age {:?} > {:?}), cold-starting",
+                path.display(),
+                age,
+                max_age
+            );
+            let _ = OspfCheckpoint::delete(&path);
+            return;
+        }
+
+        // Replay: router-id, areas + their LSDBs, lan_adj_sids.
+        self.router_id = cp.router_id;
+        let mut total_lsas = 0usize;
+        for area_cp in &cp.areas {
+            let area = self.areas.fetch(area_cp.area_id);
+            area.area_type.kind = area_cp.area_type_kind.into();
+            for snap in &area_cp.lsas {
+                let Some(lsa) = ospf_packet::OspfLsa::decode(&snap.body) else {
+                    tracing::warn!(
+                        "[GR Restart] failed to decode checkpointed LSA key={:?}, skipping",
+                        snap.key
+                    );
+                    continue;
+                };
+                if snap.self_originated {
+                    area.lsdb
+                        .insert_self_originated(lsa, &self.tx, Some(area_cp.area_id));
+                } else {
+                    area.lsdb
+                        .insert_received(lsa, &self.tx, Some(area_cp.area_id));
+                }
+                total_lsas += 1;
+            }
+        }
+        for ((ifindex, addr), label) in &cp.lan_adj_sids {
+            self.lan_adj_sids.insert((*ifindex, *addr), *label);
+        }
+
+        // Restarting state — entered_at is the original checkpoint
+        // write time so the freshness slack on this side matches
+        // the helpers' grace-period view of when we went down.
+        let remaining = max_age.saturating_sub(age);
+        let remaining_secs = remaining.as_secs().max(1);
+        let tx = self.tx.clone();
+        let abort_timer = Timer::new(
+            Duration::from_secs(remaining_secs),
+            TimerType::Once,
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::GrRestartAbort);
+                }
+            },
+        );
+        let entered_at = tokio::time::Instant::now() - age;
+        self.restarting = Some(RestartingState {
+            grace_period: cp.grace_period_secs,
+            reason: ospf_packet::GraceRestartReason::from(cp.restart_reason),
+            entered_at,
+            abort_timer: Some(abort_timer),
+        });
+
+        // Delete the on-disk file immediately. The next restart's
+        // commit handler writes a fresh one; replaying a stale
+        // file on a second boot would propagate the wrong LSDB.
+        let _ = OspfCheckpoint::delete(&path);
+
+        tracing::info!(
+            "[GR Restart] restored from checkpoint at {}: router-id={}, {} area(s), {} LSA(s), grace remaining ~{:?}",
+            path.display(),
+            cp.router_id,
+            cp.areas.len(),
+            total_lsas,
+            remaining,
+        );
+    }
+
     pub fn gr_restart_abort(&mut self) {
         if self.restarting.take().is_none() {
             return;
