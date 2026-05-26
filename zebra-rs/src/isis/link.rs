@@ -169,6 +169,11 @@ pub struct LinkTop<'a> {
     pub sr_locator: &'a Option<crate::rib::Locator>,
     pub watched_locator: &'a Option<String>,
     pub elib: &'a mut crate::isis::srv6::ElibPool,
+    /// Read-only snapshot of the policy-driven key-chain registry
+    /// (mirrors `IsisTop::key_chains`). Hello / CSNP / PSNP sign +
+    /// verify paths consult this when the per-link
+    /// `hello-authentication` scope has a `key-chain` leaf set.
+    pub key_chains: &'a std::collections::BTreeMap<String, crate::policy::KeyChain>,
 }
 
 impl<'a> LinkTop<'a> {
@@ -823,6 +828,20 @@ pub fn config_hello_auth_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp
     let name = args.string()?;
     let link = isis.links.get_mut_by_name(&name)?;
     auth_set_send_only(&mut link.config.hello_auth, &mut args, op)
+}
+
+pub fn config_hello_auth_key_chain(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    let ifindex = link.ifindex as usize;
+    crate::isis::config::auth_set_key_chain(
+        &mut link.config.hello_auth,
+        &mut args,
+        op,
+        &isis.policy_tx,
+        ifindex,
+        crate::policy::KeyChainScope::IsisIih,
+    )
 }
 
 fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) -> Option<()> {

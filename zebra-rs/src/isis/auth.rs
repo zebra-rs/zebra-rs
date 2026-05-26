@@ -25,6 +25,134 @@ use sha2::{Sha256, Sha384, Sha512};
 
 use super::config::{IsisAuthConfig, IsisAuthType};
 
+/// Fully resolved IS-IS auth send/verify parameters for one PDU.
+/// Either side composes one of these from the IsisAuthConfig and,
+/// when no inline password is set, the policy key-chain snapshot.
+#[derive(Debug, Clone)]
+pub struct ResolvedAuth {
+    pub auth_type: IsisAuthType,
+    pub key: Vec<u8>,
+    /// On-wire key-id stamped in the RFC 5310 2-byte prefix.
+    /// Ignored for `Text` / `Md5`.
+    pub key_id: u16,
+}
+
+/// Project the policy algorithm enum onto the IS-IS subset.
+/// AesCmacPrf128 belongs to TCP-AO's MUST-implement set per RFC
+/// 5926 and isn't an IS-IS algorithm, so it returns `None` and the
+/// resolve falls through (no auth on the wire).
+fn isis_algo_from_policy(a: crate::policy::CryptoAlgorithm) -> Option<IsisAuthType> {
+    use crate::policy::CryptoAlgorithm as P;
+    match a {
+        P::Md5 => Some(IsisAuthType::Md5),
+        P::HmacSha1 => Some(IsisAuthType::HmacSha1),
+        P::HmacSha256 => Some(IsisAuthType::HmacSha256),
+        P::HmacSha384 => Some(IsisAuthType::HmacSha384),
+        P::HmacSha512 => Some(IsisAuthType::HmacSha512),
+        P::AesCmacPrf128 => None,
+    }
+}
+
+/// Is this policy key usable for sending right now? RFC 8177 says a
+/// key with no algorithm or no material is mid-configuration and
+/// inactive; we also require its send-lifetime to bracket `now`.
+fn chain_key_is_send_active(k: &crate::policy::Key, now: chrono::DateTime<chrono::Utc>) -> bool {
+    k.algo.is_some() && !k.key_material.is_empty() && k.send_lifetime.is_active(now)
+}
+
+/// Same as `chain_key_is_send_active` but against accept-lifetime —
+/// gates whether a received PDU stamped with this key-id is allowed
+/// to verify.
+fn chain_key_is_accept_active(k: &crate::policy::Key, now: chrono::DateTime<chrono::Utc>) -> bool {
+    k.algo.is_some() && !k.key_material.is_empty() && k.accept_lifetime.is_active(now)
+}
+
+/// Resolve the send-side `(auth_type, key, key_id)` to use for this
+/// scope. Inline `password` always wins when set — operators of the
+/// historical simple-password setup keep their behavior, and the
+/// `key-chain` leaf is only consulted when no inline password is
+/// present. Returns `None` when neither path is configured, the
+/// chain is missing, has no active key, or the active key uses an
+/// algorithm IS-IS can't sign with.
+pub fn resolve_send(
+    cfg: &IsisAuthConfig,
+    chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<ResolvedAuth> {
+    if let Some(pw) = cfg.password.as_deref() {
+        return Some(ResolvedAuth {
+            auth_type: cfg.auth_type,
+            key: pw.as_bytes().to_vec(),
+            key_id: cfg.effective_key_id(),
+        });
+    }
+    let chain_name = cfg.key_chain.as_deref()?;
+    let chain = chains.get(chain_name)?;
+    let (id, key) = chain
+        .keys
+        .iter()
+        .find(|(_, k)| chain_key_is_send_active(k, now))?;
+    let auth_type = isis_algo_from_policy(key.algo?)?;
+    // YANG key-id is uint64; the wire stamps a u16. Reject IDs that
+    // wouldn't fit so the send path doesn't silently truncate.
+    let key_id_u16: u16 = (*id).try_into().ok()?;
+    Some(ResolvedAuth {
+        auth_type,
+        key: key.key_material.clone(),
+        key_id: key_id_u16,
+    })
+}
+
+/// Resolve the receive-side key bytes for an incoming PDU.
+///
+/// Inline `password` always wins — operators of the historical
+/// simple-password setup keep their behavior, and the `key-chain`
+/// leaf is only consulted when no inline password is set. For the
+/// chain path:
+///   - generic-crypto wire types carry the sender's RFC 5310 key-id
+///     in the TLV prefix; the caller passes that as `wire_key_id`
+///     and the lookup is an exact match.
+///   - RFC 5304 MD5 doesn't carry a key-id; the caller passes
+///     `None` and the helper picks the lowest accept-active key
+///     whose algo matches `expected_mode`.
+///
+/// The chosen key's algo must match `expected_mode` so the verify
+/// path doesn't compare digests of differing lengths.
+pub fn resolve_recv(
+    cfg: &IsisAuthConfig,
+    chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
+    expected_mode: IsisAuthType,
+    wire_key_id: Option<u16>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Vec<u8>> {
+    if let Some(pw) = cfg.password.as_deref() {
+        return Some(pw.as_bytes().to_vec());
+    }
+    let chain_name = cfg.key_chain.as_deref()?;
+    let chain = chains.get(chain_name)?;
+    let key = match wire_key_id {
+        Some(id) => chain.keys.get(&u64::from(id))?,
+        None => {
+            // No wire key-id — find the lowest accept-active key
+            // whose algo matches what the wire claims.
+            chain.keys.values().find(|k| {
+                chain_key_is_accept_active(k, now)
+                    && k.algo
+                        .and_then(isis_algo_from_policy)
+                        .is_some_and(|a| a == expected_mode)
+            })?
+        }
+    };
+    if !chain_key_is_accept_active(key, now) {
+        return None;
+    }
+    let algo = isis_algo_from_policy(key.algo?)?;
+    if algo != expected_mode {
+        return None;
+    }
+    Some(key.key_material.clone())
+}
+
 /// HMAC-MD5 over `data` keyed by `key` (RFC 2104 / RFC 5304 §3).
 /// Returns the 16-byte digest. `Hmac::new_from_slice` accepts any
 /// key length — internally hashed/padded to the MD5 block size.
@@ -102,12 +230,12 @@ pub fn digest_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// Generic-crypto (RFC 5310) values are 1 (auth-type) + 2 (Key ID)
 /// + digest-length, which is bigger than RFC 5304's md5 layout.
-pub fn auth_tlv_wire_size(cfg: &IsisAuthConfig) -> usize {
-    let Some(pw) = cfg.password.as_ref() else {
+pub fn auth_tlv_wire_size(resolved: Option<&ResolvedAuth>) -> usize {
+    let Some(r) = resolved else {
         return 0;
     };
-    match cfg.auth_type {
-        IsisAuthType::Text => 2 + 1 + pw.len(),
+    match r.auth_type {
+        IsisAuthType::Text => 2 + 1 + r.key.len(),
         IsisAuthType::Md5 => 2 + 1 + ISIS_AUTH_HMAC_MD5_LEN,
         algo if algo.is_generic_crypto() => {
             2 + 1 + ISIS_AUTH_GENERIC_KEY_ID_LEN + algo.digest_len()
@@ -122,23 +250,22 @@ pub fn auth_tlv_wire_size(cfg: &IsisAuthConfig) -> usize {
 /// placeholder. For RFC 5310 generic crypto, the placeholder is the
 /// Key-ID prefix followed by an Apad-filled digest area — `sign`
 /// will patch the real HMAC over the Apad bytes once computed.
-pub fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, cfg: &IsisAuthConfig) {
-    let Some(pw) = cfg.password.as_deref() else {
+pub fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, resolved: Option<&ResolvedAuth>) {
+    let Some(r) = resolved else {
         return;
     };
-    let tlv = match cfg.auth_type {
+    let tlv = match r.auth_type {
         IsisAuthType::Text => IsisTlvAuth {
             auth_type: ISIS_AUTH_TYPE_CLEARTEXT,
-            value: pw.as_bytes().to_vec(),
+            value: r.key.clone(),
         },
         IsisAuthType::Md5 => {
             IsisTlvAuth::placeholder(ISIS_AUTH_TYPE_HMAC_MD5, ISIS_AUTH_HMAC_MD5_LEN)
         }
         algo if algo.is_generic_crypto() => {
-            let key_id = cfg.effective_key_id();
             let digest_len = algo.digest_len();
             let mut value = Vec::with_capacity(ISIS_AUTH_GENERIC_KEY_ID_LEN + digest_len);
-            value.extend_from_slice(&key_id.to_be_bytes());
+            value.extend_from_slice(&r.key_id.to_be_bytes());
             value.extend_from_slice(&apad(digest_len));
             IsisTlvAuth {
                 auth_type: ISIS_AUTH_TYPE_GENERIC,
@@ -449,19 +576,24 @@ mod tests {
     /// configured TLV (the function the packer would build).
     #[test]
     fn auth_tlv_wire_size_matches_emit_length() {
+        let chains = std::collections::BTreeMap::new();
+        let now = chrono::Utc::now();
+
         // Cleartext: TL header (2) + auth-type (1) + password bytes.
         let cfg = IsisAuthConfig {
             password: Some("hunter2".into()),
             auth_type: IsisAuthType::Text,
             key_id: 0,
             send_only: false,
+            key_chain: None,
         };
         let tlv: IsisTlv = IsisTlvAuth {
             auth_type: ISIS_AUTH_TYPE_CLEARTEXT,
             value: b"hunter2".to_vec(),
         }
         .into();
-        assert_eq!(auth_tlv_wire_size(&cfg), tlv.wire_len());
+        let resolved = resolve_send(&cfg, &chains, now);
+        assert_eq!(auth_tlv_wire_size(resolved.as_ref()), tlv.wire_len());
 
         // HMAC-MD5: TL header (2) + auth-type (1) + 16-byte digest.
         let cfg = IsisAuthConfig {
@@ -469,14 +601,17 @@ mod tests {
             auth_type: IsisAuthType::Md5,
             key_id: 0,
             send_only: false,
+            key_chain: None,
         };
         let tlv: IsisTlv =
             IsisTlvAuth::placeholder(ISIS_AUTH_TYPE_HMAC_MD5, ISIS_AUTH_HMAC_MD5_LEN).into();
-        assert_eq!(auth_tlv_wire_size(&cfg), tlv.wire_len());
+        let resolved = resolve_send(&cfg, &chains, now);
+        assert_eq!(auth_tlv_wire_size(resolved.as_ref()), tlv.wire_len());
 
         // No auth → 0 bytes.
         let cfg = IsisAuthConfig::default();
-        assert_eq!(auth_tlv_wire_size(&cfg), 0);
+        let resolved = resolve_send(&cfg, &chains, now);
+        assert_eq!(auth_tlv_wire_size(resolved.as_ref()), 0);
     }
 
     /// End-to-end HMAC-MD5 round-trip across a real CSNP — same
@@ -764,11 +899,14 @@ mod tests {
             auth_type: IsisAuthType::HmacSha256,
             key_id: 42,
             send_only: false,
+            key_chain: None,
         };
         let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
             area_addr: vec![0x49, 0x00, 0x01],
         })];
-        append_auth_tlv(&mut tlvs, &cfg);
+        let chains = std::collections::BTreeMap::new();
+        let resolved = resolve_send(&cfg, &chains, chrono::Utc::now());
+        append_auth_tlv(&mut tlvs, resolved.as_ref());
 
         let hello = IsisHello {
             circuit_type: IsLevel::L1L2,
@@ -836,11 +974,14 @@ mod tests {
             auth_type: IsisAuthType::HmacSha512,
             key_id: 9,
             send_only: false,
+            key_chain: None,
         };
         let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
             area_addr: vec![0x49, 0x00, 0x01],
         })];
-        append_auth_tlv(&mut tlvs, &cfg);
+        let chains = std::collections::BTreeMap::new();
+        let resolved = resolve_send(&cfg, &chains, chrono::Utc::now());
+        append_auth_tlv(&mut tlvs, resolved.as_ref());
         let lsp = IsisLsp {
             pdu_len: 0,
             hold_time: 1200,

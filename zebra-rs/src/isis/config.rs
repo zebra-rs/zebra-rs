@@ -74,6 +74,10 @@ impl Isis {
             "/router/isis/area-password/send-only",
             config_area_password_send_only,
         );
+        self.callback_add(
+            "/router/isis/area-password/key-chain",
+            config_area_password_key_chain,
+        );
         self.callback_add("/router/isis/domain-password", config_domain_password);
         self.callback_add(
             "/router/isis/domain-password/password",
@@ -90,6 +94,10 @@ impl Isis {
         self.callback_add(
             "/router/isis/domain-password/send-only",
             config_domain_password_send_only,
+        );
+        self.callback_add(
+            "/router/isis/domain-password/key-chain",
+            config_domain_password_key_chain,
         );
         self.callback_add("/router/isis/timers/hold-time", config_hold_time);
         self.callback_add(
@@ -295,6 +303,10 @@ impl Isis {
         self.callback_add(
             "/router/isis/interface/hello-authentication/send-only",
             link::config_hello_auth_send_only,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello-authentication/key-chain",
+            link::config_hello_auth_key_chain,
         );
         self.callback_add(
             "/router/isis/interface/ipv4/prefix-sid/index",
@@ -549,6 +561,13 @@ pub struct IsisAuthConfig {
     /// receive. Used to drain peers from no-auth → auth without
     /// breaking adjacencies mid-rollout.
     pub send_only: bool,
+    /// Name of a key-chain under `/key-chains/key-chain <name>`.
+    /// Only consulted when `password` is unset (inline cleartext
+    /// wins so simple-password operators don't accidentally pick
+    /// up chain-resolved bytes on the wire). The chain's active
+    /// key supplies the on-wire `(auth_type, key_id, material)`
+    /// at sign / verify time.
+    pub key_chain: Option<String>,
 }
 
 impl IsisAuthConfig {
@@ -731,6 +750,7 @@ pub fn auth_reset(cfg: &mut IsisAuthConfig) {
     cfg.auth_type = IsisAuthType::default();
     cfg.key_id = 0;
     cfg.send_only = false;
+    cfg.key_chain = None;
 }
 
 pub fn auth_set_key_id(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
@@ -758,6 +778,63 @@ pub fn auth_set_send_only(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigO
     Some(())
 }
 
+/// Send Unregister(prior) + Register(new) against the policy actor
+/// when the configured chain name for an IsisAuthConfig scope changes.
+/// Mirrors BGP's `policy_attach_msgs`. Always-Unregister-before-
+/// Register avoids the watcher-leak that would otherwise occur on a
+/// rename.
+pub(crate) fn auth_key_chain_attach_msgs(
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+    ident: usize,
+    scope: crate::policy::KeyChainScope,
+    prior: Option<String>,
+    new: Option<String>,
+) {
+    if prior == new {
+        return;
+    }
+    let policy_type = crate::policy::PolicyType::KeyChain(scope);
+    if let Some(prior_name) = prior {
+        let _ = policy_tx.send(crate::policy::Message::Unregister {
+            proto: "isis".to_string(),
+            name: prior_name,
+            ident,
+            policy_type,
+        });
+    }
+    if let Some(new_name) = new {
+        let _ = policy_tx.send(crate::policy::Message::Register {
+            proto: "isis".to_string(),
+            name: new_name,
+            ident,
+            policy_type,
+        });
+    }
+}
+
+/// Mutate `cfg.key_chain` and fire the matching Register / Unregister
+/// against `policy_tx`. The area/domain scopes use the constant
+/// `ident` (only one chain ever attaches per scope on a given IS-IS
+/// instance); the per-interface scope passes the link's ifindex.
+pub(crate) fn auth_set_key_chain(
+    cfg: &mut IsisAuthConfig,
+    args: &mut Args,
+    op: ConfigOp,
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+    ident: usize,
+    scope: crate::policy::KeyChainScope,
+) -> Option<()> {
+    let prior = cfg.key_chain.clone();
+    let new = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    cfg.key_chain = new.clone();
+    auth_key_chain_attach_msgs(policy_tx, ident, scope, prior, new);
+    Some(())
+}
+
 fn config_area_password(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     if !op.is_set() {
         auth_reset(&mut isis.config.area_password);
@@ -781,6 +858,17 @@ fn config_area_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp)
     auth_set_send_only(&mut isis.config.area_password, &mut args, op)
 }
 
+fn config_area_password_key_chain(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_key_chain(
+        &mut isis.config.area_password,
+        &mut args,
+        op,
+        &isis.policy_tx,
+        0,
+        crate::policy::KeyChainScope::IsisAreaPw,
+    )
+}
+
 fn config_domain_password(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     if !op.is_set() {
         auth_reset(&mut isis.config.domain_password);
@@ -798,6 +886,17 @@ fn config_domain_password_auth_type(isis: &mut Isis, mut args: Args, op: ConfigO
 
 fn config_domain_password_key_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     auth_set_key_id(&mut isis.config.domain_password, &mut args, op)
+}
+
+fn config_domain_password_key_chain(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_key_chain(
+        &mut isis.config.domain_password,
+        &mut args,
+        op,
+        &isis.policy_tx,
+        0,
+        crate::policy::KeyChainScope::IsisDomainPw,
+    )
 }
 
 fn config_domain_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1526,6 +1625,7 @@ mod tests {
             auth_type: IsisAuthType::Md5,
             key_id: 7,
             send_only: true,
+            key_chain: Some("ringA".into()),
         };
         auth_reset(&mut cfg);
         assert_eq!(cfg, IsisAuthConfig::default());

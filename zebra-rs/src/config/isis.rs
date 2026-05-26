@@ -14,7 +14,7 @@ pub fn spawn_isis(config: &ConfigManager) {
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("isis");
     let ctx = ProtoContext::default_table(rib_client);
-    let isis = inst::Isis::new(ctx, rib_rx, bfd_client_tx);
+    let isis = inst::Isis::new(ctx, rib_rx, bfd_client_tx, config.policy_tx.clone());
     config.subscribe("isis", isis.cm.tx.clone());
     config.subscribe_show("isis", isis.show.tx.clone());
     let task = inst::serve(isis);

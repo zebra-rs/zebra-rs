@@ -871,15 +871,12 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 /// for the md5 path and `Packet::Packet` for everything else so the
 /// network writer can keep using the existing serialize-on-send code.
 fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Packet {
-    let (key, mode) = {
-        let cfg = super::lsp::level_auth_cfg(link.up_config, level);
-        let Some(pw) = cfg.password.clone() else {
-            return Packet::Packet(packet);
-        };
-        (pw, cfg.auth_type)
+    let cfg = super::lsp::level_auth_cfg(link.up_config, level);
+    let Some(resolved) = auth::resolve_send(cfg, link.key_chains, chrono::Utc::now()) else {
+        return Packet::Packet(packet);
     };
     link.state.auth_tx_signed += 1;
-    match mode {
+    match resolved.auth_type {
         IsisAuthType::Text => Packet::Packet(packet),
         algo => {
             let mut buf = bytes::BytesMut::new();
@@ -888,7 +885,7 @@ fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Pa
                 &mut buf,
                 packet.length_indicator as usize,
                 algo,
-                key.as_bytes(),
+                &resolved.key,
             );
             Packet::Bytes(buf)
         }
@@ -944,7 +941,7 @@ fn pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
 /// the LSP ages and gets re-fletcher'd in flight.
 fn verify_hmac(
     algo: IsisAuthType,
-    key: &str,
+    key: &[u8],
     auth_tlv: &IsisTlvAuth,
     pdu_bytes: &[u8],
     tlvs_start: usize,
@@ -996,7 +993,7 @@ fn verify_hmac(
             *b = 0;
         }
     }
-    let computed = auth::hmac_for_algo(algo, key.as_bytes(), &scratch);
+    let computed = auth::hmac_for_algo(algo, key, &scratch);
     // Compare against the digest portion of the parsed TLV (skip
     // the Key ID prefix for generic-crypto).
     let stored = &auth_tlv.value[header - 1..];
@@ -1029,16 +1026,18 @@ fn verify_pdu_auth(
 ) -> bool {
     // Snapshot config fields so we don't hold an immutable borrow of
     // link.config/up_config while mutating link.state.auth_rx_* below.
-    let (key, mode, send_only) = {
+    let (cfg, mode, send_only) = {
         let cfg = match scope {
             AuthScope::HelloLink => &link.config.hello_auth,
             AuthScope::AreaPassword => &link.up_config.area_password,
             AuthScope::DomainPassword => &link.up_config.domain_password,
         };
-        let Some(pw) = cfg.password.clone() else {
-            return true; // no auth configured for this scope — accept anything
-        };
-        (pw, cfg.auth_type, cfg.send_only)
+        // No password and no chain → scope is not configured for
+        // auth; accept anything.
+        if cfg.password.is_none() && cfg.key_chain.is_none() {
+            return true;
+        }
+        (cfg.clone(), cfg.auth_type, cfg.send_only)
     };
     if send_only {
         return true; // sign-only-on-tx rollover mode
@@ -1054,10 +1053,35 @@ fn verify_pdu_auth(
         return false;
     };
 
+    // Pull the on-wire RFC 5310 key-id out of the auth TLV prefix
+    // when the configured mode is generic-crypto; MD5 / Text PDUs
+    // don't carry one. The chain receive path uses this to pick the
+    // exact key the sender stamped.
+    let wire_key_id = if mode.is_generic_crypto() && auth_tlv.value.len() >= 2 {
+        Some(u16::from_be_bytes([auth_tlv.value[0], auth_tlv.value[1]]))
+    } else {
+        None
+    };
+    let Some(key) =
+        auth::resolve_recv(&cfg, link.key_chains, mode, wire_key_id, chrono::Utc::now())
+    else {
+        // Resolution failed: chain missing, no matching key-id,
+        // expired accept-lifetime, or algo mismatch. Treat as a
+        // hard reject so peers using the wrong key don't slip
+        // through.
+        link.state.auth_rx_bad += 1;
+        tracing::warn!(
+            proto = "isis",
+            link = %link.state.name,
+            pdu = ?packet.pdu_type,
+            "[AuthDrop] no usable receive key from policy registry"
+        );
+        return false;
+    };
+
     let accepted = match mode {
         IsisAuthType::Text => {
-            auth_tlv.auth_type == ISIS_AUTH_TYPE_CLEARTEXT
-                && auth::digest_eq(&auth_tlv.value, key.as_bytes())
+            auth_tlv.auth_type == ISIS_AUTH_TYPE_CLEARTEXT && auth::digest_eq(&auth_tlv.value, &key)
         }
         algo => verify_hmac(algo, &key, auth_tlv, pdu_bytes, tlvs_start, packet),
     };

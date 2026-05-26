@@ -989,16 +989,25 @@ module config {
             "Authentication key applied to Level-1 self-originated LSPs
              and SNPs (ISO 10589 §9.5 / RFC 5304 / RFC 5310). Per
              ISO 10589, L1 PDUs use the area-wide authentication string.
-             Phase 2 lands the schema and storage; the sign/verify
-             runtime arrives in Phase 4 (LSPs) and Phase 3 (SNPs are
-             carried alongside Hello auth on the link).";
+             Either `password` (inline / cleartext-friendly) or
+             `key-chain` (named RFC 8177 chain under /key-chains)
+             may carry the key — when both are set the inline
+             password wins so that simple-password operators don't
+             accidentally get chain-resolved bytes on the wire.";
 
           leaf password {
             type string;
-            mandatory true;
             description
               "Authentication key bytes. Sent cleartext on the wire
                when auth-type is text; used as the HMAC key when md5.";
+          }
+          leaf key-chain {
+            type string;
+            description
+              "Reference to a named key-chain under /key-chains.
+               Only consulted when `password` is unset. The chain's
+               active key supplies auth-type, key-id, and material
+               at sign/verify time.";
           }
           leaf auth-type {
             type enumeration {
@@ -1033,11 +1042,17 @@ module config {
           presence "L2 domain-wide IS-IS authentication";
           description
             "Authentication key applied to Level-2 self-originated LSPs
-             and SNPs. Same shape as area-password but scoped to L2.";
+             and SNPs. Same shape as area-password but scoped to L2.
+             Inline `password` wins over `key-chain` when both are set.";
 
           leaf password {
             type string;
-            mandatory true;
+          }
+          leaf key-chain {
+            type string;
+            description
+              "Reference to a named key-chain under /key-chains.
+               Only consulted when `password` is unset.";
           }
           leaf auth-type {
             type enumeration {
@@ -1299,11 +1314,17 @@ module config {
                Information TLV with auth-type 1 (text) or 54 (md5).
                Per RFC 5304 §1, send-only enables an asymmetric
                rollover where outbound is signed but inbound is
-               accepted unconditionally.";
+               accepted unconditionally. Inline `password` wins over
+               `key-chain` when both are set.";
 
             leaf password {
               type string;
-              mandatory true;
+            }
+            leaf key-chain {
+              type string;
+              description
+                "Reference to a named key-chain under /key-chains.
+                 Only consulted when `password` is unset.";
             }
             leaf auth-type {
               type enumeration {

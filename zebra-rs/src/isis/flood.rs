@@ -201,7 +201,8 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
     // domain password; the Auth TLV is appended after the LspEntries
     // TLV and so eats into the per-fragment entry budget.
     let auth_cfg = super::lsp::level_auth_cfg(link.up_config, level);
-    let auth_size = auth::auth_tlv_wire_size(auth_cfg);
+    let resolved = auth::resolve_send(auth_cfg, link.key_chains, chrono::Utc::now());
+    let auth_size = auth::auth_tlv_wire_size(resolved.as_ref());
 
     let available_len = {
         let mut buf = BytesMut::new();
@@ -243,7 +244,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         entry_size += 1;
         if entry_size == entry_size_max {
             let mut psnp_tlvs: Vec<IsisTlv> = vec![tlvs.clone().into()];
-            auth::append_auth_tlv(&mut psnp_tlvs, auth_cfg);
+            auth::append_auth_tlv(&mut psnp_tlvs, resolved.as_ref());
             let psnp = IsisPsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
@@ -258,7 +259,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
     }
     if !tlvs.entries.is_empty() {
         let mut psnp_tlvs: Vec<IsisTlv> = vec![tlvs.into()];
-        auth::append_auth_tlv(&mut psnp_tlvs, auth_cfg);
+        auth::append_auth_tlv(&mut psnp_tlvs, resolved.as_ref());
         let psnp = IsisPsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),

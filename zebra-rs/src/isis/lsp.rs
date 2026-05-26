@@ -1341,14 +1341,18 @@ fn arm_seq_wrap_freeze(top: &mut IsisTop, level: Level, lsp_id: IsisLspId) {
     top.lsp_seq_wrap_wait.get_mut(&level).insert(frag_id, timer);
 }
 
-pub fn lsp_emit(lsp: &mut IsisLsp, level: Level, auth_cfg: &IsisAuthConfig) -> BytesMut {
+pub fn lsp_emit(
+    lsp: &mut IsisLsp,
+    level: Level,
+    resolved: Option<&auth::ResolvedAuth>,
+) -> BytesMut {
     // Auth TLV (Phase 4) sits at the end of the LSP's TLV section.
     // For HMAC-MD5 it's a zero-filled placeholder that the post-emit
     // sign step patches in place; for cleartext it carries the
     // password bytes directly. Append before `IsisPacket::from` so
     // the serialized fragment size — and the Fletcher checksum
     // `IsisPacket::emit` stamps — already accounts for the TLV.
-    auth::append_auth_tlv(&mut lsp.tlvs, auth_cfg);
+    auth::append_auth_tlv(&mut lsp.tlvs, resolved);
 
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
@@ -1364,11 +1368,10 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level, auth_cfg: &IsisAuthConfig) -> B
     // digest into place, then re-stamp Fletcher (which
     // `IsisPacket::emit` already wrote covering the placeholder —
     // we redo it with the real digest in place).
-    let algo = auth_cfg.auth_type;
-    if (matches!(algo, IsisAuthType::Md5) || algo.is_generic_crypto())
-        && let Some(key) = auth_cfg.password.as_deref()
+    if let Some(r) = resolved
+        && (matches!(r.auth_type, IsisAuthType::Md5) || r.auth_type.is_generic_crypto())
     {
-        auth::sign_lsp_inplace(&mut buf, algo, key.as_bytes());
+        auth::sign_lsp_inplace(&mut buf, r.auth_type, &r.key);
     }
 
     // Offset for pdu_len and checksum.
@@ -1391,7 +1394,8 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     // TLV in each CSNP, so its on-wire size shrinks the per-fragment
     // entry budget below.
     let auth_cfg = level_auth_cfg(link.up_config, level);
-    let auth_size = auth::auth_tlv_wire_size(auth_cfg);
+    let resolved = auth::resolve_send(auth_cfg, link.key_chains, chrono::Utc::now());
+    let auth_size = auth::auth_tlv_wire_size(resolved.as_ref());
 
     // For the record, we will try to encode the packet length.
     let available_len = {
@@ -1443,7 +1447,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
         entry_size += 1;
         if entry_size == entry_size_max {
             let mut csnp_tlvs: Vec<IsisTlv> = vec![tlvs.clone().into()];
-            auth::append_auth_tlv(&mut csnp_tlvs, auth_cfg);
+            auth::append_auth_tlv(&mut csnp_tlvs, resolved.as_ref());
             let csnp = IsisCsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
@@ -1461,7 +1465,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     }
     if !tlvs.entries.is_empty() {
         let mut csnp_tlvs: Vec<IsisTlv> = vec![tlvs.into()];
-        auth::append_auth_tlv(&mut csnp_tlvs, auth_cfg);
+        auth::append_auth_tlv(&mut csnp_tlvs, resolved.as_ref());
         let csnp = IsisCsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),
