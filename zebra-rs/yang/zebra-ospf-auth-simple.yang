@@ -99,6 +99,20 @@ module zebra-ospf-auth-simple {
          commit time rather than silently truncated.";
       reference "RFC 2328 §D.3";
     }
+
+    leaf key-chain {
+      ext:help "RFC 8177 key chain name";
+      type string;
+      description
+        "Name of a key chain defined under /key-chains/key-chain.
+         When set and `authentication` is `message-digest`, the
+         chain supersedes per-interface `message-digest-key` /
+         `crypto-key` entries: send-side uses the chain's
+         currently active key (lowest key-id whose send-lifetime
+         contains now); receive-side validates the sender's
+         key-id against the chain's accept-lifetime window.";
+      reference "RFC 8177";
+    }
   }
 
   augment "/configure:set/config:router"

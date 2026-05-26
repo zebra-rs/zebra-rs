@@ -55,6 +55,8 @@ pub use lsa::*;
 pub mod flood;
 pub use flood::*;
 
+pub mod key_chain;
+
 pub mod srmpls;
 
 pub mod tracing;

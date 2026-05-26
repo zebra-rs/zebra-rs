@@ -125,6 +125,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// Defaults: helper enabled, max grace 1800s, strict LSA
     /// checking on — same as the YANG model's defaults.
     pub gr_config: super::neigh::GracefulRestartConfig,
+    /// RFC 8177 key-chain registry. Populated by `/key-chains/...`
+    /// config callbacks; per-interface `key-chain <name>` leaves
+    /// reference entries here. Independent of BGP's own
+    /// `Bgp::key_chains` storage — both daemons receive the same
+    /// config commits and update their own copies (Phase 4 option
+    /// (B); cross-protocol unification is a follow-up).
+    pub key_chains: HashMap<String, super::key_chain::OspfKeyChain>,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
     /// Cached snapshot of v4 routes the RIB is pushing via
@@ -245,7 +252,7 @@ impl<V: OspfVersion> Ospf<V> {
             let retransmit_interval = link.retransmit_interval();
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
-            let crypto_key = link.active_crypto_key();
+            let crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
             self.areas.get_mut(link_area).and_then(|area| {
                 let area_type = area.area_type;
                 link.nbrs.get_mut(src).map(|nbr| {
@@ -447,6 +454,7 @@ impl Ospf<Ospfv2> {
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            key_chains: HashMap::new(),
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
@@ -1998,7 +2006,9 @@ impl Ospf<Ospfv2> {
             return;
         };
         let link_indices: Vec<u32> = area.links.iter().copied().collect();
+        let now = chrono::Utc::now();
         for ifindex in link_indices {
+            let chains = &self.key_chains;
             let Some(link) = self.links.get_mut(&ifindex) else {
                 continue;
             };
@@ -2006,7 +2016,7 @@ impl Ospf<Ospfv2> {
             let link_state = link.state;
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
-            let crypto_key = link.active_crypto_key();
+            let crypto_key = link.resolve_active_send_key(chains, now);
             let md5_seq_cell = &link.md5_seq;
 
             // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
@@ -2106,6 +2116,8 @@ impl Ospf<Ospfv2> {
 
     /// Handle retransmit timer firing for a neighbor.
     fn process_retransmit(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let now = chrono::Utc::now();
+        let chains = &self.key_chains;
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -2113,7 +2125,7 @@ impl Ospf<Ospfv2> {
         let area_id = link.area;
         let auth_mode = link.auth_mode();
         let auth_key = link.config.auth_key;
-        let crypto_key = link.active_crypto_key();
+        let crypto_key = link.resolve_active_send_key(chains, now);
         let md5_seq_cell = &link.md5_seq;
         let Some(nbr) = link.nbrs.get_mut(&addr) else {
             return;
@@ -2197,6 +2209,8 @@ impl Ospf<Ospfv2> {
 
     /// Handle delayed ack timer firing for an interface.
     fn process_delayed_ack(&mut self, ifindex: u32) {
+        let now = chrono::Utc::now();
+        let chains = &self.key_chains;
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -2216,7 +2230,7 @@ impl Ospf<Ospfv2> {
         };
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &link.area, Ospfv2Payload::LsAck(ls_ack));
-        apply_link_auth(&mut packet, &link.auth_send_ctx());
+        apply_link_auth(&mut packet, &link.auth_send_ctx(chains, now));
         // Send to AllSPFRouters multicast.
         let _ = link.ptx.send(Message::Send(packet, ifindex, None));
     }
@@ -2296,6 +2310,8 @@ impl Ospf<Ospfv2> {
         // adds anti-replay for Type 2 — packets with a seq below
         // the per-neighbor high-watermark are dropped.
         {
+            let chains = &self.key_chains;
+            let now = chrono::Utc::now();
             let Some(link) = self.links.get(&index) else {
                 return;
             };
@@ -2304,11 +2320,29 @@ impl Ospf<Ospfv2> {
                 .get(&src)
                 .map(|n| n.auth_md5_last_seq)
                 .unwrap_or(0);
+            // Build the key source: chain takes precedence when the
+            // interface names one; otherwise the per-interface
+            // `crypto_keys` map serves Phase 2/3 configurations.
+            let key_source = match link.config.key_chain.as_deref() {
+                Some(name) => match chains.get(name) {
+                    Some(c) => crate::ospf::packet::KeySource::Chain { chain: c, now },
+                    None => {
+                        tracing::debug!(
+                            "OSPFv2 auth drop on {} from {}: chain `{}` not configured",
+                            link.name,
+                            src,
+                            name
+                        );
+                        return;
+                    }
+                },
+                None => crate::ospf::packet::KeySource::PerIface(&link.config.crypto_keys),
+            };
             if !verify_link_auth(
                 &packet,
                 link.auth_mode(),
                 link.config.auth_key,
-                &link.config.crypto_keys,
+                &key_source,
                 last_seq,
             ) {
                 tracing::debug!(
@@ -2476,10 +2510,12 @@ impl Ospf<Ospfv2> {
                 }
             }
             Message::HelloTimer(index) => {
+                let now = chrono::Utc::now();
+                let chains = &self.key_chains;
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
-                ospf_hello_send(link);
+                ospf_hello_send(link, chains, now);
             }
             Message::Lsdb(ev, area_id, key) => {
                 self.process_lsdb(ev, area_id, key);
@@ -2742,6 +2778,7 @@ impl Ospf<Ospfv3> {
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            key_chains: HashMap::new(),
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
