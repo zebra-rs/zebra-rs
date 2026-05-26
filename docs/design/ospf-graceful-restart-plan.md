@@ -7,7 +7,10 @@ zebra-rs. References:
   type 3 under link-local LSA type 9)
 - RFC 5187 — Graceful OSPFv3 Restart (Grace-LSA function code 11,
   link-local flooding scope `0x0008`)
-- RFC 4811 / 4812 — auxiliary OSPFv3 restart signaling (LR-bit)
+- RFC 4811 / 4812 — auxiliary LR-bit signaling. **OSPFv2 only**;
+  RFC 5187 makes Grace-LSAs the sole restart signal for v3. The
+  earlier mis-attribution of LR to v3 is corrected in
+  `ospf-graceful-restart-restarter.md`.
 - RFC 7770 — Router Information Opaque LSA (`gr-capable` /
   `gr-helper` bits already wire-decoded today)
 
@@ -32,7 +35,7 @@ machinery is not.
 | `OpaqueLsaType::Grace = 3` (RFC 3623 §A)         | Missing  | `parser.rs:858` has only `RouterInfo=4 / ExtPrefix=7 / ExtLink=8` |
 | Grace-LSA sub-TLV codec (Grace Period / Restart Reason / IP Interface Address) | Missing | — |
 | OSPFv3 Grace-LSA (function code 11)              | Missing  | `crates/ospf-packet/src/v3.rs` |
-| OSPFv3 LR-bit handling (RFC 5187 §2.2 / RFC 4811) | Missing | `packet_v3.rs` |
+| OSPFv3 LR-bit handling                            | N/A — RFC 5187 §3 doesn't define an LR analogue for v3 | — |
 | IETF YANG model on disk                          | Present unused | `zebra-rs/yang/ietf-ospf@2022-10-19.yang` has feature `graceful-restart` + helper identities + status typedefs |
 | Project YANG binding (`router ospf {…}`)         | Missing  | no `graceful-restart` container in `zebra-rs/yang/config.yang:310 / :459` |
 | Helper state machine                             | Missing  | `nfsm.rs` only runs the inactivity timer |
@@ -154,11 +157,10 @@ Same shape as Phase 2 against the v3 path. Extra wrinkles:
 
 - Grace-LSA function code 11, link-local scope `0x0008`
   (`packet_v3.rs`).
-- RFC 5187 §2.2 + RFC 4811: `LR` bit handling in Hellos may need
-  thought. In RFC 5187 the Grace-LSA is the primary signal; LR
-  is auxiliary and frequently disabled. Default: implement
-  Grace-LSA only, treat LR as decode-only for now, revisit if
-  FRR's v3 restart breaks.
+- ~~RFC 4811 LR-bit handling.~~ Confirmed v2-only after a
+  re-read of RFC 5187 §3 — v3 has no LR analogue. Grace LSA
+  is the sole restart signal. No Hello-options work needed
+  on the v3 helper.
 - Network-LSA equivalent is the Network-LSA (`type 0x2002`) +
   Intra-Area-Prefix-LSA (`type 0x2009`). Both must keep
   advertising the helper-mode neighbor.
@@ -199,13 +201,12 @@ Out of scope for the first GR series and now scoped in detail in
   socket closes.
 - Self-originated LSA seq + body persistence so re-flood after
   restart matches helpers' snapshot (RFC 3623 §3).
-- v3 `LR` bit signaling (RFC 4811 / 4812).
 
-See the restarter doc for the phased PR plan (5a–5f), open
-questions that must be answered before starting, and
-interactions with `ospfv3-followups.md` (which has a conflicting
-"flush self LSAs on shutdown" goal — needs to coexist with the
-GR-clean exit that explicitly does NOT flush).
+**Status (2026-05-26):** OSPFv2 restarter complete on `main`
+(PRs #888 / #900 / #904 / #905 / #907 / #908). OSPFv3 restarter
+is the remaining series item — see the "5f — v3 restarter
+mirror" section of the restarter doc; it needs its own
+scoping pass before pickup.
 
 ## Branch / PR shape
 
@@ -224,9 +225,9 @@ Each PR runs the workspace gates locally before push:
 
 ## Open questions
 
-- **OSPFv3 LR-bit policy** — implement send/receive now, or
-  decode-only? Recommend decode-only until we have evidence
-  FRR's v3 restarter relies on it.
+- ~~**OSPFv3 LR-bit policy.**~~ Answered 2026-05-26: RFC 5187
+  §3 makes Grace-LSAs the sole v3 signal; no LR analogue is
+  defined for v3. RFC 4811 LR is OSPFv2-only.
 - **`helper-strict-lsa-checking` default** — RFC 3623 §3.2
   recommends strict (exit on any topology change in the area
   during helper); some operators relax. Default strict, expose
