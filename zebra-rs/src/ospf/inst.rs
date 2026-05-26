@@ -130,13 +130,27 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// restart; `None` in steady state. While `Some`, the
     /// originated Router-Info LSA carries `gr_capable=true`.
     pub restarting: Option<super::neigh::RestartingState>,
-    /// RFC 8177 key-chain registry. Populated by `/key-chains/...`
-    /// config callbacks; per-interface `key-chain <name>` leaves
-    /// reference entries here. Independent of BGP's own
-    /// `Bgp::key_chains` storage — both daemons receive the same
-    /// config commits and update their own copies (Phase 4 option
-    /// (B); cross-protocol unification is a follow-up).
-    pub key_chains: HashMap<String, super::key_chain::OspfKeyChain>,
+    /// Snapshot of `/key-chains/key-chain <name>` entries the policy
+    /// actor has pushed to this OSPF instance via `PolicyRx::KeyChain`
+    /// notifications. The canonical map lives in `policy::Policy`;
+    /// this is a per-interface-subscribed view kept up to date by
+    /// the OSPF event loop. Per-interface `key-chain <name>` leaves
+    /// resolve into entries here.
+    ///
+    /// Empty when no interface is bound to a chain or when the
+    /// referenced chain hasn't been configured yet — `auth_send_ctx`
+    /// will then return `None` and peers reject the zero-trailer
+    /// packet, which is the louder failure we want over silently
+    /// picking a stale key.
+    pub key_chains: BTreeMap<String, crate::policy::KeyChain>,
+    /// Subscriber side of the policy channel. The `Subscribe`
+    /// message is sent on `new()`; subsequent `Register` /
+    /// `Unregister` messages happen from the per-interface
+    /// `key-chain <name>` callback. `policy_tx` is also stashed so
+    /// the config callback can fire Register / Unregister without
+    /// having to thread it through every layer.
+    pub policy_tx: UnboundedSender<crate::policy::Message>,
+    pub policy_rx: UnboundedReceiver<crate::policy::PolicyRx>,
     pub spf_last: Option<Instant>,
     pub spf_duration: Option<Duration>,
     /// Cached snapshot of v4 routes the RIB is pushing via
@@ -426,8 +440,18 @@ impl<V: OspfVersion> Ospf<V> {
 }
 
 impl Ospf<Ospfv2> {
-    pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(
+        ctx: crate::context::ProtoContext,
+        rib_rx: UnboundedReceiver<RibRx>,
+        policy_tx: UnboundedSender<crate::policy::Message>,
+    ) -> Self {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
+
+        let policy_chan = crate::policy::PolicyRxChannel::new();
+        let _ = policy_tx.send(crate::policy::Message::Subscribe {
+            proto: "ospf".into(),
+            tx: policy_chan.tx.clone(),
+        });
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, prx) = mpsc::unbounded_channel();
@@ -458,7 +482,9 @@ impl Ospf<Ospfv2> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
-            key_chains: HashMap::new(),
+            key_chains: BTreeMap::new(),
+            policy_tx,
+            policy_rx: policy_chan.rx,
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
@@ -3366,6 +3392,32 @@ impl Ospf<Ospfv2> {
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
+                Some(msg) = self.policy_rx.recv() => {
+                    self.process_policy_msg(msg);
+                }
+            }
+        }
+    }
+
+    /// Handle a `PolicyRx` push from the policy actor. Today we only
+    /// subscribe to key-chain updates, but the match is exhaustive
+    /// against the enum so future variants don't silently no-op.
+    /// Resolution is lazy (per packet, in `auth_send_ctx`) so all
+    /// this needs to do is keep the snapshot fresh.
+    fn process_policy_msg(&mut self, msg: crate::policy::PolicyRx) {
+        match msg {
+            crate::policy::PolicyRx::KeyChain {
+                name, key_chain, ..
+            } => {
+                if let Some(kc) = key_chain {
+                    self.key_chains.insert(name, kc);
+                } else {
+                    self.key_chains.remove(&name);
+                }
+            }
+            crate::policy::PolicyRx::PrefixSet { .. }
+            | crate::policy::PolicyRx::PolicyList { .. } => {
+                // OSPF doesn't subscribe to prefix-set or policy-list.
             }
         }
     }
@@ -3405,8 +3457,18 @@ impl Ospf<Ospfv3> {
     ///   `v3_send_tx` to push outgoing packets through the v6
     ///   socket. The four `build_*_lsa` self-origination helpers
     ///   above can still be exercised from tests.
-    pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
+    pub fn new(
+        ctx: crate::context::ProtoContext,
+        rib_rx: UnboundedReceiver<RibRx>,
+        policy_tx: UnboundedSender<crate::policy::Message>,
+    ) -> Self {
         let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
+
+        let policy_chan = crate::policy::PolicyRxChannel::new();
+        let _ = policy_tx.send(crate::policy::Message::Subscribe {
+            proto: "ospfv3".into(),
+            tx: policy_chan.tx.clone(),
+        });
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, _prx) = mpsc::unbounded_channel();
@@ -3460,7 +3522,9 @@ impl Ospf<Ospfv3> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
-            key_chains: HashMap::new(),
+            key_chains: BTreeMap::new(),
+            policy_tx,
+            policy_rx: policy_chan.rx,
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
@@ -5998,7 +6062,29 @@ impl Ospf<Ospfv3> {
                 Some(recv) = v3_recv_rx.recv() => {
                     self.process_recv(recv);
                 }
+                Some(msg) = self.policy_rx.recv() => {
+                    self.process_policy_msg(msg);
+                }
             }
+        }
+    }
+
+    /// Mirror of `Ospf<Ospfv2>::process_policy_msg` for the v3
+    /// instance. Same shape — only key-chain updates are consumed
+    /// today.
+    fn process_policy_msg(&mut self, msg: crate::policy::PolicyRx) {
+        match msg {
+            crate::policy::PolicyRx::KeyChain {
+                name, key_chain, ..
+            } => {
+                if let Some(kc) = key_chain {
+                    self.key_chains.insert(name, kc);
+                } else {
+                    self.key_chains.remove(&name);
+                }
+            }
+            crate::policy::PolicyRx::PrefixSet { .. }
+            | crate::policy::PolicyRx::PolicyList { .. } => {}
         }
     }
 }

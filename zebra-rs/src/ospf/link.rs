@@ -396,25 +396,34 @@ impl<V: OspfVersion> OspfLink<V> {
     }
 
     /// Resolve the active send key — chain-aware. If `key_chain` is
-    /// set, look it up and use `KeyChain::active_send_key(now)`;
-    /// otherwise fall back to the per-interface `crypto_keys` map.
-    /// Returns `None` if a chain is named but missing or has no
-    /// active key — peers will reject our zero-trailer packets,
-    /// which is a louder failure than silently picking a stale key.
+    /// set, look it up in the policy-driven snapshot and pick the
+    /// lowest key-id whose send-lifetime is active; otherwise fall
+    /// back to the per-interface `crypto_keys` map. Returns `None`
+    /// if a chain is named but missing, has no active key, or the
+    /// active key uses an algorithm OSPFv2 doesn't speak — peers
+    /// will reject our zero-trailer packets, which is a louder
+    /// failure than silently picking a stale key.
     pub fn resolve_active_send_key(
         &self,
-        chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+        chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Option<(u8, AuthKey)> {
         if let Some(name) = &self.config.key_chain {
             let chain = chains.get(name)?;
-            let (id, ck) = chain.active_send_key(now)?;
-            let algo = ck.algo?;
+            let (id, key) = chain
+                .keys
+                .iter()
+                .find(|(_, k)| chain_key_is_send_active(k, now))?;
+            let algo = policy_algo_to_ospf(key.algo?)?;
+            // YANG key-id is uint64; OSPFv2 carries 8 bits on the
+            // wire. Reject anything that wouldn't fit so we don't
+            // silently truncate.
+            let id_u8: u8 = (*id).try_into().ok()?;
             return Some((
-                id,
+                id_u8,
                 AuthKey {
                     algo,
-                    raw: ck.key_material.clone(),
+                    raw: key.key_material.clone(),
                 },
             ));
         }
@@ -435,7 +444,7 @@ impl<V: OspfVersion> OspfLink<V> {
     /// once per packet, not once per buffer reuse.
     pub fn auth_send_ctx(
         &self,
-        chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+        chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> super::packet::AuthSendCtx {
         super::packet::AuthSendCtx {
@@ -444,6 +453,42 @@ impl<V: OspfVersion> OspfLink<V> {
             crypto_key: self.resolve_active_send_key(chains, now),
             md5_seq: self.next_md5_seq(),
         }
+    }
+}
+
+/// Is this policy-side key usable for *sending* right now? RFC 8177
+/// says a key with no algorithm or no material is mid-configuration
+/// and inactive; we also require its send-lifetime to bracket `now`.
+pub(super) fn chain_key_is_send_active(
+    k: &crate::policy::Key,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    k.algo.is_some() && !k.key_material.is_empty() && k.send_lifetime.is_active(now)
+}
+
+/// Is this policy-side key usable for *accepting* a received PDU
+/// right now? Same filter as send, against accept-lifetime.
+pub(super) fn chain_key_is_accept_active(
+    k: &crate::policy::Key,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    k.algo.is_some() && !k.key_material.is_empty() && k.accept_lifetime.is_active(now)
+}
+
+/// Project the shared policy algorithm enum onto the OSPFv2-supported
+/// subset. Returns `None` for algorithms OSPF doesn't speak
+/// (e.g. AES-CMAC-PRF-128 belongs to TCP-AO's MUST-implement set per
+/// RFC 5926 but isn't an RFC 5709 OSPF algorithm) so resolve falls
+/// through to `None`.
+pub(super) fn policy_algo_to_ospf(a: crate::policy::CryptoAlgorithm) -> Option<OspfCryptoAlgo> {
+    use crate::policy::CryptoAlgorithm as P;
+    match a {
+        P::Md5 => Some(OspfCryptoAlgo::Md5),
+        P::HmacSha1 => Some(OspfCryptoAlgo::HmacSha1),
+        P::HmacSha256 => Some(OspfCryptoAlgo::HmacSha256),
+        P::HmacSha384 => Some(OspfCryptoAlgo::HmacSha384),
+        P::HmacSha512 => Some(OspfCryptoAlgo::HmacSha512),
+        P::AesCmacPrf128 => None,
     }
 }
 
