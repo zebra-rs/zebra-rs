@@ -112,7 +112,8 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     // as-is. Including it before padding keeps the PDU exactly at MTU
     // (the padding helper sees the auth TLV's size when it computes
     // the remaining budget).
-    auth::append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
+    let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
+    auth::append_auth_tlv(&mut hello.tlvs, resolved.as_ref());
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(link.state.mtu as usize);
     }
@@ -190,7 +191,8 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     };
     hello.tlvs.push(tlv.into());
 
-    auth::append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
+    let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
+    auth::append_auth_tlv(&mut hello.tlvs, resolved.as_ref());
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(link.state.mtu as usize);
     }
@@ -267,26 +269,28 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     // bytes patched after serialization, so we pre-emit and send
     // as `Packet::Bytes`. Cleartext + no-auth use the existing
     // serialize-on-send path with `Packet::Packet`.
-    let auth_cfg = &link.config.hello_auth;
-    let outgoing = match (auth_cfg.password.as_deref(), auth_cfg.auth_type) {
-        (Some(key), algo) if matches!(algo, IsisAuthType::Md5) || algo.is_generic_crypto() => {
+    let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
+    let outgoing = match resolved {
+        Some(r) if matches!(r.auth_type, IsisAuthType::Md5) || r.auth_type.is_generic_crypto() => {
             let mut buf = BytesMut::new();
             packet.emit(&mut buf);
             auth::sign_inplace(
                 &mut buf,
                 packet.length_indicator as usize,
-                algo,
-                key.as_bytes(),
+                r.auth_type,
+                &r.key,
             );
             link.state.auth_tx_signed += 1;
             Packet::Bytes(buf)
         }
-        _ => {
-            if auth_cfg.password.is_some() {
-                link.state.auth_tx_signed += 1;
-            }
+        Some(_) => {
+            // Cleartext (text) or other non-HMAC auth-type — TLV
+            // already carries the secret bytes from `hello_generate`;
+            // nothing to patch in.
+            link.state.auth_tx_signed += 1;
             Packet::Packet(packet)
         }
+        None => Packet::Packet(packet),
     };
 
     let _ = link

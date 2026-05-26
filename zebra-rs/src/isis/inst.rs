@@ -303,6 +303,25 @@ pub struct Isis {
     /// [`Self::event_loop`]. PR 7b logs the events; PR 7c replaces
     /// the log with adjacency teardown on `BfdEvent::Down`.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
+    /// Snapshot of `/key-chains/key-chain <name>` entries the policy
+    /// actor has pushed to this IS-IS instance via
+    /// `PolicyRx::KeyChain`. The canonical map lives in
+    /// `policy::Policy`; the area-password / domain-password /
+    /// per-link `hello-authentication` scopes resolve their
+    /// `key-chain <name>` leaf against this snapshot at sign /
+    /// verify time. Inline cleartext `password` continues to win
+    /// when set — chains are the alternative for HMAC keys we
+    /// don't want sitting in the running-config.
+    pub key_chains: BTreeMap<String, crate::policy::KeyChain>,
+    /// Send half of the policy channel. Stashed so per-scope
+    /// `key-chain` config callbacks can fire Register / Unregister
+    /// without threading it through every layer.
+    pub policy_tx: UnboundedSender<crate::policy::Message>,
+    /// Receive half of the policy channel. Drained by the IS-IS
+    /// event loop and forwarded to `process_policy_msg`, which
+    /// updates `key_chains` and re-originates LSPs at the affected
+    /// level for area/domain-password scope changes.
+    pub policy_rx: UnboundedReceiver<crate::policy::PolicyRx>,
 }
 
 pub struct IsisTop<'a> {
@@ -399,6 +418,11 @@ pub struct IsisTop<'a> {
     /// 256-bit Extended Admin Group bitmap (RFC 7308).
     pub affinity_map: &'a super::affinity_map::AffinityMap,
 
+    /// Read-only snapshot of the policy-driven key-chain registry
+    /// (see `Isis::key_chains`). Sign / verify paths consult this
+    /// when an auth-scope's `key-chain` leaf is set.
+    pub key_chains: &'a std::collections::BTreeMap<String, crate::policy::KeyChain>,
+
     /// Seq-wrap wait timers (see `Isis::lsp_seq_wrap_wait`). Threaded
     /// through so `lsp_generate` can short-circuit per fragment and
     /// arm the timer without round-tripping through the event loop.
@@ -421,7 +445,13 @@ impl Isis {
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        policy_tx: UnboundedSender<crate::policy::Message>,
     ) -> Self {
+        let policy_chan = crate::policy::PolicyRxChannel::new();
+        let _ = policy_tx.send(crate::policy::Message::Subscribe {
+            proto: "isis".into(),
+            tx: policy_chan.tx.clone(),
+        });
         // SR config subscription channel. One-time registration with the
         // RIB; subsequent SrBlockWatch / SrLocatorWatch messages drive
         // which named entries we receive updates for. Goes through the
@@ -515,6 +545,9 @@ impl Isis {
                 bfd_client_tx,
                 bfd_event_tx,
                 bfd_event_rx,
+                key_chains: BTreeMap::new(),
+                policy_tx,
+                policy_rx: policy_chan.rx,
             };
         isis.callback_build();
         isis.show_build();
@@ -903,8 +936,9 @@ impl Isis {
         }
 
         let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
+        let resolved = super::auth::resolve_send(&auth_cfg, top.key_chains, chrono::Utc::now());
         for mut frag in fragments {
-            let buf = lsp_emit(&mut frag, level, &auth_cfg);
+            let buf = lsp_emit(&mut frag, level, resolved.as_ref());
             let lsp_id = frag.lsp_id;
             insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
             top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -1002,7 +1036,8 @@ impl Isis {
         // RFC 6232: the zero-lifetime LSP still carries the
         // per-level Auth TLV so receivers can verify it.
         let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
-        let _buf = lsp_emit(&mut purged_lsp, level, &auth_cfg);
+        let resolved = super::auth::resolve_send(&auth_cfg, top.key_chains, chrono::Utc::now());
+        let _buf = lsp_emit(&mut purged_lsp, level, resolved.as_ref());
         insert_self_originate(&mut top, level, purged_lsp, None);
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -1070,8 +1105,9 @@ impl Isis {
             .unwrap_or(0);
 
         let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
+        let resolved = super::auth::resolve_send(&auth_cfg, top.key_chains, chrono::Utc::now());
         for mut frag in fragments {
-            let buf = lsp_emit(&mut frag, level, &auth_cfg);
+            let buf = lsp_emit(&mut frag, level, resolved.as_ref());
             let lsp_id = frag.lsp_id;
             insert_self_originate(&mut top, level, frag, Some(buf.to_vec()));
             top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
@@ -1185,7 +1221,52 @@ impl Isis {
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
                 }
+                Some(msg) = self.policy_rx.recv() => {
+                    self.process_policy_msg(msg);
+                }
             }
+        }
+    }
+
+    /// Handle a `PolicyRx` push from the policy actor. Today we only
+    /// subscribe to key-chain updates (area/domain-password and
+    /// per-link `hello-authentication`). LSP sign / verify resolve
+    /// lazily per packet, so all this needs to do is keep the
+    /// snapshot fresh and re-fire `LspOriginate` at the affected
+    /// level when an area / domain-password chain edit lands so
+    /// peers see a new signature on the next refresh without
+    /// waiting for the periodic timer.
+    fn process_policy_msg(&mut self, msg: crate::policy::PolicyRx) {
+        match msg {
+            crate::policy::PolicyRx::KeyChain {
+                name,
+                policy_type,
+                key_chain,
+                ..
+            } => {
+                if let Some(kc) = key_chain {
+                    self.key_chains.insert(name, kc);
+                } else {
+                    self.key_chains.remove(&name);
+                }
+                if let crate::policy::PolicyType::KeyChain(scope) = policy_type {
+                    use crate::policy::KeyChainScope;
+                    match scope {
+                        KeyChainScope::IsisAreaPw => {
+                            let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+                        }
+                        KeyChainScope::IsisDomainPw => {
+                            let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+                        }
+                        // IIH / non-IS-IS scopes: next hello-timer fire
+                        // (or remote subsystem) picks up the new key
+                        // lazily; no proactive event needed.
+                        _ => {}
+                    }
+                }
+            }
+            crate::policy::PolicyRx::PrefixSet { .. }
+            | crate::policy::PolicyRx::PolicyList { .. } => {}
         }
     }
 
@@ -1298,6 +1379,7 @@ impl Isis {
             srlg_groups: &self.srlg_groups,
             flex_algo: &self.flex_algo,
             affinity_map: &self.affinity_map,
+            key_chains: &self.key_chains,
             lsp_seq_wrap_wait: &mut self.lsp_seq_wrap_wait,
             lsp_placement_memory: &mut self.lsp_placement_memory,
             redist_v4: &self.redist_v4,
@@ -1335,6 +1417,7 @@ impl Isis {
             sr_locator: &self.sr_locator,
             watched_locator: &self.watched_locator,
             elib: &mut self.elib,
+            key_chains: &self.key_chains,
         })
     }
 
@@ -1701,7 +1784,11 @@ mod bfd_wiring_tests {
     fn fresh_isis_with_bfd() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
         let (ctx, rib_rx) = test_ctx();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
-        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx));
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        // Park the policy_rx so the Subscribe send in `new` doesn't
+        // drop and panic on its own send.
+        Box::leak(Box::new(policy_rx));
+        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx), policy_tx);
         (isis, bfd_client_rx)
     }
 
@@ -1745,7 +1832,9 @@ mod bfd_wiring_tests {
     #[tokio::test]
     async fn no_bfd_handle_is_noop() {
         let (ctx, rib_rx) = test_ctx();
-        let isis = Isis::new(ctx, rib_rx, None);
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(policy_rx));
+        let isis = Isis::new(ctx, rib_rx, None, policy_tx);
         let key = loopback_key();
         isis.process_bfd_subscribe(key);
         isis.process_bfd_unsubscribe(key);
