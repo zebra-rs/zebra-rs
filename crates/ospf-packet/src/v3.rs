@@ -1428,6 +1428,15 @@ pub const OSPFV3_EXT_TLV_ROUTER_LINK: u16 = 1;
 /// Intra-Area-Prefix TLV inside an E-Intra-Area-Prefix-LSA
 /// (RFC 8362 §3.7).
 pub const OSPFV3_EXT_TLV_INTRA_AREA_PREFIX: u16 = 6;
+/// SR-Algorithm TLV inside an E-Router-LSA (RFC 8666 §3.1). Lists
+/// the algorithm(s) the router supports.
+pub const OSPFV3_EXT_TLV_SR_ALGORITHM: u16 = 9;
+/// SID/Label Range TLV inside an E-Router-LSA (RFC 8666 §3.2).
+/// Advertises an SRGB block (range + first SID/Label).
+pub const OSPFV3_EXT_TLV_SID_LABEL_RANGE: u16 = 10;
+/// SR Local Block TLV inside an E-Router-LSA (RFC 8666 §3.3).
+/// Advertises an SRLB block; same wire shape as SID/Label Range.
+pub const OSPFV3_EXT_TLV_LOCAL_BLOCK: u16 = 11;
 
 // ---------------------------------------------------------------------
 // RFC 8666 OSPFv3 SR sub-TLV type codes.
@@ -1843,6 +1852,178 @@ impl Ospfv3IntraAreaPrefixTlv {
     }
 }
 
+/// SR-Algorithm TLV (RFC 8666 §3.1) — top-level TLV inside an
+/// E-Router-LSA. Carries a list of one or more `Algo` octets
+/// identifying the algorithms the router supports for SR.
+///
+/// Wire layout of the value: variable-length sequence of `Algo`
+/// octets. The outer TLV header's length field equals the number of
+/// algorithms (each algorithm is one octet); the whole value is then
+/// padded to a 32-bit boundary by the surrounding `Ospfv3ExtTlv`
+/// emit / parse machinery, same as every other top-level TLV.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3SrAlgorithmTlv {
+    pub algos: Vec<Algo>,
+}
+
+impl Ospfv3SrAlgorithmTlv {
+    fn value_len(&self) -> usize {
+        self.algos.len()
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        for a in &self.algos {
+            buf.put_u8((*a).into());
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        // Consume every byte of the value as an Algo octet; trailing
+        // zeros (if any sneak through) would be re-emitted as Algo
+        // values, but the outer TLV's length already trims to the
+        // actual algorithm count -- the surrounding `parse_be` slice
+        // is exactly `length` bytes.
+        let mut algos = Vec::with_capacity(input.len());
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (r, a) = be_u8(rest)?;
+            algos.push(a.into());
+            rest = r;
+        }
+        Ok((rest, Self { algos }))
+    }
+}
+
+/// SID/Label Range TLV (RFC 8666 §3.2) — top-level TLV inside an
+/// E-Router-LSA. Advertises one SRGB block: a 24-bit range and the
+/// first SID/Label in the block via a nested SID/Label Sub-TLV.
+///
+/// Wire layout of the value:
+///   range(3) + reserved(1) + SID/Label Sub-TLV (type(2) + length(2)
+///   + 3 octets when Label, 4 octets when Index).
+///
+/// The Label-vs-Index discriminator rides the Sub-TLV length field
+/// (3 = Label, 4 = Index), matching the v2 RFC 8665 §3.1 encoding
+/// used by `RouterInfoTlvSidLabelRange`. The inner Sub-TLV type is
+/// fixed to `OSPFV3_SUB_TLV_SID_LABEL`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3SidLabelRangeTlv {
+    pub range: u32,
+    pub sid_label: SidLabelTlv,
+}
+
+/// Inner sub-TLV type for the SID/Label Sub-TLV nested inside
+/// `Ospfv3SidLabelRangeTlv` and `Ospfv3SrLocalBlockTlv`. RFC 8666 §3
+/// reuses the OSPFv2 SID/Label Sub-TLV shape verbatim; the OSPFv3
+/// IANA registry assigns this Sub-TLV type number for use inside the
+/// SID/Label Range / SR Local Block top-level TLVs.
+pub const OSPFV3_SUB_TLV_SID_LABEL: u16 = 5;
+
+impl Ospfv3SidLabelRangeTlv {
+    fn value_len(&self) -> usize {
+        // range(3) + reserved(1) + sub-TLV header(4) + sub-TLV value
+        // (3 or 4 octets, no padding -- callers parse Label vs Index
+        // by the sub-TLV's length field exactly).
+        8 + match &self.sid_label {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&packet_utils::u32_u8_3(self.range)[..]);
+        buf.put_u8(0); // reserved
+        buf.put_u16(OSPFV3_SUB_TLV_SID_LABEL);
+        match &self.sid_label {
+            SidLabelTlv::Label(v) => {
+                buf.put_u16(3);
+                buf.put(&packet_utils::u32_u8_3(*v)[..]);
+            }
+            SidLabelTlv::Index(v) => {
+                buf.put_u16(4);
+                buf.put_u32(*v);
+            }
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, range) = be_u24(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, _sub_typ) = be_u16(input)?;
+        let (input, sub_len) = be_u16(input)?;
+        let (input, sid_label) = match sub_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => {
+                return Err(nom::Err::Incomplete(nom::Needed::new(sub_len as usize)));
+            }
+        };
+        Ok((input, Self { range, sid_label }))
+    }
+}
+
+/// SR Local Block TLV (RFC 8666 §3.3) — top-level TLV inside an
+/// E-Router-LSA. Same wire shape as `Ospfv3SidLabelRangeTlv`; held
+/// distinct so callers can tell SRGB advertisements apart from SRLB
+/// ones without inspecting the surrounding TLV type code by hand.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3SrLocalBlockTlv {
+    pub range: u32,
+    pub sid_label: SidLabelTlv,
+}
+
+impl Ospfv3SrLocalBlockTlv {
+    fn value_len(&self) -> usize {
+        8 + match &self.sid_label {
+            SidLabelTlv::Label(_) => 3,
+            SidLabelTlv::Index(_) => 4,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&packet_utils::u32_u8_3(self.range)[..]);
+        buf.put_u8(0);
+        buf.put_u16(OSPFV3_SUB_TLV_SID_LABEL);
+        match &self.sid_label {
+            SidLabelTlv::Label(v) => {
+                buf.put_u16(3);
+                buf.put(&packet_utils::u32_u8_3(*v)[..]);
+            }
+            SidLabelTlv::Index(v) => {
+                buf.put_u16(4);
+                buf.put_u32(*v);
+            }
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, range) = be_u24(input)?;
+        let (input, _reserved) = be_u8(input)?;
+        let (input, _sub_typ) = be_u16(input)?;
+        let (input, sub_len) = be_u16(input)?;
+        let (input, sid_label) = match sub_len {
+            3 => {
+                let (input, label) = be_u24(input)?;
+                (input, SidLabelTlv::Label(label))
+            }
+            4 => {
+                let (input, index) = be_u32(input)?;
+                (input, SidLabelTlv::Index(index))
+            }
+            _ => {
+                return Err(nom::Err::Incomplete(nom::Needed::new(sub_len as usize)));
+            }
+        };
+        Ok((input, Self { range, sid_label }))
+    }
+}
+
 /// One top-level TLV inside an Extended LSA body (RFC 8362 §3).
 ///
 /// Typed variants surface the structured shape; everything else
@@ -1852,6 +2033,9 @@ impl Ospfv3IntraAreaPrefixTlv {
 pub enum Ospfv3ExtTlv {
     RouterLink(Ospfv3RouterLinkTlv),
     IntraAreaPrefix(Ospfv3IntraAreaPrefixTlv),
+    SrAlgorithm(Ospfv3SrAlgorithmTlv),
+    SidLabelRange(Ospfv3SidLabelRangeTlv),
+    SrLocalBlock(Ospfv3SrLocalBlockTlv),
     Unknown { typ: u16, value: Vec<u8> },
 }
 
@@ -1863,6 +2047,9 @@ impl Ospfv3ExtTlv {
         let value_len = match self {
             Ospfv3ExtTlv::RouterLink(t) => t.value_len(),
             Ospfv3ExtTlv::IntraAreaPrefix(t) => t.value_len(),
+            Ospfv3ExtTlv::SrAlgorithm(t) => t.value_len(),
+            Ospfv3ExtTlv::SidLabelRange(t) => t.value_len(),
+            Ospfv3ExtTlv::SrLocalBlock(t) => t.value_len(),
             Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
@@ -1872,6 +2059,9 @@ impl Ospfv3ExtTlv {
         let (typ, value_len) = match self {
             Ospfv3ExtTlv::RouterLink(t) => (OSPFV3_EXT_TLV_ROUTER_LINK, t.value_len()),
             Ospfv3ExtTlv::IntraAreaPrefix(t) => (OSPFV3_EXT_TLV_INTRA_AREA_PREFIX, t.value_len()),
+            Ospfv3ExtTlv::SrAlgorithm(t) => (OSPFV3_EXT_TLV_SR_ALGORITHM, t.value_len()),
+            Ospfv3ExtTlv::SidLabelRange(t) => (OSPFV3_EXT_TLV_SID_LABEL_RANGE, t.value_len()),
+            Ospfv3ExtTlv::SrLocalBlock(t) => (OSPFV3_EXT_TLV_LOCAL_BLOCK, t.value_len()),
             Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.len()),
         };
         buf.put_u16(typ);
@@ -1879,6 +2069,9 @@ impl Ospfv3ExtTlv {
         match self {
             Ospfv3ExtTlv::RouterLink(t) => t.emit(buf),
             Ospfv3ExtTlv::IntraAreaPrefix(t) => t.emit(buf),
+            Ospfv3ExtTlv::SrAlgorithm(t) => t.emit(buf),
+            Ospfv3ExtTlv::SidLabelRange(t) => t.emit(buf),
+            Ospfv3ExtTlv::SrLocalBlock(t) => t.emit(buf),
             Ospfv3ExtTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         // Pad to 4-byte alignment.
@@ -1901,6 +2094,18 @@ impl Ospfv3ExtTlv {
             OSPFV3_EXT_TLV_INTRA_AREA_PREFIX => {
                 let (_, t) = Ospfv3IntraAreaPrefixTlv::parse_be(value)?;
                 Ospfv3ExtTlv::IntraAreaPrefix(t)
+            }
+            OSPFV3_EXT_TLV_SR_ALGORITHM => {
+                let (_, t) = Ospfv3SrAlgorithmTlv::parse_be(value)?;
+                Ospfv3ExtTlv::SrAlgorithm(t)
+            }
+            OSPFV3_EXT_TLV_SID_LABEL_RANGE => {
+                let (_, t) = Ospfv3SidLabelRangeTlv::parse_be(value)?;
+                Ospfv3ExtTlv::SidLabelRange(t)
+            }
+            OSPFV3_EXT_TLV_LOCAL_BLOCK => {
+                let (_, t) = Ospfv3SrLocalBlockTlv::parse_be(value)?;
+                Ospfv3ExtTlv::SrLocalBlock(t)
             }
             _ => Ospfv3ExtTlv::Unknown {
                 typ,
@@ -3797,5 +4002,52 @@ mod tests {
             }
             other => panic!("expected LsUpdate payload, got {:?}", other),
         }
+    }
+
+    /// RFC 8666 §3 top-level Extended TLVs round-trip cleanly through
+    /// the E-Router-LSA body: SR-Algorithm, SID/Label Range (SRGB),
+    /// and SR Local Block (SRLB). Exercises Index-form and Label-form
+    /// for the inner SID/Label sub-TLV, plus the 4-byte padding the
+    /// SR-Algorithm TLV needs (one algorithm = 1 byte value + 3 pad).
+    #[test]
+    fn ospfv3_sr_info_tlvs_round_trip() {
+        let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv {
+            algos: vec![Algo::Spf],
+        });
+        let sid_range_index = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
+            range: 8000,
+            sid_label: SidLabelTlv::Index(16000),
+        });
+        let sid_range_label = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
+            range: 100,
+            sid_label: SidLabelTlv::Label(0x10_0001),
+        });
+        let local_block = Ospfv3ExtTlv::SrLocalBlock(Ospfv3SrLocalBlockTlv {
+            range: 1000,
+            sid_label: SidLabelTlv::Label(15000),
+        });
+
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![
+                sr_algo.clone(),
+                sid_range_index.clone(),
+                sid_range_label.clone(),
+                local_block.clone(),
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::ERouter(body).emit(&mut buf);
+
+        let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_E_ROUTER_LSA_TYPE).unwrap();
+        assert!(rest.is_empty(), "trailing bytes after E-Router body parse");
+        let Ospfv3LsBody::ERouter(parsed_body) = parsed else {
+            panic!("expected ERouter variant");
+        };
+        assert_eq!(parsed_body.tlvs.len(), 4);
+        assert_eq!(parsed_body.tlvs[0], sr_algo);
+        assert_eq!(parsed_body.tlvs[1], sid_range_index);
+        assert_eq!(parsed_body.tlvs[2], sid_range_label);
+        assert_eq!(parsed_body.tlvs[3], local_block);
     }
 }
