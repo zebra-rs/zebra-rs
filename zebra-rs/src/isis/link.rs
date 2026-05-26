@@ -1350,6 +1350,8 @@ struct InterfaceDetailJson {
     level_1_info: Option<LevelInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     level_2_info: Option<LevelInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authentication: Option<AuthInfo>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ip_prefixes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1370,6 +1372,65 @@ struct LevelInfo {
     lan_priority: u8,
     dis: String,
     adjacency: String,
+}
+
+/// Per-interface authentication snapshot for `show isis interface
+/// detail`. Populated when hello-authentication is configured; left
+/// off when the operator hasn't turned it on. The four counters
+/// have been ticking on the link since Phase 3a — this is just the
+/// first surface that exposes them.
+#[derive(Serialize)]
+struct AuthInfo {
+    mode: String,
+    key_id: u16,
+    send_only: bool,
+    tx_signed: u64,
+    rx_good: u64,
+    rx_bad: u64,
+    rx_no_auth: u64,
+}
+
+fn build_auth_info(link: &IsisLink) -> Option<AuthInfo> {
+    let cfg = &link.config.hello_auth;
+    let _ = cfg.password.as_deref()?;
+    Some(AuthInfo {
+        mode: cfg.auth_type.to_string(),
+        key_id: cfg.effective_key_id(),
+        send_only: cfg.send_only,
+        tx_signed: link.state.auth_tx_signed,
+        rx_good: link.state.auth_rx_good,
+        rx_bad: link.state.auth_rx_bad,
+        rx_no_auth: link.state.auth_rx_no_auth,
+    })
+}
+
+/// Text renderer for the auth block. Returns "" when no auth is
+/// configured so the caller can `write!` it unconditionally — the
+/// auth section disappears for un-authed interfaces.
+fn render_auth_block(link: &IsisLink) -> String {
+    let Some(info) = build_auth_info(link) else {
+        return String::new();
+    };
+    render_auth_block_from(&info)
+}
+
+/// Pure renderer split out so unit tests can pin the format without
+/// having to construct a full `IsisLink` (which owns a raw socket).
+fn render_auth_block_from(info: &AuthInfo) -> String {
+    let mut buf = String::new();
+    use std::fmt::Write;
+    let _ = writeln!(buf, "  Hello Authentication:");
+    let _ = writeln!(
+        buf,
+        "    Mode: {}, Key ID: {}, Send-only: {}",
+        info.mode, info.key_id, info.send_only
+    );
+    let _ = writeln!(
+        buf,
+        "    Counters: tx-signed {}, rx-good {}, rx-bad {}, rx-no-auth {}",
+        info.tx_signed, info.rx_good, info.rx_bad, info.rx_no_auth
+    );
+    buf
 }
 
 pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std::fmt::Result {
@@ -1460,6 +1521,7 @@ pub fn show_detail(
                     snpa: link.state.mac.map(|mac| mac.to_string()),
                     level_1_info: None,
                     level_2_info: None,
+                    authentication: build_auth_info(link),
                     ip_prefixes: link.state.v4addr.iter().map(|p| p.to_string()).collect(),
                     ipv6_link_locals: link.state.v6laddr.iter().map(|p| p.to_string()).collect(),
                     ipv6_prefixes: link.state.v6addr.iter().map(|p| p.to_string()).collect(),
@@ -1507,6 +1569,12 @@ pub fn show_detail(
                     writeln!(buf, "  Level-2 Information:")?;
                     show_detail_entry(&mut buf, link, Level::L2)?;
                 }
+                // Hello authentication block (Phase 5). The four
+                // counters have been ticking since Phase 3a; this
+                // is the first surface that exposes them. Empty
+                // string when no auth is configured so the block
+                // disappears cleanly.
+                buf.push_str(&render_auth_block(link));
                 // IPv4 Address.
                 if !link.state.v4addr.is_empty() {
                     writeln!(buf, "  IP Prefix(es):")?;
@@ -1804,6 +1872,47 @@ pub fn show_dis_history(
     }
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod auth_show_tests {
+    use super::*;
+
+    /// `show isis interface detail` auth block format. Locks the
+    /// text shape so a future refactor that breaks the layout
+    /// trips this test before the BDD/scripting suite notices.
+    #[test]
+    fn render_auth_block_format() {
+        let info = AuthInfo {
+            mode: "hmac-sha-256".to_string(),
+            key_id: 42,
+            send_only: false,
+            tx_signed: 17,
+            rx_good: 16,
+            rx_bad: 1,
+            rx_no_auth: 0,
+        };
+        let out = render_auth_block_from(&info);
+        let expected = "  Hello Authentication:\n    Mode: hmac-sha-256, Key ID: 42, Send-only: false\n    Counters: tx-signed 17, rx-good 16, rx-bad 1, rx-no-auth 0\n";
+        assert_eq!(out, expected);
+    }
+
+    /// Send-only is the rollover hatch — make sure it surfaces
+    /// truthfully so operators can confirm one-sided auth is on.
+    #[test]
+    fn render_auth_block_send_only_visible() {
+        let info = AuthInfo {
+            mode: "md5".to_string(),
+            key_id: 1,
+            send_only: true,
+            tx_signed: 0,
+            rx_good: 0,
+            rx_bad: 0,
+            rx_no_auth: 0,
+        };
+        let out = render_auth_block_from(&info);
+        assert!(out.contains("Send-only: true"));
+    }
 }
 
 #[cfg(test)]

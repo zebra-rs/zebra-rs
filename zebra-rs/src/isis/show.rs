@@ -86,6 +86,32 @@ fn show_isis_summary(
     // matches what's on the wire without having to grep the database.
     writeln!(buf, "LSP MTU: {} bytes", isis.config.lsp_mtu_size())?;
 
+    // Authentication state (Phase 5). Only the L1 area-password and
+    // L2 domain-password live at the instance scope; per-interface
+    // hello-authentication is surfaced by `show isis interface
+    // detail`. Lines suppressed entirely when the scope isn't
+    // configured to keep the summary clean on un-authed nodes.
+    let area = &isis.config.area_password;
+    if let Some(_pw) = area.password.as_deref() {
+        writeln!(
+            buf,
+            "Area-password (L1): mode {}, key-id {}{}",
+            area.auth_type,
+            area.effective_key_id(),
+            if area.send_only { ", send-only" } else { "" },
+        )?;
+    }
+    let domain = &isis.config.domain_password;
+    if let Some(_pw) = domain.password.as_deref() {
+        writeln!(
+            buf,
+            "Domain-password (L2): mode {}, key-id {}{}",
+            domain.auth_type,
+            domain.effective_key_id(),
+            if domain.send_only { ", send-only" } else { "" },
+        )?;
+    }
+
     // SRv6 Locator section. Only present when the operator has
     // configured a locator name under `segment-routing/srv6/locator`;
     // an unconfigured node has nothing useful to show here.
