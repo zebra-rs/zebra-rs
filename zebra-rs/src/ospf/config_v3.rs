@@ -507,5 +507,14 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
         ospf.e_router_v3_lsa_originate(ifindex);
     }
 
+    // Originate (or flush, on disable) the per-area SR capability
+    // LSA carrying SR-Algorithm + SRGB + SRLB top-level TLVs so
+    // peers can decode the Index-form SIDs we advertise into
+    // absolute labels.
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for area_id in area_ids {
+        ospf.e_router_v3_sr_info_lsa_originate(area_id);
+    }
+
     Some(())
 }

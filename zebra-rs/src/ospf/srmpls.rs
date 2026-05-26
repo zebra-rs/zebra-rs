@@ -236,6 +236,56 @@ pub fn e_router_v3_lsa_build(
     lsa
 }
 
+/// Build an OSPFv3 E-Router-LSA carrying only the RFC 8666 §3 SR
+/// capability TLVs (SR-Algorithm, SID/Label Range = SRGB, SR Local
+/// Block = SRLB) and no Router-Link TLV. One per area; peers read it
+/// to translate Index-form SIDs we advertise into absolute labels.
+///
+/// `link_state_id` is reserved as `SR_INFO_LSID` so it cannot collide
+/// with the per-link LSAs (whose LS-ID is the interface ifindex, ≥ 1
+/// on Linux). RFC 5340 §3.4 treats the Link State ID as router-local
+/// per LS-Type, so we own the namespace.
+///
+/// The SRGB / SRLB are advertised as absolute Label blocks (the V/L
+/// equivalent in the Sub-TLV length discriminator), matching how
+/// `srmpls.rs` already pins the local pool to hardcoded constants.
+/// When configurable SRGB / SRLB land, the builder will read the
+/// configured range here.
+pub const SR_INFO_LSID: u32 = 0;
+
+pub fn e_router_v3_sr_info_lsa_build(router_id: Ipv4Addr) -> Ospfv3Lsa {
+    let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv {
+        algos: vec![Algo::Spf],
+    });
+    let sid_range = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
+        range: SRGB_RANGE,
+        sid_label: SidLabelTlv::Label(SRGB_START),
+    });
+    let local_block = Ospfv3ExtTlv::SrLocalBlock(Ospfv3SrLocalBlockTlv {
+        range: SRLB_RANGE,
+        sid_label: SidLabelTlv::Label(SRLB_START),
+    });
+
+    let body = Ospfv3ELsaBody {
+        tlvs: vec![sr_algo, sid_range, local_block],
+    };
+
+    let mut lsa = Ospfv3Lsa {
+        h: Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_E_ROUTER_LSA_TYPE,
+            link_state_id: SR_INFO_LSID,
+            advertising_router: router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: Ospfv3LsBody::ERouter(body),
+    };
+    lsa.update();
+    lsa
+}
+
 /// Construct an OSPFv3 `Ospfv3AdjSidSubTlv` from a configured
 /// Adjacency-SID (P2P case). Flag semantics mirror the v2 path's
 /// `build_p2p_adj_sub`: Index form leaves V + L clear; Absolute
