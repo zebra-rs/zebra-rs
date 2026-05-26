@@ -1056,7 +1056,7 @@ impl Rib {
             .table
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(*prefix)
+                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
             })
             .collect();
         for prefix in v4_prefixes {
@@ -1068,7 +1068,7 @@ impl Rib {
             .table_v6
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(*prefix)
+                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
             })
             .collect();
         for prefix in v6_prefixes {

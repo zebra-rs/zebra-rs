@@ -1572,14 +1572,14 @@ fn route_soft_out_peer_table(
             .local_rib
             .v4vpn
             .get(&rd)
-            .map(|t| t.1.iter().map(|(p, r)| (*p, r.clone())).collect())
+            .map(|t| t.1.iter().map(|(p, r)| (p, r.clone())).collect())
             .unwrap_or_default(),
         None => bgp
             .local_rib
             .v4
             .1
             .iter()
-            .map(|(p, r)| (*p, r.clone()))
+            .map(|(p, r)| (p, r.clone()))
             .collect(),
     };
 
@@ -3512,14 +3512,14 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             .v4
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (*prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
             .collect()
     } else {
         bgp.local_rib
             .v4
             .1
             .iter()
-            .map(|(prefix, rib)| (*prefix, rib.clone()))
+            .map(|(prefix, rib)| (prefix, rib.clone()))
             .collect()
     };
 
@@ -3568,7 +3568,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 let routes: Vec<(Ipv4Net, BgpRib)> = table
                     .0
                     .iter()
-                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (*prefix, rib.clone())))
+                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
                     .collect();
                 (*rd, routes)
             })
@@ -3581,7 +3581,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 let routes: Vec<(Ipv4Net, BgpRib)> = table
                     .1
                     .iter()
-                    .map(|(prefix, rib)| (*prefix, rib.clone()))
+                    .map(|(prefix, rib)| (prefix, rib.clone()))
                     .collect();
                 (*rd, routes)
             })

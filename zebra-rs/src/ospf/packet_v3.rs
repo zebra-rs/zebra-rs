@@ -42,7 +42,7 @@ fn compute_v3_trailer_digest(
     packet_bytes_with_checksum: &[u8],
     trailer_prefix_with_apad: &[u8],
 ) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use md5::{Digest, Md5};
     use sha1::Sha1;
     use sha2::{Sha256, Sha384, Sha512};
@@ -68,31 +68,31 @@ fn compute_v3_trailer_digest(
         }
         OspfCryptoAlgo::HmacSha1 => {
             let mut m =
-                <Hmac<Sha1> as Mac>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
+                Hmac::<Sha1>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(&src_bytes);
             m.update(packet_bytes_with_checksum);
             m.update(trailer_prefix_with_apad);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha256 => {
-            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha256>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(&src_bytes);
             m.update(packet_bytes_with_checksum);
             m.update(trailer_prefix_with_apad);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha384 => {
-            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha384>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(&src_bytes);
             m.update(packet_bytes_with_checksum);
             m.update(trailer_prefix_with_apad);
             m.finalize().into_bytes().to_vec()
         }
         OspfCryptoAlgo::HmacSha512 => {
-            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(&key.raw)
-                .expect("HMAC accepts any key length");
+            let mut m =
+                Hmac::<Sha512>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
             m.update(&src_bytes);
             m.update(packet_bytes_with_checksum);
             m.update(trailer_prefix_with_apad);

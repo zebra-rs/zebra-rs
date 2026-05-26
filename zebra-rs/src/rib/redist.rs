@@ -94,7 +94,7 @@ pub fn walk_v4(
             continue;
         };
         buf.push(RouteEntryV4 {
-            prefix: *prefix,
+            prefix,
             nexthop: nh4,
             subtype: entry.rsubtype.clone(),
             metric: entry.metric,
@@ -131,7 +131,7 @@ pub fn walk_v6(
             continue;
         };
         buf.push(RouteEntryV6 {
-            prefix: *prefix,
+            prefix,
             nexthop: nh6,
             subtype: entry.rsubtype.clone(),
             metric: entry.metric,

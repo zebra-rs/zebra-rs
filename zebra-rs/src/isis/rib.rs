@@ -299,14 +299,14 @@ pub fn diff_apply_flex_algo(
         for (prefix, _) in diff.only_curr.iter() {
             let msg = rib::Message::FlexAlgoRouteDel {
                 algo,
-                prefix: **prefix,
+                prefix: *prefix,
             };
             rib_client.send(msg).unwrap();
         }
         for (prefix, _, route) in diff.different.iter() {
             // A changed route that no longer has a usable forwarding
             // plane (lost SID or lost all nhops) collapses to a Del.
-            match make_flex_algo_route(algo, **prefix, route) {
+            match make_flex_algo_route(algo, *prefix, route) {
                 Some(r) => {
                     let msg = rib::Message::FlexAlgoRouteAdd { route: r };
                     rib_client.send(msg).unwrap();
@@ -314,14 +314,14 @@ pub fn diff_apply_flex_algo(
                 None => {
                     let msg = rib::Message::FlexAlgoRouteDel {
                         algo,
-                        prefix: **prefix,
+                        prefix: *prefix,
                     };
                     rib_client.send(msg).unwrap();
                 }
             }
         }
         for (prefix, route) in diff.only_next.iter() {
-            if let Some(r) = make_flex_algo_route(algo, **prefix, route) {
+            if let Some(r) = make_flex_algo_route(algo, *prefix, route) {
                 let msg = rib::Message::FlexAlgoRouteAdd { route: r };
                 rib_client.send(msg).unwrap();
             }
@@ -335,7 +335,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Del {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -346,7 +346,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -357,7 +357,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -420,7 +420,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
         if !route.nhops.is_empty() {
             let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Del {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -430,7 +430,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
         if !route.nhops.is_empty() {
             let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Add {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -440,7 +440,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
         if !route.nhops.is_empty() {
             let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Add {
-                prefix: **prefix,
+                prefix: *prefix,
                 rib,
             };
             rib_client.send(msg).unwrap();
@@ -489,9 +489,9 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
     // Delete.
     for (label, ilm) in diff.only_curr.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm_entry = make_ilm_entry(**label, ilm);
+            let ilm_entry = make_ilm_entry(*label, ilm);
             let msg = rib::Message::IlmDel {
-                label: **label,
+                label: *label,
                 ilm: ilm_entry,
             };
             rib_client.send(msg).unwrap();
@@ -500,9 +500,9 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
     // Add (changed).
     for (label, _, ilm) in diff.different.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm_entry = make_ilm_entry(**label, ilm);
+            let ilm_entry = make_ilm_entry(*label, ilm);
             let msg = rib::Message::IlmAdd {
-                label: **label,
+                label: *label,
                 ilm: ilm_entry,
             };
             rib_client.send(msg).unwrap();
@@ -511,9 +511,9 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
     // Add (new).
     for (label, ilm) in diff.only_next.iter() {
         if !ilm.nhops.is_empty() {
-            let ilm_entry = make_ilm_entry(**label, ilm);
+            let ilm_entry = make_ilm_entry(*label, ilm);
             let msg = rib::Message::IlmAdd {
-                label: **label,
+                label: *label,
                 ilm: ilm_entry,
             };
             rib_client.send(msg).unwrap();
@@ -991,7 +991,10 @@ fn apply_routing_updates(
 ) {
     // Update MPLS ILM
     if top.config.distribute.rib {
-        let diff = spf::table_diff(top.ilm.get(&level).iter(), ilm.iter());
+        let diff = spf::table_diff(
+            top.ilm.get(&level).iter().map(|(&k, v)| (k, v)),
+            ilm.iter().map(|(&k, v)| (k, v)),
+        );
         diff_ilm_apply(top.rib_client, &diff);
     }
     *top.ilm.get_mut(&level) = ilm;

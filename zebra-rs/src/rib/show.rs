@@ -1027,7 +1027,7 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
 
         for (prefix, entries) in rib.table.iter() {
             for entry in entries.iter() {
-                routes.push(rib_entry_to_json(rib, prefix, entry));
+                routes.push(rib_entry_to_json(rib, &prefix, entry));
             }
         }
 
@@ -1040,7 +1040,12 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
 
         for (prefix, entries) in rib.table.iter() {
             for entry in entries.iter() {
-                write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap()).unwrap();
+                write!(
+                    buf,
+                    "{}",
+                    rib_entry_show(rib, &prefix, entry, json).unwrap()
+                )
+                .unwrap();
             }
         }
         buf
@@ -1058,7 +1063,7 @@ pub fn rib_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     let mut buf = String::new();
     for (prefix, entries) in rib.table.iter() {
         for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
+            buf.push_str(&rib_entry_show_detail(rib, &prefix, entry));
         }
     }
     buf
@@ -1119,7 +1124,7 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
 
         for (prefix, entries) in rib.table_v6.iter() {
             for entry in entries.iter() {
-                routes.push(rib_entry_to_json_v6(rib, prefix, entry));
+                routes.push(rib_entry_to_json_v6(rib, &prefix, entry));
             }
         }
 
@@ -1135,7 +1140,7 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
                 write!(
                     buf,
                     "{}",
-                    rib_entry_show_v6(rib, prefix, entry, json).unwrap()
+                    rib_entry_show_v6(rib, &prefix, entry, json).unwrap()
                 )
                 .unwrap();
             }
@@ -1153,7 +1158,7 @@ pub fn rib6_show_detail(rib: &Rib, args: Args, json: bool) -> String {
     let mut buf = String::new();
     for (prefix, entries) in rib.table_v6.iter() {
         for entry in entries.iter() {
-            buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
+            buf.push_str(&rib_entry_show_v6_detail(rib, &prefix, entry));
         }
     }
     buf
@@ -1398,7 +1403,7 @@ fn ilm_to_json(
 fn find_route_for_nexthop<'a>(
     rib: &'a Rib,
     target_uni: &super::NexthopUni,
-) -> Option<(&'a Ipv4Net, &'a RibEntry)> {
+) -> Option<(Ipv4Net, &'a RibEntry)> {
     for (prefix, entries) in rib.table.iter() {
         for entry in entries.iter() {
             match &entry.nexthop {
