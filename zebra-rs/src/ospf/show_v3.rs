@@ -31,8 +31,7 @@ const SHOW_OSPFV3: &str = "/show/ipv6/ospf";
 
 impl Ospf<Ospfv3> {
     /// Register the v3 show-path dispatch table. Mirrors v2's
-    /// `show_build` shape and command set, minus `segment-routing`
-    /// (no v3 SR wiring yet).
+    /// `show_build` shape and command set.
     pub fn show_build(&mut self) {
         let prefix = SHOW_OSPFV3;
         let entries: &[(&str, ShowCallback<Ospfv3>)] = &[
@@ -45,6 +44,7 @@ impl Ospf<Ospfv3> {
             ("/route", show_ospfv3_route),
             ("/spf", show_ospfv3_spf),
             ("/graph", show_ospfv3_graph),
+            ("/segment-routing", show_ospfv3_segment_routing),
         ];
         for (path, cb) in entries {
             self.show_cb.insert(format!("{}{}", prefix, path), *cb);
@@ -903,4 +903,202 @@ fn show_ospfv3_graph(
         }
     }
     render_or(json, &entries, text)
+}
+
+// ---- show ipv6 ospf segment-routing -----------------------------
+
+#[derive(Serialize)]
+struct Ospfv3SrLanAdjSidJson {
+    neighbor_router_id: String,
+    label: u32,
+}
+
+#[derive(Serialize)]
+struct Ospfv3SrInterfaceJson {
+    name: String,
+    network_type: String,
+    prefix_sid: Option<String>,
+    adjacency_sid: Option<String>,
+    lan_adj_sids: Vec<Ospfv3SrLanAdjSidJson>,
+}
+
+#[derive(Serialize)]
+struct Ospfv3SrIlmJson {
+    label: u32,
+    ilm_type: String,
+    via: String,
+    interface: String,
+}
+
+#[derive(Serialize)]
+struct Ospfv3SegmentRoutingJson {
+    enabled: bool,
+    router_id: String,
+    srgb_start: u32,
+    srgb_end: u32,
+    srlb_start: u32,
+    srlb_end: u32,
+    interfaces: Vec<Ospfv3SrInterfaceJson>,
+    ilm: Vec<Ospfv3SrIlmJson>,
+}
+
+fn fmt_prefix_sid(p: &super::link::PrefixSid) -> String {
+    match p {
+        super::link::PrefixSid::Index(idx) => format!("idx {}", idx),
+        super::link::PrefixSid::Absolute(label) => format!("lbl {}", label),
+    }
+}
+
+fn fmt_adj_sid(a: &super::link::AdjacencySid) -> String {
+    match a {
+        super::link::AdjacencySid::Index(idx) => format!("idx {}", idx),
+        super::link::AdjacencySid::Absolute(label) => format!("lbl {}", label),
+    }
+}
+
+fn fmt_ilm_type(t: &crate::rib::inst::IlmType) -> String {
+    match t {
+        crate::rib::inst::IlmType::None => "-".to_string(),
+        crate::rib::inst::IlmType::Node(idx) => format!("Pop SR Pfx (idx {})", idx),
+        crate::rib::inst::IlmType::Adjacency(idx) => format!("Pop SR Adj (idx {})", idx),
+        crate::rib::inst::IlmType::DecapVrf { table_id, .. } => {
+            format!("Pop DecapVrf (table {})", table_id)
+        }
+    }
+}
+
+fn show_ospfv3_segment_routing(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    use super::srmpls::{SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, SegmentRoutingMode};
+
+    let enabled = top.segment_routing == SegmentRoutingMode::Mpls;
+
+    // Per-interface SR view. Iterate stable ifindex order so output
+    // is deterministic between runs (BTreeMap already orders).
+    let interfaces: Vec<Ospfv3SrInterfaceJson> = top
+        .links
+        .iter()
+        .filter(|(_, link)| link.enabled)
+        .map(|(ifindex, link)| {
+            let lan_adj_sids: Vec<Ospfv3SrLanAdjSidJson> = top
+                .lan_adj_sids
+                .iter()
+                .filter(|((idx, _), _)| idx == ifindex)
+                .map(|((_, rid), label)| Ospfv3SrLanAdjSidJson {
+                    neighbor_router_id: rid.to_string(),
+                    label: *label,
+                })
+                .collect();
+            Ospfv3SrInterfaceJson {
+                name: link.name.clone(),
+                network_type: link.network_type.to_string(),
+                prefix_sid: link.config.prefix_sid.as_ref().map(fmt_prefix_sid),
+                adjacency_sid: link.config.adjacency_sid.as_ref().map(fmt_adj_sid),
+                lan_adj_sids,
+            }
+        })
+        .collect();
+
+    // ILM view sourced from the v3 LFIB shadow. Render via address as
+    // a string (link-local IPv6 unless an unspecified placeholder).
+    let ilm: Vec<Ospfv3SrIlmJson> = top
+        .ilm6
+        .iter()
+        .map(|(label, entry)| {
+            let (via, ifname) = entry
+                .nhops
+                .iter()
+                .next()
+                .map(|(addr, nh)| {
+                    let via_s = if addr.is_unspecified() {
+                        String::new()
+                    } else {
+                        addr.to_string()
+                    };
+                    (via_s, top.ifname(nh.ifindex))
+                })
+                .unwrap_or_default();
+            Ospfv3SrIlmJson {
+                label: *label,
+                ilm_type: fmt_ilm_type(&entry.ilm_type),
+                via,
+                interface: ifname,
+            }
+        })
+        .collect();
+
+    let summary = Ospfv3SegmentRoutingJson {
+        enabled,
+        router_id: top.router_id.to_string(),
+        srgb_start: SRGB_START,
+        srgb_end: SRGB_START + SRGB_RANGE - 1,
+        srlb_start: SRLB_START,
+        srlb_end: SRLB_START + SRLB_RANGE - 1,
+        interfaces,
+        ilm,
+    };
+
+    let mut text = String::new();
+    writeln!(text)?;
+    writeln!(
+        text,
+        "  OSPFv3 Segment Routing database for ID {}",
+        summary.router_id
+    )?;
+    writeln!(
+        text,
+        "  State: {}",
+        if enabled { "enabled" } else { "disabled" }
+    )?;
+    writeln!(
+        text,
+        "  Local SRGB: [{}/{}]   SRLB: [{}/{}]",
+        summary.srgb_start, summary.srgb_end, summary.srlb_start, summary.srlb_end
+    )?;
+    writeln!(text)?;
+    writeln!(
+        text,
+        "  {:<12}  {:<14}  {:<14}  {:<14}  Adj-SID",
+        "Interface", "Network", "Prefix-SID", "Adj-SID"
+    )?;
+    writeln!(text, "  {}", "-".repeat(74))?;
+    for iface in &summary.interfaces {
+        writeln!(
+            text,
+            "  {:<12}  {:<14}  {:<14}  {:<14}",
+            iface.name,
+            iface.network_type,
+            iface.prefix_sid.as_deref().unwrap_or("-"),
+            iface.adjacency_sid.as_deref().unwrap_or("-"),
+        )?;
+        for lan in &iface.lan_adj_sids {
+            writeln!(
+                text,
+                "  {:<12}  {:<14}  {:<14}  LAN nbr={} lbl={}",
+                "", "", "", lan.neighbor_router_id, lan.label
+            )?;
+        }
+    }
+
+    writeln!(text)?;
+    writeln!(text, "  Local ILM (v3): {} entries", summary.ilm.len())?;
+    writeln!(
+        text,
+        "  {:<8}  {:<22}  {:<32}  Iface",
+        "Label", "Type", "Via"
+    )?;
+    writeln!(text, "  {}", "-".repeat(72))?;
+    for e in &summary.ilm {
+        writeln!(
+            text,
+            "  {:<8}  {:<22}  {:<32}  {}",
+            e.label, e.ilm_type, e.via, e.interface
+        )?;
+    }
+    writeln!(text)?;
+
+    render_or(json, &summary, text)
 }
