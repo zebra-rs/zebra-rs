@@ -36,7 +36,7 @@ use super::lsp::{
     target_locator_name,
 };
 use super::nfsm::nbr_hold_timer_expire;
-use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, perform_spf_calculation};
+use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, apply_spf_result, build_spf_input, compute_spf};
 use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
 use super::throttle::Throttle;
@@ -140,6 +140,17 @@ pub struct Isis {
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
     pub spf_throttle: Levels<Throttle>,
+    /// True while a `tokio::task::spawn_blocking` SPF run is in flight
+    /// for the level. Subsequent `Message::SpfCalc(level)` arrivals
+    /// during this window are coalesced via `spf_pending` rather than
+    /// dispatched concurrently. Cleared in the `SpfDone` handler.
+    pub spf_inflight: Levels<bool>,
+    /// Latch set when a `Message::SpfCalc(level)` arrives while
+    /// `spf_inflight[level]` is true. The completion path (`SpfDone`)
+    /// drains it with `mem::take`; if it was set, it re-fires exactly
+    /// one follow-up `Message::SpfCalc(level)` so coalesced LSDB
+    /// changes during the run still get observed.
+    pub spf_pending: Levels<bool>,
     /// LSP-gen coalescing slot. None means no run is currently pending;
     /// Some(Timer) means a LspGenFire is armed and additional
     /// LspOriginate events will fold into the same run.
@@ -162,8 +173,8 @@ pub struct Isis {
     /// Per-algorithm SPF graphs (RFC 9350). Outer key is the algo id
     /// from `flex_algo.config` (128..=255); inner Option mirrors the
     /// legacy `graph` shape — None means SPF could not run this cycle
-    /// (e.g. we have no source LSP yet). Recomputed every time
-    /// `perform_spf_calculation` runs; stale algos no longer in
+    /// (e.g. we have no source LSP yet). Recomputed every SPF cycle
+    /// by `build_spf_input` / `apply_spf_result`; stale algos no longer in
     /// `flex_algo.config` are purged before each refill so the
     /// snapshot stays consistent with current config.
     pub graph_flex_algo: Levels<BTreeMap<u8, Option<spf::Graph>>>,
@@ -329,6 +340,10 @@ pub struct IsisTop<'a> {
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<Throttle>,
+    /// Inflight gate for the SPF offload — see `Isis::spf_inflight`.
+    pub spf_inflight: &'a mut Levels<bool>,
+    /// Pending latch for the SPF offload — see `Isis::spf_pending`.
+    pub spf_pending: &'a mut Levels<bool>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub tilfa_result: &'a mut Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
@@ -336,15 +351,15 @@ pub struct IsisTop<'a> {
     pub mt2_spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
 
     /// Per-algorithm SPF state (see `Isis::graph_flex_algo` /
-    /// `spf_flex_algo`). Threaded through IsisTop so
-    /// `perform_spf_calculation` can refresh per-algo runs alongside
-    /// the legacy + MT 2 SPF.
+    /// `spf_flex_algo`). Threaded through IsisTop so the SPF pipeline
+    /// (`build_spf_input` / `apply_spf_result`) can refresh per-algo
+    /// runs alongside the legacy + MT 2 SPF.
     pub graph_flex_algo: &'a mut Levels<BTreeMap<u8, Option<spf::Graph>>>,
     pub spf_flex_algo: &'a mut Levels<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>,
 
     /// Per-algorithm IPv4 RIB (see `Isis::rib_flex_algo`). Threaded
-    /// so `perform_spf_calculation` can install the per-algo RIB
-    /// snapshot after each SPF cycle.
+    /// so `apply_spf_result` can install the per-algo RIB snapshot
+    /// after each SPF cycle.
     pub rib_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>,
 
     /// Read-only access to the SR snapshot the IS-IS instance is caching
@@ -448,6 +463,8 @@ impl Isis {
                 hostname: Levels::<Hostname>::default(),
                 spf_timer: Levels::<Option<Timer>>::default(),
                 spf_throttle: Levels::<Throttle>::default(),
+                spf_inflight: Levels::<bool>::default(),
+                spf_pending: Levels::<bool>::default(),
                 lsp_gen_timer: Levels::<Option<Timer>>::default(),
                 lsp_gen_throttle: Levels::<Throttle>::default(),
                 lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
@@ -693,8 +710,44 @@ impl Isis {
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
             Message::SpfCalc(level) => {
+                // Offloaded SPF: build the graph snapshot on the main
+                // task, then dispatch Dijkstra + TI-LFA to
+                // `tokio::task::spawn_blocking`. The worker sends the
+                // result back as `Message::SpfDone`, which runs the
+                // RIB build + diff on the main task. Mirrors the OSPF
+                // pipeline in `ospf/inst.rs::process_message`.
+                let tx = self.tx.clone();
                 let mut top = self.top();
-                perform_spf_calculation(&mut top, level);
+                if *top.spf_inflight.get(&level) {
+                    // Another SPF is already running for this level —
+                    // latch a follow-up so the completion path re-fires
+                    // exactly one `SpfCalc` once it returns.
+                    *top.spf_pending.get_mut(&level) = true;
+                    return;
+                }
+                // Clear the slot first so a new schedule can arm a
+                // timer if more LSDB changes arrive while the worker
+                // is running; stamp the throttle so the next schedule
+                // sees this run as the most recent.
+                *top.spf_timer.get_mut(&level) = None;
+                top.spf_throttle.get_mut(&level).mark_run();
+                let Some(input) = build_spf_input(&mut top, level) else {
+                    return;
+                };
+                *top.spf_inflight.get_mut(&level) = true;
+                tokio::task::spawn_blocking(move || {
+                    let output = compute_spf(input);
+                    let _ = tx.send(Message::SpfDone(Box::new(output)));
+                });
+            }
+            Message::SpfDone(output) => {
+                let level = output.level;
+                let mut top = self.top();
+                apply_spf_result(&mut top, *output);
+                *top.spf_inflight.get_mut(&level) = false;
+                if std::mem::take(top.spf_pending.get_mut(&level)) {
+                    let _ = self.tx.send(Message::SpfCalc(level));
+                }
             }
             Message::Recv(packet, ifindex, mac) => {
                 let Some(mut top) = self.link_top(ifindex) else {
@@ -1206,6 +1259,8 @@ impl Isis {
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
+            spf_inflight: &mut self.spf_inflight,
+            spf_pending: &mut self.spf_pending,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
             tilfa_result: &mut self.tilfa_result,
@@ -1471,6 +1526,14 @@ pub enum Message {
     /// us).
     DisOriginate(Level, IsisNeighborId, Option<u32>),
     SpfCalc(Level),
+    /// SPF run completed off the main task. Carries the owned
+    /// `SpfOutput` produced by `compute_spf`; the handler applies it
+    /// to `IsisTop` and clears `spf_inflight[level]`. If a
+    /// `Message::SpfCalc(level)` arrived while the worker was running
+    /// (latched on `spf_pending[level]`), the handler re-fires exactly
+    /// one follow-up `SpfCalc` so coalesced LSDB changes still
+    /// converge.
+    SpfDone(Box<super::rib::SpfOutput>),
     AdjacencyUp(Level, u32),
     /// MaxAge wait expired after a seq-number-wrap purge (ISO 10589
     /// §7.3.16.4). Clears the per-fragment freeze entry for
@@ -1520,6 +1583,7 @@ impl Display for Message {
                 write!(f, "[Message::DisOriginate({}, {})]", level, neighbor_id)
             }
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
+            Message::SpfDone(output) => write!(f, "[Message::SpfDone({})]", output.level),
             Message::AdjacencyUp(level, ifindex) => {
                 write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
             }
