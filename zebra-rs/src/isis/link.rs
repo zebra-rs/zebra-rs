@@ -495,6 +495,16 @@ pub struct LinkState {
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
 
+    /// Authentication counters (Phase 3a — Hellos only).
+    /// `tx_signed` increments whenever we attach an Auth TLV outbound.
+    /// `rx_good` / `rx_bad` count auth-TLV validate outcomes; `rx_no_auth`
+    /// counts inbound Hellos with no Auth TLV when this link has auth
+    /// configured (and is not in `send-only` mode).
+    pub auth_tx_signed: u64,
+    pub auth_rx_good: u64,
+    pub auth_rx_bad: u64,
+    pub auth_rx_no_auth: u64,
+
     // TODO: need to fix.
     pub hello: Levels<Option<IsisPdu>>,
 }

@@ -87,4 +87,11 @@ impl IsisType {
     pub fn is_lsp(&self) -> bool {
         matches!(self, IsisType::L1Lsp | IsisType::L2Lsp)
     }
+
+    pub fn is_hello(&self) -> bool {
+        matches!(
+            self,
+            IsisType::L1Hello | IsisType::L2Hello | IsisType::P2pHello
+        )
+    }
 }
