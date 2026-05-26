@@ -31,6 +31,14 @@ impl Ospf {
             .insert(format!("{}{}", Self::TRACING, path), cb);
     }
 
+    /// Register a callback against a literal config path (no
+    /// `/router/ospf` prefix). Used for shared top-level subtrees
+    /// like `/key-chains` that aren't OSPF-specific on the wire
+    /// but get a per-daemon copy of the data.
+    pub fn callback_add(&mut self, path: &str, cb: Callback) {
+        self.callbacks.insert(path.to_string(), cb);
+    }
+
     pub fn callback_build(&mut self) {
         self.ospf_add("/router-id", config_ospf_router_id);
         self.ospf_add("/area/area-type", config_ospf_area_type);
@@ -85,6 +93,43 @@ impl Ospf {
         self.ospf_add(
             "/area/interface/authentication-key",
             config_ospf_interface_authentication_key,
+        );
+        self.ospf_add("/area/interface/key-chain", config_ospf_interface_key_chain);
+        // Global /key-chains/... — OSPF keeps its own copy of the
+        // registry separate from BGP's. See `Ospf::key_chains`.
+        self.callback_add("/key-chains/key-chain", config_kc_chain);
+        self.callback_add(
+            "/key-chains/key-chain/description",
+            config_kc_chain_description,
+        );
+        self.callback_add("/key-chains/key-chain/key", config_kc_key);
+        self.callback_add(
+            "/key-chains/key-chain/key/crypto-algorithm",
+            config_kc_key_crypto_algorithm,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/key-string/keystring",
+            config_kc_key_keystring,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/lifetime/send-accept-lifetime/always",
+            config_kc_lifetime_always,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/lifetime/send-accept-lifetime/start-date-time",
+            config_kc_lifetime_start,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/lifetime/send-accept-lifetime/no-end-time",
+            config_kc_lifetime_no_end,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/lifetime/send-accept-lifetime/end-date-time",
+            config_kc_lifetime_end_date,
+        );
+        self.callback_add(
+            "/key-chains/key-chain/key/lifetime/send-accept-lifetime/duration",
+            config_kc_lifetime_duration,
         );
         self.ospf_add(
             "/area/interface/message-digest-key/md5",
@@ -769,6 +814,205 @@ fn config_ospf_interface_crypto_key_hmac_sha_512(
     op: ConfigOp,
 ) -> Option<()> {
     install_crypto_hmac_key(ospf, args, op, super::link::OspfCryptoAlgo::HmacSha512)
+}
+
+fn config_ospf_interface_key_chain(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.key_chain = Some(args.string()?);
+    } else {
+        link.config.key_chain = None;
+    }
+    Some(())
+}
+
+// ---------- /key-chains/... callbacks (RFC 8177) ----------
+
+fn config_kc_chain(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        ospf.key_chains.entry(name).or_default();
+    } else {
+        ospf.key_chains.remove(&name);
+    }
+    Some(())
+}
+
+fn config_kc_chain_description(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let chain = ospf.key_chains.get_mut(&name)?;
+    chain.description = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    Some(())
+}
+
+/// Parse the IETF YANG `key-id` (`uint64`) into the OSPF on-wire
+/// 8-bit space; key-ids outside `1..=255` are rejected at commit
+/// time. Returns the validated u8 key-id and the chain name still
+/// pending in `args`.
+fn kc_key_args(args: &mut Args) -> Option<(String, u8)> {
+    let chain_name = args.string()?;
+    let key_id_u64 = args.u64()?;
+    if !(1..=255).contains(&key_id_u64) {
+        return None;
+    }
+    Some((chain_name, key_id_u64 as u8))
+}
+
+fn config_kc_key(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    if op.is_set() {
+        chain.keys.entry(key_id).or_default();
+    } else {
+        chain.keys.remove(&key_id);
+    }
+    Some(())
+}
+
+fn config_kc_key_crypto_algorithm(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op.is_set() {
+        let name = args.string()?;
+        // `?` rejects the commit when the algorithm identityref
+        // isn't one we recognize, rather than silently leaving the
+        // key algorithm-less.
+        key.algo = Some(super::key_chain::parse_crypto_algorithm(&name)?);
+    } else {
+        key.algo = None;
+    }
+    Some(())
+}
+
+fn config_kc_key_keystring(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if op.is_set() {
+        key.key_material = args.string()?.into_bytes();
+    } else {
+        key.key_material.clear();
+    }
+    Some(())
+}
+
+// ---------- send-accept-lifetime/* helpers ----------
+//
+// Phase 4 covers only `send-and-accept-lifetime` (one shared
+// window). `independent-send-accept-lifetime` (separate send/accept
+// windows) is left for a follow-up — the YANG callbacks for those
+// paths aren't registered, so the libyang dispatch rejects the
+// commit instead of silently writing only one half.
+
+fn parse_yang_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// Replace the end-time half of both send + accept lifetime with
+/// `new_end`. If the lifetime is currently `Always` (no
+/// start-date-time written yet), the start defaults to UNIX_EPOCH
+/// so the bound is at least well-defined; the operator is expected
+/// to set `start-date-time` in the same commit.
+fn set_send_accept_end(
+    key: &mut super::key_chain::OspfChainKey,
+    new_end: super::key_chain::LifetimeEnd,
+) {
+    use super::key_chain::Lifetime;
+    let start = match key.send_lifetime {
+        Lifetime::Window { start, .. } => start,
+        Lifetime::Always => chrono::DateTime::UNIX_EPOCH,
+    };
+    let lt = Lifetime::Window {
+        start,
+        end: new_end,
+    };
+    key.send_lifetime = lt.clone();
+    key.accept_lifetime = lt;
+}
+
+fn config_kc_lifetime_always(ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
+    use super::key_chain::Lifetime;
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    key.send_lifetime = Lifetime::Always;
+    key.accept_lifetime = Lifetime::Always;
+    Some(())
+}
+
+/// Set or update the `start-date-time` half of the send-accept
+/// window. Preserves an existing end-time half (the YANG `case
+/// start-end-time` lets `start-date-time` and one of
+/// `no-end-time` / `duration` / `end-date-time` be configured in
+/// any order; each callback fires independently).
+fn config_kc_lifetime_start(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    use super::key_chain::{Lifetime, LifetimeEnd};
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if !op.is_set() {
+        key.send_lifetime = Lifetime::Always;
+        key.accept_lifetime = Lifetime::Always;
+        return Some(());
+    }
+    let start = parse_yang_datetime(&args.string()?)?;
+    let preserved_end = match &key.send_lifetime {
+        Lifetime::Window { end, .. } => end.clone(),
+        Lifetime::Always => LifetimeEnd::NoEnd,
+    };
+    let lt = Lifetime::Window {
+        start,
+        end: preserved_end,
+    };
+    key.send_lifetime = lt.clone();
+    key.accept_lifetime = lt;
+    Some(())
+}
+
+fn config_kc_lifetime_no_end(ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
+    use super::key_chain::LifetimeEnd;
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    set_send_accept_end(key, LifetimeEnd::NoEnd);
+    Some(())
+}
+
+fn config_kc_lifetime_end_date(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    use super::key_chain::LifetimeEnd;
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if !op.is_set() {
+        set_send_accept_end(key, LifetimeEnd::NoEnd);
+        return Some(());
+    }
+    let end = parse_yang_datetime(&args.string()?)?;
+    set_send_accept_end(key, LifetimeEnd::EndAt(end));
+    Some(())
+}
+
+fn config_kc_lifetime_duration(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    use super::key_chain::LifetimeEnd;
+    let (chain_name, key_id) = kc_key_args(&mut args)?;
+    let chain = ospf.key_chains.get_mut(&chain_name)?;
+    let key = chain.keys.get_mut(&key_id)?;
+    if !op.is_set() {
+        set_send_accept_end(key, LifetimeEnd::NoEnd);
+        return Some(());
+    }
+    let secs = args.u32()?;
+    set_send_accept_end(key, LifetimeEnd::Duration(secs));
+    Some(())
 }
 
 fn config_ospf_interface_prefix_sid_index(

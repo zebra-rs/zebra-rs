@@ -86,12 +86,18 @@ pub struct LinkConfig {
     /// Cryptographic-auth keys keyed by key-id (RFC 2328 §D.4
     /// for keyed-MD5, RFC 5709 for HMAC-SHA). Each entry carries
     /// the algorithm and the raw secret. Only consulted when
-    /// `auth_mode == MessageDigest`. Populated by either the
-    /// `message-digest-key` callback (MD5 entries) or the
-    /// `crypto-key` callback (HMAC-SHA entries) — the two paths
-    /// share this single keyring and using the same key-id from
-    /// both is a config error.
+    /// `auth_mode == MessageDigest` AND `key_chain` is unset.
+    /// Populated by either the `message-digest-key` callback
+    /// (MD5 entries) or the `crypto-key` callback (HMAC-SHA
+    /// entries) — the two paths share this single keyring and
+    /// using the same key-id from both is a config error.
     pub crypto_keys: BTreeMap<u8, AuthKey>,
+    /// RFC 8177 key-chain name (see `/key-chains` callbacks).
+    /// When set and `auth_mode == MessageDigest`, the chain
+    /// supersedes `crypto_keys` for both send-side selection
+    /// (`KeyChain::active_send_key(now)`) and receive-side
+    /// validation (`KeyChain::lookup_recv_key(key_id, now)`).
+    pub key_chain: Option<String>,
 }
 
 /// OSPFv2 per-interface authentication mode.
@@ -377,17 +383,42 @@ impl<V: OspfVersion> OspfLink<V> {
         self.config.auth_mode.unwrap_or(OspfAuthMode::Null)
     }
 
-    /// Return the active crypto-auth send key (lowest configured
-    /// key-id across both MD5 and HMAC-SHA entries) alongside its
-    /// key-id, or `None` if no keys are configured. Key rollover
-    /// (per-key send/accept lifetimes) lives in the Phase 4
-    /// key-chain plumbing.
+    /// Per-interface crypto-key fallback used when no key-chain is
+    /// configured (or when the configured chain is missing /
+    /// expired). Lowest configured key-id across MD5 + HMAC-SHA
+    /// entries.
     pub fn active_crypto_key(&self) -> Option<(u8, AuthKey)> {
         self.config
             .crypto_keys
             .iter()
             .next()
             .map(|(&id, k)| (id, k.clone()))
+    }
+
+    /// Resolve the active send key — chain-aware. If `key_chain` is
+    /// set, look it up and use `KeyChain::active_send_key(now)`;
+    /// otherwise fall back to the per-interface `crypto_keys` map.
+    /// Returns `None` if a chain is named but missing or has no
+    /// active key — peers will reject our zero-trailer packets,
+    /// which is a louder failure than silently picking a stale key.
+    pub fn resolve_active_send_key(
+        &self,
+        chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<(u8, AuthKey)> {
+        if let Some(name) = &self.config.key_chain {
+            let chain = chains.get(name)?;
+            let (id, ck) = chain.active_send_key(now)?;
+            let algo = ck.algo?;
+            return Some((
+                id,
+                AuthKey {
+                    algo,
+                    raw: ck.key_material.clone(),
+                },
+            ));
+        }
+        self.active_crypto_key()
     }
 
     /// Read and increment the per-interface cryptographic-auth
@@ -402,11 +433,15 @@ impl<V: OspfVersion> OspfLink<V> {
     /// Bundle the auth state needed to stamp one outbound packet.
     /// Bumps the cryptographic-auth seq as a side effect — call
     /// once per packet, not once per buffer reuse.
-    pub fn auth_send_ctx(&self) -> super::packet::AuthSendCtx {
+    pub fn auth_send_ctx(
+        &self,
+        chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> super::packet::AuthSendCtx {
         super::packet::AuthSendCtx {
             mode: self.auth_mode(),
             simple_key: self.config.auth_key,
-            crypto_key: self.active_crypto_key(),
+            crypto_key: self.resolve_active_send_key(chains, now),
             md5_seq: self.next_md5_seq(),
         }
     }

@@ -168,11 +168,36 @@ fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Ve
 /// the packet is acceptable. The caller must update the per-
 /// neighbor `auth_md5_last_seq` via `record_md5_seq()` afterward
 /// to enforce replay protection (RFC 2328 §D.5 / RFC 7474).
+/// Where receive-side key lookup pulls its key material from.
+/// Per-interface map is the Phase 2/3 path; key-chain is Phase 4.
+pub(super) enum KeySource<'a> {
+    PerIface(&'a std::collections::BTreeMap<u8, super::link::AuthKey>),
+    Chain {
+        chain: &'a super::key_chain::OspfKeyChain,
+        now: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl<'a> KeySource<'a> {
+    fn lookup(&self, key_id: u8) -> Option<super::link::AuthKey> {
+        match self {
+            Self::PerIface(m) => m.get(&key_id).cloned(),
+            Self::Chain { chain, now } => {
+                let ck = chain.lookup_recv_key(key_id, *now)?;
+                Some(super::link::AuthKey {
+                    algo: ck.algo?,
+                    raw: ck.key_material.clone(),
+                })
+            }
+        }
+    }
+}
+
 pub(super) fn verify_link_auth(
     packet: &Ospfv2Packet,
     mode: OspfAuthMode,
     simple_key: Option<[u8; 8]>,
-    crypto_keys: &std::collections::BTreeMap<u8, super::link::AuthKey>,
+    key_source: &KeySource<'_>,
     nbr_last_seq: u32,
 ) -> bool {
     match mode {
@@ -197,8 +222,9 @@ pub(super) fn verify_link_auth(
                 return false;
             }
             // Look up the key by id; reject if the sender used
-            // a key we don't know.
-            let Some(key) = crypto_keys.get(&crypto.key_id) else {
+            // a key we don't know or one whose accept-lifetime
+            // has elapsed (chain path).
+            let Some(key) = key_source.lookup(crypto.key_id) else {
                 return false;
             };
             // The on-wire trailer length must match what our
@@ -213,7 +239,7 @@ pub(super) fn verify_link_auth(
             }
             // Recompute the digest over raw_body (the bytes the
             // sender hashed) using our configured key + algo.
-            let expected = compute_crypto_trailer(key, &packet.raw_body);
+            let expected = compute_crypto_trailer(&key, &packet.raw_body);
             // Constant-time compare — leaking first-mismatch
             // position to a remote sender via timing is bad form.
             constant_time_eq(&expected, &packet.auth_trailer)
@@ -243,7 +269,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
-pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
+pub fn ospf_hello_packet(
+    oi: &OspfLink,
+    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Ospfv2Packet> {
     let addr = oi.addr.first()?;
     let mut hello = OspfHello {
         netmask: addr.prefix.netmask(),
@@ -266,7 +296,7 @@ pub fn ospf_hello_packet(oi: &OspfLink) -> Option<Ospfv2Packet> {
     }
 
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &oi.area, Ospfv2Payload::Hello(hello));
-    apply_link_auth(&mut packet, &oi.auth_send_ctx());
+    apply_link_auth(&mut packet, &oi.auth_send_ctx(chains, now));
 
     Some(packet)
 }
@@ -412,10 +442,14 @@ pub fn ospf_hello_recv(
     }
 }
 
-pub fn ospf_hello_send(oi: &mut OspfLink) {
+pub fn ospf_hello_send(
+    oi: &mut OspfLink,
+    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
 
-    let packet = ospf_hello_packet(oi).unwrap();
+    let packet = ospf_hello_packet(oi, chains, now).unwrap();
     if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, None)) {
         tracing::warn!("[Hello:Send] channel send failed: {}", e);
         return;
@@ -1326,7 +1360,7 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_keys(),
+            &KeySource::PerIface(&empty_keys()),
             0
         ));
 
@@ -1335,7 +1369,7 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_keys(),
+            &KeySource::PerIface(&empty_keys()),
             0
         ));
     }
@@ -1350,14 +1384,14 @@ mod auth_tests {
             &p,
             OspfAuthMode::Simple,
             Some(key),
-            &empty_keys(),
+            &KeySource::PerIface(&empty_keys()),
             0
         ));
         assert!(!verify_link_auth(
             &p,
             OspfAuthMode::Simple,
             Some(*b"other\0\0\0"),
-            &empty_keys(),
+            &KeySource::PerIface(&empty_keys()),
             0
         ));
         // Wrong mode on the receiving side — drop.
@@ -1365,7 +1399,7 @@ mod auth_tests {
             &p,
             OspfAuthMode::Null,
             None,
-            &empty_keys(),
+            &KeySource::PerIface(&empty_keys()),
             0
         ));
     }
@@ -1409,7 +1443,7 @@ mod auth_tests {
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &keys,
+            &KeySource::PerIface(&keys),
             0
         ));
         // Replay: seq below high-watermark → reject.
@@ -1417,7 +1451,7 @@ mod auth_tests {
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &keys,
+            &KeySource::PerIface(&keys),
             seq + 1
         ));
         // Unknown key-id → reject.
@@ -1427,7 +1461,7 @@ mod auth_tests {
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &wrong_keys,
+            &KeySource::PerIface(&wrong_keys),
             0
         ));
         // Same key-id, wrong material → reject.
@@ -1443,7 +1477,7 @@ mod auth_tests {
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &bad,
+            &KeySource::PerIface(&bad),
             0
         ));
     }
@@ -1485,6 +1519,77 @@ mod auth_tests {
         ));
     }
 
+    /// Verify a chain-sourced inbound packet honours the
+    /// accept-lifetime window — the same key-id outside the
+    /// window must be rejected even when the digest would
+    /// otherwise match.
+    #[test]
+    fn chain_recv_rejects_outside_accept_lifetime() {
+        use bytes::BytesMut;
+        use chrono::{TimeZone, Utc};
+        use ospf_packet::parse;
+
+        use super::super::key_chain::{Lifetime, LifetimeEnd, OspfChainKey, OspfKeyChain};
+
+        let key_id: u8 = 5;
+        let key_bytes = b"chain-secret".to_vec();
+        let mut p = hello_packet();
+        apply_link_auth(
+            &mut p,
+            &crypto_ctx(
+                key_id,
+                super::super::link::AuthKey {
+                    algo: super::super::link::OspfCryptoAlgo::HmacSha256,
+                    raw: key_bytes.clone(),
+                },
+                0xDEAD_BEEF,
+            ),
+        );
+        let mut buf = BytesMut::new();
+        p.emit(&mut buf);
+        let (_, parsed) = parse(&buf).expect("parse must succeed");
+
+        let mut chain = OspfKeyChain::default();
+        chain.keys.insert(
+            key_id,
+            OspfChainKey {
+                algo: Some(super::super::link::OspfCryptoAlgo::HmacSha256),
+                key_material: key_bytes,
+                send_lifetime: Lifetime::Always,
+                accept_lifetime: Lifetime::Window {
+                    start: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                    end: LifetimeEnd::EndAt(Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap()),
+                },
+            },
+        );
+
+        let inside = Utc.with_ymd_and_hms(2026, 1, 15, 0, 0, 0).unwrap();
+        let outside = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+        // Accept within window.
+        assert!(verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &KeySource::Chain {
+                chain: &chain,
+                now: inside,
+            },
+            0
+        ));
+        // Reject when the accept-lifetime has elapsed.
+        assert!(!verify_link_auth(
+            &parsed,
+            OspfAuthMode::MessageDigest,
+            None,
+            &KeySource::Chain {
+                chain: &chain,
+                now: outside,
+            },
+            0
+        ));
+    }
+
     /// If we apply with one algorithm and the receiver configured a
     /// different algorithm for the same key-id, verify must reject —
     /// both because the wire trailer length won't match and as a
@@ -1517,7 +1622,7 @@ mod auth_tests {
             &parsed,
             OspfAuthMode::MessageDigest,
             None,
-            &keys,
+            &KeySource::PerIface(&keys),
             0
         ));
     }
