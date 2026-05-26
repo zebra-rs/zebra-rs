@@ -70,7 +70,7 @@ fn ls_type_name(ls_type: u16) -> &'static str {
     use ospf_packet::{
         OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
-        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
     };
     match ls_type {
         OSPFV3_ROUTER_LSA_TYPE => "Router-LSA",
@@ -78,6 +78,7 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_INTER_AREA_PREFIX_LSA_TYPE => "Inter-Area-Prefix-LSA",
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE => "Inter-Area-Router-LSA",
         OSPFV3_AS_EXTERNAL_LSA_TYPE => "AS-External-LSA",
+        OSPFV3_NSSA_LSA_TYPE => "NSSA-LSA",
         OSPFV3_LINK_LSA_TYPE => "Link-LSA",
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => "Intra-Area-Prefix-LSA",
         _ => "Unknown",
@@ -517,7 +518,12 @@ fn write_lsa_detail(
                 Ipv4Addr::from(b.destination_router_id)
             )?;
         }
-        Ospfv3LsBody::AsExternal(b) => {
+        // NSSA-LSA shares the AS-External body shape per RFC 5340
+        // §A.4.9; render identical fields. The LSA-Type header line
+        // above already differentiates them ("NSSA-LSA" vs
+        // "AS-External-LSA"), and consumption semantics (P-bit /
+        // FA rules) read the same body fields.
+        Ospfv3LsBody::AsExternal(b) | Ospfv3LsBody::Nssa(b) => {
             writeln!(
                 out,
                 "  Flags: 0x{:02x} : {}",
