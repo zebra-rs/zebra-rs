@@ -4,6 +4,7 @@ use crate::policy::inst::ShowCallback;
 use super::aspath;
 use super::community;
 use super::ext_community;
+use super::keychain;
 use super::large_community;
 use super::policy_list;
 use super::prefix;
@@ -40,5 +41,7 @@ impl Policy {
         );
         self.show_add("/show/as-path-set", aspath::show::as_path_set);
         self.show_add("/show/as-path-set/name", aspath::show::as_path_set_name);
+        self.show_add("/show/key-chains", keychain::show::key_chains);
+        self.show_add("/show/key-chains/name", keychain::show::key_chain_name);
     }
 }
