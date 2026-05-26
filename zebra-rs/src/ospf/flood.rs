@@ -140,8 +140,15 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // RFC 3101 §3: a freshly-installed Type-7 may need to be
     // translated by an NSSA ABR. Resync is idempotent and gates on
     // ABR + translator-role internally.
-    if lsa.h.ls_type == OspfLsType::NssaAsExternal
-        && let Some(area_id) = area_id
+    //
+    // A Router-LSA inside an NSSA area can also flip our
+    // Candidate-mode election outcome (another ABR joined / left /
+    // changed B-bit), so trigger the same resync there.
+    if matches!(
+        lsa.h.ls_type,
+        OspfLsType::NssaAsExternal | OspfLsType::Router
+    ) && let Some(area_id) = area_id
+        && oi.area_type.is_nssa()
     {
         let _ = oi.tx.send(Message::NssaTranslateResync(area_id));
     }
