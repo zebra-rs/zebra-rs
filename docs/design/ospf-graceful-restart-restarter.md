@@ -9,7 +9,10 @@ References:
 
 - RFC 3623 §2 — OSPFv2 restarting-router procedures.
 - RFC 5187 §2 — OSPFv3 restarting-router procedures.
-- RFC 4811 / 4812 — auxiliary LR-bit signaling for v3.
+- RFC 4811 / 4812 — auxiliary LR-bit signaling. **OSPFv2 only**;
+  RFC 5187 §3 makes the Grace-LSA the sole restart signal for v3.
+  The earlier revision of this doc misattributed LR to v3; see
+  the section "RFC 4811 LR-bit is v2-only" below.
 - RFC 7770 — `gr_capable` capability bit (Router Information LSA).
 
 Per the project's `[[feedback-confirm-direction-before-sinking-work]]`
@@ -50,7 +53,7 @@ in-memory and ephemeral. Restarter mode is the opposite shape:
 | Pre-restart (state preservation)  | Persist router-id, interface IDs (v3), neighbor adjacency state, self-originated LSA seq numbers + bodies, and the per-area LSDB snapshot needed for the exit-restart consistency check. |
 | Exit                              | Tear down the daemon without withdrawing kernel routes.                                       |
 | Restart                           | On startup, detect the checkpoint, load it, enter restarting state. Re-acquire kernel link state. |
-| Re-adjacency                      | Send Hellos (v3: with `LR` bit set per RFC 4811). DBD / LSReq exchange with each pre-restart neighbor; rebuild LSDB. |
+| Re-adjacency                      | Send Hellos as normal; DBD / LSReq exchange with each pre-restart neighbor; rebuild LSDB. v2 had an optional LR-bit (RFC 4811) but FRR-style deployments use Grace-LSAs as the sole signal there too. |
 | Exit-restart success              | Reconstructed LSDB matches the persisted snapshot (or "compatible" per §3.2 of the RFC) → re-originate self LSAs at `seq + 1`, flush Grace LSAs (MaxAge), clear restarting state. |
 | Exit-restart failure / timeout    | Grace period expires before LSDB reconstruction completes, or a mismatch is detected → re-originate fresh LSAs with new content, accept that helpers will have exited. |
 
@@ -65,7 +68,6 @@ in-memory and ephemeral. Restarter mode is the opposite shape:
 | Skip-`ProtoCleanup` exit path                        | Missing  | `despawn_ospf` (`config/ospf.rs:20`) unconditionally fires `ProtoCleanup`, which withdraws kernel routes |
 | Restart-aware startup / cold-start bypass            | Missing  | `Ospf<V>::new` always cold-starts |
 | Restarting NFSM behavior (resume neighbors mid-DBD) | Missing  | NFSM enters at `Down`; no "we already knew this neighbor" path |
-| LR-bit (v3 Hello option, RFC 4811)                   | Missing  | `Ospfv3Options` bitfield does not carry it |
 | Self-originated LSA seq counter persistence          | Missing  | seq starts at `0x80000001` on every cold start (`OspfLsaHeader::new` in `parser.rs:350`) |
 
 ## Phased plan
@@ -191,17 +193,48 @@ The other half: pick up the checkpoint on the next boot.
     content, accept that helpers will exit. Same cleanup
     (`restarting=None`, delete checkpoint).
 
-### 5f — v3 LR-bit signaling
+### 5f — v3 restarter mirror (TODO — own scoping doc)
 
-OSPFv3 only. RFC 5187 §2.2 + RFC 4811 — set the LR bit in
-outgoing Hellos while restarting. Helpers that didn't catch the
-Grace LSA still detect "this neighbor is restarting" from the
-Hello.
+The work to bring OSPFv3 to restarter-side parity with v2:
+mirror 5b / 5c / 5d / 5e against the v3 path. Concretely:
 
-- Extend `Ospfv3Options` bitfield (currently `crates/ospf-packet/src/v3.rs`)
-  with an `lr` accessor. Decode-only is already shipped; emit
-  side gates on `Ospf<Ospfv3>.restarting.is_some()`.
-- v2 has no analogue; v2 uses the Grace LSA as sole signal.
+- `Ospfv3Checkpoint` shape (`NeighborCheckpoint` widens to
+  `Ipv6Addr`).
+- `Ospf<Ospfv3>::gr_restart_begin / abort / commit /
+  load_checkpoint / exit_success` mirroring the v2 methods.
+- v3 Grace-LSA originate path using the codec from PR #861.
+- Restart-aware `Ospf<Ospfv3>::new` that consumes the v3
+  checkpoint, sets `restarting=Some`, gates topology-affecting
+  v3 self-LSA origination (Router-LSA 0x2001, Network-LSA
+  0x2002, Intra-Area-Prefix-LSA 0x2009, plus the
+  Inter-Area-Prefix / Inter-Area-Router types once the
+  multi-area work in §5g lands).
+
+Estimated ~500 LoC; needs its own scoping doc before picking
+up because the v3-specific edge cases (link-local source
+addresses, interface-id stability, E-LSA seq preservation)
+have no v2 analogue to lean on.
+
+### RFC 4811 LR-bit is v2-only
+
+An earlier revision of this doc proposed "Phase 5f — v3
+LR-bit signaling" referencing RFC 4811 §2 as the basis. That
+was wrong. **RFC 4811 (and RFC 4812) is OSPFv2-only.**
+RFC 5187 §3 — the OSPFv3 GR procedures — explicitly makes
+the Grace-LSA the sole restart signal for v3:
+
+> The OSPFv3 Grace-LSA is the only way for the restarting
+> router to inform its neighbors about graceful restart.
+
+No LR analogue is defined in the OSPFv3 Options field per
+RFC 5340 §A.2. Shipping an `Ospfv3Options.lr` bit would be
+a non-standard vendor extension with nothing to interoperate
+with, so it's intentionally **not** in scope.
+
+OSPFv2's LR-bit (RFC 4811) is also not implemented here —
+v2's Grace-LSA exchange handles the helper-entry signaling
+already (PRs #864/#869 helper, #904/#905 restarter), and
+FRR-style deployments don't require LR-bit either.
 
 ### 5g (deferred) — Cross-area / ABR / ASBR restart
 
@@ -305,18 +338,17 @@ fall-back posture if the call turns out wrong in practice.
    sync the clock may be wildly wrong, and in that case
    we'd rather cold-start than restart on bad clock data.
 
-8. **Set LR on every v3 Hello while restarting.** RFC 4811
-   §2: "Once an OSPFv3 router is in the process of
-   restarting, it MUST set the LR-bit in all of its Hello
-   packets." Per-instance restart state → per-instance LR
-   bit. The bit is per-Hello on the wire; the source-of-truth
-   condition `Ospf<Ospfv3>.restarting.is_some()` is per-
-   instance. Helper side reads LR only as a confirming signal
-   — the Grace LSA stays the primary entry trigger per
-   RFC 5187 §3.
+8. **~~Set LR on every v3 Hello while restarting.~~** —
+   **REVERSED 2026-05-26.** The original decision cited
+   RFC 4811 §2, but RFC 4811 / RFC 4812 are OSPFv2-only.
+   RFC 5187 §3 makes the Grace-LSA the sole restart signal
+   for OSPFv3 — no LR analogue is defined in the OSPFv3
+   Options field per RFC 5340 §A.2. See the "RFC 4811 LR-bit
+   is v2-only" section above. The "v3 LR-bit signaling"
+   phase has been replaced by a v3 restarter mirror (now §5f).
 
-If any of these need revisiting before 5a, edit this section
-*before* picking up the work — the design rationales above are
+If any of these need revisiting, edit this section *before*
+picking up the work — the design rationales above are
 load-bearing for the PR shape.
 
 ## Interactions with neighboring work
@@ -334,17 +366,18 @@ load-bearing for the PR shape.
 
 ## Estimated PR sizing
 
-| PR    | Subject                                          | Estimated LoC |
-| ----- | ------------------------------------------------ | ------------- |
-| 5a    | `ProtoQuiesce` exit path                         | ~150          |
-| 5b    | Checkpoint storage layer + `clear … checkpoint`  | ~400          |
-| 5c    | Pre-restart Grace LSA originate + `gr_capable`   | ~250          |
-| 5d    | Wire 5a+5b+5c into the actual exit path          | ~200          |
-| 5e    | Restart-aware startup + re-adjacency             | ~500          |
-| 5f    | v3 LR-bit signaling                              | ~100          |
-| 5g    | (deferred) ABR / ASBR restart                    | —             |
-| **Total** | **(5a–5f)**                                    | **~1600**     |
+| PR              | Subject                                          | Status   | Estimated LoC | Actual LoC |
+| --------------- | ------------------------------------------------ | -------- | ------------- | ---------- |
+| 5a              | `ProtoQuiesce` exit path                         | landed (#888) | ~150  | ~110       |
+| 5b              | Checkpoint storage layer + `clear … checkpoint`  | landed (#900) | ~400  | ~550       |
+| 5c              | Pre-restart Grace LSA originate + `gr_capable`   | landed (#904) | ~250  | ~330       |
+| 5d              | Wire 5a+5b+5c into the actual exit path          | landed (#905) | ~200  | ~145       |
+| 5e-i            | Load checkpoint + skip cold-start                | landed (#907) | ~250  | ~165       |
+| 5e-ii           | Drive re-adjacency to exit-restart success       | landed (#908) | ~300  | ~120       |
+| 5f              | v3 restarter mirror (own scoping doc)            | TBD      | ~500          | —          |
+| 5g              | (deferred) ABR / ASBR restart                    | TBD      | —             | —          |
+| **Total (v2)**  | **(5a–5e)**                                      | **landed** | **~1550**   | **~1420**  |
 
-5e is the largest and the riskiest; consider sub-slicing into
-"load checkpoint + skip cold-start" and "drive re-adjacency
-to exit-restart" once we're closer.
+v2 restarter is functionally complete on `main`. v3 restarter
+(now §5f) needs its own scoping doc — the v3-specific edge
+cases don't map 1:1 onto v2's path.
