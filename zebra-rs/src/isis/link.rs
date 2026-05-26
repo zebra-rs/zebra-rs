@@ -19,7 +19,9 @@ use crate::isis_event_trace;
 use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlagsExt, MacAddr};
 
-use super::config::{IsisConfig, MtId};
+use super::config::{
+    self, IsisAuthConfig, IsisConfig, MtId, auth_set_password, auth_set_send_only, auth_set_type,
+};
 use super::graph::{ReachMap, ReachMapV6};
 use super::ifsm::{self, has_level};
 use super::lsp::PacketMessage;
@@ -268,6 +270,12 @@ pub struct LinkConfig {
     /// `prefix_sid`. Storage-only — the LSP emitter consumes it once
     /// per-algo origination lands.
     pub ipv4_flex_algo_prefix_sids: BTreeMap<u8, SidLabelValue>,
+
+    /// Per-interface authentication for IIH / CSNP / PSNP PDUs,
+    /// from /router/isis/interface/<name>/hello-authentication.
+    /// Storage-only in Phase 2; the Hello/SNP sign+verify runtime
+    /// arrives in Phase 3. Active iff `hello_auth.is_active()`.
+    pub hello_auth: IsisAuthConfig,
 }
 
 /// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
@@ -766,6 +774,38 @@ pub fn config_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.bfd.profile = op.is_set().then_some(profile);
     Some(())
+}
+
+/// `set router isis interface X hello-authentication` (presence
+/// container). The leaf callbacks below mutate fields; this one
+/// only resets the auth state when the entire container is removed
+/// so we don't leave a stale auth-type / send-only behind a
+/// vanished password.
+pub fn config_hello_auth(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    if !op.is_set() {
+        config::auth_reset(&mut link.config.hello_auth);
+    }
+    Some(())
+}
+
+pub fn config_hello_auth_password(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    auth_set_password(&mut link.config.hello_auth, &mut args, op)
+}
+
+pub fn config_hello_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    auth_set_type(&mut link.config.hello_auth, &mut args, op)
+}
+
+pub fn config_hello_auth_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    auth_set_send_only(&mut link.config.hello_auth, &mut args, op)
 }
 
 fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) -> Option<()> {

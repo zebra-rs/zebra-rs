@@ -983,6 +983,62 @@ module config {
           type string;
         }
 
+        container area-password {
+          presence "L1 area-wide IS-IS authentication";
+          description
+            "Authentication key applied to Level-1 self-originated LSPs
+             and SNPs (ISO 10589 §9.5 / RFC 5304 / RFC 5310). Per
+             ISO 10589, L1 PDUs use the area-wide authentication string.
+             Phase 2 lands the schema and storage; the sign/verify
+             runtime arrives in Phase 4 (LSPs) and Phase 3 (SNPs are
+             carried alongside Hello auth on the link).";
+
+          leaf password {
+            type string;
+            mandatory true;
+            description
+              "Authentication key bytes. Sent cleartext on the wire
+               when auth-type is text; used as the HMAC key when md5.";
+          }
+          leaf auth-type {
+            type enumeration {
+              enum text;  // ISO 10589 §9.5, TLV-10 auth-type 1
+              enum md5;   // RFC 5304, TLV-10 auth-type 54
+            }
+            default text;
+          }
+          leaf send-only {
+            type boolean;
+            default false;
+            description
+              "Sign outbound but accept any inbound regardless of
+               digest — rollover hatch per RFC 5304 §1.";
+          }
+        }
+
+        container domain-password {
+          presence "L2 domain-wide IS-IS authentication";
+          description
+            "Authentication key applied to Level-2 self-originated LSPs
+             and SNPs. Same shape as area-password but scoped to L2.";
+
+          leaf password {
+            type string;
+            mandatory true;
+          }
+          leaf auth-type {
+            type enumeration {
+              enum text;
+              enum md5;
+            }
+            default text;
+          }
+          leaf send-only {
+            type boolean;
+            default false;
+          }
+        }
+
         container timers {
           leaf hold_time {
             type uint16;
@@ -1210,6 +1266,34 @@ module config {
             }
             leaf metric {
               type uint32;
+            }
+          }
+
+          container hello-authentication {
+            presence "Per-interface IIH/CSNP/PSNP authentication";
+            description
+              "Authentication key applied to IS-IS Hello (IIH), CSNP,
+               and PSNP PDUs sent and received on this interface. RFC
+               5304 §2 carries this in the TLV-10 Authentication
+               Information TLV with auth-type 1 (text) or 54 (md5).
+               Per RFC 5304 §1, send-only enables an asymmetric
+               rollover where outbound is signed but inbound is
+               accepted unconditionally.";
+
+            leaf password {
+              type string;
+              mandatory true;
+            }
+            leaf auth-type {
+              type enumeration {
+                enum text;
+                enum md5;
+              }
+              default text;
+            }
+            leaf send-only {
+              type boolean;
+              default false;
             }
           }
 
