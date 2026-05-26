@@ -1,9 +1,7 @@
-use std::time::Duration;
-
 use ospf_packet::*;
 
 use super::inst::Message;
-use super::lsdb::{LsdbEvent, OSPF_MIN_LS_ARRIVAL, OspfLsaKey, v2_lsa_key};
+use super::lsdb::{LsdbEvent, OspfLsaKey, v2_lsa_key};
 use super::task::{Timer, TimerType};
 use super::version::OspfVersion;
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
@@ -97,25 +95,16 @@ pub fn ospf_flood_self_originated_lsa(oi: &OspfInterface, lsa: &OspfLsa) {
 }
 
 pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
+    // NB: RFC 2328 §13 step 5(a) MinLSArrival gate lives in
+    // `ospf_ls_upd_proc` (the orchestrator). Putting it here would
+    // make the discard silent — the caller would still emit a
+    // delayed Ack, the peer would prune its retransmit list, and
+    // the genuinely-newer LSA would never come around again.
     let scope = lsa_flood_scope(lsa.h.ls_type);
     let lsdb = match scope {
         FloodScope::As => &mut *oi.lsdb_as,
         _ => &mut *oi.lsdb,
     };
-
-    // MinLSArrival check: if the same LSA was installed less than 1 second ago, discard.
-    if let Some(install_time) =
-        lsdb.lookup_install_time(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router)
-        && install_time.elapsed() < Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
-    {
-        tracing::info!(
-            "[Flood] MinLSArrival: discarding LSA type={:?} id={} adv={}",
-            lsa.h.ls_type,
-            lsa.h.ls_id,
-            lsa.h.adv_router
-        );
-        return;
-    }
 
     // RFC 2328: Install into LSDB first, then flood.
     let area_id = match scope {

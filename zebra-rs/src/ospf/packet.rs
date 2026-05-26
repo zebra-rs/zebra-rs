@@ -16,8 +16,9 @@ use crate::{
 use super::{
     FloodScope, Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
     inst::OspfInterface, link::OspfAuthMode, lsa_flood_scope, lsdb::OSPF_MAX_AGE,
-    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa,
-    ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
+    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, lsdb::OSPF_MIN_LS_ARRIVAL, ospf_flood,
+    ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
+    tracing::OspfTracing,
 };
 
 /// Resolved authentication state for a single outbound packet.
@@ -945,17 +946,28 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     }
 
     // Step 4: Look up current database copy, compute comparison result.
-    // Use lookup_lsa() to get the Lsa wrapper so we can compute current_age().
-    let (current, current_age, ret) = {
-        let db_lsa = oi
-            .lsdb
-            .lookup_lsa(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+    // Use lookup_lsa() to get the Lsa wrapper so we can compute
+    // current_age() and capture install_time for the step-5(a)
+    // MinLSArrival check. Dispatch by scope so AS-scoped LSAs
+    // (AsExternal, OpaqueAsWide) read the AS LSDB instead of the
+    // area LSDB.
+    let (current, current_age, current_install_time, ret) = {
+        let lsdb_ref = match lsa_flood_scope(lsa.h.ls_type) {
+            FloodScope::As => &*oi.lsdb_as,
+            _ => &*oi.lsdb,
+        };
+        let db_lsa = lsdb_ref.lookup_lsa(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
         match db_lsa {
-            None => (None, 0u16, 1i32), // No current copy: received is "newer".
+            None => (None, 0u16, None, 1i32), // No current copy: received is "newer".
             Some(current_lsa) => {
                 let age = current_lsa.current_age();
                 let cmp = ospf_lsa_more_recent(&lsa.h, lsa.h.ls_age, &current_lsa.data.h, age);
-                (Some(current_lsa.data.clone()), age, cmp)
+                (
+                    Some(current_lsa.data.clone()),
+                    age,
+                    Some(current_lsa.install_time),
+                    cmp,
+                )
             }
         }
     };
@@ -974,6 +986,24 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
 
     // Step 5: Received LSA is newer (or no current copy exists).
     if current.is_none() || ret > 0 {
+        // Step 5(a): if the DB copy was received via flooding less
+        // than MinLSArrival ago, discard the new instance WITHOUT
+        // acknowledging — the peer's retransmit timer is what makes
+        // sure we eventually pick the genuinely-newer LSA up. If we
+        // acked here the peer would prune its `ls_rxmt` and we'd
+        // hold the stale copy until the next refresh.
+        if let Some(install_time) = current_install_time
+            && install_time.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+        {
+            tracing::info!(
+                "[LS Update] Step 5(a) MinLSArrival: discarding (no ack) LSA type={:?} id={} adv={} seq={:#x}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router,
+                lsa.h.ls_seq_number
+            );
+            return LsaProcessResult::DiscardNoAck;
+        }
         tracing::info!(
             "[LS Update] Installing newer LSA type={:?} id={} adv={} seq={:#x}",
             lsa.h.ls_type,
