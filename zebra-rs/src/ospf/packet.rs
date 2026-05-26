@@ -289,9 +289,13 @@ pub fn ospf_hello_packet(
     // RFC 2328 §A.2 / RFC 3101 §2.5: E-bit clear on stub/NSSA,
     // N-bit set on NSSA. Drives the per-area negotiation — a
     // neighbor whose bits differ is rejected by `ospf_hello_recv`.
+    //
+    // Deliberately NOT setting the O-bit: RFC 5250 §2.1 says it
+    // MUST NOT appear in Hello — Opaque capability is negotiated
+    // via DBD (see ospf_make_dd below) and via LSA headers. FRR
+    // logs `O-bit abuse?` when it sees one here.
     hello.options.set_external(oi.area_type.e_bit());
     hello.options.set_nssa(oi.area_type.n_bit());
-    hello.options.set_o(true);
     for (_, nbr) in oi.nbrs.iter() {
         if nbr.state == NfsmState::Down {
             continue;
