@@ -383,6 +383,10 @@ module exec {
           type empty;
         }
       }
+      leaf graceful-restart {
+        ext:help "IS-IS Graceful Restart (RFC 5306) per-adjacency observation";
+        type empty;
+      }
       leaf hostname {
         ext:help "IS-IS hostname";
         type empty;

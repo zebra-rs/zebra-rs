@@ -119,6 +119,13 @@ pub fn nbr_hello_interpret(
             IsisTlv::ProtoSupported(tlv) => {
                 nbr.proto = Some(tlv.clone());
             }
+            // RFC 5306 Restart TLV (type 211). Phase 2 records the
+            // observation onto the neighbor for `show isis
+            // graceful-restart` and Phase 3 helper-mode dispatch; no
+            // adjacency-state side effect yet.
+            IsisTlv::Restart(tlv) => {
+                nbr.gr.observe(tlv);
+            }
             _ => {}
         }
     }
