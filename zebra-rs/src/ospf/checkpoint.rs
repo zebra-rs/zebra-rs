@@ -39,7 +39,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bytes::BytesMut;
-use ospf_packet::OspfLsa;
 use serde::{Deserialize, Serialize};
 
 use super::area::AreaTypeKind;
@@ -300,20 +299,10 @@ impl OspfCheckpoint {
     }
 }
 
-/// Decode an `OspfLsa` from the bytes in [`LsaSnapshot::body`].
-/// Thin wrapper around `OspfLsa::decode` so Phase 5e call sites
-/// can use a module-local alias. Phase 5b doesn't have a
-/// runtime consumer yet — held under `dead_code` until 5e
-/// imports it for the post-restart LSDB rehydration.
-#[allow(dead_code)]
-pub fn parse_lsa_body(bytes: &[u8]) -> Option<OspfLsa> {
-    OspfLsa::decode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ospf_packet::{OspfLsType, OspfLsaHeader, OspfLsp, RouterLsa};
+    use ospf_packet::{OspfLsType, OspfLsa, OspfLsaHeader, OspfLsp, RouterLsa};
 
     fn build_router_lsa(adv: Ipv4Addr) -> OspfLsa {
         let h = OspfLsaHeader::new(OspfLsType::Router, adv, adv);
@@ -366,7 +355,7 @@ mod tests {
 
         // LSA body round-trips through CBOR back into a parseable
         // OspfLsa with the same seq + checksum.
-        let parsed = parse_lsa_body(&cp2.areas[0].lsas[0].body).unwrap();
+        let parsed = OspfLsa::decode(&cp2.areas[0].lsas[0].body).unwrap();
         assert_eq!(parsed.h.ls_seq_number, lsa.h.ls_seq_number);
         assert_eq!(parsed.h.ls_checksum, lsa.h.ls_checksum);
         assert_eq!(parsed.h.adv_router, lsa.h.adv_router);

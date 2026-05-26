@@ -62,24 +62,21 @@ impl Default for GracefulRestartConfig {
 ///     on every LSA flooded through the area; see `lsdb_snapshot`).
 ///
 /// `reason`, `grace_period`, `entered_at` are populated for the
-/// show output (Phase 2c-ii) but not yet read in code, hence the
-/// field-level `dead_code` allows. `expire_timer` holds the
-/// drop-handle for the grace-period timer; Tokio's runtime is the
-/// only consumer.
+/// `show ip ospf graceful-restart` output (`show.rs`).
+/// `expire_timer` holds the drop-handle for the grace-period timer;
+/// Tokio's runtime is the only consumer.
 #[derive(Debug)]
 pub struct HelperState {
     /// Restart reason carried in the Grace LSA's type-2 sub-TLV.
-    #[allow(dead_code)]
     pub reason: ospf_packet::GraceRestartReason,
     /// Grace period (seconds) the restarter requested.
-    #[allow(dead_code)]
     pub grace_period: u32,
     /// When we entered helper mode.
-    #[allow(dead_code)]
     pub entered_at: Instant,
     /// Pending grace-period-expiry timer. Dropping clears it; we
     /// keep an explicit handle so re-entry (extended grace period)
-    /// cancels the prior expiry cleanly.
+    /// cancels the prior expiry cleanly. Never read — the Timer's
+    /// `Drop` is the consumer.
     #[allow(dead_code)]
     pub expire_timer: Option<Timer>,
     /// RFC 3623 §3.2 pre-restart LSDB snapshot — for every LSA in
@@ -106,7 +103,6 @@ pub struct HelperState {
 /// Phase 5c wires entry, Grace-LSA flood, and operator-driven
 /// abort. The actual exit + restart-aware boot path (Phase 5d /
 /// 5e) consume this struct via `Ospf<V>.restarting`.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RestartingState {
     /// Grace period the restarter advertises (seconds).
@@ -183,7 +179,6 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     /// as the `neighbor_interface_id` field of TransitNetwork /
     /// PointToPoint / VirtualLink records (§A.4.3). Unused by v2;
     /// defaulted to 0.
-    #[allow(dead_code)]
     pub interface_id: u32,
     /// Graceful-restart helper state. `Some` while we are helping
     /// this neighbor restart; `None` otherwise. See [`HelperState`].

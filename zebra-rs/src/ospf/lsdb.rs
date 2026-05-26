@@ -128,30 +128,10 @@ impl<V: OspfVersion> Lsa<V> {
         age.min(OSPF_MAX_AGE)
     }
 
-    /// True when the LSA's `ls_age` field has reached MaxAge —
-    /// the canonical signal that an LSA is being flushed.
-    #[allow(dead_code)]
-    pub fn is_max_age(&self) -> bool {
-        V::ls_age(self.header()) == OSPF_MAX_AGE
-    }
-
-    // The remaining wrappers below delegate to the matching
-    // OspfVersion trait accessors. They give consumers a uniform
-    // `lsa.foo()` method-call surface instead of `V::foo(&lsa.data)`,
-    // which is easier on the eye for show / display code that
-    // needs several fields at once.
-
-    /// LS Type as a 16-bit value. See [`OspfVersion::ls_type`].
-    #[allow(dead_code)]
-    pub fn ls_type(&self) -> u16 {
-        V::ls_type(self.header())
-    }
-
-    /// Link State ID as a 32-bit value. See [`OspfVersion::ls_id`].
-    #[allow(dead_code)]
-    pub fn ls_id(&self) -> u32 {
-        V::ls_id(self.header())
-    }
+    // The wrappers below delegate to the matching OspfVersion trait
+    // accessors. They give consumers a uniform `lsa.foo()` method-call
+    // surface instead of `V::foo(&lsa.data)`, which is easier on the
+    // eye for show / display code that needs several fields at once.
 
     /// Advertising Router. See [`OspfVersion::adv_router`].
     pub fn adv_router(&self) -> Ipv4Addr {

@@ -150,15 +150,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     /// v3-only outbound packet channel. `Ospf<Ospfv3>::new` spawns
     /// `network_v6::write_packet_v6` consuming the matching receiver;
-    /// producers of v3 outgoing packets (the v3 IFSM/NFSM, once they
-    /// land) clone this sender to push packets. `None` on v2.
-    #[allow(dead_code)]
+    /// producers of v3 outgoing packets clone this sender to push
+    /// packets. `None` on v2.
     pub v3_send_tx: Option<UnboundedSender<super::network_v6::Ospfv3Send>>,
     /// v3-only inbound packet channel. `Ospf<Ospfv3>::new` spawns
     /// `network_v6::read_packet_v6` producing into the matching
-    /// sender; the v3 serve loop (once it lands) will `take()` this
-    /// receiver. `None` on v2.
-    #[allow(dead_code)]
+    /// sender; the v3 event loop `take()`s this receiver at startup.
+    /// `None` on v2.
     pub v3_recv_rx: Option<UnboundedReceiver<super::network_v6::Ospfv3Recv>>,
 }
 
@@ -3375,12 +3373,9 @@ impl Ospf<Ospfv2> {
 
 /// v3-specific methods on the parameterized `Ospf` instance.
 ///
-/// First piece of v3 protocol logic that walks `Ospf<Ospfv3>`
-/// state and produces a wire LSA. Currently dead code -- no caller
-/// constructs `Ospf<Ospfv3>` yet (that lands when the v3
-/// instance's `new()` is written). The method exists so the
-/// builder can be reviewed and tested ahead of the spawn wiring.
-#[allow(dead_code)]
+/// Walks `Ospf<Ospfv3>` state to build wire LSAs, run the
+/// IFSM/NFSM-driven send/receive paths, and drive SPF + RIB
+/// installation. Entered from `spawn_ospfv3` in `crate::config::ospf`.
 impl Ospf<Ospfv3> {
     /// Construct an `Ospf<Ospfv3>` instance.
     ///
@@ -3410,9 +3405,6 @@ impl Ospf<Ospfv3> {
     ///   `v3_send_tx` to push outgoing packets through the v6
     ///   socket. The four `build_*_lsa` self-origination helpers
     ///   above can still be exercised from tests.
-    ///
-    /// Behind `#[allow(dead_code)]` until `main.rs` learns to spawn
-    /// an `Ospf<Ospfv3>` alongside (or in place of) the v2 instance.
     pub fn new(ctx: crate::context::ProtoContext, rib_rx: UnboundedReceiver<RibRx>) -> Self {
         let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
 
@@ -5854,7 +5846,6 @@ impl Ospf<Ospfv3> {
         let super::network_v6::Ospfv3Recv {
             packet,
             src,
-            dst: _,
             ifindex,
         } = recv;
         let our_router_id = self.router_id;
@@ -6019,10 +6010,8 @@ pub fn serve(mut ospf: Ospf) -> Task<()> {
 }
 
 /// Spawn the v3 instance's main event loop. Symmetric with v2's
-/// `serve`. Currently unused — `main.rs` doesn't yet construct an
-/// `Ospf<Ospfv3>`; the spawn wiring lands when the v3 config schema
-/// and `spawn_ospfv3` path follow.
-#[allow(dead_code)]
+/// `serve`. Entered from `spawn_ospfv3` in `crate::config::ospf`
+/// once the v3 config-schema dispatch hands off an `Ospf<Ospfv3>`.
 pub fn serve_v3(mut ospf: Ospf<Ospfv3>) -> Task<()> {
     Task::spawn(async move {
         ospf.event_loop().await;

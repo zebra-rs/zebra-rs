@@ -289,7 +289,6 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
 /// Emit a Hello on `link` via the v3 send loop. Analogue of v2's
 /// `ospf_hello_send`. Returns silently if no link-local source is
 /// available yet (the link will retry on the next hello-timer fire).
-#[allow(dead_code)]
 pub fn ospfv3_hello_send(
     link: &mut OspfLink<Ospfv3>,
     v3_send_tx: &UnboundedSender<Ospfv3Send>,

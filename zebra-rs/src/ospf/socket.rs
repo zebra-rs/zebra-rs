@@ -149,7 +149,6 @@ pub fn ospf_socket_ipv6(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
 /// matching `OspfLink<Ospfv3>`, and (b) the destination v6 address,
 /// needed when verifying the IPv6 pseudo-header checksum (§4.4) on
 /// receive.
-#[allow(dead_code)]
 pub fn set_ipv6_pktinfo(socket: &Socket) {
     let optval = true as c_int;
     unsafe {
@@ -164,7 +163,6 @@ pub fn set_ipv6_pktinfo(socket: &Socket) {
 }
 
 /// Join `ff02::5` (AllSPFRouters) on the given interface.
-#[allow(dead_code)]
 pub fn ospf_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_SPF_ROUTERS;
     if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
@@ -179,7 +177,6 @@ pub fn ospf_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
 /// Join `ff02::6` (AllDRouters) on the given interface. Called when
 /// the v3 interface FSM transitions a router into the DR or BDR
 /// role on a broadcast / NBMA segment.
-#[allow(dead_code)]
 pub fn ospf_join_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_DROUTERS;
     if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
@@ -193,7 +190,6 @@ pub fn ospf_join_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
 
 /// Leave `ff02::5` on the given interface. v3 mirror of
 /// `ospf_leave_if`, called from `ospf_ifsm_interface_down`.
-#[allow(dead_code)]
 pub fn ospf_leave_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_SPF_ROUTERS;
     if let Err(e) = socket.get_ref().leave_multicast_v6(&maddr, ifindex) {
@@ -207,7 +203,6 @@ pub fn ospf_leave_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
 
 /// Leave `ff02::6` on the given interface. Called when the v3 FSM
 /// drops out of the DR / BDR role.
-#[allow(dead_code)]
 pub fn ospf_leave_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_DROUTERS;
     if let Err(e) = socket.get_ref().leave_multicast_v6(&maddr, ifindex) {
