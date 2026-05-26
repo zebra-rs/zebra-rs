@@ -92,6 +92,28 @@ pub struct HelperState {
     pub lsdb_snapshot: BTreeMap<OspfLsaKey, (u32, u16)>,
 }
 
+/// Graceful-restart restarter bookkeeping (RFC 3623 §2).
+/// Populated by `clear ip ospf graceful-restart begin` while the
+/// restarter prepares to exit; absent the rest of the time.
+///
+/// Phase 5c wires entry, Grace-LSA flood, and operator-driven
+/// abort. The actual exit + restart-aware boot path (Phase 5d /
+/// 5e) consume this struct via `Ospf<V>.restarting`.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct RestartingState {
+    /// Grace period the restarter advertises (seconds).
+    pub grace_period: u32,
+    /// RFC 3623 §A.1 restart reason carried in Grace LSAs.
+    pub reason: ospf_packet::GraceRestartReason,
+    /// When we entered restarting state.
+    pub entered_at: Instant,
+    /// Auto-abort timer. If `commit` doesn't fire within the
+    /// grace period, we walk the restart back and resume
+    /// normal operation. Phase 5d hooks the commit side.
+    pub abort_timer: Option<Timer>,
+}
+
 /// Per-neighbor protocol state.
 ///
 /// Parameterized over `V: OspfVersion` so the wire-type-carrying

@@ -123,6 +123,20 @@ module configure {
           type empty;
         }
       }
+      container graceful-restart {
+        // Phase 5c — stage / unstage a planned restart. `begin`
+        // floods Grace LSAs and sets `gr_capable`; `abort` walks
+        // it back. The actual exit (`commit`) lands in Phase 5d
+        // alongside checkpoint write + ProtoQuiesce.
+        leaf begin {
+          ext:help "Stage a graceful restart: flood Grace LSAs and set gr_capable";
+          type empty;
+        }
+        leaf abort {
+          ext:help "Abort a staged graceful restart and resume normal operation";
+          type empty;
+        }
+      }
     }
     container ospfv3 {
       // Force-recalculate the OSPFv3 SPF for every attached area.

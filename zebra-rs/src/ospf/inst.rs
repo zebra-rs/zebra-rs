@@ -125,6 +125,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// Defaults: helper enabled, max grace 1800s, strict LSA
     /// checking on — same as the YANG model's defaults.
     pub gr_config: super::neigh::GracefulRestartConfig,
+    /// RFC 3623 §2 restarting-router state. `Some` once
+    /// `gr_restart_begin` floods Grace LSAs and stages the
+    /// restart; `None` in steady state. While `Some`, the
+    /// originated Router-Info LSA carries `gr_capable=true`.
+    pub restarting: Option<super::neigh::RestartingState>,
     /// RFC 8177 key-chain registry. Populated by `/key-chains/...`
     /// config callbacks; per-interface `key-chain <name>` leaves
     /// reference entries here. Independent of BGP's own
@@ -454,6 +459,7 @@ impl Ospf<Ospfv2> {
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            restarting: None,
             key_chains: HashMap::new(),
             spf_last: None,
             spf_duration: None,
@@ -491,6 +497,13 @@ impl Ospf<Ospfv2> {
                 self.checkpoint_write_debug();
             } else if path == "/clear/ospf/checkpoint/clear" {
                 self.checkpoint_clear_debug();
+            } else if path == "/clear/ospf/graceful-restart/begin" {
+                // Default to 120s / SoftwareRestart; YANG-side
+                // optional args (period, reason) land in Phase 5d
+                // when the commit flow ships.
+                let _ = self.gr_restart_begin(120, GraceRestartReason::SoftwareRestart);
+            } else if path == "/clear/ospf/graceful-restart/abort" {
+                self.gr_restart_abort();
             }
             return;
         }
@@ -735,7 +748,8 @@ impl Ospf<Ospfv2> {
         let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
 
         if self.segment_routing == SegmentRoutingMode::Mpls {
-            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id);
+            let gr_capable = self.restarting.is_some();
+            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id, gr_capable);
 
             // Preserve sequence number if re-originating.
             if let Some(area) = self.areas.get(AREA0)
@@ -2088,6 +2102,225 @@ impl Ospf<Ospfv2> {
         false
     }
 
+    /// Stage a planned graceful restart (RFC 3623 §2). Builds and
+    /// floods one Grace LSA per active interface so peers enter
+    /// helper mode for us, marks the instance as restarting (so
+    /// the next Router-Info LSA carries `gr_capable=true`), and
+    /// arms an auto-abort timer that walks the staging back if
+    /// the commit side (Phase 5d) doesn't fire in time.
+    ///
+    /// Returns `false` if a restart was already staged (idempotent
+    /// re-entry would lose the original `entered_at`). The caller
+    /// (vty handler) reports failure to the operator.
+    pub fn gr_restart_begin(
+        &mut self,
+        grace_period: u32,
+        reason: ospf_packet::GraceRestartReason,
+    ) -> bool {
+        use super::neigh::RestartingState;
+        use super::task::{Timer, TimerType};
+
+        if self.restarting.is_some() {
+            tracing::info!("[GR Restart] begin rejected — already staged");
+            return false;
+        }
+
+        // Build + flood a Grace LSA on every enabled interface.
+        // RFC 3623 §A.3 — Grace LSA scope is link-local; we send
+        // it down each link's neighbor set directly rather than
+        // using `flood_lsa_through_area`, which would (incorrectly)
+        // fan the link-local LSA out across the area.
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        let mut originated = 0usize;
+        for ifindex in &ifindices {
+            if self.originate_grace_lsa(*ifindex, grace_period, reason) {
+                originated += 1;
+            }
+        }
+
+        let tx = self.tx.clone();
+        let abort_timer = Timer::new(
+            Timer::second(grace_period as u64),
+            TimerType::Once,
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::GrRestartAbort);
+                }
+            },
+        );
+
+        self.restarting = Some(RestartingState {
+            grace_period,
+            reason,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: Some(abort_timer),
+        });
+
+        // Re-originate the Router-Info LSA so peers see
+        // `gr_capable=true`. Only takes effect under SR-MPLS today
+        // (the LSA itself is gated on SR-MPLS); GR-without-SR-MPLS
+        // signaling falls back to the Grace LSA we just flooded,
+        // which FRR also accepts as the sole entry trigger.
+        self.router_info_lsa_originate();
+
+        tracing::info!(
+            "[GR Restart] staged: grace={}s, reason={:?}, {} Grace LSA(s) emitted",
+            grace_period,
+            reason,
+            originated
+        );
+        true
+    }
+
+    /// Walk back a staged restart without committing. Flushes the
+    /// Grace LSAs (MaxAge re-flood so helpers exit), clears
+    /// `self.restarting`, and re-originates the Router-Info LSA
+    /// without `gr_capable`. Idempotent — no-op when no restart
+    /// is staged.
+    pub fn gr_restart_abort(&mut self) {
+        if self.restarting.take().is_none() {
+            return;
+        }
+
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        for ifindex in &ifindices {
+            self.flush_grace_lsa(*ifindex);
+        }
+
+        self.router_info_lsa_originate();
+        tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
+    }
+
+    /// Build a Grace LSA for `ifindex` and emit it on that
+    /// interface only (link-local scope).
+    ///
+    /// Returns `true` on success, `false` if the interface has no
+    /// primary IPv4 address or otherwise can't be staged.
+    fn originate_grace_lsa(
+        &mut self,
+        ifindex: u32,
+        grace_period: u32,
+        reason: ospf_packet::GraceRestartReason,
+    ) -> bool {
+        use ospf_packet::{GraceLsa, GraceTlv, OpaqueLsaType, OspfLsType, OspfLsaHeader, OspfLsp};
+
+        let Some(link) = self.links.get(&ifindex) else {
+            return false;
+        };
+        let Some(addr) = link.addr.first() else {
+            return false;
+        };
+        let if_addr = addr.prefix.addr();
+
+        // Opaque-link-local LSA (LSA type 9), opaque type 3
+        // (Grace), opaque-id 0 — RFC 3623 §A.1 doesn't constrain
+        // the opaque-id; FRR uses 0 too.
+        let ls_id = Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24);
+        let body = GraceLsa {
+            tlvs: vec![
+                GraceTlv::GracePeriod(grace_period),
+                GraceTlv::Reason(reason),
+                GraceTlv::IpInterfaceAddress(if_addr),
+            ],
+        };
+        let mut h = OspfLsaHeader::new(OspfLsType::OpaqueLinkLocal, ls_id, self.router_id);
+        h.options = 0x42; // O-bit + E-bit.
+
+        // Preserve seq number across re-stages.
+        let area_id = link.area;
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(existing) =
+                area.lsdb
+                    .lookup_by_id(OspfLsType::OpaqueLinkLocal, ls_id, self.router_id)
+        {
+            h.ls_seq_number = h
+                .ls_seq_number
+                .max(existing.h.ls_seq_number.saturating_add(1));
+        }
+        let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueLinkLocalGrace(body));
+        lsa.update();
+
+        // Install into the area LSDB (v2's link-local LSAs live
+        // there for lookup purposes) and emit on this interface
+        // alone.
+        let flood_copy = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb
+                .insert_self_originated(lsa, &self.tx, Some(area_id));
+        }
+        self.flood_link_scope_lsa_v2(ifindex, &flood_copy);
+        true
+    }
+
+    /// Pre-age a previously-originated Grace LSA to MaxAge and
+    /// re-flood on `ifindex`. Called from `gr_restart_abort` to
+    /// drop helpers cleanly. No-op if no prior Grace LSA exists.
+    fn flush_grace_lsa(&mut self, ifindex: u32) {
+        use ospf_packet::{OpaqueLsaType, OspfLsType};
+
+        let ls_id = Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24);
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa(
+                OspfLsType::OpaqueLinkLocal,
+                ls_id,
+                self.router_id,
+                &self.tx,
+                Some(area_id),
+            )
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_link_scope_lsa_v2(ifindex, &lsa);
+        }
+    }
+
+    /// Emit `lsa` to every Exchange-or-later neighbor on
+    /// `ifindex`, bypassing the area-wide fanout. Used for
+    /// link-local-scope LSAs (Grace) that must not cross the
+    /// segment they were originated on.
+    fn flood_link_scope_lsa_v2(&mut self, ifindex: u32, lsa: &OspfLsa) {
+        let now = chrono::Utc::now();
+        let chains = self.key_chains.clone();
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let area = link.area;
+        let ctx = link.auth_send_ctx(&chains, now);
+        for (_, nbr) in link.nbrs.iter_mut() {
+            if nbr.state < NfsmState::Exchange {
+                continue;
+            }
+            let ls_upd = OspfLsUpdate {
+                num_adv: 1,
+                lsas: vec![lsa.clone()],
+            };
+            let mut packet =
+                Ospfv2Packet::new(&self.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
+            super::packet::apply_link_auth(&mut packet, &ctx);
+            let _ = nbr.ptx.send(Message::Send(
+                packet,
+                nbr.ifindex,
+                Some(nbr.ident.prefix.addr()),
+            ));
+        }
+    }
+
     /// Flood an LSA to all eligible neighbors in an area (RFC 2328 Section 13.3).
     ///
     /// When `source` is `Some((ifindex, addr))`, the neighbor identified by that
@@ -2703,6 +2936,12 @@ impl Ospf<Ospfv2> {
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
             }
+            Message::GrRestartAbort => {
+                tracing::info!(
+                    "[GR Restart] auto-abort timer fired (no commit within grace period)"
+                );
+                self.gr_restart_abort();
+            }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
             }
@@ -2882,6 +3121,7 @@ impl Ospf<Ospfv3> {
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             gr_config: super::neigh::GracefulRestartConfig::default(),
+            restarting: None,
             key_chains: HashMap::new(),
             spf_last: None,
             spf_duration: None,
@@ -5508,6 +5748,11 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// restarter exceeded its grace window. Exit helper and let the
     /// normal `InactivityTimer` path tear the neighbor down.
     GrHelperExpire(u32, Ipv4Addr),
+    /// Graceful-restart restarter-mode auto-abort. Fired when the
+    /// staging timer set by `gr_restart_begin` expires without an
+    /// operator-driven commit (Phase 5d). Drives the same path
+    /// as `clear ip ospf graceful-restart abort`.
+    GrRestartAbort,
     /// RFC 3101 NSSA Type-7→Type-5 translator resync request for
     /// `area_id`. Fired when a Type-7 LSA arrived in this NSSA, or
     /// when config (area-type / translator-role / ABR status)
