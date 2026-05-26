@@ -151,6 +151,16 @@ pub struct Isis {
     /// one follow-up `Message::SpfCalc(level)` so coalesced LSDB
     /// changes during the run still get observed.
     pub spf_pending: Levels<bool>,
+    /// Wall-clock time the most recent `compute_spf` for `level` spent
+    /// running Dijkstra + TI-LFA, written by `apply_spf_result` from
+    /// `SpfOutput::duration`. None until the first SPF completes for
+    /// the level. Surfaced by `show isis spf`.
+    pub spf_duration: Levels<Option<std::time::Duration>>,
+    /// `Instant` at which the most recent `compute_spf` for `level`
+    /// finished, written by `apply_spf_result` from `SpfOutput::last`.
+    /// None until the first SPF completes for the level. Surfaced by
+    /// `show isis spf` as "Last SPF: N s ago".
+    pub spf_last: Levels<Option<std::time::Instant>>,
     /// LSP-gen coalescing slot. None means no run is currently pending;
     /// Some(Timer) means a LspGenFire is armed and additional
     /// LspOriginate events will fold into the same run.
@@ -344,6 +354,10 @@ pub struct IsisTop<'a> {
     pub spf_inflight: &'a mut Levels<bool>,
     /// Pending latch for the SPF offload — see `Isis::spf_pending`.
     pub spf_pending: &'a mut Levels<bool>,
+    /// Last SPF duration per level — see `Isis::spf_duration`.
+    pub spf_duration: &'a mut Levels<Option<std::time::Duration>>,
+    /// Last SPF completion instant per level — see `Isis::spf_last`.
+    pub spf_last: &'a mut Levels<Option<std::time::Instant>>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub tilfa_result: &'a mut Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
@@ -465,6 +479,8 @@ impl Isis {
                 spf_throttle: Levels::<Throttle>::default(),
                 spf_inflight: Levels::<bool>::default(),
                 spf_pending: Levels::<bool>::default(),
+                spf_duration: Levels::<Option<std::time::Duration>>::default(),
+                spf_last: Levels::<Option<std::time::Instant>>::default(),
                 lsp_gen_timer: Levels::<Option<Timer>>::default(),
                 lsp_gen_throttle: Levels::<Throttle>::default(),
                 lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
@@ -1261,6 +1277,8 @@ impl Isis {
             spf_throttle: &mut self.spf_throttle,
             spf_inflight: &mut self.spf_inflight,
             spf_pending: &mut self.spf_pending,
+            spf_duration: &mut self.spf_duration,
+            spf_last: &mut self.spf_last,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
             tilfa_result: &mut self.tilfa_result,

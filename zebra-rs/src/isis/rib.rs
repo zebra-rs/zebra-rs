@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::{Duration, Instant};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::*;
@@ -1054,6 +1055,14 @@ pub struct SpfOutput {
     tilfa_result: BTreeMap<usize, Vec<spf::RepairPath>>,
     mt2: Option<Mt2Output>,
     flex_algos: Vec<FlexAlgoOutput>,
+    /// Wall-clock time `compute_spf` spent running Dijkstra + TI-LFA.
+    /// Sampled with `Instant::now()` before / after the work; carries
+    /// across the channel to `apply_spf_result`, which stashes it on
+    /// `IsisTop::spf_duration[level]` for `show isis spf`.
+    duration: Duration,
+    /// `Instant` at which the SPF run finished (end of `compute_spf`).
+    /// Used by `show isis spf` to render "Last SPF: N s ago".
+    last: Instant,
 }
 
 struct Mt2Output {
@@ -1168,6 +1177,11 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         mt2,
         flex_algos,
     } = input;
+    // Wall-clock window spans every Dijkstra + every TI-LFA call, so
+    // the figure reflects the cost the offload worker actually paid —
+    // not just the legacy SPF. `apply_spf_result` runs on the main
+    // task and is *not* counted; that's RIB-publish work, not compute.
+    let start = Instant::now();
 
     // Legacy SPF. Full-path mode so the legacy v6 builder can apply
     // RFC 1195 §5 strict NLPID gating across every transit node.
@@ -1220,6 +1234,9 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         )
         .collect();
 
+    let last = Instant::now();
+    let duration = last.duration_since(start);
+
     SpfOutput {
         level,
         source,
@@ -1228,6 +1245,8 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         tilfa_result,
         mt2,
         flex_algos,
+        duration,
+        last,
     }
 }
 
@@ -1244,7 +1263,16 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         tilfa_result,
         mt2,
         flex_algos,
+        duration,
+        last,
     } = output;
+
+    // Stash the compute window on `IsisTop` so `show isis spf` can
+    // render "Last SPF: N s ago, took M μs" per level. Done early so
+    // the stamps reflect "SPF finished" not "RIB-publish finished" —
+    // the RIB-publish work below isn't counted in `duration`.
+    *top.spf_duration.get_mut(&level) = Some(duration);
+    *top.spf_last.get_mut(&level) = Some(last);
 
     // Build Adjacency ILM seed from the SIDs collected during graph build.
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);

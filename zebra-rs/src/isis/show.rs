@@ -2353,6 +2353,69 @@ fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
         if sr_mpls { "on" } else { "off" },
         if sr_srv6 { "on" } else { "off" },
     );
+
+    // Per-level SPF telemetry. Sourced from the offload pipeline:
+    //   * inflight / pending → SpfCalc/SpfDone gates in `inst.rs`
+    //   * duration / last    → stamped by `compute_spf` (wall-clock
+    //                          across Dijkstra + TI-LFA) and copied
+    //                          onto `IsisTop` by `apply_spf_result`.
+    let _ = writeln!(buf, "SPF stats:");
+    for level in [Level::L1, Level::L2] {
+        let inflight = *isis.spf_inflight.get(&level);
+        let pending = *isis.spf_pending.get(&level);
+        match (isis.spf_last.get(&level), isis.spf_duration.get(&level)) {
+            (Some(last), Some(duration)) => {
+                let _ = writeln!(
+                    buf,
+                    "  {}: last {} ago, took {}, inflight={}, pending={}",
+                    level,
+                    format_duration_ago(last.elapsed()),
+                    format_compute_duration(*duration),
+                    inflight,
+                    pending,
+                );
+            }
+            _ => {
+                let _ = writeln!(
+                    buf,
+                    "  {}: never run, inflight={}, pending={}",
+                    level, inflight, pending,
+                );
+            }
+        }
+    }
+}
+
+/// Format an elapsed wall-clock interval ("how long ago"). Switches
+/// units so the figure stays in 1..=999 wherever possible — typical
+/// IS-IS SPFs run many times per minute under churn, so sub-second
+/// precision matters; long-quiet networks land in minutes.
+fn format_duration_ago(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if secs > 0 {
+        format!("{}.{:03}s", secs, d.subsec_millis())
+    } else {
+        let ms = d.subsec_millis();
+        if ms > 0 {
+            format!("{}ms", ms)
+        } else {
+            format!("{}μs", d.subsec_micros())
+        }
+    }
+}
+
+/// Format the duration `compute_spf` itself spent — typically tens
+/// of μs for tiny topologies, sub-millisecond for the labs we test
+/// against, into the millisecond range only for large fabrics.
+fn format_compute_duration(d: std::time::Duration) -> String {
+    let micros = d.as_micros();
+    if micros >= 1_000 {
+        format!("{}.{:03}ms", micros / 1_000, micros % 1_000)
+    } else {
+        format!("{}μs", micros)
+    }
 }
 
 /// `show isis flex-algo` — summary of configured FADs, peer-
