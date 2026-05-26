@@ -534,6 +534,20 @@ fn build_adjacency_ilm(
 ) -> BTreeMap<u32, SpfIlm> {
     let mut ilm = BTreeMap::new();
 
+    // Adjacency-SID labels are carved from the SRLB of the watched
+    // SR-MPLS block (the same pool `local_pool` allocates from in
+    // `nbr_hello_interpret`). The index used as `IlmType::Adjacency`
+    // is the label's offset within that SRLB. Without a snapshot the
+    // pool can't have handed out labels in the first place, so any
+    // labels here are stale — fall back to 0 instead of subtracting a
+    // bogus base.
+    let local_base = top
+        .sr_block
+        .as_ref()
+        .and_then(|b| b.local.as_ref())
+        .map(|lb| lb.start)
+        .unwrap_or(0);
+
     for (&label, nhop_id) in sids.iter() {
         let mut nhops = BTreeMap::new();
 
@@ -551,8 +565,7 @@ fn build_adjacency_ilm(
             }
         }
 
-        // TODO: Need to check local-block in RIB configuration.
-        let adj_index = label.saturating_sub(15000);
+        let adj_index = label.saturating_sub(local_base);
         let spf_ilm = SpfIlm {
             nhops,
             ilm_type: IlmType::Adjacency(adj_index),
@@ -1280,6 +1293,11 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // Build Adjacency ILM seed from the SIDs collected during graph build.
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);
 
+    // Our own SRGB — used to derive `IlmType::Node(index)` for prefix-
+    // SID labels we install. None when SR-MPLS is off, the watched
+    // block is unset, or the RIB hasn't delivered the snapshot yet.
+    let srgb = top.sr_block.as_ref().and_then(|b| b.global.as_ref());
+
     // IPv4 RIB.
     let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
 
@@ -1334,7 +1352,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         let algo_rib = match (algo_source, algo_spf.as_ref()) {
             (Some(src), Some(spf_res)) => {
                 let r = build_rib_from_flex_algo(top, level, algo, src, spf_res);
-                mpls_route(&r, &mut ilm);
+                mpls_route(&r, &mut ilm, srgb);
                 r
             }
             _ => PrefixMap::<Ipv4Net, SpfRoute>::new(),
@@ -1365,7 +1383,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
-    mpls_route(&rib, &mut ilm);
+    mpls_route(&rib, &mut ilm, srgb);
     apply_routing_updates(top, level, rib, rib_v6, ilm);
 }
 
@@ -1497,15 +1515,23 @@ fn build_rib_from_flex_algo(
     rib
 }
 
-pub fn mpls_route(rib: &PrefixMap<Ipv4Net, SpfRoute>, ilm: &mut BTreeMap<u32, SpfIlm>) {
+pub fn mpls_route(
+    rib: &PrefixMap<Ipv4Net, SpfRoute>,
+    ilm: &mut BTreeMap<u32, SpfIlm>,
+    srgb: Option<&crate::spf::label_block::LabelBlock>,
+) {
     for (_prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
-            // Calculate prefix index from SID (assuming 16000 is base)
-            let pfx_index = if (16000..24000).contains(&sid) {
-                sid - 16000
-            } else {
-                0
-            };
+            // Prefix-SID labels live inside our own SRGB; the Node
+            // index is the label's offset from `global.start`. Labels
+            // outside the SRGB (or with no SRGB snapshot at all) get
+            // index 0 — the previous hardcoded `16000..24000` window
+            // silently misindexed any operator-configured SRGB the
+            // same way.
+            let pfx_index = srgb
+                .filter(|gb| (gb.start..gb.end).contains(&sid))
+                .map(|gb| sid - gb.start)
+                .unwrap_or(0);
             let spf_ilm = SpfIlm {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),

@@ -661,24 +661,14 @@ fn config_lsp_mtu_size(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
 // child leaf. libyang invokes the callback at the container path with no
 // extra args when the container is committed (set) or removed (delete).
 fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
-    if op.is_set() {
-        isis.config.sr_mpls_enabled = true;
-        // Allocate the adjacency-SID label pool so subsequent hellos
-        // can carve labels for `IsisSubLanAdjSid` sub-TLVs. Idempotent:
-        // re-enabling without a prior disable keeps any previously
-        // handed-out labels intact.
-        if isis.local_pool.is_none() {
-            isis.local_pool = Some(crate::spf::label_pool::LabelPool::new(15000, Some(16000)));
-        }
-    } else {
-        isis.config.sr_mpls_enabled = false;
-        // Drop the pool. Any labels still cached on neighbor addr4
-        // entries become orphaned but stop short of producing fresh
-        // MPLS installs — `nbr_hello_interpret` and `lsp_generate`
-        // both gate on `local_pool`/`value.label` being present.
-        isis.local_pool = None;
-    }
+    isis.config.sr_mpls_enabled = op.is_set();
+    // The adjacency-SID label pool is derived from the watched block's
+    // SRLB and managed by `reconcile_local_pool`. On enable the pool
+    // can only materialize once the RIB hands us a block snapshot via
+    // `RibSrRx::Block` (handled inside `process_sr_rx`); on disable the
+    // reconcile here drops the pool immediately.
     isis.reconcile_block_watch();
+    isis.reconcile_local_pool();
     Some(())
 }
 
