@@ -292,7 +292,7 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
 pub fn ospfv3_hello_send(
     link: &mut OspfLink<Ospfv3>,
     v3_send_tx: &UnboundedSender<Ospfv3Send>,
-    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let Some(src) = link_local_src(link) else {

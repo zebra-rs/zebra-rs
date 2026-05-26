@@ -29,6 +29,6 @@ pub mod aspath;
 pub use aspath::*;
 
 pub mod keychain;
-pub use keychain::{KeyChain, KeyChainScope, KeyChainSetConfig};
+pub use keychain::{CryptoAlgorithm, Key, KeyChain, KeyChainScope, KeyChainSetConfig};
 
 pub mod show;

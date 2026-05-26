@@ -170,11 +170,12 @@ fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Ve
 /// neighbor `auth_md5_last_seq` via `record_md5_seq()` afterward
 /// to enforce replay protection (RFC 2328 §D.5 / RFC 7474).
 /// Where receive-side key lookup pulls its key material from.
-/// Per-interface map is the Phase 2/3 path; key-chain is Phase 4.
+/// Per-interface map is the Phase 2/3 path; key-chain is the
+/// policy-driven path used when the interface binds to a named chain.
 pub(super) enum KeySource<'a> {
     PerIface(&'a std::collections::BTreeMap<u8, super::link::AuthKey>),
     Chain {
-        chain: &'a super::key_chain::OspfKeyChain,
+        chain: &'a crate::policy::KeyChain,
         now: chrono::DateTime<chrono::Utc>,
     },
 }
@@ -184,10 +185,14 @@ impl<'a> KeySource<'a> {
         match self {
             Self::PerIface(m) => m.get(&key_id).cloned(),
             Self::Chain { chain, now } => {
-                let ck = chain.lookup_recv_key(key_id, *now)?;
+                let key = chain.keys.get(&u64::from(key_id))?;
+                if !super::link::chain_key_is_accept_active(key, *now) {
+                    return None;
+                }
+                let algo = super::link::policy_algo_to_ospf(key.algo?)?;
                 Some(super::link::AuthKey {
-                    algo: ck.algo?,
-                    raw: ck.key_material.clone(),
+                    algo,
+                    raw: key.key_material.clone(),
                 })
             }
         }
@@ -276,7 +281,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 pub fn ospf_hello_packet(
     oi: &OspfLink,
-    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<Ospfv2Packet> {
     let addr = oi.addr.first()?;
@@ -453,7 +458,7 @@ pub fn ospf_hello_recv(
 
 pub fn ospf_hello_send(
     oi: &mut OspfLink,
-    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
@@ -1567,7 +1572,8 @@ mod auth_tests {
         use chrono::{TimeZone, Utc};
         use ospf_packet::parse;
 
-        use super::super::key_chain::{Lifetime, LifetimeEnd, OspfChainKey, OspfKeyChain};
+        use crate::policy::keychain::{Key, Lifetime, LifetimeEnd};
+        use crate::policy::{CryptoAlgorithm, KeyChain};
 
         let key_id: u8 = 5;
         let key_bytes = b"chain-secret".to_vec();
@@ -1587,12 +1593,14 @@ mod auth_tests {
         p.emit(&mut buf);
         let (_, parsed) = parse(&buf).expect("parse must succeed");
 
-        let mut chain = OspfKeyChain::default();
+        let mut chain = KeyChain::default();
         chain.keys.insert(
-            key_id,
-            OspfChainKey {
-                algo: Some(super::super::link::OspfCryptoAlgo::HmacSha256),
+            u64::from(key_id),
+            Key {
+                algo: Some(CryptoAlgorithm::HmacSha256),
                 key_material: key_bytes,
+                send_id: None,
+                recv_id: None,
                 send_lifetime: Lifetime::Always,
                 accept_lifetime: Lifetime::Window {
                     start: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
