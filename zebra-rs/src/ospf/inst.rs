@@ -2002,6 +2002,8 @@ impl Ospf<Ospfv2> {
         }
 
         // Router-LSA must be re-originated whenever Full adjacency count changes.
+        // (Gated against `in_restart()` inside the method — the
+        // restart-exit success path is what re-originates instead.)
         self.router_lsa_originate();
 
         // DR updates/flushes its Network-LSA based on current full adjacency set.
@@ -2013,6 +2015,26 @@ impl Ospf<Ospfv2> {
         // is only meaningful while the link has a Full neighbor.
         // `ext_link_lsa_originate` flushes when no Full neighbor remains.
         self.ext_link_lsa_originate(ifindex);
+
+        // Phase 5e-ii — count Full transitions during restart.
+        // When we've recovered as many adjacencies as the
+        // checkpoint expected, exit-restart fires.
+        if new_state == NfsmState::Full
+            && old_state != NfsmState::Full
+            && let Some(state) = self.restarting.as_mut()
+        {
+            state.current_full_count = state.current_full_count.saturating_add(1);
+            if state.current_full_count >= state.expected_full_count
+                && state.expected_full_count > 0
+            {
+                tracing::info!(
+                    "[GR Restart] exit-restart triggered ({}/{} adjacencies recovered)",
+                    state.current_full_count,
+                    state.expected_full_count
+                );
+                let _ = self.tx.send(Message::GrRestartExitSuccess);
+            }
+        }
     }
 
     /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1).
@@ -2185,11 +2207,23 @@ impl Ospf<Ospfv2> {
             },
         );
 
+        // Snapshot Full-neighbor count at staging time. The
+        // commit handler (Phase 5d) will store the same number
+        // into the checkpoint so post-reboot 5e-ii knows when to
+        // declare success.
+        let expected_full_count = self
+            .links
+            .values()
+            .flat_map(|link| link.nbrs.values())
+            .filter(|nbr| nbr.state == NfsmState::Full)
+            .count();
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
             entered_at: tokio::time::Instant::now(),
             abort_timer: Some(abort_timer),
+            expected_full_count,
+            current_full_count: 0,
         });
 
         // Re-originate the Router-Info LSA so peers see
@@ -2330,11 +2364,23 @@ impl Ospf<Ospfv2> {
             },
         );
         let entered_at = tokio::time::Instant::now() - age;
+        // Phase 5e-ii: count was_full neighbors across every
+        // checkpointed link. Exit-restart success fires when
+        // `current_full_count` matches this — the post-reboot
+        // count of neighbors we've driven back to Full.
+        let expected_full_count = cp
+            .links
+            .iter()
+            .flat_map(|l| l.neighbors.iter())
+            .filter(|n| n.was_full)
+            .count();
         self.restarting = Some(RestartingState {
             grace_period: cp.grace_period_secs,
             reason: ospf_packet::GraceRestartReason::from(cp.restart_reason),
             entered_at,
             abort_timer: Some(abort_timer),
+            expected_full_count,
+            current_full_count: 0,
         });
 
         // Delete the on-disk file immediately. The next restart's
@@ -2369,6 +2415,56 @@ impl Ospf<Ospfv2> {
 
         self.router_info_lsa_originate();
         tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
+    }
+
+    /// Phase 5e-ii — exit-restart success. Fired by
+    /// `process_neighbor_state_change` once
+    /// `current_full_count >= expected_full_count`.
+    ///
+    /// Clears `self.restarting` (which unblocks the
+    /// `in_restart()` gates on `router_lsa_originate` /
+    /// `update_network_lsa_by_interface` / `network_lsa_flush`),
+    /// re-originates the topology-affecting self-LSAs at
+    /// `seq+1` so helpers see the restart cleanly conclude,
+    /// flushes our Grace LSAs (MaxAge re-flood) so helpers
+    /// drop helper mode, and clears `gr_capable` from the
+    /// Router-Info LSA via `router_info_lsa_originate`.
+    ///
+    /// Idempotent — no-op when called outside restart mode
+    /// (e.g. if `GrRestartAbort` already ran first).
+    pub fn gr_restart_exit_success(&mut self) {
+        if self.restarting.take().is_none() {
+            return;
+        }
+
+        let ifindices: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.enabled)
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+
+        // Flush our Grace LSAs first so helpers see them
+        // MaxAge'd before the fresh-seq topology LSAs arrive.
+        for ifindex in &ifindices {
+            self.flush_grace_lsa(*ifindex);
+        }
+
+        // Re-originate at seq+1 for every topology-affecting
+        // self LSA. `router_lsa_originate` covers Router-LSA;
+        // per-interface Network-LSA / Extended-Link comes from
+        // `update_network_lsa_by_interface` /
+        // `ext_link_lsa_originate` per DR-eligible link. The
+        // `in_restart()` gates were lifted by the take() above.
+        self.router_lsa_originate();
+        for ifindex in &ifindices {
+            self.update_network_lsa_by_interface(*ifindex);
+            self.ext_link_lsa_originate(*ifindex);
+        }
+        // Router-Info refresh clears the gr_capable bit.
+        self.router_info_lsa_originate();
+
+        tracing::info!("[GR Restart] exit-restart success; LSAs re-originated at seq+1");
     }
 
     /// Commit a staged graceful restart (RFC 3623 §2):
@@ -3188,6 +3284,9 @@ impl Ospf<Ospfv2> {
             Message::GrRestartExit => {
                 tracing::info!("[GR Restart] drain complete; exiting process");
                 std::process::exit(0);
+            }
+            Message::GrRestartExitSuccess => {
+                self.gr_restart_exit_success();
             }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
@@ -6006,6 +6105,12 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// before the process exits. Handler calls
     /// `std::process::exit(0)`; the supervisor restarts us.
     GrRestartExit,
+    /// Phase 5e-ii — fired from `process_neighbor_state_change`
+    /// when the count of post-reboot Full transitions matches
+    /// the expected count. Handler clears `restarting`,
+    /// re-originates topology-affecting self LSAs at `seq+1`,
+    /// and flushes our Grace LSAs so helpers exit cleanly.
+    GrRestartExitSuccess,
     /// RFC 3101 NSSA Type-7→Type-5 translator resync request for
     /// `area_id`. Fired when a Type-7 LSA arrived in this NSSA, or
     /// when config (area-type / translator-role / ABR status)
