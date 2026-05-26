@@ -499,6 +499,23 @@ fn show_ospf(
     if let Some(spf_duration) = ospf.spf_duration {
         writeln!(buf, " Last SPF duration {} usecs", spf_duration.as_micros())?;
     }
+    // Per-area offload gates. The instance-level `spf_last` /
+    // `spf_duration` above reflect the most-recent area's run
+    // (`apply_spf_result` stamps the instance fields unconditionally);
+    // the per-area inflight / pending flags below tell you which
+    // area's worker is still running and which has a queued
+    // follow-up. Always emitted (matching IS-IS's `show isis spf`
+    // banner) so the absence of inflight state is visible too.
+    if ospf.areas.iter().next().is_some() {
+        writeln!(buf, " SPF offload gates:")?;
+        for (area_id, area) in ospf.areas.iter() {
+            writeln!(
+                buf,
+                "   area {}: inflight={}, pending={}",
+                area_id, area.spf_inflight, area.spf_pending,
+            )?;
+        }
+    }
     Ok(buf)
 }
 
