@@ -8,8 +8,9 @@ use crate::config::{
 };
 
 use super::{
-    AsPathSetConfig, CommunitySetConfig, ExtCommunitySetConfig, LargeCommunitySetConfig,
-    PolicyConfig, PolicyList, PrefixSet, PrefixSetConfig, policy_entry_sync,
+    AsPathSetConfig, CommunitySetConfig, ExtCommunitySetConfig, KeyChain, KeyChainScope,
+    KeyChainSetConfig, LargeCommunitySetConfig, PolicyConfig, PolicyList, PrefixSet,
+    PrefixSetConfig, policy_entry_sync,
 };
 
 pub type ShowCallback = fn(&Policy, Args, bool) -> Result<String, Error>;
@@ -20,6 +21,15 @@ pub enum PolicyType {
     PrefixSetOut,
     PolicyListIn,
     PolicyListOut,
+    /// Subscription to a named `/key-chains/key-chain <name>`. The
+    /// inner `KeyChainScope` lets the subscribed protocol
+    /// demultiplex updates back to the right per-link / per-neighbor
+    /// / per-IS-IS-scope container when its `process_policy_msg`
+    /// handler fires. See `policy::keychain` for the registry.
+    ///
+    /// PR 1: declared but never constructed (no subscriber yet).
+    #[allow(dead_code)]
+    KeyChain(KeyChainScope),
 }
 
 #[derive(Debug)]
@@ -62,6 +72,16 @@ pub enum PolicyRx {
         policy_type: PolicyType,
         policy_list: Option<PolicyList>,
     },
+    /// A `/key-chains/key-chain <name>` was added, edited, or
+    /// removed. `key_chain == None` means remove. `policy_type`
+    /// always carries `PolicyType::KeyChain(scope)` so the receiver
+    /// can route the update to the right per-subsystem container.
+    KeyChain {
+        name: String,
+        ident: usize,
+        policy_type: PolicyType,
+        key_chain: Option<KeyChain>,
+    },
 }
 
 #[allow(dead_code)]
@@ -77,14 +97,33 @@ impl PolicyRxChannel {
     }
 }
 
+/// Notifications a per-set commit path fires when an entry changes.
+///
+/// Each commit phase (prefix-set, policy-list, key-chain, ...)
+/// constructs a syncer scoped to its own watch map and calls only
+/// the relevant subset of methods. Default no-op bodies let a syncer
+/// implement just the methods it needs without re-declaring the
+/// others — keeps PolicySyncer / KeyChainSyncer focused.
 pub trait Syncer {
-    fn prefix_set_update(&self, name: &str, prefix_set: &PrefixSet);
-    fn prefix_set_remove(&self, name: &str);
-    fn policy_list_update(&self, name: &str, policy_list: &PolicyList);
-    fn policy_list_remove(&self, name: &str);
+    fn prefix_set_update(&self, _name: &str, _prefix_set: &PrefixSet) {}
+    fn prefix_set_remove(&self, _name: &str) {}
+    fn policy_list_update(&self, _name: &str, _policy_list: &PolicyList) {}
+    fn policy_list_remove(&self, _name: &str) {}
+    fn key_chain_update(&self, _name: &str, _key_chain: &KeyChain) {}
+    fn key_chain_remove(&self, _name: &str) {}
 }
 
 pub struct PolicySyncer<'a> {
+    watch_map: &'a BTreeMap<String, Vec<PolicyWatch>>,
+    clients: &'a BTreeMap<String, UnboundedSender<PolicyRx>>,
+}
+
+/// `Syncer` used by the key-chain commit path. Unlike prefix-set /
+/// policy-list, key-chain watchers can come from multiple distinct
+/// `KeyChainScope`s (per-OSPF-link, per-BGP-neighbor, ...). The
+/// `policy_type` carried on each `PolicyWatch` already encodes the
+/// scope, so we just thread it through unchanged.
+pub struct KeyChainSyncer<'a> {
     watch_map: &'a BTreeMap<String, Vec<PolicyWatch>>,
     clients: &'a BTreeMap<String, UnboundedSender<PolicyRx>>,
 }
@@ -156,6 +195,40 @@ impl<'a> Syncer for PolicySyncer<'a> {
     }
 }
 
+impl<'a> Syncer for KeyChainSyncer<'a> {
+    fn key_chain_update(&self, name: &str, key_chain: &KeyChain) {
+        if let Some(watches) = self.watch_map.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::KeyChain {
+                        name: name.to_string(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        key_chain: Some(key_chain.clone()),
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    fn key_chain_remove(&self, name: &str) {
+        if let Some(watches) = self.watch_map.get(name) {
+            for watch in watches {
+                if let Some(tx) = self.clients.get(&watch.proto) {
+                    let msg = PolicyRx::KeyChain {
+                        name: name.to_string(),
+                        ident: watch.ident,
+                        policy_type: watch.policy_type,
+                        key_chain: None,
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+}
+
 pub struct Policy {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
@@ -168,9 +241,15 @@ pub struct Policy {
     pub ext_community_config: ExtCommunitySetConfig,
     pub large_community_config: LargeCommunitySetConfig,
     pub as_path_config: AsPathSetConfig,
+    /// Canonical RFC 8177 key-chain registry. PR 1 stores entries
+    /// but has no subscribers — OSPF and BGP still parse
+    /// `/key-chains/...` into their own per-daemon copies. PRs 2–4
+    /// migrate each protocol onto this registry.
+    pub key_chain_config: KeyChainSetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,
     pub watch_policy: BTreeMap<String, Vec<PolicyWatch>>,
+    pub watch_keychain: BTreeMap<String, Vec<PolicyWatch>>,
 }
 
 #[derive(Debug)]
@@ -195,9 +274,11 @@ impl Policy {
             ext_community_config: ExtCommunitySetConfig::new(),
             large_community_config: LargeCommunitySetConfig::new(),
             as_path_config: AsPathSetConfig::new(),
+            key_chain_config: KeyChainSetConfig::new(),
             clients: BTreeMap::new(),
             watch_prefix: BTreeMap::new(),
             watch_policy: BTreeMap::new(),
+            watch_keychain: BTreeMap::new(),
         };
         policy.show_build();
         policy
@@ -254,6 +335,25 @@ impl Policy {
                         };
                         self.watch_policy.entry(name).or_default().push(watch);
                     }
+                    PolicyType::KeyChain(_) => {
+                        if let Some(kc) = self.key_chain_config.config.get(&name)
+                            && let Some(tx) = self.clients.get(&proto)
+                        {
+                            let msg = PolicyRx::KeyChain {
+                                name: name.clone(),
+                                ident,
+                                policy_type,
+                                key_chain: Some(kc.clone()),
+                            };
+                            let _ = tx.send(msg);
+                        }
+                        let watch = PolicyWatch {
+                            proto,
+                            ident,
+                            policy_type,
+                        };
+                        self.watch_keychain.entry(name).or_default().push(watch);
+                    }
                 }
             }
             Message::Unregister {
@@ -265,6 +365,7 @@ impl Policy {
                 let map = match policy_type {
                     PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => &mut self.watch_prefix,
                     PolicyType::PolicyListIn | PolicyType::PolicyListOut => &mut self.watch_policy,
+                    PolicyType::KeyChain(_) => &mut self.watch_keychain,
                 };
                 if let Some(watches) = map.get_mut(&name) {
                     watches.retain(|w| {
@@ -294,6 +395,8 @@ impl Policy {
                     let _ = self.large_community_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/as-path-set") {
                     let _ = self.as_path_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/key-chains") {
+                    let _ = self.key_chain_config.exec(path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -326,6 +429,18 @@ impl Policy {
                     &mut self.prefix_config.config,
                     &mut self.prefix_config.cache,
                     syncer,
+                );
+                // Sync key-chain. No cascade: key-chains aren't
+                // referenced from any other policy entity, so a chain
+                // edit only fans out to its direct subscribers.
+                let kc_syncer = KeyChainSyncer {
+                    watch_map: &self.watch_keychain,
+                    clients: &self.clients,
+                };
+                KeyChainSetConfig::commit(
+                    &mut self.key_chain_config.config,
+                    &mut self.key_chain_config.cache,
+                    kc_syncer,
                 );
                 // Sync community-set.
                 self.community_config.commit();

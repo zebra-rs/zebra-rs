@@ -28,4 +28,7 @@ pub use large_community::*;
 pub mod aspath;
 pub use aspath::*;
 
+pub mod keychain;
+pub use keychain::{KeyChain, KeyChainScope, KeyChainSetConfig};
+
 pub mod show;

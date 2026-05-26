@@ -1343,6 +1343,13 @@ impl Bgp {
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
+            // PR 1 skeleton: BGP doesn't subscribe to PolicyType::KeyChain
+            // yet (the per-peer `/.../tcp-ao/key-chain` callback still
+            // mutates `Bgp::key_chains` directly). Once PR 3 lands the
+            // Register/Unregister + snapshot path, this arm gains a real
+            // handler. Until then ignoring the variant keeps the match
+            // exhaustive without affecting behavior.
+            policy::PolicyRx::KeyChain { .. } => {}
         }
     }
 
