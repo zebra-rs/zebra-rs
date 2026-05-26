@@ -39,6 +39,10 @@ pub enum IsisTlvType {
     MtIpv6Reach = 237,
     P2p3Way = 240,
     RouterCap = 242,
+    /// Restart TLV (RFC 5306). Carries Restart Request (RR), Restart
+    /// Acknowledgement (RA), and Suppress Adjacency (SA) flags in IIH
+    /// PDUs to drive Graceful Restart.
+    Restart = 211,
     Unknown(u8),
 }
 
@@ -80,6 +84,7 @@ impl IsisTlvType {
                 | MtIpv6Reach
                 | P2p3Way
                 | RouterCap
+                | Restart
         )
     }
 }
@@ -113,6 +118,7 @@ impl From<IsisTlvType> for u8 {
             MtIpv6Reach => 237,
             P2p3Way => 240,
             RouterCap => 242,
+            Restart => 211,
             Unknown(v) => v,
         }
     }
@@ -147,6 +153,7 @@ impl From<u8> for IsisTlvType {
             237 => MtIpv6Reach,
             240 => P2p3Way,
             242 => RouterCap,
+            211 => Restart,
             v => Unknown(v),
         }
     }
