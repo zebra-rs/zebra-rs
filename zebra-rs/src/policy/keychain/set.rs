@@ -123,12 +123,6 @@ pub struct Key {
     pub accept_lifetime: Lifetime,
 }
 
-impl Key {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// Named RFC 8177 key chain. Keys are ordered by key-id (YANG-typed
 /// as `uint64`; individual protocols narrow to u8/u16 at resolve
 /// time).
@@ -141,10 +135,4 @@ pub struct KeyChain {
     pub description: Option<String>,
     pub keys: BTreeMap<u64, Key>,
     pub delete: bool,
-}
-
-impl KeyChain {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }

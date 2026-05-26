@@ -26,9 +26,6 @@ pub enum PolicyType {
     /// demultiplex updates back to the right per-link / per-neighbor
     /// / per-IS-IS-scope container when its `process_policy_msg`
     /// handler fires. See `policy::keychain` for the registry.
-    ///
-    /// PR 1: declared but never constructed (no subscriber yet).
-    #[allow(dead_code)]
     KeyChain(KeyChainScope),
 }
 

@@ -93,11 +93,14 @@ none of them are required for the locked plan to be "complete."
 - **IETF send-id / recv-id.** OSPFv2 carries a single 8-bit key-id
   per RFC 2328 §D.3; the IETF model's per-direction id distinction
   doesn't apply on the wire. BGP's TCP-AO path uses them.
-- **Cross-protocol key-chain registry.** BGP keeps its own
-  `Bgp::key_chains: HashMap<String, _>`; OSPF added a parallel
-  `Ospf::key_chains` in Phase 4 (option (B) of the design
-  discussion). Both daemons receive the same `/key-chains/...`
-  commits and update their own copies. Unification deferred.
+- **Cross-protocol key-chain registry.** Done as of PR #928 / #930.
+  The canonical `/key-chains/...` data model lives in
+  `policy::keychain`; the policy actor parses each commit once and
+  pushes per-name snapshots to OSPF / BGP / IS-IS via
+  `PolicyRx::KeyChain`. Each protocol still owns its selection
+  helpers (lowest active by lifetime, key-id-matched receive, …)
+  and projects the shared `CryptoAlgorithm` enum onto its own
+  supported subset.
 - **OSPFv3 IPsec (RFC 4552).** Out-of-process key management,
   large surface; skip until a customer asks.
 - **Live interop testing against FRR.** Every PR's test plan
@@ -191,17 +194,24 @@ OSPF payload).
 crates/ospf-packet/
   src/parser.rs                 Ospfv2Auth, Ospfv2AuthCrypto, auth_trailer, raw_body
   src/v3.rs                     Ospfv3Options::at, Ospfv3AuthTrailer, raw_body
+zebra-rs/src/policy/keychain/
+  set.rs                        Lifetime / LifetimeEnd / Key / KeyChain / CryptoAlgorithm
+  config.rs                     KeyChainSetConfig (/key-chains/... commit)
+  mod.rs                        KeyChainScope (OspfInterface / BgpNeighbor / IsisIih / …)
 zebra-rs/src/ospf/
-  key_chain.rs                  Lifetime / LifetimeEnd / OspfChainKey / OspfKeyChain
-  link.rs                       OspfAuthMode, AuthKey, OspfCryptoAlgo, LinkConfig auth fields
+  link.rs                       OspfAuthMode, AuthKey, OspfCryptoAlgo, LinkConfig auth fields,
+                                chain_key_is_send_active, policy_algo_to_ospf,
+                                resolve_active_send_key (consumes policy::KeyChain snapshot)
   packet.rs                     AuthSendCtx, apply_link_auth, verify_link_auth, KeySource,
                                 compute_crypto_trailer, constant_time_eq
   packet_v3.rs                  apply_v3_auth_trailer, verify_v3_auth_trailer,
                                 compute_v3_trailer_digest, set_at_bit, apad_bytes
   network.rs                    inbound checksum slicing (Phase 0c)
   network_v6.rs                 outbound trailer append (Phase 5)
-  inst.rs                       Ospf::key_chains storage; v2 + v3 process_recv auth verify
-  config.rs                     /area/interface/* + /key-chains/* callbacks
+  inst.rs                       Ospf::key_chains snapshot, process_policy_msg (PolicyRx::KeyChain),
+                                v2 + v3 process_recv auth verify
+  config.rs                     /area/interface/* callbacks; per-interface key-chain
+                                Register/Unregister against policy actor
 zebra-rs/yang/
   zebra-ospf-auth-simple.yang   authentication / authentication-key / key-chain
   zebra-ospf-auth-md5.yang      message-digest-key/<id>/md5
