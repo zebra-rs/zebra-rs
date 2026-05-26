@@ -63,7 +63,7 @@ pub(super) fn key_for_tlv(tlv: &IsisTlv) -> Option<TlvKey> {
 }
 
 use super::auth;
-use super::config::{IsisAuthConfig, IsisConfig, MtId};
+use super::config::{IsisAuthConfig, IsisAuthType, IsisConfig, MtId};
 use super::ifsm::has_level;
 use super::inst::{IsisTop, Message};
 use super::level::Level;
@@ -1341,7 +1341,15 @@ fn arm_seq_wrap_freeze(top: &mut IsisTop, level: Level, lsp_id: IsisLspId) {
     top.lsp_seq_wrap_wait.get_mut(&level).insert(frag_id, timer);
 }
 
-pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
+pub fn lsp_emit(lsp: &mut IsisLsp, level: Level, auth_cfg: &IsisAuthConfig) -> BytesMut {
+    // Auth TLV (Phase 4) sits at the end of the LSP's TLV section.
+    // For HMAC-MD5 it's a zero-filled placeholder that the post-emit
+    // sign step patches in place; for cleartext it carries the
+    // password bytes directly. Append before `IsisPacket::from` so
+    // the serialized fragment size — and the Fletcher checksum
+    // `IsisPacket::emit` stamps — already accounts for the TLV.
+    auth::append_auth_tlv(&mut lsp.tlvs, auth_cfg);
+
     let packet = match level {
         Level::L1 => IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp.clone())),
@@ -1349,6 +1357,17 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level) -> BytesMut {
 
     let mut buf = BytesMut::new();
     packet.emit(&mut buf);
+
+    // HMAC-MD5: hash the buffer with Remaining Lifetime + Checksum
+    // + Auth Value all zeroed, patch the digest into place, then
+    // re-stamp Fletcher (which `IsisPacket::emit` already wrote
+    // covering a zero auth-value — we have to redo it with the
+    // real digest in place).
+    if matches!(auth_cfg.auth_type, IsisAuthType::Md5)
+        && let Some(key) = auth_cfg.password.as_deref()
+    {
+        auth::sign_lsp_md5_inplace(&mut buf, key.as_bytes());
+    }
 
     // Offset for pdu_len and checksum.
     const PDU_LEN_OFFSET: usize = 8;
@@ -1369,7 +1388,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     // (RFC 5304 §3). The Auth TLV is appended after the LspEntries
     // TLV in each CSNP, so its on-wire size shrinks the per-fragment
     // entry budget below.
-    let auth_cfg = snp_auth_cfg(link.up_config, level);
+    let auth_cfg = level_auth_cfg(link.up_config, level);
     let auth_size = auth::auth_tlv_wire_size(auth_cfg);
 
     // For the record, we will try to encode the packet length.
@@ -1461,7 +1480,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 /// `&IsisConfig` (not `&LinkTop`) so callers that hold a disjoint
 /// mutable borrow of `link.lsdb` / `link.state` can still pull the
 /// config out via `link.up_config`.
-pub fn snp_auth_cfg(up_config: &IsisConfig, level: Level) -> &IsisAuthConfig {
+pub fn level_auth_cfg(up_config: &IsisConfig, level: Level) -> &IsisAuthConfig {
     match level {
         Level::L1 => &up_config.area_password,
         Level::L2 => &up_config.domain_password,

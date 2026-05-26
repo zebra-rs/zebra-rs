@@ -647,7 +647,8 @@ fn lsp_clone_with_seqno_inc(lsp: &IsisLsp) -> IsisLsp {
 pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     if let Some(lsa) = top.lsdb.get(&level).get(&key) {
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
-        let buf = lsp_emit(&mut lsp, level);
+        let auth_cfg = crate::isis::lsp::level_auth_cfg(top.config, level).clone();
+        let buf = lsp_emit(&mut lsp, level, &auth_cfg);
         let lsp_id = lsp.lsp_id;
         insert_self_originate(top, level, lsp, Some(buf.to_vec()));
         lsp_flood(top, level, &lsp_id);

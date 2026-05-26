@@ -872,7 +872,7 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
 /// network writer can keep using the existing serialize-on-send code.
 fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Packet {
     let (key, mode) = {
-        let cfg = super::lsp::snp_auth_cfg(link.up_config, level);
+        let cfg = super::lsp::level_auth_cfg(link.up_config, level);
         let Some(pw) = cfg.password.clone() else {
             return Packet::Packet(packet);
         };
@@ -891,10 +891,9 @@ fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Pa
 }
 
 /// Which authentication scope a given PDU type+level falls under.
-/// Hello uses the per-link `hello-authentication`; SNPs follow RFC
-/// 5304 §3 and use the area-password (L1) or domain-password (L2).
-/// LSPs share the same per-level keys as SNPs but stay out of scope
-/// here until Phase 4.
+/// Hello uses the per-link `hello-authentication`; SNPs and LSPs
+/// follow RFC 5304 §3 and use area-password (L1) or domain-password
+/// (L2) — same per-level keys.
 enum AuthScope {
     HelloLink,
     AreaPassword,
@@ -904,21 +903,21 @@ enum AuthScope {
 fn auth_scope_for(pdu_type: IsisType) -> Option<AuthScope> {
     match pdu_type {
         IsisType::L1Hello | IsisType::L2Hello | IsisType::P2pHello => Some(AuthScope::HelloLink),
-        IsisType::L1Csnp | IsisType::L1Psnp => Some(AuthScope::AreaPassword),
-        IsisType::L2Csnp | IsisType::L2Psnp => Some(AuthScope::DomainPassword),
+        IsisType::L1Csnp | IsisType::L1Psnp | IsisType::L1Lsp => Some(AuthScope::AreaPassword),
+        IsisType::L2Csnp | IsisType::L2Psnp | IsisType::L2Lsp => Some(AuthScope::DomainPassword),
         _ => None,
     }
 }
 
-/// Return the first Authentication TLV (type 10) in any Hello/SNP
-/// PDU. LSPs handled in Phase 4 — return None here so they fall
-/// through to the LSP-specific verify when that lands.
+/// Return the first Authentication TLV (type 10) in any
+/// Hello/SNP/LSP PDU.
 fn pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
     let tlvs: &[IsisTlv] = match pdu {
         IsisPdu::L1Hello(h) | IsisPdu::L2Hello(h) => &h.tlvs,
         IsisPdu::P2pHello(h) => &h.tlvs,
         IsisPdu::L1Csnp(c) | IsisPdu::L2Csnp(c) => &c.tlvs,
         IsisPdu::L1Psnp(p) | IsisPdu::L2Psnp(p) => &p.tlvs,
+        IsisPdu::L1Lsp(l) | IsisPdu::L2Lsp(l) => &l.tlvs,
         _ => return None,
     };
     tlvs.iter().find_map(|tlv| match tlv {
@@ -997,6 +996,18 @@ fn verify_pdu_auth(
                     let mut scratch = pdu_bytes.to_vec();
                     for b in &mut scratch[digest_start..digest_end] {
                         *b = 0;
+                    }
+                    // RFC 5304 §3: LSP HMAC is computed with
+                    // Remaining Lifetime and Checksum also zeroed so
+                    // the digest stays valid as the LSP ages and is
+                    // re-flooded with a stamped Fletcher.
+                    if packet.pdu_type.is_lsp() && scratch.len() >= auth::LSP_CHECKSUM_RANGE.end {
+                        for b in &mut scratch[auth::LSP_REMAINING_LIFETIME_RANGE] {
+                            *b = 0;
+                        }
+                        for b in &mut scratch[auth::LSP_CHECKSUM_RANGE] {
+                            *b = 0;
+                        }
                     }
                     let computed = auth::hmac_md5(key.as_bytes(), &scratch);
                     auth::digest_eq(&computed, &auth_tlv.value)

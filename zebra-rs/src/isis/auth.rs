@@ -81,12 +81,13 @@ pub fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, cfg: &IsisAuthConfig) {
     tlvs.push(tlv.into());
 }
 
-/// Two-pass HMAC-MD5 sign step. Locate the Auth TLV inside the
-/// just-emitted PDU bytes, compute HMAC over the buffer (the
-/// placeholder's digest area is still zero, per RFC 5304 §3), and
-/// patch the resulting digest into place. No-op when the TLV
-/// isn't found or its digest area isn't the expected length —
-/// the caller is responsible for having added a placeholder first.
+/// Two-pass HMAC-MD5 sign step for Hello / SNP PDUs. Locate the
+/// Auth TLV inside the just-emitted PDU bytes, compute HMAC over
+/// the buffer (the placeholder's digest area is still zero, per
+/// RFC 5304 §3), and patch the resulting digest into place. No-op
+/// when the TLV isn't found or its digest area isn't the expected
+/// length — the caller is responsible for having added a placeholder
+/// first.
 pub fn sign_md5_inplace(buf: &mut BytesMut, tlvs_start: usize, key: &[u8]) {
     let Some(value_range) = locate_auth_tlv(buf, tlvs_start) else {
         return;
@@ -98,6 +99,66 @@ pub fn sign_md5_inplace(buf: &mut BytesMut, tlvs_start: usize, key: &[u8]) {
     }
     let digest = hmac_md5(key, buf);
     buf[digest_start..digest_end].copy_from_slice(&digest);
+}
+
+/// LSP fixed-header offsets relative to the IS-IS discriminator
+/// (byte 0). Per ISO 10589 §9.10 / RFC 5304 §3, HMAC for LSPs is
+/// computed with Remaining Lifetime and Fletcher Checksum zeroed.
+pub const LSP_REMAINING_LIFETIME_RANGE: std::ops::Range<usize> = 10..12;
+pub const LSP_CHECKSUM_RANGE: std::ops::Range<usize> = 24..26;
+/// First TLV byte for an LSP (length_indicator = 27).
+pub const LSP_TLVS_START: usize = 27;
+
+/// Two-pass HMAC-MD5 sign step for LSPs (RFC 5304 §3). LSPs need
+/// extra care versus Hello/SNP:
+///   1. Remaining Lifetime is zeroed during the hash so the digest
+///      stays valid as the LSP ages across the network.
+///   2. Fletcher Checksum is zeroed too — the sender stamps it
+///      *after* the HMAC is patched in, otherwise the checksum
+///      would not cover the digest bytes the receiver checks.
+///
+/// `buf` must contain a serialized LSP PDU with an Auth TLV whose
+/// digest area is zero-filled (i.e., `IsisTlvAuth::placeholder` was
+/// added before `IsisPacket::emit`). On exit, the Auth Value carries
+/// the HMAC and the Fletcher Checksum has been re-stamped to cover
+/// the patched bytes.
+pub fn sign_lsp_md5_inplace(buf: &mut BytesMut, key: &[u8]) {
+    let Some(value_range) = locate_auth_tlv(buf, LSP_TLVS_START) else {
+        return;
+    };
+    let digest_start = value_range.start + 1;
+    let digest_end = value_range.end;
+    if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
+        return;
+    }
+
+    // Compute HMAC over a copy with Remaining Lifetime + Checksum
+    // zeroed. The Auth Value bytes are already zero from the
+    // placeholder, so no additional masking is needed there.
+    let mut scratch = buf.to_vec();
+    for b in &mut scratch[LSP_REMAINING_LIFETIME_RANGE] {
+        *b = 0;
+    }
+    for b in &mut scratch[LSP_CHECKSUM_RANGE] {
+        *b = 0;
+    }
+    let digest = hmac_md5(key, &scratch);
+
+    // Patch the HMAC into the live buffer at the auth-value range,
+    // then re-stamp Fletcher over the bytes that now carry the
+    // digest. `checksum_calc` assumes the checksum field reads as
+    // zero (the existing IsisPacket::emit path satisfies that
+    // implicitly by emitting with `IsisLsp.checksum = 0`), so zero
+    // it explicitly before the recompute since the buffer already
+    // carries an emit-time stamp.
+    buf[digest_start..digest_end].copy_from_slice(&digest);
+    if buf.len() >= LSP_CHECKSUM_RANGE.end {
+        for b in &mut buf[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        let checksum = isis_packet::checksum_calc(&buf[12..]);
+        buf[LSP_CHECKSUM_RANGE].copy_from_slice(&checksum);
+    }
 }
 
 /// Walk the TLV section starting at `tlvs_start` and return the byte
@@ -367,6 +428,158 @@ mod tests {
 
         // Wrong key → mismatch.
         assert!(!digest_eq(&hmac_md5(b"wrong", &scratch), &stored));
+    }
+
+    /// LSP HMAC-MD5 round-trip. Exercises the full sign_lsp_md5_inplace
+    /// flow (zero lifetime + zero checksum + zero auth-value, HMAC,
+    /// patch, re-stamp Fletcher) and the verify-side mirror.
+    #[test]
+    fn lsp_pdu_md5_round_trip_via_helpers() {
+        use isis_packet::{
+            IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr,
+            IsisTlvAuth, IsisType,
+        };
+
+        let lsp = IsisLsp {
+            pdu_len: 0,
+            hold_time: 1200,
+            lsp_id: IsisLspId::new(
+                IsisSysId {
+                    id: [1, 2, 3, 4, 5, 6],
+                },
+                0,
+                0,
+            ),
+            seq_number: 0x12,
+            checksum: 0, // emit overwrites with real Fletcher
+            types: Default::default(),
+            tlvs: vec![
+                IsisTlv::AreaAddr(IsisTlvAreaAddr {
+                    area_addr: vec![0x49, 0x00, 0x01],
+                }),
+                IsisTlv::Auth(IsisTlvAuth::placeholder(
+                    ISIS_AUTH_TYPE_HMAC_MD5,
+                    ISIS_AUTH_HMAC_MD5_LEN,
+                )),
+            ],
+        };
+        let packet = IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp));
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+
+        let key = b"area-key";
+        sign_lsp_md5_inplace(&mut buf, key);
+
+        // Verify mirrors the recv side: zero lifetime + checksum +
+        // auth-value, recompute, compare.
+        let range = locate_auth_tlv(&buf, LSP_TLVS_START).unwrap();
+        let digest_start = range.start + 1;
+        let digest_end = range.end;
+        let stored = buf[digest_start..digest_end].to_vec();
+
+        let mut scratch = buf.to_vec();
+        for b in &mut scratch[digest_start..digest_end] {
+            *b = 0;
+        }
+        for b in &mut scratch[LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        assert!(digest_eq(&hmac_md5(key, &scratch), &stored));
+
+        // Aging: simulate a peer decrementing the Remaining Lifetime
+        // mid-flood. Receivers zero it before HMAC, so the digest
+        // stays valid.
+        let mut aged = buf.clone();
+        aged[10..12].copy_from_slice(&100u16.to_be_bytes());
+        let mut scratch_aged = aged.to_vec();
+        for b in &mut scratch_aged[digest_start..digest_end] {
+            *b = 0;
+        }
+        for b in &mut scratch_aged[LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch_aged[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        let recomputed_aged = hmac_md5(key, &scratch_aged);
+        assert!(
+            digest_eq(&recomputed_aged, &stored),
+            "HMAC must survive Remaining Lifetime decrement"
+        );
+
+        // Fletcher checksum must validate over the patched-digest
+        // buffer (sign_lsp_md5_inplace re-stamps it).
+        assert!(isis_packet::is_valid_checksum(&buf));
+
+        // Tampering the body invalidates the digest.
+        let mut tampered = buf.clone();
+        tampered[28] ^= 0x01; // somewhere in the AreaAddr TLV value
+        let mut scratch_t = tampered.to_vec();
+        for b in &mut scratch_t[digest_start..digest_end] {
+            *b = 0;
+        }
+        for b in &mut scratch_t[LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch_t[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        assert!(!digest_eq(&hmac_md5(key, &scratch_t), &stored));
+    }
+
+    /// RFC 6232 purge: an LSP with Remaining Lifetime = 0 and no body
+    /// TLVs (only the Auth TLV) must still produce a verifiable HMAC.
+    #[test]
+    fn lsp_purge_md5_round_trip() {
+        use isis_packet::{
+            IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAuth, IsisType,
+        };
+
+        let lsp = IsisLsp {
+            pdu_len: 0,
+            hold_time: 0, // purge
+            lsp_id: IsisLspId::new(
+                IsisSysId {
+                    id: [7, 7, 7, 7, 7, 7],
+                },
+                0,
+                3,
+            ),
+            seq_number: 42,
+            checksum: 0,
+            types: Default::default(),
+            tlvs: vec![IsisTlv::Auth(IsisTlvAuth::placeholder(
+                ISIS_AUTH_TYPE_HMAC_MD5,
+                ISIS_AUTH_HMAC_MD5_LEN,
+            ))],
+        };
+        let packet = IsisPacket::from(IsisType::L2Lsp, IsisPdu::L2Lsp(lsp));
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+
+        let key = b"domain-key";
+        sign_lsp_md5_inplace(&mut buf, key);
+
+        let range = locate_auth_tlv(&buf, LSP_TLVS_START).unwrap();
+        let digest_start = range.start + 1;
+        let digest_end = range.end;
+        let stored = buf[digest_start..digest_end].to_vec();
+
+        let mut scratch = buf.to_vec();
+        for b in &mut scratch[digest_start..digest_end] {
+            *b = 0;
+        }
+        for b in &mut scratch[LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        assert!(digest_eq(&hmac_md5(key, &scratch), &stored));
+        assert!(isis_packet::is_valid_checksum(&buf));
     }
 
     /// End-to-end HMAC-MD5 round-trip across a real PSNP. Verifies
