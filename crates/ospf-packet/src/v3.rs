@@ -2373,17 +2373,20 @@ mod tests {
     }
 
     /// An LSU carrying an LSA whose LS Type isn't in our dispatch
-    /// table (e.g. NSSA-AS-External 0x2007 or any reserved value)
+    /// table (e.g. an IANA-reserved or vendor-experimental code)
     /// falls into `Ospfv3LsBody::Unknown` with the body bytes
     /// preserved. This is the residual roundtrip guarantee.
     #[test]
     fn ospfv3_lsupdate_unknown_ls_type_roundtrip() {
-        // Synthesise an LSA with a reserved LS Type and 8 bytes of
-        // body.
+        // Synthesise an LSA with a reserved LS Type (S2/S1 = AS
+        // scope, function code 0x0F0 — not currently allocated)
+        // and 8 bytes of body. 0x2007 was previously used here but
+        // is now wired as NSSA-LSA, so it goes through the Nssa
+        // dispatch arm instead of Unknown.
         let body_bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF];
         let h = Ospfv3LsaHeader {
             ls_age: 0,
-            ls_type: 0x2007, // NSSA-AS-External, currently Unknown
+            ls_type: 0x40F0, // unallocated AS-scope code
             link_state_id: 0,
             advertising_router: Ipv4Addr::new(192, 0, 2, 1),
             ls_seq_number: 0x8000_0001,
