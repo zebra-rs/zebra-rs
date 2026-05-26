@@ -476,7 +476,7 @@ module config {
           }
           leaf max-grace-period {
             type uint32;
-            units seconds;
+            units "seconds";
             default 1800;
             description
               "Upper bound on the grace period we will honour. A
