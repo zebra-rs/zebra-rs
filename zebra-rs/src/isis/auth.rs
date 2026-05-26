@@ -16,10 +16,12 @@ use std::ops::Range;
 use bytes::BytesMut;
 use hmac::{Hmac, KeyInit, Mac};
 use isis_packet::{
-    ISIS_AUTH_HMAC_MD5_LEN, ISIS_AUTH_TYPE_CLEARTEXT, ISIS_AUTH_TYPE_HMAC_MD5, IsisTlv,
-    IsisTlvAuth, IsisTlvType,
+    ISIS_AUTH_GENERIC_KEY_ID_LEN, ISIS_AUTH_HMAC_MD5_LEN, ISIS_AUTH_TYPE_CLEARTEXT,
+    ISIS_AUTH_TYPE_GENERIC, ISIS_AUTH_TYPE_HMAC_MD5, IsisTlv, IsisTlvAuth, IsisTlvType,
 };
 use md5::Md5;
+use sha1::Sha1;
+use sha2::{Sha256, Sha384, Sha512};
 
 use super::config::{IsisAuthConfig, IsisAuthType};
 
@@ -33,6 +35,51 @@ pub fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
     let mut digest = [0u8; 16];
     digest.copy_from_slice(&out[..16]);
     digest
+}
+
+/// HMAC over arbitrary data with the algorithm selected by
+/// `algo` — md5 (RFC 5304) or the RFC 5310 SHA family. Returns
+/// the variable-length digest as a Vec so the caller can compare
+/// it with whatever the wire format carries.
+pub fn hmac_for_algo(algo: IsisAuthType, key: &[u8], data: &[u8]) -> Vec<u8> {
+    match algo {
+        IsisAuthType::Text | IsisAuthType::Md5 => hmac_md5(key, data).to_vec(),
+        IsisAuthType::HmacSha1 => {
+            let mut m = <Hmac<Sha1>>::new_from_slice(key).expect("HMAC accepts any key length");
+            m.update(data);
+            m.finalize().into_bytes().to_vec()
+        }
+        IsisAuthType::HmacSha256 => {
+            let mut m = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts any key length");
+            m.update(data);
+            m.finalize().into_bytes().to_vec()
+        }
+        IsisAuthType::HmacSha384 => {
+            let mut m = <Hmac<Sha384>>::new_from_slice(key).expect("HMAC accepts any key length");
+            m.update(data);
+            m.finalize().into_bytes().to_vec()
+        }
+        IsisAuthType::HmacSha512 => {
+            let mut m = <Hmac<Sha512>>::new_from_slice(key).expect("HMAC accepts any key length");
+            m.update(data);
+            m.finalize().into_bytes().to_vec()
+        }
+    }
+}
+
+/// RFC 5310 §3.3 "Apad" — the value 0x878FE1F3 repeated `L/4` times
+/// where L is the digest length. The IS-IS PDU's Authentication
+/// Data field is set to Apad during the HMAC computation, then
+/// replaced with the resulting digest on the wire.
+pub fn apad(digest_len: usize) -> Vec<u8> {
+    const APAD_WORD: [u8; 4] = [0x87, 0x8F, 0xE1, 0xF3];
+    let mut out = Vec::with_capacity(digest_len);
+    while out.len() < digest_len {
+        let remaining = digest_len - out.len();
+        let take = remaining.min(APAD_WORD.len());
+        out.extend_from_slice(&APAD_WORD[..take]);
+    }
+    out
 }
 
 /// Constant-time byte comparison so a partial-match digest doesn't
@@ -52,19 +99,29 @@ pub fn digest_eq(a: &[u8], b: &[u8]) -> bool {
 /// header + 1-byte auth-type + payload), used by the SNP packer to
 /// shrink its fragmentation budget so a CSNP/PSNP stays within MTU
 /// once the TLV is appended. Returns 0 when no auth is configured.
+///
+/// Generic-crypto (RFC 5310) values are 1 (auth-type) + 2 (Key ID)
+/// + digest-length, which is bigger than RFC 5304's md5 layout.
 pub fn auth_tlv_wire_size(cfg: &IsisAuthConfig) -> usize {
-    match (cfg.password.as_ref(), cfg.auth_type) {
-        (None, _) => 0,
-        (Some(pw), IsisAuthType::Text) => 2 + 1 + pw.len(),
-        (Some(_), IsisAuthType::Md5) => 2 + 1 + ISIS_AUTH_HMAC_MD5_LEN,
+    let Some(pw) = cfg.password.as_ref() else {
+        return 0;
+    };
+    match cfg.auth_type {
+        IsisAuthType::Text => 2 + 1 + pw.len(),
+        IsisAuthType::Md5 => 2 + 1 + ISIS_AUTH_HMAC_MD5_LEN,
+        algo if algo.is_generic_crypto() => {
+            2 + 1 + ISIS_AUTH_GENERIC_KEY_ID_LEN + algo.digest_len()
+        }
+        _ => 0,
     }
 }
 
 /// Append the Authentication TLV (type 10) to `tlvs` when this scope
 /// has authentication configured. For cleartext the value is the
 /// password bytes verbatim; for HMAC-MD5 it's a zero-filled
-/// placeholder that `sign_md5_inplace` will patch in place once the
-/// digest is known. No-op when `cfg.password.is_none()`.
+/// placeholder. For RFC 5310 generic crypto, the placeholder is the
+/// Key-ID prefix followed by an Apad-filled digest area — `sign`
+/// will patch the real HMAC over the Apad bytes once computed.
 pub fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, cfg: &IsisAuthConfig) {
     let Some(pw) = cfg.password.as_deref() else {
         return;
@@ -77,28 +134,60 @@ pub fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, cfg: &IsisAuthConfig) {
         IsisAuthType::Md5 => {
             IsisTlvAuth::placeholder(ISIS_AUTH_TYPE_HMAC_MD5, ISIS_AUTH_HMAC_MD5_LEN)
         }
+        algo if algo.is_generic_crypto() => {
+            let key_id = cfg.effective_key_id();
+            let digest_len = algo.digest_len();
+            let mut value = Vec::with_capacity(ISIS_AUTH_GENERIC_KEY_ID_LEN + digest_len);
+            value.extend_from_slice(&key_id.to_be_bytes());
+            value.extend_from_slice(&apad(digest_len));
+            IsisTlvAuth {
+                auth_type: ISIS_AUTH_TYPE_GENERIC,
+                value,
+            }
+        }
+        _ => return,
     };
     tlvs.push(tlv.into());
 }
 
-/// Two-pass HMAC-MD5 sign step for Hello / SNP PDUs. Locate the
-/// Auth TLV inside the just-emitted PDU bytes, compute HMAC over
-/// the buffer (the placeholder's digest area is still zero, per
-/// RFC 5304 §3), and patch the resulting digest into place. No-op
-/// when the TLV isn't found or its digest area isn't the expected
-/// length — the caller is responsible for having added a placeholder
-/// first.
-pub fn sign_md5_inplace(buf: &mut BytesMut, tlvs_start: usize, key: &[u8]) {
+/// Two-pass HMAC sign step for Hello / SNP PDUs. Locate the Auth TLV
+/// inside the just-emitted PDU bytes, compute the HMAC over the
+/// buffer (the placeholder's digest area is already filled with
+/// zero or Apad depending on `algo`, matching RFC 5304 §3 /
+/// RFC 5310 §3.3), and patch the resulting digest into place.
+/// No-op when the TLV isn't found, the digest area length doesn't
+/// match `algo`, or `algo` isn't an HMAC algorithm.
+pub fn sign_inplace(buf: &mut BytesMut, tlvs_start: usize, algo: IsisAuthType, key: &[u8]) {
     let Some(value_range) = locate_auth_tlv(buf, tlvs_start) else {
         return;
     };
-    let digest_start = value_range.start + 1;
+    let digest_start = digest_start_for(value_range.start, algo);
     let digest_end = value_range.end;
-    if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
+    if digest_end <= digest_start {
         return;
     }
-    let digest = hmac_md5(key, buf);
+    if digest_end - digest_start != algo.digest_len() {
+        return;
+    }
+    if !matches!(algo, IsisAuthType::Md5) && !algo.is_generic_crypto() {
+        return;
+    }
+    let digest = hmac_for_algo(algo, key, buf);
     buf[digest_start..digest_end].copy_from_slice(&digest);
+}
+
+/// Byte offset where the digest area starts inside an Auth TLV's
+/// value, relative to the TLV value's first byte. For RFC 5304 the
+/// digest follows the 1-byte auth-type; for RFC 5310 it follows
+/// auth-type + 2-byte Key ID.
+fn digest_start_for(value_start: usize, algo: IsisAuthType) -> usize {
+    let header = 1usize
+        + if algo.is_generic_crypto() {
+            ISIS_AUTH_GENERIC_KEY_ID_LEN
+        } else {
+            0
+        };
+    value_start + header
 }
 
 /// LSP fixed-header offsets relative to the IS-IS discriminator
@@ -122,19 +211,26 @@ pub const LSP_TLVS_START: usize = 27;
 /// added before `IsisPacket::emit`). On exit, the Auth Value carries
 /// the HMAC and the Fletcher Checksum has been re-stamped to cover
 /// the patched bytes.
-pub fn sign_lsp_md5_inplace(buf: &mut BytesMut, key: &[u8]) {
+pub fn sign_lsp_inplace(buf: &mut BytesMut, algo: IsisAuthType, key: &[u8]) {
     let Some(value_range) = locate_auth_tlv(buf, LSP_TLVS_START) else {
         return;
     };
-    let digest_start = value_range.start + 1;
+    let digest_start = digest_start_for(value_range.start, algo);
     let digest_end = value_range.end;
-    if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
+    if digest_end <= digest_start {
+        return;
+    }
+    if digest_end - digest_start != algo.digest_len() {
+        return;
+    }
+    if !matches!(algo, IsisAuthType::Md5) && !algo.is_generic_crypto() {
         return;
     }
 
     // Compute HMAC over a copy with Remaining Lifetime + Checksum
-    // zeroed. The Auth Value bytes are already zero from the
-    // placeholder, so no additional masking is needed there.
+    // zeroed. The Auth Value bytes carry the placeholder fill
+    // (zero for md5, Apad for RFC 5310) which is what the digest
+    // is meant to be computed over per the respective RFCs.
     let mut scratch = buf.to_vec();
     for b in &mut scratch[LSP_REMAINING_LIFETIME_RANGE] {
         *b = 0;
@@ -142,7 +238,7 @@ pub fn sign_lsp_md5_inplace(buf: &mut BytesMut, key: &[u8]) {
     for b in &mut scratch[LSP_CHECKSUM_RANGE] {
         *b = 0;
     }
-    let digest = hmac_md5(key, &scratch);
+    let digest = hmac_for_algo(algo, key, &scratch);
 
     // Patch the HMAC into the live buffer at the auth-value range,
     // then re-stamp Fletcher over the bytes that now carry the
@@ -357,6 +453,7 @@ mod tests {
         let cfg = IsisAuthConfig {
             password: Some("hunter2".into()),
             auth_type: IsisAuthType::Text,
+            key_id: 0,
             send_only: false,
         };
         let tlv: IsisTlv = IsisTlvAuth {
@@ -370,6 +467,7 @@ mod tests {
         let cfg = IsisAuthConfig {
             password: Some("hunter2".into()),
             auth_type: IsisAuthType::Md5,
+            key_id: 0,
             send_only: false,
         };
         let tlv: IsisTlv =
@@ -412,7 +510,12 @@ mod tests {
         packet.emit(&mut buf);
 
         let key = b"area-key";
-        sign_md5_inplace(&mut buf, packet.length_indicator as usize, key);
+        sign_inplace(
+            &mut buf,
+            packet.length_indicator as usize,
+            IsisAuthType::Md5,
+            key,
+        );
 
         // Verify: peel out the patched digest, zero its range, recompute.
         let range = locate_auth_tlv(&buf, packet.length_indicator as usize).unwrap();
@@ -468,7 +571,7 @@ mod tests {
         packet.emit(&mut buf);
 
         let key = b"area-key";
-        sign_lsp_md5_inplace(&mut buf, key);
+        sign_lsp_inplace(&mut buf, IsisAuthType::Md5, key);
 
         // Verify mirrors the recv side: zero lifetime + checksum +
         // auth-value, recompute, compare.
@@ -561,7 +664,7 @@ mod tests {
         packet.emit(&mut buf);
 
         let key = b"domain-key";
-        sign_lsp_md5_inplace(&mut buf, key);
+        sign_lsp_inplace(&mut buf, IsisAuthType::Md5, key);
 
         let range = locate_auth_tlv(&buf, LSP_TLVS_START).unwrap();
         let digest_start = range.start + 1;
@@ -610,7 +713,12 @@ mod tests {
         packet.emit(&mut buf);
 
         let key = b"domain-key";
-        sign_md5_inplace(&mut buf, packet.length_indicator as usize, key);
+        sign_inplace(
+            &mut buf,
+            packet.length_indicator as usize,
+            IsisAuthType::Md5,
+            key,
+        );
 
         let range = locate_auth_tlv(&buf, packet.length_indicator as usize).unwrap();
         let digest_start = range.start + 1;
@@ -621,5 +729,166 @@ mod tests {
             *b = 0;
         }
         assert!(digest_eq(&hmac_md5(key, &scratch), &stored));
+    }
+
+    /// RFC 5310 §3.3: Apad is 0x878FE1F3 repeated L/4 times.
+    /// Verify the helper produces the right pattern at the digest
+    /// lengths the IS-IS auth-type table allows.
+    #[test]
+    fn apad_pattern_repeats() {
+        let p = apad(20);
+        assert_eq!(p.len(), 20);
+        assert_eq!(&p[0..4], &[0x87, 0x8F, 0xE1, 0xF3]);
+        assert_eq!(&p[16..20], &[0x87, 0x8F, 0xE1, 0xF3]);
+
+        let p = apad(64);
+        assert_eq!(p.len(), 64);
+        for chunk in p.chunks(4) {
+            assert_eq!(chunk, &[0x87, 0x8F, 0xE1, 0xF3]);
+        }
+    }
+
+    /// End-to-end HMAC-SHA256 round-trip across a real Hello PDU.
+    /// Mirrors the md5 path but with the RFC 5310 wire shape:
+    /// auth-type 3, 2-byte Key ID, 32-byte digest area filled with
+    /// Apad before the HMAC.
+    #[test]
+    fn hello_pdu_sha256_round_trip_via_helpers() {
+        use isis_packet::{
+            IsLevel, IsisHello, IsisNeighborId, IsisPacket, IsisPdu, IsisSysId, IsisTlv,
+            IsisTlvAreaAddr, IsisType,
+        };
+
+        let cfg = IsisAuthConfig {
+            password: Some("sha-key".into()),
+            auth_type: IsisAuthType::HmacSha256,
+            key_id: 42,
+            send_only: false,
+        };
+        let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        })];
+        append_auth_tlv(&mut tlvs, &cfg);
+
+        let hello = IsisHello {
+            circuit_type: IsLevel::L1L2,
+            source_id: IsisSysId {
+                id: [1, 2, 3, 4, 5, 6],
+            },
+            hold_time: 30,
+            pdu_len: 0,
+            priority: 64,
+            lan_id: IsisNeighborId::default(),
+            tlvs,
+        };
+        let packet = IsisPacket::from(IsisType::L1Hello, IsisPdu::L1Hello(hello));
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+
+        sign_inplace(
+            &mut buf,
+            packet.length_indicator as usize,
+            IsisAuthType::HmacSha256,
+            cfg.password.as_deref().unwrap().as_bytes(),
+        );
+
+        // Locate auth TLV value: [auth-type=3, key_id(2), digest(32)].
+        let range = locate_auth_tlv(&buf, packet.length_indicator as usize).unwrap();
+        assert_eq!(buf[range.start], ISIS_AUTH_TYPE_GENERIC);
+        let key_id = u16::from_be_bytes(buf[range.start + 1..range.start + 3].try_into().unwrap());
+        assert_eq!(key_id, 42);
+
+        let digest_start = range.start + 1 + ISIS_AUTH_GENERIC_KEY_ID_LEN;
+        let digest_end = range.end;
+        assert_eq!(digest_end - digest_start, 32);
+        let stored = buf[digest_start..digest_end].to_vec();
+        // Patched digest is no longer Apad.
+        assert_ne!(stored, apad(32));
+
+        // Verify: replace digest area with Apad, recompute HMAC,
+        // compare. Mirrors `verify_hmac` in packet.rs.
+        let mut scratch = buf.to_vec();
+        let apad32 = apad(32);
+        scratch[digest_start..digest_end].copy_from_slice(&apad32);
+        let computed = hmac_for_algo(
+            IsisAuthType::HmacSha256,
+            cfg.password.as_deref().unwrap().as_bytes(),
+            &scratch,
+        );
+        assert!(digest_eq(&computed, &stored));
+
+        // Wrong key → mismatch.
+        let bad = hmac_for_algo(IsisAuthType::HmacSha256, b"wrong", &scratch);
+        assert!(!digest_eq(&bad, &stored));
+    }
+
+    /// LSP HMAC-SHA512 round-trip — exercises the LSP-specific
+    /// lifetime+checksum zeroing and Fletcher re-stamping with the
+    /// 64-byte digest.
+    #[test]
+    fn lsp_pdu_sha512_round_trip_via_helpers() {
+        use isis_packet::{
+            IsisLsp, IsisLspId, IsisPacket, IsisPdu, IsisSysId, IsisTlv, IsisTlvAreaAddr, IsisType,
+        };
+
+        let cfg = IsisAuthConfig {
+            password: Some("lsp-sha-key".into()),
+            auth_type: IsisAuthType::HmacSha512,
+            key_id: 9,
+            send_only: false,
+        };
+        let mut tlvs = vec![IsisTlv::AreaAddr(IsisTlvAreaAddr {
+            area_addr: vec![0x49, 0x00, 0x01],
+        })];
+        append_auth_tlv(&mut tlvs, &cfg);
+        let lsp = IsisLsp {
+            pdu_len: 0,
+            hold_time: 1200,
+            lsp_id: IsisLspId::new(
+                IsisSysId {
+                    id: [1, 2, 3, 4, 5, 6],
+                },
+                0,
+                0,
+            ),
+            seq_number: 1,
+            checksum: 0,
+            types: Default::default(),
+            tlvs,
+        };
+        let packet = IsisPacket::from(IsisType::L1Lsp, IsisPdu::L1Lsp(lsp));
+        let mut buf = BytesMut::new();
+        packet.emit(&mut buf);
+
+        sign_lsp_inplace(
+            &mut buf,
+            IsisAuthType::HmacSha512,
+            cfg.password.as_deref().unwrap().as_bytes(),
+        );
+
+        let range = locate_auth_tlv(&buf, LSP_TLVS_START).unwrap();
+        let digest_start = range.start + 1 + ISIS_AUTH_GENERIC_KEY_ID_LEN;
+        let digest_end = range.end;
+        assert_eq!(digest_end - digest_start, 64);
+        let stored = buf[digest_start..digest_end].to_vec();
+
+        // Verify: Apad + zero lifetime + zero checksum, recompute.
+        let mut scratch = buf.to_vec();
+        scratch[digest_start..digest_end].copy_from_slice(&apad(64));
+        for b in &mut scratch[LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch[LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+        let computed = hmac_for_algo(
+            IsisAuthType::HmacSha512,
+            cfg.password.as_deref().unwrap().as_bytes(),
+            &scratch,
+        );
+        assert!(digest_eq(&computed, &stored));
+
+        // Fletcher must validate over the patched-digest buffer.
+        assert!(isis_packet::is_valid_checksum(&buf));
     }
 }

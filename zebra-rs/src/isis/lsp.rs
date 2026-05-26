@@ -1358,15 +1358,17 @@ pub fn lsp_emit(lsp: &mut IsisLsp, level: Level, auth_cfg: &IsisAuthConfig) -> B
     let mut buf = BytesMut::new();
     packet.emit(&mut buf);
 
-    // HMAC-MD5: hash the buffer with Remaining Lifetime + Checksum
-    // + Auth Value all zeroed, patch the digest into place, then
-    // re-stamp Fletcher (which `IsisPacket::emit` already wrote
-    // covering a zero auth-value — we have to redo it with the
-    // real digest in place).
-    if matches!(auth_cfg.auth_type, IsisAuthType::Md5)
+    // HMAC sign (md5 or RFC 5310 SHA family): hash the buffer with
+    // Remaining Lifetime + Checksum + Auth Value all set to the
+    // placeholder fill (zero for md5, Apad for RFC 5310), patch the
+    // digest into place, then re-stamp Fletcher (which
+    // `IsisPacket::emit` already wrote covering the placeholder —
+    // we redo it with the real digest in place).
+    let algo = auth_cfg.auth_type;
+    if (matches!(algo, IsisAuthType::Md5) || algo.is_generic_crypto())
         && let Some(key) = auth_cfg.password.as_deref()
     {
-        auth::sign_lsp_md5_inplace(&mut buf, key.as_bytes());
+        auth::sign_lsp_inplace(&mut buf, algo, key.as_bytes());
     }
 
     // Offset for pdu_len and checksum.

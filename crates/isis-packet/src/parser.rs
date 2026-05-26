@@ -777,6 +777,15 @@ pub const ISIS_AUTH_TYPE_CLEARTEXT: u8 = 1;
 pub const ISIS_AUTH_TYPE_HMAC_MD5: u8 = 54;
 pub const ISIS_AUTH_TYPE_GENERIC: u8 = 3;
 pub const ISIS_AUTH_HMAC_MD5_LEN: usize = 16;
+/// Generic-crypto (RFC 5310) Key ID is fixed 2 bytes between the
+/// Auth-Type byte and the digest. The digest length depends on the
+/// algorithm — RFC 5310 §3.1 enumerates 20/28/32/48/64 octets for
+/// SHA-1/SHA-224/SHA-256/SHA-384/SHA-512.
+pub const ISIS_AUTH_GENERIC_KEY_ID_LEN: usize = 2;
+pub const ISIS_AUTH_HMAC_SHA1_LEN: usize = 20;
+pub const ISIS_AUTH_HMAC_SHA256_LEN: usize = 32;
+pub const ISIS_AUTH_HMAC_SHA384_LEN: usize = 48;
+pub const ISIS_AUTH_HMAC_SHA512_LEN: usize = 64;
 
 impl IsisTlvAuth {
     /// Build a placeholder Auth TLV with the digest area zero-filled.
