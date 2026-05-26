@@ -160,8 +160,17 @@ pub fn ospf_ifsm_interface_up<V: OspfVersion>(link: &mut OspfLink<V>) -> Option<
         return None;
     }
 
-    V::join_if(&link.sock, link.index);
-    link.multicast_memberships.set_all_routers(true);
+    // Idempotent join: `InterfaceUp` can fire twice within a single
+    // run when `Message::Enable` and the kernel-driven `link_up`
+    // path race during startup (config commit + netlink dump on an
+    // already-up interface). Re-calling `IP_ADD_MEMBERSHIP` for the
+    // same (group, ifindex) returns EADDRINUSE; the tracked flag
+    // lets us no-op the second join instead. Same pattern the DR
+    // path already uses for AllDRouters.
+    if !link.multicast_memberships.all_routers() {
+        V::join_if(&link.sock, link.index);
+        link.multicast_memberships.set_all_routers(true);
+    }
 
     // P2P interfaces skip Waiting / DR election entirely (RFC 2328
     // §10.3) — they go straight to PointToPoint and let the NFSM
