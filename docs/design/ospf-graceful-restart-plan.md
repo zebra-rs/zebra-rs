@@ -187,25 +187,25 @@ overhead than value):
 
 ## Phase 5 (deferred) — Restarting-router mode
 
-Out of scope for the first GR series. Requires:
+Out of scope for the first GR series and now scoped in detail in
+`ospf-graceful-restart-restarter.md`. The big-picture gaps are:
 
-- LSDB checkpoint: serialize per-area LSDBs to disk before
-  planned exit, restore before adjacency comes back, originate
-  Grace LSAs *before* the daemon dies (or via a pre-exit hook
-  the supervisor calls).
-- Route checkpoint or fast SPF before re-originating
-  Router-LSAs.
-- Neighbor identity preservation: router-id stable, interface
-  IDs stable (v3).
-- Process supervision cooperation: a planned restart must not
-  tear down the OSPF raw socket before Grace LSAs are flushed.
-  zebra-rs currently has no "drain then exit" lifecycle hook —
-  same gap noted under `ospfv3-followups.md` "Self-originated
-  LSA flush on instance shutdown".
+- LSDB / per-instance state checkpoint to disk before planned
+  exit, restored at next boot before adjacencies come back.
+- Skip-`ProtoCleanup` exit path so kernel routes survive the
+  daemon restart (today's `despawn_ospf` unconditionally
+  withdraws them).
+- Pre-exit Grace LSA flood with a drain window before the raw
+  socket closes.
+- Self-originated LSA seq + body persistence so re-flood after
+  restart matches helpers' snapshot (RFC 3623 §3).
+- v3 `LR` bit signaling (RFC 4811 / 4812).
 
-Write this up as its own design doc when picking it up; it will
-likely interact with the in-flight BGP / IS-IS work on graceful
-shutdown (PRs #809, #810).
+See the restarter doc for the phased PR plan (5a–5f), open
+questions that must be answered before starting, and
+interactions with `ospfv3-followups.md` (which has a conflicting
+"flush self LSAs on shutdown" goal — needs to coexist with the
+GR-clean exit that explicitly does NOT flush).
 
 ## Branch / PR shape
 
