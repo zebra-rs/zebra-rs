@@ -417,7 +417,7 @@ pub fn ospfv3_populate_initial_db_summary(
     use ospf_packet::{
         OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
     };
 
     for ls_type in [
@@ -428,6 +428,18 @@ pub fn ospfv3_populate_initial_db_summary(
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
     ] {
         ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
+    }
+
+    // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs flood with
+    // area scope inside an NSSA, so they belong in the per-area DBD
+    // summary — but only when this area is NSSA.
+    if oi.area_type.is_nssa() {
+        ospf_db_summary_add_table(
+            nbr,
+            oi.lsdb
+                .iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE)
+                .map(|(_, lsa)| lsa),
+        );
     }
 
     if oi.area_type.accepts_as_external() {
