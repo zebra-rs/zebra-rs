@@ -5,7 +5,7 @@ use isis_packet::*;
 
 use crate::context::Timer;
 
-use super::{Level, LinkTop, Lsdb, Message, MsgSender, Packet, PacketMessage, psnp_send_pdu};
+use super::{Level, LinkTop, Lsdb, Message, MsgSender, Packet, PacketMessage, auth, psnp_send_pdu};
 
 #[derive(Default)]
 pub struct LspFloodMap(pub BTreeMap<IsisLspId, IsisLspEntry>);
@@ -197,6 +197,12 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
     // Interface MTU.
     let mtu = link.state.mtu as usize;
 
+    // PSNPs are signed per RFC 5304 §3 with the level's area or
+    // domain password; the Auth TLV is appended after the LspEntries
+    // TLV and so eats into the per-fragment entry budget.
+    let auth_cfg = super::lsp::snp_auth_cfg(link.up_config, level);
+    let auth_size = auth::auth_tlv_wire_size(auth_cfg);
+
     let available_len = {
         let mut buf = BytesMut::new();
 
@@ -216,8 +222,10 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         let base_len = 3;
         let tlv_header_len = 2;
 
-        let total_base_len = packet_len + base_len + tlv_header_len;
-
+        let total_base_len = packet_len + base_len + tlv_header_len + auth_size;
+        if mtu <= total_base_len {
+            return;
+        }
         mtu - total_base_len
     };
 
@@ -234,11 +242,13 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
 
         entry_size += 1;
         if entry_size == entry_size_max {
+            let mut psnp_tlvs: Vec<IsisTlv> = vec![tlvs.clone().into()];
+            auth::append_auth_tlv(&mut psnp_tlvs, auth_cfg);
             let psnp = IsisPsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
                 source_id_circuit: 0,
-                tlvs: vec![tlvs.clone().into()],
+                tlvs: psnp_tlvs,
             };
             psnps.push(psnp);
 
@@ -247,11 +257,13 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         }
     }
     if !tlvs.entries.is_empty() {
+        let mut psnp_tlvs: Vec<IsisTlv> = vec![tlvs.into()];
+        auth::append_auth_tlv(&mut psnp_tlvs, auth_cfg);
         let psnp = IsisPsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),
             source_id_circuit: 0,
-            tlvs: vec![tlvs.into()],
+            tlvs: psnp_tlvs,
         };
         psnps.push(psnp);
     }

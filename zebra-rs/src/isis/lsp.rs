@@ -62,7 +62,8 @@ pub(super) fn key_for_tlv(tlv: &IsisTlv) -> Option<TlvKey> {
     }
 }
 
-use super::config::{IsisConfig, MtId};
+use super::auth;
+use super::config::{IsisAuthConfig, IsisConfig, MtId};
 use super::ifsm::has_level;
 use super::inst::{IsisTop, Message};
 use super::level::Level;
@@ -1364,6 +1365,13 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     // Interface MTU.
     let mtu = link.state.mtu as usize;
 
+    // SNPs are signed with the per-level area/domain password
+    // (RFC 5304 §3). The Auth TLV is appended after the LspEntries
+    // TLV in each CSNP, so its on-wire size shrinks the per-fragment
+    // entry budget below.
+    let auth_cfg = snp_auth_cfg(link.up_config, level);
+    let auth_size = auth::auth_tlv_wire_size(auth_cfg);
+
     // For the record, we will try to encode the packet length.
     let available_len = {
         let mut buf = BytesMut::new();
@@ -1386,8 +1394,10 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
         let base_len = 3;
         let tlv_header_len = 2;
 
-        let total_base_len = packet_len + base_len + tlv_header_len;
-
+        let total_base_len = packet_len + base_len + tlv_header_len + auth_size;
+        if mtu <= total_base_len {
+            return vec![];
+        }
         mtu - total_base_len
     };
     // tracing::info!("[CSNP:Gen] available_len {}", available_len);
@@ -1411,13 +1421,15 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 
         entry_size += 1;
         if entry_size == entry_size_max {
+            let mut csnp_tlvs: Vec<IsisTlv> = vec![tlvs.clone().into()];
+            auth::append_auth_tlv(&mut csnp_tlvs, auth_cfg);
             let csnp = IsisCsnp {
                 pdu_len: 0,
                 source_id: link.up_config.net.sys_id(),
                 source_id_circuit: 0,
                 start: start.unwrap_or(IsisLspId::start()),
                 end: lsa.lsp.lsp_id,
-                tlvs: vec![tlvs.clone().into()],
+                tlvs: csnp_tlvs,
             };
             csnps.push(csnp);
 
@@ -1427,18 +1439,33 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
         }
     }
     if !tlvs.entries.is_empty() {
+        let mut csnp_tlvs: Vec<IsisTlv> = vec![tlvs.into()];
+        auth::append_auth_tlv(&mut csnp_tlvs, auth_cfg);
         let csnp = IsisCsnp {
             pdu_len: 0,
             source_id: link.up_config.net.sys_id(),
             source_id_circuit: 0,
             start: start.unwrap_or(IsisLspId::start()),
             end: IsisLspId::end(),
-            tlvs: vec![tlvs.into()],
+            tlvs: csnp_tlvs,
         };
         csnps.push(csnp);
     }
 
     csnps
+}
+
+/// Per-level auth config for SNPs and (Phase 4) LSPs. RFC 5304 §3
+/// pins L1 SNPs to the area-wide string and L2 SNPs to the domain-
+/// wide string — same keys the LSPs at that level use. Takes
+/// `&IsisConfig` (not `&LinkTop`) so callers that hold a disjoint
+/// mutable borrow of `link.lsdb` / `link.state` can still pull the
+/// config out via `link.up_config`.
+pub fn snp_auth_cfg(up_config: &IsisConfig, level: Level) -> &IsisAuthConfig {
+    match level {
+        Level::L1 => &up_config.area_password,
+        Level::L2 => &up_config.domain_password,
+    }
 }
 
 pub enum PacketMessage {
