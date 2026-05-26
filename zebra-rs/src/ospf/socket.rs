@@ -37,13 +37,29 @@ pub fn set_ipv4_pktinfo(socket: &Socket) {
     };
 }
 
+/// EADDRINUSE from `IP_ADD_MEMBERSHIP` / `IPV6_JOIN_GROUP` is the
+/// kernel telling us the (group, ifindex) is already on this
+/// socket's mc_list. That's the *desired* end state — the IFSM
+/// guard in `ospf_ifsm_interface_up` avoids the syscall when we
+/// know we're a member, but it can still fire on paths that race
+/// with `interface_down` (which currently clears the bookkeeping
+/// flag without issuing an explicit `IP_DROP_MEMBERSHIP`). Treat
+/// it as informational rather than warning the operator.
+fn is_eaddrinuse(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EADDRINUSE)
+}
+
 pub fn ospf_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv2::ALL_SPF_ROUTERS;
     if let Err(e) = socket
         .get_ref()
         .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex))
     {
-        tracing::warn!("ospf: join AllSPFRouters on ifindex {ifindex} failed: {e}");
+        if is_eaddrinuse(&e) {
+            tracing::debug!("ospf: AllSPFRouters already joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: join AllSPFRouters on ifindex {ifindex} failed: {e}");
+        }
     }
 }
 
@@ -53,7 +69,11 @@ pub fn ospf_join_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
         .get_ref()
         .join_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex))
     {
-        tracing::warn!("ospf: join AllDRouters on ifindex {ifindex} failed: {e}");
+        if is_eaddrinuse(&e) {
+            tracing::debug!("ospf: AllDRouters already joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: join AllDRouters on ifindex {ifindex} failed: {e}");
+        }
     }
 }
 
@@ -118,7 +138,11 @@ pub fn set_ipv6_pktinfo(socket: &Socket) {
 pub fn ospf_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_SPF_ROUTERS;
     if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
-        tracing::warn!("ospf: join AllSPFRouters (v6) on ifindex {ifindex} failed: {e}");
+        if is_eaddrinuse(&e) {
+            tracing::debug!("ospf: AllSPFRouters (v6) already joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: join AllSPFRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
     }
 }
 
@@ -129,7 +153,11 @@ pub fn ospf_join_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
 pub fn ospf_join_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_DROUTERS;
     if let Err(e) = socket.get_ref().join_multicast_v6(&maddr, ifindex) {
-        tracing::warn!("ospf: join AllDRouters (v6) on ifindex {ifindex} failed: {e}");
+        if is_eaddrinuse(&e) {
+            tracing::debug!("ospf: AllDRouters (v6) already joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: join AllDRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
     }
 }
 
