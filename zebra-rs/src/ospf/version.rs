@@ -351,29 +351,19 @@ impl OspfVersion for Ospfv2 {
     fn update_lsa(lsa: &mut OspfLsa) {
         lsa.update();
     }
-    // The five read-only header accessors below are part of the
-    // trait surface that subsequent behavioral-migration PRs will
-    // consume (rewriting v2-bound flooding / show / packet code
-    // to read header fields via V::foo(...) instead of direct
-    // field access). `dead_code` allowed until the first consumer
-    // lands -- removed in PR 7g.
     fn ls_type(h: &OspfLsaHeader) -> u16 {
         let v: u8 = h.ls_type.into();
         v as u16
     }
-    #[allow(dead_code)]
     fn ls_id(h: &OspfLsaHeader) -> u32 {
         h.ls_id.into()
     }
-    #[allow(dead_code)]
     fn adv_router(h: &OspfLsaHeader) -> Ipv4Addr {
         h.adv_router
     }
-    #[allow(dead_code)]
     fn ls_checksum(h: &OspfLsaHeader) -> u16 {
         h.ls_checksum
     }
-    #[allow(dead_code)]
     fn length(h: &OspfLsaHeader) -> u16 {
         h.length
     }
@@ -428,14 +418,8 @@ impl OspfVersion for Ospfv2 {
 /// OSPFv3 dispatch marker (RFC 5340). Distinct from the
 /// `Ospfv3Packet` / `Ospfv3Hello` / … codec types in the
 /// `ospf-packet` crate; this is the protocol-side address-family
-/// marker that subsequent Phase 5 PRs will use to thread v6
-/// constants into the socket / network code.
-//
-// `dead_code` allowed because nothing constructs `Ospfv3` yet —
-// the `Ospf<Ospfv3>` instance lands later in Phase 5 / Phase 6.
-// The trait impl is used (via `Ospfv3::ALL_SPF_ROUTERS` etc.) in
-// `socket.rs::ospf_socket_ipv6`.
-#[allow(dead_code)]
+/// marker that threads v6 constants into the socket / network
+/// code via the [`OspfVersion`] trait impl below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ospfv3;
 
@@ -476,23 +460,18 @@ impl OspfVersion for Ospfv3 {
     fn update_lsa(lsa: &mut Ospfv3Lsa) {
         lsa.update();
     }
-    #[allow(dead_code)]
     fn ls_type(h: &Ospfv3LsaHeader) -> u16 {
         h.ls_type
     }
-    #[allow(dead_code)]
     fn ls_id(h: &Ospfv3LsaHeader) -> u32 {
         h.link_state_id
     }
-    #[allow(dead_code)]
     fn adv_router(h: &Ospfv3LsaHeader) -> Ipv4Addr {
         h.advertising_router
     }
-    #[allow(dead_code)]
     fn ls_checksum(h: &Ospfv3LsaHeader) -> u16 {
         h.ls_checksum
     }
-    #[allow(dead_code)]
     fn length(h: &Ospfv3LsaHeader) -> u16 {
         h.length
     }

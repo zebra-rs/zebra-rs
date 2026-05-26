@@ -47,15 +47,15 @@ pub struct Ospfv3Send {
 /// One v3 packet just received off the wire.
 ///
 /// Carries the parsed packet plus the transport-layer metadata the
-/// upper-layer protocol code needs to dispatch it: src/dst v6 from
-/// the `in6_pktinfo` ancillary message + the recvmsg sockaddr, and
-/// the ingress ifindex.
-#[allow(dead_code)]
+/// upper-layer protocol code needs to dispatch it: source v6 from
+/// the recvmsg sockaddr and the ingress ifindex from the
+/// `in6_pktinfo` ancillary message. The destination address is
+/// consumed only by the pseudo-header checksum verification here
+/// in [`read_packet_v6`] and is not forwarded up.
 #[derive(Debug)]
 pub struct Ospfv3Recv {
     pub packet: Ospfv3Packet,
     pub src: Ipv6Addr,
-    pub dst: Ipv6Addr,
     pub ifindex: u32,
 }
 
@@ -116,7 +116,6 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Ospf
                 let _ = tx.send(Ospfv3Recv {
                     packet,
                     src,
-                    dst,
                     ifindex,
                 });
 
