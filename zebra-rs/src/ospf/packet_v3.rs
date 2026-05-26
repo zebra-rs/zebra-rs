@@ -8,17 +8,222 @@ use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
 use ospf_packet::{
-    Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck, Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate,
-    Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+    Ospfv3AuthTrailer, Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck, Ospfv3LsRequest,
+    Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet,
+    Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::network_v6::Ospfv3Send;
-use super::version::Ospfv3;
+use super::version::{OspfVersion, Ospfv3};
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
     inst::OspfInterface,
 };
+
+/// RFC 7166 §3.5 Apad — a per-algorithm hex pattern used to fill
+/// the Authentication Data field while computing the HMAC. The
+/// 0x878FE1F3 word is repeated to the algorithm's digest length;
+/// after the HMAC is computed, the digest itself replaces Apad in
+/// the trailer.
+fn apad_bytes(len: usize) -> Vec<u8> {
+    const PATTERN: [u8; 4] = [0x87, 0x8F, 0xE1, 0xF3];
+    PATTERN.into_iter().cycle().take(len).collect()
+}
+
+/// RFC 7166 §4.5 cryptographic-auth hash over
+/// `IPv6src || OSPFv3 packet (with checksum stamped) || trailer
+/// prefix || Apad`. The trailer's digest field is filled with
+/// Apad during the hash; the resulting MAC then replaces Apad
+/// for the wire form.
+fn compute_v3_trailer_digest(
+    key: &super::link::AuthKey,
+    ipv6_src: &Ipv6Addr,
+    packet_bytes_with_checksum: &[u8],
+    trailer_prefix_with_apad: &[u8],
+) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use md5::{Digest, Md5};
+    use sha1::Sha1;
+    use sha2::{Sha256, Sha384, Sha512};
+
+    use super::link::OspfCryptoAlgo;
+
+    let src_bytes = ipv6_src.octets();
+    match key.algo {
+        OspfCryptoAlgo::Md5 => {
+            // Keyed-MD5 isn't a defined RFC 7166 algorithm — it's
+            // allowed here for symmetry with the v2 path so an
+            // operator who configured `md5` keys on a v3 interface
+            // sees a consistent error rather than a silent fall-
+            // through. Computes `MD5(src || pkt || trailer || key)`,
+            // which doesn't match any standard but isn't going to
+            // interop either way.
+            let mut h = Md5::new();
+            h.update(src_bytes);
+            h.update(packet_bytes_with_checksum);
+            h.update(trailer_prefix_with_apad);
+            h.update(&key.raw);
+            h.finalize().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha1 => {
+            let mut m =
+                <Hmac<Sha1> as Mac>::new_from_slice(&key.raw).expect("HMAC accepts any key length");
+            m.update(&src_bytes);
+            m.update(packet_bytes_with_checksum);
+            m.update(trailer_prefix_with_apad);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha256 => {
+            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(&src_bytes);
+            m.update(packet_bytes_with_checksum);
+            m.update(trailer_prefix_with_apad);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha384 => {
+            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(&src_bytes);
+            m.update(packet_bytes_with_checksum);
+            m.update(trailer_prefix_with_apad);
+            m.finalize().into_bytes().to_vec()
+        }
+        OspfCryptoAlgo::HmacSha512 => {
+            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(&key.raw)
+                .expect("HMAC accepts any key length");
+            m.update(&src_bytes);
+            m.update(packet_bytes_with_checksum);
+            m.update(trailer_prefix_with_apad);
+            m.finalize().into_bytes().to_vec()
+        }
+    }
+}
+
+/// Set the AT-bit on whichever payload carries an Options field
+/// (Hello + DbDesc per RFC 5340 §A.3.2 / §A.3.3). LSReq / LSUpd /
+/// LSAck don't have Options on the wire; their trailer is signaled
+/// implicitly by the adjacency's negotiated AT state.
+fn set_at_bit(packet: &mut Ospfv3Packet) {
+    match &mut packet.payload {
+        Ospfv3Payload::Hello(h) => {
+            h.options.set_at(true);
+        }
+        Ospfv3Payload::DbDesc(d) => {
+            d.options.set_at(true);
+        }
+        _ => {}
+    }
+}
+
+/// Stamp an RFC 7166 Authentication Trailer onto an outbound v3
+/// packet. Sets the AT-bit (where applicable), scratch-emits the
+/// packet body with its real pseudo-header checksum (so the
+/// digest covers the same bytes the receiver will see), then
+/// computes the HMAC and stashes the full trailer in
+/// `packet.auth_trailer`. `network_v6::write_packet_v6` appends
+/// `auth_trailer` after its own `emit_with_checksum` call.
+///
+/// No-op when the link isn't configured for cryptographic
+/// authentication, or when MessageDigest is configured but no
+/// active key is available — the peer will reject the
+/// trailer-less packet, which is the desired loud failure mode.
+pub(super) fn apply_v3_auth_trailer(
+    packet: &mut Ospfv3Packet,
+    ctx: &super::packet::AuthSendCtx,
+    ipv6_src: &Ipv6Addr,
+    ipv6_dst: &Ipv6Addr,
+) {
+    use super::link::OspfAuthMode;
+    use bytes::BytesMut;
+
+    if ctx.mode != OspfAuthMode::MessageDigest {
+        return;
+    }
+    let Some((key_id, key)) = ctx.crypto_key.as_ref() else {
+        return;
+    };
+    let digest_len = key.algo.digest_len();
+    set_at_bit(packet);
+
+    // Build the trailer prefix with Apad in place of the digest;
+    // emit it so the hash input matches what the receiver
+    // reconstructs.
+    let trailer = Ospfv3AuthTrailer {
+        auth_type: Ospfv3AuthTrailer::AUTH_TYPE_HMAC,
+        auth_data_len: (Ospfv3AuthTrailer::PREFIX_LEN + digest_len) as u16,
+        reserved: 0,
+        sa_id: u16::from(*key_id),
+        // OSPFv3 trailer carries a 64-bit seq (RFC 7166 §4.1).
+        // Stretch the v2 32-bit `md5_seq` into the low half; the
+        // high half stays 0. Once v3 lifetimes/key-chains land
+        // we can plumb a 64-bit counter through `AuthSendCtx`.
+        seq_high: 0,
+        seq_low: ctx.md5_seq,
+        digest: apad_bytes(digest_len),
+    };
+
+    let mut scratch = BytesMut::new();
+    packet.emit_with_checksum(&mut scratch, ipv6_src, ipv6_dst);
+    let mut trailer_with_apad = BytesMut::new();
+    trailer.emit(&mut trailer_with_apad);
+    let digest = compute_v3_trailer_digest(key, ipv6_src, &scratch, &trailer_with_apad);
+
+    // Replace Apad with the real digest in a freshly emitted
+    // trailer; this is what goes on the wire.
+    let final_trailer = Ospfv3AuthTrailer { digest, ..trailer };
+    let mut buf = BytesMut::new();
+    final_trailer.emit(&mut buf);
+    packet.auth_trailer = buf.to_vec();
+}
+
+/// Verify the RFC 7166 Authentication Trailer on an inbound v3
+/// packet. Returns the trailer's 64-bit seq on accept (the caller
+/// updates per-neighbor replay state); returns `None` on any
+/// failure (no trailer when one was expected, unknown SA ID,
+/// digest mismatch, replay).
+pub(super) fn verify_v3_auth_trailer(
+    packet: &Ospfv3Packet,
+    ipv6_src: &Ipv6Addr,
+    mode: super::link::OspfAuthMode,
+    key_source: &super::packet::KeySource<'_>,
+    nbr_last_seq: u64,
+) -> Option<u64> {
+    use super::link::OspfAuthMode;
+
+    if mode != OspfAuthMode::MessageDigest {
+        return None;
+    }
+    let trailer = Ospfv3AuthTrailer::parse(&packet.auth_trailer)?;
+    if trailer.auth_type != Ospfv3AuthTrailer::AUTH_TYPE_HMAC {
+        return None;
+    }
+    let seq = trailer.seq();
+    // RFC 7166 §4.5 anti-replay — seq monotonically increasing.
+    if seq < nbr_last_seq {
+        return None;
+    }
+    let sa_u8 = u8::try_from(trailer.sa_id).ok()?;
+    let key = key_source.lookup(sa_u8)?;
+    let expected_digest_len = key.algo.digest_len();
+    if trailer.digest.len() != expected_digest_len {
+        return None;
+    }
+    // Reconstruct the hash input: raw_body || trailer prefix with
+    // Apad in place of the digest.
+    let trailer_for_hash = Ospfv3AuthTrailer {
+        digest: apad_bytes(expected_digest_len),
+        ..trailer.clone()
+    };
+    let mut trailer_with_apad = bytes::BytesMut::new();
+    trailer_for_hash.emit(&mut trailer_with_apad);
+    let computed = compute_v3_trailer_digest(&key, ipv6_src, &packet.raw_body, &trailer_with_apad);
+    if !super::packet::constant_time_eq_pub(&computed, &trailer.digest) {
+        return None;
+    }
+    Some(seq)
+}
 
 /// First link-local address on this interface, or `None` if none has
 /// been picked up from `rib::Link` yet. The v3 send loop folds this
@@ -85,7 +290,12 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
 /// `ospf_hello_send`. Returns silently if no link-local source is
 /// available yet (the link will retry on the next hello-timer fire).
 #[allow(dead_code)]
-pub fn ospfv3_hello_send(link: &mut OspfLink<Ospfv3>, v3_send_tx: &UnboundedSender<Ospfv3Send>) {
+pub fn ospfv3_hello_send(
+    link: &mut OspfLink<Ospfv3>,
+    v3_send_tx: &UnboundedSender<Ospfv3Send>,
+    chains: &std::collections::HashMap<String, super::key_chain::OspfKeyChain>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     let Some(src) = link_local_src(link) else {
         tracing::debug!(
             "[v3 Hello:Send] {} has no link-local source yet, skipping",
@@ -93,9 +303,11 @@ pub fn ospfv3_hello_send(link: &mut OspfLink<Ospfv3>, v3_send_tx: &UnboundedSend
         );
         return;
     };
-    let Some(packet) = build_hello_packet(link) else {
+    let Some(mut packet) = build_hello_packet(link) else {
         return;
     };
+    let dst = Ospfv3::ALL_SPF_ROUTERS;
+    apply_v3_auth_trailer(&mut packet, &link.auth_send_ctx(chains, now), &src, &dst);
 
     let item = Ospfv3Send {
         packet,
@@ -322,7 +534,7 @@ pub fn ospfv3_db_desc_send(
         nbr.timer.db_desc = None;
     }
 
-    let packet = Ospfv3Packet::new(
+    let mut packet = Ospfv3Packet::new(
         &oident.router_id,
         &area,
         0, // instance_id (RFC 5340 §A.3.1)
@@ -337,13 +549,15 @@ pub fn ospfv3_db_desc_send(
         tracing::debug!("[v3 DBD:Send] no link-local source on interface");
         return;
     };
+    let dst = nbr.ident.prefix.addr();
+    apply_v3_auth_trailer(&mut packet, &oi.auth_send_ctx(), &src, &dst);
 
     let item = Ospfv3Send {
         packet,
         ifindex: nbr.ifindex,
         // Unicast to the neighbor's link-local (captured in
         // `ospfv3_hello_recv` as a `/128` Ipv6Net).
-        dest: Some(nbr.ident.prefix.addr()),
+        dest: Some(dst),
         src,
     };
     if let Err(e) = tx.send(item) {
@@ -380,16 +594,18 @@ fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<Ospfv3>) {
         return;
     };
 
-    let packet = Ospfv3Packet::new(
+    let mut packet = Ospfv3Packet::new(
         oi.router_id,
         &oi.area_id,
         0,
         Ospfv3Payload::DbDesc(sent.clone()),
     );
+    let dst = nbr.ident.prefix.addr();
+    apply_v3_auth_trailer(&mut packet, &oi.auth_send_ctx(), &src, &dst);
     let item = Ospfv3Send {
         packet,
         ifindex: nbr.ifindex,
-        dest: Some(nbr.ident.prefix.addr()),
+        dest: Some(dst),
         src,
     };
     if let Err(e) = tx.send(item) {
@@ -655,7 +871,7 @@ pub fn ospfv3_ls_req_send(
     let mut ls_req = Ospfv3LsRequest::default();
     ospfv3_packet_ls_req_set(nbr, &mut ls_req);
 
-    let packet = Ospfv3Packet::new(
+    let mut packet = Ospfv3Packet::new(
         &oident.router_id,
         &area,
         0,
@@ -670,11 +886,13 @@ pub fn ospfv3_ls_req_send(
         tracing::debug!("[v3 LSReq:Send] no link-local source on interface");
         return;
     };
+    let dst = nbr.ident.prefix.addr();
+    apply_v3_auth_trailer(&mut packet, &oi.auth_send_ctx(), &src, &dst);
 
     let item = Ospfv3Send {
         packet,
         ifindex: nbr.ifindex,
-        dest: Some(nbr.ident.prefix.addr()),
+        dest: Some(dst),
         src,
     };
     if let Err(e) = tx.send(item) {
@@ -694,7 +912,7 @@ pub fn ospfv3_ls_upd_send(
     let area = oi.area_id;
     let ls_upd = Ospfv3LsUpdate { lsas };
 
-    let packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsUpdate(ls_upd));
+    let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsUpdate(ls_upd));
 
     let Some(tx) = oi.v3_send_tx else {
         tracing::debug!("[v3 LSUpd:Send] no v3 send channel on OspfInterface");
@@ -704,11 +922,13 @@ pub fn ospfv3_ls_upd_send(
         tracing::debug!("[v3 LSUpd:Send] no link-local source on interface");
         return;
     };
+    let dst = nbr.ident.prefix.addr();
+    apply_v3_auth_trailer(&mut packet, &oi.auth_send_ctx(), &src, &dst);
 
     let item = Ospfv3Send {
         packet,
         ifindex: nbr.ifindex,
-        dest: Some(nbr.ident.prefix.addr()),
+        dest: Some(dst),
         src,
     };
     if let Err(e) = tx.send(item) {
@@ -773,7 +993,7 @@ pub fn ospfv3_ls_ack_send(
     let area = oi.area_id;
     let ls_ack = Ospfv3LsAck { lsa_headers };
 
-    let packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsAck(ls_ack));
+    let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsAck(ls_ack));
 
     let Some(tx) = oi.v3_send_tx else {
         tracing::debug!("[v3 LSAck:Send] no v3 send channel on OspfInterface");
@@ -783,11 +1003,13 @@ pub fn ospfv3_ls_ack_send(
         tracing::debug!("[v3 LSAck:Send] no link-local source on interface");
         return;
     };
+    let dst = nbr.ident.prefix.addr();
+    apply_v3_auth_trailer(&mut packet, &oi.auth_send_ctx(), &src, &dst);
 
     let item = Ospfv3Send {
         packet,
         ifindex: nbr.ifindex,
-        dest: Some(nbr.ident.prefix.addr()),
+        dest: Some(dst),
         src,
     };
     if let Err(e) = tx.send(item) {
@@ -1232,4 +1454,143 @@ pub fn ospfv3_ls_upd_recv(
     // Check whether the request list is now empty; if so the
     // neighbor can leave Loading.
     super::nfsm::ospf_nfsm_check_nbr_loading(nbr);
+}
+
+#[cfg(test)]
+mod v3_auth_tests {
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+
+    use bytes::BytesMut;
+    use ospf_packet::{Ospfv3Hello, Ospfv3Options, parse_v3};
+
+    use super::*;
+    use crate::ospf::link::{AuthKey, OspfAuthMode, OspfCryptoAlgo};
+    use crate::ospf::packet::{AuthSendCtx, KeySource};
+
+    fn hello_v3() -> Ospfv3Packet {
+        let mut options = Ospfv3Options::default();
+        options.set_v6(true);
+        options.set_e(true);
+        options.set_r(true);
+        let hello = Ospfv3Hello {
+            interface_id: 1,
+            priority: 1,
+            options,
+            hello_interval: 10,
+            router_dead_interval: 40,
+            d_router: Ipv4Addr::UNSPECIFIED,
+            bd_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: Vec::new(),
+        };
+        Ospfv3Packet::new(
+            &Ipv4Addr::new(1, 1, 1, 1),
+            &Ipv4Addr::UNSPECIFIED,
+            0,
+            Ospfv3Payload::Hello(hello),
+        )
+    }
+
+    fn key_for(algo: OspfCryptoAlgo, material: &[u8]) -> AuthKey {
+        AuthKey {
+            algo,
+            raw: material.to_vec(),
+        }
+    }
+
+    fn roundtrip_v3_for(algo: OspfCryptoAlgo, material: &[u8]) {
+        let src = "fe80::1".parse().unwrap();
+        let dst = Ospfv3::ALL_SPF_ROUTERS;
+        let key_id = 7u8;
+        let key = key_for(algo, material);
+        let ctx = AuthSendCtx {
+            mode: OspfAuthMode::MessageDigest,
+            simple_key: None,
+            crypto_key: Some((key_id, key.clone())),
+            md5_seq: 0xCAFE_BABE,
+        };
+
+        let mut packet = hello_v3();
+        apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
+
+        // After stamping: AT-bit set in Options, trailer present.
+        match &packet.payload {
+            Ospfv3Payload::Hello(h) => assert!(h.options.at()),
+            _ => unreachable!(),
+        }
+        let expected_len = ospf_packet::Ospfv3AuthTrailer::PREFIX_LEN + algo.digest_len();
+        assert_eq!(packet.auth_trailer.len(), expected_len);
+
+        // Serialize body + trailer (mirrors network_v6::write_packet_v6).
+        let mut buf = BytesMut::new();
+        packet.emit_with_checksum(&mut buf, &src, &dst);
+        buf.extend_from_slice(&packet.auth_trailer);
+
+        // Parse back — the trailer is consumed via parse_v3 because
+        // the AT-bit is set on Hello.
+        let (rest, parsed) = parse_v3(&buf).expect("parse must succeed");
+        assert!(rest.is_empty());
+        assert_eq!(parsed.auth_trailer.len(), expected_len);
+
+        let mut keys: BTreeMap<u8, AuthKey> = BTreeMap::new();
+        keys.insert(key_id, key.clone());
+
+        // Accept with matching key + fresh seq.
+        let accepted = verify_v3_auth_trailer(
+            &parsed,
+            &src,
+            OspfAuthMode::MessageDigest,
+            &KeySource::PerIface(&keys),
+            0,
+        );
+        assert_eq!(accepted, Some(0xCAFE_BABE));
+
+        // Replay: seq below high-watermark → reject.
+        let replay = verify_v3_auth_trailer(
+            &parsed,
+            &src,
+            OspfAuthMode::MessageDigest,
+            &KeySource::PerIface(&keys),
+            0xCAFE_BABE + 1,
+        );
+        assert!(replay.is_none());
+
+        // Different IPv6 src → digest mismatch → reject.
+        let other_src = "fe80::dead:beef".parse().unwrap();
+        let wrong_src = verify_v3_auth_trailer(
+            &parsed,
+            &other_src,
+            OspfAuthMode::MessageDigest,
+            &KeySource::PerIface(&keys),
+            0,
+        );
+        assert!(wrong_src.is_none());
+
+        // Unknown SA-id → reject.
+        let mut wrong_keys: BTreeMap<u8, AuthKey> = BTreeMap::new();
+        wrong_keys.insert(9u8, key.clone());
+        let unknown_id = verify_v3_auth_trailer(
+            &parsed,
+            &src,
+            OspfAuthMode::MessageDigest,
+            &KeySource::PerIface(&wrong_keys),
+            0,
+        );
+        assert!(unknown_id.is_none());
+    }
+
+    #[test]
+    fn v3_hmac_sha1_roundtrip() {
+        roundtrip_v3_for(OspfCryptoAlgo::HmacSha1, b"sha1-shared");
+    }
+
+    #[test]
+    fn v3_hmac_sha256_roundtrip() {
+        roundtrip_v3_for(OspfCryptoAlgo::HmacSha256, b"sha256-shared");
+    }
+
+    #[test]
+    fn v3_hmac_sha512_roundtrip() {
+        roundtrip_v3_for(OspfCryptoAlgo::HmacSha512, b"sha512-shared");
+    }
 }
