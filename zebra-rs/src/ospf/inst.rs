@@ -548,6 +548,26 @@ impl Ospf<Ospfv2> {
     fn router_lsa_build(&self) -> RouterLsa {
         let mut router_lsa = RouterLsa::default();
 
+        // RFC 2328 §A.4.2 / RFC 3101 §3.1 Router-LSA flags:
+        //   bit 0 (0x01) — B: this router is an ABR
+        //   bit 1 (0x02) — E: this router is an ASBR
+        //   bit 4 (0x10) — Nt: this router is an NSSA translator
+        // B-bit goes in the LSA we originate into every area we're
+        // attached to; phase-4b Candidate election (in
+        // `is_nssa_translator_for`) reads other routers' B-bits out
+        // of NSSA Router-LSAs to pick the elected translator.
+        //
+        // Nt-bit is intentionally NOT set here. The Nt-bit MUST sit
+        // in the Router-LSA scoped to the NSSA itself (RFC 3101
+        // §3.1), but `router_lsa_originate` currently emits a single
+        // Router-LSA into AREA0 — per-area emission is a separate
+        // refactor. Election is locally-computed across all OSPF
+        // implementations, so omitting Nt-bit is interop-safe; the
+        // bit becomes meaningful once per-area Router-LSAs land.
+        if self.is_abr() {
+            router_lsa.flags |= 0x0001;
+        }
+
         for link in self.links.values() {
             if !link.enabled {
                 continue;
@@ -1099,11 +1119,26 @@ impl Ospf<Ospfv2> {
     }
 
     /// True when this router should translate Type-7 → Type-5 for
-    /// `area_id`. Phase 4a only honors `translator-role = Always`
-    /// (with the ABR gate). `Candidate` (the RFC default) returns
-    /// false until phase 4b adds Nt-bit election; `Never` is also
-    /// false by construction.
+    /// `area_id`. RFC 3101 §3.1 translator-role evaluation:
+    ///
+    /// - `Never`: never translate.
+    /// - `Always`: translate unconditionally (may create duplicate
+    ///   Type-5s across multiple Always-mode ABRs in the same NSSA;
+    ///   operator hazard called out in RFC 3101 §3.1).
+    /// - `Candidate` (default): translate iff our router-id is the
+    ///   highest among all ABRs visible in this NSSA's LSDB.
+    ///   "ABR" is identified by the B-bit in the peer's Router-LSA
+    ///   (set per `router_lsa_build`); a peer that doesn't set
+    ///   B-bit is treated as non-ABR.
+    ///
+    /// Election is locally computed (no protocol negotiation). The
+    /// Nt-bit in our Router-LSA is the spec-mandated announcement of
+    /// our translator role, but currently isn't emitted — see
+    /// `router_lsa_build` for the deferral note. All known
+    /// implementations (FRR / IOS / Junos) elect locally, so the
+    /// missing Nt-bit doesn't affect interop.
     pub fn is_nssa_translator_for(&self, area_id: Ipv4Addr) -> bool {
+        use super::area::NssaTranslatorRole;
         let Some(area) = self.areas.get(area_id) else {
             return false;
         };
@@ -1113,10 +1148,42 @@ impl Ospf<Ospfv2> {
         if !self.is_abr() {
             return false;
         }
-        matches!(
-            area.area_type.nssa_translator_role,
-            super::area::NssaTranslatorRole::Always
-        )
+        match area.area_type.nssa_translator_role {
+            NssaTranslatorRole::Never => false,
+            NssaTranslatorRole::Always => true,
+            NssaTranslatorRole::Candidate => {
+                // Find the highest router-id among other ABRs in
+                // this NSSA's LSDB. We win the election iff our
+                // router-id is greater or equal; greater handles
+                // the normal case, equal handles the (unlikely)
+                // tie where our own Router-LSA is also visible in
+                // the LSDB.
+                let highest_other = area
+                    .lsdb
+                    .iter_by_type(OspfLsType::Router)
+                    .filter_map(|(_, lsa)| {
+                        let OspfLsp::Router(ref body) = lsa.data.lsp else {
+                            return None;
+                        };
+                        // B-bit (bit 0, mask 0x01) in Router-LSA
+                        // flags = peer is an ABR.
+                        if (body.flags & 0x0001) == 0 {
+                            return None;
+                        }
+                        // Skip our own Router-LSA when present —
+                        // we're comparing against OTHERS.
+                        if lsa.data.h.adv_router == self.router_id {
+                            return None;
+                        }
+                        Some(lsa.data.h.adv_router)
+                    })
+                    .max();
+                match highest_other {
+                    None => true, // No other ABRs visible; we win.
+                    Some(other) => self.router_id >= other,
+                }
+            }
+        }
     }
 
     /// Translate a single Type-7 NSSA-AS-External LSA into a Type-5
