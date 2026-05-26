@@ -232,54 +232,92 @@ its own follow-up doc.
 - **Concurrent v2 + v3 restart**. Each instance checkpoints
   independently. No coordination layer.
 
-## Open questions (must answer before 5a)
+## Decisions (locked 2026-05-25)
 
-1. **`ProtoCleanup` vs `ProtoQuiesce`** — extend the existing
-   message with a flag, or add a new variant? The RIB-side code
-   path is the same modulo "send RTM_DELROUTE or don't". I lean
-   toward a new variant for callsite clarity at
-   `despawn_ospf` (`config/ospf.rs:24`), but the user may prefer
-   the flag.
-2. **Checkpoint format**. CBOR (`serde_cbor` / `ciborium`) is
-   compact + binary; TOML is human-readable but bloats the LSA
-   bodies. LSAs are 50-500 bytes each, an LSDB might hold 100s.
-   Recommend CBOR + a `clear ip ospf checkpoint dump` show
-   command that pretty-prints it.
-3. **Checkpoint location**. `/var/lib/zebra-rs/` requires a
-   packaging change (the systemd unit must create the dir
-   `StateDirectory=`). Alternative: `~/.zebra-rs/` or a
-   configurable path. Recommend `/var/lib/zebra-rs/checkpoint/`
-   matching the FRR convention.
-4. **Restart trigger surface**. Three candidates:
-   - `clear ip ospf graceful-restart {begin,commit,abort}` —
-     vty-only, ops type it interactively.
-   - SIGUSR1 (or a custom signal) — supervisor-friendly,
-     scriptable.
-   - YANG action (NETCONF RPC) — most "modern", needs more
-     infrastructure than the others.
-   Recommend vty first, signal second, YANG-action skip.
-5. **Sequence number storage scope**. RFC 3623 §3 wants
-   re-flood at the same seq during restart. Need to checkpoint
-   the seq of *every* self-originated LSA, including Opaque
-   ones (Router-Info, Ext-Prefix, Ext-Link). Significant data
-   volume; confirm we're OK persisting full LSA bodies (the
-   alternative is rebuilding them from config + neighbor state,
-   which risks content drift triggering helper exits).
-6. **Drain window length**. 100ms is plausible for LAN; over
-   WAN/tunnel the Hello-arrival round-trip pushes this higher.
-   Tunable, with a sane default — recommend 200ms default,
-   `graceful-restart drain-time <ms>` YANG knob.
-7. **Boot-time freshness window**. If the checkpoint is older
-   than the grace period in it, treat as stale and cold-start.
-   What's the clock source — system time (`SystemTime::now`)
-   subject to NTP corrections, or a monotonic since-boot
-   timestamp from the supervisor? Recommend wall clock with a
-   1.5x grace-period slack.
-8. **Multi-area neighbors and the LR-bit on v3**. RFC 4811
-   places LR in the per-Hello Options; per-interface, but the
-   restart is per-instance. Confirm we set LR on *all* v3
-   Hellos while restarting (yes — the bit is per-packet, the
-   restart is per-router).
+These are the answers to the eight questions raised when this
+doc was first scoped. Each carries the rationale + the
+fall-back posture if the call turns out wrong in practice.
+
+1. **New `ProtoQuiesce` variant, not a flag on `ProtoCleanup`.**
+   Callsite at `despawn_ospf` (`config/ospf.rs:24`) reads
+   clearly as "we are intentionally NOT withdrawing", and the
+   RIB-side handler can extract a shared helper that both
+   variants call for the common path (drop redist sender, clear
+   SR watchers). Flag-on-existing-variant would force every
+   pattern-match site to learn about the new behavior, even
+   ones that have no opinion.
+
+2. **CBOR via `ciborium`.** Per-LSA bodies are 50-500 bytes;
+   a busy router can hold 100s of LSAs, so a typical
+   checkpoint is 30-80 KB binary. TOML would inflate that
+   2-5× through base64'd bodies plus indentation, and gain
+   nothing — operators don't hand-edit checkpoints. `ciborium`
+   is IETF-standard (RFC 8949), supports schema evolution,
+   and has a stable wire format across crate versions
+   (unlike `bincode`). Ship a debug `clear ip ospf checkpoint
+   dump` that pretty-prints to JSON for ops inspection.
+
+3. **`/var/lib/zebra-rs/checkpoint/{ospf,ospfv3}.cbor` with a
+   YANG override.** Matches FRR's convention so operators
+   migrating from FRR don't have to relearn the path. The
+   systemd unit in `packaging/` will need `StateDirectory=
+   zebra-rs/checkpoint` (cheap fix, lands alongside 5b). Add
+   a YANG knob `graceful-restart/checkpoint-path` (default
+   = above) so the path can be overridden without a code
+   change — useful for containerized deployments where
+   `/var/lib` may be ephemeral.
+
+4. **vty + signal, no NETCONF RPC.** `clear ip ospf
+   graceful-restart {begin,commit,abort}` for interactive
+   operator use; `SIGUSR1` (or `SIGRTMIN+N`) for
+   supervisor-driven restarts (systemd `ExecReload=`,
+   automated rolling upgrades). Both feed the same handler.
+   Skip YANG-action / NETCONF RPC — needs RPC plumbing we
+   don't have, and there is no operator demand evident in
+   the codebase for it.
+
+5. **Persist full self-originated LSA bodies, every type.**
+   Router-LSA, Network-LSA, all Opaque flavours (Router-Info,
+   Ext-Prefix, Ext-Link), and the v3 equivalents (incl.
+   Intra-Area-Prefix and Link-LSAs). Volume is bounded by
+   routing-table + config size — typically <100 KB total per
+   instance. Re-deriving from config + neighbor state was the
+   alternative considered and rejected: the SR-MPLS
+   Adjacency-SID label depends on `local_pool` allocation
+   order, which is observed-but-not-deterministic across a
+   restart, so re-derivation would silently drift the LSA
+   content and trip every helper's `gr_helper_check_exit`.
+
+6. **200ms default drain, `graceful-restart drain-time-ms`
+   YANG knob (range 50-2000).** LAN Hello round-trips are
+   <10ms; the 200ms default absorbs tunnel/WAN paths with
+   100ms+ RTT and the kernel's send-queue drain. Picked at
+   the high end of "imperceptible to operators" so we don't
+   ship a fragile default and have to bump it later.
+
+7. **Wall clock (`SystemTime::now`) with 1.5× grace-period
+   slack.** Monotonic-since-boot is useless here — it resets
+   on the very event we're trying to span. NTP-corrected wall
+   clock is the only signal that survives reboot. The 1.5×
+   slack absorbs typical NTP jitter and kernel/systemd
+   startup latency between checkpoint-write and
+   first-Hello-out; on a freshly-booted system with no NTP
+   sync the clock may be wildly wrong, and in that case
+   we'd rather cold-start than restart on bad clock data.
+
+8. **Set LR on every v3 Hello while restarting.** RFC 4811
+   §2: "Once an OSPFv3 router is in the process of
+   restarting, it MUST set the LR-bit in all of its Hello
+   packets." Per-instance restart state → per-instance LR
+   bit. The bit is per-Hello on the wire; the source-of-truth
+   condition `Ospf<Ospfv3>.restarting.is_some()` is per-
+   instance. Helper side reads LR only as a confirming signal
+   — the Grace LSA stays the primary entry trigger per
+   RFC 5187 §3.
+
+If any of these need revisiting before 5a, edit this section
+*before* picking up the work — the design rationales above are
+load-bearing for the PR shape.
 
 ## Interactions with neighboring work
 
