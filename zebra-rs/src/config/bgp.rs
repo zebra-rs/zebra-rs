@@ -41,3 +41,19 @@ pub fn despawn_bgp(config: &ConfigManager) {
         proto: "bgp".to_string(),
     });
 }
+
+/// Graceful-restart variant of [`despawn_bgp`] (RFC 4724).
+/// Drops the protocol task + registrations but sends
+/// `ProtoQuiesce` instead of `ProtoCleanup`, so the kernel
+/// routes the BGP speaker owns stay installed while the daemon
+/// restarts. Peers in receiving-restart-helper mode mark these
+/// as "stale" until our re-advertise + End-of-RIB marker.
+#[allow(dead_code)]
+pub fn despawn_bgp_graceful(config: &ConfigManager) {
+    config.cm_clients.borrow_mut().remove("bgp");
+    config.show_clients.borrow_mut().remove("bgp");
+    config.protocol_tasks.borrow_mut().remove("bgp");
+    let _ = config.rib_tx.send(rib::Message::ProtoQuiesce {
+        proto: "bgp".to_string(),
+    });
+}
