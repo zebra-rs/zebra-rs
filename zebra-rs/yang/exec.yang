@@ -290,6 +290,10 @@ module exec {
           ext:help "OSPF graceful-restart helper status";
           type empty;
         }
+        leaf checkpoint {
+          ext:help "OSPF graceful-restart checkpoint (on-disk state)";
+          type empty;
+        }
       }
     }
 

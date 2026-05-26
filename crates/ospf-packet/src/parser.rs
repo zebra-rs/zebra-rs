@@ -454,6 +454,16 @@ impl OspfLsa {
         Self { h, lsp }
     }
 
+    /// Decode a complete OSPFv2 LSA (20-octet header + body) from
+    /// raw bytes. Returns `None` if the bytes don't parse. Public
+    /// wrapper so consumers (e.g. the graceful-restart checkpoint
+    /// in `zebra-rs/src/ospf/checkpoint.rs`) don't need to depend
+    /// on `nom_derive` just to call `parse_be`.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        use nom_derive::Parse;
+        Self::parse_be(bytes).ok().map(|(_, lsa)| lsa)
+    }
+
     /// Emit the LSA payload (body only) to a buffer. Public so tests
     /// can round-trip a constructed LSA without depending on the
     /// crate-private `Emit` trait.
