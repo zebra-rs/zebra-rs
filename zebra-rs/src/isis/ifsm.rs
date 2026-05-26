@@ -105,39 +105,18 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
         }
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
-    // Auth TLV (Phase 3a) lives at the end of the real TLVs, *before*
-    // padding. For HMAC-MD5 it's a zero-filled placeholder that the
-    // send path patches in after the HMAC is computed; for cleartext
-    // we attach the password bytes directly and the recv side
-    // compares them as-is. Including it before padding keeps the
-    // PDU exactly at MTU (the padding helper sees the auth TLV's
-    // size when it computes the remaining budget).
-    append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
+    // Auth TLV lives at the end of the real TLVs, *before* padding.
+    // For HMAC-MD5 it's a zero-filled placeholder that `hello_send`
+    // patches in after the HMAC is computed; for cleartext we attach
+    // the password bytes directly and the recv side compares them
+    // as-is. Including it before padding keeps the PDU exactly at MTU
+    // (the padding helper sees the auth TLV's size when it computes
+    // the remaining budget).
+    auth::append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(link.state.mtu as usize);
     }
     hello
-}
-
-/// Append the Authentication TLV (type 10) to `tlvs` when this link
-/// has hello-authentication configured. For cleartext the value is
-/// the password bytes verbatim; for HMAC-MD5 it's a zero-filled
-/// placeholder that `hello_send_signed` will patch in place once
-/// the digest is known.
-fn append_auth_tlv(tlvs: &mut Vec<IsisTlv>, cfg: &super::config::IsisAuthConfig) {
-    let Some(pw) = cfg.password.as_deref() else {
-        return;
-    };
-    let tlv = match cfg.auth_type {
-        IsisAuthType::Text => IsisTlvAuth {
-            auth_type: ISIS_AUTH_TYPE_CLEARTEXT,
-            value: pw.as_bytes().to_vec(),
-        },
-        IsisAuthType::Md5 => {
-            IsisTlvAuth::placeholder(ISIS_AUTH_TYPE_HMAC_MD5, ISIS_AUTH_HMAC_MD5_LEN)
-        }
-    };
-    tlvs.push(tlv.into());
 }
 
 pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
@@ -211,7 +190,7 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     };
     hello.tlvs.push(tlv.into());
 
-    append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
+    auth::append_auth_tlv(&mut hello.tlvs, &link.config.hello_auth);
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
         hello.padding(link.state.mtu as usize);
     }
@@ -292,7 +271,7 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         (Some(key), IsisAuthType::Md5) => {
             let mut buf = BytesMut::new();
             packet.emit(&mut buf);
-            sign_hello_md5_inplace(&mut buf, packet.length_indicator as usize, key.as_bytes());
+            auth::sign_md5_inplace(&mut buf, packet.length_indicator as usize, key.as_bytes());
             link.state.auth_tx_signed += 1;
             Packet::Bytes(buf)
         }
@@ -308,26 +287,6 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         .ptx
         .send(PacketMessage::Send(outgoing, ifindex, level, mac));
     Ok(())
-}
-
-/// Locate the Auth TLV value inside the just-emitted Hello PDU and
-/// patch the HMAC-MD5 digest in place. The TLV was emitted with a
-/// zero-filled placeholder (per `append_auth_tlv`), so the HMAC is
-/// computed over the buffer exactly as it sits — RFC 5304 §3's
-/// "set the Authentication Value field to zero before computing".
-fn sign_hello_md5_inplace(buf: &mut BytesMut, tlvs_start: usize, key: &[u8]) {
-    let Some(value_range) = auth::locate_auth_tlv(buf, tlvs_start) else {
-        return;
-    };
-    // value_range covers [auth_type, payload]. The digest area is
-    // everything after the 1-byte auth_type.
-    let digest_start = value_range.start + 1;
-    let digest_end = value_range.end;
-    if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
-        return;
-    }
-    let digest = auth::hmac_md5(key, buf);
-    buf[digest_start..digest_end].copy_from_slice(&digest);
 }
 
 pub fn has_level(is_level: IsLevel, level: Level) -> bool {

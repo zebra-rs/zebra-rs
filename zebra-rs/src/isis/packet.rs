@@ -640,8 +640,9 @@ fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
         Level::L1 => IsisPacket::from(IsisType::L1Csnp, IsisPdu::L1Csnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Csnp, IsisPdu::L2Csnp(pdu.clone())),
     };
+    let outgoing = sign_snp_outgoing(link, level, packet);
     let _ = link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
+        outgoing,
         link.ifindex,
         level,
         link.dest(level),
@@ -853,21 +854,71 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
         Level::L1 => IsisPacket::from(IsisType::L1Psnp, IsisPdu::L1Psnp(pdu.clone())),
         Level::L2 => IsisPacket::from(IsisType::L2Psnp, IsisPdu::L2Psnp(pdu.clone())),
     };
+    let outgoing = sign_snp_outgoing(link, level, packet);
     let _ = link.ptx.send(PacketMessage::Send(
-        Packet::Packet(packet),
+        outgoing,
         link.ifindex,
         level,
         link.dest(level),
     ));
 }
 
-/// Return the (auth_type, value) of the first Authentication TLV in
-/// the parsed Hello PDU, if any. Used by verify_hello_auth — the
-/// raw bytes are reached separately via `packet.bytes`.
-fn hello_pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
+/// Sign an outbound CSNP/PSNP per RFC 5304 §3 using the level's
+/// area/domain password. Cleartext is already in the placeholder
+/// from `csnp_generate` / `psnp_send_pdu` — we just emit it. HMAC-MD5
+/// needs the two-pass patch: emit to bytes, locate the placeholder,
+/// compute the HMAC, copy the digest into place. Returns `Packet::Bytes`
+/// for the md5 path and `Packet::Packet` for everything else so the
+/// network writer can keep using the existing serialize-on-send code.
+fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Packet {
+    let (key, mode) = {
+        let cfg = super::lsp::snp_auth_cfg(link.up_config, level);
+        let Some(pw) = cfg.password.clone() else {
+            return Packet::Packet(packet);
+        };
+        (pw, cfg.auth_type)
+    };
+    link.state.auth_tx_signed += 1;
+    match mode {
+        IsisAuthType::Text => Packet::Packet(packet),
+        IsisAuthType::Md5 => {
+            let mut buf = bytes::BytesMut::new();
+            packet.emit(&mut buf);
+            auth::sign_md5_inplace(&mut buf, packet.length_indicator as usize, key.as_bytes());
+            Packet::Bytes(buf)
+        }
+    }
+}
+
+/// Which authentication scope a given PDU type+level falls under.
+/// Hello uses the per-link `hello-authentication`; SNPs follow RFC
+/// 5304 §3 and use the area-password (L1) or domain-password (L2).
+/// LSPs share the same per-level keys as SNPs but stay out of scope
+/// here until Phase 4.
+enum AuthScope {
+    HelloLink,
+    AreaPassword,
+    DomainPassword,
+}
+
+fn auth_scope_for(pdu_type: IsisType) -> Option<AuthScope> {
+    match pdu_type {
+        IsisType::L1Hello | IsisType::L2Hello | IsisType::P2pHello => Some(AuthScope::HelloLink),
+        IsisType::L1Csnp | IsisType::L1Psnp => Some(AuthScope::AreaPassword),
+        IsisType::L2Csnp | IsisType::L2Psnp => Some(AuthScope::DomainPassword),
+        _ => None,
+    }
+}
+
+/// Return the first Authentication TLV (type 10) in any Hello/SNP
+/// PDU. LSPs handled in Phase 4 — return None here so they fall
+/// through to the LSP-specific verify when that lands.
+fn pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
     let tlvs: &[IsisTlv] = match pdu {
         IsisPdu::L1Hello(h) | IsisPdu::L2Hello(h) => &h.tlvs,
         IsisPdu::P2pHello(h) => &h.tlvs,
+        IsisPdu::L1Csnp(c) | IsisPdu::L2Csnp(c) => &c.tlvs,
+        IsisPdu::L1Psnp(p) | IsisPdu::L2Psnp(p) => &p.tlvs,
         _ => return None,
     };
     tlvs.iter().find_map(|tlv| match tlv {
@@ -876,49 +927,58 @@ fn hello_pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
     })
 }
 
-/// Validate the Authentication TLV on an inbound Hello PDU against
-/// the per-link `hello-authentication` config. Returns `true` to
+/// Validate the Authentication TLV on an inbound Hello or SNP PDU
+/// against the relevant configured auth scope. Returns `true` to
 /// accept the PDU, `false` to drop it (and bumps the relevant
 /// counter on the link).
 ///
-/// Decision matrix:
-/// - link auth not configured → accept (peer may still send auth;
-///   the TLV stays in the parsed PDU as data).
-/// - link auth configured, `send-only` true → accept regardless of
-///   inbound content (RFC 5304 §1 rollover hatch).
-/// - link auth configured, no inbound Auth TLV → drop, bump
+/// Decision matrix (per RFC 5304 §1):
+/// - scope not configured → accept (peer may still send auth; the
+///   TLV remains in the parsed PDU as data).
+/// - scope configured, `send-only` true → accept regardless of
+///   inbound content (rollover hatch).
+/// - scope configured, no inbound Auth TLV → drop, bump
 ///   `auth_rx_no_auth`.
-/// - link auth configured, type mismatch → drop, bump `auth_rx_bad`.
+/// - scope configured, type mismatch → drop, bump `auth_rx_bad`.
 /// - cleartext (type 1) → byte-compare value against configured
-///   password; match → accept + `auth_rx_good`, else drop +
-///   `auth_rx_bad`.
+///   password.
 /// - HMAC-MD5 (type 54) → zero the digest in a copy of the raw
-///   bytes, recompute HMAC, constant-time compare → accept +
-///   `auth_rx_good`, else drop + `auth_rx_bad`.
-fn verify_hello_auth(
+///   bytes, recompute HMAC, constant-time compare.
+fn verify_pdu_auth(
     link: &mut super::link::LinkTop<'_>,
+    scope: AuthScope,
     tlvs_start: usize,
     pdu_bytes: &[u8],
     packet: &IsisPacket,
 ) -> bool {
-    let cfg = &link.config.hello_auth;
-    let Some(key) = cfg.password.as_deref() else {
-        return true; // no auth configured — accept anything
+    // Snapshot config fields so we don't hold an immutable borrow of
+    // link.config/up_config while mutating link.state.auth_rx_* below.
+    let (key, mode, send_only) = {
+        let cfg = match scope {
+            AuthScope::HelloLink => &link.config.hello_auth,
+            AuthScope::AreaPassword => &link.up_config.area_password,
+            AuthScope::DomainPassword => &link.up_config.domain_password,
+        };
+        let Some(pw) = cfg.password.clone() else {
+            return true; // no auth configured for this scope — accept anything
+        };
+        (pw, cfg.auth_type, cfg.send_only)
     };
-    if cfg.send_only {
+    if send_only {
         return true; // sign-only-on-tx rollover mode
     }
-    let Some(auth_tlv) = hello_pdu_auth_tlv(&packet.pdu) else {
+    let Some(auth_tlv) = pdu_auth_tlv(&packet.pdu) else {
         link.state.auth_rx_no_auth += 1;
         tracing::warn!(
             proto = "isis",
             link = %link.state.name,
-            "[Hello:AuthDrop] no auth TLV from peer"
+            pdu = ?packet.pdu_type,
+            "[AuthDrop] no auth TLV from peer"
         );
         return false;
     };
 
-    let accepted = match cfg.auth_type {
+    let accepted = match mode {
         IsisAuthType::Text => {
             auth_tlv.auth_type == ISIS_AUTH_TYPE_CLEARTEXT
                 && auth::digest_eq(&auth_tlv.value, key.as_bytes())
@@ -958,7 +1018,8 @@ fn verify_hello_auth(
         tracing::warn!(
             proto = "isis",
             link = %link.state.name,
-            "[Hello:AuthDrop] auth verification failed"
+            pdu = ?packet.pdu_type,
+            "[AuthDrop] auth verification failed"
         );
         false
     }
@@ -987,12 +1048,14 @@ pub fn process_packet(
         return Ok(());
     }
 
-    // Hello authentication (Phase 3a). Validated before the PDU is
-    // handed to the adjacency FSM so a mismatching peer never gets
-    // to mutate neighbor state. SNP/LSP auth lands in Phase 3b/4.
-    if packet.pdu_type.is_hello()
-        && !verify_hello_auth(
+    // Hello (Phase 3a) and CSNP/PSNP (Phase 3b) authentication.
+    // Validated before the parsed PDU reaches the adjacency FSM /
+    // LSDB update path so a mismatching peer never mutates state.
+    // LSPs land in Phase 4.
+    if let Some(scope) = auth_scope_for(packet.pdu_type)
+        && !verify_pdu_auth(
             link,
+            scope,
             packet.length_indicator as usize,
             &packet.bytes,
             &packet,
