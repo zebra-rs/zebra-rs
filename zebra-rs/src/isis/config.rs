@@ -55,6 +55,34 @@ impl Isis {
         self.callback_add("/router/isis/net", config_net);
         self.callback_add("/router/isis/is-type", config_is_type);
         self.callback_add("/router/isis/hostname", config_hostname);
+        // Authentication storage (Phase 2). The runtime sign/verify
+        // paths read these in Phase 3 (Hello/SNP) and Phase 4 (LSP).
+        self.callback_add("/router/isis/area-password", config_area_password);
+        self.callback_add(
+            "/router/isis/area-password/password",
+            config_area_password_password,
+        );
+        self.callback_add(
+            "/router/isis/area-password/auth-type",
+            config_area_password_auth_type,
+        );
+        self.callback_add(
+            "/router/isis/area-password/send-only",
+            config_area_password_send_only,
+        );
+        self.callback_add("/router/isis/domain-password", config_domain_password);
+        self.callback_add(
+            "/router/isis/domain-password/password",
+            config_domain_password_password,
+        );
+        self.callback_add(
+            "/router/isis/domain-password/auth-type",
+            config_domain_password_auth_type,
+        );
+        self.callback_add(
+            "/router/isis/domain-password/send-only",
+            config_domain_password_send_only,
+        );
         self.callback_add("/router/isis/timers/hold-time", config_hold_time);
         self.callback_add(
             "/router/isis/timers/lsp-refresh-interval",
@@ -238,6 +266,24 @@ impl Isis {
             "/router/isis/interface/bfd/profile",
             link::config_bfd_profile,
         );
+        // Per-interface hello-authentication (Phase 2 storage). The
+        // Hello/CSNP/PSNP sign+verify runtime lands in Phase 3.
+        self.callback_add(
+            "/router/isis/interface/hello-authentication",
+            link::config_hello_auth,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello-authentication/password",
+            link::config_hello_auth_password,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello-authentication/auth-type",
+            link::config_hello_auth_type,
+        );
+        self.callback_add(
+            "/router/isis/interface/hello-authentication/send-only",
+            link::config_hello_auth_send_only,
+        );
         self.callback_add(
             "/router/isis/interface/ipv4/prefix-sid/index",
             link::config_ipv4_prefix_sid_index,
@@ -361,6 +407,16 @@ pub struct IsisConfig {
     /// Storage-only today — the LSP emitter and RIB-source plumbing
     /// will read from it in a follow-up.
     pub redistribute: BTreeMap<(IsisRedistAfi, IsisRedistSource), IsisRedistribute>,
+
+    /// Authentication for L1 self-originated LSPs and L1 SNPs
+    /// (ISO 10589 §9.5 / RFC 5304 / RFC 5310). Active iff
+    /// `password.is_some()`. Storage-only in Phase 2; Phase 4 will
+    /// drive the LSP signer from this and Phase 3 the SNP path.
+    pub area_password: IsisAuthConfig,
+
+    /// Authentication for L2 self-originated LSPs and L2 SNPs.
+    /// Same shape and lifecycle as `area_password`.
+    pub domain_password: IsisAuthConfig,
 }
 
 /// AFI key for the redistribute map. Mirrors the
@@ -411,6 +467,38 @@ pub struct IsisRedistribute {
     pub metric_type: Option<IsisRedistMetricType>,
     /// Populated only when source == Ospf. Empty set means "no filter".
     pub ospf_match: BTreeSet<IsisRedistOspfMatch>,
+}
+
+/// IS-IS Authentication algorithm selector. Maps to the TLV-10
+/// Authentication Type byte at sign/verify time:
+///   Text → 1   (ISO 10589 §9.5 cleartext)
+///   Md5  → 54  (RFC 5304 HMAC-MD5)
+/// RFC 5310 generic-crypto (auth-type 3, HMAC-SHA family) is a
+/// Phase 4b follow-on and intentionally absent from the enum so it
+/// can't be committed before the runtime supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EnumString, Display)]
+pub enum IsisAuthType {
+    #[default]
+    #[strum(serialize = "text")]
+    Text,
+    #[strum(serialize = "md5")]
+    Md5,
+}
+
+/// Shared shape for all three IS-IS auth scopes: instance-level
+/// area-password (L1 LSPs+SNPs), domain-password (L2 LSPs+SNPs), and
+/// per-interface hello-authentication (IIH/CSNP/PSNP). A scope is
+/// active iff `password.is_some()` — the YANG layer makes `password`
+/// mandatory inside the (presence) container, so an active scope
+/// always has a key.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct IsisAuthConfig {
+    pub password: Option<String>,
+    pub auth_type: IsisAuthType,
+    /// RFC 5304 §1 rollover hatch: sign on send, accept-any on
+    /// receive. Used to drain peers from no-auth → auth without
+    /// breaking adjacencies mid-rollout.
+    pub send_only: bool,
 }
 
 impl IsisConfig {
@@ -565,6 +653,74 @@ fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     }
 
     Some(())
+}
+
+/// Reset an IsisAuthConfig to its YANG-default state. Used by the
+/// presence-container delete callbacks when the whole auth scope is
+/// removed, so we don't leave stale auth-type / send-only behind a
+/// vanished password.
+pub fn auth_reset(cfg: &mut IsisAuthConfig) {
+    cfg.password = None;
+    cfg.auth_type = IsisAuthType::default();
+    cfg.send_only = false;
+}
+
+pub fn auth_set_password(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
+    let pw = args.string()?;
+    cfg.password = op.is_set().then_some(pw);
+    Some(())
+}
+
+pub fn auth_set_type(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        cfg.auth_type = IsisAuthType::from_str(&args.string()?).ok()?;
+    } else {
+        cfg.auth_type = IsisAuthType::default();
+    }
+    Some(())
+}
+
+pub fn auth_set_send_only(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
+    cfg.send_only = op.is_set() && args.boolean()?;
+    Some(())
+}
+
+fn config_area_password(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    if !op.is_set() {
+        auth_reset(&mut isis.config.area_password);
+    }
+    Some(())
+}
+
+fn config_area_password_password(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_password(&mut isis.config.area_password, &mut args, op)
+}
+
+fn config_area_password_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_type(&mut isis.config.area_password, &mut args, op)
+}
+
+fn config_area_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_send_only(&mut isis.config.area_password, &mut args, op)
+}
+
+fn config_domain_password(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    if !op.is_set() {
+        auth_reset(&mut isis.config.domain_password);
+    }
+    Some(())
+}
+
+fn config_domain_password_password(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_password(&mut isis.config.domain_password, &mut args, op)
+}
+
+fn config_domain_password_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_type(&mut isis.config.domain_password, &mut args, op)
+}
+
+fn config_domain_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_send_only(&mut isis.config.domain_password, &mut args, op)
 }
 
 fn config_hold_time(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1260,4 +1416,36 @@ fn config_distribute_rib(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
     }
 
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_type_parses_yang_enum_names() {
+        // The two enum values the YANG schema admits — the FromStr
+        // impl gates what the auth-type leaf callback will accept.
+        assert_eq!(IsisAuthType::from_str("text"), Ok(IsisAuthType::Text));
+        assert_eq!(IsisAuthType::from_str("md5"), Ok(IsisAuthType::Md5));
+        assert!(IsisAuthType::from_str("hmac-sha-256").is_err());
+    }
+
+    #[test]
+    fn auth_reset_returns_defaults() {
+        // Phase 3/4 short-circuit on `password.is_none()`. The
+        // presence-container delete path goes through auth_reset, so
+        // a stale auth-type or send-only must not survive a password
+        // removal — verified here so the contract is locked.
+        let mut cfg = IsisAuthConfig {
+            password: Some("secret".into()),
+            auth_type: IsisAuthType::Md5,
+            send_only: true,
+        };
+        auth_reset(&mut cfg);
+        assert_eq!(cfg, IsisAuthConfig::default());
+        assert!(cfg.password.is_none());
+        assert_eq!(cfg.auth_type, IsisAuthType::Text);
+        assert!(!cfg.send_only);
+    }
 }
