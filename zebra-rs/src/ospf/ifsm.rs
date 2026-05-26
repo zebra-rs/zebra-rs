@@ -202,7 +202,17 @@ pub fn ospf_ifsm_interface_down<V: OspfVersion>(oi: &mut OspfLink<V>) -> Option<
     oi.ident.d_router = Ipv4Addr::UNSPECIFIED;
     oi.ident.bd_router = Ipv4Addr::UNSPECIFIED;
 
-    // Reset multicast memberships.
+    // Symmetric multicast cleanup: drop kernel memberships before
+    // clearing the bookkeeping flags so the two stay consistent
+    // across a Down→Up flap. Earlier this only cleared the
+    // bitfield, which left the kernel still subscribed and made
+    // the next `interface_up` join return EADDRINUSE.
+    if oi.multicast_memberships.all_drouters() {
+        V::leave_alldrouters(&oi.sock, oi.index);
+    }
+    if oi.multicast_memberships.all_routers() {
+        V::leave_if(&oi.sock, oi.index);
+    }
     oi.multicast_memberships = 0.into();
 
     None

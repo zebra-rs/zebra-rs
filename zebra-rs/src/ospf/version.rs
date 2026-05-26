@@ -245,6 +245,12 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// IFSM moves an interface out of `Down`.
     fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
 
+    /// Leave the AllSPFRouters group. Mirror of `join_if`, called
+    /// from `ospf_ifsm_interface_down` so kernel membership and
+    /// `multicast_memberships` bookkeeping stay in sync across
+    /// interface flaps.
+    fn leave_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
+
     /// Join the version's AllDRouters multicast group. Called by
     /// DR-election state changes when this router becomes DR or BDR.
     fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32);
@@ -387,6 +393,9 @@ impl OspfVersion for Ospfv2 {
     fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_join_if(sock, ifindex);
     }
+    fn leave_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_leave_if(sock, ifindex);
+    }
     fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_join_alldrouters(sock, ifindex);
     }
@@ -502,6 +511,9 @@ impl OspfVersion for Ospfv3 {
     }
     fn join_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_join_if_v6(sock, ifindex);
+    }
+    fn leave_if(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
+        crate::ospf::socket::ospf_leave_if_v6(sock, ifindex);
     }
     fn join_alldrouters(sock: &tokio::io::unix::AsyncFd<socket2::Socket>, ifindex: u32) {
         crate::ospf::socket::ospf_join_alldrouters_v6(sock, ifindex);
