@@ -49,6 +49,13 @@ fn is_eaddrinuse(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(libc::EADDRINUSE)
 }
 
+/// Counterpart for the leave path: the kernel returns
+/// EADDRNOTAVAIL when we're not actually a member. Demote to
+/// debug — it just means the bookkeeping and kernel agree.
+fn is_not_member(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EADDRNOTAVAIL)
+}
+
 pub fn ospf_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv2::ALL_SPF_ROUTERS;
     if let Err(e) = socket
@@ -59,6 +66,25 @@ pub fn ospf_join_if(socket: &AsyncFd<Socket>, ifindex: u32) {
             tracing::debug!("ospf: AllSPFRouters already joined on ifindex {ifindex}");
         } else {
             tracing::warn!("ospf: join AllSPFRouters on ifindex {ifindex} failed: {e}");
+        }
+    }
+}
+
+/// Leave AllSPFRouters on the given interface. Mirror of
+/// `ospf_join_if`, called from `ospf_ifsm_interface_down` so the
+/// bookkeeping in `multicast_memberships` stays in sync with
+/// kernel state. EADDRNOTAVAIL means we weren't a member — log
+/// at debug and move on.
+pub fn ospf_leave_if(socket: &AsyncFd<Socket>, ifindex: u32) {
+    let maddr = Ospfv2::ALL_SPF_ROUTERS;
+    if let Err(e) = socket
+        .get_ref()
+        .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex))
+    {
+        if is_not_member(&e) {
+            tracing::debug!("ospf: AllSPFRouters not joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: leave AllSPFRouters on ifindex {ifindex} failed: {e}");
         }
     }
 }
@@ -83,7 +109,11 @@ pub fn ospf_leave_alldrouters(socket: &AsyncFd<Socket>, ifindex: u32) {
         .get_ref()
         .leave_multicast_v4_n(&maddr, &InterfaceIndexOrAddress::Index(ifindex))
     {
-        tracing::warn!("ospf: leave AllDRouters on ifindex {ifindex} failed: {e}");
+        if is_not_member(&e) {
+            tracing::debug!("ospf: AllDRouters not joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: leave AllDRouters on ifindex {ifindex} failed: {e}");
+        }
     }
 }
 
@@ -161,12 +191,30 @@ pub fn ospf_join_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     }
 }
 
+/// Leave `ff02::5` on the given interface. v3 mirror of
+/// `ospf_leave_if`, called from `ospf_ifsm_interface_down`.
+#[allow(dead_code)]
+pub fn ospf_leave_if_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
+    let maddr = Ospfv3::ALL_SPF_ROUTERS;
+    if let Err(e) = socket.get_ref().leave_multicast_v6(&maddr, ifindex) {
+        if is_not_member(&e) {
+            tracing::debug!("ospf: AllSPFRouters (v6) not joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: leave AllSPFRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
+    }
+}
+
 /// Leave `ff02::6` on the given interface. Called when the v3 FSM
 /// drops out of the DR / BDR role.
 #[allow(dead_code)]
 pub fn ospf_leave_alldrouters_v6(socket: &AsyncFd<Socket>, ifindex: u32) {
     let maddr = Ospfv3::ALL_DROUTERS;
     if let Err(e) = socket.get_ref().leave_multicast_v6(&maddr, ifindex) {
-        tracing::warn!("ospf: leave AllDRouters (v6) on ifindex {ifindex} failed: {e}");
+        if is_not_member(&e) {
+            tracing::debug!("ospf: AllDRouters (v6) not joined on ifindex {ifindex}");
+        } else {
+            tracing::warn!("ospf: leave AllDRouters (v6) on ifindex {ifindex} failed: {e}");
+        }
     }
 }
