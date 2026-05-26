@@ -124,12 +124,18 @@ module configure {
         }
       }
       container graceful-restart {
-        // Phase 5c — stage / unstage a planned restart. `begin`
-        // floods Grace LSAs and sets `gr_capable`; `abort` walks
-        // it back. The actual exit (`commit`) lands in Phase 5d
-        // alongside checkpoint write + ProtoQuiesce.
+        // Stage / commit / unstage a planned restart.
+        // `begin` (Phase 5c) floods Grace LSAs and sets
+        // `gr_capable`; `commit` (Phase 5d) writes the
+        // checkpoint and exits the process for the
+        // supervisor to restart; `abort` walks the staging
+        // back without exiting.
         leaf begin {
           ext:help "Stage a graceful restart: flood Grace LSAs and set gr_capable";
+          type empty;
+        }
+        leaf commit {
+          ext:help "Write the GR checkpoint, drain, and exit the process";
           type empty;
         }
         leaf abort {

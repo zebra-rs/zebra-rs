@@ -499,11 +499,13 @@ impl Ospf<Ospfv2> {
                 self.checkpoint_clear_debug();
             } else if path == "/clear/ospf/graceful-restart/begin" {
                 // Default to 120s / SoftwareRestart; YANG-side
-                // optional args (period, reason) land in Phase 5d
-                // when the commit flow ships.
+                // optional args (period, reason) land alongside
+                // restart-aware boot in Phase 5e.
                 let _ = self.gr_restart_begin(120, GraceRestartReason::SoftwareRestart);
             } else if path == "/clear/ospf/graceful-restart/abort" {
                 self.gr_restart_abort();
+            } else if path == "/clear/ospf/graceful-restart/commit" {
+                let _ = self.gr_restart_commit();
             }
             return;
         }
@@ -2202,6 +2204,80 @@ impl Ospf<Ospfv2> {
         tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
     }
 
+    /// Commit a staged graceful restart (RFC 3623 §2):
+    ///
+    ///   1. Build a Phase 5b checkpoint and atomically write it
+    ///      to `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
+    ///      `ZEBRA_OSPF_CHECKPOINT_DIR` override).
+    ///   2. Arm a drain timer for `gr_config.drain_time_ms` so
+    ///      the Grace LSAs already flooded by Phase 5c reach the
+    ///      wire.
+    ///   3. When the timer fires, `Message::GrRestartExit` runs
+    ///      `std::process::exit(0)` — the supervisor (systemd /
+    ///      operator script) is responsible for restarting us.
+    ///
+    /// Kernel routes installed by the OSPFv2 instance survive the
+    /// exit because the protocol task dies without calling
+    /// `despawn_ospf` (which fires `ProtoCleanup` / withdraws
+    /// every route). Phase 5e's restart-aware boot path reclaims
+    /// ownership of those routes via checkpoint replay.
+    ///
+    /// Returns `false` if no restart is staged or the checkpoint
+    /// write fails; the caller (vty handler) reports failure.
+    pub fn gr_restart_commit(&mut self) -> bool {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+        use super::task::{Timer, TimerType};
+
+        let Some(state) = self.restarting.as_ref() else {
+            tracing::warn!("[GR Restart] commit rejected — no restart staged");
+            return false;
+        };
+        let grace_period = state.grace_period;
+        let reason: u8 = state.reason.into();
+
+        let cp = OspfCheckpoint::from_instance(self, grace_period, reason);
+        let path = default_path("ospf");
+        if let Err(e) = cp.write_to_path(&path) {
+            tracing::warn!(
+                "[GR Restart] commit aborted: checkpoint write to {} failed: {}",
+                path.display(),
+                e
+            );
+            return false;
+        }
+        tracing::info!(
+            "[GR Restart] committed: checkpoint at {} ({} areas, {} links), drain={}ms",
+            path.display(),
+            cp.areas.len(),
+            cp.links.len(),
+            self.gr_config.drain_time_ms
+        );
+
+        // Arm the drain timer. When it fires the handler in
+        // `process_msg` calls `process::exit(0)`. We don't try to
+        // tear down the runtime gracefully — that's the
+        // supervisor's job after we exit.
+        let tx = self.tx.clone();
+        let drain_ms = self.gr_config.drain_time_ms as u64;
+        let drain_timer = Timer::new(
+            std::time::Duration::from_millis(drain_ms),
+            TimerType::Once,
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::GrRestartExit);
+                }
+            },
+        );
+        // Park the timer on the existing RestartingState so it
+        // doesn't get dropped before firing. Replaces the
+        // auto-abort timer — committed restarts don't auto-abort.
+        if let Some(state) = self.restarting.as_mut() {
+            state.abort_timer = Some(drain_timer);
+        }
+        true
+    }
+
     /// Build a Grace LSA for `ifindex` and emit it on that
     /// interface only (link-local scope).
     ///
@@ -2941,6 +3017,10 @@ impl Ospf<Ospfv2> {
                     "[GR Restart] auto-abort timer fired (no commit within grace period)"
                 );
                 self.gr_restart_abort();
+            }
+            Message::GrRestartExit => {
+                tracing::info!("[GR Restart] drain complete; exiting process");
+                std::process::exit(0);
             }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
@@ -5753,6 +5833,12 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// operator-driven commit (Phase 5d). Drives the same path
     /// as `clear ip ospf graceful-restart abort`.
     GrRestartAbort,
+    /// Graceful-restart commit drain complete — fired by the
+    /// short timer `gr_restart_commit` arms after writing the
+    /// checkpoint, so the Grace LSAs have time to reach the wire
+    /// before the process exits. Handler calls
+    /// `std::process::exit(0)`; the supervisor restarts us.
+    GrRestartExit,
     /// RFC 3101 NSSA Type-7→Type-5 translator resync request for
     /// `area_id`. Fired when a Type-7 LSA arrived in this NSSA, or
     /// when config (area-type / translator-role / ABR status)
