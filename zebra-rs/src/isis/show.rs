@@ -43,6 +43,7 @@ impl Isis {
         self.show_add("/show/isis/dis/history", link::show_dis_history);
         self.show_add("/show/isis/neighbor", neigh::show);
         self.show_add("/show/isis/neighbor/detail", neigh::show_detail);
+        self.show_add("/show/isis/graceful-restart", show_isis_graceful_restart);
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
         self.show_add("/show/isis/hostname", hostname::show);
@@ -128,6 +129,107 @@ fn show_isis_summary(
         writeln!(buf, "{row}")?;
     }
 
+    Ok(buf)
+}
+
+// RFC 5306 Graceful Restart observation, per adjacency. Phase 2 is
+// read-only: the IIH receive path records whatever the peer puts in
+// its Restart TLV onto `Neighbor.gr`, and this view surfaces it so an
+// operator can confirm GR signaling reaches us before Phase 3 turns on
+// helper-mode behavior.
+#[derive(Serialize)]
+struct GrAdjJson {
+    level: u8,
+    system_id: String,
+    interface: String,
+    state: String,
+    restart_count: u32,
+    rr: bool,
+    ra: bool,
+    sa: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remaining_time: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restarting_neighbor: Option<String>,
+}
+
+fn gr_adj_rows(isis: &Isis) -> Vec<GrAdjJson> {
+    let mut rows: Vec<GrAdjJson> = Vec::new();
+    for link in isis.links.values() {
+        for (level, nbrs) in [
+            (Level::L1, &link.state.nbrs.l1),
+            (Level::L2, &link.state.nbrs.l2),
+        ] {
+            for nbr in nbrs.values() {
+                let (rr, ra, sa, remaining, restarting) = match &nbr.gr.last_seen {
+                    Some(t) => (
+                        t.rr(),
+                        t.ra(),
+                        t.sa(),
+                        t.remaining_time,
+                        t.restarting_neighbor.map(|id| id.to_string()),
+                    ),
+                    None => (false, false, false, None, None),
+                };
+                rows.push(GrAdjJson {
+                    level: level.digit(),
+                    system_id: nbr.sys_id.to_string(),
+                    interface: isis.ifname(nbr.ifindex),
+                    state: nbr.state.to_string(),
+                    restart_count: nbr.gr.restart_count,
+                    rr,
+                    ra,
+                    sa,
+                    remaining_time: remaining,
+                    restarting_neighbor: restarting,
+                });
+            }
+        }
+    }
+    rows
+}
+
+fn show_isis_graceful_restart(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let rows = gr_adj_rows(isis);
+
+    if json {
+        return Ok(serde_json::to_string(&rows).unwrap());
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "Graceful Restart (RFC 5306) — observation only")?;
+    writeln!(buf)?;
+    writeln!(
+        buf,
+        "L  System Id           Interface    State          Restarts RR RA SA Remaining"
+    )?;
+    if rows.is_empty() {
+        writeln!(buf, "(no neighbors)")?;
+        return Ok(buf);
+    }
+    for r in &rows {
+        let rem = r
+            .remaining_time
+            .map(|t| format!("{}s", t))
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            buf,
+            "{:<3}{:<20}{:<13}{:<15}{:<9}{:<3}{:<3}{:<3}{}",
+            r.level,
+            r.system_id,
+            r.interface,
+            r.state,
+            r.restart_count,
+            r.rr as u8,
+            r.ra as u8,
+            r.sa as u8,
+            rem,
+        )?;
+    }
     Ok(buf)
 }
 

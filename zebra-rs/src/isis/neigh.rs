@@ -14,6 +14,7 @@ use crate::rib;
 use crate::rib::MacAddr;
 use crate::rib::{Locator, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
 
+use super::adj::AdjGrState;
 use super::link::NetworkType;
 use super::nfsm::NfsmState;
 use super::{Isis, Level, Message, NeighborAddr4, NeighborAddr6};
@@ -51,6 +52,12 @@ pub struct Neighbor {
     /// allocator pass picks a function.
     pub endx_sid: Option<(u16, Ipv6Addr)>,
 
+    /// Graceful Restart observation (RFC 5306). Phase 2 records the
+    /// peer's most recent Restart TLV passively; helper-side behavior
+    /// (refresh hold once, send RA, suppress teardown) arrives in
+    /// Phase 3.
+    pub gr: AdjGrState,
+
     // For logging purpose.
     pub created: bool,
 }
@@ -82,6 +89,7 @@ impl Neighbor {
             hold_time: 0,
             network_type,
             endx_sid: None,
+            gr: AdjGrState::default(),
             created: true,
         }
     }
