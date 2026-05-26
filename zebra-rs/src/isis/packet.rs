@@ -8,6 +8,7 @@ use isis_packet::*;
 
 use crate::bfd::session::SessionKey;
 use crate::fmt::DisplayOpt;
+use crate::isis::adj::HelperEdge;
 use crate::isis::auth;
 use crate::isis::config::IsisAuthType;
 use crate::isis::link::DisStatus;
@@ -88,9 +89,11 @@ pub fn nbr_hello_interpret(
     mac: Option<MacAddr>,
     sys_id: IsisSysId,
     local_pool: &mut Option<LabelPool>,
-) -> (bool, bool) {
+) -> (bool, bool, HelperEdge) {
     let mut has_mac = false;
     let mut has_my_sys_id = false;
+    let mut restart_tlv_seen = false;
+    let mut helper_edge = HelperEdge::None;
 
     let mut addr4 = BTreeMap::new();
     let mut addr6 = BTreeMap::new();
@@ -119,15 +122,26 @@ pub fn nbr_hello_interpret(
             IsisTlv::ProtoSupported(tlv) => {
                 nbr.proto = Some(tlv.clone());
             }
-            // RFC 5306 Restart TLV (type 211). Phase 2 records the
-            // observation onto the neighbor for `show isis
-            // graceful-restart` and Phase 3 helper-mode dispatch; no
-            // adjacency-state side effect yet.
+            // RFC 5306 Restart TLV (type 211). The edge tells the
+            // caller whether to refresh the hold timer (skip on Stay
+            // per RFC 5306 §3.2(a)) and whether to trigger an
+            // immediate IIH to deliver the RA (on Enter).
             IsisTlv::Restart(tlv) => {
-                nbr.gr.observe(tlv);
+                restart_tlv_seen = true;
+                helper_edge = nbr.gr.observe(tlv);
             }
             _ => {}
         }
+    }
+
+    // Defensive: peer that previously sent RR=1 but suddenly stops
+    // including the Restart TLV altogether. RFC 5306 doesn't mandate
+    // RR=0 in the closing IIH (typical FRR/Cisco senders do, but the
+    // wire spec only requires the absence of RR), so treat "TLV
+    // disappeared while helper was active" as Exit.
+    if !restart_tlv_seen && nbr.gr.helper_active {
+        nbr.gr.helper_active = false;
+        helper_edge = HelperEdge::Exit;
     }
 
     // Release removed address's label.
@@ -173,7 +187,7 @@ pub fn nbr_hello_interpret(
 
     nbr.addr6l = laddr6;
 
-    (has_mac, has_my_sys_id)
+    (has_mac, has_my_sys_id, helper_edge)
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -249,15 +263,32 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     nbr.lan_id = pdu.lan_id;
     nbr.mac = mac;
 
-    // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
-    // holdingTimer) for each “Ln Intermediate System” adjacency.
-    nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-    // Interpret TLVs.
+    // Interpret TLVs first so the Restart TLV — if present — has fed
+    // helper-mode state before we decide whether to refresh the hold
+    // timer. RFC 5306 §3.2(a) suppresses the refresh on retransmitted
+    // RR (HelperEdge::Stay) to prevent a repetitive restart from
+    // pinning the adjacency indefinitely.
     let mac = link.state.mac;
     let sys_id = link.up_config.net.sys_id();
     let ifname = link.state.name.clone();
-    let (has_mac, _) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+    let (has_mac, _, helper_edge) =
+        nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+
+    // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
+    // holdingTimer) for each “Ln Intermediate System” adjacency. The
+    // Stay case is the only one that skips the refresh.
+    if helper_edge != HelperEdge::Stay {
+        nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+    }
+
+    // First RR=1 on this adjacency — schedule an immediate IIH so the
+    // RA reaches the restarter without waiting up to one hello_interval
+    // (RFC 5306 §3.2(b)). Periodic IIHs already carry RA for every
+    // helper_active neighbor, so a missed wakeup here just delays
+    // delivery by one interval rather than breaking GR.
+    if helper_edge == HelperEdge::Enter {
+        nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+    }
     nbr.ensure_endx_sid(
         &ifname,
         link.sr_locator,
@@ -418,14 +449,26 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         nbr.circuit_type = pdu.circuit_type;
         nbr.hold_time = pdu.hold_time;
 
-        // Reset hold timer
-        nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
-
-        // Interpret TLVs.
+        // Interpret TLVs first so helper-mode state is fed before the
+        // hold-timer refresh decision below. Matches the LAN ordering
+        // — see hello_recv for the RFC 5306 §3.2(a) rationale.
         let mac = link.state.mac;
         let sys_id = link.up_config.net.sys_id();
         let ifname = link.state.name.clone();
-        let (_, has_my_sys_id) = nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+        let (_, has_my_sys_id, helper_edge) =
+            nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
+
+        // Refresh hold timer except on Stay (RFC 5306 §3.2(a)).
+        if helper_edge != HelperEdge::Stay {
+            nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
+        }
+
+        // First RR=1 — fire an immediate IIH so the RA reaches the
+        // restarter inside RFC 5306 §3.2(b)'s "immediately" window
+        // rather than waiting up to one hello_interval.
+        if helper_edge == HelperEdge::Enter {
+            nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
+        }
         nbr.ensure_endx_sid(
             &ifname,
             link.sr_locator,

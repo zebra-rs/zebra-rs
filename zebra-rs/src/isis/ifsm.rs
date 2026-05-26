@@ -39,6 +39,37 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
     IsisTlvProtoSupported { nlpids }
 }
 
+/// RFC 5306 §3.2(b) — for every neighbor on this link/level currently
+/// observed in helper mode, produce a Restart TLV with RA=1, Remaining
+/// Time set to the actual seconds until the hold timer for that
+/// neighbor expires, and (LAN only) Restarting Neighbor System ID set
+/// to the restarter's System ID. `include_restarting_neighbor` is
+/// false for P2P, where the field is unused.
+fn helper_ra_tlvs(link: &LinkTop, level: Level, include_restarting_neighbor: bool) -> Vec<IsisTlv> {
+    let mut out = Vec::new();
+    for nbr in link.state.nbrs.get(&level).values() {
+        if !nbr.gr.helper_active {
+            continue;
+        }
+        let remaining: u16 = nbr
+            .hold_timer
+            .as_ref()
+            .map(|t| t.rem_sec().min(u16::MAX as u64) as u16)
+            .unwrap_or(0);
+        let restarting_neighbor = if include_restarting_neighbor {
+            Some(nbr.sys_id)
+        } else {
+            None
+        };
+        out.push(IsisTlv::Restart(IsisTlvRestart {
+            flags: ISIS_RESTART_FLAG_RA,
+            remaining_time: Some(remaining),
+            restarting_neighbor,
+        }));
+    }
+    out
+}
+
 pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     let source_id = link.up_config.net.sys_id();
     let lan_id = link
@@ -105,6 +136,12 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
         }
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
+
+    // RFC 5306 §3.2(b) RA reply for each helper-active neighbor at
+    // this level. Empty when no peer is mid-restart, so non-GR
+    // deployments pay nothing.
+    hello.tlvs.extend(helper_ra_tlvs(link, level, true));
+
     // Auth TLV lives at the end of the real TLVs, *before* padding.
     // For HMAC-MD5 it's a zero-filled placeholder that `hello_send`
     // patches in after the HMAC is computed; for cleartext we attach
@@ -190,6 +227,11 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         }
     };
     hello.tlvs.push(tlv.into());
+
+    // RFC 5306 §3.2(b) RA reply on P2P. Restarting Neighbor System ID
+    // is unused on P2P circuits, so omit it. At most one TLV emitted
+    // since P2P has a single neighbor; empty otherwise.
+    hello.tlvs.extend(helper_ra_tlvs(link, level, false));
 
     let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
     auth::append_auth_tlv(&mut hello.tlvs, resolved.as_ref());
