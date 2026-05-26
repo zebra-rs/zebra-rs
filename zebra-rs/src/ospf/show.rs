@@ -182,6 +182,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/graph", show_ospf_graph);
         self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
         self.show_add("/show/ip/ospf/graceful-restart", show_ospf_graceful_restart);
+        self.show_add("/show/ip/ospf/checkpoint", show_ospf_checkpoint);
     }
 }
 
@@ -1779,6 +1780,74 @@ fn show_ospf_graceful_restart(
     }
     if !any {
         writeln!(buf, "  (no active helpers)")?;
+    }
+    Ok(buf)
+}
+
+/// `show ip ospf checkpoint` — debug entry for the
+/// graceful-restart storage layer (Phase 5b). Reads the
+/// on-disk checkpoint at the default path and pretty-prints
+/// a summary so operators / tests can verify the write side
+/// without unpacking CBOR manually.
+fn show_ospf_checkpoint(
+    _ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use super::checkpoint::{OspfCheckpoint, default_path};
+
+    let path = default_path("ospf");
+    let mut buf = String::new();
+    writeln!(buf, "Checkpoint path: {}", path.display())?;
+    let cp = match OspfCheckpoint::read_from_path(&path) {
+        Ok(cp) => cp,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(buf, "  (no checkpoint on disk)")?;
+            return Ok(buf);
+        }
+        Err(e) => {
+            writeln!(buf, "  read error: {}", e)?;
+            return Ok(buf);
+        }
+    };
+    writeln!(buf, "  Format version: {}", cp.format_version)?;
+    writeln!(
+        buf,
+        "  Written at: {:?} (grace period {}s, reason {})",
+        cp.written_at, cp.grace_period_secs, cp.restart_reason
+    )?;
+    writeln!(buf, "  Router-ID: {}", cp.router_id)?;
+    writeln!(buf, "  Areas: {}", cp.areas.len())?;
+    for area in &cp.areas {
+        writeln!(
+            buf,
+            "    {} (type: {:?}, {} LSAs)",
+            area.area_id,
+            area.area_type_kind,
+            area.lsas.len()
+        )?;
+    }
+    writeln!(buf, "  Links: {}", cp.links.len())?;
+    for link in &cp.links {
+        writeln!(
+            buf,
+            "    ifindex {} ({}) area {} — {} neighbor(s)",
+            link.ifindex,
+            link.ifname,
+            link.area_id,
+            link.neighbors.len()
+        )?;
+        for nbr in &link.neighbors {
+            writeln!(
+                buf,
+                "      {} via {} (was_full: {})",
+                nbr.router_id, nbr.interface_addr, nbr.was_full
+            )?;
+        }
+    }
+    writeln!(buf, "  LAN Adj-SIDs: {}", cp.lan_adj_sids.len())?;
+    for ((ifindex, addr), label) in &cp.lan_adj_sids {
+        writeln!(buf, "    if{} {} -> label {}", ifindex, addr, label)?;
     }
     Ok(buf)
 }

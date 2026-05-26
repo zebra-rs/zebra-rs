@@ -487,6 +487,10 @@ impl Ospf<Ospfv2> {
         if msg.op == ConfigOp::Clear {
             if path == "/clear/ospf/spf" {
                 self.clear_spf();
+            } else if path == "/clear/ospf/checkpoint/write" {
+                self.checkpoint_write_debug();
+            } else if path == "/clear/ospf/checkpoint/clear" {
+                self.checkpoint_clear_debug();
             }
             return;
         }
@@ -505,6 +509,39 @@ impl Ospf<Ospfv2> {
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
         for id in area_ids {
             let _ = self.tx.send(Message::SpfCalc(id));
+        }
+    }
+
+    /// Debug entry — capture the current instance state and
+    /// atomically write a checkpoint to disk. Used to exercise
+    /// the storage layer (Phase 5b) before the real GR-commit
+    /// path lands in Phase 5d. Grace period + reason are
+    /// placeholders (60s / SoftwareRestart) since this path
+    /// isn't an actual restart.
+    fn checkpoint_write_debug(&mut self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+
+        let cp = OspfCheckpoint::from_instance(self, 60, 1);
+        let path = default_path("ospf");
+        match cp.write_to_path(&path) {
+            Ok(()) => tracing::info!(
+                "[Checkpoint] wrote {} areas, {} links to {}",
+                cp.areas.len(),
+                cp.links.len(),
+                path.display()
+            ),
+            Err(e) => tracing::warn!("[Checkpoint] write to {} failed: {}", path.display(), e),
+        }
+    }
+
+    /// Debug entry — delete the on-disk checkpoint. Idempotent.
+    fn checkpoint_clear_debug(&mut self) {
+        use super::checkpoint::{OspfCheckpoint, default_path};
+
+        let path = default_path("ospf");
+        match OspfCheckpoint::delete(&path) {
+            Ok(()) => tracing::info!("[Checkpoint] cleared {}", path.display()),
+            Err(e) => tracing::warn!("[Checkpoint] clear {} failed: {}", path.display(), e),
         }
     }
 

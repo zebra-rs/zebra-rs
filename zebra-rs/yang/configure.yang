@@ -110,6 +110,19 @@ module configure {
       leaf spf {
         type empty;
       }
+      container checkpoint {
+        // Debug entry for the graceful-restart checkpoint storage
+        // layer (Phase 5b). Becomes operator-facing once the
+        // restart-commit flow lands in Phase 5d.
+        leaf write {
+          ext:help "Write the current instance state to /var/lib/zebra-rs/checkpoint/ospf.cbor";
+          type empty;
+        }
+        leaf clear {
+          ext:help "Delete the on-disk OSPF graceful-restart checkpoint";
+          type empty;
+        }
+      }
     }
     container ospfv3 {
       // Force-recalculate the OSPFv3 SPF for every attached area.
