@@ -1323,7 +1323,11 @@ fn ospfv3_ls_upd_proc(
         let mut area_lsa_installed = false;
         match scope {
             Ospfv3LsaScope::Area => {
-                oi.lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+                // Go through `insert_received_v3` so RFC 8666 §3 SR
+                // capability TLVs on E-Router-LSAs (SRGB / SRLB)
+                // update `label_map[adv_router]` before the LSA hits
+                // the LSDB. Mirrors v2's `insert_received` shape.
+                oi.lsdb.insert_received_v3(cloned, oi.tx, Some(area_id));
                 area_lsa_installed = true;
             }
             Ospfv3LsaScope::As => {

@@ -539,3 +539,76 @@ impl Lsdb<Ospfv2> {
         }
     }
 }
+
+impl Lsdb<super::version::Ospfv3> {
+    /// v3 sibling of `Lsdb<Ospfv2>::insert_received`. Calls
+    /// [`update_lsa_v3`] for SR-info ingest, then hands off to the
+    /// generic install path. Used by the v3 flooding code in
+    /// `packet_v3.rs` instead of bare `install_lsa`.
+    pub fn insert_received_v3(
+        &mut self,
+        ospf_lsa: Ospfv3Lsa,
+        tx: &UnboundedSender<Message<super::version::Ospfv3>>,
+        area_id: Option<Ipv4Addr>,
+    ) {
+        self.update_lsa_v3(&ospf_lsa);
+        self.install_lsa(ospf_lsa, tx, area_id);
+    }
+
+    /// Scan an inbound v3 LSA for RFC 8666 §3 SR capability TLVs
+    /// (SID/Label Range = SRGB, SR Local Block = SRLB) and update
+    /// `label_map[adv_router]` accordingly. MaxAge LSAs evict the
+    /// entry. Mirrors the v2 path's `update_lsa` for OpaqueAreaRouterInfo.
+    ///
+    /// Any E-Router-LSA can carry these top-level TLVs per RFC 8362
+    /// §3.2 nesting; we don't gate on the LS-ID convention zebra-rs
+    /// uses for its own SR-info LSA (`SR_INFO_LSID = 0`) because
+    /// foreign implementations may place the TLVs on a different
+    /// LS-ID — only the presence of the TLVs matters.
+    pub fn update_lsa_v3(&mut self, lsa: &Ospfv3Lsa) {
+        if lsa.h.ls_type != OSPFV3_E_ROUTER_LSA_TYPE {
+            return;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.body else {
+            return;
+        };
+
+        let mut global = None;
+        let mut local = None;
+        for tlv in &body.tlvs {
+            match tlv {
+                Ospfv3ExtTlv::SidLabelRange(r) => {
+                    if let SidLabelTlv::Label(start) = r.sid_label {
+                        global = Some(LabelBlock::new(start, r.range));
+                    }
+                }
+                Ospfv3ExtTlv::SrLocalBlock(lb) => {
+                    if let SidLabelTlv::Label(start) = lb.sid_label {
+                        local = Some(LabelBlock::new(start, lb.range));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Only react when this LSA actually carried SR capability
+        // TLVs. The same advertising router emits multiple
+        // E-Router-LSAs (one per link, plus one SR-info), and the
+        // per-link ones must not evict the SR-info-derived
+        // `label_map` entry.
+        if global.is_none() && local.is_none() {
+            return;
+        }
+
+        if lsa.h.ls_age == OSPF_MAX_AGE {
+            self.label_map.remove(&lsa.h.advertising_router);
+            return;
+        }
+
+        if let Some(global) = global {
+            let label_config = LabelConfig { global, local };
+            self.label_map
+                .insert(lsa.h.advertising_router, label_config);
+        }
+    }
+}
