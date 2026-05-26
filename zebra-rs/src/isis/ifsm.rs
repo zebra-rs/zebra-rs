@@ -263,15 +263,21 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     *link.state.hello.get_mut(&level) = Some(hello);
 
     let ifindex = link.ifindex;
-    // HMAC-MD5 needs the bytes patched after serialization, so we
-    // pre-emit and send as `Packet::Bytes`. Cleartext + no-auth use
-    // the existing serialize-on-send path with `Packet::Packet`.
+    // Any HMAC algorithm (md5 or RFC 5310 SHA family) needs the
+    // bytes patched after serialization, so we pre-emit and send
+    // as `Packet::Bytes`. Cleartext + no-auth use the existing
+    // serialize-on-send path with `Packet::Packet`.
     let auth_cfg = &link.config.hello_auth;
     let outgoing = match (auth_cfg.password.as_deref(), auth_cfg.auth_type) {
-        (Some(key), IsisAuthType::Md5) => {
+        (Some(key), algo) if matches!(algo, IsisAuthType::Md5) || algo.is_generic_crypto() => {
             let mut buf = BytesMut::new();
             packet.emit(&mut buf);
-            auth::sign_md5_inplace(&mut buf, packet.length_indicator as usize, key.as_bytes());
+            auth::sign_inplace(
+                &mut buf,
+                packet.length_indicator as usize,
+                algo,
+                key.as_bytes(),
+            );
             link.state.auth_tx_signed += 1;
             Packet::Bytes(buf)
         }

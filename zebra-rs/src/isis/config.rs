@@ -67,6 +67,10 @@ impl Isis {
             config_area_password_auth_type,
         );
         self.callback_add(
+            "/router/isis/area-password/key-id",
+            config_area_password_key_id,
+        );
+        self.callback_add(
             "/router/isis/area-password/send-only",
             config_area_password_send_only,
         );
@@ -78,6 +82,10 @@ impl Isis {
         self.callback_add(
             "/router/isis/domain-password/auth-type",
             config_domain_password_auth_type,
+        );
+        self.callback_add(
+            "/router/isis/domain-password/key-id",
+            config_domain_password_key_id,
         );
         self.callback_add(
             "/router/isis/domain-password/send-only",
@@ -281,6 +289,10 @@ impl Isis {
             link::config_hello_auth_type,
         );
         self.callback_add(
+            "/router/isis/interface/hello-authentication/key-id",
+            link::config_hello_auth_key_id,
+        );
+        self.callback_add(
             "/router/isis/interface/hello-authentication/send-only",
             link::config_hello_auth_send_only,
         );
@@ -470,12 +482,9 @@ pub struct IsisRedistribute {
 }
 
 /// IS-IS Authentication algorithm selector. Maps to the TLV-10
-/// Authentication Type byte at sign/verify time:
-///   Text → 1   (ISO 10589 §9.5 cleartext)
-///   Md5  → 54  (RFC 5304 HMAC-MD5)
-/// RFC 5310 generic-crypto (auth-type 3, HMAC-SHA family) is a
-/// Phase 4b follow-on and intentionally absent from the enum so it
-/// can't be committed before the runtime supports it.
+/// Authentication Type byte (1 / 54 / 3) plus, for generic-crypto,
+/// a digest-length selector that drives both the wire format
+/// (RFC 5310 §3.1) and the HMAC primitive (sha1 / sha2 family).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, EnumString, Display)]
 pub enum IsisAuthType {
     #[default]
@@ -483,6 +492,43 @@ pub enum IsisAuthType {
     Text,
     #[strum(serialize = "md5")]
     Md5,
+    #[strum(serialize = "hmac-sha-1")]
+    HmacSha1,
+    #[strum(serialize = "hmac-sha-256")]
+    HmacSha256,
+    #[strum(serialize = "hmac-sha-384")]
+    HmacSha384,
+    #[strum(serialize = "hmac-sha-512")]
+    HmacSha512,
+}
+
+impl IsisAuthType {
+    /// True for the RFC 5310 algorithms — the wire shape carries a
+    /// 2-byte Key ID prefix between Auth-Type and the digest, and
+    /// the HMAC is computed over the PDU with the digest area
+    /// filled with Apad (not zero, as RFC 5304 specifies for MD5).
+    pub fn is_generic_crypto(self) -> bool {
+        matches!(
+            self,
+            Self::HmacSha1 | Self::HmacSha256 | Self::HmacSha384 | Self::HmacSha512
+        )
+    }
+
+    /// Length of the HMAC digest in octets, per RFC 5310 §3.1.
+    /// `Text` and `Md5` aren't generic-crypto, so they return 0 /
+    /// the MD5 digest size respectively — callers normally check
+    /// `is_generic_crypto` first.
+    pub fn digest_len(self) -> usize {
+        use isis_packet::*;
+        match self {
+            Self::Text => 0,
+            Self::Md5 => ISIS_AUTH_HMAC_MD5_LEN,
+            Self::HmacSha1 => ISIS_AUTH_HMAC_SHA1_LEN,
+            Self::HmacSha256 => ISIS_AUTH_HMAC_SHA256_LEN,
+            Self::HmacSha384 => ISIS_AUTH_HMAC_SHA384_LEN,
+            Self::HmacSha512 => ISIS_AUTH_HMAC_SHA512_LEN,
+        }
+    }
 }
 
 /// Shared shape for all three IS-IS auth scopes: instance-level
@@ -495,10 +541,31 @@ pub enum IsisAuthType {
 pub struct IsisAuthConfig {
     pub password: Option<String>,
     pub auth_type: IsisAuthType,
+    /// RFC 5310 §3.1 Key Identifier — emitted on the wire as the
+    /// 2-byte prefix on the TLV-10 value for the generic-crypto
+    /// auth-types. Ignored for `Text` and `Md5`. YANG default is 1.
+    pub key_id: u16,
     /// RFC 5304 §1 rollover hatch: sign on send, accept-any on
     /// receive. Used to drain peers from no-auth → auth without
     /// breaking adjacencies mid-rollout.
     pub send_only: bool,
+}
+
+impl IsisAuthConfig {
+    /// YANG default for the `key-id` leaf when no value has been set
+    /// (or when the auth-type doesn't carry one on the wire).
+    pub const DEFAULT_KEY_ID: u16 = 1;
+
+    /// Effective Key ID — `key_id` if non-zero (operator-set), else
+    /// the YANG default. Callers should use this when stamping or
+    /// matching the wire value.
+    pub fn effective_key_id(&self) -> u16 {
+        if self.key_id == 0 {
+            Self::DEFAULT_KEY_ID
+        } else {
+            self.key_id
+        }
+    }
 }
 
 impl IsisConfig {
@@ -657,12 +724,18 @@ fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
 
 /// Reset an IsisAuthConfig to its YANG-default state. Used by the
 /// presence-container delete callbacks when the whole auth scope is
-/// removed, so we don't leave stale auth-type / send-only behind a
-/// vanished password.
+/// removed, so we don't leave stale auth-type / key-id / send-only
+/// behind a vanished password.
 pub fn auth_reset(cfg: &mut IsisAuthConfig) {
     cfg.password = None;
     cfg.auth_type = IsisAuthType::default();
+    cfg.key_id = 0;
     cfg.send_only = false;
+}
+
+pub fn auth_set_key_id(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
+    cfg.key_id = if op.is_set() { args.u16()? } else { 0 };
+    Some(())
 }
 
 pub fn auth_set_password(cfg: &mut IsisAuthConfig, args: &mut Args, op: ConfigOp) -> Option<()> {
@@ -700,6 +773,10 @@ fn config_area_password_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp)
     auth_set_type(&mut isis.config.area_password, &mut args, op)
 }
 
+fn config_area_password_key_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_key_id(&mut isis.config.area_password, &mut args, op)
+}
+
 fn config_area_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     auth_set_send_only(&mut isis.config.area_password, &mut args, op)
 }
@@ -717,6 +794,10 @@ fn config_domain_password_password(isis: &mut Isis, mut args: Args, op: ConfigOp
 
 fn config_domain_password_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     auth_set_type(&mut isis.config.domain_password, &mut args, op)
+}
+
+fn config_domain_password_key_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    auth_set_key_id(&mut isis.config.domain_password, &mut args, op)
 }
 
 fn config_domain_password_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1414,11 +1495,24 @@ mod tests {
 
     #[test]
     fn auth_type_parses_yang_enum_names() {
-        // The two enum values the YANG schema admits — the FromStr
-        // impl gates what the auth-type leaf callback will accept.
+        // The enum values the YANG schema admits — the FromStr impl
+        // gates what the auth-type leaf callback will accept. Includes
+        // the RFC 5310 SHA family added in Phase 4b.
         assert_eq!(IsisAuthType::from_str("text"), Ok(IsisAuthType::Text));
         assert_eq!(IsisAuthType::from_str("md5"), Ok(IsisAuthType::Md5));
-        assert!(IsisAuthType::from_str("hmac-sha-256").is_err());
+        assert_eq!(
+            IsisAuthType::from_str("hmac-sha-1"),
+            Ok(IsisAuthType::HmacSha1)
+        );
+        assert_eq!(
+            IsisAuthType::from_str("hmac-sha-256"),
+            Ok(IsisAuthType::HmacSha256)
+        );
+        assert_eq!(
+            IsisAuthType::from_str("hmac-sha-512"),
+            Ok(IsisAuthType::HmacSha512)
+        );
+        assert!(IsisAuthType::from_str("hmac-sha-1024").is_err());
     }
 
     #[test]
@@ -1430,12 +1524,38 @@ mod tests {
         let mut cfg = IsisAuthConfig {
             password: Some("secret".into()),
             auth_type: IsisAuthType::Md5,
+            key_id: 7,
             send_only: true,
         };
         auth_reset(&mut cfg);
         assert_eq!(cfg, IsisAuthConfig::default());
         assert!(cfg.password.is_none());
         assert_eq!(cfg.auth_type, IsisAuthType::Text);
+        assert_eq!(cfg.key_id, 0);
         assert!(!cfg.send_only);
+    }
+
+    #[test]
+    fn effective_key_id_falls_back_to_default() {
+        let mut cfg = IsisAuthConfig::default();
+        assert_eq!(cfg.effective_key_id(), 1);
+        cfg.key_id = 42;
+        assert_eq!(cfg.effective_key_id(), 42);
+    }
+
+    #[test]
+    fn auth_type_includes_generic_crypto() {
+        assert!(IsisAuthType::HmacSha1.is_generic_crypto());
+        assert!(IsisAuthType::HmacSha256.is_generic_crypto());
+        assert!(IsisAuthType::HmacSha512.is_generic_crypto());
+        assert!(!IsisAuthType::Text.is_generic_crypto());
+        assert!(!IsisAuthType::Md5.is_generic_crypto());
+
+        // Digest lengths per RFC 5310 §3.1.
+        assert_eq!(IsisAuthType::HmacSha1.digest_len(), 20);
+        assert_eq!(IsisAuthType::HmacSha256.digest_len(), 32);
+        assert_eq!(IsisAuthType::HmacSha384.digest_len(), 48);
+        assert_eq!(IsisAuthType::HmacSha512.digest_len(), 64);
+        assert_eq!(IsisAuthType::Md5.digest_len(), 16);
     }
 }

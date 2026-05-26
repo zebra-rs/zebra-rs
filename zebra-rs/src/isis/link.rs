@@ -20,7 +20,8 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{Link, LinkFlagsExt, MacAddr};
 
 use super::config::{
-    self, IsisAuthConfig, IsisConfig, MtId, auth_set_password, auth_set_send_only, auth_set_type,
+    self, IsisAuthConfig, IsisConfig, MtId, auth_set_key_id, auth_set_password, auth_set_send_only,
+    auth_set_type,
 };
 use super::graph::{ReachMap, ReachMapV6};
 use super::ifsm::{self, has_level};
@@ -810,6 +811,12 @@ pub fn config_hello_auth_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> 
     let name = args.string()?;
     let link = isis.links.get_mut_by_name(&name)?;
     auth_set_type(&mut link.config.hello_auth, &mut args, op)
+}
+
+pub fn config_hello_auth_key_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    auth_set_key_id(&mut link.config.hello_auth, &mut args, op)
 }
 
 pub fn config_hello_auth_send_only(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {

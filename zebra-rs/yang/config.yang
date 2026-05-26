@@ -1002,10 +1002,23 @@ module config {
           }
           leaf auth-type {
             type enumeration {
-              enum text;  // ISO 10589 §9.5, TLV-10 auth-type 1
-              enum md5;   // RFC 5304, TLV-10 auth-type 54
+              enum text;         // ISO 10589 §9.5, TLV-10 auth-type 1
+              enum md5;          // RFC 5304, TLV-10 auth-type 54
+              enum hmac-sha-1;   // RFC 5310 generic crypto, 20-byte digest
+              enum hmac-sha-256; // RFC 5310, 32-byte digest
+              enum hmac-sha-384; // RFC 5310, 48-byte digest
+              enum hmac-sha-512; // RFC 5310, 64-byte digest
             }
             default text;
+          }
+          leaf key-id {
+            type uint16;
+            default 1;
+            description
+              "Key Identifier (RFC 5310 §3.1). Only meaningful for
+               the hmac-sha-* auth-types; embedded as the 2-byte
+               prefix on the TLV-10 value. Ignored for text and md5.
+               Receivers MUST present the same Key ID to verify.";
           }
           leaf send-only {
             type boolean;
@@ -1030,8 +1043,16 @@ module config {
             type enumeration {
               enum text;
               enum md5;
+              enum hmac-sha-1;
+              enum hmac-sha-256;
+              enum hmac-sha-384;
+              enum hmac-sha-512;
             }
             default text;
+          }
+          leaf key-id {
+            type uint16;
+            default 1;
           }
           leaf send-only {
             type boolean;
@@ -1288,8 +1309,16 @@ module config {
               type enumeration {
                 enum text;
                 enum md5;
+                enum hmac-sha-1;
+                enum hmac-sha-256;
+                enum hmac-sha-384;
+                enum hmac-sha-512;
               }
               default text;
+            }
+            leaf key-id {
+              type uint16;
+              default 1;
             }
             leaf send-only {
               type boolean;

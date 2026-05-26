@@ -881,10 +881,15 @@ fn sign_snp_outgoing(link: &mut LinkTop, level: Level, packet: IsisPacket) -> Pa
     link.state.auth_tx_signed += 1;
     match mode {
         IsisAuthType::Text => Packet::Packet(packet),
-        IsisAuthType::Md5 => {
+        algo => {
             let mut buf = bytes::BytesMut::new();
             packet.emit(&mut buf);
-            auth::sign_md5_inplace(&mut buf, packet.length_indicator as usize, key.as_bytes());
+            auth::sign_inplace(
+                &mut buf,
+                packet.length_indicator as usize,
+                algo,
+                key.as_bytes(),
+            );
             Packet::Bytes(buf)
         }
     }
@@ -924,6 +929,78 @@ fn pdu_auth_tlv(pdu: &IsisPdu) -> Option<&IsisTlvAuth> {
         IsisTlv::Auth(a) => Some(a),
         _ => None,
     })
+}
+
+/// Recompute the HMAC over `pdu_bytes` for one of the supported
+/// HMAC algorithms (RFC 5304 md5 or RFC 5310 sha-1/256/384/512) and
+/// compare it against the digest carried in the parsed Auth TLV.
+///
+/// Encapsulates the layout differences:
+///   * md5      — TLV value = [auth_type=54, digest(16)]; placeholder zero.
+///   * generic  — TLV value = [auth_type=3, key_id(2), digest(L)]; placeholder Apad.
+///
+/// Plus the LSP-only zeroing of Remaining Lifetime + Checksum
+/// (RFC 5304 §3 / RFC 5310 inherit) so the digest stays valid as
+/// the LSP ages and gets re-fletcher'd in flight.
+fn verify_hmac(
+    algo: IsisAuthType,
+    key: &str,
+    auth_tlv: &IsisTlvAuth,
+    pdu_bytes: &[u8],
+    tlvs_start: usize,
+    packet: &IsisPacket,
+) -> bool {
+    // Validate the wire auth-type byte matches what we expect.
+    let want_auth_type = if algo.is_generic_crypto() {
+        ISIS_AUTH_TYPE_GENERIC
+    } else {
+        ISIS_AUTH_TYPE_HMAC_MD5
+    };
+    if auth_tlv.auth_type != want_auth_type {
+        return false;
+    }
+    let header = 1 + if algo.is_generic_crypto() {
+        ISIS_AUTH_GENERIC_KEY_ID_LEN
+    } else {
+        0
+    };
+    let digest_len = algo.digest_len();
+    if auth_tlv.value.len() != header - 1 + digest_len {
+        return false;
+    }
+    let Some(value_range) = auth::locate_auth_tlv(pdu_bytes, tlvs_start) else {
+        return false;
+    };
+    let digest_start = value_range.start + header;
+    let digest_end = value_range.end;
+    if digest_end <= digest_start || digest_end - digest_start != digest_len {
+        return false;
+    }
+
+    let mut scratch = pdu_bytes.to_vec();
+    if algo.is_generic_crypto() {
+        // RFC 5310 §3.3: replace the digest area with Apad during
+        // the HMAC, not zero. The Key ID and Auth-Type stay as-is.
+        let apad = auth::apad(digest_len);
+        scratch[digest_start..digest_end].copy_from_slice(&apad);
+    } else {
+        for b in &mut scratch[digest_start..digest_end] {
+            *b = 0;
+        }
+    }
+    if packet.pdu_type.is_lsp() && scratch.len() >= auth::LSP_CHECKSUM_RANGE.end {
+        for b in &mut scratch[auth::LSP_REMAINING_LIFETIME_RANGE] {
+            *b = 0;
+        }
+        for b in &mut scratch[auth::LSP_CHECKSUM_RANGE] {
+            *b = 0;
+        }
+    }
+    let computed = auth::hmac_for_algo(algo, key.as_bytes(), &scratch);
+    // Compare against the digest portion of the parsed TLV (skip
+    // the Key ID prefix for generic-crypto).
+    let stored = &auth_tlv.value[header - 1..];
+    auth::digest_eq(&computed, stored)
 }
 
 /// Validate the Authentication TLV on an inbound Hello or SNP PDU
@@ -982,43 +1059,7 @@ fn verify_pdu_auth(
             auth_tlv.auth_type == ISIS_AUTH_TYPE_CLEARTEXT
                 && auth::digest_eq(&auth_tlv.value, key.as_bytes())
         }
-        IsisAuthType::Md5 => {
-            if auth_tlv.auth_type != ISIS_AUTH_TYPE_HMAC_MD5
-                || auth_tlv.value.len() != ISIS_AUTH_HMAC_MD5_LEN
-            {
-                false
-            } else if let Some(value_range) = auth::locate_auth_tlv(pdu_bytes, tlvs_start) {
-                let digest_start = value_range.start + 1;
-                let digest_end = value_range.end;
-                if digest_end - digest_start != ISIS_AUTH_HMAC_MD5_LEN {
-                    false
-                } else {
-                    let mut scratch = pdu_bytes.to_vec();
-                    for b in &mut scratch[digest_start..digest_end] {
-                        *b = 0;
-                    }
-                    // RFC 5304 §3: LSP HMAC is computed with
-                    // Remaining Lifetime and Checksum also zeroed so
-                    // the digest stays valid as the LSP ages and is
-                    // re-flooded with a stamped Fletcher.
-                    if packet.pdu_type.is_lsp() && scratch.len() >= auth::LSP_CHECKSUM_RANGE.end {
-                        for b in &mut scratch[auth::LSP_REMAINING_LIFETIME_RANGE] {
-                            *b = 0;
-                        }
-                        for b in &mut scratch[auth::LSP_CHECKSUM_RANGE] {
-                            *b = 0;
-                        }
-                    }
-                    let computed = auth::hmac_md5(key.as_bytes(), &scratch);
-                    auth::digest_eq(&computed, &auth_tlv.value)
-                }
-            } else {
-                // Parsed TLV exists but raw bytes don't carry it —
-                // network.rs preserves the buffer for every PDU, so
-                // this is a hard inconsistency: reject.
-                false
-            }
-        }
+        algo => verify_hmac(algo, &key, auth_tlv, pdu_bytes, tlvs_start, packet),
     };
 
     if accepted {
