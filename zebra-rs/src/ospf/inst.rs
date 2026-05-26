@@ -4508,6 +4508,54 @@ impl Ospf<Ospfv3> {
         }
     }
 
+    /// Originate (or flush) the per-area E-Router-LSA carrying the
+    /// RFC 8666 §3 SR capability TLVs (SR-Algorithm, SID/Label Range
+    /// = SRGB, SR Local Block = SRLB) for the given area.
+    ///
+    /// Uses `SR_INFO_LSID` (= 0) as the per-LSA key so it never
+    /// collides with per-link E-Router-LSAs (which key by ifindex
+    /// ≥ 1 on Linux). Originates when `segment_routing == Mpls`;
+    /// flushes (MaxAge) otherwise. Re-origination on subsequent
+    /// calls bumps the sequence number based on the LSDB's prior
+    /// copy, matching the convention `e_router_v3_lsa_originate`
+    /// already uses for per-link LSAs.
+    pub fn e_router_v3_sr_info_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
+
+        use super::srmpls::{SR_INFO_LSID, SegmentRoutingMode};
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
+
+        if self.segment_routing == SegmentRoutingMode::Mpls && self.areas.get(area_id).is_some() {
+            let mut lsa = super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id);
+
+            if let Some(area) = self.areas.get(area_id)
+                && let Some(prev_seq) = area
+                    .lsdb
+                    .lookup_by_raw_key(key)
+                    .map(|prev| prev.h.ls_seq_number)
+            {
+                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            }
+            self.flood_self_originated_lsa(area_id, &flood_lsa);
+        } else {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+        }
+    }
+
     /// Detect Full state transitions on `nbr` and re-originate the
     /// LSAs that depend on the full-adjacency set. Mirrors v2's
     /// `process_neighbor_state_change`:
