@@ -14,7 +14,7 @@ pub enum SegmentRoutingMode {
 
 /// Default SRGB (Segment Routing Global Block).
 pub(super) const SRGB_START: u32 = 16000;
-const SRGB_RANGE: u32 = 2001;
+pub(super) const SRGB_RANGE: u32 = 2001;
 
 /// Default SRLB (Segment Routing Local Block).
 pub(super) const SRLB_START: u32 = 15000;
