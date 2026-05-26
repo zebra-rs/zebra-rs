@@ -119,6 +119,19 @@ pub struct RestartingState {
     /// grace period, we walk the restart back and resume
     /// normal operation. Phase 5d hooks the commit side.
     pub abort_timer: Option<Timer>,
+    /// Number of neighbors that were Full at the moment we
+    /// staged or wrote the checkpoint. Phase 5e-ii drives
+    /// exit-restart success when `current_full_count` matches
+    /// this on the post-reboot side. Zero when the staging
+    /// happened mid-flight without a checkpoint (Phase 5c
+    /// `begin` without `commit`).
+    pub expected_full_count: usize,
+    /// Number of neighbors that have transitioned back to Full
+    /// since restart began. Incremented in
+    /// `process_neighbor_state_change`; checked against
+    /// `expected_full_count` to decide when to declare
+    /// exit-restart success.
+    pub current_full_count: usize,
 }
 
 /// Per-neighbor protocol state.
