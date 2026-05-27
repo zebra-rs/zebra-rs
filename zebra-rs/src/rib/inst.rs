@@ -95,13 +95,9 @@ pub enum Message {
     LocatorDel {
         name: String,
     },
-    // The Sr* variants below carry #[allow(dead_code)] because they're
-    // produced only by per-protocol subscribers (IS-IS lands in PR 2).
-    // Removed once PR 2 wires the IS-IS sender side.
     /// One-time per-protocol registration of the SR return channel. The
     /// channel carries `RibSrRx` updates for any block / locator the
     /// protocol later watches.
-    #[allow(dead_code)]
     SrSubscribe {
         proto: String,
         tx: UnboundedSender<RibSrRx>,
@@ -109,22 +105,18 @@ pub enum Message {
     /// Register interest in a named block. Triggers an immediate push of
     /// the current `Rib::blocks.get(name)` value (Some or None) and any
     /// subsequent updates.
-    #[allow(dead_code)]
     SrBlockWatch {
         proto: String,
         name: String,
     },
-    #[allow(dead_code)]
     SrBlockUnwatch {
         proto: String,
         name: String,
     },
-    #[allow(dead_code)]
     SrLocatorWatch {
         proto: String,
         name: String,
     },
-    #[allow(dead_code)]
     SrLocatorUnwatch {
         proto: String,
         name: String,
@@ -132,11 +124,9 @@ pub enum Message {
     /// Register an allocated SRv6 SID. Owners (IS-IS, OSPF, BGP) push
     /// one of these whenever they carve a function out of a locator;
     /// the RIB stores it for `show segment-routing srv6 sid`.
-    #[allow(dead_code)]
     SidAdd {
         sid: Sid,
     },
-    #[allow(dead_code)]
     SidDel {
         addr: std::net::Ipv6Addr,
     },
@@ -236,7 +226,6 @@ pub enum Message {
     /// future deltas for `(proto, afi, rtype)` with subtype filtered
     /// by `subtypes`. Empty `subtypes` is wildcard. Triggers a bulk
     /// replay followed by a `BulkPhase::Eor` marker.
-    #[allow(dead_code)]
     RedistAdd {
         proto: String,
         afi: super::RedistAfi,
@@ -250,7 +239,6 @@ pub enum Message {
     ///
     /// No-op on identical sets. Issuing RedistUpdate for a row that
     /// was never RedistAdd'd is treated as RedistAdd.
-    #[allow(dead_code)]
     RedistUpdate {
         proto: String,
         afi: super::RedistAfi,
@@ -261,7 +249,6 @@ pub enum Message {
     /// every currently-matched prefix (in chunks ending in
     /// `BulkPhase::Eor`) so the consumer can withdraw without having
     /// to remember its own per-filter state.
-    #[allow(dead_code)]
     RedistDel {
         proto: String,
         afi: super::RedistAfi,
@@ -1574,7 +1561,7 @@ impl Rib {
                 );
             }
             Message::BlockAdd { name, config } => {
-                let block = config.to_block(&name);
+                let block = config.to_block();
                 self.blocks.insert(name.clone(), block);
                 self.notify_block_watchers(&name);
             }
@@ -1590,7 +1577,7 @@ impl Rib {
                 self.notify_block_watchers(&name);
             }
             Message::LocatorAdd { name, config } => {
-                let locator = config.to_locator(&name);
+                let locator = config.to_locator();
                 self.locators.insert(name.clone(), locator);
                 self.notify_locator_watchers(&name);
             }

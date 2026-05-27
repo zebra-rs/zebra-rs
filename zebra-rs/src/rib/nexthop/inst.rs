@@ -136,11 +136,6 @@ pub struct NexthopList {
 #[serde(untagged)]
 pub enum NexthopMember {
     Uni(NexthopUni),
-    // Multi is constructed in tests but no production code path
-    // emits one yet — TI-LFA's "ECMP primary + per-primary repair"
-    // install will be the first real user. Drop the allow when that
-    // lands.
-    #[allow(dead_code)]
     Multi(NexthopMulti),
 }
 
@@ -196,96 +191,6 @@ pub struct NexthopMulti {
 
     // Nexthop Group id for multipath.
     pub gid: usize,
-}
-
-/// Either a single nexthop or an ECMP group at one metric. Used as
-/// the primary / backup slot inside `NexthopProtect` — restricted
-/// (vs `Nexthop`) so nested protection and protect-inside-list are
-/// disallowed by construction.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(untagged)]
-#[allow(dead_code)] // wired into `Nexthop` in a follow-up commit
-pub enum NexthopPath {
-    Uni(NexthopUni),
-    Multi(NexthopMulti),
-}
-
-#[allow(dead_code)]
-impl NexthopPath {
-    pub fn metric(&self) -> u32 {
-        match self {
-            Self::Uni(u) => u.metric,
-            Self::Multi(m) => m.metric,
-        }
-    }
-
-    pub fn iter_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
-        match self {
-            Self::Uni(u) => std::slice::from_ref(u).iter(),
-            Self::Multi(m) => m.nexthops.iter(),
-        }
-    }
-
-    pub fn iter_unis_mut(&mut self) -> impl Iterator<Item = &mut NexthopUni> + '_ {
-        match self {
-            Self::Uni(u) => std::slice::from_mut(u).iter_mut(),
-            Self::Multi(m) => m.nexthops.iter_mut(),
-        }
-    }
-}
-
-/// IP/MPLS Fast-ReRoute (FRR): forward over `primary`; on primary
-/// link-down the kernel fails over to `backup` without waiting for
-/// the next SPF.
-///
-/// This is the slot TI-LFA repair install will fill, replacing the
-/// `BACKUP_METRIC_OFFSET` trick that currently piggybacks repair
-/// paths onto a `NexthopList` and distinguishes them by metric
-/// ordering. A dedicated variant makes the FRR relationship explicit
-/// (no metric sentinel), bounds the shape to exactly two slots, and
-/// gives the FIB installer a clear hook to emit a kernel FRR nexthop
-/// group (`NEXTHOP_GRP_TYPE_FRR`) rather than two separate
-/// metric-distinguished routes.
-///
-/// Both slots are `NexthopPath`, so ECMP-primary + ECMP-backup is
-/// expressible. The per-primary "each primary link has its own
-/// backup that excludes that link" association is *not* preserved at
-/// this level — primaries fail over collectively to backups, which
-/// matches what `build_rib_nexthop` already produces today.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[allow(dead_code)] // wired into `Nexthop` in a follow-up commit
-pub struct NexthopProtect {
-    pub primary: NexthopPath,
-    pub backup: NexthopPath,
-}
-
-#[allow(dead_code)]
-impl NexthopProtect {
-    /// Primary's metric — the route's metric for sorting / display.
-    /// Backup carries no meaningful metric in the FRR model.
-    pub fn metric(&self) -> u32 {
-        self.primary.metric()
-    }
-
-    /// Walk every `NexthopUni` leaf — primaries first, then backups.
-    pub fn iter_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
-        self.primary.iter_unis().chain(self.backup.iter_unis())
-    }
-
-    /// Mutable counterpart of `iter_unis`. Destructured up-front so
-    /// the borrow checker sees two disjoint mutable borrows.
-    pub fn iter_unis_mut(&mut self) -> impl Iterator<Item = &mut NexthopUni> + '_ {
-        let Self { primary, backup } = self;
-        primary.iter_unis_mut().chain(backup.iter_unis_mut())
-    }
-
-    pub fn iter_primary_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
-        self.primary.iter_unis()
-    }
-
-    pub fn iter_backup_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
-        self.backup.iter_unis()
-    }
 }
 
 #[cfg(test)]
@@ -363,87 +268,5 @@ mod tests {
         };
         let multi_member = NexthopMember::Multi(multi.clone());
         assert_eq!(multi_member.as_nexthop(), Nexthop::Multi(multi));
-    }
-
-    #[test]
-    fn protect_metric_returns_primary_metric() {
-        // The backup's "metric" is irrelevant in the FRR model;
-        // sort / display use the primary's.
-        let protect = NexthopProtect {
-            primary: NexthopPath::Uni(mk_uni("10.0.0.1", 20)),
-            backup: NexthopPath::Uni(mk_uni("10.0.0.5", 99)),
-        };
-        assert_eq!(protect.metric(), 20);
-    }
-
-    #[test]
-    fn protect_iter_unis_visits_primary_then_backup() {
-        // ECMP-primary + ECMP-backup: order is all primaries, then
-        // all backups — what the netlink FRR group emit needs.
-        let primary_multi = NexthopMulti {
-            metric: 20,
-            nexthops: vec![mk_uni("10.0.0.1", 20), mk_uni("10.0.0.2", 20)],
-            ..Default::default()
-        };
-        let backup_multi = NexthopMulti {
-            metric: 20,
-            nexthops: vec![mk_uni("10.0.0.5", 20), mk_uni("10.0.0.6", 20)],
-            ..Default::default()
-        };
-        let protect = NexthopProtect {
-            primary: NexthopPath::Multi(primary_multi),
-            backup: NexthopPath::Multi(backup_multi),
-        };
-        let addrs: Vec<_> = protect.iter_unis().map(|u| u.addr.to_string()).collect();
-        assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.2", "10.0.0.5", "10.0.0.6"]);
-    }
-
-    #[test]
-    fn protect_primary_and_backup_iters_are_disjoint() {
-        let protect = NexthopProtect {
-            primary: NexthopPath::Uni(mk_uni("10.0.0.1", 20)),
-            backup: NexthopPath::Uni(mk_uni("10.0.0.5", 20)),
-        };
-        let pri: Vec<_> = protect
-            .iter_primary_unis()
-            .map(|u| u.addr.to_string())
-            .collect();
-        let bkp: Vec<_> = protect
-            .iter_backup_unis()
-            .map(|u| u.addr.to_string())
-            .collect();
-        assert_eq!(pri, vec!["10.0.0.1"]);
-        assert_eq!(bkp, vec!["10.0.0.5"]);
-    }
-
-    #[test]
-    fn protect_iter_unis_mut_writes_through_both_slots() {
-        // Resolver path will use this to set ifindex_resolved /
-        // valid on every leaf; both primary and backup must receive
-        // the updates.
-        let mut protect = NexthopProtect {
-            primary: NexthopPath::Uni(mk_uni("10.0.0.1", 20)),
-            backup: NexthopPath::Uni(mk_uni("10.0.0.5", 20)),
-        };
-        for u in protect.iter_unis_mut() {
-            u.valid = true;
-        }
-        assert!(matches!(&protect.primary, NexthopPath::Uni(u) if u.valid));
-        assert!(matches!(&protect.backup, NexthopPath::Uni(u) if u.valid));
-    }
-
-    #[test]
-    fn path_metric_and_iter_match_inner() {
-        let uni_path = NexthopPath::Uni(mk_uni("10.0.0.1", 20));
-        assert_eq!(uni_path.metric(), 20);
-        assert_eq!(uni_path.iter_unis().count(), 1);
-
-        let multi_path = NexthopPath::Multi(NexthopMulti {
-            metric: 30,
-            nexthops: vec![mk_uni("10.0.0.2", 30), mk_uni("10.0.0.3", 30)],
-            ..Default::default()
-        });
-        assert_eq!(multi_path.metric(), 30);
-        assert_eq!(multi_path.iter_unis().count(), 2);
     }
 }

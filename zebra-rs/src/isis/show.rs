@@ -2964,7 +2964,6 @@ mod tests {
     #[test]
     fn locator_row_classic_when_resolved_with_no_behavior() {
         let loc = Locator {
-            name: "LOC_N1".into(),
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
         };
@@ -2978,7 +2977,6 @@ mod tests {
     #[test]
     fn locator_row_usid_when_resolved_with_usid_behavior() {
         let loc = Locator {
-            name: "LOC_N1".into(),
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: Some(LocatorBehavior::Usid),
         };
@@ -3004,7 +3002,6 @@ mod tests {
         // Locator entry exists in the global config but has no prefix
         // leaf yet. Same Down treatment as fully unresolved.
         let loc = Locator {
-            name: "LOC_N1".into(),
             prefix: None,
             behavior: None,
         };

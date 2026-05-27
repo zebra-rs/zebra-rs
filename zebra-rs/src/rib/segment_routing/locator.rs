@@ -32,14 +32,9 @@ impl LocatorBehavior {
 }
 
 /// Applied snapshot of an SRv6 locator, exported to the rest of the system
-/// once a config commit lands.
-///
-/// Fields carry `#[allow(dead_code)]` until the IS-IS-side `srv6/locator`
-/// handler (next PR) reads them by name from `Rib::locators`.
-#[allow(dead_code)]
+/// once a config commit lands. Keyed by name in `Rib::locators`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Locator {
-    pub name: String,
     pub prefix: Option<Ipv6Net>,
     pub behavior: Option<LocatorBehavior>,
 }
@@ -98,9 +93,8 @@ pub struct LocatorConfig {
 }
 
 impl LocatorConfig {
-    pub fn to_locator(&self, name: &str) -> Locator {
+    pub fn to_locator(&self) -> Locator {
         Locator {
-            name: name.to_string(),
             prefix: self.prefix,
             behavior: self.behavior.clone(),
         }
@@ -271,7 +265,6 @@ mod tests {
     #[test]
     fn node_sid_uses_prefix_network_address() {
         let loc = Locator {
-            name: "loc1".into(),
             prefix: Some("2001:db8:a:2::/64".parse().unwrap()),
             behavior: None,
         };
@@ -284,7 +277,6 @@ mod tests {
         // resolve to the canonical first address; protocols rely on
         // this to advertise a stable Node SID.
         let loc = Locator {
-            name: "loc1".into(),
             prefix: Some("2001:db8:a:2::5/64".parse().unwrap()),
             behavior: None,
         };
@@ -294,7 +286,6 @@ mod tests {
     #[test]
     fn node_sid_none_when_prefix_unset() {
         let loc = Locator {
-            name: "loc1".into(),
             prefix: None,
             behavior: None,
         };

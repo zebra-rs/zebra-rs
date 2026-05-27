@@ -62,7 +62,6 @@ pub struct FdbEntry {
     pub vxlan_local: Option<IpAddr>,
 }
 
-#[allow(dead_code)]
 pub struct RibRxChannel {
     pub tx: UnboundedSender<RibRx>,
     pub rx: UnboundedReceiver<RibRx>,
@@ -155,13 +154,11 @@ pub enum RibRx {
     // instead of N walks and N EoRs. Self-route filtering is
     // enforced by RIB before send — a subscriber whose proto maps
     // to `rtype` will never see a RouteAdd of that rtype.
-    #[allow(dead_code)]
     RouteAdd {
         rtype: RibType,
         routes: RouteBatch,
         bulk: BulkPhase,
     },
-    #[allow(dead_code)]
     RouteDel {
         rtype: RibType,
         routes: RouteBatch,
@@ -177,11 +174,9 @@ pub enum RibRx {
     // below. The colour-aware nexthop resolver (next PR) is the first
     // consumer; today the fan-out lands on every subscribed protocol
     // and they ignore it.
-    #[allow(dead_code)]
     FlexAlgoRouteAdd {
         route: FlexAlgoRoute,
     },
-    #[allow(dead_code)]
     FlexAlgoRouteDel {
         algo: u8,
         prefix: Ipv4Net,
