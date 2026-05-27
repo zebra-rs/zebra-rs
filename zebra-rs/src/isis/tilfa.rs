@@ -300,15 +300,23 @@ fn repair_segments_to_mpls_labels(
     segments: &[spf::SrSegment],
 ) -> Option<Vec<rib::Label>> {
     let mut labels = Vec::with_capacity(segments.len());
-    for seg in segments {
-        let label = match seg {
-            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v)?,
+    for (idx, seg) in segments.iter().enumerate() {
+        let resolved = match seg {
+            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v),
             spf::SrSegment::AdjSid(from, to, via) => {
-                adj_sid_label_for_link(top, level, *from, *to, *via)?
+                adj_sid_label_for_link(top, level, *from, *to, *via)
             }
+        };
+        let Some(label) = resolved else {
+            tracing::debug!(
+                "[tilfa] {level:?} repair segment[{idx}] {seg:?} failed to resolve to MPLS label; \
+                 dropping repair stack (partial: {labels:?})"
+            );
+            return None;
         };
         labels.push(rib::Label::Explicit(label));
     }
+    tracing::debug!("[tilfa] {level:?} repair segments resolved: {segments:?} -> {labels:?}");
     Some(labels)
 }
 
