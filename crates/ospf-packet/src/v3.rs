@@ -37,7 +37,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bitfield_struct::bitfield;
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use internet_checksum::Checksum;
 use nom::IResult;
 use nom::bytes::complete::take;
@@ -2454,12 +2454,36 @@ impl Ospfv3LsBody {
 pub struct Ospfv3Lsa {
     pub h: Ospfv3LsaHeader,
     pub body: Ospfv3LsBody,
+    /// Cached on-wire bytes for byte-perfect re-flooding of transit
+    /// LSAs. Mirrors the v2 `OspfLsa.raw` field — see that struct's
+    /// docs for the rationale. Stamped by `Ospfv3LsUpdate::parse_be`
+    /// on receive; `None` for LSAs constructed via
+    /// [`Ospfv3Lsa::from`] (self-originated). The [`Self::emit`]
+    /// path uses this when present so downstream peers see the
+    /// exact bytes the originator emitted, keeping the Fletcher
+    /// checksum valid.
+    ///
+    /// [`Self::update`] clears this — any header mutation invalidates
+    /// the cached bytes.
+    pub raw: Option<Bytes>,
 }
 
 impl Ospfv3Lsa {
+    /// Construct a v3 LSA from its header and body. Sets `raw` to
+    /// `None` so the typed `emit` path runs (self-originated LSAs
+    /// recompute their checksum via `update()` and the bytes on the
+    /// wire match).
+    pub fn from(h: Ospfv3LsaHeader, body: Ospfv3LsBody) -> Self {
+        Self { h, body, raw: None }
+    }
+
     pub fn emit(&self, buf: &mut BytesMut) {
-        self.h.emit(buf);
-        self.body.emit(buf);
+        if let Some(raw) = self.raw.as_ref() {
+            buf.put_slice(raw);
+        } else {
+            self.h.emit(buf);
+            self.body.emit(buf);
+        }
     }
 
     /// Recompute `length` and `ls_checksum` after the caller
@@ -2473,7 +2497,13 @@ impl Ospfv3Lsa {
     /// the LS Age field, with the checksum field included as
     /// zero. Both versions share the same checksum offset, so
     /// the calculator is reused from the v2 codec.
+    ///
+    /// Invalidates any cached `raw` bytes — `update()` only runs
+    /// on the self-originated path, and after this call the
+    /// canonical emit is what we want on the wire.
     pub fn update(&mut self) {
+        // Mutation invalidates any cached raw bytes from receive.
+        self.raw = None;
         // 1) Length = 20-octet header + serialized body length.
         let mut body_buf = BytesMut::new();
         self.body.emit(&mut body_buf);
@@ -2499,7 +2529,7 @@ impl ParseBe<Ospfv3Lsa> for Ospfv3Lsa {
         let body_len = (h.length as usize).saturating_sub(OSPFV3_LSA_HEADER_LEN as usize);
         let (input, body_bytes) = nom::bytes::complete::take(body_len)(input)?;
         let (_, body) = Ospfv3LsBody::parse_be(body_bytes, h.ls_type)?;
-        Ok((input, Ospfv3Lsa { h, body }))
+        Ok((input, Ospfv3Lsa::from(h, body)))
     }
 }
 
@@ -2536,7 +2566,17 @@ impl ParseBe<Ospfv3LsUpdate> for Ospfv3LsUpdate {
         let (mut input, num) = be_u32(input)?;
         let mut lsas = Vec::with_capacity(num as usize);
         for _ in 0..num {
-            let (rest, lsa) = Ospfv3Lsa::parse_be(input)?;
+            // Capture the slice this LSA consumes so transit floods
+            // can re-emit it byte-for-byte — same rationale as the
+            // v2 `parse_lsas_with_raw` path. Without this, codec
+            // gaps for any v3 LSA flavor with unfamiliar TLVs would
+            // produce re-emitted bytes whose Fletcher residue is
+            // wrong against the originator-stored checksum, and
+            // downstream peers would reject the flood.
+            let start = input;
+            let (rest, mut lsa) = Ospfv3Lsa::parse_be(start)?;
+            let consumed = start.len() - rest.len();
+            lsa.raw = Some(Bytes::copy_from_slice(&start[..consumed]));
             lsas.push(lsa);
             input = rest;
         }
@@ -2691,10 +2731,12 @@ mod tests {
                 Ospfv3Lsa {
                     h: router_h.clone(),
                     body: Ospfv3LsBody::Router(router_body),
+                    raw: None,
                 },
                 Ospfv3Lsa {
                     h: net_h.clone(),
                     body: Ospfv3LsBody::Network(net_body),
+                    raw: None,
                 },
             ],
         };
@@ -2760,6 +2802,7 @@ mod tests {
             lsas: vec![Ospfv3Lsa {
                 h,
                 body: Ospfv3LsBody::Unknown(body_bytes.clone()),
+                raw: None,
             }],
         };
         let pkt = Ospfv3Packet::new(
@@ -2927,6 +2970,7 @@ mod tests {
                 length: 0,
             },
             body: Ospfv3LsBody::Router(body),
+            raw: None,
         };
         lsa.update();
 
@@ -2968,6 +3012,7 @@ mod tests {
                 length: 0,
             },
             body: Ospfv3LsBody::Router(body),
+            raw: None,
         };
 
         lsa.update();
@@ -4131,6 +4176,7 @@ mod tests {
         let lsa = Ospfv3Lsa {
             h: h.clone(),
             body: Ospfv3LsBody::Grace(body),
+            raw: None,
         };
 
         let lsu = Ospfv3LsUpdate { lsas: vec![lsa] };

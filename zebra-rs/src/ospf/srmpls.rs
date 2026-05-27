@@ -236,6 +236,7 @@ pub fn e_router_v3_lsa_build(
             length: 0,
         },
         body: Ospfv3LsBody::ERouter(body),
+        raw: None,
     };
     lsa.update();
     lsa
@@ -286,6 +287,7 @@ pub fn e_router_v3_sr_info_lsa_build(router_id: Ipv4Addr) -> Ospfv3Lsa {
             length: 0,
         },
         body: Ospfv3LsBody::ERouter(body),
+        raw: None,
     };
     lsa.update();
     lsa
@@ -398,6 +400,7 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
             length: 0,
         },
         body: Ospfv3LsBody::EIntraAreaPrefix(body),
+        raw: None,
     };
     lsa.update();
     lsa

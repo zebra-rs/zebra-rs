@@ -3792,6 +3792,7 @@ impl Ospf<Ospfv3> {
                 length: 0,
             },
             body: Ospfv3LsBody::IntraAreaPrefix(body),
+            raw: None,
         };
         lsa.update();
         Some(lsa)
@@ -3881,6 +3882,7 @@ impl Ospf<Ospfv3> {
                 length: 0,
             },
             body: Ospfv3LsBody::Link(body),
+            raw: None,
         };
         lsa.update();
         Some(lsa)
@@ -3945,6 +3947,7 @@ impl Ospf<Ospfv3> {
                 length: 0,
             },
             body: Ospfv3LsBody::Network(body),
+            raw: None,
         };
         lsa.update();
         Some(lsa)
@@ -4068,6 +4071,7 @@ impl Ospf<Ospfv3> {
                 length: 0,
             },
             body: Ospfv3LsBody::Router(body),
+            raw: None,
         };
         lsa.update();
         lsa
@@ -4198,6 +4202,7 @@ impl Ospf<Ospfv3> {
         let mut lsa = ospf_packet::Ospfv3Lsa {
             h: header,
             body: Ospfv3LsBody::Nssa(body),
+            raw: None,
         };
 
         // Preserve sequence number on refresh.
@@ -4380,6 +4385,7 @@ impl Ospf<Ospfv3> {
         let mut new_lsa = Ospfv3Lsa {
             h: header,
             body: Ospfv3LsBody::AsExternal(translated_body),
+            raw: None,
         };
 
         // Preserve sequence number on refresh.
@@ -5882,6 +5888,7 @@ impl Ospf<Ospfv3> {
                 length: 0,
             },
             body: Ospfv3LsBody::IntraAreaPrefix(body),
+            raw: None,
         };
         lsa.update();
         Some(lsa)
