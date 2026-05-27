@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub type Graph = BTreeMap<usize, Vertex>;
 
@@ -320,7 +320,7 @@ pub fn path_has_x(path: &[usize], x: &[usize]) -> bool {
     path.iter().any(|p| x.contains(p))
 }
 
-pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> {
+pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf(graph, s, &SpfOpt::full_path());
 
     spf.iter()
@@ -331,7 +331,7 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> 
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
             if has_valid_paths { Some(*vertex) } else { None }
         })
-        .collect::<HashSet<_>>()
+        .collect::<BTreeSet<_>>()
 }
 
 /// Compute the post-convergence paths from `s` to `d` while excluding
@@ -344,7 +344,7 @@ pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize
         .map_or_else(Vec::new, |data| data.paths)
 }
 
-pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> {
+pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf_reverse(graph, d, &SpfOpt::full_path());
 
     spf.iter()
@@ -355,7 +355,7 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> 
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
             if has_valid_paths { Some(*vertex) } else { None }
         })
-        .collect::<HashSet<_>>()
+        .collect::<BTreeSet<_>>()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -368,8 +368,8 @@ pub struct Intersect {
 // Intersect with P and Q.
 pub fn intersect(
     pc_path: &Vec<usize>,
-    p_nodes: &HashSet<usize>,
-    q_nodes: &HashSet<usize>,
+    p_nodes: &BTreeSet<usize>,
+    q_nodes: &BTreeSet<usize>,
 ) -> Vec<Intersect> {
     let mut intersects = Vec::new();
 
@@ -533,6 +533,10 @@ pub struct RepairPath {
 pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);
+
+    println!("s[{s}] d[{d}] x[{x:?}]");
+    println!("PSpace:[{p_vertices:?}]");
+    println!("QSpace:[{q_vertices:?}]");
 
     // Run the modified SPF inline so we have access to D's
     // `first_hop_links` alongside `paths`. Going through
