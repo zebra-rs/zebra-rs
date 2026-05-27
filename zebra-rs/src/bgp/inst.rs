@@ -641,13 +641,13 @@ impl Bgp {
         match msg {
             Message::Event(ident, event) => {
                 match event {
-                    Event::BGPOpen(ref _msg) => {
+                    Event::BGPOpen(_, ref _msg) => {
                         // tracing::info!("Open from: {}", peer);
                     }
                     Event::UpdateMsg(ref _msg) => {
                         // tracing::info!("Update from: {}", peer);
                     }
-                    Event::KeepAliveMsg => {
+                    Event::KeepAliveMsg(_) => {
                         // tracing::info!("Keepalive from: {}", peer);
                     }
                     Event::KeepaliveTimerExpires => {
