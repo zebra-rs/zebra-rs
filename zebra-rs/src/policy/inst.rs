@@ -81,7 +81,6 @@ pub enum PolicyRx {
     },
 }
 
-#[allow(dead_code)]
 pub struct PolicyRxChannel {
     pub tx: UnboundedSender<PolicyRx>,
     pub rx: UnboundedReceiver<PolicyRx>,

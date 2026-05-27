@@ -1379,8 +1379,8 @@ mod tests {
         assert_eq!(entry.action, PolicyAction::Permit);
 
         // Verify prefix-set contains the correct prefix
-        assert_eq!(prefix_set.len(), 1);
-        assert!(prefix_set.contains_prefix(&prefix.into()));
+        assert_eq!(prefix_set.iter().count(), 1);
+        assert!(prefix_set.iter().any(|(p, _)| *p == prefix.into()));
 
         // Note: Default deny behavior is implicit - if no entry matches,
         // the policy should deny by default (this would be implemented
