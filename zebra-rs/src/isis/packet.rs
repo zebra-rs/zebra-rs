@@ -100,7 +100,10 @@ fn helper_elected_for_csnp(link: &LinkTop, level: Level) -> bool {
 /// Fire the §3.2(b) CSNP + SRM kick if elected. Idempotent on the
 /// wire — CSNP+SRM are normally periodic, this just brings them
 /// forward so the restarter's database resync starts immediately
-/// rather than after the next csnp_interval.
+/// rather than after the next csnp_interval. The caller already
+/// gates entry on `gr_helper_enabled`, so the disabled case never
+/// reaches this function; the predicate is checked anyway for the
+/// LAN election.
 fn helper_kick_csnp(link: &mut LinkTop, level: Level) {
     if !helper_elected_for_csnp(link, level) {
         return;
@@ -326,8 +329,14 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // 8.4.2.5.2 The IS shall keep a separate holding time (adjacency
     // holdingTimer) for each “Ln Intermediate System” adjacency. The
-    // Stay case is the only one that skips the refresh.
-    if helper_edge != HelperEdge::Stay {
+    // Stay case is the only one that skips the refresh — and only
+    // when GR helper mode is enabled in config; with helper disabled
+    // we refresh unconditionally so the adjacency behaves exactly
+    // like a non-GR-aware deployment.
+    let gr_enabled = link.up_config.gr_helper_enabled;
+    let helper_entered = gr_enabled && helper_edge == HelperEdge::Enter;
+    let suppress_refresh = gr_enabled && helper_edge == HelperEdge::Stay;
+    if !suppress_refresh {
         nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
     }
 
@@ -340,7 +349,6 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // The CSNP+SRM kick (Phase 3b) is dispatched at the bottom of the
     // function instead of here, because it needs `&mut link` and `nbr`
     // is still borrowing from `link.state.nbrs` at this point.
-    let helper_entered = helper_edge == HelperEdge::Enter;
     if helper_entered {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
@@ -519,8 +527,13 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         let (_, has_my_sys_id, helper_edge) =
             nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
 
-        // Refresh hold timer except on Stay (RFC 5306 §3.2(a)).
-        if helper_edge != HelperEdge::Stay {
+        // Refresh hold timer except on Stay when GR helper is enabled
+        // (RFC 5306 §3.2(a)). With helper disabled in config we always
+        // refresh.
+        let gr_enabled = link.up_config.gr_helper_enabled;
+        let helper_entered = gr_enabled && helper_edge == HelperEdge::Enter;
+        let suppress_refresh = gr_enabled && helper_edge == HelperEdge::Stay;
+        if !suppress_refresh {
             nbr.hold_timer = Some(nfsm_hold_timer(nbr, level));
         }
 
@@ -529,7 +542,6 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // rather than waiting up to one hello_interval. CSNP+SRM kick
         // (Phase 3b) deferred to the bottom of the loop because we
         // need `&mut link` after the nbr borrow ends.
-        let helper_entered = helper_edge == HelperEdge::Enter;
         if helper_entered {
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         }
