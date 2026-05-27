@@ -300,8 +300,7 @@ pub fn ospf_inactivity_timer<V: OspfVersion>(nbr: &Neighbor<V>) -> Timer {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {
-            tx.send(Message::Nfsm(ifindex, nbr_addr, InactivityTimer))
-                .unwrap();
+            let _ = tx.send(Message::Nfsm(ifindex, nbr_addr, InactivityTimer));
         }
     })
 }
