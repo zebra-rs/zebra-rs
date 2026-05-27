@@ -16,8 +16,6 @@ use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use bgp_packet::RouteDistinguisher;
-
 use crate::config::{ConfigChannel, ShowChannel};
 use crate::context::{ProtoContext, Task};
 
@@ -30,11 +28,6 @@ use super::super::update_group::UpdateGroupMap;
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
 
 /// Per-VRF BGP runtime. One task per `router bgp vrf X` block.
-///
-/// Most fields are written by `BgpVrf::new` at spawn time but
-/// don't gain a reader until later steps (15-18). The
-/// `dead_code` allow goes away as each consumer site lands.
-#[allow(dead_code)]
 pub struct BgpVrf {
     /// VRF name (matches the YANG list key under
     /// `/router/bgp/vrf/<name>`). Used in log lines, `show bgp vrf
@@ -57,11 +50,6 @@ pub struct BgpVrf {
     /// from the global Loc-RIB via [`BgpVrfMsg::ImportV4`] /
     /// [`BgpVrfMsg::ImportV6`] (step 18).
     pub local_rib: LocalRib,
-    /// Route Distinguisher prepended to VPNv4/v6 advertisements
-    /// originated from this VRF. `None` until the operator has
-    /// committed `set router bgp vrf <name> rd <RD>`; export to
-    /// the global Loc-RIB (step 17) is gated on `rd.is_some()`.
-    pub rd: Option<RouteDistinguisher>,
     /// Per-VRF BGP router-id. Defaults to the global router-id at
     /// spawn time (passed through by step 14); the operator may
     /// override via `set router bgp vrf <name> router-id <addr>`,
@@ -249,7 +237,6 @@ impl BgpVrf {
     pub fn new(
         name: String,
         ctx: ProtoContext,
-        rd: Option<RouteDistinguisher>,
         router_id: Ipv4Addr,
         asn: u32,
         label: u32,
@@ -262,7 +249,6 @@ impl BgpVrf {
             ctx,
             peers: PeerMap::new(),
             local_rib: LocalRib::default(),
-            rd,
             router_id,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -323,39 +309,6 @@ impl BgpVrf {
         }
     }
 
-    /// Step 17b-i hook: push a freshly-elected best-path winner to
-    /// the global Bgp task as a VPNv4 export candidate. The global
-    /// side prepends the VRF's RD and tags the configured
-    /// export-RT set before inserting into `LocalRib.v4vpn`.
-    ///
-    /// Caller hands over `attr` by value — the global task
-    /// re-interns into its own `BgpAttrStore`. `label` is a per-VRF
-    /// MPLS label allocated by step 19; until that lands, callers
-    /// pass `0` and the global side logs / skips the install.
-    ///
-    /// Not yet wired into the per-VRF FSM. Step 17b-ii hooks it
-    /// to the post-best-path notification in
-    /// [`Self::process_msg`].
-    #[allow(dead_code)] // first caller lands in step 17b-ii.
-    pub fn export_best_path(&self, prefix: ipnet::Ipv4Net, attr: bgp_packet::BgpAttr, label: u32) {
-        let _ = self.global_tx.send(BgpGlobalMsg::Export {
-            vrf: self.name.clone(),
-            prefix,
-            attr,
-            label,
-        });
-    }
-
-    /// Inverse of [`Self::export_best_path`]. Tells the global
-    /// task to withdraw the matching VPNv4 advertisement.
-    #[allow(dead_code)] // first caller lands in step 17b-ii.
-    pub fn withdraw_exported(&self, prefix: ipnet::Ipv4Net) {
-        let _ = self.global_tx.send(BgpGlobalMsg::WithdrawExport {
-            vrf: self.name.clone(),
-            prefix,
-        });
-    }
-
     /// Handle a per-VRF FSM event off `self.rx`. Step 15d wires
     /// the same set the global `Bgp::process_msg` handles —
     /// minus `Accept` (passive accept lives at the global task
@@ -410,12 +363,6 @@ impl BgpVrf {
                     vrf = %self.name,
                     "bgp vrf: ignored Accept on vrf.tx (active-only path in step 15d)",
                 );
-            }
-            Message::Show(tx) => {
-                // Re-route to the global show subsystem by echoing
-                // the request back through the bounded tx. Step
-                // 20 wires `show bgp vrf <name>` properly.
-                let _ = self.tx.try_send(Message::Show(tx));
             }
             Message::FlushUpdateGroupIpv4(group_id) => {
                 super::super::update_group::flush_ipv4(
@@ -594,9 +541,6 @@ impl BgpVrf {
             } => {
                 self.handle_import_v4(rd, prefix, attr, label);
             }
-            BgpVrfMsg::ImportV6 { .. } => {
-                // v6 import lands after v4 ships.
-            }
             BgpVrfMsg::WithdrawImport { rd, prefix } => {
                 self.handle_withdraw_import(rd, prefix);
             }
@@ -642,7 +586,6 @@ mod tests {
         let (mut vrf, inbox) = BgpVrf::new(
             "vrf-test".to_string(),
             ctx,
-            None,
             Ipv4Addr::UNSPECIFIED,
             65000,
             /* label */ 16,
@@ -670,7 +613,6 @@ mod tests {
         let (mut vrf, inbox) = BgpVrf::new(
             "vrf-test2".to_string(),
             ctx,
-            None,
             Ipv4Addr::UNSPECIFIED,
             65000,
             /* label */ 16,
@@ -682,77 +624,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), vrf.event_loop())
             .await
             .expect("event_loop exits when inbox is dropped");
-    }
-
-    #[tokio::test]
-    async fn export_best_path_sends_global_msg_with_payload() {
-        // Step 17b-i invariant: `export_best_path` pushes a
-        // `BgpGlobalMsg::Export` carrying the VRF name, prefix,
-        // attr (by value), and label stub. The global instance's
-        // handler is exercised separately; here we only verify
-        // the producer side.
-        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
-        let ctx = test_ctx_for_vrf(20, "vrf-export");
-        let (vrf, _inbox) = BgpVrf::new(
-            "vrf-export".to_string(),
-            ctx,
-            None,
-            Ipv4Addr::UNSPECIFIED,
-            65000,
-            /* label */ 16,
-            global_tx,
-        );
-
-        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let attr = bgp_packet::BgpAttr::default();
-        vrf.export_best_path(prefix, attr.clone(), 0);
-
-        let msg = global_rx
-            .try_recv()
-            .expect("Export pushed onto global channel");
-        match msg {
-            BgpGlobalMsg::Export {
-                vrf: v,
-                prefix: p,
-                attr: a,
-                label,
-            } => {
-                assert_eq!(v, "vrf-export");
-                assert_eq!(p, prefix);
-                assert_eq!(a, attr);
-                assert_eq!(label, 0);
-            }
-            other => panic!("expected Export, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn withdraw_exported_sends_global_msg() {
-        let (global_tx, mut global_rx) = unbounded_channel::<BgpGlobalMsg>();
-        let ctx = test_ctx_for_vrf(21, "vrf-withdraw");
-        let (vrf, _inbox) = BgpVrf::new(
-            "vrf-withdraw".to_string(),
-            ctx,
-            None,
-            Ipv4Addr::UNSPECIFIED,
-            65000,
-            /* label */ 16,
-            global_tx,
-        );
-
-        let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        vrf.withdraw_exported(prefix);
-
-        let msg = global_rx
-            .try_recv()
-            .expect("WithdrawExport pushed onto global channel");
-        match msg {
-            BgpGlobalMsg::WithdrawExport { vrf: v, prefix: p } => {
-                assert_eq!(v, "vrf-withdraw");
-                assert_eq!(p, prefix);
-            }
-            other => panic!("expected WithdrawExport, got {other:?}"),
-        }
     }
 
     #[tokio::test]

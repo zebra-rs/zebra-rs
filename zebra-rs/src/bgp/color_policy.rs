@@ -37,7 +37,6 @@ impl ColorPolicy {
     /// `None` when no binding is configured — the caller decides
     /// whether to fall back (RFC 9256 §2.5) or treat the resolution
     /// as unreachable.
-    #[allow(dead_code)]
     pub fn flex_algo_for(&self, color: u32) -> Option<u8> {
         self.bindings.get(&color).copied()
     }

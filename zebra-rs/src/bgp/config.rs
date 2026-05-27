@@ -525,7 +525,6 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-#[allow(dead_code)]
 fn config_rtc(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Rtc);
@@ -1440,12 +1439,6 @@ fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
 
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
-        let prefix = String::from("/router/bgp/neighbor");
-        self.callbacks.insert(prefix + path, cb);
-    }
-
-    #[allow(dead_code)]
-    fn callback_afi_safi(&mut self, path: &str, cb: Callback) {
         let prefix = String::from("/router/bgp/neighbor");
         self.callbacks.insert(prefix + path, cb);
     }

@@ -144,7 +144,6 @@ pub fn spawn_bgp_vrf(
     let (mut vrf, inbox) = BgpVrf::new(
         name.clone(),
         ctx,
-        cfg.rd,
         effective_router_id,
         asn,
         label,
@@ -419,7 +418,6 @@ mod tests {
         let (mut vrf, _inbox) = BgpVrf::new(
             "v1".to_string(),
             ctx,
-            None,
             Ipv4Addr::UNSPECIFIED,
             65000,
             /* label */ 16,
@@ -466,7 +464,6 @@ mod tests {
         let (mut vrf, _inbox) = BgpVrf::new(
             "v0".to_string(),
             ctx,
-            None,
             Ipv4Addr::UNSPECIFIED,
             65000,
             /* label */ 16,

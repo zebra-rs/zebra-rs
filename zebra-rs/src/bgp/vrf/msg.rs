@@ -14,9 +14,10 @@
 //! Step 13 landed the enums with `Shutdown` and `Accept`
 //! populated; step 14 drains `BgpGlobalMsg` in the global event
 //! loop (`process_vrf_global_msg`) and uses `Shutdown` from
-//! `despawn_bgp_vrf`. Every other variant is still a stub for
-//! steps 16-18; the per-variant `#[allow(dead_code)]` on those
-//! variants will drop as each step lands its consumer.
+//! `despawn_bgp_vrf`. Step 16's accept dispatcher emits `Accept`
+//! though the per-VRF FSM driver (step 15d) doesn't yet consume
+//! the stream; the field carries an `#[allow(dead_code)]` until
+//! that lands.
 
 use std::net::SocketAddr;
 
@@ -55,17 +56,8 @@ pub enum BgpVrfMsg {
     ImportV4 {
         rd: RouteDistinguisher,
         prefix: ipnet::Ipv4Net,
-        #[allow(dead_code)] // first reader lands in step 18b.
         attr: BgpAttr,
         label: u32,
-    },
-
-    /// VPNv6 best-path import. Symmetric to [`Self::ImportV4`].
-    /// Stays a placeholder until v6 imports follow v4.
-    #[allow(dead_code)]
-    ImportV6 {
-        rd: RouteDistinguisher,
-        // step 18 fills the remaining fields.
     },
 
     /// Withdraw a previously-imported route. RD identifies the
@@ -99,10 +91,6 @@ pub enum BgpGlobalMsg {
     Export {
         vrf: String,
         prefix: Ipv4Net,
-        // First reader lands in step 17b-ii (LocRIB write). The
-        // step-17b-i handler logs the export decision but doesn't
-        // yet consume the attributes themselves.
-        #[allow(dead_code)]
         attr: BgpAttr,
         label: u32,
     },
@@ -117,12 +105,4 @@ pub enum BgpGlobalMsg {
     /// via [`BgpVrfMsg::Accept`]. Emitted by step 16's spawn
     /// site for every materialised peer.
     RegisterPeer { vrf: String, addr: std::net::IpAddr },
-
-    /// Inverse of [`Self::RegisterPeer`]. The global dispatcher
-    /// stops routing inbound connects from this IP to the VRF.
-    /// Step 16 doesn't yet emit this from VRF code (despawn
-    /// scrubs `peer_index` defensively on the global side);
-    /// step 15d's per-VRF FSM cleanup is the first emitter.
-    #[allow(dead_code)]
-    UnregisterPeer { vrf: String, addr: std::net::IpAddr },
 }
