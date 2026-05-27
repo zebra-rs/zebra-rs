@@ -968,6 +968,24 @@ impl FibHandle {
                     return;
                 }
 
+                // On-link nexthops with an unspecified gateway
+                // (0.0.0.0 / ::) have no representation in the kernel
+                // nexthop table — NHA_GATEWAY can't carry the
+                // wildcard address and an interface-only nh_id needs
+                // a gateway anyway under our address_family setup.
+                // RIB only allocates these as the resolved nexthop
+                // for OSPF stub-network LSAs and other intra-segment
+                // routes that lose to the Connected route, so they
+                // never need a kernel nh_id. NexthopMap still tracks
+                // them for logical bookkeeping inside zebra-rs.
+                if uni.addr.is_unspecified() {
+                    tracing::debug!(
+                        "[nexthop_add Uni] gid={gid} skipped — addr={} is unspecified, no kernel nh_id needed",
+                        uni.addr,
+                    );
+                    return;
+                }
+
                 // Address family follows the gateway address.
                 msg.header.address_family = match uni.addr {
                     std::net::IpAddr::V4(_) => AddressFamily::Inet,
@@ -978,21 +996,16 @@ impl FibHandle {
                 let attr = NexthopAttribute::Id(uni.gid() as u32);
                 msg.attributes.push(attr);
 
-                // Gateway address. Skip NHA_GATEWAY for on-link
-                // nexthops (unspecified addr): the kernel rejects
-                // NHA_GATEWAY=0.0.0.0/:: with EINVAL — an
-                // interface-only nexthop must carry only NHA_OIF.
-                if !uni.addr.is_unspecified() {
-                    let attr = match uni.addr {
-                        std::net::IpAddr::V4(ipv4) => {
-                            NexthopAttribute::Gateway(RouteAddress::Inet(ipv4))
-                        }
-                        std::net::IpAddr::V6(ipv6) => {
-                            NexthopAttribute::Gateway(RouteAddress::Inet6(ipv6))
-                        }
-                    };
-                    msg.attributes.push(attr);
-                }
+                // Gateway address.
+                let attr = match uni.addr {
+                    std::net::IpAddr::V4(ipv4) => {
+                        NexthopAttribute::Gateway(RouteAddress::Inet(ipv4))
+                    }
+                    std::net::IpAddr::V6(ipv6) => {
+                        NexthopAttribute::Gateway(RouteAddress::Inet6(ipv6))
+                    }
+                };
+                msg.attributes.push(attr);
 
                 // Outgoing if. Origin wins over resolved; fall back to 0
                 // ("no Oif attribute") if neither was filled, which is a
@@ -1118,6 +1131,15 @@ impl FibHandle {
     pub async fn nexthop_del(&self, nexthop: &Group) {
         // Skip nexthop table management for kernels < 5.3
         if !self.use_nhid {
+            return;
+        }
+
+        // Mirror the unspecified-addr skip in nexthop_add: we never
+        // installed a kernel nh_id for these, so don't ask the
+        // kernel to delete one (it would just log ENOENT).
+        if let Group::Uni(uni) = nexthop
+            && uni.addr.is_unspecified()
+        {
             return;
         }
 
