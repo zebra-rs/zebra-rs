@@ -2,9 +2,9 @@ use ospf_packet::*;
 
 use super::inst::Message;
 use super::lsdb::{LsdbEvent, OspfLsaKey, v2_lsa_key};
-use super::task::{Timer, TimerType};
 use super::version::OspfVersion;
 use super::{Neighbor, NfsmState, inst::OspfInterface, nfsm::ospf_nfsm_check_nbr_loading};
+use crate::context::{Timer, TimerType};
 
 #[derive(Debug, PartialEq)]
 pub enum FloodScope {
@@ -187,16 +187,12 @@ pub fn ospf_retransmit_timer<V: OspfVersion>(nbr: &Neighbor<V>, retransmit_inter
     let tx = nbr.tx.clone();
     let ifindex = nbr.ifindex;
     let addr = V::nbr_addr(&nbr.ident);
-    Timer::new(
-        Timer::second(retransmit_interval as u64),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::Retransmit(ifindex, addr));
-            }
-        },
-    )
+    Timer::new(retransmit_interval as u64, TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Retransmit(ifindex, addr));
+        }
+    })
 }
 
 pub fn ospf_ls_retransmit_add<V: OspfVersion>(

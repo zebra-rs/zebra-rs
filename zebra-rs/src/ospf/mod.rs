@@ -19,9 +19,6 @@ pub use ifsm::{IfsmEvent, IfsmState};
 pub mod nfsm;
 pub use nfsm::{NfsmEvent, NfsmState};
 
-pub mod task;
-pub use task::{Timer, TimerType};
-
 pub mod addr;
 
 pub mod area;

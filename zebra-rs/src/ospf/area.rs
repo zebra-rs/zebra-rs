@@ -4,8 +4,8 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 
 use super::Lsdb;
-use super::task::Timer;
 use super::version::{OspfVersion, Ospfv2};
+use crate::context::Timer;
 
 pub const AREA0: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 

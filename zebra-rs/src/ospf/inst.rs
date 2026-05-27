@@ -34,17 +34,17 @@ use super::area::{OspfArea, OspfAreaMap};
 use super::config::Callback;
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
 use super::link::{OspfLink, OspfNetworkType};
-use super::lsdb::{LsdbEvent, OspfLsaKey, v2_lsa_key_unpack};
+use super::lsdb::{LsdbEvent, OspfLsaKey, seq_max, v2_lsa_key_unpack};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
-use super::task::{Timer, TimerType};
 use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv3};
 use super::{
     AREA0, Identity, Lsdb, Neighbor, NfsmState, ospf_ls_ack_recv, ospf_ls_req_recv,
     ospf_ls_upd_recv,
 };
+use crate::context::{Timer, TimerType};
 
 /// `show <path>` dispatch handler. Parameterized over `V` so an
 /// `Ospf<Ospfv3>` instance carries its own `ShowCallback<Ospfv3>`
@@ -418,7 +418,7 @@ impl<V: OspfVersion> Ospf<V> {
     /// V-specific data, so the timer body is generic.
     fn ospf_spf_timer_generic(tx: &UnboundedSender<Message<V>>, area_id: Ipv4Addr) -> Timer {
         let tx = tx.clone();
-        Timer::new(Timer::second(1), TimerType::Once, move || {
+        Timer::new(1, TimerType::Once, move || {
             let tx = tx.clone();
             async move {
                 let _ = tx.send(Message::SpfCalc(area_id));
@@ -753,10 +753,10 @@ impl Ospf<Ospfv2> {
             let mut lsa = OspfLsa::from(lsah, router_lsa.into());
 
             if let Some(seq) = current_seq {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
             }
             if let Some(seq) = min_seq {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
             }
 
             lsa.update();
@@ -793,10 +793,10 @@ impl Ospf<Ospfv2> {
                     area.lsdb
                         .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
             {
-                lsa.h.ls_seq_number = lsa
-                    .h
-                    .ls_seq_number
-                    .max(existing.h.ls_seq_number.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
             }
             lsa.update();
 
@@ -919,10 +919,10 @@ impl Ospf<Ospfv2> {
                     area.lsdb
                         .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
             {
-                lsa.h.ls_seq_number = lsa
-                    .h
-                    .ls_seq_number
-                    .max(existing.h.ls_seq_number.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
             }
             lsa.update();
 
@@ -977,10 +977,10 @@ impl Ospf<Ospfv2> {
                     area.lsdb
                         .lookup_by_id(OspfLsType::OpaqueAreaLocal, ls_id, self.router_id)
             {
-                lsa.h.ls_seq_number = lsa
-                    .h
-                    .ls_seq_number
-                    .max(existing.h.ls_seq_number.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(
+                    lsa.h.ls_seq_number,
+                    existing.h.ls_seq_number.saturating_add(1),
+                );
             }
             lsa.update();
 
@@ -1059,10 +1059,10 @@ impl Ospf<Ospfv2> {
                 area.lsdb
                     .lookup_by_id(OspfLsType::NssaAsExternal, ls_id, self.router_id)
         {
-            lsa.h.ls_seq_number = lsa
-                .h
-                .ls_seq_number
-                .max(existing.h.ls_seq_number.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(
+                lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
         }
         lsa.update();
 
@@ -1341,10 +1341,10 @@ impl Ospf<Ospfv2> {
             self.lsdb_as
                 .lookup_by_id(OspfLsType::AsExternal, ls_id, self.router_id)
         {
-            new_lsa.h.ls_seq_number = new_lsa
-                .h
-                .ls_seq_number
-                .max(existing.h.ls_seq_number.saturating_add(1));
+            new_lsa.h.ls_seq_number = seq_max(
+                new_lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
         }
         new_lsa.update();
 
@@ -1786,6 +1786,67 @@ impl Ospf<Ospfv2> {
                     }
                 }
             }
+            OspfLsType::OpaqueAreaLocal => {
+                // Opaque-Area LSAs (RFC 5250) we originate are
+                // Router-Info / Extended-Prefix / Extended-Link.
+                // The opaque-type sits in the top byte of `ls_id`;
+                // the lower 24 bits are the opaque-id (for
+                // ExtPrefix/ExtLink that's the originating ifindex
+                // masked to 24 bits, mirroring the originate path).
+                // Each originator already bumps seq# above the
+                // existing LSDB copy via its `lookup_by_id...max(seq+1)`
+                // pattern, so calling it here is enough to take us
+                // past the received_seq the §13.4 trigger holds.
+                let opaque_type = (u32::from(ls_id) >> 24) as u8;
+                let opaque_id = u32::from(ls_id) & 0x00FF_FFFF;
+                match opaque_type {
+                    OpaqueLsaType::ROUTER_INFO => {
+                        tracing::info!(
+                            "[Self-Originated] Re-originating Router-Info Opaque LSA id={} seq={:#x}",
+                            ls_id,
+                            received_seq
+                        );
+                        self.router_info_lsa_originate();
+                    }
+                    OpaqueLsaType::EXT_PREFIX => {
+                        tracing::info!(
+                            "[Self-Originated] Re-originating Ext-Prefix Opaque LSA id={} ifindex={} seq={:#x}",
+                            ls_id,
+                            opaque_id,
+                            received_seq
+                        );
+                        self.ext_prefix_lsa_originate(opaque_id);
+                    }
+                    OpaqueLsaType::EXT_LINK => {
+                        tracing::info!(
+                            "[Self-Originated] Re-originating Ext-Link Opaque LSA id={} ifindex={} seq={:#x}",
+                            ls_id,
+                            opaque_id,
+                            received_seq
+                        );
+                        self.ext_link_lsa_originate(opaque_id);
+                    }
+                    _ => {
+                        tracing::info!(
+                            "[Self-Originated] Flushing Opaque LSA id={} opaque-type={} (unknown owner)",
+                            ls_id,
+                            opaque_type
+                        );
+                        let flushed =
+                            self.areas
+                                .get_mut(area_id.expect("area-local"))
+                                .and_then(|area| {
+                                    area.lsdb
+                                        .flush_lsa(ls_type, ls_id, adv_router, &self.tx, area_id)
+                                });
+                        if let Some(lsa) = flushed
+                            && let Some(area_id) = area_id
+                        {
+                            self.flood_self_originated_lsa(area_id, &lsa);
+                        }
+                    }
+                }
+            }
             _ => {
                 // Summary origination not yet implemented; flush with MaxAge.
                 tracing::info!(
@@ -1900,7 +1961,7 @@ impl Ospf<Ospfv2> {
                     }),
                 );
                 if let Some(seq) = current_seq {
-                    lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+                    lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
                 }
 
                 lsa.update();
@@ -2187,7 +2248,7 @@ impl Ospf<Ospfv2> {
         reason: ospf_packet::GraceRestartReason,
     ) -> bool {
         use super::neigh::RestartingState;
-        use super::task::{Timer, TimerType};
+        use crate::context::{Timer, TimerType};
 
         if self.restarting.is_some() {
             tracing::info!("[GR Restart] begin rejected — already staged");
@@ -2213,16 +2274,12 @@ impl Ospf<Ospfv2> {
         }
 
         let tx = self.tx.clone();
-        let abort_timer = Timer::new(
-            Timer::second(grace_period as u64),
-            TimerType::Once,
-            move || {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(Message::GrRestartAbort);
-                }
-            },
-        );
+        let abort_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartAbort);
+            }
+        });
 
         // Snapshot Full-neighbor count at staging time. The
         // commit handler will store the same number into the
@@ -2302,7 +2359,7 @@ impl Ospf<Ospfv2> {
     fn gr_restart_load_checkpoint(&mut self) {
         use super::checkpoint::{OspfCheckpoint, default_path};
         use super::neigh::RestartingState;
-        use super::task::{Timer, TimerType};
+        use crate::context::{Timer, TimerType};
         use std::time::{Duration, SystemTime};
 
         let path = default_path("ospf");
@@ -2370,16 +2427,12 @@ impl Ospf<Ospfv2> {
         let remaining = max_age.saturating_sub(age);
         let remaining_secs = remaining.as_secs().max(1);
         let tx = self.tx.clone();
-        let abort_timer = Timer::new(
-            Duration::from_secs(remaining_secs),
-            TimerType::Once,
-            move || {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(Message::GrRestartAbort);
-                }
-            },
-        );
+        let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartAbort);
+            }
+        });
         let entered_at = tokio::time::Instant::now() - age;
         // Count was_full neighbors across every checkpointed link.
         // Exit-restart success fires when `current_full_count`
@@ -2505,7 +2558,7 @@ impl Ospf<Ospfv2> {
     /// write fails; the caller (vty handler) reports failure.
     pub fn gr_restart_commit(&mut self) -> bool {
         use super::checkpoint::{OspfCheckpoint, default_path};
-        use super::task::{Timer, TimerType};
+        use crate::context::Timer;
 
         let Some(state) = self.restarting.as_ref() else {
             tracing::warn!("[GR Restart] commit rejected — no restart staged");
@@ -2538,16 +2591,12 @@ impl Ospf<Ospfv2> {
         // supervisor's job after we exit.
         let tx = self.tx.clone();
         let drain_ms = self.gr_config.drain_time_ms as u64;
-        let drain_timer = Timer::new(
-            std::time::Duration::from_millis(drain_ms),
-            TimerType::Once,
-            move || {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(Message::GrRestartExit);
-                }
-            },
-        );
+        let drain_timer = Timer::once_ms(drain_ms, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartExit);
+            }
+        });
         // Park the timer on the existing RestartingState so it
         // doesn't get dropped before firing. Replaces the
         // auto-abort timer — committed restarts don't auto-abort.
@@ -2599,9 +2648,7 @@ impl Ospf<Ospfv2> {
                 area.lsdb
                     .lookup_by_id(OspfLsType::OpaqueLinkLocal, ls_id, self.router_id)
         {
-            h.ls_seq_number = h
-                .ls_seq_number
-                .max(existing.h.ls_seq_number.saturating_add(1));
+            h.ls_seq_number = seq_max(h.ls_seq_number, existing.h.ls_seq_number.saturating_add(1));
         }
         let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueLinkLocalGrace(body));
         lsa.update();
@@ -2936,16 +2983,12 @@ impl Ospf<Ospfv2> {
         // Start delayed ack timer if not already running (1 second interval).
         if link.timer.ls_ack.is_none() {
             let tx = self.tx.clone();
-            link.timer.ls_ack = Some(super::task::Timer::new(
-                std::time::Duration::from_secs(1),
-                super::task::TimerType::Once,
-                move || {
-                    let tx = tx.clone();
-                    async move {
-                        let _ = tx.send(Message::DelayedAck(ifindex));
-                    }
-                },
-            ));
+            link.timer.ls_ack = Some(Timer::new(1, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::DelayedAck(ifindex));
+                }
+            }));
         }
     }
 
@@ -4056,7 +4099,7 @@ impl Ospf<Ospfv3> {
                 .lookup_by_raw_key(key)
                 .map(|prev| prev.h.ls_seq_number);
             if let Some(seq) = current_seq {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
             }
         }
         lsa.update();
@@ -4162,10 +4205,10 @@ impl Ospf<Ospfv3> {
         if let Some(area) = self.areas.get(area_id)
             && let Some(existing) = area.lsdb.lookup_by_raw_key(key)
         {
-            lsa.h.ls_seq_number = lsa
-                .h
-                .ls_seq_number
-                .max(existing.h.ls_seq_number.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(
+                lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
         }
         lsa.update();
 
@@ -4343,10 +4386,10 @@ impl Ospf<Ospfv3> {
         let key: super::lsdb::OspfLsaKey =
             (OSPFV3_AS_EXTERNAL_LSA_TYPE, link_state_id, self.router_id);
         if let Some(existing) = self.lsdb_as.lookup_by_raw_key(key) {
-            new_lsa.h.ls_seq_number = new_lsa
-                .h
-                .ls_seq_number
-                .max(existing.h.ls_seq_number.saturating_add(1));
+            new_lsa.h.ls_seq_number = seq_max(
+                new_lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
         }
         new_lsa.update();
 
@@ -4959,17 +5002,58 @@ impl Ospf<Ospfv3> {
                 // Intra-Area-Prefix-LSA, NSSA-LSA default, translated
                 // AS-External); other LSA types fall through.
                 use ospf_packet::{
-                    OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
-                    OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+                    OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+                    OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+                    OSPFV3_LINK_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE,
+                    OSPFV3_ROUTER_LSA_TYPE,
                 };
+
+                use super::srmpls::SR_INFO_LSID;
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
                     let (ls_type, ls_id, _) = key;
                     let area = area_id.unwrap_or(AREA0);
                     match ls_type {
                         t if t == OSPFV3_ROUTER_LSA_TYPE => self.router_lsa_originate(),
                         t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),
-                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
+                        // Link-LSA (RFC 5340 §A.4.9): link-scoped,
+                        // keyed by ifindex. Originator lives at
+                        // `link_lsa_originate(ifindex)` — `interface_id
+                        // = link.index` so passing `ls_id` directly
+                        // is correct.
+                        t if t == OSPFV3_LINK_LSA_TYPE => self.link_lsa_originate(ls_id),
+                        // Intra-Area-Prefix-LSA (RFC 5340 §A.4.10)
+                        // has two distinct origin paths:
+                        //   * Router-referenced (ls_id == 0): one
+                        //     per area, drives `router_intra_area_
+                        //     prefix_lsa_originate`.
+                        //   * Network-referenced (ls_id == DR
+                        //     interface_id): one per broadcast
+                        //     segment we're DR for, drives
+                        //     `network_intra_area_prefix_lsa_
+                        //     originate(ifindex)`.
+                        // The originate paths key on those exact
+                        // ls_id values, so the dispatch matches.
+                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE && ls_id == 0 => {
                             self.router_intra_area_prefix_lsa_originate(area)
+                        }
+                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
+                            self.network_intra_area_prefix_lsa_originate(ls_id)
+                        }
+                        // E-Router-LSA (RFC 8362 §3.1) — two callers:
+                        //   * SR-Info (ls_id == SR_INFO_LSID == 0):
+                        //     per-area aggregate via
+                        //     `e_router_v3_sr_info_lsa_originate`.
+                        //   * Per-link Adj-SID (ls_id == ifindex):
+                        //     `e_router_v3_lsa_originate(ifindex)`.
+                        t if t == OSPFV3_E_ROUTER_LSA_TYPE && ls_id == SR_INFO_LSID => {
+                            self.e_router_v3_sr_info_lsa_originate(area)
+                        }
+                        t if t == OSPFV3_E_ROUTER_LSA_TYPE => self.e_router_v3_lsa_originate(ls_id),
+                        // E-Intra-Area-Prefix-LSA (RFC 8362 §3.7 /
+                        // RFC 8666 §5) carries the per-link
+                        // Prefix-SID; ls_id == ifindex.
+                        t if t == OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => {
+                            self.ext_intra_area_prefix_v3_lsa_originate(ls_id)
                         }
                         // Only the default NSSA-LSA (link_state_id
                         // == 0) is self-originated today. Other
@@ -5069,7 +5153,7 @@ impl Ospf<Ospfv3> {
                 .lookup_by_raw_key(key)
                 .map(|prev| prev.h.ls_seq_number)
         {
-            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
         }
         lsa.update();
 
@@ -5221,7 +5305,7 @@ impl Ospf<Ospfv3> {
                 .lookup_by_raw_key(key)
                 .map(|prev| prev.h.ls_seq_number)
         {
-            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
         }
         lsa.update();
 
@@ -5299,7 +5383,7 @@ impl Ospf<Ospfv3> {
                     .lookup_by_raw_key(key)
                     .map(|prev| prev.h.ls_seq_number)
             {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
             }
             lsa.update();
 
@@ -5458,7 +5542,7 @@ impl Ospf<Ospfv3> {
                     .lookup_by_raw_key(key)
                     .map(|prev| prev.h.ls_seq_number)
             {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
             }
             lsa.update();
 
@@ -5511,7 +5595,7 @@ impl Ospf<Ospfv3> {
                     .lookup_by_raw_key(key)
                     .map(|prev| prev.h.ls_seq_number)
             {
-                lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
             }
             lsa.update();
 
@@ -5682,7 +5766,7 @@ impl Ospf<Ospfv3> {
                 .lookup_by_raw_key(key)
                 .map(|prev| prev.h.ls_seq_number)
         {
-            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
         }
         lsa.update();
 
@@ -5853,7 +5937,7 @@ impl Ospf<Ospfv3> {
                 .lookup_by_raw_key(key)
                 .map(|prev| prev.h.ls_seq_number)
         {
-            lsa.h.ls_seq_number = lsa.h.ls_seq_number.max(prev_seq.saturating_add(1));
+            lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
         }
         lsa.update();
 

@@ -881,10 +881,18 @@ pub fn ospf_ls_req_recv(
 // age1/age2 are the current ages of the respective LSAs (callers must pass
 // dynamic current_age for database copies).
 fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, age2: u16) -> i32 {
-    if lsa1.ls_seq_number > lsa2.ls_seq_number {
+    // RFC 2328 §A.4.1: `ls_seq_number` is a SIGNED 32-bit integer
+    // wrapping from `InitialSequenceNumber` (0x80000001, most-negative)
+    // up to `MaxSequenceNumber` (0x7FFFFFFF). Comparison must be
+    // signed: a positive value like 0x08000038 is GREATER than a
+    // negative one like 0x80000008 even though unsigned compare
+    // would say the opposite. Cast through `i32` before the compare.
+    let s1 = lsa1.ls_seq_number as i32;
+    let s2 = lsa2.ls_seq_number as i32;
+    if s1 > s2 {
         return 1;
     }
-    if lsa1.ls_seq_number < lsa2.ls_seq_number {
+    if s1 < s2 {
         return -1;
     }
     if lsa1.ls_checksum > lsa2.ls_checksum {
@@ -956,14 +964,14 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // MinLSArrival check. Dispatch by scope so AS-scoped LSAs
     // (AsExternal, OpaqueAsWide) read the AS LSDB instead of the
     // area LSDB.
-    let (current, current_age, current_install_time, ret) = {
+    let (current, current_age, current_install_time, current_last_flood_out, ret) = {
         let lsdb_ref = match lsa_flood_scope(lsa.h.ls_type) {
             FloodScope::As => &*oi.lsdb_as,
             _ => &*oi.lsdb,
         };
         let db_lsa = lsdb_ref.lookup_lsa(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
         match db_lsa {
-            None => (None, 0u16, None, 1i32), // No current copy: received is "newer".
+            None => (None, 0u16, None, None, 1i32), // No current copy: received is "newer".
             Some(current_lsa) => {
                 let age = current_lsa.current_age();
                 let cmp = ospf_lsa_more_recent(&lsa.h, lsa.h.ls_age, &current_lsa.data.h, age);
@@ -971,6 +979,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
                     Some(current_lsa.data.clone()),
                     age,
                     Some(current_lsa.install_time),
+                    current_lsa.last_flood_out,
                     cmp,
                 )
             }
@@ -1093,15 +1102,54 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         return LsaProcessResult::DiscardNoAck;
     }
 
-    // Send database copy back to the neighbor.
+    // RFC 2328 §13 step 8: "If the database copy has not been sent
+    // in a Link State Update within the last MinLSArrival seconds,
+    // send the database copy back to the sending neighbor." Without
+    // this gate a peer that keeps retransmitting a stale instance
+    // pulls us into a tight send-back loop — we'd re-flood the same
+    // newer DB copy on every received packet. Track the last
+    // send-back per LSDB entry and skip when we're inside the
+    // MinLSArrival window.
+    if let Some(last) = current_last_flood_out
+        && last.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+    {
+        tracing::debug!(
+            "[LS Update] DB copy newer but within MinLSArrival, skip send: type={:?} id={} adv={} seq={:#x}",
+            lsa.h.ls_type,
+            lsa.h.ls_id,
+            lsa.h.adv_router,
+            current.h.ls_seq_number
+        );
+        return LsaProcessResult::DbCopyNewer;
+    }
+
+    // Send database copy back to the neighbor, and stamp the
+    // last-flood-out so the next stale instance lands in the
+    // MinLSArrival skip above.
     tracing::info!(
-        "[LS Update] DB copy newer, sending back: type={:?} id={} adv={} seq={:#x}",
+        "[LS Update] DB copy newer, sending back: type={:?} id={} adv={} \
+         rcv={{seq={:#x} csum={:#06x} age={}}} \
+         db={{seq={:#x} csum={:#06x} age={}}}",
         lsa.h.ls_type,
         lsa.h.ls_id,
         lsa.h.adv_router,
-        current.h.ls_seq_number
+        lsa.h.ls_seq_number,
+        lsa.h.ls_checksum,
+        lsa.h.ls_age,
+        current.h.ls_seq_number,
+        current.h.ls_checksum,
+        current_age,
     );
     ospf_ls_upd_send(oi, nbr, vec![current]);
+    {
+        let lsdb_mut = match lsa_flood_scope(lsa.h.ls_type) {
+            FloodScope::As => &mut *oi.lsdb_as,
+            _ => &mut *oi.lsdb,
+        };
+        if let Some(db) = lsdb_mut.lookup_lsa_mut(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router) {
+            db.last_flood_out = Some(tokio::time::Instant::now());
+        }
+    }
     LsaProcessResult::DbCopyNewer
 }
 
@@ -1158,7 +1206,7 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
     use std::collections::BTreeMap;
 
     use super::neigh::HelperState;
-    use super::task::{Timer, TimerType};
+    use crate::context::{Timer, TimerType};
 
     if lsa.h.ls_type != OspfLsType::OpaqueLinkLocal {
         return;
@@ -1209,16 +1257,12 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
     let ifindex = nbr.ifindex;
     let router_id = nbr.ident.router_id;
     let tx = oi.tx.clone();
-    let expire_timer = Timer::new(
-        Timer::second(grace_period as u64),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
-            }
-        },
-    );
+    let expire_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
+        }
+    });
 
     // RFC 3623 §3.2 — snapshot the restarter's LSAs in the area
     // LSDB at the moment we enter helper. `gr_helper_check_exit`

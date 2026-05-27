@@ -8,9 +8,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 use super::lsdb::OspfLsaKey;
-use super::task::Timer;
 use super::version::{OspfVersion, Ospfv2};
 use super::{Identity, Message, NfsmEvent, NfsmState};
+use crate::context::Timer;
 
 /// Per-instance graceful-restart helper policy. Mirrors the YANG
 /// `router/ospf/graceful-restart` container; defaults match the

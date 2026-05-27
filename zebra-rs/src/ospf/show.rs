@@ -953,7 +953,7 @@ fn show_ospf_database(
                 header = false;
                 writeln!(
                     out,
-                    "Link ID         ADV Router      Age  Seq#       CkSum  Link count"
+                    "Link ID         ADV Router      Age  Seq#       CkSum  Link count  Hold"
                 )?;
             }
             let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
@@ -961,13 +961,14 @@ fn show_ospf_database(
             };
             let _ = writeln!(
                 out,
-                "{:15} {:15} {:4} 0x{:08x} 0x{:04x} {}",
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x} {:10}  {}",
                 lsa_id,
                 adv_router,
                 lsa.current_age(),
                 lsa.ls_seq_number(),
                 lsa.ls_checksum(),
                 lsp.links.len(),
+                fmt_hold(lsa),
             );
         }
 
@@ -979,16 +980,20 @@ fn show_ospf_database(
         for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
             if header {
                 header = false;
-                writeln!(out, "Link ID         ADV Router      Age  Seq#       CkSum")?;
+                writeln!(
+                    out,
+                    "Link ID         ADV Router      Age  Seq#       CkSum   Hold"
+                )?;
             }
             let _ = writeln!(
                 out,
-                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}  {}",
                 lsa_id,
                 adv_router,
                 lsa.current_age(),
                 lsa.ls_seq_number(),
                 lsa.ls_checksum(),
+                fmt_hold(lsa),
             );
         }
 
@@ -1004,16 +1009,20 @@ fn show_ospf_database(
                 area.id
             )?;
             writeln!(out)?;
-            writeln!(out, "Opaque-Type/Id  ADV Router      Age  Seq#       CkSum")?;
+            writeln!(
+                out,
+                "Opaque-Type/Id  ADV Router      Age  Seq#       CkSum   Hold"
+            )?;
             for ((lsa_id, adv_router), lsa) in opaque_iter {
                 let _ = writeln!(
                     out,
-                    "{:15} {:15} {:4} 0x{:08x} 0x{:04x}",
+                    "{:15} {:15} {:4} 0x{:08x} 0x{:04x}  {}",
                     lsa_id,
                     adv_router,
                     lsa.current_age(),
                     lsa.ls_seq_number(),
                     lsa.ls_checksum(),
+                    fmt_hold(lsa),
                 );
             }
         }
@@ -1137,6 +1146,7 @@ fn show_ospf_database_detail(
             writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
             writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
             writeln!(out, "  Length: {}", lsa.length())?;
+            write_timer_remaining(&mut out, lsa)?;
 
             let OspfLsp::Router(ref lsp) = lsa.data.lsp else {
                 continue;
@@ -1215,6 +1225,7 @@ fn show_ospf_database_detail(
             writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
             writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
             writeln!(out, "  Length: {}", lsa.length())?;
+            write_timer_remaining(&mut out, lsa)?;
 
             let OspfLsp::Network(ref lsp) = lsa.data.lsp else {
                 continue;
@@ -1274,6 +1285,7 @@ fn show_ospf_database_detail(
                 writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
                 writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
                 writeln!(out, "  Length: {}", lsa.length())?;
+                write_timer_remaining(&mut out, lsa)?;
 
                 let payload_len = lsa.length().saturating_sub(20);
                 writeln!(out, "  Opaque-Info: {} octets of data", payload_len)?;
@@ -1296,6 +1308,49 @@ fn show_ospf_database_detail(
     }
 
     Ok(out)
+}
+
+/// Brief-format hold-remaining cell. For self-originated entries
+/// the refresh-remaining is appended in parentheses, e.g.
+/// `3581s (1781s)`. Reads the actual `Timer::remaining()` so a
+/// missing or wrong timer surfaces in `show ip ospf database`
+/// rather than being masked by a derived value.
+fn fmt_hold(lsa: &super::lsdb::Lsa) -> String {
+    let hold = match lsa.hold_remaining() {
+        Some(s) => format!("{}s", s),
+        None => "-".to_string(),
+    };
+    if lsa.originated {
+        let refresh = match lsa.refresh_remaining() {
+            Some(s) => format!("{}s", s),
+            None => "-".to_string(),
+        };
+        format!("{} ({})", hold, refresh)
+    } else {
+        hold
+    }
+}
+
+/// Render the actual LSDB timer state for an LSA — hold timer
+/// remaining (every entry) and refresh timer remaining (only
+/// self-originated entries). Reads `Timer::remaining()` directly
+/// so any miscalculation or missing-timer bug surfaces in
+/// `show ip ospf database` instead of being silently masked.
+fn write_timer_remaining(
+    out: &mut String,
+    lsa: &super::lsdb::Lsa,
+) -> std::result::Result<(), std::fmt::Error> {
+    match lsa.hold_remaining() {
+        Some(s) => writeln!(out, "  Hold remaining: {}s", s)?,
+        None => writeln!(out, "  Hold remaining: <unarmed>")?,
+    }
+    if lsa.originated {
+        match lsa.refresh_remaining() {
+            Some(s) => writeln!(out, "  Refresh remaining: {}s", s)?,
+            None => writeln!(out, "  Refresh remaining: <unarmed>")?,
+        }
+    }
+    Ok(())
 }
 
 fn show_router_info_detail(

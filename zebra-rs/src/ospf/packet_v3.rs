@@ -1066,10 +1066,17 @@ fn ospfv3_lsa_more_recent(h1: &Ospfv3LsaHeader, age1: u16, h2: &Ospfv3LsaHeader,
     use super::lsdb::OSPF_MAX_AGE;
     const OSPF_MAX_AGE_DIFF: u16 = 900;
 
-    if h1.ls_seq_number > h2.ls_seq_number {
+    // RFC 5340 §4.5 / RFC 2328 §A.4.1: signed 32-bit seq compare.
+    // Unsigned would mis-order any pre-fix 0x0xxxxxxx (positive)
+    // value against the RFC-correct 0x8xxxxxxx (negative) range
+    // and treat the negative as "newer" — see the matching v2
+    // fix in `ospf_lsa_more_recent`.
+    let s1 = h1.ls_seq_number as i32;
+    let s2 = h2.ls_seq_number as i32;
+    if s1 > s2 {
         return 1;
     }
-    if h1.ls_seq_number < h2.ls_seq_number {
+    if s1 < s2 {
         return -1;
     }
     if h1.ls_checksum > h2.ls_checksum {
@@ -1140,7 +1147,7 @@ fn gr_maybe_enter_helper_v3(
     use ospf_packet::{GraceRestartReason, OSPFV3_GRACE_LSA_TYPE, Ospfv3LsBody};
 
     use super::neigh::HelperState;
-    use super::task::{Timer, TimerType};
+    use crate::context::{Timer, TimerType};
 
     if lsa.h.ls_type != OSPFV3_GRACE_LSA_TYPE {
         return;
@@ -1191,16 +1198,12 @@ fn gr_maybe_enter_helper_v3(
     let ifindex = nbr.ifindex;
     let router_id = nbr.ident.router_id;
     let tx = oi.tx.clone();
-    let expire_timer = Timer::new(
-        Timer::second(grace_period as u64),
-        TimerType::Once,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
-            }
-        },
-    );
+    let expire_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
+        }
+    });
 
     // RFC 5187 §3.2 snapshot — same shape as v2. Captures the
     // `(ls_seq_number, ls_checksum)` of every restarter-originated
