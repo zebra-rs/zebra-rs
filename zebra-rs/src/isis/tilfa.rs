@@ -196,17 +196,45 @@ fn resolve_sid_to_label(
 /// for the first prefix-SID sub-TLV, then resolves Index against the
 /// originator's SRGB.
 fn node_sid_label_for_vertex(top: &IsisTop, level: Level, vertex: usize) -> Option<u32> {
-    let sys_id = *top.lsp_map.get(&level).resolve(vertex)?;
-    let entries = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id)?;
+    let Some(sys_id) = top.lsp_map.get(&level).resolve(vertex).copied() else {
+        tracing::debug!(
+            "[tilfa] node_sid {level:?} vertex={vertex}: no sys_id in lsp_map (vertex not in LSDB?)"
+        );
+        return None;
+    };
+    let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) else {
+        tracing::debug!(
+            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id}: \
+             reach_map has no IPv4 entries (peer didn't advertise TLV 135?)"
+        );
+        return None;
+    };
+    let mut saw_prefix_sid = false;
     for entry in entries.iter() {
         let Some(prefix_sid) = entry.prefix_sid() else {
             continue;
         };
+        saw_prefix_sid = true;
         if let Some(label) =
             resolve_sid_to_label(top, level, &sys_id, &prefix_sid.sid, SrBlockKind::Global)
         {
             return Some(label);
         }
+        tracing::debug!(
+            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id}: \
+             prefix={:?} prefix_sid={:?} could not resolve against SRGB \
+             (peer's label_map block missing or index out of range)",
+            entry.prefix,
+            prefix_sid.sid,
+        );
+    }
+    if !saw_prefix_sid {
+        tracing::debug!(
+            "[tilfa] node_sid {level:?} vertex={vertex} sys_id={sys_id}: \
+             {} IPv4 reach entries scanned, none carry a Prefix-SID sub-TLV \
+             (peer not advertising prefix-SID for any loopback?)",
+            entries.len(),
+        );
     }
     None
 }
@@ -300,15 +328,23 @@ fn repair_segments_to_mpls_labels(
     segments: &[spf::SrSegment],
 ) -> Option<Vec<rib::Label>> {
     let mut labels = Vec::with_capacity(segments.len());
-    for seg in segments {
-        let label = match seg {
-            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v)?,
+    for (idx, seg) in segments.iter().enumerate() {
+        let resolved = match seg {
+            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex(top, level, *v),
             spf::SrSegment::AdjSid(from, to, via) => {
-                adj_sid_label_for_link(top, level, *from, *to, *via)?
+                adj_sid_label_for_link(top, level, *from, *to, *via)
             }
+        };
+        let Some(label) = resolved else {
+            tracing::debug!(
+                "[tilfa] {level:?} repair segment[{idx}] {seg:?} failed to resolve to MPLS label; \
+                 dropping repair stack (partial: {labels:?})"
+            );
+            return None;
         };
         labels.push(rib::Label::Explicit(label));
     }
+    tracing::debug!("[tilfa] {level:?} repair segments resolved: {segments:?} -> {labels:?}");
     Some(labels)
 }
 
