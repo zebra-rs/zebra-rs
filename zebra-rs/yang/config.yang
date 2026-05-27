@@ -921,6 +921,29 @@ module config {
           }
         }
 
+        container graceful-restart {
+          // RFC 5306 helper-side configuration. zebra-rs is helper-only
+          // today; restarter-side mode (Phase 6+) needs LSDB/FIB
+          // checkpointing infrastructure that does not yet exist.
+          // Defaults match FRR: helper enabled out of the box, since
+          // helper behavior is transparent to peers that don't speak
+          // GR and lossless to peers that do.
+          leaf helper-enabled {
+            type boolean;
+            default true;
+            description
+              "Honor a peer's Restart TLV (RFC 5306). When true, an
+               IIH with RR=1 from an Up adjacency maintains the
+               adjacency, suppresses the hold-timer refresh on
+               retransmitted RR (RFC §3.2(a)), and triggers the §3.2(b)
+               RA reply plus an immediate CSNP+SRM kick on LANs where
+               we are the elected helper. When false, every Restart
+               TLV is observed for `show isis graceful-restart` but no
+               adjacency-state side effects occur — IIH+RR is
+               treated as any other IIH.";
+          }
+        }
+
         leaf multi-topology {
           // RFC 5120 M-ISIS Multi Topology (MT). IPv6 unicast is the
           // only option used in the industry today, so the enum

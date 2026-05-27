@@ -205,6 +205,12 @@ fn show_isis_graceful_restart(
 
     let mut buf = String::new();
     writeln!(buf, "Graceful Restart (RFC 5306) — helper mode")?;
+    let cfg_state = if isis.config.gr_helper_enabled {
+        "enabled (config)"
+    } else {
+        "DISABLED (config) — Restart TLVs observed but ignored"
+    };
+    writeln!(buf, "Helper: {}", cfg_state)?;
     writeln!(buf)?;
     writeln!(
         buf,

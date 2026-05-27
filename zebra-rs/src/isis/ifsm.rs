@@ -44,9 +44,14 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
 /// Time set to the actual seconds until the hold timer for that
 /// neighbor expires, and (LAN only) Restarting Neighbor System ID set
 /// to the restarter's System ID. `include_restarting_neighbor` is
-/// false for P2P, where the field is unused.
+/// false for P2P, where the field is unused. Returns an empty Vec
+/// when GR helper mode is disabled in config, so disabled instances
+/// never advertise themselves as helpers.
 fn helper_ra_tlvs(link: &LinkTop, level: Level, include_restarting_neighbor: bool) -> Vec<IsisTlv> {
     let mut out = Vec::new();
+    if !link.up_config.gr_helper_enabled {
+        return out;
+    }
     for nbr in link.state.nbrs.get(&level).values() {
         if !nbr.gr.helper_active {
             continue;

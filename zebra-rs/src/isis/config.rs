@@ -141,6 +141,10 @@ impl Isis {
             config_sr_srv6_locator,
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
+        self.callback_add(
+            "/router/isis/graceful-restart/helper-enabled",
+            config_gr_helper_enabled,
+        );
         self.callback_add("/router/isis/multi-topology", config_mt);
         self.callback_add("/router/isis/afi-safi/network", config_network);
 
@@ -348,7 +352,6 @@ impl Default for IsisDistribute {
     }
 }
 
-#[derive(Default)]
 pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
@@ -441,6 +444,17 @@ pub struct IsisConfig {
     /// Authentication for L2 self-originated LSPs and L2 SNPs.
     /// Same shape and lifecycle as `area_password`.
     pub domain_password: IsisAuthConfig,
+
+    /// RFC 5306 Graceful Restart helper-side enable
+    /// (`/router/isis/graceful-restart/helper-enabled`). Defaults to
+    /// true — helper behavior is transparent to peers that don't
+    /// speak GR and lossless to peers that do, so out-of-the-box on
+    /// matches FRR / IOS. When false, the IIH receive path treats
+    /// every Restart TLV as ignorable: hold timer always refreshes,
+    /// no RA in outbound IIH, no §3.2(b) CSNP kick. Observation
+    /// still feeds `show isis graceful-restart` so operators can see
+    /// what the peer sent.
+    pub gr_helper_enabled: bool,
 }
 
 /// AFI key for the redistribute map. Mirrors the
@@ -583,6 +597,49 @@ impl IsisAuthConfig {
             Self::DEFAULT_KEY_ID
         } else {
             self.key_id
+        }
+    }
+}
+
+impl Default for IsisConfig {
+    // Manual rather than derived because `gr_helper_enabled` defaults
+    // to `true` (matches the YANG default for
+    // `/router/isis/graceful-restart/helper-enabled` and FRR's
+    // out-of-the-box behavior). Every other field still takes
+    // `Default::default()` so adding a new field here is the same
+    // boilerplate as adding it to the derive.
+    fn default() -> Self {
+        Self {
+            net: Default::default(),
+            hostname: Default::default(),
+            is_type: Default::default(),
+            refresh_time: Default::default(),
+            hold_time: Default::default(),
+            min_lsp_arrival_time: Default::default(),
+            spf_initial_wait: Default::default(),
+            spf_secondary_wait: Default::default(),
+            spf_maximum_wait: Default::default(),
+            lsp_gen_initial_wait: Default::default(),
+            lsp_gen_secondary_wait: Default::default(),
+            lsp_gen_maximum_wait: Default::default(),
+            lsp_mtu_size: Default::default(),
+            te_router_id: Default::default(),
+            rib_router_id: Default::default(),
+            enable: Default::default(),
+            distribute: Default::default(),
+            sr_mpls_enabled: Default::default(),
+            sr_srv6_enabled: Default::default(),
+            sr_srv6_locator: Default::default(),
+            sr_srv6_flex_algo_locators: Default::default(),
+            ti_lfa_enabled: Default::default(),
+            mt_enabled: Default::default(),
+            mt_topologies: Default::default(),
+            networks_v4: Default::default(),
+            networks_v6: Default::default(),
+            redistribute: Default::default(),
+            area_password: Default::default(),
+            domain_password: Default::default(),
+            gr_helper_enabled: true,
         }
     }
 }
@@ -1069,6 +1126,19 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     // drops them (on disable) for every prefix in this instance.
     let _ = isis.tx.send(Message::SpfCalc(Level::L1));
     let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    Some(())
+}
+
+/// `/router/isis/graceful-restart/helper-enabled`. Gates the
+/// helper-mode behavior wired in Phases 3a/3b: hold-timer-refresh
+/// suppression on retransmitted RR, RA reply in outbound IIH, and the
+/// §3.2(b) CSNP+SRM kick. On disable, the IIH receive path keeps
+/// observing Restart TLVs for `show isis graceful-restart` so the
+/// signaling stays diagnosable, but no adjacency-state side effect
+/// occurs.
+fn config_gr_helper_enabled(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    isis.config.gr_helper_enabled = value;
     Some(())
 }
 
