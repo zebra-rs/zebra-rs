@@ -32,6 +32,13 @@ pub struct Timer {
     tx: UnboundedSender<TimerMessage>,
     duration: Duration,              // Store the timer duration
     last_reset: Arc<Mutex<Instant>>, // Track the last reset time
+    join_handle: task::JoinHandle<()>,
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.join_handle.abort();
+    }
 }
 
 #[derive(Debug)]
@@ -66,7 +73,7 @@ impl Timer {
         let last_reset = Arc::new(Mutex::new(Instant::now()));
 
         let last_reset_clone = last_reset.clone();
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(duration);
             if typ != TimerType::ImmediateRepeat {
                 _ = interval.tick().await;
@@ -102,6 +109,7 @@ impl Timer {
             tx,
             duration,
             last_reset,
+            join_handle,
         }
     }
 
