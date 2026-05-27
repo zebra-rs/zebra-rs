@@ -125,6 +125,11 @@ pub struct LinkTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub flags: &'a LinkFlags,
     pub up_config: &'a IsisConfig,
+    /// Snapshot of the per-instance `Isis.restarting` state. `Some`
+    /// only between `clear isis graceful-restart begin` and either
+    /// `abort` / `restarter-enabled=false` / (Phase 5d+) successful
+    /// exit. Read by the IIH send path to attach RR=1.
+    pub restarting: Option<&'a super::inst::RestartingState>,
     pub tracing: &'a IsisTracing,
     pub config: &'a LinkConfig,
     pub state: &'a mut LinkState,

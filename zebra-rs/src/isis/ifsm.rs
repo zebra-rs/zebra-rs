@@ -39,6 +39,24 @@ pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
     IsisTlvProtoSupported { nlpids }
 }
 
+/// RFC 5306 §3.1 — when this instance is staged for restart, every
+/// outbound IIH carries a Restart TLV with RR=1. Remaining Time
+/// echoes the operator-requested grace period so helpers can seed
+/// their T3 from a non-zero value. Returns None when no restart is
+/// staged or when the restarter-enabled knob is off, so the IIH
+/// build path stays unchanged for normal operation.
+fn restarter_rr_tlv(link: &LinkTop) -> Option<IsisTlv> {
+    if !link.up_config.gr_restarter_enabled {
+        return None;
+    }
+    let r = link.restarting?;
+    Some(IsisTlv::Restart(IsisTlvRestart {
+        flags: ISIS_RESTART_FLAG_RR,
+        remaining_time: Some(r.grace_period_secs.min(u16::MAX as u32) as u16),
+        restarting_neighbor: None,
+    }))
+}
+
 /// RFC 5306 §3.2(b) — for every neighbor on this link/level currently
 /// observed in helper mode, produce a Restart TLV with RA=1, Remaining
 /// Time set to the actual seconds until the hold timer for that
@@ -142,6 +160,12 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     }
     hello.tlvs.push(IsisTlvIsNeighbor { neighbors }.into());
 
+    // RFC 5306 §3.1 RR for this instance, if we're the staged
+    // restarter. Empty for normal operation.
+    if let Some(tlv) = restarter_rr_tlv(link) {
+        hello.tlvs.push(tlv);
+    }
+
     // RFC 5306 §3.2(b) RA reply for each helper-active neighbor at
     // this level. Empty when no peer is mid-restart, so non-GR
     // deployments pay nothing.
@@ -232,6 +256,11 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         }
     };
     hello.tlvs.push(tlv.into());
+
+    // RFC 5306 §3.1 RR for this instance, if staged for restart.
+    if let Some(tlv) = restarter_rr_tlv(link) {
+        hello.tlvs.push(tlv);
+    }
 
     // RFC 5306 §3.2(b) RA reply on P2P. Restarting Neighbor System ID
     // is unused on P2P circuits, so omit it. At most one TLV emitted

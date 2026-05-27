@@ -145,6 +145,10 @@ impl Isis {
             "/router/isis/graceful-restart/helper-enabled",
             config_gr_helper_enabled,
         );
+        self.callback_add(
+            "/router/isis/graceful-restart/restarter-enabled",
+            config_gr_restarter_enabled,
+        );
         self.callback_add("/router/isis/multi-topology", config_mt);
         self.callback_add("/router/isis/afi-safi/network", config_network);
 
@@ -455,6 +459,15 @@ pub struct IsisConfig {
     /// still feeds `show isis graceful-restart` so operators can see
     /// what the peer sent.
     pub gr_helper_enabled: bool,
+
+    /// RFC 5306 Graceful Restart restarter-side enable
+    /// (`/router/isis/graceful-restart/restarter-enabled`). Defaults
+    /// to **false** — until Phase 5d wires the exit path,
+    /// advertising restarter capability without it would tear down
+    /// routes on every restart while still claiming GR to peers.
+    /// Gates `clear isis graceful-restart begin` and the IIH+RR
+    /// origination.
+    pub gr_restarter_enabled: bool,
 }
 
 /// AFI key for the redistribute map. Mirrors the
@@ -640,6 +653,7 @@ impl Default for IsisConfig {
             area_password: Default::default(),
             domain_password: Default::default(),
             gr_helper_enabled: true,
+            gr_restarter_enabled: false,
         }
     }
 }
@@ -1139,6 +1153,21 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
 fn config_gr_helper_enabled(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = if op.is_set() { args.boolean()? } else { true };
     isis.config.gr_helper_enabled = value;
+    Some(())
+}
+
+/// `/router/isis/graceful-restart/restarter-enabled`. Gates
+/// `clear isis graceful-restart begin` and the IIH+RR origination.
+/// On disable while restarting, the restart state is cleared and
+/// the next periodic Hello goes out with RR=0 (same effect as
+/// `clear isis graceful-restart abort`).
+fn config_gr_restarter_enabled(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { false };
+    if !value && isis.restarting.is_some() {
+        // Toggling the knob off mid-restart unwinds the staging.
+        isis.restarting = None;
+    }
+    isis.config.gr_restarter_enabled = value;
     Some(())
 }
 

@@ -115,6 +115,21 @@ module configure {
           type empty;
         }
       }
+      container graceful-restart {
+        // RFC 5306 restarter-side staging. `begin` arms the
+        // restart state and floods IIH+RR on every Up interface;
+        // helpers around us enter helper mode and reply with RA.
+        // `abort` walks the staging back. Phase 5c only — `commit`
+        // (Phase 5d) writes the checkpoint and exits the process.
+        leaf begin {
+          ext:help "Stage a graceful restart: flood IIH+RR and freeze self-LSP refresh";
+          type empty;
+        }
+        leaf abort {
+          ext:help "Abort a staged graceful restart and resume normal operation";
+          type empty;
+        }
+      }
     }
     container ospf {
       // Force-recalculate the OSPFv2 SPF for every attached area

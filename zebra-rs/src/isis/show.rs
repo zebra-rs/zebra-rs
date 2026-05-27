@@ -211,7 +211,26 @@ fn show_isis_graceful_restart(
     } else {
         "DISABLED (config) — Restart TLVs observed but ignored"
     };
-    writeln!(buf, "Helper: {}", cfg_state)?;
+    writeln!(buf, "Helper:    {}", cfg_state)?;
+    // Restarter side: config + current staged-restart state. Each
+    // is independent of the helper flag — an instance can be a
+    // helper for peers while also restarting itself.
+    let restarter_cfg = if isis.config.gr_restarter_enabled {
+        "enabled (config)"
+    } else {
+        "disabled (config)"
+    };
+    write!(buf, "Restarter: {}", restarter_cfg)?;
+    if let Some(r) = isis.restarting.as_ref() {
+        let elapsed = r.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+        writeln!(
+            buf,
+            " — STAGED, grace={}s, elapsed={}s",
+            r.grace_period_secs, elapsed,
+        )?;
+    } else {
+        writeln!(buf)?;
+    }
     writeln!(buf)?;
     writeln!(
         buf,

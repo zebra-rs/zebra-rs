@@ -51,6 +51,23 @@ pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std
 
 pub type MsgSender = UnboundedSender<Message>;
 
+/// In-progress RFC 5306 restart state. `Some` between
+/// `clear isis graceful-restart begin` and either `abort`, the
+/// `restarter-enabled` knob flipping off, or (Phase 5d+) the
+/// successful exit-restart completion.
+#[derive(Debug)]
+pub struct RestartingState {
+    /// Wall-clock at restart start. Phase 5b checkpoint freshness
+    /// and Phase 5e's T3 use this to bound how long the restart
+    /// can take.
+    pub started_at: std::time::SystemTime,
+    /// Grace period requested at restart begin (seconds). Carried
+    /// in the Restart TLV's `Remaining Time` field once Phase 5d's
+    /// exit path encodes the deadline; today it's the operator-
+    /// supplied or default value the begin handler captured.
+    pub grace_period_secs: u32,
+}
+
 pub struct Isis {
     pub tx: UnboundedSender<Message>,
     pub rx: UnboundedReceiver<Message>,
@@ -62,6 +79,15 @@ pub struct Isis {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub config: IsisConfig,
+
+    /// In-progress RFC 5306 restart, if any. `None` outside a
+    /// staged restart. Read by the IIH send path to attach RR=1 to
+    /// outbound Hellos, and by the LSP refresh dispatcher to
+    /// suppress seq bumps mid-restart (RFC 5306 §3.1 forbids
+    /// re-originating at higher seq during restart — would trip
+    /// helpers' MaxSeqAdvance recovery).
+    pub restarting: Option<RestartingState>,
+
     /// Flex-Algorithm (RFC 9350) configuration tree, keyed by the
     /// numeric algorithm identifier (128..=255). Owns its own
     /// pending-cache → commit pipeline mirroring the static-route
@@ -477,6 +503,7 @@ impl Isis {
                 show: ShowChannel::new(),
                 show_cb: HashMap::new(),
                 config: IsisConfig::default(),
+                restarting: None,
                 flex_algo: super::flex_algo::FlexAlgoConfig::new(),
                 affinity_map: super::affinity_map::AffinityMap::new(),
                 tracing: IsisTracing::default(),
@@ -588,6 +615,15 @@ impl Isis {
                 "/clear/isis/checkpoint/clear" => {
                     self.checkpoint_clear_debug();
                 }
+                "/clear/isis/graceful-restart/begin" => {
+                    // Default grace period 120s — matches OSPF's
+                    // operator-default. Phase 5d's `commit` will
+                    // accept an optional `period N` arg.
+                    self.gr_restart_begin(120);
+                }
+                "/clear/isis/graceful-restart/abort" => {
+                    self.gr_restart_abort();
+                }
                 _ => {
                     //
                 }
@@ -650,6 +686,67 @@ impl Isis {
             }
             Err(e) => {
                 tracing::error!("[GR Checkpoint] write to {} failed: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// `clear isis graceful-restart begin` — stage a restart per
+    /// RFC 5306 §3.1. Arms `self.restarting`, freezes self-LSP
+    /// refresh, and kicks an IIH on every link so the next
+    /// outbound Hello carries RR=1. Helpers around us see this and
+    /// enter helper mode (their Phase 3a path), replying with RA.
+    ///
+    /// Phase 5c only — no actual exit happens. `commit` (Phase 5d)
+    /// will extend this with checkpoint write + drain + despawn.
+    /// `abort` walks the staging back without exiting.
+    fn gr_restart_begin(&mut self, grace_period_secs: u32) {
+        if !self.config.gr_restarter_enabled {
+            tracing::warn!(
+                "[GR Restart] begin ignored: graceful-restart restarter-enabled is false"
+            );
+            return;
+        }
+        if self.restarting.is_some() {
+            tracing::warn!("[GR Restart] begin ignored: already restarting");
+            return;
+        }
+        self.restarting = Some(RestartingState {
+            started_at: std::time::SystemTime::now(),
+            grace_period_secs,
+        });
+        tracing::info!(
+            "[GR Restart] staged, grace period {}s; flooding IIH+RR on all links",
+            grace_period_secs,
+        );
+        self.kick_hello_all_links();
+    }
+
+    /// `clear isis graceful-restart abort` — walk back a staged
+    /// restart. Clears `self.restarting`, re-allows LSP refresh,
+    /// and kicks an IIH on every link so peers see RR=0 and exit
+    /// helper mode. No-op when no restart is staged.
+    fn gr_restart_abort(&mut self) {
+        if self.restarting.take().is_none() {
+            tracing::warn!("[GR Restart] abort: no restart staged");
+            return;
+        }
+        tracing::info!("[GR Restart] aborted; flooding IIH with RR=0");
+        self.kick_hello_all_links();
+    }
+
+    /// Fire `HelloOriginate` for every (link, level) pair so the
+    /// next IIH on every interface reflects the freshly-changed
+    /// `self.restarting` state. `hello_send`'s own `has_level`
+    /// filter drops the level the link doesn't run, so sending
+    /// both unconditionally is safe.
+    fn kick_hello_all_links(&self) {
+        for (ifindex, _) in self.links.iter() {
+            for level in [Level::L1, Level::L2] {
+                let _ = self.tx.send(Message::Ifsm(
+                    IfsmEvent::HelloOriginate,
+                    *ifindex,
+                    Some(level),
+                ));
             }
         }
     }
@@ -1241,6 +1338,16 @@ impl Isis {
 
     fn process_lsdb(&mut self, ev: LsdbEvent, level: Level, key: IsisLspId) {
         use LsdbEvent::*;
+        // RFC 5306 §3.1: during restart, we MUST NOT re-originate
+        // our self-LSPs at a higher sequence number — helpers
+        // would treat the bump as a topology change and trip their
+        // MaxSeqAdvance recovery, tearing the restart down. Skip
+        // the refresh entirely; the timer keeps ticking and the
+        // post-restart `restarting = None` path resumes normal
+        // refresh cadence on the next expiry.
+        if self.restarting.is_some() && matches!(ev, RefreshTimerExpire) {
+            return;
+        }
         let mut top = self.top();
         match ev {
             RefreshTimerExpire => {
@@ -1452,6 +1559,7 @@ impl Isis {
             tx: &self.tx,
             ptx: &link.ptx,
             up_config: &self.config,
+            restarting: self.restarting.as_ref(),
             tracing: &self.tracing,
             lsdb: &mut self.lsdb,
             flags: &link.flags,
