@@ -67,7 +67,7 @@ fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} Hostname",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} Hostname",
         "Neighbor",
         "V",
         "AS",
@@ -77,8 +77,8 @@ fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
         "InQ",
         "OutQ",
         "Up/Down",
-        "State/PfxRcd",
-        "PfxSnt",
+        "State",
+        "PfxRcd/Snt",
     )
 }
 
@@ -93,16 +93,15 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
     let up_down = uptime(&peer.instant);
     let negotiated = peer_has_negotiated(peer, afi, safi);
 
-    let (pfx_rcvd_str, pfx_sent_str) = if !negotiated {
-        ("NoNeg".to_string(), "NoNeg".to_string())
-    } else if peer.state != State::Established {
-        // Show the FSM state in place of the prefix count; PfxSnt is
-        // meaningless before the session is up, so render "0".
-        (peer.state.to_str().to_string(), "0".to_string())
+    let state_str = peer.state.to_str().to_string();
+    let pfx_str = if peer.state != State::Established {
+        "N/A".to_string()
+    } else if !negotiated {
+        "NoNeg".to_string()
     } else {
         let pr = peer.adj_in.count(afi, safi);
         let ps = peer.adj_out.count(afi, safi);
-        (pr.to_string(), ps.to_string())
+        format!("{}/{}", pr, ps)
     };
 
     let hostname = peer
@@ -114,7 +113,7 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
 
     writeln!(
         buf,
-        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9}{:>13}{:>9} {}",
+        "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} {}",
         peer.address.to_string(),
         "4",
         peer.remote_as,
@@ -124,8 +123,8 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
         "0", // InQ — not tracked today
         "0", // OutQ — not tracked today
         up_down,
-        pfx_rcvd_str,
-        pfx_sent_str,
+        state_str,
+        pfx_str,
         hostname,
     )
 }
@@ -2069,7 +2068,7 @@ mod summary_tests {
         let mut buf = String::new();
         write_summary_header_row(&mut buf).unwrap();
         let expected = "\
-Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State/PfxRcd   PfxSnt Hostname\n";
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname\n";
         assert_eq!(buf, expected);
     }
 
