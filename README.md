@@ -1,6 +1,4 @@
-# zebra-rs
-
-<img src="docs/logo.png" alt="Project Logo" width="100" height="100">
+# <img src="docs/logo.png" alt="Project Logo" width="100" height="100"> zebra-rs
 
 This is a routing protocol implementation project Zebra.
 
