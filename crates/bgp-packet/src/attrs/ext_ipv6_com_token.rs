@@ -11,7 +11,7 @@ pub enum Token {
 
 fn parse_ipv6_value(s: &str) -> Option<(Ipv6Addr, u16)> {
     let pos = s.rfind(':')?;
-    let (addr, val) = s.split_at(pos);
+    let (addr, val) = s.split_at_checked(pos)?;
 
     // Normalize [3001:2001::] and 3001:2001::.
     let re = Regex::new(r"^\[?([^]]+)\]?$").unwrap();
