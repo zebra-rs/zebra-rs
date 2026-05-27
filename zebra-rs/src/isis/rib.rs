@@ -137,7 +137,12 @@ pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
 pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
 pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
-fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> rib::NexthopUni {
+fn nhop_to_nexthop_uni(
+    key: &Ipv4Addr,
+    route: &SpfRoute,
+    value: &SpfNexthop,
+    metric: u32,
+) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
         mpls.push(if value.adjacency {
@@ -146,7 +151,7 @@ fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> 
             rib::Label::Explicit(sid)
         });
     }
-    let mut nhop = rib::NexthopUni::from(*key, route.metric, mpls);
+    let mut nhop = rib::NexthopUni::from(*key, metric, mpls);
     // IS-IS knows the egress link from the adjacency state machine —
     // record it as the origin so the RIB resolver doesn't re-derive
     // (and potentially mis-derive) the link via a recursive table
@@ -155,19 +160,28 @@ fn nhop_to_nexthop_uni(key: &Ipv4Addr, route: &SpfRoute, value: &SpfNexthop) -> 
     nhop
 }
 
-fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
+fn make_rib_entry(route: &SpfRoute, backup_as_primary: bool) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
     // Flatten primaries and (when present) their TI-LFA repair backups
     // into a single Vec at distinct metrics; build_rib_nexthop groups
     // them by metric and routes Multi-vs-List dispatch from there.
-    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    //
+    // `backup_as_primary` flips the metric-sort offset: when set, the
+    // repair installs at route.metric (sorted first) and the SPF
+    // primary installs at route.metric + BACKUP_METRIC_OFFSET.
+    let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let (primary_metric, backup_metric) = if backup_as_primary {
+        (offset_metric, route.metric)
+    } else {
+        (route.metric, offset_metric)
+    };
     let nhops: Vec<rib::NexthopUni> = route
         .nhops
         .iter()
         .flat_map(|(key, value)| {
-            let primary = nhop_to_nexthop_uni(key, route, value);
+            let primary = nhop_to_nexthop_uni(key, route, value, primary_metric);
             let backup = value
                 .backup
                 .as_ref()
@@ -329,11 +343,15 @@ pub fn diff_apply_flex_algo(
     }
 }
 
-pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
+pub fn diff_apply(
+    rib_client: &crate::rib::client::RibClient,
+    diff: &DiffResult,
+    backup_as_primary: bool,
+) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, backup_as_primary);
             let msg = rib::Message::Ipv4Del {
                 prefix: *prefix,
                 rib,
@@ -344,7 +362,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
     // Add (changed).
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, backup_as_primary);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -355,7 +373,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
     // Add (new).
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, backup_as_primary);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -369,6 +387,7 @@ fn nhop_to_nexthop_uni_v6(
     key: &Ipv6Addr,
     route: &SpfRouteV6,
     value: &SpfNexthopV6,
+    metric: u32,
 ) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
@@ -378,7 +397,7 @@ fn nhop_to_nexthop_uni_v6(
             rib::Label::Explicit(sid)
         });
     }
-    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), route.metric, mpls);
+    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), metric, mpls);
     // IPv6 link-local nexthops can't be disambiguated by table
     // lookup — every interface advertises fe80::/64. The adjacency
     // already pinned the egress link, so record it as the origin.
@@ -386,16 +405,21 @@ fn nhop_to_nexthop_uni_v6(
     nhop
 }
 
-fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
+fn make_rib_entry_v6(route: &SpfRouteV6, backup_as_primary: bool) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
-    let backup_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let (primary_metric, backup_metric) = if backup_as_primary {
+        (offset_metric, route.metric)
+    } else {
+        (route.metric, offset_metric)
+    };
     let nhops: Vec<rib::NexthopUni> = route
         .nhops
         .iter()
         .flat_map(|(key, value)| {
-            let primary = nhop_to_nexthop_uni_v6(key, route, value);
+            let primary = nhop_to_nexthop_uni_v6(key, route, value, primary_metric);
             let backup = value
                 .backup
                 .as_ref()
@@ -415,10 +439,14 @@ fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::Nextho
     nhop
 }
 
-pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResultV6) {
+pub fn diff_apply_v6(
+    rib_client: &crate::rib::client::RibClient,
+    diff: &DiffResultV6,
+    backup_as_primary: bool,
+) {
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, backup_as_primary);
             let msg = rib::Message::Ipv6Del {
                 prefix: *prefix,
                 rib,
@@ -428,7 +456,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
     }
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, backup_as_primary);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -438,7 +466,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
     }
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, backup_as_primary);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -1012,17 +1040,19 @@ fn apply_routing_updates(
     }
     *top.ilm.get_mut(&level) = ilm;
 
+    let backup_as_primary = top.config.fast_reroute_backup_as_primary;
+
     // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
-        diff_apply(top.rib_client, &diff);
+        diff_apply(top.rib_client, &diff, backup_as_primary);
     }
     *top.rib.get_mut(&level) = rib;
 
     // Update IPv6 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
-        diff_apply_v6(top.rib_client, &diff);
+        diff_apply_v6(top.rib_client, &diff, backup_as_primary);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1820,7 +1850,7 @@ mod tests {
             prefix_sid: None,
             dest_vertex: None,
         };
-        let entry = make_rib_entry(&route);
+        let entry = make_rib_entry(&route, false);
         assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
     }
 
@@ -1853,7 +1883,7 @@ mod tests {
             prefix_sid: None,
             dest_vertex: None,
         };
-        let entry = make_rib_entry(&route);
+        let entry = make_rib_entry(&route, false);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -1873,6 +1903,56 @@ mod tests {
         assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
         assert_eq!(b.mpls.len(), 2);
         assert_eq!(b.ifindex_origin, Some(20));
+    }
+
+    #[test]
+    fn make_rib_entry_with_backup_as_primary_inverts_metric_order() {
+        // backup-as-primary=true swaps the metric offset: the repair
+        // installs at route.metric (sorted first) and the SPF primary
+        // installs at route.metric + BACKUP_METRIC_OFFSET.
+        let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            primary_addr,
+            SpfNexthop {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathMpls {
+                    ifindex: 20,
+                    addr: backup_addr,
+                    labels: vec![rib::Label::Implicit(16002)],
+                }),
+            },
+        );
+        let route = SpfRoute {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+        };
+        let entry = make_rib_entry(&route, true);
+
+        let rib::Nexthop::List(list) = &entry.nexthop else {
+            panic!("expected List, got {:?}", entry.nexthop);
+        };
+        assert_eq!(list.nexthops.len(), 2);
+
+        // First member is the backup (now at the lower metric).
+        let rib::NexthopMember::Uni(b) = &list.nexthops[0] else {
+            panic!("expected Uni backup, got {:?}", list.nexthops[0]);
+        };
+        assert_eq!(b.metric, 20);
+        assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
+
+        // Second member is the SPF primary (now at metric+offset).
+        let rib::NexthopMember::Uni(p) = &list.nexthops[1] else {
+            panic!("expected Uni primary, got {:?}", list.nexthops[1]);
+        };
+        assert_eq!(p.metric, 21);
+        assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
     }
 
     #[test]
@@ -1906,7 +1986,7 @@ mod tests {
             prefix_sid: None,
             dest_vertex: None,
         };
-        let entry = make_rib_entry_v6(&route);
+        let entry = make_rib_entry_v6(&route, false);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
