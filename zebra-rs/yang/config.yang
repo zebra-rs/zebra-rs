@@ -922,12 +922,13 @@ module config {
         }
 
         container graceful-restart {
-          // RFC 5306 helper-side configuration. zebra-rs is helper-only
-          // today; restarter-side mode (Phase 6+) needs LSDB/FIB
-          // checkpointing infrastructure that does not yet exist.
-          // Defaults match FRR: helper enabled out of the box, since
-          // helper behavior is transparent to peers that don't speak
-          // GR and lossless to peers that do.
+          // RFC 5306 helper and restarter configuration. Defaults
+          // match FRR: helper enabled out of the box (transparent /
+          // lossless), restarter OFF until the exit-wiring (Phase
+          // 5d) + restart-aware boot (5e) make the full path safe.
+          // Restarter capability advertised on the wire without the
+          // exit path would tear down routes on every restart while
+          // still claiming GR to peers — worse than no GR.
           leaf helper-enabled {
             type boolean;
             default true;
@@ -941,6 +942,18 @@ module config {
                TLV is observed for `show isis graceful-restart` but no
                adjacency-state side effects occur — IIH+RR is
                treated as any other IIH.";
+          }
+          leaf restarter-enabled {
+            type boolean;
+            default false;
+            description
+              "Allow this instance to act as the restarter side of
+               RFC 5306 graceful restart. When true, an operator-
+               triggered `clear isis graceful-restart begin` floods
+               IIH+RR on every Up interface and freezes self-LSP
+               refresh. When false, the `clear` is a no-op — until
+               the Phase 5d exit-wiring lands, advertising restarter
+               capability without it would be worse than no GR.";
           }
         }
 
