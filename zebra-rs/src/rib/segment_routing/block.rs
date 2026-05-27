@@ -14,13 +14,9 @@ use crate::spf::label_block::LabelBlock;
 /// Applied snapshot of an SR-MPLS block, exported to the rest of the system
 /// once a config commit lands. `global` and `local` are populated only when
 /// both `start` and `range` were configured for the corresponding container.
-///
-/// Fields carry `#[allow(dead_code)]` until the IS-IS-side `mpls/block`
-/// handler reads them by name from `Rib::blocks`.
-#[allow(dead_code)]
+/// Keyed by name in `Rib::blocks`.
 #[derive(Debug, Default, Clone)]
 pub struct Block {
-    pub name: String,
     /// SR Global Block (SRGB) — prefix-SID label range.
     pub global: Option<LabelBlock>,
     /// SR Local Block (SRLB) — adjacency-SID label range.
@@ -42,7 +38,6 @@ impl Block {
     /// after a delete of the same name. SRGB 16000..23999 + SRLB 15000..15099.
     pub fn default_block() -> Self {
         Self {
-            name: DEFAULT_BLOCK_NAME.to_string(),
             global: Some(LabelBlock::new(DEFAULT_GLOBAL_START, DEFAULT_GLOBAL_RANGE)),
             local: Some(LabelBlock::new(DEFAULT_LOCAL_START, DEFAULT_LOCAL_RANGE)),
         }
@@ -73,7 +68,7 @@ pub struct BlockConfig {
 }
 
 impl BlockConfig {
-    pub fn to_block(&self, name: &str) -> Block {
+    pub fn to_block(&self) -> Block {
         let global = match (self.global_start, self.global_range) {
             (Some(start), Some(range)) => Some(LabelBlock::new(start, range)),
             _ => None,
@@ -82,11 +77,7 @@ impl BlockConfig {
             (Some(start), Some(range)) => Some(LabelBlock::new(start, range)),
             _ => None,
         };
-        Block {
-            name: name.to_string(),
-            global,
-            local,
-        }
+        Block { global, local }
     }
 }
 
@@ -276,7 +267,6 @@ mod tests {
     #[test]
     fn default_block_has_canonical_values() {
         let b = Block::default_block();
-        assert_eq!(b.name, DEFAULT_BLOCK_NAME);
 
         // LabelBlock stores (start, end = start + range), so verify the
         // pair through that derived shape.

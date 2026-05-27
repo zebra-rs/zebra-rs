@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 
 use crate::rib::RibEntries;
-use crate::rib::inst::IlmEntry;
 
 /// Applied state for one VRF instance.
 ///
@@ -42,17 +39,8 @@ pub struct Vrf {
 /// routes the install into the matching inner table.
 #[derive(Debug, Default)]
 pub struct VrfRibTables {
-    // Step 9's dispatcher reads these. Until then VrfAdd parks an
-    // empty `VrfRibTables` per VRF, and the unit tests below
-    // exercise construction — nothing in the bin target writes or
-    // reads the inner maps yet, so allow dead_code at the field
-    // level rather than churn it in/out across two PRs.
-    #[allow(dead_code)]
     pub table: PrefixMap<Ipv4Net, RibEntries>,
-    #[allow(dead_code)]
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
-    #[allow(dead_code)]
-    pub ilm: BTreeMap<u32, IlmEntry>,
 }
 
 impl VrfRibTables {
@@ -70,7 +58,6 @@ mod tests {
         let t = VrfRibTables::new();
         assert!(t.table.iter().next().is_none());
         assert!(t.table_v6.iter().next().is_none());
-        assert!(t.ilm.is_empty());
     }
 
     #[test]
@@ -79,6 +66,5 @@ mod tests {
         let b = VrfRibTables::default();
         assert_eq!(a.table.iter().count(), b.table.iter().count());
         assert_eq!(a.table_v6.iter().count(), b.table_v6.iter().count());
-        assert_eq!(a.ilm.len(), b.ilm.len());
     }
 }

@@ -13,11 +13,6 @@ use ipnet::Ipv6Net;
 /// SRv6 endpoint behavior for an allocated SID. RFC 8986 base set plus
 /// the RFC 9800 NEXT-C-SID (uSID) variants we install today; other
 /// behaviors (End.DT4, End.DT6, End.B6, ...) extend the enum.
-///
-/// `#[allow(dead_code)]` on the type until PR 2 starts populating the
-/// registry; the show callback already discriminates on every variant
-/// so no individual variant carries the attribute.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum SidBehavior {
     /// Plain End — RFC 8986 §4.1, "node SID". The SID identifies the
@@ -94,7 +89,6 @@ impl std::error::Error for SidBehaviorParseError {}
 /// Required to install a uSID SID into the kernel because the
 /// `seg6local` NEXT-C-SID flavor needs Lblen / Nflen attributes to
 /// know what to shift; classic End / End.X don't carry one.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidStructure {
     pub lb_bits: u8,
@@ -106,7 +100,6 @@ pub struct SidStructure {
 /// Optional context that disambiguates per-link / per-VRF SIDs. End is
 /// always `None`; End.X carries the outgoing interface name. Future
 /// per-VRF behaviors (End.DT4, End.DT6) would add a `Vrf(String)`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidContext {
     None,
@@ -122,22 +115,17 @@ impl fmt::Display for SidContext {
     }
 }
 
-/// How the SID's function bits were chosen. `Dynamic` is the common
-/// case (allocator picks the next free function); `Explicit` covers an
-/// operator-configured SID and is reserved for a future static-SID
-/// feature.
-#[allow(dead_code)]
+/// How the SID's function bits were chosen. Only `Dynamic` is used
+/// today (allocator picks the next free function).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidAllocationType {
     Dynamic,
-    Explicit,
 }
 
 impl fmt::Display for SidAllocationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dynamic => write!(f, "dynamic"),
-            Self::Explicit => write!(f, "explicit"),
         }
     }
 }
@@ -153,7 +141,6 @@ pub struct SidOwner {
 }
 
 impl SidOwner {
-    #[allow(dead_code)] // first user lands in PR 2 (IS-IS End SID allocator)
     pub fn new(proto: impl Into<String>, instance: u32) -> Self {
         Self {
             proto: proto.into(),
@@ -178,7 +165,6 @@ impl fmt::Display for SidOwner {
 ///     output device); `nh6` is `None`.
 ///   - End.X: `ifindex` is the outgoing link, `nh6` is the IPv6 link-
 ///     local of the neighbor.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sid {
     pub addr: Ipv6Addr,
@@ -296,6 +282,5 @@ mod tests {
         // Lower-case matches the FRR-style table in the design doc and
         // keeps the column narrow.
         assert_eq!(SidAllocationType::Dynamic.to_string(), "dynamic");
-        assert_eq!(SidAllocationType::Explicit.to_string(), "explicit");
     }
 }

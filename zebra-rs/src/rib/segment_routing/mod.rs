@@ -11,19 +11,11 @@ pub mod locator;
 pub use locator::{Locator, LocatorBehavior, LocatorBuilder, LocatorConfig};
 
 pub mod sid;
-// PR 2 wires up the IS-IS allocators that consume these types; until
-// then only the show callback reaches into `Sid` and these helper
-// types stay technically unused at the crate boundary.
-#[allow(unused_imports)]
 pub use sid::{Sid, SidAllocationType, SidBehavior, SidContext, SidOwner, SidStructure};
 
 /// Subscription-channel return type from RIB to a protocol module.
 /// `block: None` / `locator: None` signals deletion (or "doesn't exist
 /// yet" if the protocol asked for a name that hasn't been configured).
-///
-/// The variants carry `#[allow(dead_code)]` until PR 2 of this branch
-/// wires the IS-IS-side consumer that destructures them.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum RibSrRx {
     Block {

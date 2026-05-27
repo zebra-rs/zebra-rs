@@ -156,7 +156,6 @@ impl RibSubType {
 /// Address-family selector for a redistribute subscription. Kept as a
 /// thin enum (not the heavier `bgp_packet::AfiSafi`) because RIB only
 /// distinguishes IPv4 vs IPv6 for redistribution — SAFI doesn't apply.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
 pub enum RedistAfi {
     Ipv4,
@@ -168,7 +167,6 @@ pub enum RedistAfi {
 /// `Eor` marks the end of the initial walk-and-replay triggered by
 /// `RedistAdd` / `RedistUpdate`, or the final batch of withdrawals
 /// triggered by `RedistDel`.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum BulkPhase {
     More,
@@ -185,7 +183,6 @@ pub enum BulkPhase {
 /// `subtype` is per-entry (not per-message) so a wildcard
 /// subscription replays in a single pass with one final EoR, instead
 /// of N walks and N EoRs (one per subtype).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntryV4 {
     pub prefix: ipnet::Ipv4Net,
@@ -196,7 +193,6 @@ pub struct RouteEntryV4 {
     pub ifindex: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntryV6 {
     pub prefix: ipnet::Ipv6Net,
@@ -211,37 +207,14 @@ pub struct RouteEntryV6 {
 /// `RouteDel` message — keeps the inner `Vec` tight (no per-entry
 /// AFI tag, no `enum{V4(…),V6(…)}` overhead) since a single
 /// subscription is always one AFI by construction.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteBatch {
     V4(Vec<RouteEntryV4>),
     V6(Vec<RouteEntryV6>),
 }
 
-#[allow(dead_code)]
-impl RouteBatch {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::V4(v) => v.len(),
-            Self::V6(v) => v.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn afi(&self) -> RedistAfi {
-        match self {
-            Self::V4(_) => RedistAfi::Ipv4,
-            Self::V6(_) => RedistAfi::Ipv6,
-        }
-    }
-}
-
 /// Cap per-message route count. Bounded so a slow consumer can't be
 /// blocked by one giant Vec, and so steady-state GC pressure stays
 /// flat. ~32 KiB per IPv4 batch at this size; tune later if profiles
 /// say so.
-#[allow(dead_code)]
 pub const REDIST_BATCH_MAX: usize = 1024;
