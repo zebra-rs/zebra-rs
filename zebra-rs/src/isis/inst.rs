@@ -76,11 +76,24 @@ pub struct RestartingState {
     /// - **5e-i auto-abort**: `gr_restart_load_checkpoint` arms a
     ///   `Timer::once(remaining_secs)` that fires `GrRestartAbort`
     ///   when the grace window expires without 5e-ii's exit-success
-    ///   path. Prevents the restart state from pinning indefinitely
-    ///   if 5e-ii hasn't yet shipped or its success path fails.
+    ///   path firing first.
     ///
     /// `None` outside both windows.
     pub abort_timer: Option<crate::context::Timer>,
+    /// Phase 5e-ii exit-success driver. At load time
+    /// (`gr_restart_load_checkpoint`) this is populated with the
+    /// sys-ids of every adjacency the checkpoint recorded. Each
+    /// post-restart NFSM Up transition (`Message::GrNeighborUp`)
+    /// removes the matching entry; the set going from non-empty
+    /// to empty as a result of that removal triggers
+    /// `gr_restart_exit_success`.
+    ///
+    /// Empty when no checkpoint was loaded (operator-staged
+    /// `begin` / `commit` flows) — the GrNeighborUp removal
+    /// returns `false` for an entry that wasn't there, so the
+    /// success path never fires. Operator restarts always end via
+    /// `abort` or `commit`+exit, not the success path.
+    pub pending_neighbors: std::collections::BTreeSet<IsisSysId>,
 }
 
 pub struct Isis {
@@ -819,6 +832,16 @@ impl Isis {
             }
         });
 
+        // Pending-set: drives the 5e-ii exit-success path. Each
+        // NFSM Up transition that matches a sys-id here removes it
+        // from the set; the last removal fires
+        // `gr_restart_exit_success`.
+        let pending_neighbors: std::collections::BTreeSet<isis_packet::IsisSysId> = cp
+            .adjacencies
+            .iter()
+            .map(|a| isis_packet::IsisSysId { id: a.sys_id })
+            .collect();
+
         self.restarting = Some(RestartingState {
             // Preserve original checkpoint write time so the show
             // command and helpers' grace-period view stay aligned
@@ -826,6 +849,7 @@ impl Isis {
             started_at: cp.written_at,
             grace_period_secs: cp.grace_period_secs,
             abort_timer: Some(abort_timer),
+            pending_neighbors,
         });
 
         let _ = IsisCheckpoint::delete(&path);
@@ -862,6 +886,10 @@ impl Isis {
             started_at: std::time::SystemTime::now(),
             grace_period_secs,
             abort_timer: None,
+            // Operator-staged restart — no checkpointed neighbor
+            // set. Exit-success never fires here; operator ends
+            // the restart via `abort` or `commit`+exit.
+            pending_neighbors: std::collections::BTreeSet::new(),
         });
         tracing::info!(
             "[GR Restart] staged, grace period {}s; flooding IIH+RR on all links",
@@ -963,6 +991,52 @@ impl Isis {
         if let Some(state) = self.restarting.as_mut() {
             state.abort_timer = Some(drain_timer);
         }
+    }
+
+    /// Phase 5e-ii: NFSM Up transition observed for `sys_id`.
+    /// Trim `pending_neighbors`; the last removal that empties the
+    /// set fires `gr_restart_exit_success`. Returns early when no
+    /// restart is in progress or when the sys_id wasn't part of
+    /// the loaded checkpoint (operator-staged restarts always have
+    /// an empty pending set, so the success path never fires from
+    /// them).
+    fn gr_check_exit_success(&mut self, sys_id: IsisSysId) {
+        let Some(state) = self.restarting.as_mut() else {
+            return;
+        };
+        if !state.pending_neighbors.remove(&sys_id) {
+            return;
+        }
+        if state.pending_neighbors.is_empty() {
+            self.gr_restart_exit_success();
+        }
+    }
+
+    /// Phase 5e-ii: every checkpointed neighbor is back to Up.
+    /// Clear the restart state (drops `abort_timer` via Drop so
+    /// the auto-abort safety net is cancelled), re-originate self
+    /// LSPs at `seq+1` so helpers see fresh content with the new
+    /// process's view, log success. SPF runs naturally on the
+    /// next LSDB event now that the dispatch-side gate has lifted.
+    fn gr_restart_exit_success(&mut self) {
+        let elapsed = self
+            .restarting
+            .as_ref()
+            .and_then(|s| s.started_at.elapsed().ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.restarting = None;
+        tracing::info!(
+            "[GR Restart] exit-success: all checkpointed neighbors re-converged in ~{}s; re-originating self-LSPs at seq+1",
+            elapsed,
+        );
+        // `LspOriginate` with floor=None bumps `existing+1` per
+        // `lsp.rs:447-451`. Existing comes from the LSDB which
+        // 5e-i restored at the original seq, so the bump is +1
+        // relative to what helpers snapshotted — no MaxSeqAdvance
+        // trip, fresh content takes effect.
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 
     /// `clear isis graceful-restart abort` — walk back a staged
@@ -1159,6 +1233,18 @@ impl Isis {
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
             Message::SpfCalc(level) => {
+                // Phase 5e-ii FIB hold-back: while restarting, skip
+                // SPF entirely. Kernel routes from before the
+                // restart are still installed (despawn_isis_graceful
+                // sent ProtoQuiesce, not ProtoCleanup); recomputing
+                // and installing new routes mid-restart would
+                // partially overwrite that set with output from a
+                // possibly-stale LSDB. The exit-success path
+                // (re-originate at seq+1 + next LSDB event) drives
+                // an authoritative SPF after restart clears.
+                if self.restarting.is_some() {
+                    return;
+                }
                 // Offloaded SPF: build the graph snapshot on the main
                 // task, then dispatch Dijkstra + TI-LFA to
                 // `tokio::task::spawn_blocking`. The worker sends the
@@ -1273,6 +1359,9 @@ impl Isis {
                     "[GR Restart] grace window expired without exit-success; auto-aborting"
                 );
                 self.gr_restart_abort();
+            }
+            Message::GrNeighborUp(sys_id) => {
+                self.gr_check_exit_success(sys_id);
             }
         }
     }
@@ -2087,8 +2176,15 @@ pub enum Message {
     /// the remaining grace window. When it fires, we run the
     /// `gr_restart_abort` path: clear `restarting`, kick Hellos
     /// with RR=0, resume normal operation. Phase 5e-ii's success
-    /// path will replace this auto-abort with proper T2/T3 drive.
+    /// path lands first when neighbors reconverge before the
+    /// window expires; this auto-abort is the safety net.
     GrRestartAbort,
+    /// Sent by the IIH receive path on every NFSM Down/Init→Up
+    /// transition. The handler trims `pending_neighbors`; the
+    /// last removal fires `gr_restart_exit_success`. Outside a
+    /// loaded-checkpoint restart, `pending_neighbors` is empty
+    /// and the message is a no-op.
+    GrNeighborUp(IsisSysId),
     /// Re-originate the self LSP at `level`. The optional seq-number
     /// floor carries §7.3.16.4 semantics: when a peer floods our own
     /// LSP back at us with a seq higher than what we hold, we must
@@ -2184,6 +2280,7 @@ impl Display for Message {
             }
             Message::GrRestartExit => write!(f, "[Message::GrRestartExit]"),
             Message::GrRestartAbort => write!(f, "[Message::GrRestartAbort]"),
+            Message::GrNeighborUp(sys_id) => write!(f, "[Message::GrNeighborUp({})]", sys_id),
         }
     }
 }

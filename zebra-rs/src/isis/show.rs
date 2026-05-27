@@ -223,11 +223,20 @@ fn show_isis_graceful_restart(
     write!(buf, "Restarter: {}", restarter_cfg)?;
     if let Some(r) = isis.restarting.as_ref() {
         let elapsed = r.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-        writeln!(
+        write!(
             buf,
             " — STAGED, grace={}s, elapsed={}s",
             r.grace_period_secs, elapsed,
         )?;
+        // Pending neighbors: populated by 5e-i checkpoint load,
+        // drained by 5e-ii GrNeighborUp. Zero means we either
+        // never had one (operator-staged) or already cleared
+        // them all and are waiting for the next event loop turn
+        // to fire exit-success.
+        if !r.pending_neighbors.is_empty() {
+            write!(buf, ", pending: {} neighbor(s)", r.pending_neighbors.len())?;
+        }
+        writeln!(buf)?;
     } else {
         writeln!(buf)?;
     }
