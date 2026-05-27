@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_layer1" data-name="layer1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 79.27 78.89">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #d64c16;
+      }
+
+      .cls-2 {
+        fill: #398ccc;
+      }
+
+      .cls-3 {
+        fill: #8cbe6e;
+      }
+
+      .cls-4 {
+        fill: #e38829;
+      }
+
+      .cls-5 {
+        fill: #91ae91;
+      }
+
+      .cls-6 {
+        fill: #c9ba5d;
+      }
+
+      .cls-7 {
+        fill: #eec61b;
+      }
+
+      .cls-8 {
+        fill: #32a4bf;
+      }
+
+      .cls-9 {
+        fill: #35b6a2;
+      }
+    </style>
+  </defs>
+  <ellipse class="cls-7" cx="11.68" cy="11.4" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-6" cx="39.64" cy="11.4" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-2" cx="67.59" cy="11.4" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-4" cx="11.68" cy="39.44" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-3" cx="39.64" cy="39.44" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-8" cx="67.59" cy="39.44" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-1" cx="11.68" cy="67.48" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-5" cx="39.64" cy="67.48" rx="11.68" ry="11.4"/>
+  <ellipse class="cls-9" cx="67.59" cy="67.48" rx="11.68" ry="11.4"/>
+</svg>
