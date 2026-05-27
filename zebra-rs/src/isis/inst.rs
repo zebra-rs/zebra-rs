@@ -582,6 +582,12 @@ impl Isis {
                 "/clear/isis/spf" => {
                     self.clear_spf();
                 }
+                "/clear/isis/checkpoint/write" => {
+                    self.checkpoint_write_debug();
+                }
+                "/clear/isis/checkpoint/clear" => {
+                    self.checkpoint_clear_debug();
+                }
                 _ => {
                     //
                 }
@@ -611,6 +617,59 @@ impl Isis {
     fn clear_spf(&mut self) {
         let _ = self.tx.send(Message::SpfCalc(Level::L1));
         let _ = self.tx.send(Message::SpfCalc(Level::L2));
+    }
+
+    /// Debug entry — capture the current IS-IS state and atomically
+    /// write a checkpoint to disk. Used to exercise the Phase 5b
+    /// storage layer (`docs/design/isis-graceful-restart-restarter.
+    /// md`) before the real GR-commit path lands in Phase 5d. The
+    /// grace period (60s) is a placeholder; the actual commit path
+    /// derives it from the locked YANG knob.
+    fn checkpoint_write_debug(&mut self) {
+        use super::checkpoint::{IsisCheckpoint, default_path};
+
+        let cp = IsisCheckpoint::from_instance(self, 60);
+        let path = default_path();
+        match cp.write_to_path(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    "[GR Checkpoint] wrote {} L1 LSPs, {} L2 LSPs, {} adjacencies to {}",
+                    cp.levels
+                        .iter()
+                        .find(|l| l.level == 1)
+                        .map(|l| l.self_lsps.len())
+                        .unwrap_or(0),
+                    cp.levels
+                        .iter()
+                        .find(|l| l.level == 2)
+                        .map(|l| l.self_lsps.len())
+                        .unwrap_or(0),
+                    cp.adjacencies.len(),
+                    path.display(),
+                );
+            }
+            Err(e) => {
+                tracing::error!("[GR Checkpoint] write to {} failed: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Debug entry — delete the on-disk checkpoint. Phase 5e-i's
+    /// post-restart success path will call this from production;
+    /// today it's behind a `clear` so the storage layer can be
+    /// exercised independently.
+    fn checkpoint_clear_debug(&mut self) {
+        use super::checkpoint::{IsisCheckpoint, default_path};
+
+        let path = default_path();
+        match IsisCheckpoint::delete(&path) {
+            Ok(()) => {
+                tracing::info!("[GR Checkpoint] deleted {}", path.display());
+            }
+            Err(e) => {
+                tracing::error!("[GR Checkpoint] delete of {} failed: {}", path.display(), e);
+            }
+        }
     }
 
     pub fn process_rib_msg(&mut self, msg: RibRx) {

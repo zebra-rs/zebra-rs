@@ -44,6 +44,7 @@ impl Isis {
         self.show_add("/show/isis/neighbor", neigh::show);
         self.show_add("/show/isis/neighbor/detail", neigh::show_detail);
         self.show_add("/show/isis/graceful-restart", show_isis_graceful_restart);
+        self.show_add("/show/isis/checkpoint", show_isis_checkpoint);
         self.show_add("/show/isis/database", show_isis_database);
         self.show_add("/show/isis/database/detail", show_isis_database_detail);
         self.show_add("/show/isis/hostname", hostname::show);
@@ -239,6 +240,112 @@ fn show_isis_graceful_restart(
             r.ra as u8,
             r.sa as u8,
             rem,
+        )?;
+    }
+    Ok(buf)
+}
+
+/// `show isis checkpoint` — read the on-disk graceful-restart
+/// checkpoint (Phase 5b storage layer) and pretty-print its summary.
+/// Mirrors `show ip ospf checkpoint`. JSON mode emits the full
+/// CBOR-decoded struct via serde for ops inspection; the text mode
+/// is a human-friendly summary keyed off the same fields.
+fn show_isis_checkpoint(
+    _isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use super::checkpoint::{IsisCheckpoint, default_path};
+
+    let path = default_path();
+    let cp = match IsisCheckpoint::read_from_path(&path) {
+        Ok(cp) => cp,
+        Err(e) => {
+            if json {
+                return Ok(format!(
+                    "{{\"path\":\"{}\",\"error\":\"{}\"}}",
+                    path.display(),
+                    e
+                ));
+            }
+            let mut buf = String::new();
+            writeln!(buf, "Checkpoint path: {}", path.display())?;
+            writeln!(buf, "  (no checkpoint: {})", e)?;
+            return Ok(buf);
+        }
+    };
+
+    if json {
+        return Ok(
+            serde_json::to_string(&cp).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        );
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "Checkpoint path: {}", path.display())?;
+    writeln!(buf, "Format version:  {}", cp.format_version)?;
+    writeln!(
+        buf,
+        "Written at:      {} (UNIX secs since epoch)",
+        cp.written_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    )?;
+    writeln!(buf, "Grace period:    {}s", cp.grace_period_secs)?;
+    let sys_id_s = cp
+        .sys_id
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>();
+    writeln!(
+        buf,
+        "System ID:       {}{}.{}{}.{}{}",
+        sys_id_s[0], sys_id_s[1], sys_id_s[2], sys_id_s[3], sys_id_s[4], sys_id_s[5],
+    )?;
+    writeln!(buf, "is-type:         {:?}", cp.is_type)?;
+    for lvl in &cp.levels {
+        writeln!(
+            buf,
+            "L{}: {} self-originated LSPs",
+            lvl.level,
+            lvl.self_lsps.len()
+        )?;
+        for lsp in &lvl.self_lsps {
+            let id = &lsp.lsp_id;
+            writeln!(
+                buf,
+                "  {:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}.{:02x}-{:02x}  seq=0x{:08x}  cksum=0x{:04x}  body={}B",
+                id[0],
+                id[1],
+                id[2],
+                id[3],
+                id[4],
+                id[5],
+                id[6],
+                id[7],
+                lsp.seq_number,
+                lsp.checksum,
+                lsp.body.len(),
+            )?;
+        }
+    }
+    writeln!(buf, "Adjacencies:     {}", cp.adjacencies.len())?;
+    for adj in &cp.adjacencies {
+        let id = &adj.sys_id;
+        writeln!(
+            buf,
+            "  L{} {:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}  ifindex={}  circuit_id={:?}  was_up={}",
+            adj.level,
+            id[0],
+            id[1],
+            id[2],
+            id[3],
+            id[4],
+            id[5],
+            adj.ifindex,
+            adj.circuit_id,
+            adj.was_up,
         )?;
     }
     Ok(buf)
