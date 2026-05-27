@@ -44,6 +44,40 @@ pub enum State {
     Established,
 }
 
+/// Which side opened the TCP connection. Required for RFC 4271 §6.8
+/// collision resolution: the BGP-Identifier comparison picks the
+/// surviving connection by role (the higher-ID endpoint's initiated
+/// connection wins).
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum Role {
+    /// We initiated the connect.
+    Active,
+    /// Peer initiated; we accepted.
+    Passive,
+}
+
+/// Identifies which TCP connection an incoming event arrived on.
+/// `Primary` is the connection currently owning `Peer::packet_tx`
+/// and `Peer::task.{reader,writer}`. `Collision` is the parallel
+/// connection held in `Peer::collision` during §6.8 resolution.
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum ConnTag {
+    Primary,
+    Collision,
+}
+
+/// Parallel TCP connection held while RFC 4271 §6.8 collision
+/// resolution is pending. Mirrors the primary connection's
+/// reader/writer/packet_tx triple plus the originating role so the
+/// BGP-Identifier comparison can pick the winner.
+#[derive(Debug)]
+pub struct CollisionConn {
+    pub packet_tx: UnboundedSender<BytesMut>,
+    pub reader: Task<()>,
+    pub writer: Task<()>,
+    pub role: Role,
+}
+
 impl State {
     pub fn to_str(self) -> &'static str {
         match self {
@@ -63,19 +97,19 @@ impl State {
 
 #[derive(Debug)]
 pub enum Event {
-    ConfigUpdate,                 // 0
-    Start,                        // 1
-    Stop,                         // 2
-    ConnRetryTimerExpires,        // 9
-    HoldTimerExpires,             // 10
-    KeepaliveTimerExpires,        // 11
-    IdleHoldTimerExpires,         // 13
-    Connected(TcpStream),         // 17
-    ConnFail,                     // 18
-    BGPOpen(OpenPacket),          // 19
-    NotifMsg(NotificationPacket), // 25
-    KeepAliveMsg,                 // 26
-    UpdateMsg(UpdatePacket),      // 27
+    ConfigUpdate,                          // 0
+    Start,                                 // 1
+    Stop,                                  // 2
+    ConnRetryTimerExpires,                 // 9
+    HoldTimerExpires,                      // 10
+    KeepaliveTimerExpires,                 // 11
+    IdleHoldTimerExpires,                  // 13
+    Connected(TcpStream),                  // 17
+    ConnFail(ConnTag),                     // 18
+    BGPOpen(ConnTag, OpenPacket),          // 19
+    NotifMsg(ConnTag, NotificationPacket), // 25
+    KeepAliveMsg(ConnTag),                 // 26
+    UpdateMsg(UpdatePacket),               // 27
     // RFC 2918 Route Refresh receive. Carries the AFI/SAFI from the
     // wire (raw u16/u8) so unknown-AF refreshes still dispatch
     // through the FSM rather than tearing the session down.
@@ -364,6 +398,15 @@ pub struct Peer {
     pub param_tx: PeerParam,
     pub param_rx: PeerParam,
     pub packet_tx: Option<UnboundedSender<BytesMut>>,
+    /// Origin of the current primary connection. `Some(Active)` if we
+    /// initiated, `Some(Passive)` if peer initiated. `None` while we
+    /// have no primary (Idle/Connect/Active states).
+    pub primary_role: Option<Role>,
+    /// Parallel TCP connection awaiting RFC 4271 §6.8 resolution. Set
+    /// when an inbound connect arrives while we already have a primary
+    /// in OpenSent/OpenConfirm; cleared (one way or the other) when the
+    /// first OPEN on either connection lets us pick the winner.
+    pub collision: Option<CollisionConn>,
     pub tx: mpsc::Sender<Message>,
     pub config: PeerConfig,
     pub cap_send: BgpCap,
@@ -446,6 +489,8 @@ impl Peer {
             param_rx: PeerParam::default(),
             // stat: PeerStat::default(),
             packet_tx: None,
+            primary_role: None,
+            collision: None,
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
@@ -631,11 +676,13 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
         Event::HoldTimerExpires => (fsm_holdtimer_expires(peer), FsmEffect::None),
         Event::KeepaliveTimerExpires => (fsm_keepalive_expires(peer), FsmEffect::None),
         Event::IdleHoldTimerExpires => (fsm_idle_hold_timer_expires(peer), FsmEffect::None),
-        Event::Connected(stream) => (fsm_connected(peer, stream), FsmEffect::None),
-        Event::ConnFail => (fsm_conn_fail(peer), FsmEffect::None),
-        Event::BGPOpen(packet) => (fsm_bgp_open(peer, packet), FsmEffect::None),
-        Event::NotifMsg(packet) => (fsm_bgp_notification(peer, packet), FsmEffect::None),
-        Event::KeepAliveMsg => (fsm_bgp_keepalive(peer), FsmEffect::None),
+        Event::Connected(stream) => (fsm_connected(peer, Role::Active, stream), FsmEffect::None),
+        Event::ConnFail(conn) => (fsm_conn_fail(peer, conn), FsmEffect::None),
+        Event::BGPOpen(conn, packet) => (fsm_bgp_open(peer, conn, packet), FsmEffect::None),
+        Event::NotifMsg(conn, packet) => {
+            (fsm_bgp_notification(peer, conn, packet), FsmEffect::None)
+        }
+        Event::KeepAliveMsg(conn) => (fsm_bgp_keepalive(peer, conn), FsmEffect::None),
         Event::UpdateMsg(packet) => {
             peer.counter[BgpType::Update as usize].rcvd += 1;
             timer::refresh_hold_timer(peer);
@@ -761,8 +808,53 @@ pub fn open_asn(packet: &OpenPacket) -> u32 {
     }
 }
 
-//
-pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
+/// RFC 4271 §6.8 — which side's connection survives. The connection
+/// initiated by the higher-BGP-Identifier endpoint wins. On a tie
+/// (misconfig — duplicate BGP IDs) we deterministically keep the
+/// passive side so both ends converge on the same choice.
+pub fn collision_winner(local_id: Ipv4Addr, remote_id: Ipv4Addr) -> Role {
+    let local = u32::from(local_id);
+    let remote = u32::from(remote_id);
+    if local > remote {
+        Role::Active
+    } else {
+        Role::Passive
+    }
+}
+
+/// Send a NOTIFICATION on the collision conn's packet_tx and drop the
+/// conn (its reader/writer tasks exit when the stream closes). Used to
+/// tear down the loser of §6.8 resolution.
+fn close_collision(collision: CollisionConn, code: NotifyCode, sub_code: u8) {
+    let notif = NotificationPacket::new(code, sub_code, Vec::new());
+    let bytes: BytesMut = notif.into();
+    let _ = collision.packet_tx.send(bytes);
+    // Dropping the CollisionConn drops packet_tx (writer task drains
+    // its channel and exits) and the reader/writer task handles
+    // (cancelling them).
+    drop(collision);
+}
+
+/// Tear down the primary connection in place (send NOTIFICATION first,
+/// then drop the reader/writer/packet_tx triple).
+fn close_primary(peer: &mut Peer, code: NotifyCode, sub_code: u8) {
+    peer_send_notification(peer, code, sub_code, Vec::new());
+    peer.packet_tx = None;
+    peer.task.reader = None;
+    peer.task.writer = None;
+    peer.primary_role = None;
+}
+
+/// Move the collision conn into the primary slot. Caller is
+/// responsible for having already torn down the previous primary.
+fn promote_collision_to_primary(peer: &mut Peer, collision: CollisionConn) {
+    peer.packet_tx = Some(collision.packet_tx);
+    peer.task.reader = Some(collision.reader);
+    peer.task.writer = Some(collision.writer);
+    peer.primary_role = Some(collision.role);
+}
+
+pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
     peer.counter[BgpType::Open as usize].rcvd += 1;
 
     // Peer ASN.
@@ -770,6 +862,20 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
 
     // Compare with configured asn.
     if peer.remote_as != asn {
+        // The OPEN that fails this check came on `conn`. For Primary
+        // this matches today's behaviour. For Collision we just tear
+        // the collision conn down and stay in our current state — the
+        // primary conn is unaffected.
+        if conn == ConnTag::Collision
+            && let Some(collision) = peer.collision.take()
+        {
+            close_collision(
+                collision,
+                NotifyCode::OpenMsgError,
+                OpenError::BadPeerAS.into(),
+            );
+            return peer.state;
+        }
         peer_send_notification(
             peer,
             NotifyCode::OpenMsgError,
@@ -779,29 +885,76 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
         return State::Idle;
     }
 
-    if peer.state != State::OpenSent {
-        // Send notification.
-        return State::Idle;
+    if peer.state != State::OpenSent && peer.state != State::OpenConfirm {
+        // OPEN in an unexpected state — discard.
+        return peer.state;
     }
     if packet.asn as u32 != peer.remote_as {
         // Send notification.
         return State::Idle;
     }
-    // TODO: correct router-id validation.
-    // if packet.bgp_id != peer.address.octets() {
-    //     // Send notification.
-    //     println!("router-id mismatch {:?}", peer.address);
-    //     return State::Idle;
-    // }
     if packet.hold_time > 0 && packet.hold_time < 3 {
         return State::Idle;
     }
-    peer.remote_id = Ipv4Addr::new(
+    let remote_id = Ipv4Addr::new(
         packet.bgp_id[0],
         packet.bgp_id[1],
         packet.bgp_id[2],
         packet.bgp_id[3],
     );
+
+    // RFC 4271 §6.8 collision resolution. If we have both a primary
+    // and a collision connection at the moment this OPEN arrives, the
+    // peer's BGP Identifier (just learned) tells us which side's
+    // connection should survive.
+    if let Some(collision) = peer.collision.take() {
+        let local_id = peer.local_identifier.unwrap_or(peer.router_id);
+        let winner_role = collision_winner(local_id, remote_id);
+        let arriving_role = match conn {
+            ConnTag::Primary => peer.primary_role.unwrap_or(Role::Active),
+            ConnTag::Collision => collision.role,
+        };
+        if winner_role != arriving_role {
+            // OPEN came on the loser. Close it, keep the other conn
+            // alive, and stay in OpenSent waiting for the winner's
+            // OPEN to arrive.
+            match conn {
+                ConnTag::Primary => {
+                    // The arriving conn (primary) loses; promote the
+                    // collision (winner) to primary.
+                    close_primary(peer, NotifyCode::Cease, 7); // ConnectionCollisionResolution
+                    promote_collision_to_primary(peer, collision);
+                }
+                ConnTag::Collision => {
+                    // The arriving conn (collision) loses; just drop it.
+                    close_collision(collision, NotifyCode::Cease, 7);
+                }
+            }
+            return State::OpenSent;
+        }
+        // Arriving conn is the winner. Close the other conn and
+        // continue processing this OPEN.
+        match conn {
+            ConnTag::Primary => {
+                // Primary wins, collision loses.
+                close_collision(collision, NotifyCode::Cease, 7);
+            }
+            ConnTag::Collision => {
+                // Collision wins, primary loses. Tear down primary,
+                // then move collision into the primary slot so the
+                // rest of fsm_bgp_open writes to the right tx.
+                close_primary(peer, NotifyCode::Cease, 7);
+                promote_collision_to_primary(peer, collision);
+            }
+        }
+    } else if conn == ConnTag::Collision {
+        // OPEN arrived on a collision conn that the peer has already
+        // forgotten about (e.g. a race where conn_fail cleared the
+        // slot first). Discard.
+        return peer.state;
+    }
+
+    peer.remote_id = remote_id;
 
     timer::update_open_timers(peer, &packet);
 
@@ -827,13 +980,32 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     State::OpenConfirm
 }
 
-pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> State {
+pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, _packet: NotificationPacket) -> State {
     peer.counter[BgpType::Notification as usize].rcvd += 1;
+    // NOTIFICATION on the collision conn just kills that conn; the
+    // primary session is unaffected.
+    if conn == ConnTag::Collision
+        && let Some(collision) = peer.collision.take()
+    {
+        drop(collision);
+        return peer.state;
+    }
+    // NOTIFICATION on the primary tears the session down. Also drop
+    // any pending collision conn — the peer is asking us to stop.
+    if let Some(collision) = peer.collision.take() {
+        drop(collision);
+    }
     State::Idle
 }
 
-pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
+pub fn fsm_bgp_keepalive(peer: &mut Peer, conn: ConnTag) -> State {
     peer.counter[BgpType::Keepalive as usize].rcvd += 1;
+    // KEEPALIVE on a collision conn before §6.8 has resolved is
+    // meaningless to us (we haven't decided whether to keep the conn).
+    // Ignore it; the resolution will happen when an OPEN arrives.
+    if conn == ConnTag::Collision {
+        return peer.state;
+    }
     timer::refresh_hold_timer(peer);
     match peer.state {
         // RFC 4271 §8.2.2: KEEPALIVE in OpenConfirm completes the
@@ -846,15 +1018,16 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     }
 }
 
-pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
+pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
+    peer.primary_role = Some(role);
     let (read_half, write_half) = stream.into_split();
-    peer.task.reader = Some(peer_start_reader(peer, read_half));
+    peer.task.reader = Some(peer_start_reader(peer, ConnTag::Primary, read_half));
     peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
     peer_send_open(peer);
     State::OpenSent
@@ -887,10 +1060,26 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
     peer.state
 }
 
-pub fn fsm_conn_fail(peer: &mut Peer) -> State {
+pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
+    // A failure on the collision conn just drops the collision slot;
+    // the primary session is unaffected.
+    if conn == ConnTag::Collision {
+        if let Some(collision) = peer.collision.take() {
+            drop(collision);
+        }
+        return peer.state;
+    }
+    // Primary conn failed. If a collision conn is waiting, promote it
+    // — there is no §6.8 decision to make yet (we haven't seen an
+    // OPEN on either) but the surviving TCP is the only one we have.
     peer.task.writer = None;
     peer.task.reader = None;
     peer.packet_tx = None;
+    peer.primary_role = None;
+    if let Some(collision) = peer.collision.take() {
+        promote_collision_to_primary(peer, collision);
+        return State::OpenSent;
+    }
     peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Active
 }
@@ -898,6 +1087,7 @@ pub fn fsm_conn_fail(peer: &mut Peer) -> State {
 pub async fn peer_packet_parse(
     rx: &[u8],
     ident: usize,
+    conn: ConnTag,
     tx: mpsc::Sender<Message>,
     config: &mut PeerConfig,
     opt: &mut ParseOption,
@@ -910,15 +1100,21 @@ pub async fn peer_packet_parse(
                     if config.extended_message && p.bgp_cap.extended.is_some() {
                         opt.extended_message = true;
                     }
-                    let _ = tx.send(Message::Event(ident, Event::BGPOpen(*p))).await;
+                    let _ = tx
+                        .send(Message::Event(ident, Event::BGPOpen(conn, *p)))
+                        .await;
                 }
                 BgpPacket::Keepalive(_) => {
                     // tracing::info!("Recv keepavlie {}", ident);
-                    let _ = tx.send(Message::Event(ident, Event::KeepAliveMsg)).await;
+                    let _ = tx
+                        .send(Message::Event(ident, Event::KeepAliveMsg(conn)))
+                        .await;
                 }
                 BgpPacket::Notification(p) => {
                     // tracing::info!("{p}");
-                    let _ = tx.send(Message::Event(ident, Event::NotifMsg(p))).await;
+                    let _ = tx
+                        .send(Message::Event(ident, Event::NotifMsg(conn, p)))
+                        .await;
                 }
                 BgpPacket::Update(p) => {
                     let _ = tx.send(Message::Event(ident, Event::UpdateMsg(*p))).await;
@@ -937,6 +1133,7 @@ pub async fn peer_packet_parse(
 
 pub async fn peer_read(
     ident: usize,
+    conn: ConnTag,
     tx: mpsc::Sender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
@@ -947,7 +1144,7 @@ pub async fn peer_read(
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
                 if read_len == 0 {
-                    let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
+                    let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
                     return;
                 }
                 while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
@@ -955,38 +1152,40 @@ pub async fn peer_read(
 
                     // Validate message length (RFC 8654).
                     if length < BGP_HEADER_LEN as usize || length > opt.max_message_len() {
-                        let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
+                        let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
                         return;
                     }
 
                     let mut remain = buf.split_off(length);
                     remain.reserve(BGP_EXTENDED_PACKET_LEN);
 
-                    match peer_packet_parse(&buf, ident, tx.clone(), &mut config, &mut opt).await {
+                    match peer_packet_parse(&buf, ident, conn, tx.clone(), &mut config, &mut opt)
+                        .await
+                    {
                         Ok(_) => {
                             buf = remain;
                         }
                         Err(_err) => {
-                            let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
+                            let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
                             return;
                         }
                     }
                 }
             }
             Err(_err) => {
-                let _ = tx.send(Message::Event(ident, Event::ConnFail)).await;
+                let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
             }
         }
     }
 }
 
-pub fn peer_start_reader(peer: &Peer, read_half: OwnedReadHalf) -> Task<()> {
+pub fn peer_start_reader(peer: &Peer, conn: ConnTag, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
     let opt = peer.opt.clone();
     Task::spawn(async move {
-        peer_read(ident, tx.clone(), read_half, config, opt).await;
+        peer_read(ident, conn, tx.clone(), read_half, config, opt).await;
     })
 }
 
@@ -1034,7 +1233,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
             }
             Err(_err) => {
-                let _ = tx.try_send(Message::Event(ident, Event::ConnFail));
+                // Active-connect failure is by definition a primary
+                // event — there is no collision conn yet.
+                let _ = tx.try_send(Message::Event(ident, Event::ConnFail(ConnTag::Primary)));
             }
         };
     })
@@ -1091,9 +1292,20 @@ async fn peer_connect(
 }
 
 pub fn peer_send_open(peer: &mut Peer) {
-    let Some(packet_tx) = peer.packet_tx.as_ref() else {
+    let Some(packet_tx) = peer.packet_tx.clone() else {
         return;
     };
+    let bytes = build_open_packet(peer);
+    peer.counter[BgpType::Open as usize].sent += 1;
+    let _ = packet_tx.send(bytes);
+}
+
+/// Build the serialized OPEN packet for this peer using its current
+/// caps/config. Side-effects on the peer: records the sent caps and
+/// hold/keepalive in `cap_send` / `param_tx`. Callers ship the
+/// resulting bytes via whichever `packet_tx` (primary or collision)
+/// they own.
+fn build_open_packet(peer: &mut Peer) -> BytesMut {
     let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
     let router_id = if let Some(identifier) = peer.local_identifier {
         identifier
@@ -1171,8 +1383,7 @@ pub fn peer_send_open(peer: &mut Peer) {
 
     let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, bgp_cap);
     let bytes: BytesMut = open.into();
-    peer.counter[BgpType::Open as usize].sent += 1;
-    let _ = packet_tx.send(bytes);
+    bytes
 }
 
 pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, data: Vec<u8>) {
@@ -1236,6 +1447,29 @@ fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
     });
 }
 
+/// Stash an inbound TCP stream as the peer's collision connection,
+/// starting a reader/writer pair tagged `ConnTag::Collision` and
+/// sending our OPEN over it. The §6.8 resolution is deferred until an
+/// OPEN arrives on either connection.
+fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
+    let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+    let (read_half, write_half) = stream.into_split();
+    let reader = peer_start_reader(peer, ConnTag::Collision, read_half);
+    let writer = peer_start_writer(write_half, packet_rx);
+    // Stash before sending OPEN so peer_send_open_on_tx has the tx to
+    // write into.
+    peer.collision = Some(CollisionConn {
+        packet_tx: packet_tx.clone(),
+        reader,
+        writer,
+        role: Role::Passive,
+    });
+    // Mirror peer_send_open but target the collision packet_tx.
+    let bytes = build_open_packet(peer);
+    peer.counter[BgpType::Open as usize].sent += 1;
+    let _ = packet_tx.send(bytes);
+}
+
 /// Handle incoming connection for a peer based on current BGP state
 fn handle_peer_connection(
     bgp: &mut Bgp,
@@ -1252,26 +1486,33 @@ fn handle_peer_connection(
             State::Connect => {
                 // Cancel connect task.
                 peer.task.connect = None;
-                peer.state = fsm_connected(peer, stream);
+                peer.state = fsm_connected(peer, Role::Passive, stream);
                 None
             }
             State::Active => {
-                peer.state = fsm_connected(peer, stream);
+                peer.state = fsm_connected(peer, Role::Passive, stream);
                 None
             }
-            State::OpenSent => {
-                // In case of OpenSent. We need to keep the session until we
-                // receive Open for collision detection (RFC 4271).
-                Some(stream)
-            }
-            State::OpenConfirm => {
-                // Already in OpenConfirm with another connection - send NOTIFICATION.
-                reject_connection(stream, NotifyCode::Cease, 7); // ConnectionCollisionResolution
-                None
+            State::OpenSent | State::OpenConfirm => {
+                // RFC 4271 §6.8 collision: we already have a primary
+                // connection in flight. Stash this one as the
+                // collision conn and wait for an OPEN on either side
+                // to decide which survives. If a collision is already
+                // pending, drop the new one — having three TCPs to
+                // the same peer isn't worth modeling.
+                if peer.primary_role == Some(Role::Active) && peer.collision.is_none() {
+                    start_collision_conn(peer, stream);
+                    None
+                } else {
+                    reject_connection(stream, NotifyCode::Cease, 7); // ConnectionCollisionResolution
+                    None
+                }
             }
             State::Established => {
-                // Session already established - send NOTIFICATION.
-                reject_connection(stream, NotifyCode::Cease, 5); // ConnectionRejected
+                // Session already established. Per RFC 4271 §6.8,
+                // close the new connection with Cease
+                // (ConnectionCollisionResolution).
+                reject_connection(stream, NotifyCode::Cease, 7);
                 None
             }
         }
@@ -1493,6 +1734,42 @@ pub fn clear_bgp_action(
         targets.len(),
         op
     ))
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn higher_local_id_keeps_active_connection() {
+        // local 10.0.0.2 > remote 10.0.0.1 → our active connect wins.
+        let winner = collision_winner(Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(winner, Role::Active);
+    }
+
+    #[test]
+    fn lower_local_id_keeps_passive_connection() {
+        // local 10.0.0.1 < remote 10.0.0.2 → peer-initiated wins.
+        let winner = collision_winner(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(winner, Role::Passive);
+    }
+
+    #[test]
+    fn tie_breaks_to_passive_deterministically() {
+        // Equal IDs is misconfig; both ends pick `Passive` so they
+        // agree on which connection to drop.
+        let winner = collision_winner(Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(winner, Role::Passive);
+    }
+
+    #[test]
+    fn comparison_is_unsigned_big_endian() {
+        // 192.0.2.1 (u32=0xC0_00_02_01) > 1.2.3.4 (u32=0x01_02_03_04)
+        // — guard against accidental signed compare flipping the sign.
+        let winner = collision_winner(Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(1, 2, 3, 4));
+        assert_eq!(winner, Role::Active);
+    }
 }
 
 #[cfg(test)]
