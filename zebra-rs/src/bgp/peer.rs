@@ -819,7 +819,12 @@ pub fn fsm_bgp_open(peer: &mut Peer, packet: OpenPacket) -> State {
     // Record received capability.
     peer.cap_recv = packet.bgp_cap;
 
-    State::Established
+    // Per RFC 4271 §8.2.2, after validating the peer's OPEN we send
+    // KEEPALIVE and transition to OpenConfirm. The
+    // OpenConfirm→Established move happens when the peer's KEEPALIVE
+    // is received (handled in `fsm_bgp_keepalive`).
+    peer_send_keepalive(peer);
+    State::OpenConfirm
 }
 
 pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> State {
@@ -830,7 +835,15 @@ pub fn fsm_bgp_notification(peer: &mut Peer, _packet: NotificationPacket) -> Sta
 pub fn fsm_bgp_keepalive(peer: &mut Peer) -> State {
     peer.counter[BgpType::Keepalive as usize].rcvd += 1;
     timer::refresh_hold_timer(peer);
-    State::Established
+    match peer.state {
+        // RFC 4271 §8.2.2: KEEPALIVE in OpenConfirm completes the
+        // handshake and moves us to Established.
+        State::OpenConfirm | State::Established => State::Established,
+        // KEEPALIVE arriving in any other state is unexpected. The
+        // FSM should ignore it here rather than spuriously promote;
+        // stricter handling (tear down to Idle) is deferred.
+        other => other,
+    }
 }
 
 pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
@@ -844,7 +857,6 @@ pub fn fsm_connected(peer: &mut Peer, stream: TcpStream) -> State {
     peer.task.reader = Some(peer_start_reader(peer, read_half));
     peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
     peer_send_open(peer);
-    peer_send_keepalive(peer);
     State::OpenSent
 }
 
@@ -867,7 +879,12 @@ pub fn fsm_idle_hold_timer_expires(peer: &mut Peer) -> State {
 pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
     // tracing::info!("Send keepalive {}", peer.ident);
     peer_send_keepalive(peer);
-    State::Established
+    // The keepalive *send* timer fires in both OpenConfirm and
+    // Established (it is armed by `update_open_timers` after we
+    // receive the peer's OPEN). It must not drive a transition —
+    // sending a KEEPALIVE does not promote us to Established, the
+    // peer's KEEPALIVE does.
+    peer.state
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer) -> State {

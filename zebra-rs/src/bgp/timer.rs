@@ -232,12 +232,11 @@ pub fn update_timers(peer: &mut Peer) {
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }
-        OpenConfirm => {
-            peer.timer.idle_hold_timer = None;
-            peer.timer.hold_timer = None;
-            peer.timer.keepalive = None;
-        }
-        Established => {
+        OpenConfirm | Established => {
+            // Hold and keepalive timers were armed by
+            // `update_open_timers` when the peer's OPEN was received;
+            // they must keep running across OpenConfirm and Established
+            // so we keep refreshing the session.
             peer.timer.idle_hold_timer = None;
             peer.timer.connect_retry = None;
             if peer.timer.hold_timer.is_none() && peer.param.hold_time > 0 {
