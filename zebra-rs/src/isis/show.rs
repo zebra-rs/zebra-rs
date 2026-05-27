@@ -220,6 +220,16 @@ fn show_isis_graceful_restart(
     } else {
         "disabled (config)"
     };
+    // RFC 5306 §3.1 exit-failure flag: set by gr_restart_expire,
+    // cleared 30s later by Message::ClearOverload. While true,
+    // every self-LSP we originate carries ol_bits=true, telling
+    // the rest of the network to use us as transit-of-last-resort.
+    if isis.overloaded {
+        writeln!(
+            buf,
+            "Overload:  YES — set by recent GR exit-failure, will clear soon"
+        )?;
+    }
     write!(buf, "Restarter: {}", restarter_cfg)?;
     if let Some(r) = isis.restarting.as_ref() {
         let elapsed = r.started_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
