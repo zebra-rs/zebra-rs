@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use bitfield_struct::bitfield;
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
@@ -369,8 +369,34 @@ impl OspfLsRequestEntry {
 #[derive(Debug, NomBE)]
 pub struct OspfLsUpdate {
     pub num_adv: u32,
-    #[nom(Count = "num_adv")]
+    #[nom(Parse = "{ |x| parse_lsas_with_raw(x, num_adv as usize) }")]
     pub lsas: Vec<OspfLsa>,
+}
+
+/// Parse `n` LSAs, stamping each one's `raw` field with the slice of
+/// bytes it consumed. Transit LSAs (received from a neighbor, then
+/// re-flooded) MUST be propagated byte-for-byte to keep the originator's
+/// Fletcher checksum valid downstream — our typed parser may reorder
+/// or drop sub-TLVs it doesn't fully model, so the re-emit can produce
+/// a different byte sequence than what came in. By holding the
+/// original bytes here and emitting them verbatim on flood, the
+/// downstream peer's `ospf_lsa_checksum_valid()` keeps passing.
+/// Self-originated LSAs build via `OspfLsa::from` (no `raw`), and
+/// emit through the typed path whose `update()` recomputes the
+/// checksum to match — so they don't need the cache.
+fn parse_lsas_with_raw(input: &[u8], n: usize) -> IResult<&[u8], Vec<OspfLsa>> {
+    use nom_derive::Parse;
+    let mut out = Vec::with_capacity(n);
+    let mut rest = input;
+    for _ in 0..n {
+        let start = rest;
+        let (after, mut lsa) = OspfLsa::parse_be(start)?;
+        let consumed = start.len() - after.len();
+        lsa.raw = Some(Bytes::copy_from_slice(&start[..consumed]));
+        out.push(lsa);
+        rest = after;
+    }
+    Ok((rest, out))
 }
 
 impl OspfLsUpdate {
@@ -449,12 +475,27 @@ pub struct OspfLsa {
     pub h: OspfLsaHeader,
     #[nom(Parse = "{ |x| OspfLsp::parse_lsa_with_length(x, h.ls_type, h.length, h.ls_id) }")]
     pub lsp: OspfLsp,
+    /// Cached on-wire bytes for byte-perfect re-flooding of transit
+    /// LSAs. Stamped by `parse_lsas_with_raw` on receive; `None` for
+    /// LSAs constructed via `OspfLsa::from` (self-originated). The
+    /// `Emit` impl uses this when present so downstream peers see
+    /// the exact bytes the originator emitted, keeping the Fletcher
+    /// checksum valid.
+    ///
+    /// `update()` clears this — any header mutation (seq bump,
+    /// length recompute) invalidates the cache.
+    #[nom(Ignore)]
+    pub raw: Option<Bytes>,
 }
 
 impl Emit for OspfLsa {
     fn emit(&self, buf: &mut BytesMut) {
-        self.h.emit(buf);
-        self.emit_lsp(buf);
+        if let Some(raw) = self.raw.as_ref() {
+            buf.put_slice(raw);
+        } else {
+            self.h.emit(buf);
+            self.emit_lsp(buf);
+        }
     }
 }
 
@@ -462,7 +503,7 @@ const LSA_HEADER_LEN: u16 = 20;
 
 impl OspfLsa {
     pub fn from(h: OspfLsaHeader, lsp: OspfLsp) -> Self {
-        Self { h, lsp }
+        Self { h, lsp, raw: None }
     }
 
     /// Decode a complete OSPFv2 LSA (20-octet header + body) from
@@ -511,7 +552,14 @@ impl OspfLsa {
 
     /// Update the LSA length and calculate checksum according to RFC 2328.
     /// The checksum uses Fletcher algorithm over the LSA excluding the LS Age field.
+    ///
+    /// Invalidates any cached `raw` bytes — `update()` only runs on
+    /// the self-originated path (refresh, re-originate, build-from-
+    /// scratch), and after this call the canonical `h.emit() +
+    /// emit_lsp()` is what we want on the wire.
     pub fn update(&mut self) {
+        // Mutation invalidates any cached raw bytes from receive.
+        self.raw = None;
         // Calculate payload length.
         let lsp_len = match &self.lsp {
             OspfLsp::Router(lsp) => lsp.lsa_len(),
