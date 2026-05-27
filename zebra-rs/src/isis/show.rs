@@ -132,17 +132,19 @@ fn show_isis_summary(
     Ok(buf)
 }
 
-// RFC 5306 Graceful Restart observation, per adjacency. Phase 2 is
-// read-only: the IIH receive path records whatever the peer puts in
-// its Restart TLV onto `Neighbor.gr`, and this view surfaces it so an
-// operator can confirm GR signaling reaches us before Phase 3 turns on
-// helper-mode behavior.
+// RFC 5306 Graceful Restart, per adjacency. Phase 3a wires helper
+// behavior: `helper_active` reflects whether we're currently treating
+// the peer as mid-restart (suppressing hold-timer refresh, including
+// RA in outbound IIH). `last_seen` still shows the most recent
+// Restart TLV the peer sent for operator debugging of the signaling
+// path.
 #[derive(Serialize)]
 struct GrAdjJson {
     level: u8,
     system_id: String,
     interface: String,
     state: String,
+    helper_active: bool,
     restart_count: u32,
     rr: bool,
     ra: bool,
@@ -176,6 +178,7 @@ fn gr_adj_rows(isis: &Isis) -> Vec<GrAdjJson> {
                     system_id: nbr.sys_id.to_string(),
                     interface: isis.ifname(nbr.ifindex),
                     state: nbr.state.to_string(),
+                    helper_active: nbr.gr.helper_active,
                     restart_count: nbr.gr.restart_count,
                     rr,
                     ra,
@@ -201,11 +204,11 @@ fn show_isis_graceful_restart(
     }
 
     let mut buf = String::new();
-    writeln!(buf, "Graceful Restart (RFC 5306) — observation only")?;
+    writeln!(buf, "Graceful Restart (RFC 5306) — helper mode")?;
     writeln!(buf)?;
     writeln!(
         buf,
-        "L  System Id           Interface    State          Restarts RR RA SA Remaining"
+        "L  System Id           Interface    State          Helper   Restarts RR RA SA Remaining"
     )?;
     if rows.is_empty() {
         writeln!(buf, "(no neighbors)")?;
@@ -216,13 +219,15 @@ fn show_isis_graceful_restart(
             .remaining_time
             .map(|t| format!("{}s", t))
             .unwrap_or_else(|| "-".to_string());
+        let helper = if r.helper_active { "Active" } else { "-" };
         writeln!(
             buf,
-            "{:<3}{:<20}{:<13}{:<15}{:<9}{:<3}{:<3}{:<3}{}",
+            "{:<3}{:<20}{:<13}{:<15}{:<9}{:<9}{:<3}{:<3}{:<3}{}",
             r.level,
             r.system_id,
             r.interface,
             r.state,
+            helper,
             r.restart_count,
             r.rr as u8,
             r.ra as u8,
