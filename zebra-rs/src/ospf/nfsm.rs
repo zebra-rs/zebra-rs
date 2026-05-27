@@ -6,9 +6,10 @@ use tokio::time::Instant;
 
 use super::version::{OspfVersion, Ospfv2, Ospfv3};
 use super::{
-    Identity, IfsmEvent, Message, Neighbor, Timer, TimerType, inst::OspfInterface,
-    ospf_ls_request_isempty, tracing::FsmType,
+    Identity, IfsmEvent, Message, Neighbor, inst::OspfInterface, ospf_ls_request_isempty,
+    tracing::FsmType,
 };
+use crate::context::{Timer, TimerType};
 
 /// Neighbor state machine state — RFC 2328 §10.1.
 ///
@@ -250,32 +251,24 @@ pub fn ospf_db_desc_timer<V: OspfVersion>(nbr: &Neighbor<V>, retransmit_interval
     let tx = nbr.tx.clone();
     let nbr_addr = V::nbr_addr(&nbr.ident);
     let ifindex = nbr.ifindex;
-    Timer::new(
-        Timer::second(retransmit_interval as u64),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::DdRetransmit(ifindex, nbr_addr));
-            }
-        },
-    )
+    Timer::new(retransmit_interval as u64, TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::DdRetransmit(ifindex, nbr_addr));
+        }
+    })
 }
 
 pub fn ospf_ls_req_timer<V: OspfVersion>(nbr: &Neighbor<V>, retransmit_interval: u16) -> Timer {
     let tx = nbr.tx.clone();
     let nbr_addr = V::nbr_addr(&nbr.ident);
     let ifindex = nbr.ifindex;
-    Timer::new(
-        Timer::second(retransmit_interval as u64),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::LsReqRetransmit(ifindex, nbr_addr));
-            }
-        },
-    )
+    Timer::new(retransmit_interval as u64, TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::LsReqRetransmit(ifindex, nbr_addr));
+        }
+    })
 }
 
 pub fn ospf_nfsm_ls_req_timer_on<V: OspfVersion>(nbr: &mut Neighbor<V>, retransmit_interval: u16) {
@@ -296,7 +289,7 @@ pub fn ospf_inactivity_timer<V: OspfVersion>(nbr: &Neighbor<V>) -> Timer {
     let tx = nbr.tx.clone();
     let nbr_addr = V::nbr_addr(&nbr.ident);
     let ifindex = nbr.ifindex;
-    Timer::new(Timer::second(40), TimerType::Once, move || {
+    Timer::new(40, TimerType::Once, move || {
         use NfsmEvent::*;
         let tx = tx.clone();
         async move {

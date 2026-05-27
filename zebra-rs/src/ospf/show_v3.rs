@@ -503,6 +503,16 @@ fn write_lsa_detail(
     writeln!(out, "  LS Sequence Number: 0x{:08x}", lsa.ls_seq_number())?;
     writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
     writeln!(out, "  Length: {}", lsa.length())?;
+    match lsa.hold_remaining() {
+        Some(s) => writeln!(out, "  Hold remaining: {}s", s)?,
+        None => writeln!(out, "  Hold remaining: <unarmed>")?,
+    }
+    if lsa.originated {
+        match lsa.refresh_remaining() {
+            Some(s) => writeln!(out, "  Refresh remaining: {}s", s)?,
+            None => writeln!(out, "  Refresh remaining: <unarmed>")?,
+        }
+    }
 
     match &lsa.data.body {
         Ospfv3LsBody::Router(b) => {

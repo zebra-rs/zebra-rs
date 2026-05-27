@@ -1,9 +1,9 @@
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
-use super::task::{Timer, TimerType};
 use super::version::OspfVersion;
 use super::{Identity, Message, NfsmEvent, NfsmState, OspfLink};
+use crate::context::{Timer, TimerType};
 
 /// Interface state machine state — RFC 2328 §9.1.
 ///
@@ -132,7 +132,7 @@ pub fn ospf_hello_timer<V: OspfVersion>(oi: &OspfLink<V>) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
     let timer: u64 = oi.hello_interval().into();
-    Timer::new(Timer::second(timer), TimerType::Infinite, move || {
+    Timer::new(timer, TimerType::Infinite, move || {
         let tx = tx.clone();
         async move {
             let _ = tx.send(Message::HelloTimer(index));
@@ -143,16 +143,12 @@ pub fn ospf_hello_timer<V: OspfVersion>(oi: &OspfLink<V>) -> Timer {
 pub fn ospf_wait_timer<V: OspfVersion>(oi: &OspfLink<V>) -> Timer {
     let tx = oi.tx.clone();
     let index = oi.index;
-    Timer::new(
-        Timer::second(oi.dead_interval().into()),
-        TimerType::Infinite,
-        move || {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(Message::Ifsm(index, IfsmEvent::WaitTimer));
-            }
-        },
-    )
+    Timer::new(oi.dead_interval().into(), TimerType::Infinite, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::Ifsm(index, IfsmEvent::WaitTimer));
+        }
+    })
 }
 
 pub fn ospf_ifsm_interface_up<V: OspfVersion>(link: &mut OspfLink<V>) -> Option<IfsmState> {

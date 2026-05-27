@@ -11,9 +11,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rib::Link;
 
+use super::addr::OspfAddr;
 use super::version::{OspfVersion, Ospfv2};
 use super::{Identity, IfsmState, Message, Neighbor};
-use super::{addr::OspfAddr, task::Timer};
+use crate::context::Timer;
 
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
 pub const OSPF_DEFAULT_HELLO_INTERVAL: u16 = 10;

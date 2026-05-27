@@ -150,14 +150,19 @@ impl Timer {
         let _ = self.tx.send(TimerMessage::Refresh);
     }
 
-    /// Get the remaining seconds until the next tick
-    pub fn rem_sec(&self) -> u64 {
+    /// Time remaining until the next fire. `Once` timers count
+    /// down from `duration` to zero and stay at zero after firing;
+    /// `Infinite` / `ImmediateRepeat` reset on each tick (and on
+    /// every `refresh()`) so this is "time until next tick".
+    pub fn remaining(&self) -> Duration {
         let elapsed = self.last_reset.lock().unwrap().elapsed();
-        if elapsed >= self.duration {
-            0
-        } else {
-            (self.duration - elapsed).as_secs()
-        }
+        self.duration.saturating_sub(elapsed)
+    }
+
+    /// `remaining()` truncated to whole seconds. Kept as a thin
+    /// convenience for call sites that just want the integer.
+    pub fn rem_sec(&self) -> u64 {
+        self.remaining().as_secs()
     }
 
     /// Get the timer's full duration in seconds (the value it was set to)

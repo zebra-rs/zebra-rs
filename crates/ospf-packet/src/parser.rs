@@ -407,6 +407,17 @@ pub struct OspfLsaHeader {
     pub length: u16,
 }
 
+/// RFC 2328 §A.4.1 `InitialSequenceNumber` — the smallest valid LS
+/// Sequence Number (treated as a signed 32-bit integer, so this is
+/// −2,147,483,647). All newly-originated LSAs start here and
+/// monotonically increase toward `MaxSequenceNumber` (0x7FFFFFFF).
+///
+/// The bare-literal callsites elsewhere in the codebase
+/// (`srmpls.rs`, `inst.rs`, `v3.rs`) already use this exact value;
+/// declaring it here keeps `OspfLsaHeader::new` aligned with the
+/// rest of the originate paths.
+pub const INITIAL_SEQUENCE_NUMBER: u32 = 0x8000_0001;
+
 impl OspfLsaHeader {
     pub fn new(ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) -> Self {
         Self {
@@ -415,7 +426,7 @@ impl OspfLsaHeader {
             ls_type,
             ls_id,
             adv_router,
-            ls_seq_number: 0x8000000,
+            ls_seq_number: INITIAL_SEQUENCE_NUMBER,
             ls_checksum: 0,
             length: 0,
         }

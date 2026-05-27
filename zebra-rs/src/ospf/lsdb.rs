@@ -1,4 +1,3 @@
-use std::time::Duration;
 use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use ospf_packet::*;
@@ -8,8 +7,8 @@ use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
 
 use super::ReachMap;
 use super::inst::Message;
-use super::task::{Timer, TimerType};
 use super::version::{OspfVersion, Ospfv2};
+use crate::context::{Timer, TimerType};
 
 pub type OspfLabelMap = LabelMap<Ipv4Addr>;
 
@@ -18,6 +17,20 @@ pub const OSPF_MAX_AGE_DIFF: u16 = 900; // 15 minutes (RFC 2328 Section 13.1)
 pub const OSPF_LS_REFRESH_TIME: u64 = 1800;
 pub const OSPF_MAX_LSA_SEQ: u32 = 0x7FFFFFFF;
 pub const OSPF_MIN_LS_ARRIVAL: u64 = 1; // 1 second (RFC 2328)
+
+/// Signed-aware max for LS Sequence Numbers. RFC 2328 §13.1 /
+/// §A.4.1 treats `ls_seq_number` as a SIGNED 32-bit integer —
+/// `InitialSequenceNumber = 0x8000_0001` is the *smallest* valid
+/// value (≈ −2.1 billion), `MaxSequenceNumber = 0x7FFF_FFFF` the
+/// largest. Plain `u32::max` would treat a legacy positive value
+/// like `0x0800_0038` as "larger" than the correct initial
+/// `0x8000_0001`, and the originator-bump path would re-pick the
+/// initial — producing a self-vs-network ping-pong loop until
+/// every peer power-cycles. Use this at every originate-with-
+/// min-seq callsite.
+pub fn seq_max(a: u32, b: u32) -> u32 {
+    if (a as i32) > (b as i32) { a } else { b }
+}
 
 /// Flat LSDB storage: a single BTreeMap keyed by the full
 /// `(LS-Type, LS-ID, Advertising-Router)` triple. Replaces the
@@ -97,6 +110,15 @@ pub struct Lsa<V: OspfVersion = Ospfv2> {
     pub originated: bool,
     pub birth_time: tokio::time::Instant,
     pub install_time: tokio::time::Instant,
+    /// Last time we sent THIS LSA back to a neighbor via the
+    /// RFC 2328 §13 step 8 "DB copy newer" path. Gates re-sends so
+    /// we don't loop-flood when a peer keeps retransmitting a stale
+    /// instance; see the step 8 wording:
+    /// "If the database copy has not been sent in a Link State
+    /// Update within the last MinLSArrival seconds, send the
+    /// database copy back to the sending neighbor."
+    /// `None` means "never sent back" — always allowed.
+    pub last_flood_out: Option<tokio::time::Instant>,
     pub hold_timer: Option<Timer>,
     pub refresh_timer: Option<Timer>,
 }
@@ -109,6 +131,7 @@ impl<V: OspfVersion> Lsa<V> {
             originated: false,
             birth_time: now,
             install_time: now,
+            last_flood_out: None,
             hold_timer: None,
             refresh_timer: None,
         }
@@ -126,6 +149,24 @@ impl<V: OspfVersion> Lsa<V> {
         let elapsed = self.birth_time.elapsed().as_secs() as u16;
         let age = initial_age.saturating_add(elapsed);
         age.min(OSPF_MAX_AGE)
+    }
+
+    /// Seconds remaining on the actual hold `Timer` — read directly
+    /// from the tokio timer so the show output reflects whatever the
+    /// timer was actually set to, not a derived expectation. Returns
+    /// `None` when the entry has no armed hold timer (which itself is
+    /// a bug worth noticing in show output).
+    pub fn hold_remaining(&self) -> Option<u64> {
+        self.hold_timer.as_ref().map(|t| t.remaining().as_secs())
+    }
+
+    /// Same as [`Self::hold_remaining`] for the refresh timer.
+    /// `None` for non-self-originated entries (they have no refresh
+    /// timer) and for any self-originated entry whose refresh timer
+    /// has been lost — flagging that in show output is the whole
+    /// point of having this accessor.
+    pub fn refresh_remaining(&self) -> Option<u64> {
+        self.refresh_timer.as_ref().map(|t| t.remaining().as_secs())
     }
 
     // The wrappers below delegate to the matching OspfVersion trait
@@ -162,7 +203,7 @@ fn lsdb_timer<V: OspfVersion>(
     ev: LsdbEvent,
 ) -> Timer {
     let tx = tx.clone();
-    Timer::new(Duration::from_secs(secs), TimerType::Once, move || {
+    Timer::new(secs, TimerType::Once, move || {
         let tx = tx.clone();
         let msg = Message::<V>::Lsdb(ev, area_id, key);
         async move {
@@ -328,6 +369,18 @@ impl<V: OspfVersion> Lsdb<V> {
         self.tables.get(&v2_lsa_key(ls_type, ls_id, adv_router))
     }
 
+    /// Mutable variant of [`Self::lookup_lsa`] — used by the
+    /// §13 step 8 send-back path to stamp `last_flood_out` on the
+    /// LSDB entry after re-flooding our newer copy.
+    pub fn lookup_lsa_mut(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> Option<&mut Lsa<V>> {
+        self.tables.get_mut(&v2_lsa_key(ls_type, ls_id, adv_router))
+    }
+
     /// Install a parsed LSA into the LSDB and start its hold
     /// timer. The key is derived from the LSA header via the
     /// `OspfVersion` trait accessors; no version-specific body
@@ -345,6 +398,16 @@ impl<V: OspfVersion> Lsdb<V> {
             (V::ls_type(h), V::ls_id(h), V::adv_router(h))
         };
         let ls_age = V::ls_age(V::lsa_header(&lsa_data));
+        let hold_secs = (OSPF_MAX_AGE - ls_age).max(1);
+        let (ls_type_raw, ls_id_raw, adv_router) = lsa_key;
+        tracing::info!(
+            "[LSDB install_lsa] type=0x{:04x} id=0x{:08x} adv={} ls_age={} hold={}s",
+            ls_type_raw,
+            ls_id_raw,
+            adv_router,
+            ls_age,
+            hold_secs,
+        );
         let mut lsa = Lsa::<V>::new(lsa_data);
         lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, ls_age));
         self.tables.insert(lsa_key, lsa);
@@ -367,6 +430,17 @@ impl<V: OspfVersion> Lsdb<V> {
             (V::ls_type(h), V::ls_id(h), V::adv_router(h))
         };
         let ls_age = V::ls_age(V::lsa_header(&lsa_data));
+        let hold_secs = (OSPF_MAX_AGE - ls_age).max(1);
+        let (ls_type_raw, ls_id_raw, adv_router) = lsa_key;
+        tracing::info!(
+            "[LSDB install_originated] type=0x{:04x} id=0x{:08x} adv={} ls_age={} hold={}s refresh={}s",
+            ls_type_raw,
+            ls_id_raw,
+            adv_router,
+            ls_age,
+            hold_secs,
+            OSPF_LS_REFRESH_TIME,
+        );
         let mut lsa = Lsa::<V>::new(lsa_data);
         lsa.originated = true;
         lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, ls_age));
@@ -429,7 +503,7 @@ impl<V: OspfVersion> Lsdb<V> {
         if let Some(old_lsa) = self.tables.get(&lsa_key) {
             let mut new_data = old_lsa.data.clone();
             let h = V::lsa_header_mut(&mut new_data);
-            let next_seq = V::ls_seq_number(h).max(min_seq) + 1;
+            let next_seq = seq_max(V::ls_seq_number(h), min_seq).saturating_add(1);
             V::set_ls_seq_number(h, next_seq);
             V::set_ls_age(h, 0);
             V::update_lsa(&mut new_data);
