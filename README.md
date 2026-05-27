@@ -1,5 +1,7 @@
 # zebra-rs
 
+<img src="docs/logo.png" alt="Project Logo" width="100" height="100">
+
 This is a routing protocol implementation project Zebra.
 
 ## Install Instruction
