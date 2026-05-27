@@ -919,6 +919,15 @@ module config {
             // enabled for the repair to install in the dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
           }
+          container backup-as-primary {
+            // Swap the metric-sort offset between the SPF primary
+            // nexthop and the TI-LFA repair: the repair installs at
+            // route.metric (sorted first), and the primary installs
+            // at route.metric + BACKUP_METRIC_OFFSET. Lets operators
+            // pin traffic onto the TI-LFA path for protection
+            // testing without rewiring the topology.
+            presence "Install TI-LFA backup as the primary nexthop";
+          }
         }
 
         container graceful-restart {

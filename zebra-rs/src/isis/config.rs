@@ -142,6 +142,10 @@ impl Isis {
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
         self.callback_add(
+            "/router/isis/fast-reroute/backup-as-primary",
+            config_fast_reroute_backup_as_primary,
+        );
+        self.callback_add(
             "/router/isis/graceful-restart/helper-enabled",
             config_gr_helper_enabled,
         );
@@ -406,6 +410,16 @@ pub struct IsisConfig {
     /// Adj-SID B-flag (RFC 8667 §2.2.1) emitted in TLV 22 sub-TLVs.
     pub ti_lfa_enabled: bool,
 
+    /// Set when /router/isis/fast-reroute/backup-as-primary is
+    /// committed. Inverts the primary/backup metric-sort offset used
+    /// by `make_rib_entry`: the TI-LFA repair installs at
+    /// `route.metric` (sorted first) and the SPF primary installs at
+    /// `route.metric + BACKUP_METRIC_OFFSET`. Lets operators force
+    /// traffic onto the repair path for protection validation
+    /// without rewiring the topology. No effect when `ti_lfa_enabled`
+    /// is false (no repair gets stamped in the first place).
+    pub fast_reroute_backup_as_primary: bool,
+
     /// True when `/router/isis/multi-topology` carries an MT id.
     /// Drives whether IS-IS originates TLV 229 and the per-MT reach
     /// TLVs.
@@ -641,6 +655,7 @@ impl Default for IsisConfig {
             sr_srv6_locator: Default::default(),
             sr_srv6_flex_algo_locators: Default::default(),
             ti_lfa_enabled: Default::default(),
+            fast_reroute_backup_as_primary: Default::default(),
             mt_enabled: Default::default(),
             mt_topologies: Default::default(),
             networks_v4: Default::default(),
@@ -1134,6 +1149,21 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     // Recompute SPF so the RIB picks up repair paths (on enable) or
     // drops them (on disable) for every prefix in this instance.
+    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
+    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    Some(())
+}
+
+fn config_fast_reroute_backup_as_primary(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    let prev = isis.config.fast_reroute_backup_as_primary;
+    isis.config.fast_reroute_backup_as_primary = op.is_set();
+    if isis.config.fast_reroute_backup_as_primary == prev {
+        return Some(());
+    }
+    // Re-run SPF so the RIB rebuilds with the inverted primary/backup
+    // metric ordering. No LSP re-origination needed — the swap is a
+    // local install-side decision and doesn't change anything we
+    // advertise.
     let _ = isis.tx.send(Message::SpfCalc(Level::L1));
     let _ = isis.tx.send(Message::SpfCalc(Level::L2));
     Some(())
