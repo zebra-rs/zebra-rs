@@ -397,6 +397,10 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
+            // Phase 5e-ii: drive exit-success when every
+            // checkpointed peer has come back to Up. No-op outside
+            // a loaded-checkpoint restart.
+            let _ = link.tx.send(Message::GrNeighborUp(nbr.sys_id));
         }
     } else {
         // 8.4.2.5.3
@@ -579,6 +583,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
+            // Phase 5e-ii: same exit-success trigger as the LAN
+            // path. No-op outside a loaded-checkpoint restart.
+            let _ = link.tx.send(Message::GrNeighborUp(nbr.sys_id));
         }
 
         // RFC 5303 §6.1: peer's P2P-3way TLV no longer reports our
