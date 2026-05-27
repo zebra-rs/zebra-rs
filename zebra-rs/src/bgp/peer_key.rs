@@ -15,20 +15,7 @@ use ipnet::IpNet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PeerKey {
     Addr(IpAddr),
-    // Wired in by the follow-up interface-neighbor PR; defining the
-    // variant now keeps PeerMap signatures stable across that change.
-    #[allow(dead_code)]
     Interface(u32),
-}
-
-impl PeerKey {
-    #[allow(dead_code)]
-    pub fn addr(&self) -> Option<IpAddr> {
-        match self {
-            Self::Addr(a) => Some(*a),
-            Self::Interface(_) => None,
-        }
-    }
 }
 
 impl From<IpAddr> for PeerKey {
@@ -48,10 +35,8 @@ pub enum PeerOrigin {
     #[default]
     Static,
     /// Configured by interface: `neighbor IFNAME interface ...`.
-    #[allow(dead_code)]
     Interface { ifindex: u32 },
     /// Created on inbound accept by a `bgp listen range` match.
-    #[allow(dead_code)]
     Dynamic { range_prefix: IpNet },
 }
 
@@ -65,13 +50,6 @@ mod tests {
         let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
         let k: PeerKey = a.into();
         assert_eq!(k, PeerKey::Addr(a));
-        assert_eq!(k.addr(), Some(a));
-    }
-
-    #[test]
-    fn peer_key_interface_has_no_addr() {
-        let k = PeerKey::Interface(42);
-        assert_eq!(k.addr(), None);
     }
 
     #[test]

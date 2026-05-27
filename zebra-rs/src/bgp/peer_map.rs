@@ -96,16 +96,7 @@ impl PeerMap {
             })
     }
 
-    /// Iterate over every peer regardless of key variant.
-    #[allow(dead_code)]
-    pub fn iter_all(&self) -> impl Iterator<Item = (&PeerKey, &Peer)> {
-        self.map
-            .iter()
-            .filter_map(move |(key, &idx)| self.peers[idx].as_ref().map(|peer| (key, peer)))
-    }
-
     /// Iterate every peer regardless of key variant, mutable.
-    #[allow(dead_code)]
     pub fn iter_mut_all(&mut self) -> impl Iterator<Item = (&PeerKey, &mut Peer)> {
         let map = &self.map;
         self.peers
@@ -179,7 +170,7 @@ mod tests {
         );
 
         assert_eq!(m.iter().count(), 1, "addr-only iter skips interface peer");
-        assert_eq!(m.iter_all().count(), 2, "iter_all includes both");
+        assert_eq!(m.iter_mut_all().count(), 2, "iter_mut_all includes both");
         assert_eq!(m.len(), 2);
     }
 

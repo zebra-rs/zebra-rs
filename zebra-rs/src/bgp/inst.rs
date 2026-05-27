@@ -16,7 +16,7 @@ use crate::rib::api::{FdbEntry, RibRx};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// Map a `/clear/bgp/<afi>/neighbor[/soft[/in|out]]` path (from
 /// zebra-bgp-clear.yang) to the (AFI, SAFI, op) triple the BGP runtime
@@ -46,12 +46,10 @@ fn parse_clear_bgp_path(
     Some((afi, safi, op))
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum Message {
     Event(usize, Event),
     Accept(TcpStream, SocketAddr),
-    Show(Sender<String>),
     /// Adv-debounce timer expired for an IPv4-unicast update-group:
     /// drain the group's pending cache, encode one UPDATE per attr
     /// bucket, and ship to each member with split-horizon pruning.
@@ -79,22 +77,6 @@ pub(crate) fn peer_index_register(
             new_vrf = %vrf,
             "bgp: peer address claimed by multiple VRFs; most recent wins",
         );
-    }
-}
-
-/// Drop the `peer_index` entry for `addr` iff it currently
-/// belongs to `vrf`. Guards against a stale `UnregisterPeer`
-/// arriving after the operator moved the peer to a different
-/// VRF.
-pub(crate) fn peer_index_unregister(
-    index: &mut BTreeMap<std::net::IpAddr, String>,
-    vrf: &str,
-    addr: std::net::IpAddr,
-) {
-    if let Some(owner) = index.get(&addr)
-        && owner == vrf
-    {
-        index.remove(&addr);
     }
 }
 
@@ -189,19 +171,13 @@ pub(crate) fn matching_import_vrfs(
 #[derive(Debug, Clone, Default)]
 pub struct RibKnownVrf {
     pub table_id: u32,
-    #[allow(dead_code)] // read by step 16's accept dispatcher.
     pub ifindex: u32,
-    #[allow(dead_code)] // first reader lands in step 18.
     pub import_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
-    #[allow(dead_code)] // first reader lands in step 17b.
     pub export_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
-    #[allow(dead_code)] // first reader lands in step 18.
     pub import_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
-    #[allow(dead_code)] // first reader lands in step 17b.
     pub export_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 }
 
-#[allow(dead_code)]
 pub struct Bgp {
     pub asn: u32,
     pub router_id: Ipv4Addr,
@@ -740,9 +716,6 @@ impl Bgp {
                 } else {
                     accept(self, socket, sockaddr);
                 }
-            }
-            Message::Show(tx) => {
-                let _ = self.tx.try_send(Message::Show(tx));
             }
             Message::FlushUpdateGroupIpv4(group_id) => {
                 super::update_group::flush_ipv4(
@@ -1584,9 +1557,6 @@ impl Bgp {
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
             }
-            super::vrf::BgpGlobalMsg::UnregisterPeer { vrf, addr } => {
-                peer_index_unregister(&mut self.peer_index, &vrf, addr);
-            }
         }
     }
 
@@ -1678,7 +1648,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::IpAddr;
 
-    use super::{peer_index_register, peer_index_unregister};
+    use super::peer_index_register;
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -1709,30 +1679,6 @@ mod tests {
         peer_index_register(&mut index, "vrfA".to_string(), addr("192.0.2.1"));
         assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfA".to_string()));
         assert_eq!(index.len(), 1);
-    }
-
-    #[test]
-    fn unregister_drops_only_when_owner_matches() {
-        // Defends against a stale `UnregisterPeer` arriving from
-        // a VRF that no longer owns the address (operator moved
-        // the peer to a different VRF since).
-        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
-        peer_index_register(&mut index, "vrfB".to_string(), addr("192.0.2.1"));
-        peer_index_unregister(&mut index, "vrfA", addr("192.0.2.1"));
-        assert_eq!(
-            index.get(&addr("192.0.2.1")),
-            Some(&"vrfB".to_string()),
-            "stale Unregister from vrfA must not strip vrfB's claim",
-        );
-        peer_index_unregister(&mut index, "vrfB", addr("192.0.2.1"));
-        assert!(index.is_empty());
-    }
-
-    #[test]
-    fn unregister_unknown_addr_is_noop() {
-        let mut index: BTreeMap<IpAddr, String> = BTreeMap::new();
-        peer_index_unregister(&mut index, "vrfA", addr("203.0.113.1"));
-        assert!(index.is_empty());
     }
 
     /// Step 17b-ii: helper that takes a `BgpAttr` and tags it with
