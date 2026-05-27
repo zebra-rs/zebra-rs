@@ -34,8 +34,7 @@ pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool) -> OspfLsa {
     //   - bit 4 (gr_helper)  — Graceful Restart helper-mode capable
     //                          (RFC 3623).
     //   - bit 5 (gr_capable) — Restarter capable; toggles on while
-    //                          we're staged for a planned restart
-    //                          (Phase 5c).
+    //                          we're staged for a planned restart.
     let caps = RouterCapability::new()
         .with_te(true)
         .with_gr_helper(true)
@@ -436,9 +435,9 @@ mod tests {
         assert!(!cap.stub(), "stub bit must remain clear");
     }
 
-    /// While the restarter is staged (Phase 5c
-    /// `gr_restart_begin`), GR-capable (bit 5) is set to advertise
-    /// the planned restart to helpers.
+    /// While the restarter is staged (`gr_restart_begin`),
+    /// GR-capable (bit 5) is set to advertise the planned restart
+    /// to helpers.
     #[test]
     fn router_info_lsa_restarting_sets_gr_capable() {
         let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true);

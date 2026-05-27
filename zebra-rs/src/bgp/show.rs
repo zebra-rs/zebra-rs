@@ -2161,8 +2161,8 @@ fn show_bgp_attributes(
 /// kernel mirror), and `Bgp::vrf_registry` (the running task
 /// handle with its allocated label and ILM ifindex). Per-peer
 /// detail (FSM state, AdjRib stats) lives on the per-VRF tokio
-/// task and isn't reachable from here; step 20b would mirror it
-/// via a `BgpGlobalMsg::VrfStatus` snapshot.
+/// task and isn't reachable from here; a future
+/// `BgpGlobalMsg::VrfStatus` snapshot could mirror it.
 fn show_bgp_vrf(
     bgp: &Bgp,
     mut args: Args,

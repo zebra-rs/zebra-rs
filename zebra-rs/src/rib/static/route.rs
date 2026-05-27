@@ -341,8 +341,9 @@ mod tests {
 
     #[test]
     fn srv6_segs_only_no_nexthops_returns_some() {
-        // Pre-Step-1 the absence of nexthops short-circuited to None;
-        // segs alone must now be sufficient to produce a RibEntry.
+        // Segs alone must be sufficient to produce a RibEntry —
+        // historically the absence of nexthops short-circuited to
+        // None.
         let r = StaticRoute::<V4> {
             segs: vec![seg("fd00:c::")],
             ..Default::default()

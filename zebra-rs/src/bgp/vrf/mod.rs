@@ -1,20 +1,15 @@
-//! Per-VRF BGP runtime (step 13 of the BGP MPLS/VPN refactor).
+//! Per-VRF BGP runtime.
 //!
 //! Sibling of the global [`crate::bgp::Bgp`] runtime: one
-//! [`BgpVrf`] task per `router bgp vrf X` block. Step 13 lays down
-//! the task shape and lifecycle — message enums, the event loop,
-//! channels to the global task — without wiring peers or the
-//! import/export pipeline. Subsequent steps fill those in:
-//!
-//! * step 14 — `spawn_bgp_vrf` / `despawn_bgp_vrf` from the
-//!   commit-time diff against [`crate::bgp::Bgp::vrfs`].
-//! * step 15 — per-VRF peer configure + active connect via
-//!   `ProtoContext::for_vrf` (the per-VRF socket binding gets
-//!   exercised end-to-end here).
-//! * step 16 — passive accept dispatch from the global task to the
-//!   matching VRF via `BgpVrfMsg::Accept`.
-//! * step 17 / 18 — export to / import from the global VPNv4
-//!   Loc-RIB across the `BgpGlobalMsg` / `BgpVrfMsg` channels.
+//! [`BgpVrf`] task per `router bgp vrf X` block. The task shape
+//! and lifecycle (message enums, event loop, channels to the
+//! global task) live here, alongside `spawn_bgp_vrf` /
+//! `despawn_bgp_vrf` (driven from the commit-time diff against
+//! [`crate::bgp::Bgp::vrfs`]), per-VRF peer configure + active
+//! connect via `ProtoContext::for_vrf`, passive accept dispatch
+//! from the global task via `BgpVrfMsg::Accept`, and export to /
+//! import from the global VPNv4 Loc-RIB across the
+//! `BgpGlobalMsg` / `BgpVrfMsg` channels.
 
 pub mod inst;
 pub mod label;

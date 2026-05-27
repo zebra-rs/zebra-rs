@@ -4,13 +4,13 @@ use serde::Serialize;
 /// Per-adjacency Graceful Restart observation + helper-mode state
 /// (RFC 5306).
 ///
-/// Phase 2 recorded the peer's Restart TLV passively. Phase 3a adds
-/// the helper-mode flag — `helper_active` flips on the first IIH that
-/// carries RR=1 and clears on the first IIH with RR=0 — and the
-/// `observe()` method returns a [`HelperEdge`] so the caller can
-/// (a) suppress the per-IIH hold-timer refresh while the peer keeps
-/// retransmitting RR (RFC 5306 §3.2(a) — "otherwise, the holding time
-/// is not refreshed"), and (b) trigger an immediate IIH to deliver the
+/// Tracks the peer's Restart TLV and helper-mode state.
+/// `helper_active` flips on the first IIH that carries RR=1 and
+/// clears on the first IIH with RR=0. The `observe()` method
+/// returns a [`HelperEdge`] so the caller can (a) suppress the
+/// per-IIH hold-timer refresh while the peer keeps retransmitting
+/// RR (RFC 5306 §3.2(a) — "otherwise, the holding time is not
+/// refreshed"), and (b) trigger an immediate IIH to deliver the
 /// RA reply without waiting for the next periodic hello.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct AdjGrState {

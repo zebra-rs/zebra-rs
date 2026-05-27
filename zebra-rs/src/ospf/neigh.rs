@@ -56,10 +56,10 @@ impl Default for GracefulRestartConfig {
 /// neighbor's adjacency stays Full across the restart window.
 ///
 /// Exit paths (RFC 3623 §3.2):
-///   - Grace-period expiry (Phase 2a — `expire_timer` fires
-///     `Message::GrHelperExpire`).
-///   - Topology change (Phase 2c-i — `gr_helper_check_exit` runs
-///     on every LSA flooded through the area; see `lsdb_snapshot`).
+///   - Grace-period expiry — `expire_timer` fires
+///     `Message::GrHelperExpire`.
+///   - Topology change — `gr_helper_check_exit` runs on every LSA
+///     flooded through the area; see `lsdb_snapshot`.
 ///
 /// `reason`, `grace_period`, `entered_at` are populated for the
 /// `show ip ospf graceful-restart` output (`show.rs`).
@@ -100,9 +100,8 @@ pub struct HelperState {
 /// Populated by `clear ip ospf graceful-restart begin` while the
 /// restarter prepares to exit; absent the rest of the time.
 ///
-/// Phase 5c wires entry, Grace-LSA flood, and operator-driven
-/// abort. The actual exit + restart-aware boot path (Phase 5d /
-/// 5e) consume this struct via `Ospf<V>.restarting`.
+/// Consumed by the GR exit and restart-aware boot paths via
+/// `Ospf<V>.restarting`.
 #[derive(Debug)]
 pub struct RestartingState {
     /// Grace period the restarter advertises (seconds).
@@ -113,14 +112,13 @@ pub struct RestartingState {
     pub entered_at: Instant,
     /// Auto-abort timer. If `commit` doesn't fire within the
     /// grace period, we walk the restart back and resume
-    /// normal operation. Phase 5d hooks the commit side.
+    /// normal operation.
     pub abort_timer: Option<Timer>,
     /// Number of neighbors that were Full at the moment we
-    /// staged or wrote the checkpoint. Phase 5e-ii drives
-    /// exit-restart success when `current_full_count` matches
-    /// this on the post-reboot side. Zero when the staging
-    /// happened mid-flight without a checkpoint (Phase 5c
-    /// `begin` without `commit`).
+    /// staged or wrote the checkpoint. Drives exit-restart success
+    /// when `current_full_count` matches this on the post-reboot
+    /// side. Zero when the staging happened mid-flight without a
+    /// checkpoint (`begin` without `commit`).
     pub expected_full_count: usize,
     /// Number of neighbors that have transitioned back to Full
     /// since restart began. Incremented in

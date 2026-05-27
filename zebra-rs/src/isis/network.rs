@@ -80,9 +80,9 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                     return Err(ErrorKind::UnexpectedEof.into());
                 }
                 // Always preserve the raw PDU bytes — the auth-verify
-                // path (Phase 3+) reads them to recompute HMAC against
-                // the exact byte sequence the peer signed, and the
-                // existing LSP install path needs them too.
+                // path reads them to recompute HMAC against the exact
+                // byte sequence the peer signed, and the existing LSP
+                // install path needs them too.
                 packet.1.bytes = input[3..].to_vec();
 
                 let mac = addr.addr().map(MacAddr::from);

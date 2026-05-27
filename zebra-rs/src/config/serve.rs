@@ -612,9 +612,8 @@ impl VtyAddr {
 ///   3. Resolves a `(uid, bash_pid)` session key via `/proc` and records or
 ///      refreshes the entry in [`SessionTable`].
 ///
-/// The session table is populated for observation only in Phase 1 — no RPC
-/// behavior depends on it yet. Subsequent phases (RBAC, enable, streaming)
-/// will read from it.
+/// The session table backs RBAC, enable, and streaming consumers via
+/// [`SessionTable`].
 #[derive(Clone)]
 struct VtyPeerInterceptor {
     allow_uids: Option<Arc<HashSet<u32>>>,

@@ -2,15 +2,10 @@
 //! `router bgp vrf X` block.
 //!
 //! Mirrors the global [`crate::bgp::Bgp`] structure on a smaller
-//! surface: a [`PeerMap`] for CE peers (populated in step 15),
-//! a per-VRF [`LocalRib`] for the IPv4/IPv6 unicast Loc-RIB
-//! (populated by best-path / import in step 17 / 18), and the
-//! identity (`name`, `rd`, `router_id`) the global task supplies
-//! at spawn time.
-//!
-//! Step 13 ships the type and the lifecycle (`event_loop`,
-//! `serve_vrf`, `Shutdown` handling); step 14's `spawn_bgp_vrf`
-//! is the first production consumer.
+//! surface: a [`PeerMap`] for CE peers, a per-VRF [`LocalRib`]
+//! for the IPv4/IPv6 unicast Loc-RIB (populated by best-path /
+//! import), and the identity (`name`, `rd`, `router_id`) the
+//! global task supplies at spawn time.
 
 use std::net::Ipv4Addr;
 
@@ -35,49 +30,42 @@ pub struct BgpVrf {
     /// `RegisterPeer` payload so the global task can attribute
     /// cross-task messages back to a VRF.
     pub name: String,
-    /// Spawn-time runtime context built by step 14 via
+    /// Spawn-time runtime context built via
     /// [`ProtoContext::for_vrf`]. Every socket the per-VRF runtime
     /// opens flows through `ctx.tcp_socket_v*` / `ctx.tcp_listen`
-    /// and therefore inherits the `SO_BINDTODEVICE` binding step 8
-    /// installed.
+    /// and therefore inherits the `SO_BINDTODEVICE` binding.
     pub ctx: ProtoContext,
     /// Per-VRF peer table — CE peers configured under
-    /// `/router/bgp/vrf/<name>/neighbor/...`. Populated in step 15.
+    /// `/router/bgp/vrf/<name>/neighbor/...`.
     pub peers: PeerMap,
     /// IPv4/IPv6 unicast Loc-RIB scoped to this VRF. VPNv4/v6 /
     /// EVPN stay anchored on the global Loc-RIB; the per-VRF Loc-
     /// RIB holds only the CE-facing surface plus routes imported
-    /// from the global Loc-RIB via [`BgpVrfMsg::ImportV4`] /
-    /// [`BgpVrfMsg::ImportV6`] (step 18).
+    /// from the global Loc-RIB via [`BgpVrfMsg::ImportV4`].
     pub local_rib: LocalRib,
     /// Per-VRF BGP router-id. Defaults to the global router-id at
-    /// spawn time (passed through by step 14); the operator may
-    /// override via `set router bgp vrf <name> router-id <addr>`,
-    /// in which case step 14 respawns the VRF with the new value.
+    /// spawn time; the operator may override via
+    /// `set router bgp vrf <name> router-id <addr>`, in which case
+    /// the VRF is respawned with the new value.
     pub router_id: Ipv4Addr,
-    /// Config-manager subscription. Path-dispatch by step 14
-    /// routes `/router/bgp/vrf/<name>/...` callbacks here so the
-    /// per-VRF runtime owns its own commit sequencing.
+    /// Config-manager subscription. Path-dispatch routes
+    /// `/router/bgp/vrf/<name>/...` callbacks here so the per-VRF
+    /// runtime owns its own commit sequencing.
     pub cm: ConfigChannel,
-    /// Show-command subscription. Step 20 wires `show bgp vrf
-    /// <name> ...` to dispatch through this channel.
+    /// Show-command subscription. `show bgp vrf <name> ...`
+    /// dispatches through this channel.
     pub show: ShowChannel,
     /// Outbound channel to the global `Bgp` task. Used for peer
-    /// registration (step 16) and per-VRF best-path exports
-    /// (step 17 / 18).
+    /// registration and per-VRF best-path exports.
     pub global_tx: UnboundedSender<BgpGlobalMsg>,
     /// Inbound channel from the global `Bgp` task. The accept
-    /// dispatcher (step 16) and the import pipeline (step 18) push
-    /// here. `Shutdown` from `despawn_bgp_vrf` (step 14) also
-    /// arrives on this channel.
+    /// dispatcher and the import pipeline push here. `Shutdown`
+    /// from `despawn_bgp_vrf` also arrives on this channel.
     pub global_rx: UnboundedReceiver<BgpVrfMsg>,
     /// FSM event channel. Per-VRF peers send `Event(ident, ...)`
     /// here when their timers expire or their TCP state changes;
     /// the per-VRF event loop drives the FSM from these. Bounded
-    /// (8192) to match the global `Bgp::tx/rx`. Step 15c lands the
-    /// channel so peers can be materialized at spawn time; the
-    /// loop drains it as a no-op until step 15d wires the FSM
-    /// driver.
+    /// (8192) to match the global `Bgp::tx/rx`.
     pub tx: tokio::sync::mpsc::Sender<Message>,
     pub rx: tokio::sync::mpsc::Receiver<Message>,
     /// Local AS number. Threaded in from the global `Bgp::asn` at
@@ -89,15 +77,14 @@ pub struct BgpVrf {
     /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`
     /// at spawn time. Stamped onto every `BgpGlobalMsg::Export`
     /// this VRF emits so receiving PEs can identify the egress
-    /// VRF; step 19b installs the matching AF_MPLS ILM that pops
-    /// this label and routes the inner packet into
-    /// `vrf_tables[table_id]`.
+    /// VRF; the matching AF_MPLS ILM pops this label and routes
+    /// the inner packet into `vrf_tables[table_id]`.
     pub label: u32,
     /// Dedup pool for `BgpAttr` instances seen by this VRF's
-    /// peers. Step 15d gives every per-VRF runtime its own pool
-    /// (cheaper than threading a shared lock across the `!Send`
-    /// boundary, and the attribute populations are largely
-    /// disjoint between VRFs in practice).
+    /// peers. Every per-VRF runtime gets its own pool (cheaper
+    /// than threading a shared lock across the `!Send` boundary,
+    /// and the attribute populations are largely disjoint between
+    /// VRFs in practice).
     pub attr_store: BgpAttrStore,
     /// IOS-XR-style update-groups scoped to this VRF. Same
     /// rationale as `attr_store`: per-VRF copy avoids cross-task
@@ -107,15 +94,15 @@ pub struct BgpVrf {
     /// resolution. The per-VRF runtime starts with an empty
     /// cache; BGP unnumbered (interface-neighbor) lives on the
     /// global instance and isn't yet exposed at the VRF surface.
-    /// Step 15d threads this through `BgpTop` so the FSM driver
-    /// compiles even though no path here populates it today.
+    /// Threaded through `BgpTop` so the FSM driver compiles even
+    /// though no path here populates it today.
     pub interface_addrs: InterfaceAddrs,
 }
 
 /// Sender side of the per-VRF inbound channel — handed back to
 /// the global task at spawn time so `despawn_bgp_vrf` can send
 /// `BgpVrfMsg::Shutdown`, and so the accept / import dispatchers
-/// (step 16 / 18) can locate the matching VRF's queue.
+/// can locate the matching VRF's queue.
 pub type BgpVrfInbox = UnboundedSender<BgpVrfMsg>;
 
 /// Hook handed to the shared `route_update_ipv4` path so a
@@ -135,19 +122,18 @@ pub struct VrfExporter {
     /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`.
     /// Stamped onto every `BgpGlobalMsg::Export` emitted from
     /// this exporter; the receiving PE binds an AF_MPLS ILM at
-    /// this label (step 19b) so data-plane forwarding pops the
-    /// label and looks the inner packet up in the matching VRF
-    /// table.
+    /// this label so data-plane forwarding pops the label and
+    /// looks the inner packet up in the matching VRF table.
     pub label: u32,
 }
 
 /// Send a `BgpGlobalMsg::Export` for `prefix` carrying the
 /// winner's `BgpAttr` (cloned out of the `Arc` so the global
-/// task can re-intern). Step 17b-iii's hook calls this from
-/// `route_update_ipv4` after best-path returns a non-empty
-/// `selected`. `label = 0` is the step-19 stub — the global
-/// handler treats that as "skip the per-route install" rather
-/// than emit an explicit-null label.
+/// task can re-intern). Called from `route_update_ipv4` after
+/// best-path returns a non-empty `selected`. `label = 0` means
+/// "no per-VRF label allocated" — the global handler treats it as
+/// "skip the per-route install" rather than emit an
+/// explicit-null label.
 pub fn vrf_emit_export(exporter: &VrfExporter, prefix: ipnet::Ipv4Net, attr: &bgp_packet::BgpAttr) {
     let _ = exporter.tx.send(BgpGlobalMsg::Export {
         vrf: exporter.name.clone(),
@@ -184,9 +170,9 @@ pub struct VrfImportDispatcher<'a> {
 /// Fan a freshly best-path-selected VPNv4 route out to every
 /// VRF whose `import_rts_v4` intersects the route's RT extcomms.
 /// Called from the shared `route_ipv4_update` after
-/// `local_rib.update(Some(rd), ...)` returns. `label = 0` is the
-/// step-19 stub — the receiving VRF treats it the same way the
-/// Export side does (skip the install).
+/// `local_rib.update(Some(rd), ...)` returns. `label = 0` means
+/// "no per-VRF label" — the receiving VRF treats it the same way
+/// the Export side does (skip the install).
 pub fn dispatch_import_v4(
     dispatcher: &VrfImportDispatcher<'_>,
     rd: bgp_packet::RouteDistinguisher,
@@ -211,8 +197,7 @@ pub fn dispatch_import_v4(
 /// Inverse of [`dispatch_import_v4`]. Floods
 /// `BgpVrfMsg::WithdrawImport` to every VRF whose
 /// `import_rts_v4` matches; the receiver decides whether the
-/// matching imported route is one it actually holds (step 18b
-/// wires the receive-side filter).
+/// matching imported route is one it actually holds.
 pub fn dispatch_withdraw_import_v4(
     dispatcher: &VrfImportDispatcher<'_>,
     rd: bgp_packet::RouteDistinguisher,
@@ -230,10 +215,10 @@ pub fn dispatch_withdraw_import_v4(
 
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
-    /// caller (step 14's `spawn_bgp_vrf`) keeps the
-    /// `BgpVrfInbox`, hands the `BgpVrf` to [`serve_vrf`], and
-    /// stashes the inbox in a per-VRF registry so cross-task
-    /// messages can locate this task.
+    /// caller (`spawn_bgp_vrf`) keeps the `BgpVrfInbox`, hands the
+    /// `BgpVrf` to [`serve_vrf`], and stashes the inbox in a
+    /// per-VRF registry so cross-task messages can locate this
+    /// task.
     pub fn new(
         name: String,
         ctx: ProtoContext,
@@ -292,15 +277,14 @@ impl BgpVrf {
                 }
                 _msg = self.cm.rx.recv() => {
                     // CM dispatch from /router/bgp/vrf/<name>/...
-                    // arrives in step 14 once `spawn_bgp_vrf`
-                    // registers the path handler. Step 13 drops it
-                    // on the floor — no consumer has been wired
-                    // yet, and the channel staying drained keeps
-                    // the select! arm from livelocking.
+                    // arrives once `spawn_bgp_vrf` registers the
+                    // path handler. Drained but ignored when no
+                    // consumer is wired yet — keeps the select!
+                    // arm from livelocking.
                 }
                 _msg = self.show.rx.recv() => {
-                    // `show bgp vrf <name> ...` dispatch lands in
-                    // step 20. Same drain rationale as above.
+                    // `show bgp vrf <name> ...` dispatch — same
+                    // drain rationale as above.
                 }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);
@@ -309,12 +293,11 @@ impl BgpVrf {
         }
     }
 
-    /// Handle a per-VRF FSM event off `self.rx`. Step 15d wires
-    /// the same set the global `Bgp::process_msg` handles —
-    /// minus `Accept` (passive accept lives at the global task
-    /// and is forwarded via `BgpVrfMsg::Accept`; step 15d doesn't
-    /// yet drive that path because `peer::accept` is tied to the
-    /// global `Bgp`).
+    /// Handle a per-VRF FSM event off `self.rx`. Wires the same
+    /// set the global `Bgp::process_msg` handles — minus `Accept`
+    /// (passive accept lives at the global task and is forwarded
+    /// via `BgpVrfMsg::Accept`; the per-VRF path doesn't yet drive
+    /// it because `peer::accept` is tied to the global `Bgp`).
     fn process_msg(&mut self, msg: Message) {
         use super::super::peer::{BgpTop, fsm};
         match msg {
@@ -361,7 +344,7 @@ impl BgpVrf {
                 // ever gains a path that sends into `vrf.tx`.
                 tracing::debug!(
                     vrf = %self.name,
-                    "bgp vrf: ignored Accept on vrf.tx (active-only path in step 15d)",
+                    "bgp vrf: ignored Accept on vrf.tx (active-only path)",
                 );
             }
             Message::FlushUpdateGroupIpv4(group_id) => {
@@ -376,7 +359,7 @@ impl BgpVrf {
         }
     }
 
-    /// Step 18b: insert an imported VPNv4 route into the per-VRF
+    /// Insert an imported VPNv4 route into the per-VRF
     /// IPv4 unicast LocRIB and fan out to CE peers. `attr` is
     /// re-interned in the per-VRF `attr_store`, the VPNv4
     /// next-hop is rewritten to the VRF's router-id
@@ -471,7 +454,7 @@ impl BgpVrf {
         );
     }
 
-    /// Step 18b: drop an imported route from the per-VRF LocRIB
+    /// Drop an imported route from the per-VRF LocRIB
     /// and advertise the withdraw (or a replacement winner) to
     /// CE peers. Symmetric with [`Self::handle_import_v4`].
     fn handle_withdraw_import(
@@ -517,20 +500,19 @@ impl BgpVrf {
     }
 
     /// Per-task handling of cross-task messages that aren't
-    /// `Shutdown`. Step 13 is intentionally a no-op match — every
-    /// non-`Shutdown` variant is a stub for later steps.
+    /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
         match msg {
             BgpVrfMsg::Accept(_, sockaddr) => {
-                // Step 16 lands the global accept dispatcher that
-                // routes us here; step 15d will pick up the
-                // `TcpStream` and continue the FSM. Until then the
-                // stream drops at the end of this arm and the TCP
-                // connection closes.
+                // The global accept dispatcher routes inbound
+                // connections here; the per-VRF FSM driver picks
+                // up the `TcpStream` and continues. Without that
+                // wiring the stream drops at the end of this arm
+                // and the TCP connection closes.
                 tracing::debug!(
                     vrf = %self.name,
                     peer = %sockaddr.ip(),
-                    "bgp vrf: received inbound Accept (FSM driver lands in step 15d)",
+                    "bgp vrf: received inbound Accept",
                 );
             }
             BgpVrfMsg::ImportV4 {
@@ -577,10 +559,10 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_message_exits_event_loop_within_timeout() {
-        // Step 13's lifecycle invariant: `Shutdown` on the inbound
-        // channel makes `event_loop` return — without that
-        // contract, `despawn_bgp_vrf` (step 14) wouldn't be able
-        // to tear a VRF task down cleanly.
+        // Lifecycle invariant: `Shutdown` on the inbound channel
+        // makes `event_loop` return — without that contract,
+        // `despawn_bgp_vrf` wouldn't be able to tear a VRF task
+        // down cleanly.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = test_ctx_for_vrf(10, "vrf-test");
         let (mut vrf, inbox) = BgpVrf::new(
@@ -606,8 +588,8 @@ mod tests {
     async fn inbox_drop_closes_event_loop() {
         // If every sender to the inbound channel is dropped, the
         // VRF task exits anyway — defensive cleanup so a buggy
-        // step-14 caller that forgets to send `Shutdown` still
-        // doesn't leak the task.
+        // caller that forgets to send `Shutdown` still doesn't
+        // leak the task.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = test_ctx_for_vrf(11, "vrf-test2");
         let (mut vrf, inbox) = BgpVrf::new(
@@ -628,9 +610,9 @@ mod tests {
 
     #[tokio::test]
     async fn vrf_emit_export_sends_export_msg_via_exporter() {
-        // Step 17b-iii: the free-function hook called from
-        // `route_update_ipv4`'s post-best-path arm pushes an
-        // Export with the winner's prefix + attr + label stub.
+        // The free-function hook called from `route_update_ipv4`'s
+        // post-best-path arm pushes an Export with the winner's
+        // prefix + attr + label.
         let (tx, mut rx) = unbounded_channel::<BgpGlobalMsg>();
         let exporter = VrfExporter {
             name: "vrf-hook".to_string(),

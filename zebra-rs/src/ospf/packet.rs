@@ -170,7 +170,7 @@ fn compute_crypto_trailer(key: &super::link::AuthKey, packet_bytes: &[u8]) -> Ve
 /// neighbor `auth_md5_last_seq` via `record_md5_seq()` afterward
 /// to enforce replay protection (RFC 2328 §D.5 / RFC 7474).
 /// Where receive-side key lookup pulls its key material from.
-/// Per-interface map is the Phase 2/3 path; key-chain is the
+/// Per-interface map is the direct path; key-chain is the
 /// policy-driven path used when the interface binds to a named chain.
 pub(super) enum KeySource<'a> {
     PerIface(&'a std::collections::BTreeMap<u8, super::link::AuthKey>),
@@ -1021,8 +1021,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         // RFC 3623 §3.1: a Grace LSA from a Full neighbor advertising
         // its own router-id is the trigger to enter helper mode. Run
         // this check after flooding so the LSA itself still propagates
-        // (RFC 3623 §A.3); helper-policy gating + strict LSDB checks
-        // land in Phase 2c.
+        // (RFC 3623 §A.3).
         gr_maybe_enter_helper(oi, nbr, lsa);
 
         // RFC 2328 Section 13.4: Self-originated LSA check.
@@ -1142,11 +1141,10 @@ pub fn ospf_ls_upd_validate_proc(
 /// advertised by the sender (a Full neighbor), set the per-neighbor
 /// `gr_helper` state and arm the grace-period expiry timer.
 ///
-/// Phase 2a does the minimum-viable check: the sender must be Full,
-/// the LSA's advertising-router must match the neighbor (i.e. the
-/// neighbor is announcing its own restart), and the grace period
-/// must be within [1, `MAX_GRACE_PERIOD_SECS`]. Strict-LSA-checking
-/// (RFC 3623 §3.2 bullets 2-3 / LSDB snapshot) lands in Phase 2c.
+/// Minimum-viable check: the sender must be Full, the LSA's
+/// advertising-router must match the neighbor (i.e. the neighbor
+/// is announcing its own restart), and the grace period must be
+/// within [1, `MAX_GRACE_PERIOD_SECS`].
 fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     use std::collections::BTreeMap;
 

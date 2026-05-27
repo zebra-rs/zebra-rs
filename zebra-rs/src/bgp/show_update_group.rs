@@ -1,9 +1,9 @@
 //! Renderers for `show bgp update-group` (summary, detail, JSON).
 //!
-//! Phase 1 — observability for the grouping skeleton in
-//! `update_group.rs`. Membership counters are built and exposed but
-//! they're mostly zero until Phase 2 wires the advertise pipeline
-//! through the groups. See `docs/design/bgp-update-groups.md` §5.
+//! Observability for the grouping skeleton in `update_group.rs`.
+//! Membership counters are built and exposed but they're mostly
+//! zero until the advertise pipeline runs through the groups. See
+//! `docs/design/bgp-update-groups.md` §5.
 
 use std::fmt::Write;
 use std::time::Instant;

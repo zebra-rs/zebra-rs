@@ -112,12 +112,11 @@ impl RibSubscriber {
         (client, chan.rx)
     }
 
-    /// Send a `Message::IlmAdd` directly to RIB. Step 19b's
-    /// per-VRF BGP spawn site uses this to install the
-    /// AF_MPLS Decap ILM bound to the VRF master interface.
-    /// The legacy `rib_tx` is the right channel — `IlmAdd` is
-    /// a global RIB mutation, not a per-protocol envelope, so
-    /// the `RibInbound` path doesn't fit.
+    /// Send a `Message::IlmAdd` directly to RIB. The per-VRF BGP
+    /// spawn site uses this to install the AF_MPLS Decap ILM bound
+    /// to the VRF master interface. The legacy `rib_tx` is the
+    /// right channel — `IlmAdd` is a global RIB mutation, not a
+    /// per-protocol envelope, so the `RibInbound` path doesn't fit.
     pub fn send_ilm_add(&self, label: u32, ilm: crate::rib::inst::IlmEntry) {
         let _ = self.rib_tx.send(crate::rib::Message::IlmAdd { label, ilm });
     }
@@ -141,18 +140,17 @@ pub struct ConfigManager {
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
     /// Inbound envelope channel toward RIB. Mints every `RibClient`
-    /// handed out by [`Self::subscribe_to_rib`]; all protocol-side
-    /// sends go through here once step 2's migration completes. The
-    /// legacy `rib_tx` survives in parallel for `Subscribe` /
-    /// `ProtoCleanup` and other registration-time messages that are
-    /// not attributable to a single subscriber.
+    /// handed out by [`Self::subscribe_to_rib`]; protocol-side sends
+    /// flow through here. The legacy `rib_tx` survives in parallel
+    /// for `Subscribe` / `ProtoCleanup` and other registration-time
+    /// messages that are not attributable to a single subscriber.
     pub rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
     /// Monotonic allocator for `ProtoId`s handed out at
     /// `subscribe_to_rib` time. `Arc<AtomicU32>` so per-protocol
     /// tasks that need to mint their own subscriptions later (e.g.
-    /// the per-VRF BGP spawn site, step 15) can clone the
-    /// allocator and call `fetch_add` from a tokio task without
-    /// re-entering `ConfigManager` (which is `!Send`).
+    /// the per-VRF BGP spawn site) can clone the allocator and
+    /// call `fetch_add` from a tokio task without re-entering
+    /// `ConfigManager` (which is `!Send`).
     pub next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
@@ -237,9 +235,9 @@ impl ConfigManager {
     ///
     /// Default-VRF subscriptions go through this entry point; the
     /// per-VRF sibling [`Self::subscribe_to_rib_for_vrf`] is used
-    /// by step 15+ to hand out subscriptions with a non-zero VRF
-    /// id so the inbound dispatcher (step 9) routes installs into
-    /// the matching per-VRF table.
+    /// to hand out subscriptions with a non-zero VRF id so the
+    /// inbound dispatcher routes installs into the matching
+    /// per-VRF table.
     pub fn subscribe_to_rib(
         &self,
         proto: &str,
@@ -255,8 +253,8 @@ impl ConfigManager {
     /// `ConfigManager` itself is `!Send` (holds `RefCell`s), but the
     /// three fields the subscriber needs — `rib_tx`,
     /// `rib_inbound_tx`, `next_proto_id` — are all clone-Send. Used
-    /// by step 15's BGP-per-VRF spawn site so each new per-VRF task
-    /// can register its own `RibClient` with a non-zero `vrf_id`.
+    /// by the BGP-per-VRF spawn site so each new per-VRF task can
+    /// register its own `RibClient` with a non-zero `vrf_id`.
     pub fn rib_subscriber(&self) -> RibSubscriber {
         RibSubscriber {
             rib_tx: self.rib_tx.clone(),
@@ -266,9 +264,9 @@ impl ConfigManager {
     }
 
     /// VRF-aware counterpart to [`Self::subscribe_to_rib`]. Used by
-    /// step 15's per-VRF BGP spawn site: every per-VRF task gets a
-    /// fresh `ProtoId` whose `Subscriber` row is bound to the VRF's
-    /// kernel `table_id`, so step 9's inbound dispatcher routes the
+    /// the per-VRF BGP spawn site: every per-VRF task gets a fresh
+    /// `ProtoId` whose `Subscriber` row is bound to the VRF's
+    /// kernel `table_id`, so the inbound dispatcher routes the
     /// task's route installs into `vrf_tables[vrf_id]` instead of
     /// the global table.
     pub fn subscribe_to_rib_for_vrf(

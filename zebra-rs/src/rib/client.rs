@@ -3,18 +3,13 @@
 //! Every protocol module talks to RIB through a `RibClient`. The
 //! client wraps the inbound envelope channel with a `ProtoId` minted
 //! at spawn time, so RIB knows *which* subscriber sent each install
-//! without `Message` having to carry an explicit identifier. Today
-//! the `from` field is captured but not yet consulted by RIB's
-//! dispatch — step 9 of the BGP MPLS/VPN refactor turns it into the
-//! per-VRF table lookup key.
+//! without `Message` having to carry an explicit identifier. The
+//! `from` field is the per-VRF table lookup key.
 //!
 //! Allocation happens in
 //! [`crate::config::ConfigManager::subscribe_to_rib`]; RIB records
 //! the resulting `(ProtoId, rib_rx_tx)` pair in the
-//! [`ClientRegistry`] alongside the legacy `redists` map. The
-//! registry is the canonical source of truth — `redists` survives in
-//! step 3 only to keep the outbound broadcast paths unchanged until
-//! step 9 retires it.
+//! [`ClientRegistry`].
 //!
 //! The `proto_id` is deliberately opaque: protocol modules never
 //! inspect, compare, serialise, or branch on it.
@@ -114,13 +109,13 @@ impl RibClient {
 ///   delta path, which matches `filters[proto]` against this row.
 /// - `rib_rx_tx` is the outbound sender every push path (link / addr
 ///   / router-id / FDB / VXLAN broadcasts; redistribute delta) walks
-///   through. Step 10 makes the registry the sole source of truth
-///   for those pushes — the legacy `redists` HashMap is gone.
+///   through. The registry is the sole source of truth for those
+///   pushes.
 /// - `vrf_id` is the subscriber's bound VRF (0 = default routing
-///   table). Step 9's inbound dispatcher routes installs into the
-///   matching per-VRF table; step 10's outbound dispatcher uses the
-///   same value to filter events so a VRF subscriber sees only its
-///   own VRF's links / addresses. The value itself is the kernel
+///   table). The inbound dispatcher routes installs into the
+///   matching per-VRF table; the outbound dispatcher uses the same
+///   value to filter events so a VRF subscriber sees only its own
+///   VRF's links / addresses. The value itself is the kernel
 ///   `rtm_table` id allocated by `VrfIdAllocator`; the `0 = default`
 ///   convention matches `ProtoContext::vrf_id` so the same value
 ///   flows end-to-end without translation.
@@ -180,9 +175,8 @@ impl ClientRegistry {
     /// Return the VRF id this subscriber is bound to, or `0` if the
     /// id is unknown. Returning `0` (default-VRF) for unknown ids is
     /// deliberately fail-safe: an envelope from a ghost subscriber
-    /// installs into the global table — the same place it landed
-    /// pre-step 9 — rather than panicking on a stale `ProtoId` that
-    /// arrived after `unregister`.
+    /// installs into the global table rather than panicking on a
+    /// stale `ProtoId` that arrived after `unregister`.
     pub fn vrf_id_for(&self, id: ProtoId) -> u32 {
         self.subscribers.get(&id).map(|s| s.vrf_id).unwrap_or(0)
     }
@@ -214,7 +208,7 @@ impl ClientRegistry {
         self.subscribers.iter().map(|(id, s)| (*id, s))
     }
 
-    /// Walk subscribers bound to `vrf_id`. Step 10's link / addr /
+    /// Walk subscribers bound to `vrf_id`. The link / addr /
     /// router-id push paths use this so a VRF subscriber only sees
     /// events that originated in its own VRF.
     pub fn iter_vrf(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
@@ -301,7 +295,7 @@ mod tests {
         // A ProtoId that was never registered must look like a
         // default-VRF subscriber, not panic. Routes from a torn-down
         // subscriber still in flight in the channel buffer land in
-        // the global table — same place they landed pre-step 9.
+        // the global table.
         assert_eq!(reg.vrf_id_for(ProtoId::from_raw(42)), 0);
     }
 
@@ -319,8 +313,8 @@ mod tests {
 
     #[test]
     fn iter_vrf_returns_only_matching_subscribers() {
-        // Step 10 outbound-dispatch invariant: a link / addr push
-        // for VRF 10 must reach the VRF-10 subscriber and *not* the
+        // Outbound-dispatch invariant: a link / addr push for VRF
+        // 10 must reach the VRF-10 subscriber and *not* the
         // default-VRF subscriber.
         let mut reg = ClientRegistry::new();
         let (tx_default, _rx_a) = unbounded_channel();
@@ -343,9 +337,8 @@ mod tests {
 
     #[test]
     fn iter_returns_every_subscriber() {
-        // FDB / VXLAN broadcasts walk every subscriber regardless of
-        // VRF — confirm `iter()` keeps that contract after step 10's
-        // refactor.
+        // FDB / VXLAN broadcasts walk every subscriber regardless
+        // of VRF — confirm `iter()` keeps that contract.
         let mut reg = ClientRegistry::new();
         let (tx_default, _rx_a) = unbounded_channel();
         let (tx_vrf10, _rx_b) = unbounded_channel();

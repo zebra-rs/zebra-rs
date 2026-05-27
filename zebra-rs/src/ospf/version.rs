@@ -2,9 +2,9 @@
 //!
 //! The boundary between version-agnostic protocol logic (IFSM /
 //! NFSM / LSDB plumbing / flooding) and the v2-vs-v3-specific bits
-//! (packet formats, address sizes, multicast groups). Subsequent
-//! Phase 6 PRs parameterize `Ospf<V>`, `OspfLink<V>`, `Neighbor<V>`,
-//! and `Lsdb<V>` over the associated types declared here.
+//! (packet formats, address sizes, multicast groups). `Ospf<V>`,
+//! `OspfLink<V>`, `Neighbor<V>`, and `Lsdb<V>` are parameterized
+//! over the associated types declared here.
 //!
 //! The trait carries five associated wire types — `Packet`,
 //! `Hello`, `DbDesc`, `LsaHeader`, `Lsa` — that downstream generic
@@ -112,11 +112,11 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     // ---- LSA / header accessors --------------------------------
     //
     // Static-style trait methods (called as `V::ls_age(h)`, not
-    // `h.ls_age()`) per the Phase 6 PR 7 direction. The associated
-    // types `Lsa` and `LsaHeader` are opaque to generic code; these
-    // methods are how generic Lsdb / NFSM code reads and mutates
-    // the header fields that have identical semantics in v2
-    // (RFC 2328 §A.4.1) and v3 (RFC 5340 §A.4.2.1).
+    // `h.ls_age()`). The associated types `Lsa` and `LsaHeader` are
+    // opaque to generic code; these methods are how generic Lsdb /
+    // NFSM code reads and mutates the header fields that have
+    // identical semantics in v2 (RFC 2328 §A.4.1) and v3
+    // (RFC 5340 §A.4.2.1).
 
     /// Borrow the LSA header out of an LSA. Both `OspfLsa` and
     /// `Ospfv3Lsa` carry it as a public `h` field — this method is
@@ -156,11 +156,10 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     // The five read-only header accessors below — `ls_type`,
     // `ls_id`, `adv_router`, `ls_checksum`, `length` — are
     // consumed by the matching wrapper methods on `Lsa<V>` in
-    // `lsdb.rs` (PR 7g), which in turn back the JSON-format
-    // database show paths in `show.rs`. `ls_type` and `ls_id`
-    // have wrappers but no callers yet — those land as more
-    // show / flooding / packet code migrates off direct
-    // `lsa.data.h.foo` access.
+    // `lsdb.rs`, which in turn back the JSON-format database show
+    // paths in `show.rs`. `ls_type` and `ls_id` have wrappers but
+    // no callers yet — those land as more show / flooding / packet
+    // code migrates off direct `lsa.data.h.foo` access.
 
     /// LS Type as a 16-bit value. v2's `OspfLsType` is u8-sized so
     /// it widens cleanly; v3's `ls_type` is natively u16 per

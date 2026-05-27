@@ -84,9 +84,9 @@ pub(crate) fn peer_index_register(
 /// communities (RFC 4360 §4.1 — subtype `0x02`). RTs share the
 /// 6-octet on-wire encoding with RDs; the `From<RouteDistinguisher>`
 /// impl picks the right high_type (Two-Octet-AS vs IPv4) but
-/// leaves `low_type = 0`, so step 17b-ii sets it to `0x02` to
-/// mark each entry as RT. Returns `attr` unchanged when the
-/// export-RT set is empty.
+/// leaves `low_type = 0`, so this helper sets it to `0x02` to mark
+/// each entry as RT. Returns `attr` unchanged when the export-RT
+/// set is empty.
 pub(crate) fn tag_attr_with_export_rts(
     mut attr: bgp_packet::BgpAttr,
     export_rts: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
@@ -127,7 +127,7 @@ pub(crate) fn matching_import_vrfs(
     };
     // Build the set of RTs the route carries: every extcomm with
     // RT sub-type, reinterpreted as a `RouteDistinguisher` (RT and
-    // RD share the on-wire 6-octet shape — same trick as step 17a).
+    // RD share the on-wire 6-octet shape).
     let route_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher> = ecom
         .0
         .iter()
@@ -163,11 +163,11 @@ pub(crate) fn matching_import_vrfs(
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd` and the matching RT sets observed via
 /// `RibRx::VrfRouteTargets`. Used by
-/// [`Bgp::maybe_respawn_vrf_with_kernel_ctx`] to lift a step-14
-/// placeholder `ProtoContext` to a real
-/// `ProtoContext::for_vrf(rib, table_id, name)`; step 17b's
-/// Export pipeline reads `export_rts_v4`/`v6` and step 18's
-/// Import pipeline reads `import_rts_v4`/`v6`.
+/// [`Bgp::maybe_respawn_vrf_with_kernel_ctx`] to lift a placeholder
+/// `ProtoContext` to a real
+/// `ProtoContext::for_vrf(rib, table_id, name)`; the Export
+/// pipeline reads `export_rts_v4`/`v6` and the Import pipeline
+/// reads `import_rts_v4`/`v6`.
 #[derive(Debug, Clone, Default)]
 pub struct RibKnownVrf {
     pub table_id: u32,
@@ -259,11 +259,10 @@ pub struct Bgp {
     pub key_chains: BTreeMap<String, crate::policy::KeyChain>,
 
     /// IOS-XR-style `neighbor-group` definitions
-    /// (zebra-bgp-neighbor-group.yang). Phase-1 storage: each entry
-    /// holds the group's overridable defaults; field-level
-    /// inheritance into peers that reference a group via
-    /// `PeerConfig::neighbor_group` is not wired in the runtime
-    /// yet — that lands in a follow-up.
+    /// (zebra-bgp-neighbor-group.yang). Each entry holds the
+    /// group's overridable defaults; field-level inheritance into
+    /// peers that reference a group via `PeerConfig::neighbor_group`
+    /// is not wired in the runtime yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
 
     /// Color → Flex-Algorithm binding table
@@ -298,25 +297,25 @@ pub struct Bgp {
     /// [`super::interface_neighbor::materialize_peer`].
     pub interface_neighbors: BTreeMap<String, super::interface_neighbor::InterfaceNeighborCfg>,
     /// Staged per-VRF BGP intent — populated by the callbacks for
-    /// `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang, steps 11
-    /// and 12). Diffed against [`Self::vrf_registry`] at each
-    /// `CommitEnd` to drive [`super::vrf::spawn_bgp_vrf`] and
-    /// [`super::vrf::despawn_bgp_vrf`] (step 14).
+    /// `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang). Diffed
+    /// against [`Self::vrf_registry`] at each `CommitEnd` to drive
+    /// [`super::vrf::spawn_bgp_vrf`] and
+    /// [`super::vrf::despawn_bgp_vrf`].
     pub vrfs: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
     /// Per-VRF tasks currently running. The diff against
     /// [`Self::vrfs`] at `CommitEnd` spawns the names that show up
     /// in the desired set but not here, and despawns names that
-    /// show up here but not in the desired set. Step 15 lifts the
-    /// step-14 placeholder `ProtoContext::default_table_no_rib`
+    /// show up here but not in the desired set. The spawn site
+    /// lifts the placeholder `ProtoContext::default_table_no_rib`
     /// to a real `ProtoContext::for_vrf(rib, table_id, name)` when
     /// [`Self::rib_known_vrfs`] gains the matching kernel info via
     /// `RibRx::VrfAdd`.
     pub vrf_registry: BTreeMap<String, super::vrf::BgpVrfHandle>,
     /// Kernel VRF master devices RIB has told us about, keyed by
     /// VRF name. Populated by `RibRx::VrfAdd` (and replayed from
-    /// `Rib::subscribe`). Step 15 consults this at per-VRF spawn
-    /// time to build a real `ProtoContext::for_vrf`; when the kernel
-    /// info isn't yet known the spawn falls back to a placeholder
+    /// `Rib::subscribe`). The per-VRF spawn site consults this to
+    /// build a real `ProtoContext::for_vrf`; when the kernel info
+    /// isn't yet known the spawn falls back to a placeholder
     /// context and the entry gets a respawn the moment `VrfAdd`
     /// arrives.
     pub rib_known_vrfs: BTreeMap<String, RibKnownVrf>,
@@ -324,22 +323,21 @@ pub struct Bgp {
     /// `ConfigManager::rib_subscriber()` at spawn time. The
     /// per-VRF spawn site uses this to mint a fresh `RibClient`
     /// plus `Subscribe` with the VRF's kernel `table_id`, so the
-    /// step-9 inbound dispatcher routes route installs into
+    /// inbound dispatcher routes route installs into
     /// `vrf_tables[table_id]`.
     pub rib_subscriber: crate::config::RibSubscriber,
-    /// Per-VRF MPLS label allocator (step 19a). Hands out one
-    /// label per `spawn_bgp_vrf` call; reclaims at despawn. The
-    /// label gets stamped onto every `BgpGlobalMsg::Export` the
-    /// VRF emits and (step 19b) drives the matching ILM Decap
-    /// install on the PE.
+    /// Per-VRF MPLS label allocator. Hands out one label per
+    /// `spawn_bgp_vrf` call; reclaims at despawn. The label gets
+    /// stamped onto every `BgpGlobalMsg::Export` the VRF emits and
+    /// drives the matching ILM Decap install on the PE.
     pub vrf_label_alloc: super::vrf::VrfLabelAllocator,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
-    /// drained on `UnregisterPeer`. Step 16's accept handler
-    /// consults this: a connection from an IP claimed by some VRF
-    /// is forwarded via `BgpVrfMsg::Accept` to that VRF's task;
-    /// every other connection falls through to the existing
+    /// drained on `UnregisterPeer`. The accept handler consults
+    /// this: a connection from an IP claimed by some VRF is
+    /// forwarded via `BgpVrfMsg::Accept` to that VRF's task; every
+    /// other connection falls through to the existing
     /// global-instance accept path.
     pub peer_index: BTreeMap<std::net::IpAddr, String>,
     /// Outbound sender every per-VRF task uses to push messages
@@ -348,9 +346,8 @@ pub struct Bgp {
     /// spawn time so all VRFs fan in to one channel here.
     pub vrf_global_tx: UnboundedSender<super::vrf::BgpGlobalMsg>,
     /// Receiver paired with [`Self::vrf_global_tx`], drained in
-    /// the event loop. Step 14 logs each variant at debug; the
-    /// real handlers wire in at step 16 (peer register / accept
-    /// dispatch) and step 17 (export -> VPNv4/v6).
+    /// the event loop. Handlers cover peer register / accept
+    /// dispatch and export -> VPNv4/v6.
     pub vrf_global_rx: UnboundedReceiver<super::vrf::BgpGlobalMsg>,
     /// `if-name` → `ifindex` mirror fed by `RibRx::LinkAdd`. Needed
     /// because the YANG callback receives a name but
@@ -364,8 +361,8 @@ pub struct Bgp {
     /// (RFC 8950). See [`super::interface_addrs`].
     pub interface_addrs: super::interface_addrs::InterfaceAddrs,
     /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
-    /// Phase-1: signature + membership tracking only — the advertise
-    /// pipeline does not yet share work across members. See
+    /// Signature + membership tracking only — the advertise pipeline
+    /// does not yet share work across members. See
     /// `docs/design/bgp-update-groups.md`.
     pub update_groups: super::update_group::UpdateGroupMap,
     /// Debug configuration flags
@@ -386,8 +383,9 @@ pub struct Bgp {
     /// matching `bfd_event_rx` below.
     pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
     /// Receive half drained by the BGP event loop in
-    /// [`Self::event_loop`]. PR 5d logs the events; PR 5e replaces
-    /// the log with neighbor teardown on `BfdEvent::Down`.
+    /// [`Self::event_loop`]. Events are logged today; a future
+    /// pass will replace the log with neighbor teardown on
+    /// `BfdEvent::Down`.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
     /// Receive half of the ND `NeighborDiscovered` subscription. ND's
     /// engine sends here whenever a Router Advertisement arrives on
@@ -418,7 +416,7 @@ pub struct Bgp {
     /// advertising the same prefix stay distinct (each row carries
     /// its own policy / metric / multipath override at Loc-RIB
     /// injection time). Consumed by the BGP origination path in a
-    /// follow-up (step 5b).
+    /// follow-up.
     pub redist_v4: BTreeMap<(crate::rib::RibType, ipnet::Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: BTreeMap<(crate::rib::RibType, ipnet::Ipv6Net), crate::rib::RouteEntryV6>,
 
@@ -664,10 +662,10 @@ impl Bgp {
                 // dynamic-peer GC below.
                 let prev_state = self.peers.get_by_idx(ident).map(|p| p.state);
 
-                // Step 18a: the global v4vpn ingest path uses this
-                // dispatcher to fan accepted VPNv4 routes out to
-                // every VRF whose `import_rts_v4` matches. Borrows
-                // are disjoint from the BgpTop mutable refs below
+                // The global v4vpn ingest path uses this dispatcher
+                // to fan accepted VPNv4 routes out to every VRF
+                // whose `import_rts_v4` matches. Borrows are
+                // disjoint from the BgpTop mutable refs below
                 // (`rib_known_vrfs` and `vrf_registry` are different
                 // fields).
                 let import_dispatcher = super::vrf::VrfImportDispatcher {
@@ -694,10 +692,10 @@ impl Bgp {
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
             }
             Message::Accept(socket, sockaddr) => {
-                // Step 16: if the source IP is claimed by a per-VRF
-                // task, hand the connection off there. The receiving
-                // task picks up the stream from `BgpVrfMsg::Accept`
-                // and continues the FSM. Unclaimed addresses fall
+                // If the source IP is claimed by a per-VRF task,
+                // hand the connection off there. The receiving task
+                // picks up the stream from `BgpVrfMsg::Accept` and
+                // continues the FSM. Unclaimed addresses fall
                 // through to the existing global-instance accept
                 // path — that's how default-VRF peers and the
                 // dynamic-neighbor fallback still work.
@@ -777,9 +775,9 @@ impl Bgp {
             .collect()
     }
 
-    /// Reconcile [`Self::vrfs`] (desired set, populated by step 12
-    /// callbacks) against [`Self::vrf_registry`] (running set):
-    /// spawn the additions, despawn the removals. Called from
+    /// Reconcile [`Self::vrfs`] (desired set, populated by per-VRF
+    /// config callbacks) against [`Self::vrf_registry`] (running
+    /// set): spawn the additions, despawn the removals. Called from
     /// `CommitEnd` once per commit.
     fn apply_vrf_commit_diff(&mut self) {
         let (to_spawn, to_despawn) = super::vrf::compute_vrf_diff(&self.vrfs, &self.vrf_registry);
@@ -787,11 +785,11 @@ impl Bgp {
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle);
-                // Step 19b: withdraw the AF_MPLS DecapVrf ILM
-                // ahead of returning the label. The netlink
-                // delete keys off the label alone so the
-                // IlmEntry contents are mostly informational —
-                // any non-zero match on `rtype = Bgp` works.
+                // Withdraw the AF_MPLS DecapVrf ILM ahead of
+                // returning the label. The netlink delete keys off
+                // the label alone so the IlmEntry contents are
+                // mostly informational — any non-zero match on
+                // `rtype = Bgp` works.
                 if let Some(vrf_ifindex) = handle.ilm_decap_ifindex {
                     let entry = crate::rib::inst::IlmEntry {
                         rtype: crate::rib::RibType::Bgp,
@@ -824,13 +822,12 @@ impl Bgp {
             };
             let kernel = self.rib_known_vrfs.get(&name).cloned();
             // Allocate a fresh MPLS label for this VRF — used in
-            // every `BgpGlobalMsg::Export` it emits and (step 19b)
-            // bound to an AF_MPLS ILM for PE-side decap. The
-            // 20-bit label space is large enough that the
-            // `.unwrap_or(0)` fallback effectively never fires;
-            // 0 would mean "no label" downstream, which the
-            // Export handler already treats as "skip label
-            // install" — a safe degradation.
+            // every `BgpGlobalMsg::Export` it emits and bound to an
+            // AF_MPLS ILM for PE-side decap. The 20-bit label space
+            // is large enough that the `.unwrap_or(0)` fallback
+            // effectively never fires; 0 would mean "no label"
+            // downstream, which the Export handler already treats
+            // as "skip label install" — a safe degradation.
             let label = self.vrf_label_alloc.alloc().unwrap_or(0);
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
@@ -846,7 +843,7 @@ impl Bgp {
         }
     }
 
-    /// Called when `RibRx::VrfAdd` for `name` arrives. If a step-14
+    /// Called when `RibRx::VrfAdd` for `name` arrives. If a
     /// placeholder per-VRF task is already running for this name,
     /// tear it down and respawn it with the real
     /// `ProtoContext::for_vrf` so the `SO_BINDTODEVICE` binding
@@ -913,13 +910,12 @@ impl Bgp {
                 }
             }
             ConfigOp::CommitEnd => {
-                // Step 12 observed the per-VRF intent at debug;
-                // step 14 turns the observation into action: diff
+                // Log the per-VRF intent at debug, then diff
                 // `self.vrfs` (desired) against `self.vrf_registry`
                 // (running), spawn the additions, despawn the
-                // removals. Edits to an already-spawned VRF aren't
-                // detected here — step 15 layers cfg-hash
-                // comparison on top.
+                // removals. Edits to an already-spawned VRF are
+                // not detected here — a follow-up will layer
+                // cfg-hash comparison on top.
                 super::vrf_config::log_commit_diff(self);
                 self.apply_vrf_commit_diff();
             }
@@ -1117,12 +1113,12 @@ impl Bgp {
                 };
                 self.rib_known_vrfs.insert(name.clone(), entry);
                 // If the operator already committed `router bgp vrf
-                // <name> ...` and the step-14 placeholder context
-                // is in place, swap it for a real `for_vrf` now. The
+                // <name> ...` and the placeholder context is in
+                // place, swap it for a real `for_vrf` now. The
                 // placeholder spawn happened before the kernel had
                 // assigned `table_id`; without this respawn the
-                // `SO_BINDTODEVICE` binding step 8 installed would
-                // never fire for that VRF.
+                // `SO_BINDTODEVICE` binding would never fire for
+                // that VRF.
                 self.maybe_respawn_vrf_with_kernel_ctx(&name);
             }
             RibRx::VrfDel { name } => {
@@ -1130,7 +1126,7 @@ impl Bgp {
                 // No despawn here — the VRF could come back, and the
                 // per-VRF task carries the YANG intent. If the
                 // operator subsequently deletes the BGP VRF block,
-                // step 14's `apply_vrf_commit_diff` handles teardown.
+                // `apply_vrf_commit_diff` handles teardown.
             }
             RibRx::VrfRouteTargets {
                 name,
@@ -1142,11 +1138,11 @@ impl Bgp {
                 // Mutate-in-place if a `VrfAdd` already populated
                 // the row; otherwise stage the RT cache so a later
                 // `VrfAdd` picks it up (defensive against
-                // out-of-order delivery — step 15a's replay
-                // contract puts VrfAdd first, but the active
-                // commit path sends them as separate messages and
-                // a slow `tokio::select!` could draw the RT
-                // message ahead of the VrfAdd).
+                // out-of-order delivery — the replay contract puts
+                // VrfAdd first, but the active commit path sends
+                // them as separate messages and a slow
+                // `tokio::select!` could draw the RT message ahead
+                // of the VrfAdd).
                 let entry = self.rib_known_vrfs.entry(name).or_default();
                 entry.import_rts_v4 = ipv4_import_rts;
                 entry.export_rts_v4 = ipv4_export_rts;
@@ -1379,10 +1375,8 @@ impl Bgp {
                     self.process_nd_event(event);
                 }
                 Some(msg) = self.vrf_global_rx.recv() => {
-                    // VRF→global fan-in. Step 14 just logs each
-                    // variant — the real handlers wire in later
-                    // (step 16: peer register / accept dispatch;
-                    // step 17: Export → VPNv4/v6).
+                    // VRF→global fan-in: peer register / accept
+                    // dispatch and Export → VPNv4/v6.
                     self.process_vrf_global_msg(msg);
                 }
             }
@@ -1420,12 +1414,11 @@ impl Bgp {
                 let interned = self.attr_store.intern(tagged);
 
                 // VPNv4 NLRI carries a single MPLS label per route.
-                // Step 19 wires a real per-VRF label allocator;
-                // until then VRF tasks pass `0` and we treat that
-                // as "no label allocated yet", which `make_bgp_rib_entry_v4`
-                // and the VPNv4 emit path interpret as "skip
-                // install / advertise" rather than emit the
-                // explicit-null label.
+                // VRF tasks without an allocator pass `0`, which we
+                // treat as "no label allocated yet":
+                // `make_bgp_rib_entry_v4` and the VPNv4 emit path
+                // interpret it as "skip install / advertise" rather
+                // than emit the explicit-null label.
                 let label_obj = if label != 0 {
                     Some(bgp_packet::Label {
                         label,
@@ -1461,15 +1454,14 @@ impl Bgp {
                 let (_, selected, _gen) = self.local_rib.update(Some(rd), prefix, rib);
                 let selected_len = selected.len();
 
-                // Step 17c: fan out the new VPNv4 winner to PE
-                // peers via the existing `route_advertise_to_peers`
-                // helper. The helper iterates Established peers
-                // matching (Afi=Ip, Safi=MplsVpn), runs split-
-                // horizon + outbound policy + RTC, and pushes to
-                // each peer's `cache_vpnv4` (debounced flush). The
-                // global instance has `vrf_export = None`, so no
-                // infinite loop on the export hook in
-                // `route_ipv4_update`.
+                // Fan out the new VPNv4 winner to PE peers via the
+                // existing `route_advertise_to_peers` helper. The
+                // helper iterates Established peers matching
+                // (Afi=Ip, Safi=MplsVpn), runs split-horizon +
+                // outbound policy + RTC, and pushes to each peer's
+                // `cache_vpnv4` (debounced flush). The global
+                // instance has `vrf_export = None`, so no infinite
+                // loop on the export hook in `route_ipv4_update`.
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
@@ -1640,11 +1632,11 @@ pub fn serve(mut bgp: Bgp) -> Task<()> {
 
 #[cfg(test)]
 mod tests {
-    //! Pure-function tests on the step-16 `peer_index` mutations.
+    //! Pure-function tests on the `peer_index` mutations.
     //! Building a full `Bgp` to drive `process_vrf_global_msg`
     //! end-to-end would require netlink — out of reach for unit
-    //! tests; the BDD scenarios in step 21 cover that. Here we
-    //! exercise the index helpers directly.
+    //! tests; BDD scenarios cover that path. Here we exercise the
+    //! index helpers directly.
     use std::collections::BTreeMap;
     use std::net::IpAddr;
 
@@ -1681,8 +1673,8 @@ mod tests {
         assert_eq!(index.len(), 1);
     }
 
-    /// Step 17b-ii: helper that takes a `BgpAttr` and tags it with
-    /// one `ExtCommunity` per RT in the export set. Sub-type 0x02
+    /// Helper that takes a `BgpAttr` and tags it with one
+    /// `ExtCommunity` per RT in the export set. Sub-type 0x02
     /// distinguishes RT from Route Origin (sub-type 0x03);
     /// `high_type` (0x00 for ASN, 0x01 for IPv4) is carried over
     /// from the matching `RouteDistinguisher`.
@@ -1771,9 +1763,9 @@ mod tests {
         }
     }
 
-    /// Step 18a: `matching_import_vrfs` walks `rib_known_vrfs`
-    /// and returns every VRF whose `import_rts_v4` intersects
-    /// the route's RT ext-communities.
+    /// `matching_import_vrfs` walks `rib_known_vrfs` and returns
+    /// every VRF whose `import_rts_v4` intersects the route's RT
+    /// ext-communities.
     mod matching_import_vrfs_tests {
         use std::collections::{BTreeMap, BTreeSet};
         use std::str::FromStr;

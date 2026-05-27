@@ -3,18 +3,10 @@
 //! Per RFC 3623 §2 the restarter must, on coming back up, restore
 //! enough state to re-flood its self-originated LSAs at the same
 //! `(seq, checksum)` the helpers snapshotted at restart entry —
-//! otherwise the helpers' [`gr_helper_check_exit`] (PR #869) trips
-//! the restarter-LSA-changed condition and tears down the restart.
+//! otherwise the helpers' [`gr_helper_check_exit`] trips the
+//! restarter-LSA-changed condition and tears down the restart.
 //!
-//! This module is the storage layer alone — Phase 5b of the
-//! restarting-router plan (`docs/design/ospf-graceful-restart-restarter.md`).
-//! The actual restart-aware boot path (Phase 5e) and the pre-exit
-//! flow (Phase 5d) consume this file but are deliberately not
-//! wired here; the layer ships in isolation so it can be
-//! exercised via `clear ospf checkpoint write` / `show ip ospf
-//! checkpoint` before the GR lifecycle lands.
-//!
-//! Format choices (locked 2026-05-25, see the restarter doc):
+//! Format choices:
 //!
 //! - **CBOR via `ciborium`** — RFC 8949, stable wire format,
 //!   schema-evolution-friendly. A typical instance serializes to
@@ -25,12 +17,9 @@
 //!   or none at all, never a torn file.
 //! - **Default path** `/var/lib/zebra-rs/checkpoint/<proto>.cbor`
 //!   matching FRR's convention. Tests / dev workflows override via
-//!   `ZEBRA_OSPF_CHECKPOINT_DIR=<path>`. Phase 5d will add a YANG
-//!   knob `graceful-restart/checkpoint-path` for ops use.
+//!   `ZEBRA_OSPF_CHECKPOINT_DIR=<path>`.
 //!
-//! Scope of this PR: OSPFv2 only. The v3 sibling (Phase 5b-v3) is
-//! a small follow-up — same shape, neighbor address widens to
-//! v6.
+//! Scope: OSPFv2 only.
 
 use std::fs;
 use std::io::{self, Write};
@@ -70,9 +59,8 @@ pub fn default_path(proto: &str) -> PathBuf {
 pub struct OspfCheckpoint {
     /// See [`CHECKPOINT_FORMAT_VERSION`].
     pub format_version: u32,
-    /// Wall-clock timestamp at write. Phase 5e treats checkpoints
-    /// older than `1.5 × grace_period_secs` as stale (RFC 3623
-    /// §2 freshness rule per the locked design).
+    /// Wall-clock timestamp at write. Treated as stale when older
+    /// than `1.5 × grace_period_secs` (RFC 3623 §2 freshness rule).
     pub written_at: SystemTime,
     /// Grace period the restarter requested (seconds). Echoed
     /// here so the freshness window is self-contained — the
@@ -147,9 +135,10 @@ pub struct NeighborCheckpoint {
     /// Source IP we last saw Hellos from. Becomes the key for
     /// pre-populating `link.nbrs` on restart.
     pub interface_addr: Ipv4Addr,
-    /// True iff the neighbor was Full at checkpoint time.
-    /// Phase 5e short-circuits NFSM to ExStart when the first
-    /// post-restart Hello arrives from a was-Full neighbor.
+    /// True iff the neighbor was Full at checkpoint time. The
+    /// restart-aware boot path short-circuits NFSM to ExStart when
+    /// the first post-restart Hello arrives from a was-Full
+    /// neighbor.
     pub was_full: bool,
 }
 
@@ -279,8 +268,8 @@ impl OspfCheckpoint {
     /// Parse a CBOR-encoded checkpoint from disk. Returns an
     /// error if the file is missing, unreadable, or the bytes
     /// don't decode. Freshness checking (per the 1.5× grace
-    /// rule) is the caller's responsibility — Phase 5e drives
-    /// it from the restart-aware boot path.
+    /// rule) is the caller's responsibility — driven from the
+    /// restart-aware boot path.
     pub fn read_from_path(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         ciborium::from_reader(&bytes[..]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))

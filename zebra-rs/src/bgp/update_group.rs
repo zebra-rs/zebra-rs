@@ -1,5 +1,5 @@
-//! IOS-XR-style BGP **update-groups** — Phase 1 (signature + grouping
-//! skeleton, observability only).
+//! IOS-XR-style BGP **update-groups** — signature + grouping
+//! skeleton, observability only.
 //!
 //! Two peers belong to the same update-group for a given `(afi, safi)`
 //! iff every input that drives `route_update_ipv4` and
@@ -7,9 +7,9 @@
 //! capability that changes UPDATE wire format. See
 //! `docs/design/bgp-update-groups.md` §3.1 for the full signature.
 //!
-//! Phase 1 only computes signatures and tracks membership — the
+//! Today this only computes signatures and tracks membership — the
 //! advertise pipeline is unchanged. Sharing the attribute transform,
-//! outbound policy, and encoded UPDATE bytes lands in Phase 2/3.
+//! outbound policy, and encoded UPDATE bytes is a follow-up.
 //!
 //! Conservatism rule: any outbound knob that the signature does not
 //! yet model forces the peer into a singleton group. Silent data leak
@@ -136,7 +136,7 @@ pub struct UpdateGroup {
     pub created_at: Instant,
     pub counters: UpdateGroupCounters,
 
-    // ── IPv4 unicast pending advertisement cache (Phase 3) ──
+    // ── IPv4 unicast pending advertisement cache ──
     //
     // Buckets pending advertisements by attribute so a single
     // MP_REACH UPDATE can carry every NLRI sharing one attr-set.
@@ -338,7 +338,7 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
     }
 }
 
-// ── IPv4 unicast send / cache_remove / flush (Phase 3) ──
+// ── IPv4 unicast send / cache_remove / flush ──
 //
 // Owns the per-attr-bucket batching that used to live on `Peer`
 // (cache_ipv4 + cache_ipv4_rev + cache_ipv4_timer). Moving the
@@ -792,10 +792,10 @@ mod tests {
         assert_eq!(id.to_string(), "evpn.2");
     }
 
-    /// Phase 2 hook: the counter-bump path uses `group_by_id_mut`
-    /// to find the group from a peer's back-reference id. Verifies
-    /// the lookup finds the group and that mutating returned
-    /// reference persists.
+    /// The counter-bump path uses `group_by_id_mut` to find the
+    /// group from a peer's back-reference id. Verifies the lookup
+    /// finds the group and that mutating the returned reference
+    /// persists.
     #[test]
     fn group_by_id_mut_finds_and_mutates() {
         let mut af = UpdateGroupAf::default();

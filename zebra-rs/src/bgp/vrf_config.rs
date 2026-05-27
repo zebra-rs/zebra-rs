@@ -1,13 +1,9 @@
-//! Per-VRF BGP configuration staging (step 12 of the BGP MPLS/VPN
-//! refactor).
+//! Per-VRF BGP configuration staging.
 //!
 //! The callbacks in this module fan out the YANG paths under
-//! `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang, step 11) into a
-//! single [`BgpVrfConfig`] per VRF, stored on `Bgp::vrfs`. Step 13
-//! reads from that map to spawn per-VRF tasks; until then this is
-//! observation-only — the commit-time hook emits a `debug!` log so
-//! the operator can verify the intent without anything else
-//! changing.
+//! `/router/bgp/vrf/<name>/...` (zebra-bgp-vrf.yang) into a single
+//! [`BgpVrfConfig`] per VRF, stored on `Bgp::vrfs`. The per-VRF
+//! runtime consumes this map to spawn tasks and materialize peers.
 //!
 //! Design notes:
 //!
@@ -18,7 +14,7 @@
 //!   tolerates the leaf handler racing ahead.
 //! - The `peer-group` reference is a plain string (matching the
 //!   schema). Resolution against `neighbor-groups/neighbor-group/<X>`
-//!   happens when the per-VRF runtime materializes peers in step 15.
+//!   happens when the per-VRF runtime materializes peers.
 //! - `BgpVrfNeighborConfig::enabled` defaults to `true` so a freshly
 //!   added neighbor row matches the YANG default without the user
 //!   needing to `set ... enabled true` explicitly.
@@ -318,8 +314,7 @@ pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
 
 /// Commit-time observation hook. Emits a single `debug!` line per
 /// VRF entry so operators can see the staged intent at the boundary
-/// where step 13's spawn / despawn logic will plug in. Until that
-/// step lands, this is the only consumer of `Bgp::vrfs`.
+/// where spawn / despawn logic consumes `Bgp::vrfs`.
 pub fn log_commit_diff(bgp: &Bgp) {
     if bgp.vrfs.is_empty() {
         return;
@@ -374,7 +369,7 @@ mod tests {
     fn neighbor_default_is_enabled() {
         // YANG default for `enabled` is true — every other leaf is
         // None, so a `set ... neighbor X` without further leaves
-        // produces a live peer at step-13 materialization time.
+        // produces a live peer at materialization time.
         let nbr = BgpVrfNeighborConfig::default();
         assert!(nbr.enabled);
         assert!(nbr.remote_as.is_none());

@@ -420,10 +420,10 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 /// `set router bgp neighbor X bfd enable true|false` — flips the
-/// BFD attachment for this neighbor. PR 5b stored the bit on
-/// `peer.config.bfd.enable`; PR 5d wires the same flip into a
+/// BFD attachment for this neighbor. Stores the bit on
+/// `peer.config.bfd.enable` and wires the same flip into a
 /// `ClientReq::Subscribe` / `Unsubscribe` against the BFD instance
-/// (when `bgp.bfd_client_tx` is populated — see PR 5c).
+/// when `bgp.bfd_client_tx` is populated.
 fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let enable = args.boolean()?;
@@ -454,7 +454,7 @@ fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
         multihop: false,
     };
     let req = if new_enable {
-        // PR 5d uses SessionParams::default() for every neighbor — the
+        // Uses SessionParams::default() for every neighbor — the
         // peer's `bfd profile` reference is stored but not yet read.
         // Profile resolution against `/bfd/profile/<name>` is a
         // follow-up that needs cross-task config access (BGP would
@@ -491,7 +491,7 @@ fn unspecified_for(remote: &IpAddr) -> IpAddr {
 /// `set router bgp neighbor X bfd profile NAME` — selects the BFD
 /// profile applied when this neighbor's BFD session is created.
 /// Stored verbatim; resolution against `/bfd/profile/<name>` is
-/// the responsibility of the PR 5c subscribe path.
+/// the responsibility of the subscribe path.
 fn config_peer_bfd_profile(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let name = args.string()?;
@@ -1493,10 +1493,9 @@ impl Bgp {
             super::color_policy::config_color_flex_algorithm,
         );
         // `set router bgp vrf <name> [...]` (zebra-bgp-vrf.yang).
-        // Staging-only in step 12: the callbacks populate
-        // `Bgp::vrfs` and the CommitEnd hook in `process_cm_msg`
-        // emits a debug log per VRF entry. Per-VRF task spawn / peer
-        // materialization land in step 13+.
+        // The callbacks populate `Bgp::vrfs`; the CommitEnd hook in
+        // `process_cm_msg` emits a debug log per VRF entry and
+        // drives per-VRF task spawn / peer materialization.
         self.callback_add("/router/bgp/vrf", super::vrf_config::config_vrf);
         self.callback_add("/router/bgp/vrf/rd", super::vrf_config::config_vrf_rd);
         self.callback_add(
@@ -1575,8 +1574,8 @@ impl Bgp {
         // both lower onto the same runtime state.
         self.callback_peer("/password", config_peer_tcp_md5_password);
         // FRR-style per-neighbor BFD attachment from
-        // zebra-bgp-bfd.yang. PR 5b stores the leaves on
-        // `peer.config.bfd`; PR 5c wires the runtime subscribe /
+        // zebra-bgp-bfd.yang. Stores the leaves on
+        // `peer.config.bfd` and wires the runtime subscribe /
         // unsubscribe path to the BFD client API.
         self.callback_peer("/bfd/enable", config_peer_bfd_enable);
         self.callback_peer("/bfd/profile", config_peer_bfd_profile);
@@ -1823,7 +1822,7 @@ mod bfd_wiring_tests {
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                     "remote address mirrors the configured neighbor",
                 );
-                assert!(!key.multihop, "single-hop only in PR 5d");
+                assert!(!key.multihop, "single-hop only");
                 assert_eq!(key.ifindex, 0);
             }
             other => panic!("expected Subscribe, got {other:?}"),
@@ -1871,7 +1870,7 @@ mod bfd_wiring_tests {
     }
 
     // -----------------------------------------------------------------
-    // PR 5e: process_bfd_event teardown behaviour
+    // process_bfd_event teardown behaviour
     // -----------------------------------------------------------------
 
     use crate::bfd::inst::BfdEvent;

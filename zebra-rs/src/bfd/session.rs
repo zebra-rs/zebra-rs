@@ -7,9 +7,8 @@
 //! locally-assigned discriminator (for demultiplexing inbound packets
 //! per RFC 5880 §6.8.6).
 //!
-//! PR 3a wires session lookup into the event loop but does not yet
-//! expose a public `add_session` API or run a TX/detection timer —
-//! both arrive in PR 3b together with the outbound packet path.
+//! Session lookup is wired into the event loop; the outbound TX /
+//! detection timer paths arrive alongside the outbound packet path.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -60,8 +59,8 @@ impl Default for SessionParams {
     }
 }
 
-/// Per-session counters surfaced via `show bfd session counters` in
-/// later PRs. Reset on session creation; never reset by the FSM.
+/// Per-session counters surfaced via `show bfd session counters`.
+/// Reset on session creation; never reset by the FSM.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Stats {
     pub rx_count: u64,
@@ -101,9 +100,9 @@ pub struct Session {
     pub remote_min_rx_us: u32,
     pub remote_detect_mult: u8,
 
-    /// Demand mode flags. Always false in Phase 1 — wired here so the
-    /// session record matches RFC §6.8.1 even though Phase 1 never
-    /// negotiates Demand.
+    /// Demand mode flags. Always false today — wired here so the
+    /// session record matches RFC §6.8.1 even though Demand
+    /// negotiation isn't exercised.
     pub demand: bool,
     pub remote_demand: bool,
 
@@ -114,7 +113,7 @@ pub struct Session {
 }
 
 /// Reason a [`Session::handle_packet`] call changed the local state,
-/// useful for the event loop to log and (in later PRs) notify clients.
+/// used by the event loop for logging and client notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateChange {
     pub from: State,
@@ -407,7 +406,7 @@ mod tests {
         assert_eq!(change.to, State::Init);
 
         // Remote-reported fields are cached for the negotiation
-        // formulas used by the future timer engine (PR 3b).
+        // formulas used by the timer engine.
         assert_eq!(session.remote_disc, 0xdead_beef);
         assert_eq!(session.remote_state, State::Down);
         assert_eq!(session.remote_detect_mult, 5);

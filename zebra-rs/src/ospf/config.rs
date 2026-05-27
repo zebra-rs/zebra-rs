@@ -1017,8 +1017,8 @@ fn config_ospf_gr_helper_strict_lsa_checking(
 
 /// `router ospf / graceful-restart / drain-time-ms`. Drain
 /// window between writing the restart checkpoint and exiting
-/// the process during `clear ip ospf graceful-restart commit`
-/// (Phase 5d). YANG range 50-2000ms, default 200ms.
+/// the process during `clear ip ospf graceful-restart commit`.
+/// YANG range 50-2000ms, default 200ms.
 fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);

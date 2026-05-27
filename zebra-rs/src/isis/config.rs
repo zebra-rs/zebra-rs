@@ -55,8 +55,8 @@ impl Isis {
         self.callback_add("/router/isis/net", config_net);
         self.callback_add("/router/isis/is-type", config_is_type);
         self.callback_add("/router/isis/hostname", config_hostname);
-        // Authentication storage (Phase 2). The runtime sign/verify
-        // paths read these in Phase 3 (Hello/SNP) and Phase 4 (LSP).
+        // Authentication storage. The runtime sign/verify paths
+        // read these for Hello/SNP and LSP.
         self.callback_add("/router/isis/area-password", config_area_password);
         self.callback_add(
             "/router/isis/area-password/password",
@@ -282,16 +282,13 @@ impl Isis {
             "/router/isis/interface/ipv4/enable",
             link::config_ipv4_enable,
         );
-        // Per-interface BFD attachment (PR 6 — storage only; the
-        // adjacency-FSM subscribe and BfdEvent::Down teardown paths
-        // land in PR 7).
+        // Per-interface BFD attachment.
         self.callback_add("/router/isis/interface/bfd/enable", link::config_bfd_enable);
         self.callback_add(
             "/router/isis/interface/bfd/profile",
             link::config_bfd_profile,
         );
-        // Per-interface hello-authentication (Phase 2 storage). The
-        // Hello/CSNP/PSNP sign+verify runtime lands in Phase 3.
+        // Per-interface hello-authentication.
         self.callback_add(
             "/router/isis/interface/hello-authentication",
             link::config_hello_auth,
@@ -441,8 +438,7 @@ pub struct IsisConfig {
 
     /// Authentication for L1 self-originated LSPs and L1 SNPs
     /// (ISO 10589 §9.5 / RFC 5304 / RFC 5310). Active iff
-    /// `password.is_some()`. Storage-only in Phase 2; Phase 4 will
-    /// drive the LSP signer from this and Phase 3 the SNP path.
+    /// `password.is_some()`.
     pub area_password: IsisAuthConfig,
 
     /// Authentication for L2 self-originated LSPs and L2 SNPs.
@@ -462,10 +458,10 @@ pub struct IsisConfig {
 
     /// RFC 5306 Graceful Restart restarter-side enable
     /// (`/router/isis/graceful-restart/restarter-enabled`). Defaults
-    /// to **false** — until Phase 5d wires the exit path,
-    /// advertising restarter capability without it would tear down
-    /// routes on every restart while still claiming GR to peers.
-    /// Gates `clear isis graceful-restart begin` and the IIH+RR
+    /// to **false** — advertising restarter capability without
+    /// wiring the exit path would tear down routes on every restart
+    /// while still claiming GR to peers. Gates
+    /// `clear isis graceful-restart begin` and the IIH+RR
     /// origination.
     pub gr_restarter_enabled: bool,
 }
@@ -1694,8 +1690,8 @@ mod tests {
     #[test]
     fn auth_type_parses_yang_enum_names() {
         // The enum values the YANG schema admits — the FromStr impl
-        // gates what the auth-type leaf callback will accept. Includes
-        // the RFC 5310 SHA family added in Phase 4b.
+        // gates what the auth-type leaf callback will accept,
+        // including the RFC 5310 SHA family.
         assert_eq!(IsisAuthType::from_str("text"), Ok(IsisAuthType::Text));
         assert_eq!(IsisAuthType::from_str("md5"), Ok(IsisAuthType::Md5));
         assert_eq!(
@@ -1715,7 +1711,7 @@ mod tests {
 
     #[test]
     fn auth_reset_returns_defaults() {
-        // Phase 3/4 short-circuit on `password.is_none()`. The
+        // Auth runtime short-circuits on `password.is_none()`. The
         // presence-container delete path goes through auth_reset, so
         // a stale auth-type or send-only must not survive a password
         // removal — verified here so the contract is locked.

@@ -6,14 +6,7 @@
 //! the helpers' MaxSeqAdvance recovery (ISO 10589 §7.3.16.4) trips
 //! on the restarter's first LSP and tears the restart down.
 //!
-//! This module is **the storage layer alone** — Phase 5b of the
-//! restarter plan (`docs/design/isis-graceful-restart-restarter.md`).
-//! The pre-exit flow (Phase 5d) and the restart-aware boot path
-//! (Phase 5e-i/-ii) consume this file but are deliberately not
-//! wired here; the layer ships in isolation so it can be exercised
-//! via `clear isis checkpoint write` before the GR lifecycle lands.
-//!
-//! Format choices (decided in the Phase 5 design doc):
+//! Format choices:
 //!
 //! - **CBOR via `ciborium`** — RFC 8949, stable wire format,
 //!   schema-evolution-friendly. A typical instance serializes to
@@ -26,15 +19,12 @@
 //! - **Default path** `/var/lib/zebra-rs/checkpoint/isis.cbor`
 //!   matching FRR's convention and OSPF's path in this codebase.
 //!   Tests / dev workflows override via
-//!   `ZEBRA_ISIS_CHECKPOINT_DIR=<path>`. Phase 5d will add a YANG
-//!   knob `graceful-restart/checkpoint-path` for ops use.
+//!   `ZEBRA_ISIS_CHECKPOINT_DIR=<path>`.
 //!
-//! Scope of this PR: per-level self-LSP wire bodies and seq, plus
-//! per-adjacency identity. SR-MPLS `local_pool` / ELIB End.X SID
-//! allocations and RFC 5310 auth-replay state were both recommended
-//! IN by the design doc but are additive to the schema; they ship
-//! in a follow-up PR within Phase 5b so this slice stays
-//! reviewable.
+//! Scope: per-level self-LSP wire bodies and seq, plus per-adjacency
+//! identity. SR-MPLS `local_pool` / ELIB End.X SID allocations and
+//! RFC 5310 auth-replay state are additive to the schema and ship
+//! in a follow-up.
 
 use std::fs;
 use std::io::{self, Write};
@@ -79,9 +69,8 @@ pub fn default_path() -> PathBuf {
 pub struct IsisCheckpoint {
     /// See [`CHECKPOINT_FORMAT_VERSION`].
     pub format_version: u32,
-    /// Wall-clock timestamp at write. Phase 5e treats checkpoints
-    /// older than `1.5 × grace_period_secs` as stale (per the
-    /// locked design choices).
+    /// Wall-clock timestamp at write. Treated as stale when older
+    /// than `1.5 × grace_period_secs`.
     pub written_at: SystemTime,
     /// Grace period the restarter requested (seconds). Echoed
     /// here so the freshness window is self-contained — the
@@ -100,10 +89,10 @@ pub struct IsisCheckpoint {
     /// Per-level state. Each entry holds the self-originated LSPs
     /// for that level keyed by `IsisLspId`'s wire bytes.
     pub levels: Vec<LevelCheckpoint>,
-    /// Per-adjacency identity snapshot. Phase 5e-i pre-populates
-    /// `link.state.nbrs` from these so the first post-restart IIH
-    /// from a known peer skips Down→Init and resumes adjacency
-    /// recovery with continuity.
+    /// Per-adjacency identity snapshot. The restart-aware boot path
+    /// pre-populates `link.state.nbrs` from these so the first
+    /// post-restart IIH from a known peer skips Down→Init and
+    /// resumes adjacency recovery with continuity.
     pub adjacencies: Vec<AdjCheckpoint>,
 }
 
@@ -126,8 +115,9 @@ pub struct LspSnapshot {
     pub seq_number: u32,
     pub checksum: u16,
     /// Raw wire bytes (header + TLVs), exactly what
-    /// `IsisLsp::emit` produces. Restored verbatim — Phase 5e-i
-    /// drops these into `Lsdb.map` with `originated = true`.
+    /// `IsisLsp::emit` produces. Restored verbatim — the
+    /// restart-aware boot path drops these into `Lsdb.map` with
+    /// `originated = true`.
     pub body: Vec<u8>,
 }
 
@@ -140,9 +130,10 @@ pub struct AdjCheckpoint {
     pub ifindex: u32,
     /// P2P circuit ID (None on LAN).
     pub circuit_id: Option<u32>,
-    /// True iff NFSM was Up at checkpoint time. Phase 5e-i uses
-    /// this to short-circuit the first post-restart IIH back to
-    /// Up (Init→Up if peer reports our MAC on first Hello).
+    /// True iff NFSM was Up at checkpoint time. The restart-aware
+    /// boot path uses this to short-circuit the first post-restart
+    /// IIH back to Up (Init→Up if peer reports our MAC on first
+    /// Hello).
     pub was_up: bool,
 }
 
@@ -152,8 +143,7 @@ impl IsisCheckpoint {
     ///
     /// `grace_period_secs` should reflect the restarter's
     /// requested T2 ceiling so the freshness check downstream
-    /// (Phase 5e-i) can decide whether the file is too stale to
-    /// trust.
+    /// can decide whether the file is too stale to trust.
     pub fn from_instance(isis: &Isis, grace_period_secs: u32) -> Self {
         let sys_id = isis.config.net.sys_id();
         let area_addrs = vec![isis.config.net.area_id()];
@@ -246,7 +236,7 @@ impl IsisCheckpoint {
     /// error if the file is missing, unreadable, or the bytes
     /// don't decode. Freshness checking (per the `1.5×
     /// grace_period_secs` rule) is the caller's responsibility —
-    /// Phase 5e-i drives it from the restart-aware boot path.
+    /// the restart-aware boot path drives it.
     pub fn read_from_path(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         ciborium::from_reader(&bytes[..]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -297,8 +287,8 @@ mod tests {
     }
 
     /// CBOR encode/decode round-trip recovers every field including
-    /// the LSP wire bytes, which Phase 5e-i will hand to
-    /// `IsisLsp::parse_be` to rebuild the LSDB.
+    /// the LSP wire bytes, which the restart-aware boot path hands
+    /// to `IsisLsp::parse_be` to rebuild the LSDB.
     #[test]
     fn cbor_round_trip() {
         let cp = sample_checkpoint();

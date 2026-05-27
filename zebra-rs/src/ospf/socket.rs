@@ -10,8 +10,8 @@ use crate::context::ProtoContext;
 use super::{OspfVersion, Ospfv2, Ospfv3};
 
 pub fn ospf_socket_ipv4(ctx: &ProtoContext) -> Result<Socket, std::io::Error> {
-    // Initial socket through the context so VRF binding (when
-    // step 8 lights up `SO_BINDTODEVICE`) applies automatically.
+    // Initial socket through the context so VRF binding via
+    // `SO_BINDTODEVICE` applies automatically.
     let socket = ctx.raw_socket(Domain::IPV4, Protocol::from(Ospfv2::IP_PROTO as i32))?;
 
     socket.set_nonblocking(true)?;

@@ -127,8 +127,8 @@ pub struct LinkTop<'a> {
     pub up_config: &'a IsisConfig,
     /// Snapshot of the per-instance `Isis.restarting` state. `Some`
     /// only between `clear isis graceful-restart begin` and either
-    /// `abort` / `restarter-enabled=false` / (Phase 5d+) successful
-    /// exit. Read by the IIH send path to attach RR=1.
+    /// `abort`, `restarter-enabled=false`, or successful exit.
+    /// Read by the IIH send path to attach RR=1.
     pub restarting: Option<&'a super::inst::RestartingState>,
     pub tracing: &'a IsisTracing,
     pub config: &'a LinkConfig,
@@ -242,14 +242,14 @@ pub struct LinkConfig {
     /// Per-MT metric overrides — populated from
     /// /router/isis/interface/<name>/multi-topology/<id>/metric.
     /// Empty when no per-MT metric is configured; lookup falls back
-    /// to the link's `metric` leaf above. PR 2 reads this when
-    /// emitting MT IS Reach (TLV 222) entries.
+    /// to the link's `metric` leaf above. Consumed when emitting MT
+    /// IS Reach (TLV 222) entries.
     pub mt_metrics: BTreeMap<MtId, u32>,
 
     /// Per-interface BFD attachment recorded from
-    /// `/router/isis/interface/<name>/bfd/{enable,profile}`. Storage
-    /// in PR 6; the adjacency FSM subscribe path (on Up) and the
-    /// BfdEvent::Down → adjacency teardown path arrive in PR 7.
+    /// `/router/isis/interface/<name>/bfd/{enable,profile}`. The
+    /// adjacency FSM subscribe path (on Up) and the
+    /// `BfdEvent::Down` → adjacency teardown path consume this.
     pub bfd: LinkBfdConfig,
 
     /// SRLG group names this link belongs to (from the leaf-list at
@@ -284,14 +284,14 @@ pub struct LinkConfig {
 
     /// Per-interface authentication for IIH / CSNP / PSNP PDUs,
     /// from /router/isis/interface/<name>/hello-authentication.
-    /// Storage-only in Phase 2; the Hello/SNP sign+verify runtime
-    /// arrives in Phase 3. Active iff `hello_auth.is_active()`.
+    /// Active iff `hello_auth.is_active()`.
     pub hello_auth: IsisAuthConfig,
 }
 
 /// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
-/// Empty defaults match the YANG schema; PR 7 reads this when the
-/// adjacency FSM reaches Up to decide whether to subscribe.
+/// Empty defaults match the YANG schema; the adjacency FSM reads
+/// this when an adjacency reaches Up to decide whether to
+/// subscribe.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct LinkBfdConfig {
     pub enable: bool,
@@ -506,11 +506,11 @@ pub struct LinkState {
     pub stats: Direction<LinkStats>,
     pub stats_unknown: u64,
 
-    /// Authentication counters (Phase 3a — Hellos only).
-    /// `tx_signed` increments whenever we attach an Auth TLV outbound.
-    /// `rx_good` / `rx_bad` count auth-TLV validate outcomes; `rx_no_auth`
-    /// counts inbound Hellos with no Auth TLV when this link has auth
-    /// configured (and is not in `send-only` mode).
+    /// Authentication counters (Hellos only). `tx_signed` increments
+    /// whenever we attach an Auth TLV outbound. `rx_good` /
+    /// `rx_bad` count auth-TLV validate outcomes; `rx_no_auth`
+    /// counts inbound Hellos with no Auth TLV when this link has
+    /// auth configured (and is not in `send-only` mode).
     pub auth_tx_signed: u64,
     pub auth_rx_good: u64,
     pub auth_rx_bad: u64,
@@ -774,9 +774,9 @@ pub fn config_priority(isis: &mut Isis, mut args: Args, _op: ConfigOp) -> Option
 }
 
 /// `set router isis interface X bfd enable true|false` — flips the
-/// per-interface BFD attachment recorded on the IS-IS link. PR 6
-/// is storage-only; PR 7 wires the runtime subscribe path (on
-/// adjacency FSM Up) and the teardown path (on BfdEvent::Down).
+/// per-interface BFD attachment recorded on the IS-IS link. The
+/// runtime subscribe path runs on adjacency FSM Up; the teardown
+/// path runs on `BfdEvent::Down`.
 pub fn config_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let enable = args.boolean()?;
@@ -929,8 +929,8 @@ pub fn config_ipv4_enable(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<(
 
 // Per-MT, per-link metric override. The path arrives with three
 // values from libyang dispatch: outer interface key (`if-name`), inner
-// list key (MT id keyword), then the leaf value (`metric`). PR 1 just
-// stores it; PR 2 reads it when emitting TLV 222 entries.
+// list key (MT id keyword), then the leaf value (`metric`). The MT
+// IS Reach emitter (TLV 222) consumes this.
 pub fn config_mt_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     use std::str::FromStr;
 
@@ -1400,9 +1400,7 @@ struct LevelInfo {
 
 /// Per-interface authentication snapshot for `show isis interface
 /// detail`. Populated when hello-authentication is configured; left
-/// off when the operator hasn't turned it on. The four counters
-/// have been ticking on the link since Phase 3a — this is just the
-/// first surface that exposes them.
+/// off when the operator hasn't turned it on.
 #[derive(Serialize)]
 struct AuthInfo {
     mode: String,
@@ -1593,11 +1591,9 @@ pub fn show_detail(
                     writeln!(buf, "  Level-2 Information:")?;
                     show_detail_entry(&mut buf, link, Level::L2)?;
                 }
-                // Hello authentication block (Phase 5). The four
-                // counters have been ticking since Phase 3a; this
-                // is the first surface that exposes them. Empty
-                // string when no auth is configured so the block
-                // disappears cleanly.
+                // Hello authentication block. Empty string when no
+                // auth is configured so the block disappears
+                // cleanly.
                 buf.push_str(&render_auth_block(link));
                 // IPv4 Address.
                 if !link.state.v4addr.is_empty() {
@@ -1958,7 +1954,7 @@ mod bfd_config_tests {
 
     /// Round-trip: setting enable + profile mirrors the CLI flow
     /// (`bfd enable true; bfd profile FAST`) producing the state
-    /// the PR 7 adjacency-FSM subscribe path will read.
+    /// the adjacency-FSM subscribe path reads.
     #[test]
     fn enable_and_profile_round_trip() {
         let mut lc = LinkConfig::default();

@@ -342,7 +342,7 @@ pub struct Rib {
     /// Subscriber registry — the sole source of truth for protocol
     /// modules attached to RIB. Populated by `Rib::subscribe`,
     /// drained by `proto_cleanup`, walked by the inbound dispatcher
-    /// (step 9) and by the outbound `api_*` push paths (step 10).
+    /// and the outbound `api_*` push paths.
     pub client_registry: ClientRegistry,
     /// Sender half of the `RibInbound` channel — cloned by
     /// `ConfigManager` into every `RibClient` it hands out at
@@ -350,9 +350,8 @@ pub struct Rib {
     pub inbound_tx: UnboundedSender<RibInbound>,
     /// Receive half polled in `event_loop`. Each `RibInbound` is
     /// unwrapped and forwarded to `process_msg` exactly like the
-    /// legacy `rx` channel. The `from: ProtoId` field is captured
-    /// for future use (step 9 routes per-VRF installs through it)
-    /// but is otherwise inert in step 1.
+    /// legacy `rx` channel. The `from: ProtoId` field routes
+    /// per-VRF installs through the inbound dispatcher.
     pub inbound_rx: UnboundedReceiver<RibInbound>,
     /// Per-proto redistribute subscription registry. Outer key is the
     /// subscriber's protocol name (matches `Subscriber::proto`); inner
@@ -372,10 +371,9 @@ pub struct Rib {
     /// Per-VRF routing tables, keyed by the same `table_id` the
     /// kernel uses. Each entry holds the IPv4 + IPv6 prefix tries
     /// and the MPLS ILM map for that VRF. Created on `VrfAdd`
-    /// (empty), removed on `VrfDel`. Step 9's per-`ProtoId` inbound
+    /// (empty), removed on `VrfDel`. The per-`ProtoId` inbound
     /// dispatcher writes into these when a VRF-attached protocol
-    /// installs a route; nothing inserts into the inner maps in
-    /// step 7.
+    /// installs a route.
     pub vrf_tables: BTreeMap<u32, VrfRibTables>,
     pub vrf_id_alloc: VrfIdAllocator,
     /// Operator intent for per-interface VRF binding, keyed by ifname.
@@ -386,8 +384,8 @@ pub struct Rib {
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntry>,
-    /// Per-IS-IS-Flex-Algorithm IPv4 route shadow (Phase 3 of the
-    /// BGP ↔ IS-IS Flex-Algo integration). Outer key is the algo id
+    /// Per-IS-IS-Flex-Algorithm IPv4 route shadow used by the
+    /// BGP ↔ IS-IS Flex-Algo integration. Outer key is the algo id
     /// (128..=255); inner map mirrors the per-algo subset of IS-IS's
     /// `Isis::rib_flex_algo`. Populated by `Message::FlexAlgoRouteAdd`
     /// / `Del`, cleared on shutdown. **Not** installed to the kernel
@@ -476,9 +474,8 @@ pub const SR0_DUMMY_NAME: &str = "sr0";
 /// `netlink_packet_route::route::RouteHeader::RT_TABLE_MAIN`
 /// (254) and is the value every callsite that operates on the
 /// global routing table passes to `FibHandle::route_ipv*_add/del`.
-/// Step 9 threads `table_id` through those calls so a future
-/// per-VRF dispatch can supply a different value without changing
-/// the call shape.
+/// `table_id` is threaded through those calls so per-VRF dispatch
+/// can supply a different value without changing the call shape.
 pub const RT_TABLE_MAIN: u32 = 254;
 
 const DEFAULT_RIB_SYNC_INTERVAL_SEC: u64 = 1;
@@ -905,9 +902,9 @@ impl Rib {
     /// Register a subscriber. `proto_id` is allocated by
     /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
     /// runs; we record the row in `client_registry`, which is the
-    /// sole source of truth for both inbound dispatch (step 9) and
-    /// the outbound push paths (step 10). The initial-state dump
-    /// and the trailing `EoR` are unchanged.
+    /// sole source of truth for both inbound dispatch and the
+    /// outbound push paths. The initial-state dump and the trailing
+    /// `EoR` are unchanged.
     pub fn subscribe(
         &mut self,
         proto_id: ProtoId,
@@ -997,8 +994,8 @@ impl Rib {
                     return;
                 }
                 // RT snapshot follows the VrfAdd. The receiver
-                // can already key off `name` because step 15a's
-                // replay guarantees VrfAdd lands first.
+                // can already key off `name` because the replay
+                // guarantees VrfAdd lands first.
                 let rt_msg = RibRx::VrfRouteTargets {
                     name: vrf.name.clone(),
                     ipv4_import_rts: vrf.ipv4_import_rts.clone(),
@@ -1083,9 +1080,8 @@ impl Rib {
 
     // ---- redistribute subscription handlers ------------------------
     //
-    // Step 2: registry + walk-and-replay. Steady-state delta hook
-    // (firing on FIB churn) lands in step 3; per-protocol senders /
-    // consumers land in step 4.
+    // Registry + walk-and-replay plus the steady-state delta hook
+    // that fires on FIB churn.
 
     /// Self-route check + registry insert. Returns the Tx the walker
     /// should push routes to, or `None` if the subscription is to be
@@ -1273,8 +1269,8 @@ impl Rib {
     /// `table_id == RT_TABLE_MAIN`, or to the per-VRF helper that
     /// records the install in `vrf_tables[table_id]` otherwise.
     /// The per-VRF helper deliberately skips best-path / FIB; the
-    /// import / export pipeline in step 18 supplies the resolution
-    /// overlay that makes the kernel install correct.
+    /// import / export pipeline supplies the resolution overlay
+    /// that makes the kernel install correct.
     ///
     /// ILM is VRF-agnostic at the kernel (single global MPLS table),
     /// so the dispatcher ignores `table_id` for those variants and
@@ -1408,12 +1404,10 @@ impl Rib {
                         ipv6_export_rts: std::collections::BTreeSet::new(),
                     },
                 );
-                // Park an empty per-VRF routing table set keyed by the
-                // same `table_id` the kernel uses. Step 9's per-
-                // `ProtoId` dispatcher will start writing routes here
-                // when a VRF-attached protocol installs. Until then
-                // the entry exists so the lookup is never a `None`
-                // surprise once the dispatcher lands.
+                // Park an empty per-VRF routing table set keyed by
+                // the same `table_id` the kernel uses. The
+                // per-`ProtoId` dispatcher writes routes here when a
+                // VRF-attached protocol installs.
                 self.vrf_tables.insert(table_id, VrfRibTables::new());
                 tracing::info!(
                     "vrf_add: {} table_id={} ifindex={}",
@@ -1449,11 +1443,10 @@ impl Rib {
                     self.fib_handle.vrf_del(&name).await;
                     return;
                 };
-                // Drop the parked per-VRF routing tables alongside the
-                // kernel VRF master. Step 7 doesn't walk the tables for
-                // FIB withdrawal because no route ever lands in them —
-                // step 9's dispatcher will start populating these,
-                // and the matching withdraw walk lands then too.
+                // Drop the parked per-VRF routing tables alongside
+                // the kernel VRF master. The per-VRF dispatcher
+                // populates these on install; a follow-up will add
+                // the matching withdraw walk.
                 self.vrf_tables.remove(&vrf.table_id);
                 self.fib_handle.vrf_del(&name).await;
                 self.vrf_id_alloc.release(vrf.table_id);
@@ -1765,13 +1758,13 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
-                // If the deleted address is still in config, push it back
-                // to the kernel rather than tearing down state. Recovery
-                // may be suppressed (Step 7 hold-down); in either case
-                // skip the normal teardown so the connected route
-                // doesn't churn. The next NewAddr we receive (from our
-                // own re-install, or from a future operator add) runs
-                // the sync chain.
+                // If the deleted address is still in config, push it
+                // back to the kernel rather than tearing down state.
+                // Recovery may be suppressed by hold-down; in either
+                // case skip the normal teardown so the connected
+                // route doesn't churn. The next NewAddr we receive
+                // (from our own re-install, or from a future operator
+                // add) runs the sync chain.
                 if self.addr_recover_if_configured(&addr).await {
                     return;
                 }
@@ -1972,7 +1965,7 @@ impl Rib {
                     self.process_msg(msg, RT_TABLE_MAIN).await;
                 }
                 Some(env) = self.inbound_rx.recv() => {
-                    // Step 9: look up the sender's VRF binding from
+                    // Look up the sender's VRF binding from
                     // `client_registry` and translate to the kernel
                     // `rtm_table` id. `vrf_id == 0` is default-VRF
                     // (= `RT_TABLE_MAIN`); a non-zero value flows

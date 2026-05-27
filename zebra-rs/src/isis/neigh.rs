@@ -52,10 +52,9 @@ pub struct Neighbor {
     /// allocator pass picks a function.
     pub endx_sid: Option<(u16, Ipv6Addr)>,
 
-    /// Graceful Restart observation (RFC 5306). Phase 2 records the
-    /// peer's most recent Restart TLV passively; helper-side behavior
-    /// (refresh hold once, send RA, suppress teardown) arrives in
-    /// Phase 3.
+    /// Graceful Restart observation (RFC 5306). Records the peer's
+    /// most recent Restart TLV and drives helper-side behavior
+    /// (refresh hold once, send RA, suppress teardown).
     pub gr: AdjGrState,
 
     // For logging purpose.
