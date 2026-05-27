@@ -1190,35 +1190,86 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         return None;
     };
 
-    let password_bytes: Vec<u8> = if op == ConfigOp::Set {
+    // Store the password on the peer if it exists. The peer may not
+    // be in the map yet if the per-leaf callbacks fire in deeper-first
+    // order (`/password` before `/neighbor`); in that case we just
+    // skip the field-store — the peer will be created momentarily and
+    // a follow-up `apply_md5_refresh_all` will catch up. The earlier
+    // `?` short-circuit also skipped the listener install, which is
+    // the actual bug that left passive peers unauthenticated.
+    if op == ConfigOp::Set {
         let password = args.string()?;
-        let bytes = password.as_bytes().to_vec();
-        bgp.peers.get_mut(&addr)?.config.transport.md5_password = Some(password);
-        bytes
-    } else {
-        bgp.peers.get_mut(&addr)?.config.transport.md5_password = None;
-        Vec::new()
-    };
+        if let Some(peer) = bgp.peers.get_mut(&addr) {
+            peer.config.transport.md5_password = Some(password);
+        }
+    } else if let Some(peer) = bgp.peers.get_mut(&addr) {
+        peer.config.transport.md5_password = None;
+    }
 
-    // Install (or remove, with an empty key) on the listener for this
-    // peer's address family. The kernel requires the key to be on the
-    // listener before the peer's SYN arrives — a post-accept() call
-    // is too late.
+    // Reconcile the listener state for this peer regardless of
+    // whether the field-store branch fired. The reconciler reads from
+    // peer.config.transport.md5_password, so callers later in the
+    // commit can still get the install when the peer materializes
+    // (we run apply_md5_refresh_all from config_peer too).
+    apply_md5_refresh_for(bgp, addr);
+
+    Some(())
+}
+
+/// Reconcile the listener TCP MD5 key for a single peer. Reads
+/// `peer.config.transport.md5_password` and installs (or removes,
+/// with an empty key) on the appropriate listening socket. Silent
+/// when there is no listener fd yet — `apply_md5_refresh_all` from
+/// `listen()` will fill in once the bind completes.
+fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
     let listen_fd = match addr {
         IpAddr::V4(_) => bgp.listen_fd_v4,
         IpAddr::V6(_) => bgp.listen_fd_v6,
     };
-    if let Some(fd) = listen_fd
-        && let Err(e) = super::auth::set_tcp_md5_key(fd, addr, &password_bytes)
-    {
-        tracing::warn!(
-            peer = %addr,
-            error = %e,
-            "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
-        );
-    }
+    let Some(fd) = listen_fd else {
+        // Listener not bound yet. The startup reconciler in `listen()`
+        // will install the key once the fd is captured.
+        return;
+    };
 
-    Some(())
+    // Empty key removes the entry. Either the peer has no password
+    // set, or the peer doesn't exist in the map (delete path).
+    let password_bytes: Vec<u8> = bgp
+        .peers
+        .get(&addr)
+        .and_then(|p| p.config.transport.md5_password.as_ref())
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
+
+    match super::auth::set_tcp_md5_key(fd, addr, &password_bytes) {
+        Ok(()) => {
+            if !password_bytes.is_empty() {
+                tracing::debug!(
+                    peer = %addr,
+                    keylen = password_bytes.len(),
+                    "bgp: TCP MD5 installed on listener for peer",
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                peer = %addr,
+                error = %e,
+                "TCP MD5 setsockopt on listener failed; incoming SYNs from this peer will be dropped"
+            );
+        }
+    }
+}
+
+/// Iterate every peer with an MD5 password configured and install its
+/// key on the matching listener fd. Mirrors `apply_ao_refresh_all`.
+/// Safe to call repeatedly — `setsockopt(TCP_MD5SIG)` is idempotent
+/// for the same (addr, key) tuple.
+pub(super) fn apply_md5_refresh_all(bgp: &mut Bgp) {
+    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
+    for addr in addrs {
+        apply_md5_refresh_for(bgp, addr);
+    }
 }
 
 fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {

@@ -1033,6 +1033,15 @@ impl Bgp {
             ));
         }
 
+        // Reconcile listener-side authentication for every peer that
+        // already has a key configured. Necessary because per-leaf
+        // callbacks that fired before `listen()` completed observed
+        // `listen_fd_v4/v6 = None` and skipped the install — without
+        // this sweep a passive peer with MD5/AO never sees a SYN-ACK
+        // because the kernel drops the incoming SYN.
+        super::config::apply_md5_refresh_all(self);
+        super::config::apply_ao_refresh_all(self);
+
         Ok(())
     }
 
