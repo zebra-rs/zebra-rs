@@ -47,7 +47,9 @@ impl PrefixSet {
     }
 
     /// Insert (or replace) the entry for `prefix`. Returns the
-    /// previous entry if one existed.
+    /// previous entry if one existed. Used by tests across modules
+    /// (same-module tests + bgp/policy_list tests) as the natural
+    /// counterpart to `entry()`.
     #[allow(dead_code)]
     pub fn insert(&mut self, prefix: IpNet, entry: PrefixSetEntry) -> Option<PrefixSetEntry> {
         let prev = self.prefixes.insert(prefix, entry);
@@ -86,21 +88,6 @@ impl PrefixSet {
 
     pub fn iter(&self) -> btree_map::Iter<'_, IpNet, PrefixSetEntry> {
         self.prefixes.iter()
-    }
-
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.prefixes.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.prefixes.is_empty()
-    }
-
-    #[allow(dead_code)]
-    pub fn contains_prefix(&self, prefix: &IpNet) -> bool {
-        self.prefixes.contains_key(prefix)
     }
 
     /// Check if the given IPv4 or IPv6 network matches any prefix in this set.

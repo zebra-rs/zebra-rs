@@ -4,8 +4,6 @@ pub use inst::*;
 pub mod action;
 pub use action::Action;
 
-pub mod rmap;
-
 pub mod regex;
 
 pub mod com_list;
