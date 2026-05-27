@@ -75,3 +75,40 @@ ubuntu>show ip route
 
 ## Configuration
 
+zebra-rs keeps two configuration views:
+
+- **running config** — what the daemon is currently acting on. Only `commit` changes it.
+- **candidate config** — the editable buffer that accumulates `set` and `delete` statements until you `commit` (or `discard`) them.
+
+Enter configure mode with `configure`, edit the candidate, then `commit`:
+
+``` shell
+ubuntu>configure
+ubuntu#set system hostname r1
+ubuntu#set router bgp 65000 router-id 10.0.0.1
+ubuntu#set router bgp 65000 neighbor 10.0.0.2 peer-as 65001
+ubuntu#commit
+r1#show running-config
+system {
+    hostname r1
+}
+router {
+    bgp 65000 {
+        router-id 10.0.0.1
+        neighbor 10.0.0.2 {
+            peer-as 65001
+        }
+    }
+}
+```
+
+Other useful editing commands:
+
+| Command | Effect |
+|---|---|
+| `delete <path>` | Remove a leaf or list item from the candidate |
+| `discard` | Revert candidate back to running |
+| `load` | Re-load the on-disk config file into the candidate, then commit |
+| `save` | Write the running config to the on-disk file |
+
+The same configuration can be viewed in different formats. `show running-config formal` prints the flat `set ...` form, `show running-config json` and `show running-config yaml` print the equivalent JSON / YAML. The same trio works for `show candidate-config`.
