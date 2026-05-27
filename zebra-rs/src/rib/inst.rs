@@ -262,19 +262,6 @@ pub enum Message {
     ProtoCleanup {
         proto: String,
     },
-    /// Drop the registry / redist filters / SR watchers for a
-    /// protocol whose task is being despawned, **without**
-    /// withdrawing the routes / ILMs it owns. Used by the
-    /// graceful-restart exit path so the kernel keeps forwarding
-    /// through the proto's installed routes while the daemon
-    /// restarts (RFC 3623 for OSPF, RFC 4724 for BGP, RFC 5306 for
-    /// IS-IS). The next spawn of the same proto is expected to
-    /// reclaim ownership via its protocol-specific re-convergence
-    /// (OSPF: checkpoint replay; BGP: RIB re-walk + End-of-RIB
-    /// markers; IS-IS: T2/T3 helper completion). Idempotent.
-    ProtoQuiesce {
-        proto: String,
-    },
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -1078,10 +1065,8 @@ impl Rib {
     }
 
     /// Drop the per-protocol registry / redist filters / SR
-    /// watchers without touching the FIB. Used by both
-    /// `proto_cleanup` (after withdrawing routes) and
-    /// `proto_quiesce` (which deliberately leaves routes
-    /// installed for graceful restart).
+    /// watchers without touching the FIB. Used by
+    /// `proto_cleanup` after withdrawing routes.
     fn proto_unregister(&mut self, proto: &str) {
         if let Some(proto_id) = self.client_registry.find_by_proto(proto) {
             self.client_registry.unregister(proto_id);
@@ -1094,20 +1079,6 @@ impl Rib {
         for watchers in self.locator_watch.values_mut() {
             watchers.remove(proto);
         }
-    }
-
-    /// `ProtoQuiesce` handler — RFC 3623 / 4724 / 5306
-    /// graceful-restart exit. The protocol task is going down
-    /// (planned restart), but the kernel routes / ILMs it owns
-    /// MUST stay installed so the data plane keeps forwarding.
-    /// Same registry / filter teardown as `proto_cleanup` minus
-    /// the route + ILM withdrawal pass.
-    ///
-    /// `proto` is validated only as a name lookup (no `rtype`
-    /// match required — quiesce is protocol-agnostic, and an
-    /// unknown name is a no-op).
-    fn proto_quiesce(&mut self, proto: &str) {
-        self.proto_unregister(proto);
     }
 
     // ---- redistribute subscription handlers ------------------------
@@ -1700,9 +1671,6 @@ impl Rib {
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
-            }
-            Message::ProtoQuiesce { proto } => {
-                self.proto_quiesce(&proto);
             }
             Message::MacAdd {
                 vni,

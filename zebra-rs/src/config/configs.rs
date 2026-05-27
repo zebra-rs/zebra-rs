@@ -51,14 +51,9 @@ macro_rules! arg_parse_type {
     };
 }
 
-#[allow(dead_code)]
 impl Args {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 
     pub fn string(&mut self) -> Option<String> {

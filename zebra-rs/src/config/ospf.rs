@@ -26,22 +26,6 @@ pub fn despawn_ospf(config: &ConfigManager) {
     });
 }
 
-/// Graceful-restart variant of [`despawn_ospf`]. Drops the
-/// protocol task + registrations but sends `ProtoQuiesce`
-/// instead of `ProtoCleanup`, so the kernel routes the OSPFv2
-/// instance owns stay installed across the restart (RFC 3623).
-/// Caller is expected to have already flushed Grace LSAs and
-/// written the restart checkpoint.
-#[allow(dead_code)]
-pub fn despawn_ospf_graceful(config: &ConfigManager) {
-    config.cm_clients.borrow_mut().remove("ospf");
-    config.show_clients.borrow_mut().remove("ospf");
-    config.protocol_tasks.borrow_mut().remove("ospf");
-    let _ = config.rib_tx.send(rib::Message::ProtoQuiesce {
-        proto: "ospf".to_string(),
-    });
-}
-
 /// Spawn an OSPFv3 instance. Mirrors [`spawn_ospf`] but constructs
 /// `Ospf<Ospfv3>` instead of the default-typed `Ospf<Ospfv2>` and
 /// uses the `"ospfv3"` proto-name across the rib client / config
@@ -65,18 +49,6 @@ pub fn despawn_ospfv3(config: &ConfigManager) {
     config.show_clients.borrow_mut().remove("ospfv3");
     config.protocol_tasks.borrow_mut().remove("ospfv3");
     let _ = config.rib_tx.send(rib::Message::ProtoCleanup {
-        proto: "ospfv3".to_string(),
-    });
-}
-
-/// Graceful-restart variant of [`despawn_ospfv3`]. See
-/// [`despawn_ospf_graceful`] — same shape, OSPFv3 proto name.
-#[allow(dead_code)]
-pub fn despawn_ospfv3_graceful(config: &ConfigManager) {
-    config.cm_clients.borrow_mut().remove("ospfv3");
-    config.show_clients.borrow_mut().remove("ospfv3");
-    config.protocol_tasks.borrow_mut().remove("ospfv3");
-    let _ = config.rib_tx.send(rib::Message::ProtoQuiesce {
         proto: "ospfv3".to_string(),
     });
 }

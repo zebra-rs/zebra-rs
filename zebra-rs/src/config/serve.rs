@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::Response;
@@ -509,7 +509,6 @@ impl Clear for ClearService {
 
 pub struct Cli {
     pub tx: mpsc::Sender<Message>,
-    pub _show_clients: HashMap<String, UnboundedSender<DisplayRequest>>,
     /// Runtime-mutable set of YANG-defined service-account uids. Shared
     /// with `ConfigManager`, which updates it on commit of
     /// `vty service-account uid N` changes (D25).
@@ -523,14 +522,8 @@ impl Cli {
     ) -> Self {
         Self {
             tx: config_tx,
-            _show_clients: HashMap::new(),
             yang_service_accounts,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn subscribe(&mut self, name: &str, tx: UnboundedSender<DisplayRequest>) {
-        self._show_clients.insert(name.to_string(), tx);
     }
 }
 
