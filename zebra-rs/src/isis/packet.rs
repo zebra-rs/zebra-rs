@@ -59,6 +59,56 @@ use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
 use crate::spf::label_pool::LabelPool;
 
+/// RFC 5306 §3.2(b) helper-election predicate. P2P circuits always
+/// fire the CSNP+SRM kick. On a LAN we only fire when we beat every
+/// other GR-capable, non-restarting neighbor on (priority, mac) — so
+/// when multiple helpers cohabit the LAN exactly one floods CSNP and
+/// the others stay silent. The actual DIS is NOT consulted (and not
+/// changed) by this process; the RFC is explicit about that.
+fn helper_elected_for_csnp(link: &LinkTop, level: Level) -> bool {
+    if link.is_p2p() {
+        return true;
+    }
+    let my_priority = link.config.priority();
+    let my_mac = link.state.mac;
+    for nbr in link.state.nbrs.get(&level).values() {
+        // Skip non-Up adjacencies and routers that have never sent a
+        // Restart TLV (treated as non-GR-capable per §3.2(b)).
+        if nbr.state != NfsmState::Up {
+            continue;
+        }
+        if nbr.gr.last_seen.is_none() {
+            continue;
+        }
+        // Exclude the restarter(s) themselves from the election pool.
+        if nbr.gr.helper_active {
+            continue;
+        }
+        let nbr_wins = nbr.priority > my_priority
+            || (nbr.priority == my_priority
+                && match (nbr.mac, my_mac) {
+                    (Some(n), Some(m)) => n > m,
+                    _ => false,
+                });
+        if nbr_wins {
+            return false;
+        }
+    }
+    true
+}
+
+/// Fire the §3.2(b) CSNP + SRM kick if elected. Idempotent on the
+/// wire — CSNP+SRM are normally periodic, this just brings them
+/// forward so the restarter's database resync starts immediately
+/// rather than after the next csnp_interval.
+fn helper_kick_csnp(link: &mut LinkTop, level: Level) {
+    if !helper_elected_for_csnp(link, level) {
+        return;
+    }
+    srm_set_for_all_lsp(link, level);
+    csnp_send(link, level);
+}
+
 #[derive(Debug)]
 pub struct NeighborAddr4 {
     pub addr: Ipv4Addr,
@@ -286,7 +336,12 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // (RFC 5306 §3.2(b)). Periodic IIHs already carry RA for every
     // helper_active neighbor, so a missed wakeup here just delays
     // delivery by one interval rather than breaking GR.
-    if helper_edge == HelperEdge::Enter {
+    //
+    // The CSNP+SRM kick (Phase 3b) is dispatched at the bottom of the
+    // function instead of here, because it needs `&mut link` and `nbr`
+    // is still borrowing from `link.state.nbrs` at this point.
+    let helper_entered = helper_edge == HelperEdge::Enter;
+    if helper_entered {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
     nbr.ensure_endx_sid(
@@ -394,6 +449,12 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
     // we can read link.state.v4addr / link.config.bfd freely.
     bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
+
+    // Phase 3b — CSNP + SRM kick on first RR. Deferred to here so we
+    // can take `&mut link` after the `nbr` borrow has expired.
+    if helper_entered {
+        helper_kick_csnp(link, level);
+    }
 }
 
 #[isis_pdu_handler(Hello, Recv)]
@@ -465,8 +526,11 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // First RR=1 — fire an immediate IIH so the RA reaches the
         // restarter inside RFC 5306 §3.2(b)'s "immediately" window
-        // rather than waiting up to one hello_interval.
-        if helper_edge == HelperEdge::Enter {
+        // rather than waiting up to one hello_interval. CSNP+SRM kick
+        // (Phase 3b) deferred to the bottom of the loop because we
+        // need `&mut link` after the nbr borrow ends.
+        let helper_entered = helper_edge == HelperEdge::Enter;
+        if helper_entered {
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         }
         nbr.ensure_endx_sid(
@@ -545,6 +609,13 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // borrow is gone so we can read link.state / link.config
         // freely.
         bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
+
+        // Phase 3b — CSNP+SRM kick on first RR. P2P always wins the
+        // helper_elected_for_csnp predicate, so this fires every
+        // time the peer enters Restart mode.
+        if helper_entered {
+            helper_kick_csnp(link, level);
+        }
     }
 }
 
