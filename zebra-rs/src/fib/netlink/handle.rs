@@ -978,16 +978,21 @@ impl FibHandle {
                 let attr = NexthopAttribute::Id(uni.gid() as u32);
                 msg.attributes.push(attr);
 
-                // Gateway address.
-                let attr = match uni.addr {
-                    std::net::IpAddr::V4(ipv4) => {
-                        NexthopAttribute::Gateway(RouteAddress::Inet(ipv4))
-                    }
-                    std::net::IpAddr::V6(ipv6) => {
-                        NexthopAttribute::Gateway(RouteAddress::Inet6(ipv6))
-                    }
-                };
-                msg.attributes.push(attr);
+                // Gateway address. Skip NHA_GATEWAY for on-link
+                // nexthops (unspecified addr): the kernel rejects
+                // NHA_GATEWAY=0.0.0.0/:: with EINVAL — an
+                // interface-only nexthop must carry only NHA_OIF.
+                if !uni.addr.is_unspecified() {
+                    let attr = match uni.addr {
+                        std::net::IpAddr::V4(ipv4) => {
+                            NexthopAttribute::Gateway(RouteAddress::Inet(ipv4))
+                        }
+                        std::net::IpAddr::V6(ipv6) => {
+                            NexthopAttribute::Gateway(RouteAddress::Inet6(ipv6))
+                        }
+                    };
+                    msg.attributes.push(attr);
+                }
 
                 // Outgoing if. Origin wins over resolved; fall back to 0
                 // ("no Oif attribute") if neither was filled, which is a
