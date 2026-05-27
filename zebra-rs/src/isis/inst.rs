@@ -51,6 +51,25 @@ pub type ShowCallback = fn(&Isis, Args, bool) -> std::result::Result<String, std
 
 pub type MsgSender = UnboundedSender<Message>;
 
+/// RFC 5306 §3.1 T1 cadence — retransmit IIH+RR every 3s while
+/// restarting. Default per RFC; not currently operator-tunable
+/// (a YANG knob can be added if interop bench shows operators
+/// want a longer/shorter cycle).
+const T1_RETRANSMIT_SECS: u64 = 3;
+
+/// Build the T1 retransmit timer. Pulled out so both the
+/// operator-staged (`gr_restart_begin`) and checkpoint-load
+/// (`gr_restart_load_checkpoint`) paths arm it identically.
+fn arm_t1_timer(tx: &UnboundedSender<Message>) -> crate::context::Timer {
+    let tx = tx.clone();
+    crate::context::Timer::repeat(T1_RETRANSMIT_SECS, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::GrT1Tick);
+        }
+    })
+}
+
 /// In-progress RFC 5306 restart state. `Some` between
 /// `clear isis graceful-restart begin` and either `abort`, the
 /// `restarter-enabled` knob flipping off, or (Phase 5d+) the
@@ -94,6 +113,18 @@ pub struct RestartingState {
     /// success path never fires. Operator restarts always end via
     /// `abort` or `commit`+exit, not the success path.
     pub pending_neighbors: std::collections::BTreeSet<IsisSysId>,
+    /// RFC 5306 §3.1 T1 retransmit timer — repeats every 3s while
+    /// restarting, fires `Message::GrT1Tick` which kicks
+    /// `HelloOriginate` on every link. Speeds up the
+    /// helper-acknowledgement loop versus the normal
+    /// hello_interval (default 10s). Auto-cancelled when
+    /// `RestartingState` drops (Timer Drop). `allow(dead_code)`
+    /// because the field is never accessed post-construction — it
+    /// exists solely to bind the Timer's lifetime to the restart
+    /// window; the wakeup arrives via the channel into `process_msg`,
+    /// not via this field.
+    #[allow(dead_code)]
+    pub t1_timer: Option<crate::context::Timer>,
 }
 
 pub struct Isis {
@@ -115,6 +146,19 @@ pub struct Isis {
     /// re-originating at higher seq during restart — would trip
     /// helpers' MaxSeqAdvance recovery).
     pub restarting: Option<RestartingState>,
+
+    /// RFC 5306 §3.1 exit-failure overload: set when `gr_restart_
+    /// expire` fired before exit-success completed. While true,
+    /// `lsp_generate` builds self-LSPs with `IsisLspTypes.ol_bits =
+    /// true`, telling the rest of the IS-IS network that we should
+    /// be used only as a transit-of-last-resort. Cleared 30s later
+    /// by `Message::ClearOverload` which re-originates without OL.
+    pub overloaded: bool,
+
+    /// Parks the `Timer::once(30, …)` armed by `gr_restart_expire`
+    /// so its Drop doesn't cancel the wakeup before it fires.
+    /// `None` outside the post-expire overload window.
+    pub overload_clear_timer: Option<crate::context::Timer>,
 
     /// Flex-Algorithm (RFC 9350) configuration tree, keyed by the
     /// numeric algorithm identifier (128..=255). Owns its own
@@ -382,6 +426,10 @@ pub struct IsisTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub links: &'a mut IsisLinks,
     pub config: &'a IsisConfig,
+    /// Snapshot of `Isis.overloaded`. Consumed by `lsp.rs::lsp_generate`
+    /// (and the pseudonode origination path) to set
+    /// `IsisLspTypes.ol_bits` on the freshly-built self-LSPs.
+    pub overloaded: bool,
     pub tracing: &'a IsisTracing,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
@@ -532,6 +580,8 @@ impl Isis {
                 show_cb: HashMap::new(),
                 config: IsisConfig::default(),
                 restarting: None,
+                overloaded: false,
+                overload_clear_timer: None,
                 flex_algo: super::flex_algo::FlexAlgoConfig::new(),
                 affinity_map: super::affinity_map::AffinityMap::new(),
                 tracing: IsisTracing::default(),
@@ -842,6 +892,7 @@ impl Isis {
             .map(|a| isis_packet::IsisSysId { id: a.sys_id })
             .collect();
 
+        let t1_timer = arm_t1_timer(&self.tx);
         self.restarting = Some(RestartingState {
             // Preserve original checkpoint write time so the show
             // command and helpers' grace-period view stay aligned
@@ -850,6 +901,7 @@ impl Isis {
             grace_period_secs: cp.grace_period_secs,
             abort_timer: Some(abort_timer),
             pending_neighbors,
+            t1_timer: Some(t1_timer),
         });
 
         let _ = IsisCheckpoint::delete(&path);
@@ -882,6 +934,7 @@ impl Isis {
             tracing::warn!("[GR Restart] begin ignored: already restarting");
             return;
         }
+        let t1_timer = arm_t1_timer(&self.tx);
         self.restarting = Some(RestartingState {
             started_at: std::time::SystemTime::now(),
             grace_period_secs,
@@ -890,6 +943,7 @@ impl Isis {
             // set. Exit-success never fires here; operator ends
             // the restart via `abort` or `commit`+exit.
             pending_neighbors: std::collections::BTreeSet::new(),
+            t1_timer: Some(t1_timer),
         });
         tracing::info!(
             "[GR Restart] staged, grace period {}s; flooding IIH+RR on all links",
@@ -1035,6 +1089,70 @@ impl Isis {
         // 5e-i restored at the original seq, so the bump is +1
         // relative to what helpers snapshotted — no MaxSeqAdvance
         // trip, fresh content takes effect.
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+    }
+
+    /// RFC 5306 §3.1 exit-failure path. Auto-abort timer fired
+    /// before `gr_restart_exit_success` — i.e. the checkpointed
+    /// neighbors didn't all come back inside the grace window.
+    /// Per the RFC: set the OL bit on our self-LSPs, resume normal
+    /// operation, then clear OL after a short grace.
+    ///
+    /// Distinct from `gr_restart_abort` (operator-driven `clear …
+    /// abort`), which exits cleanly without overload.
+    fn gr_restart_expire(&mut self) {
+        use crate::context::Timer;
+        // OL-CLEAR-DELAY: how long we keep the overload bit set
+        // after exit-failure. RFC 5306 §3.1 ties it to T2's
+        // completion — without proper T2 modeling here, 30s is a
+        // pragmatic default that gives the network time to route
+        // around us before we re-advertise as a normal transit.
+        const OL_CLEAR_DELAY_SECS: u64 = 30;
+
+        // Clear restart state first so the SPF gate lifts and the
+        // re-originate below produces fresh content (instead of
+        // being suppressed).
+        self.restarting = None;
+        self.overloaded = true;
+
+        tracing::warn!(
+            "[GR Restart] exit-failure: setting OL bit, will clear after {}s",
+            OL_CLEAR_DELAY_SECS
+        );
+
+        // Re-originate at seq+1 with OL=true. lsp_generate reads
+        // top.overloaded which we just flipped.
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+
+        // Kick Hellos so peers see RR=0 (we're no longer
+        // restarting) and stop their helper mode.
+        self.kick_hello_all_links();
+
+        // Arm the OL-clear timer. Replaces any existing
+        // overload_clear_timer (multiple expires would re-set OL
+        // and re-arm — last one wins, that's fine).
+        let tx = self.tx.clone();
+        let clear_timer = Timer::once(OL_CLEAR_DELAY_SECS, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::ClearOverload);
+            }
+        });
+        self.overload_clear_timer = Some(clear_timer);
+    }
+
+    /// Clear the post-restart OL bit. Called from
+    /// `Message::ClearOverload` when the `overload_clear_timer`
+    /// armed by `gr_restart_expire` fires.
+    fn clear_overload(&mut self) {
+        if !self.overloaded {
+            return;
+        }
+        self.overloaded = false;
+        self.overload_clear_timer = None;
+        tracing::info!("[GR Restart] clearing OL bit; re-originating self-LSPs");
         let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
         let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
@@ -1352,16 +1470,26 @@ impl Isis {
                 std::process::exit(0);
             }
             Message::GrRestartAbort => {
-                // Auto-abort fired (5e-i grace window expired). Run
-                // the same path as `clear isis graceful-restart
-                // abort`: clear restarting, kick Hellos with RR=0.
+                // Auto-abort fired (grace window expired without
+                // exit-success). Per RFC 5306 §3.1, exit-failure
+                // means we set the OL bit on our self-LSPs and
+                // resume operation as a last-resort transit; the
+                // OL clears 30s later (Message::ClearOverload).
                 tracing::warn!(
-                    "[GR Restart] grace window expired without exit-success; auto-aborting"
+                    "[GR Restart] grace window expired without exit-success; setting OL bit"
                 );
-                self.gr_restart_abort();
+                self.gr_restart_expire();
             }
             Message::GrNeighborUp(sys_id) => {
                 self.gr_check_exit_success(sys_id);
+            }
+            Message::ClearOverload => {
+                self.clear_overload();
+            }
+            Message::GrT1Tick => {
+                if self.restarting.is_some() {
+                    self.kick_hello_all_links();
+                }
             }
         }
     }
@@ -1858,6 +1986,7 @@ impl Isis {
             tx: &self.tx,
             links: &mut self.links,
             config: &self.config,
+            overloaded: self.overloaded,
             tracing: &self.tracing,
             lsdb: &mut self.lsdb,
             lsp_map: &mut self.lsp_map,
@@ -2185,6 +2314,18 @@ pub enum Message {
     /// loaded-checkpoint restart, `pending_neighbors` is empty
     /// and the message is a no-op.
     GrNeighborUp(IsisSysId),
+    /// `gr_restart_expire` armed an `overload_clear_timer` 30s
+    /// after the exit-failure path set OL on our self-LSPs. When
+    /// it fires, this message clears `overloaded` and re-originates
+    /// without OL so the network resumes treating us as a normal
+    /// transit (RFC 5306 §3.1).
+    ClearOverload,
+    /// `RestartingState.t1_timer` fires every 3s while restarting
+    /// to drive the per-RFC §3.1 IIH+RR retransmit cadence (faster
+    /// than the normal hello_interval). Handler kicks
+    /// `HelloOriginate` on every link. Auto-cancelled when
+    /// `restarting` drops (the Timer is parked inside it).
+    GrT1Tick,
     /// Re-originate the self LSP at `level`. The optional seq-number
     /// floor carries §7.3.16.4 semantics: when a peer floods our own
     /// LSP back at us with a seq higher than what we hold, we must
@@ -2281,6 +2422,8 @@ impl Display for Message {
             Message::GrRestartExit => write!(f, "[Message::GrRestartExit]"),
             Message::GrRestartAbort => write!(f, "[Message::GrRestartAbort]"),
             Message::GrNeighborUp(sys_id) => write!(f, "[Message::GrNeighborUp({})]", sys_id),
+            Message::ClearOverload => write!(f, "[Message::ClearOverload]"),
+            Message::GrT1Tick => write!(f, "[Message::GrT1Tick]"),
         }
     }
 }

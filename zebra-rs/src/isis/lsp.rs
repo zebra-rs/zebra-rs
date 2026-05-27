@@ -381,7 +381,10 @@ pub fn dis_generate(
     };
 
     let frag0_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
-    let types = IsisLspTypes::from(level.digit());
+    // Pseudonode LSPs ride the same overload posture as the DIS's
+    // own router LSP — when we're flagged overloaded post-restart
+    // (RFC 5306 §3.1 exit-failure), the LAN's pseudonode is too.
+    let types = IsisLspTypes::from(level.digit()).with_ol_bits(top.overloaded);
 
     // Build the single TLV 22 listing the DIS itself plus every Up
     // neighbor on this LAN, then defer to the same splitter/packer
@@ -552,7 +555,10 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     //     (SRv6 locators, IS-Reach, MT IS-Reach, IP-Reach, IPv6-Reach,
     //     MT IPv6-Reach).
     // The packer then bin-packs them into fragments under `lsp_mtu_size`.
-    let types = IsisLspTypes::from(level.digit());
+    // OL bit reflects `top.overloaded` — set by `gr_restart_expire` when
+    // the GR exit-failure path fires; cleared 30s later by
+    // `Message::ClearOverload` (RFC 5306 §3.1).
+    let types = IsisLspTypes::from(level.digit()).with_ol_bits(top.overloaded);
     let mut anchors: Vec<IsisTlv> = Vec::new();
     let mut distributable: Vec<IsisTlv> = Vec::new();
 
