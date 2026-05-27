@@ -997,10 +997,19 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         // sure we eventually pick the genuinely-newer LSA up. If we
         // acked here the peer would prune its `ls_rxmt` and we'd
         // hold the stale copy until the next refresh.
+        //
+        // Skip the gate when the DB copy is self-originated: it was
+        // produced by our own refresh path, not flood-received, so the
+        // §13 step-5(a) wording doesn't apply. Letting it through is
+        // what allows the §13.4 self-originated handler below to fire
+        // and bump our seq above the stale neighbor copy (otherwise we
+        // never catch up to a high-seq pre-restart LSA the neighbors
+        // still hold — especially one carrying DO_NOT_AGE).
         if let Some(install_time) = current_install_time
             && install_time.elapsed() < std::time::Duration::from_secs(OSPF_MIN_LS_ARRIVAL)
+            && !ospf_is_self_originated(oi, lsa)
         {
-            tracing::info!(
+            tracing::debug!(
                 "[LS Update] Step 5(a) MinLSArrival: discarding (no ack) LSA type={:?} id={} adv={} seq={:#x}",
                 lsa.h.ls_type,
                 lsa.h.ls_id,
