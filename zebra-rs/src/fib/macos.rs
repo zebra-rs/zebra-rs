@@ -36,7 +36,6 @@ impl FibHandle {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn route_ipv4_del(&self, dest: &Ipv4Net, entry: &RibEntry, _table_id: u32) {
         if let Some(nexthop) = entry.nexthops.first() {
             let route = Route::new(IpAddr::V4(dest.addr()), dest.prefix_len())

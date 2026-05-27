@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::{TcpListener, TcpSocket, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket};
 
 use crate::rib::client::RibClient;
 
@@ -95,10 +95,6 @@ impl ProtoContext {
     /// `vrf_ifname` so the resulting socket lands in the matching
     /// kernel routing table.
     ///
-    /// First production caller arrives in a step-15 follow-up
-    /// that wires per-VRF [`RibClient`] subscriptions. Until then
-    /// [`Self::for_vrf_no_rib`] is the spawn-side entry point.
-    #[allow(dead_code)]
     pub fn for_vrf(rib: RibClient, vrf_id: u32, vrf_ifname: String) -> Self {
         debug_assert!(
             vrf_id != 0,
@@ -111,27 +107,10 @@ impl ProtoContext {
         }
     }
 
-    /// VRF-attached counterpart to [`Self::default_table_no_rib`].
-    /// Retained because tests construct contexts without a real
-    /// `RibClient`; production now goes through [`Self::for_vrf`]
-    /// since the per-VRF `RibClient` subscription landed.
+    /// Read-only accessor for the VRF id. Only same-file tests
+    /// consult it today; the bin target reaches the field through
+    /// `maybe_bind_device` instead, so the lint requires the allow.
     #[allow(dead_code)]
-    pub fn for_vrf_no_rib(vrf_id: u32, vrf_ifname: String) -> Self {
-        debug_assert!(
-            vrf_id != 0,
-            "ProtoContext::for_vrf_no_rib requires a non-zero vrf_id"
-        );
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        Box::leak(Box::new(rx));
-        let rib = RibClient::new(tx, crate::rib::client::ProtoId::from_raw(u32::MAX));
-        Self {
-            vrf_id,
-            vrf_ifname: Some(vrf_ifname),
-            rib,
-        }
-    }
-
-    #[allow(dead_code)] // first reader lands in step 8 (per-VRF table dispatch).
     pub fn vrf_id(&self) -> u32 {
         self.vrf_id
     }
@@ -194,26 +173,6 @@ impl ProtoContext {
         TcpListener::from_std(std_listener)
     }
 
-    /// Bound UDP socket — convenience wrapper. Used by callers that
-    /// only need a simple bound `tokio::net::UdpSocket` and no
-    /// further per-socket setsockopt configuration. Internally
-    /// builds an unbound socket via [`Self::udp_socket_unbound`],
-    /// applies `SO_REUSEADDR`, binds, sets non-blocking, and
-    /// converts to the tokio type.
-    #[allow(dead_code)] // first caller lands when a VRF-aware UDP protocol arrives.
-    pub async fn udp_socket(&self, addr: SocketAddr) -> io::Result<UdpSocket> {
-        let domain = match addr {
-            SocketAddr::V4(_) => Domain::IPV4,
-            SocketAddr::V6(_) => Domain::IPV6,
-        };
-        let sock = self.udp_socket_unbound(domain)?;
-        sock.set_reuse_address(true)?;
-        sock.bind(&addr.into())?;
-        let std_sock: std::net::UdpSocket = sock.into();
-        std_sock.set_nonblocking(true)?;
-        UdpSocket::from_std(std_sock)
-    }
-
     /// Unbound DGRAM UDP socket pre-`SO_BINDTODEVICE`-applied.
     /// Returned as `socket2::Socket` so the caller can configure
     /// further setsockopts (`IP_TTL`, `IP_RECVTTL`, `IP_PKTINFO`,
@@ -230,7 +189,6 @@ impl ProtoContext {
     /// Caller still does any further `setsockopt` it needs (`IP_HDRINCL`,
     /// `IP_PKTINFO`, multicast joins). Returned as `socket2::Socket`
     /// so protocols can keep using `AsyncFd` to drive it.
-    #[allow(dead_code)] // OSPF / IS-IS migration in step 6 is the first caller.
     pub fn raw_socket(&self, domain: Domain, protocol: Protocol) -> io::Result<Socket> {
         let sock = Socket::new(domain, Type::RAW, Some(protocol))?;
         self.maybe_bind_device(&sock)?;
@@ -372,18 +330,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_socket_on_ephemeral_port_succeeds() {
-        let ctx = ProtoContext::default_table(test_rib_client());
-        let sock = ctx
-            .udp_socket("127.0.0.1:0".parse().unwrap())
-            .await
-            .expect("udp bind on ephemeral port");
-        let local = sock.local_addr().expect("local_addr");
-        assert!(local.port() != 0);
-        assert!(local.ip().is_loopback());
-    }
-
-    #[tokio::test]
     async fn tcp_listen_v6_only_succeeds_on_localhost() {
         let ctx = ProtoContext::default_table(test_rib_client());
         let listener = ctx
@@ -477,12 +423,5 @@ mod tests {
         let observed = std::str::from_utf8(&buf[..len.saturating_sub(1) as usize])
             .expect("ifname is valid utf-8");
         assert_eq!(observed, "lo");
-    }
-
-    #[test]
-    fn for_vrf_no_rib_records_id_and_ifname() {
-        let ctx = ProtoContext::for_vrf_no_rib(17, "vrf-test".to_string());
-        assert_eq!(ctx.vrf_id(), 17);
-        assert_eq!(ctx.vrf_ifname.as_deref(), Some("vrf-test"));
     }
 }

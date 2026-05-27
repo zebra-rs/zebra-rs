@@ -63,7 +63,6 @@ pub struct FibAddr {
 }
 
 impl FibAddr {
-    #[allow(dead_code)]
     pub fn new() -> FibAddr {
         Self {
             ..Default::default()

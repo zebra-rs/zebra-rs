@@ -59,7 +59,6 @@ impl AffinityMap {
     /// Bit position currently committed for `name`, if any. Used at
     /// LSP-build time to assemble the per-link 256-bit Extended Admin
     /// Group bitmap from the names attached to each link.
-    #[allow(dead_code)]
     pub fn bit(&self, name: &str) -> Option<u16> {
         self.config.get(name).and_then(|e| e.bit_position)
     }

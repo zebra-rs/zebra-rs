@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -12,12 +11,7 @@ pub struct SpfOpt {
     pub _srv6: bool,
 }
 
-#[allow(dead_code)]
 impl SpfOpt {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn full_path() -> Self {
         Self {
             full_path: true,
@@ -47,7 +41,6 @@ pub struct Vertex {
     pub ilinks: Vec<Link>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum SpfDirect {
     Normal,
@@ -58,7 +51,8 @@ impl Vertex {
     /// Construct a Vertex representing a real routing system
     /// (IS-IS Node / OSPF router). `sys_id` defaults to `name` —
     /// callers with distinct hostname vs sys-id should use a
-    /// struct literal instead.
+    /// struct literal instead. Test-only today; production code
+    /// (isis/graph.rs) builds vertices via struct literals.
     #[allow(dead_code)]
     pub fn new_node(name: &str, id: usize) -> Self {
         Self {
@@ -72,6 +66,7 @@ impl Vertex {
     }
 
     /// Construct a Vertex representing an IS-IS LAN pseudonode.
+    /// Test-only today.
     #[allow(dead_code)]
     pub fn new_pseudo_node(name: &str, id: usize) -> Self {
         Self {
@@ -84,7 +79,6 @@ impl Vertex {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_pseudo_node(&self) -> bool {
         self.vtype == VertexType::PseudoNode
     }
@@ -95,11 +89,6 @@ impl Vertex {
         } else {
             &self.ilinks
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn is_disabled(&self) -> bool {
-        false
     }
 }
 
@@ -119,6 +108,9 @@ pub struct Link {
 }
 
 impl Link {
+    /// Test-only constructor with implicit `link_id = 0`. Production
+    /// graph builders call [`Self::with_id`] directly so the rib-builder
+    /// can resolve back to a specific ifindex.
     #[allow(dead_code)]
     pub fn new(from: usize, to: usize, cost: u32) -> Self {
         Self {
@@ -129,7 +121,6 @@ impl Link {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_id(from: usize, to: usize, cost: u32, link_id: u32) -> Self {
         Self {
             from,
@@ -158,13 +149,6 @@ impl PartialOrd for Path {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Eq, PartialEq, Clone)] // Added Clone for easier conversion
-pub enum Paths {
-    Full(Vec<Vec<usize>>),
-    Nexthop(HashSet<Vec<usize>>),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)] // Added Clone for easier conversion
@@ -350,6 +334,16 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> 
         .collect::<HashSet<_>>()
 }
 
+/// Compute the post-convergence paths from `s` to `d` while excluding
+/// every vertex in `x`. Test-only today; the TI-LFA repair-path
+/// builder consumes `spf_calc` directly.
+#[allow(dead_code)]
+pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize>> {
+    spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal)
+        .remove(&d)
+        .map_or_else(Vec::new, |data| data.paths)
+}
+
 pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> {
     let spf = spf_reverse(graph, d, &SpfOpt::full_path());
 
@@ -362,12 +356,6 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> 
             if has_valid_paths { Some(*vertex) } else { None }
         })
         .collect::<HashSet<_>>()
-}
-
-pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize>> {
-    spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal)
-        .remove(&d)
-        .map_or_else(Vec::new, |data| data.paths)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -522,23 +510,6 @@ pub fn make_repair_list(
     sr_segments
 }
 
-pub fn repair_list_print(graph: &Graph, repair_list: &Vec<SrSegment>) {
-    let name = |id: &usize| graph.get(id).map(|n| n.name.as_str()).unwrap_or("?");
-    for list in repair_list {
-        match list {
-            SrSegment::NodeSid(nid) => {
-                print!("NodeSid({}) ", name(nid));
-            }
-            SrSegment::AdjSid(from, to, None) => {
-                print!("AdjSid({}, {}) ", name(from), name(to));
-            }
-            SrSegment::AdjSid(from, to, Some(via)) => {
-                print!("AdjSid({}, {}, via {}) ", name(from), name(to), name(via));
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct RepairPath {
     /// Immediate nexthop node id on the post-convergence path —
@@ -628,24 +599,6 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
         repair_paths.push(repair_path);
     }
     repair_paths
-}
-
-pub fn disp(spf: &BTreeMap<usize, Path>, full_path: bool) {
-    if full_path {
-        for (vertex, path) in spf {
-            println!("vertex: {} nexthops: {}", vertex, path.paths.len());
-            for p in &path.paths {
-                println!("  metric {} path {:?}", path.cost, p);
-            }
-        }
-    } else {
-        for (vertex, nhops) in spf {
-            println!("vertex: {} nexthops: {}", vertex, nhops.nexthops.len());
-            for p in &nhops.nexthops {
-                println!("  metric {} path {:?}", nhops.cost, p);
-            }
-        }
-    }
 }
 
 use std::fmt::Write;
@@ -795,7 +748,7 @@ mod tests {
         }
 
         // SPF with nexthop tracking mode.
-        let mut opt = SpfOpt::new();
+        let mut opt = SpfOpt::default();
         let tree = spf(&graph, 0, &opt);
 
         // vertex:0 nexthops: 1

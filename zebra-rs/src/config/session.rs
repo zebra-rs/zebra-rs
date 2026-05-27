@@ -41,11 +41,9 @@ pub type SessionKey = (u32, u32);
 /// the operator via PAM and promotes them to `Admin` for a bounded window
 /// (see [`Session::enable_expires`] / [`Session::enable_hard_deadline`]).
 /// Service accounts (Phase 4-d) start at `Admin` permanently.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     View,
-    Operator,
     Admin,
 }
 
@@ -65,16 +63,13 @@ pub struct SessionContext {
 /// Phase 1 added the identity and timing fields. Phase 4-a added the RBAC
 /// (`role`) and enable-state fields. Phase 4-c adds `username` (resolved
 /// once at session creation) and wires the consumption logic.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub uid: u32,
     pub bash_pid: u32,
     /// Resolved via `getpwuid_r` at session creation. `None` only when the
     /// lookup failed (uid not in passwd db); in that case enable cannot
     /// run and admin operations fail closed.
     pub username: Option<String>,
-    pub created: Instant,
     pub last_active: Instant,
     /// Current authorization role. Defaults to `View`.
     pub role: Role,
@@ -100,13 +95,11 @@ pub const ENABLE_IDLE_TTL: Duration = Duration::from_secs(15 * 60);
 pub const ENABLE_HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
 
 impl Session {
-    fn new(uid: u32, bash_pid: u32, username: Option<String>) -> Self {
+    fn new(bash_pid: u32, username: Option<String>) -> Self {
         let now = Instant::now();
         Self {
-            uid,
             bash_pid,
             username,
-            created: now,
             last_active: now,
             role: Role::View,
             enabled: false,
@@ -260,7 +253,7 @@ impl SessionTable {
         }
 
         let username = reader.resolve_username(peer_uid);
-        let mut session = Session::new(peer_uid, ppid_u32, username);
+        let mut session = Session::new(ppid_u32, username);
         // Permanent-admin uids: root (D20) and any uid in the
         // service-account allow-list (D21/D25). Both bypass enable and
         // have no deadlines. The yang set is consulted via the same
@@ -408,10 +401,8 @@ impl SessionTable {
         self.sessions.insert(
             key,
             Session {
-                uid: key.0,
                 bash_pid: key.1,
                 username: None,
-                created: last_active,
                 last_active,
                 role: Role::View,
                 enabled: false,
@@ -758,7 +749,6 @@ mod tests {
         assert!(is_new);
         assert_eq!(table.len(), 1);
         let sess = table.get(&key).unwrap();
-        assert_eq!(sess.uid, 1000);
         assert_eq!(sess.bash_pid, 1000);
         // Non-root sessions start as View, not enabled.
         assert_eq!(sess.role, Role::View);

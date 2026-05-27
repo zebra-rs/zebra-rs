@@ -32,19 +32,3 @@ pub fn despawn_isis(config: &ConfigManager) {
         proto: "isis".to_string(),
     });
 }
-
-/// Graceful-restart variant of [`despawn_isis`] (RFC 5306).
-/// Drops the protocol task + registrations but sends
-/// `ProtoQuiesce` instead of `ProtoCleanup`, so the kernel
-/// routes the IS-IS instance owns stay installed across the
-/// restart. Peers in T2/T3 helper state preserve the adjacency
-/// until our re-flood and CSNP/PSNP convergence completes.
-#[allow(dead_code)]
-pub fn despawn_isis_graceful(config: &ConfigManager) {
-    config.cm_clients.borrow_mut().remove("isis");
-    config.show_clients.borrow_mut().remove("isis");
-    config.protocol_tasks.borrow_mut().remove("isis");
-    let _ = config.rib_tx.send(rib::Message::ProtoQuiesce {
-        proto: "isis".to_string(),
-    });
-}
