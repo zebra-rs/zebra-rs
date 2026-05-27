@@ -72,13 +72,13 @@ fn arm_t1_timer(tx: &UnboundedSender<Message>) -> crate::context::Timer {
 
 /// In-progress RFC 5306 restart state. `Some` between
 /// `clear isis graceful-restart begin` and either `abort`, the
-/// `restarter-enabled` knob flipping off, or (Phase 5d+) the
-/// successful exit-restart completion.
+/// `restarter-enabled` knob flipping off, or the successful
+/// exit-restart completion.
 #[derive(Debug)]
 pub struct RestartingState {
-    /// Wall-clock at restart start. Phase 5b checkpoint freshness
-    /// and Phase 5e's T3 use this to bound how long the restart
-    /// can take.
+    /// Wall-clock at restart start. Used by the checkpoint
+    /// freshness check and T3 to bound how long the restart can
+    /// take.
     pub started_at: std::time::SystemTime,
     /// Grace period requested at restart begin (seconds). Carried
     /// in the Restart TLV's `Remaining Time` field so helpers can
@@ -88,18 +88,19 @@ pub struct RestartingState {
     /// its Drop doesn't cancel the wakeup before it fires. Two
     /// concrete uses:
     ///
-    /// - **5d commit-exit**: `gr_restart_commit` arms a
+    /// - **commit-exit**: `gr_restart_commit` arms a
     ///   `Timer::once_ms(DRAIN_MS)` that fires `GrRestartExit` to
     ///   run `std::process::exit(0)` once the IIH+RR drain
     ///   completes.
-    /// - **5e-i auto-abort**: `gr_restart_load_checkpoint` arms a
+    /// - **load-checkpoint auto-abort**:
+    ///   `gr_restart_load_checkpoint` arms a
     ///   `Timer::once(remaining_secs)` that fires `GrRestartAbort`
-    ///   when the grace window expires without 5e-ii's exit-success
+    ///   when the grace window expires without the exit-success
     ///   path firing first.
     ///
     /// `None` outside both windows.
     pub abort_timer: Option<crate::context::Timer>,
-    /// Phase 5e-ii exit-success driver. At load time
+    /// Exit-success driver. At load time
     /// (`gr_restart_load_checkpoint`) this is populated with the
     /// sys-ids of every adjacency the checkpoint recorded. Each
     /// post-restart NFSM Up transition (`Message::GrNeighborUp`)
@@ -178,20 +179,20 @@ pub struct Isis {
 
     /// MT 2 (IPv6 unicast) IPv6 reach indexed per peer. Populated from
     /// TLV 237 entries with mt=2. Kept separate from reach_map_v6 so
-    /// strict per-topology RIB build (PR 4b) can pull MT 2's view
+    /// the strict per-topology RIB build can pull MT 2's view
     /// without mixing it with legacy TLV 236 from non-MT peers.
     pub mt2_reach_map_v6: Levels<ReachMapV6>,
 
     /// Per-peer set of MT IDs the peer advertised in TLV 229. Empty
     /// (or absent key) means the peer is single-topology / legacy.
-    /// Used by the per-MT graph builder (PR 4b) to filter peers and
-    /// by show callbacks to render the MT-aware view.
+    /// Used by the per-MT graph builder to filter peers and by
+    /// show callbacks to render the MT-aware view.
     pub mt_membership: Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: Levels<IsisLabelMap>,
 
     /// Peer SRv6 End SID per system id. Populated from the IsisTlvSrv6
     /// sub-TLV `IsisSubSrv6EndSid` carried inside each peer's LSP
-    /// (parallel to label_map for SR-MPLS). Used by TI-LFA Step 4d to
+    /// (parallel to label_map for SR-MPLS). Used by TI-LFA to
     /// assemble the SRH segment list for a 1-segment repair.
     pub srv6_end_map: Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
 
@@ -372,7 +373,7 @@ pub struct Isis {
     /// advertising the same prefix stay distinct (each row carries
     /// its own policy / metric override at LSP-emit time).
     /// Populated by `process_rib_msg`; consumed by the LSP emitter
-    /// in a follow-up (step 5).
+    /// in a follow-up.
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
 
@@ -398,8 +399,8 @@ pub struct Isis {
     /// handed to BFD as the `notifier` on every `Subscribe`.
     pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
     /// Receive half drained by the IS-IS event loop in
-    /// [`Self::event_loop`]. PR 7b logs the events; PR 7c replaces
-    /// the log with adjacency teardown on `BfdEvent::Down`.
+    /// [`Self::event_loop`]. Events are logged and drive adjacency
+    /// teardown on `BfdEvent::Down`.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
     /// Snapshot of `/key-chains/key-chain <name>` entries the policy
     /// actor has pushed to this IS-IS instance via
@@ -557,8 +558,7 @@ impl Isis {
         // SR config subscription channel. One-time registration with the
         // RIB; subsequent SrBlockWatch / SrLocatorWatch messages drive
         // which named entries we receive updates for. Goes through the
-        // typed handle just like every other protocol-to-RIB send post-
-        // step-2.
+        // typed handle just like every other protocol-to-RIB send.
         let (sr_tx, sr_rx) = mpsc::unbounded_channel::<RibSrRx>();
         let _ = ctx.rib.send(rib::Message::SrSubscribe {
             proto: "isis".into(),
@@ -656,10 +656,10 @@ impl Isis {
             };
         isis.callback_build();
         isis.show_build();
-        // Phase 5e-i: restart-aware boot. No-op when no checkpoint
-        // on disk (cold-start). When present + fresh, restores
-        // self-LSPs + sets restarting state so the first IIH on
-        // every link goes out with RR=1.
+        // Restart-aware boot. No-op when no checkpoint on disk
+        // (cold-start). When present + fresh, restores self-LSPs +
+        // sets restarting state so the first IIH on every link
+        // goes out with RR=1.
         isis.gr_restart_load_checkpoint();
         isis
     }
@@ -741,11 +741,9 @@ impl Isis {
     }
 
     /// Debug entry — capture the current IS-IS state and atomically
-    /// write a checkpoint to disk. Used to exercise the Phase 5b
-    /// storage layer (`docs/design/isis-graceful-restart-restarter.
-    /// md`) before the real GR-commit path lands in Phase 5d. The
-    /// grace period (60s) is a placeholder; the actual commit path
-    /// derives it from the locked YANG knob.
+    /// write a checkpoint to disk. The grace period (60s) is a
+    /// placeholder; the actual commit path derives it from the
+    /// YANG knob.
     fn checkpoint_write_debug(&mut self) {
         use super::checkpoint::{IsisCheckpoint, default_path};
 
@@ -775,9 +773,9 @@ impl Isis {
         }
     }
 
-    /// Phase 5e-i: restart-aware boot. Called from `Isis::new()`
-    /// after the default-constructed instance. If a recent
-    /// checkpoint is on disk:
+    /// Restart-aware boot. Called from `Isis::new()` after the
+    /// default-constructed instance. If a recent checkpoint is on
+    /// disk:
     ///   - per-level self-LSPs are restored into the LSDB verbatim
     ///     (so re-flood on first link-up post-restart is
     ///     byte-identical to what helpers snapshotted),
@@ -787,8 +785,8 @@ impl Isis {
     ///     on a second boot would propagate the wrong LSDB),
     ///   - an auto-abort `Timer::once` fires `GrRestartAbort` when
     ///     the remaining grace window expires, so the restart
-    ///     state doesn't pin indefinitely until 5e-ii's
-    ///     exit-success drive lands.
+    ///     state doesn't pin indefinitely until the exit-success
+    ///     drive fires.
     ///
     /// Cold-starts (returns silently) when:
     ///   - the file is absent,
@@ -838,9 +836,9 @@ impl Isis {
         }
 
         // Replay self-LSPs verbatim. Hold/refresh timers stay None
-        // until 5e-ii completes — `process_lsdb` gates both expiry
-        // arms on `restarting.is_some()` so the entries don't age
-        // out during the restart window.
+        // until exit-success completes — `process_lsdb` gates both
+        // expiry arms on `restarting.is_some()` so the entries don't
+        // age out during the restart window.
         let mut total = 0usize;
         for lvl_cp in &cp.levels {
             let level = match lvl_cp.level {
@@ -870,8 +868,8 @@ impl Isis {
         }
 
         // Arm the auto-abort timer for whatever's left of the grace
-        // window. Phase 5e-ii will replace this with the
-        // exit-success drive.
+        // window. The exit-success path takes over once adjacencies
+        // recover.
         let remaining = max_age.saturating_sub(age);
         let remaining_secs = remaining.as_secs().max(1);
         let tx = self.tx.clone();
@@ -882,10 +880,9 @@ impl Isis {
             }
         });
 
-        // Pending-set: drives the 5e-ii exit-success path. Each
-        // NFSM Up transition that matches a sys-id here removes it
-        // from the set; the last removal fires
-        // `gr_restart_exit_success`.
+        // Pending-set: drives the exit-success path. Each NFSM Up
+        // transition that matches a sys-id here removes it from the
+        // set; the last removal fires `gr_restart_exit_success`.
         let pending_neighbors: std::collections::BTreeSet<isis_packet::IsisSysId> = cp
             .adjacencies
             .iter()
@@ -918,11 +915,11 @@ impl Isis {
     /// RFC 5306 §3.1. Arms `self.restarting`, freezes self-LSP
     /// refresh, and kicks an IIH on every link so the next
     /// outbound Hello carries RR=1. Helpers around us see this and
-    /// enter helper mode (their Phase 3a path), replying with RA.
+    /// enter helper mode, replying with RA.
     ///
-    /// Phase 5c only — no actual exit happens. `commit` (Phase 5d)
-    /// will extend this with checkpoint write + drain + despawn.
-    /// `abort` walks the staging back without exiting.
+    /// No actual exit happens here — `commit` extends the staging
+    /// with checkpoint write + drain + despawn; `abort` walks the
+    /// staging back without exiting.
     fn gr_restart_begin(&mut self, grace_period_secs: u32) {
         if !self.config.gr_restarter_enabled {
             tracing::warn!(
@@ -954,8 +951,8 @@ impl Isis {
 
     /// `clear isis graceful-restart commit` — stage (if not
     /// already staged) and execute the planned restart:
-    ///   1. Originate IIH+RR on every link (Phase 5c flood).
-    ///   2. Build a Phase 6 checkpoint and atomically write it to
+    ///   1. Originate IIH+RR on every link.
+    ///   2. Build a checkpoint and atomically write it to
     ///      `default_path()`.
     ///   3. Arm a `Timer::once_ms(DRAIN_MS)` parked on
     ///      `RestartingState.abort_timer` so the IIH+RR packets
@@ -1047,7 +1044,7 @@ impl Isis {
         }
     }
 
-    /// Phase 5e-ii: NFSM Up transition observed for `sys_id`.
+    /// NFSM Up transition observed for `sys_id`.
     /// Trim `pending_neighbors`; the last removal that empties the
     /// set fires `gr_restart_exit_success`. Returns early when no
     /// restart is in progress or when the sys_id wasn't part of
@@ -1066,7 +1063,7 @@ impl Isis {
         }
     }
 
-    /// Phase 5e-ii: every checkpointed neighbor is back to Up.
+    /// Every checkpointed neighbor is back to Up.
     /// Clear the restart state (drops `abort_timer` via Drop so
     /// the auto-abort safety net is cancelled), re-originate self
     /// LSPs at `seq+1` so helpers see fresh content with the new
@@ -1086,9 +1083,9 @@ impl Isis {
         );
         // `LspOriginate` with floor=None bumps `existing+1` per
         // `lsp.rs:447-451`. Existing comes from the LSDB which
-        // 5e-i restored at the original seq, so the bump is +1
-        // relative to what helpers snapshotted — no MaxSeqAdvance
-        // trip, fresh content takes effect.
+        // the load-checkpoint path restored at the original seq,
+        // so the bump is +1 relative to what helpers snapshotted —
+        // no MaxSeqAdvance trip, fresh content takes effect.
         let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
         let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
@@ -1187,10 +1184,10 @@ impl Isis {
         }
     }
 
-    /// Debug entry — delete the on-disk checkpoint. Phase 5e-i's
-    /// post-restart success path will call this from production;
-    /// today it's behind a `clear` so the storage layer can be
-    /// exercised independently.
+    /// Debug entry — delete the on-disk checkpoint. The post-restart
+    /// success path will call this from production; today it's
+    /// behind a `clear` so the storage layer can be exercised
+    /// independently.
     fn checkpoint_clear_debug(&mut self) {
         use super::checkpoint::{IsisCheckpoint, default_path};
 
@@ -1351,12 +1348,12 @@ impl Isis {
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
             Message::SpfCalc(level) => {
-                // Phase 5e-ii FIB hold-back: while restarting, skip
-                // SPF entirely. Kernel routes from before the
-                // restart are still installed (despawn_isis_graceful
-                // sent ProtoQuiesce, not ProtoCleanup); recomputing
-                // and installing new routes mid-restart would
-                // partially overwrite that set with output from a
+                // FIB hold-back: while restarting, skip SPF
+                // entirely. Kernel routes from before the restart
+                // are still installed (despawn_isis_graceful sent
+                // ProtoQuiesce, not ProtoCleanup); recomputing and
+                // installing new routes mid-restart would partially
+                // overwrite that set with output from a
                 // possibly-stale LSDB. The exit-success path
                 // (re-originate at seq+1 + next LSDB event) drives
                 // an authoritative SPF after restart clears.
@@ -1462,10 +1459,10 @@ impl Isis {
                 self.process_bfd_unsubscribe(key);
             }
             Message::GrRestartExit => {
-                // Drain window elapsed. Per the Phase 5 design doc,
-                // we trust the supervisor (systemd / operator) to
-                // restart us. Kernel routes tagged RibType::Isis
-                // survive because no ProtoCleanup is dispatched.
+                // Drain window elapsed. The supervisor (systemd /
+                // operator) is trusted to restart us. Kernel routes
+                // tagged RibType::Isis survive because no
+                // ProtoCleanup is dispatched.
                 tracing::info!("[GR Restart] drain complete; exiting process");
                 std::process::exit(0);
             }
@@ -1504,11 +1501,10 @@ impl Isis {
         let _ = tx.send(crate::bfd::inst::ClientReq::Subscribe {
             client: "isis".to_string(),
             key,
-            // PR 7b uses default params for every IS-IS adjacency.
+            // Uses default params for every IS-IS adjacency.
             // Profile resolution against `/bfd/profile/<name>` (the
-            // per-interface `bfd { profile NAME }` reference stored
-            // in PR 6) is a follow-up that needs cross-task config
-            // access.
+            // per-interface `bfd { profile NAME }` reference) is a
+            // follow-up that needs cross-task config access.
             params: crate::bfd::session::SessionParams::default(),
             notifier: self.bfd_event_tx.clone(),
         });
@@ -2304,9 +2300,9 @@ pub enum Message {
     /// `gr_restart_load_checkpoint` armed an auto-abort timer for
     /// the remaining grace window. When it fires, we run the
     /// `gr_restart_abort` path: clear `restarting`, kick Hellos
-    /// with RR=0, resume normal operation. Phase 5e-ii's success
-    /// path lands first when neighbors reconverge before the
-    /// window expires; this auto-abort is the safety net.
+    /// with RR=0, resume normal operation. The exit-success path
+    /// lands first when neighbors reconverge before the window
+    /// expires; this auto-abort is the safety net.
     GrRestartAbort,
     /// Sent by the IIH receive path on every NFSM Down/Init→Up
     /// transition. The handler trims `pending_neighbors`; the
@@ -2525,7 +2521,7 @@ mod bfd_wiring_tests {
     }
 
     // ----------------------------------------------------------------
-    // PR 7c: process_bfd_event teardown behaviour
+    // process_bfd_event teardown behaviour
     // ----------------------------------------------------------------
 
     use crate::bfd::inst::BfdEvent;

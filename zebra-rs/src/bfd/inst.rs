@@ -18,7 +18,7 @@ use super::timer::{InitialParams, TimerCmd, session_timer};
 /// Identifier for a BFD subscriber. Conventionally the proto name
 /// ("bgp", "ospf", "isis", "static"), plus an optional disambiguator
 /// when one process registers more than one logical client per
-/// session (rare in Phase 1).
+/// session (rare).
 pub type ClientId = String;
 
 /// Top-level BFD instance. Owns the IPv4 single-hop UDP socket, the
@@ -406,7 +406,7 @@ impl Bfd {
             return;
         };
         let IpAddr::V4(remote) = session.key.remote else {
-            // PR 7 adds IPv6.
+            // IPv6 not yet supported.
             return;
         };
         let dst = SocketAddrV4::new(remote, session.dst_port);

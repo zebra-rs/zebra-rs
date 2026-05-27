@@ -83,8 +83,8 @@ pub struct SpfRoute {
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
     /// SPF vertex id this route was built from. Set by
-    /// `build_rib_from_spf`; used by TI-LFA Step 4c to join routes
-    /// with per-destination repair candidates from Step 4b.
+    /// `build_rib_from_spf`; used by TI-LFA to join routes with
+    /// per-destination repair candidates.
     pub dest_vertex: Option<usize>,
 }
 
@@ -110,7 +110,7 @@ pub struct SpfRouteV6 {
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
     /// Same role as `SpfRoute.dest_vertex` — populated by
-    /// `build_rib_from_spf_v6` for Step 4d's repair-path join.
+    /// `build_rib_from_spf_v6` for the IPv6 repair-path join.
     pub dest_vertex: Option<usize>,
 }
 
@@ -1362,7 +1362,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         new_flex_algo_spfs.insert(algo, algo_spf);
         new_flex_algo_rib.insert(algo, algo_rib);
     }
-    // Per-algo route diff → RIB publish (Phase 3). The shadow on
+    // Per-algo route diff → RIB publish. The shadow on
     // `Rib::flex_algo_routes` is the colour-aware nexthop resolver's
     // source of truth for the outer MPLS label per (algo, prefix).
     if top.config.distribute.rib {

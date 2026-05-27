@@ -346,9 +346,10 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // helper_active neighbor, so a missed wakeup here just delays
     // delivery by one interval rather than breaking GR.
     //
-    // The CSNP+SRM kick (Phase 3b) is dispatched at the bottom of the
-    // function instead of here, because it needs `&mut link` and `nbr`
-    // is still borrowing from `link.state.nbrs` at this point.
+    // The CSNP+SRM kick is dispatched at the bottom of the
+    // function instead of here, because it needs `&mut link` and
+    // `nbr` is still borrowing from `link.state.nbrs` at this
+    // point.
     if helper_entered {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
@@ -397,9 +398,9 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
             // XXX Adjacency(Up)
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             nbr.event(Message::Ifsm(DisSelection, nbr.ifindex, Some(level)));
-            // Phase 5e-ii: drive exit-success when every
-            // checkpointed peer has come back to Up. No-op outside
-            // a loaded-checkpoint restart.
+            // Drive exit-success when every checkpointed peer has
+            // come back to Up. No-op outside a loaded-checkpoint
+            // restart.
             let _ = link.tx.send(Message::GrNeighborUp(nbr.sys_id));
         }
     } else {
@@ -462,8 +463,8 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // we can read link.state.v4addr / link.config.bfd freely.
     bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
 
-    // Phase 3b — CSNP + SRM kick on first RR. Deferred to here so we
-    // can take `&mut link` after the `nbr` borrow has expired.
+    // CSNP + SRM kick on first RR. Deferred to here so we can take
+    // `&mut link` after the `nbr` borrow has expired.
     if helper_entered {
         helper_kick_csnp(link, level);
     }
@@ -543,9 +544,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
         // First RR=1 — fire an immediate IIH so the RA reaches the
         // restarter inside RFC 5306 §3.2(b)'s "immediately" window
-        // rather than waiting up to one hello_interval. CSNP+SRM kick
-        // (Phase 3b) deferred to the bottom of the loop because we
-        // need `&mut link` after the nbr borrow ends.
+        // rather than waiting up to one hello_interval. The
+        // CSNP+SRM kick is deferred to the bottom of the loop
+        // because we need `&mut link` after the nbr borrow ends.
         if helper_entered {
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         }
@@ -583,8 +584,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
             let _ = link.tx.send(Message::AdjacencyUp(level, nbr.ifindex));
-            // Phase 5e-ii: same exit-success trigger as the LAN
-            // path. No-op outside a loaded-checkpoint restart.
+            // Same exit-success trigger as the LAN path. No-op
+            // outside a loaded-checkpoint restart.
             let _ = link.tx.send(Message::GrNeighborUp(nbr.sys_id));
         }
 
@@ -629,7 +630,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // freely.
         bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
 
-        // Phase 3b — CSNP+SRM kick on first RR. P2P always wins the
+        // CSNP+SRM kick on first RR. P2P always wins the
         // helper_elected_for_csnp predicate, so this fires every
         // time the peer enters Restart mode.
         if helper_entered {
@@ -1264,10 +1265,9 @@ pub fn process_packet(
         return Ok(());
     }
 
-    // Hello (Phase 3a) and CSNP/PSNP (Phase 3b) authentication.
-    // Validated before the parsed PDU reaches the adjacency FSM /
-    // LSDB update path so a mismatching peer never mutates state.
-    // LSPs land in Phase 4.
+    // Hello and CSNP/PSNP authentication. Validated before the
+    // parsed PDU reaches the adjacency FSM / LSDB update path so a
+    // mismatching peer never mutates state.
     if let Some(scope) = auth_scope_for(packet.pdu_type)
         && !verify_pdu_auth(
             link,

@@ -19,8 +19,8 @@ pub const BFD_SINGLE_HOP_PORT: u16 = 3784;
 ///   * report the destination address and ingress ifindex via
 ///     `IP_PKTINFO` so multi-address hosts can demultiplex sessions.
 ///
-/// The initial socket comes from the `ProtoContext` factory — that's
-/// where `SO_BINDTODEVICE` lands once step 8 wires the VRF-aware
+/// The initial socket comes from the `ProtoContext` factory —
+/// that's where `SO_BINDTODEVICE` is applied via the VRF-aware
 /// branch in `maybe_bind_device`. `bind` controls the local socket
 /// address. Production callers pass `(0.0.0.0, BFD_SINGLE_HOP_PORT)`;
 /// tests can pass an ephemeral port.

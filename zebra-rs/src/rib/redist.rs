@@ -271,7 +271,7 @@ fn flush_v6(
 // flow through `ipv{4,6}_route_{add,del}` (e.g. the debounced
 // `ipv4_route_resolve` path) are not yet hooked. The initial walk
 // at subscription time still covers those, but they won't update
-// in steady state until step 4 generalizes the hook.
+// in steady state until the hook is generalized.
 
 fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
     let nh = first_v4_nexthop(&e.nexthop)?;
@@ -305,9 +305,9 @@ fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
 /// VRF-attached subscribers (`vrf_id != 0`) are skipped here because
 /// `notify_v*_delta` is called from the default-VRF route paths
 /// (`Rib::ipv*_route_{add,del}` on `self.table` / `self.table_v6`).
-/// The per-VRF resolve + select pipeline that lands in step 18 will
-/// install a sibling hook that walks `vrf_tables[vrf_id]` and pushes
-/// to subscribers bound to that VRF.
+/// A per-VRF resolve + select pipeline can install a sibling hook
+/// that walks `vrf_tables[vrf_id]` and pushes to subscribers bound
+/// to that VRF.
 pub fn notify_v4_delta(
     filters: &HashMap<String, FilterMap>,
     registry: &ClientRegistry,

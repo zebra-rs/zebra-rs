@@ -253,9 +253,7 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
 // Version-agnostic helpers. These methods touch only generic-safe
 // fields on `Ospf<V>` (links, areas, lsdb_as, router_id, tracing,
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
-// `&Neighbor<V>` values typed by `V`. They moved here from
-// `impl Ospf<Ospfv2>` as part of the Phase 6 behavioral migration
-// — same code, just no longer pinned to `Ospfv2`.
+// `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
     pub fn ospf_interface<'a>(
         &'a mut self,
@@ -495,10 +493,9 @@ impl Ospf<Ospfv2> {
         ospf.callback_build();
         ospf.show_build();
 
-        // Phase 5e-i: if a fresh graceful-restart checkpoint is on
-        // disk, replay the saved state into this instance + enter
-        // restarting mode so we don't cold-start over a planned
-        // restart.
+        // If a fresh graceful-restart checkpoint is on disk, replay
+        // the saved state into this instance + enter restarting mode
+        // so we don't cold-start over a planned restart.
         ospf.gr_restart_load_checkpoint();
 
         let tx = ospf.tx.clone();
@@ -530,7 +527,7 @@ impl Ospf<Ospfv2> {
             } else if path == "/clear/ospf/graceful-restart/begin" {
                 // Default to 120s / SoftwareRestart; YANG-side
                 // optional args (period, reason) land alongside
-                // restart-aware boot in Phase 5e.
+                // the restart-aware boot path.
                 let _ = self.gr_restart_begin(120, GraceRestartReason::SoftwareRestart);
             } else if path == "/clear/ospf/graceful-restart/abort" {
                 self.gr_restart_abort();
@@ -558,11 +555,9 @@ impl Ospf<Ospfv2> {
     }
 
     /// Debug entry — capture the current instance state and
-    /// atomically write a checkpoint to disk. Used to exercise
-    /// the storage layer (Phase 5b) before the real GR-commit
-    /// path lands in Phase 5d. Grace period + reason are
-    /// placeholders (60s / SoftwareRestart) since this path
-    /// isn't an actual restart.
+    /// atomically write a checkpoint to disk. Grace period +
+    /// reason are placeholders (60s / SoftwareRestart) since this
+    /// path isn't an actual restart.
     fn checkpoint_write_debug(&mut self) {
         use super::checkpoint::{OspfCheckpoint, default_path};
 
@@ -629,8 +624,8 @@ impl Ospf<Ospfv2> {
     ///
     /// GR-helper invariant (RFC 3623 §3.1): adjacencies to neighbors
     /// in helper mode must keep appearing in this LSA exactly as
-    /// they did when the link was Full. Phase 2a's
-    /// `ospf_nfsm_inactivity_timer` suppression keeps `nbr.state`
+    /// they did when the link was Full. The inactivity-timer
+    /// suppression in `ospf_nfsm_inactivity_timer` keeps `nbr.state`
     /// stuck at `Full` while we're helping, so the `state ==
     /// NfsmState::Full` filters below honour the invariant
     /// implicitly — do not switch them to a tighter "still receiving
@@ -643,7 +638,7 @@ impl Ospf<Ospfv2> {
         //   bit 1 (0x02) — E: this router is an ASBR
         //   bit 4 (0x10) — Nt: this router is an NSSA translator
         // B-bit goes in the LSA we originate into every area we're
-        // attached to; phase-4b Candidate election (in
+        // attached to; Candidate election (in
         // `is_nssa_translator_for`) reads other routers' B-bits out
         // of NSSA Router-LSAs to pick the elected translator.
         //
@@ -738,12 +733,12 @@ impl Ospf<Ospfv2> {
     }
 
     fn router_lsa_originate_with_min_seq(&mut self, min_seq: Option<u32>) {
-        // Phase 5e — while restarting, the checkpoint-loaded
-        // Router-LSA must stay verbatim (helpers snapshotted its
-        // seq+checksum). Fresh re-origination here would clobber
-        // it and trip `gr_helper_check_exit`. Skip; the
-        // exit-restart path (5e-ii) re-originates at seq+1 once
-        // we declare the restart complete.
+        // While restarting, the checkpoint-loaded Router-LSA must
+        // stay verbatim (helpers snapshotted its seq+checksum).
+        // Fresh re-origination here would clobber it and trip
+        // `gr_helper_check_exit`. Skip; the exit-restart path
+        // re-originates at seq+1 once we declare the restart
+        // complete.
         if self.in_restart() {
             return;
         }
@@ -1042,8 +1037,7 @@ impl Ospf<Ospfv2> {
         let mut lsa_header = OspfLsaHeader::new(OspfLsType::NssaAsExternal, ls_id, self.router_id);
         // RFC 3101 §2.4 LSA header Options on Type-7: E bit MUST be
         // clear (NSSA areas can't accept Type-5); N bit set; P bit
-        // clear for ABR-originated LSAs (translation knob lands in
-        // phase 4).
+        // clear for ABR-originated LSAs.
         let mut options = OspfOptions::default();
         options.set_nssa(true);
         options.set_o(true);
@@ -1297,7 +1291,7 @@ impl Ospf<Ospfv2> {
     ///   double state for no gain
     /// - P-bit set in the source — RFC 3101 §3.2.1
     /// - forwarding-address non-zero — FA=0 receive semantics
-    ///   aren't wired yet (phase 3 also skips FA!=0 on receive);
+    ///   aren't wired yet (the SPF receive path also skips FA!=0);
     ///   defer FA resolution to a later cleanup that covers both
     ///   paths together
     fn nssa_translate_one(&mut self, type7: &OspfLsa) -> bool {
@@ -1714,9 +1708,9 @@ impl Ospf<Ospfv2> {
             }
             OspfLsType::NssaAsExternal => {
                 // Three self-origination paths today:
-                //   1. NSSA default-LSA (ls_id 0.0.0.0) — phase 2.
+                //   1. NSSA default-LSA (ls_id 0.0.0.0).
                 //   2. Redistributed connected (ls_id ∈ area's
-                //      `redist_connected_originated`) — phase 2c.
+                //      `redist_connected_originated`).
                 //   3. Other — no owner; flush.
                 let Some(area_id) = area_id else {
                     return;
@@ -1762,10 +1756,10 @@ impl Ospf<Ospfv2> {
             }
             OspfLsType::AsExternal => {
                 // The only Type-5s we self-originate today are NSSA
-                // Type-7→Type-5 translations (phase 4). If `ls_id`
-                // matches an entry in any NSSA area's
-                // `nssa_translated`, that area's resync re-translates
-                // (bumps seq# in the process). Otherwise flush.
+                // Type-7→Type-5 translations. If `ls_id` matches an
+                // entry in any NSSA area's `nssa_translated`, that
+                // area's resync re-translates (bumps seq# in the
+                // process). Otherwise flush.
                 let owning_area = self
                     .areas
                     .iter()
@@ -1832,17 +1826,16 @@ impl Ospf<Ospfv2> {
     /// neighbor on this segment is in helper mode, that neighbor
     /// must continue appearing in the `attached_routers` list, and
     /// the segment's `full_nbr_count` must continue counting it.
-    /// Phase 2a's inactivity-timer suppression keeps `nbr.state` at
-    /// `Full` throughout helper, so the `state == Full` filter
-    /// below honours both invariants implicitly; in particular the
+    /// The inactivity-timer suppression keeps `nbr.state` at `Full`
+    /// throughout helper, so the `state == Full` filter below
+    /// honours both invariants implicitly; in particular the
     /// `full_nbr_count == 0` branch (which would flush the
     /// Network-LSA per RFC 2328 §14.1) does not fire while a
     /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
-        // Phase 5e — Network-LSA is topology-affecting, so the
-        // checkpoint-loaded copy stays verbatim during restart.
-        // 5e-ii's exit path re-emits at seq+1 once adjacencies
-        // re-converge.
+        // Network-LSA is topology-affecting, so the checkpoint-loaded
+        // copy stays verbatim during restart. The exit-restart path
+        // re-emits at seq+1 once adjacencies re-converge.
         if self.in_restart() {
             return;
         }
@@ -1940,9 +1933,9 @@ impl Ospf<Ospfv2> {
     /// `ls_id` is the primary interface address — same value used
     /// at origination in `update_network_lsa_by_interface`.
     pub fn network_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
-        // Phase 5e — premature-aging our Network-LSA mid-restart
-        // would tear down helpers' view of this segment. Skip
-        // until exit-restart (5e-ii).
+        // Premature-aging our Network-LSA mid-restart would tear
+        // down helpers' view of this segment. Skip until
+        // exit-restart.
         if self.in_restart() {
             return;
         }
@@ -2040,9 +2033,9 @@ impl Ospf<Ospfv2> {
         // `ext_link_lsa_originate` flushes when no Full neighbor remains.
         self.ext_link_lsa_originate(ifindex);
 
-        // Phase 5e-ii — count Full transitions during restart.
-        // When we've recovered as many adjacencies as the
-        // checkpoint expected, exit-restart fires.
+        // Count Full transitions during restart. When we've
+        // recovered as many adjacencies as the checkpoint expected,
+        // exit-restart fires.
         if new_state == NfsmState::Full
             && old_state != NfsmState::Full
             && let Some(state) = self.restarting.as_mut()
@@ -2183,7 +2176,7 @@ impl Ospf<Ospfv2> {
     /// helper mode for us, marks the instance as restarting (so
     /// the next Router-Info LSA carries `gr_capable=true`), and
     /// arms an auto-abort timer that walks the staging back if
-    /// the commit side (Phase 5d) doesn't fire in time.
+    /// the commit side doesn't fire in time.
     ///
     /// Returns `false` if a restart was already staged (idempotent
     /// re-entry would lose the original `entered_at`). The caller
@@ -2232,8 +2225,8 @@ impl Ospf<Ospfv2> {
         );
 
         // Snapshot Full-neighbor count at staging time. The
-        // commit handler (Phase 5d) will store the same number
-        // into the checkpoint so post-reboot 5e-ii knows when to
+        // commit handler will store the same number into the
+        // checkpoint so the post-reboot exit path knows when to
         // declare success.
         let expected_full_count = self
             .links
@@ -2272,17 +2265,17 @@ impl Ospf<Ospfv2> {
     /// without `gr_capable`. Idempotent — no-op when no restart
     /// is staged.
     /// `true` while we're in the middle of a graceful restart —
-    /// either because the operator just typed `… begin` (Phase 5c)
-    /// or because we booted with a fresh checkpoint on disk
-    /// (Phase 5e). Self-LSA origination paths check this and
-    /// skip seq-number bumps so the helpers' snapshot
-    /// (PR #869) keeps matching across the restart window.
+    /// either because the operator just typed `… begin` or because
+    /// we booted with a fresh checkpoint on disk. Self-LSA
+    /// origination paths check this and skip seq-number bumps so
+    /// the helpers' snapshot keeps matching across the restart
+    /// window.
     pub fn in_restart(&self) -> bool {
         self.restarting.is_some()
     }
 
-    /// Phase 5e-i — replay an on-disk checkpoint into a freshly
-    /// constructed `Ospf<Ospfv2>` instance.
+    /// Replay an on-disk checkpoint into a freshly constructed
+    /// `Ospf<Ospfv2>` instance.
     ///
     /// Called from `Ospf::new()` after the default-construction.
     /// If `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
@@ -2299,8 +2292,8 @@ impl Ospf<Ospfv2> {
     ///   - `self.restarting = Some(...)` so origination methods
     ///     short-circuit and the show output reflects the mode.
     ///   - Auto-abort timer armed for the remaining grace
-    ///     window; 5e-ii will replace it with the exit-restart
-    ///     drive.
+    ///     window; the exit-restart path will replace it once
+    ///     adjacencies recover.
     ///
     /// The checkpoint file is deleted immediately after a
     /// successful load — a second restart MUST NOT replay the
@@ -2388,10 +2381,10 @@ impl Ospf<Ospfv2> {
             },
         );
         let entered_at = tokio::time::Instant::now() - age;
-        // Phase 5e-ii: count was_full neighbors across every
-        // checkpointed link. Exit-restart success fires when
-        // `current_full_count` matches this — the post-reboot
-        // count of neighbors we've driven back to Full.
+        // Count was_full neighbors across every checkpointed link.
+        // Exit-restart success fires when `current_full_count`
+        // matches this — the post-reboot count of neighbors we've
+        // driven back to Full.
         let expected_full_count = cp
             .links
             .iter()
@@ -2441,7 +2434,7 @@ impl Ospf<Ospfv2> {
         tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
     }
 
-    /// Phase 5e-ii — exit-restart success. Fired by
+    /// Exit-restart success. Fired by
     /// `process_neighbor_state_change` once
     /// `current_full_count >= expected_full_count`.
     ///
@@ -2493,12 +2486,11 @@ impl Ospf<Ospfv2> {
 
     /// Commit a staged graceful restart (RFC 3623 §2):
     ///
-    ///   1. Build a Phase 5b checkpoint and atomically write it
-    ///      to `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
+    ///   1. Build a checkpoint and atomically write it to
+    ///      `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
     ///      `ZEBRA_OSPF_CHECKPOINT_DIR` override).
     ///   2. Arm a drain timer for `gr_config.drain_time_ms` so
-    ///      the Grace LSAs already flooded by Phase 5c reach the
-    ///      wire.
+    ///      the previously-flooded Grace LSAs reach the wire.
     ///   3. When the timer fires, `Message::GrRestartExit` runs
     ///      `std::process::exit(0)` — the supervisor (systemd /
     ///      operator script) is responsible for restarting us.
@@ -2506,7 +2498,7 @@ impl Ospf<Ospfv2> {
     /// Kernel routes installed by the OSPFv2 instance survive the
     /// exit because the protocol task dies without calling
     /// `despawn_ospf` (which fires `ProtoCleanup` / withdraws
-    /// every route). Phase 5e's restart-aware boot path reclaims
+    /// every route). The restart-aware boot path reclaims
     /// ownership of those routes via checkpoint replay.
     ///
     /// Returns `false` if no restart is staged or the checkpoint
@@ -3022,7 +3014,8 @@ impl Ospf<Ospfv2> {
                 .unwrap_or(0);
             // Build the key source: chain takes precedence when the
             // interface names one; otherwise the per-interface
-            // `crypto_keys` map serves Phase 2/3 configurations.
+            // `crypto_keys` map serves the cryptographic-auth
+            // configuration.
             let key_source = match link.config.key_chain.as_deref() {
                 Some(name) => match chains.get(name) {
                     Some(c) => crate::ospf::packet::KeySource::Chain { chain: c, now },
@@ -3931,8 +3924,8 @@ impl Ospf<Ospfv3> {
     /// to be emittable).
     ///
     /// Returns an `Ospfv3Lsa` with checksum + length stamped via
-    /// `Ospfv3Lsa::update` (PR 7i). Ready to install through
-    /// `Lsdb::install_originated` (PR 7j).
+    /// `Ospfv3Lsa::update`. Ready to install through
+    /// `Lsdb::install_originated`.
     pub fn build_router_lsa(&self) -> ospf_packet::Ospfv3Lsa {
         use ospf_packet::{
             OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE,
@@ -4981,9 +4974,9 @@ impl Ospf<Ospfv3> {
                         // Only the default NSSA-LSA (link_state_id
                         // == 0) is self-originated today. Other
                         // ls-ids will land here once redistribute
-                        // is wired on v3 (phase 6 follow-on); for
-                        // now they're treated as no-owner and the
-                        // generic flush path handles them.
+                        // is wired on v3; for now they're treated
+                        // as no-owner and the generic flush path
+                        // handles them.
                         t if t == OSPFV3_NSSA_LSA_TYPE && ls_id == 0 => {
                             self.nssa_default_lsa_originate(area)
                         }
@@ -6171,8 +6164,8 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     GrHelperExpire(u32, Ipv4Addr),
     /// Graceful-restart restarter-mode auto-abort. Fired when the
     /// staging timer set by `gr_restart_begin` expires without an
-    /// operator-driven commit (Phase 5d). Drives the same path
-    /// as `clear ip ospf graceful-restart abort`.
+    /// operator-driven commit. Drives the same path as
+    /// `clear ip ospf graceful-restart abort`.
     GrRestartAbort,
     /// Graceful-restart commit drain complete — fired by the
     /// short timer `gr_restart_commit` arms after writing the
@@ -6180,11 +6173,11 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// before the process exits. Handler calls
     /// `std::process::exit(0)`; the supervisor restarts us.
     GrRestartExit,
-    /// Phase 5e-ii — fired from `process_neighbor_state_change`
-    /// when the count of post-reboot Full transitions matches
-    /// the expected count. Handler clears `restarting`,
-    /// re-originates topology-affecting self LSAs at `seq+1`,
-    /// and flushes our Grace LSAs so helpers exit cleanly.
+    /// Fired from `process_neighbor_state_change` when the count
+    /// of post-reboot Full transitions matches the expected count.
+    /// Handler clears `restarting`, re-originates topology-affecting
+    /// self LSAs at `seq+1`, and flushes our Grace LSAs so helpers
+    /// exit cleanly.
     GrRestartExitSuccess,
     /// RFC 3101 NSSA Type-7→Type-5 translator resync request for
     /// `area_id`. Fired when a Type-7 LSA arrived in this NSSA, or
@@ -6904,11 +6897,11 @@ fn add_as_external_routes(
 ///   - E2 (E-bit set):    LSA.metric only
 ///
 /// P-bit is intentionally not consulted here — it controls
-/// Type-7→Type-5 translation at the ABR (phase 4), not SPF
-/// installation on the receiver. Non-zero forwarding-address LSAs
-/// are skipped (RFC 3101 §2.5 step 5 FA resolution deferred to a
-/// follow-up); MaxAge'd LSAs and self-originated LSAs are skipped
-/// for the same reasons as Type-5.
+/// Type-7→Type-5 translation at the ABR, not SPF installation on
+/// the receiver. Non-zero forwarding-address LSAs are skipped
+/// (RFC 3101 §2.5 step 5 FA resolution deferred to a follow-up);
+/// MaxAge'd LSAs and self-originated LSAs are skipped for the
+/// same reasons as Type-5.
 fn add_nssa_routes(
     top: &Ospf,
     area_id: Ipv4Addr,
@@ -7362,8 +7355,7 @@ fn build_rib6_from_spf(
 /// v3 differences from the v2 walker:
 ///   - LSDB lookup uses `iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE)`
 ///     (v3 LS-Types are u16, not the v2 `OspfLsType` enum).
-///   - Body decode is via `Ospfv3LsBody::Nssa(Ospfv3AsExternalLsa)`
-///     (phase 5 codec).
+///   - Body decode is via `Ospfv3LsBody::Nssa(Ospfv3AsExternalLsa)`.
 ///   - Prefix comes from `(prefix_length, address_prefix)` per
 ///     RFC 5340 §A.4.1.1, not v2's `(netmask, ls_id)`.
 ///   - E-bit lives in `flags & OSPFV3_AS_EXTERNAL_FLAG_E` per
@@ -7381,8 +7373,7 @@ fn build_rib6_from_spf(
 ///
 /// P-bit (RFC 3101 §2.4, carried in `prefix_options`) is
 /// intentionally NOT consulted here — it controls Type-7→Type-5
-/// translation at the ABR (phase 6d on v3), not SPF installation
-/// on the receiver.
+/// translation at the ABR, not SPF installation on the receiver.
 fn add_nssa_routes_v3(
     top: &Ospf<Ospfv3>,
     area_id: Ipv4Addr,

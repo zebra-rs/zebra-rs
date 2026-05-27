@@ -2,8 +2,7 @@
 //!
 //! Maps a BGP Color extended community value (RFC 9012 §4.3) to an
 //! IS-IS Flex-Algorithm id (RFC 9350) so the color-aware nexthop
-//! resolver (Phase 3 of the BGP ↔ Flex-Algo plan) can pick the
-//! correct entry in `Isis::rib_flex_algo`.
+//! resolver can pick the correct entry in `Isis::rib_flex_algo`.
 //!
 //! This module is storage-only on landing — no consumer reads
 //! `Bgp::color_policy` yet. Config callbacks stage / commit edits

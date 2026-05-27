@@ -256,8 +256,8 @@ fn split_distributable_at_255(tlv: IsisTlv) -> Vec<IsisTlv> {
 /// every fragment because we don't expose them yet.
 ///
 /// LSPDBOverflow (RFC 5311 territory — > 256 fragments) is logged
-/// and the trailing TLVs are dropped. Phase 5 / RFC 5311 will
-/// extend the namespace via virtual sys-IDs.
+/// and the trailing TLVs are dropped. A future extension via RFC
+/// 5311 virtual sys-IDs will widen the namespace.
 fn pack_into_fragments(
     anchors: Vec<IsisTlv>,
     distributable: Vec<IsisTlv>,
@@ -1352,7 +1352,7 @@ pub fn lsp_emit(
     level: Level,
     resolved: Option<&auth::ResolvedAuth>,
 ) -> BytesMut {
-    // Auth TLV (Phase 4) sits at the end of the LSP's TLV section.
+    // Auth TLV sits at the end of the LSP's TLV section.
     // For HMAC-MD5 it's a zero-filled placeholder that the post-emit
     // sign step patches in place; for cleartext it carries the
     // password bytes directly. Append before `IsisPacket::from` so
@@ -1486,9 +1486,9 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
     csnps
 }
 
-/// Per-level auth config for SNPs and (Phase 4) LSPs. RFC 5304 §3
-/// pins L1 SNPs to the area-wide string and L2 SNPs to the domain-
-/// wide string — same keys the LSPs at that level use. Takes
+/// Per-level auth config for SNPs and LSPs. RFC 5304 §3 pins L1
+/// SNPs to the area-wide string and L2 SNPs to the domain-wide
+/// string — same keys the LSPs at that level use. Takes
 /// `&IsisConfig` (not `&LinkTop`) so callers that hold a disjoint
 /// mutable borrow of `link.lsdb` / `link.state` can still pull the
 /// config out via `link.up_config`.

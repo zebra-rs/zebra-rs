@@ -125,8 +125,8 @@ pub struct AuthKey {
     pub raw: Vec<u8>,
 }
 
-/// Cryptographic-auth algorithms covered by Phase 2 (MD5) and
-/// Phase 3 (HMAC-SHA family per RFC 5709).
+/// Cryptographic-auth algorithms: MD5 and the HMAC-SHA family
+/// per RFC 5709.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OspfCryptoAlgo {
     /// RFC 2328 §D.4 — keyed-MD5 `MD5(packet || key padded to 16)`.

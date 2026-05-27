@@ -87,8 +87,8 @@ fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
 
 /// Reconcile the kernel FIB state for `prefix` with the BGP best-path
 /// outcome. `selected` is the `select_best_path` return: at most one
-/// `BgpRib` after Phase-1 best-path selection. Empty means every
-/// candidate just disappeared — emit a withdraw.
+/// `BgpRib` after best-path selection. Empty means every candidate
+/// just disappeared — emit a withdraw.
 ///
 /// VPNv4 / EVPN take their own install paths; this helper is for
 /// plain IPv4 unicast only.
@@ -96,10 +96,10 @@ fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib
     let installable = selected.first().and_then(make_bgp_rib_entry_v4);
     match installable {
         Some(mut rib_entry) => {
-            // Colour-aware Flex-Algo label push (Phase 3b). When the
-            // route carries a Color extcomm bound to a configured
-            // IS-IS Flex-Algorithm, append the per-algo outer MPLS
-            // label IS-IS published via RIB.
+            // Colour-aware Flex-Algo label push. When the route
+            // carries a Color extcomm bound to a configured IS-IS
+            // Flex-Algorithm, append the per-algo outer MPLS label
+            // IS-IS published via RIB.
             if let Some(best) = selected.first()
                 && let Some(BgpNexthop::Ipv4(nh)) = best.attr.nexthop.as_ref()
                 && let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh)
@@ -197,7 +197,7 @@ pub struct BgpRib {
     pub egress_ifindex_v6: Option<u32>,
     // Stale.
     pub stale: bool,
-    // Phase 4D: EVPN ESI (Ethernet Segment Identifier) for multi-homing
+    // EVPN ESI (Ethernet Segment Identifier) for multi-homing.
     pub esi: Option<[u8; 10]>,
 }
 
@@ -890,12 +890,12 @@ pub fn route_ipv4_update(
     rib.weight = decision.weight;
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
-    // Step 17b-iii: per-VRF best-path → global VPNv4 export. The
-    // hook only fires for IPv4 unicast (rd==None) inside a VRF
-    // task (`vrf_export` is Some). Empty `selected` after an
-    // update means the new candidate didn't survive best-path
-    // and there are no remaining winners — translate to a
-    // WithdrawExport so the global instance drops the row.
+    // Per-VRF best-path → global VPNv4 export. The hook only
+    // fires for IPv4 unicast (rd==None) inside a VRF task
+    // (`vrf_export` is Some). Empty `selected` after an update
+    // means the new candidate didn't survive best-path and there
+    // are no remaining winners — translate to a WithdrawExport so
+    // the global instance drops the row.
     if rd.is_none()
         && let Some(exporter) = bgp.vrf_export
     {
@@ -906,10 +906,10 @@ pub fn route_ipv4_update(
         }
     }
 
-    // Step 18a: global v4vpn best-path → per-VRF import. Inverse
-    // of the step-17b-iii hook: when an incoming VPNv4 route
-    // becomes the global best-path winner, fan out to every VRF
-    // whose `import_rts_v4` intersects the route's RT extcomms.
+    // Global v4vpn best-path → per-VRF import. Inverse of the
+    // export hook above: when an incoming VPNv4 route becomes the
+    // global best-path winner, fan out to every VRF whose
+    // `import_rts_v4` intersects the route's RT extcomms.
     // `vrf_import` is `Some(...)` only in the global Bgp task;
     // per-VRF runtimes never receive VPNv4 NLRI directly.
     if let Some(rd) = rd
@@ -1005,9 +1005,9 @@ fn route_advertise_to_addpath(
                 };
                 peer.send_vpnv4(vpnv4_nlri, attr, true);
             } else {
-                // IPv4 unicast addpath: bucket into the group cache
-                // (Phase 3c). All addpath-enabled peers share the
-                // same `addpath_send: true` signature, so the group
+                // IPv4 unicast addpath: bucket into the group cache.
+                // All addpath-enabled peers share the same
+                // `addpath_send: true` signature, so the group
                 // contains only addpath peers — fan-out at flush
                 // time goes only to other addpath peers.
                 let group_id = peer.update_group_id.get(&afi_safi).cloned();
@@ -1216,9 +1216,9 @@ pub(super) fn route_advertise_to_peers(
                     peer.send_vpnv4(vpnv4_nlri, attr, true);
                 } else {
                     // IPv4 unicast: bucket into the group's pending
-                    // cache (Phase 3b). Source ident comes from the
-                    // selected best path so split-horizon pruning at
-                    // flush time can drop NLRIs from their originator.
+                    // cache. Source ident comes from the selected
+                    // best path so split-horizon pruning at flush
+                    // time can drop NLRIs from their originator.
                     let source_ident = new_best.map(|b| b.ident).unwrap_or(peer.ident);
                     let group_id = peer.update_group_id.get(&afi_safi).cloned();
                     if let Some(gid) = group_id
@@ -1771,7 +1771,7 @@ fn route_soft_out_peer_table_evpn(
 // withdraw from Loc-RIB only — the Adj-RIB-In entry stays so the next
 // replay (e.g., after another policy edit) still has it.
 //
-// Phase 3 covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-in is left
+// Covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-in is left
 // for a follow-up, mirroring the EVPN soft-out gap.
 pub fn route_soft_in_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let (do_v4, vpn_rds) = {
@@ -1908,10 +1908,10 @@ pub fn route_ipv4_withdraw(
         fib_install_v4(bgp, nlri.prefix, &selected);
     }
 
-    // Step 17b-iii: VRF export — symmetric with `route_update_ipv4`.
-    // After a withdraw, either a replacement winner exists (emit a
-    // fresh Export so the global v4vpn row carries the new attrs)
-    // or `selected` is empty (emit WithdrawExport to drop the row).
+    // VRF export — symmetric with `route_update_ipv4`. After a
+    // withdraw, either a replacement winner exists (emit a fresh
+    // Export so the global v4vpn row carries the new attrs) or
+    // `selected` is empty (emit WithdrawExport to drop the row).
     if rd.is_none()
         && let Some(exporter) = bgp.vrf_export
     {
@@ -1922,12 +1922,12 @@ pub fn route_ipv4_withdraw(
         }
     }
 
-    // Step 18a: global v4vpn withdraw → per-VRF import dispatch.
-    // If a replacement winner survives best-path, that VPNv4 row
-    // now carries a different attr; re-import with the new attr.
-    // If `selected` is empty, the route truly went away — flood
-    // a WithdrawImport using the *removed* row's attr to resolve
-    // the matching-VRF set (we no longer have the new attr).
+    // Global v4vpn withdraw → per-VRF import dispatch. If a
+    // replacement winner survives best-path, that VPNv4 row now
+    // carries a different attr; re-import with the new attr. If
+    // `selected` is empty, the route truly went away — flood a
+    // WithdrawImport using the *removed* row's attr to resolve the
+    // matching-VRF set (we no longer have the new attr).
     if let Some(rd) = rd
         && let Some(dispatcher) = bgp.vrf_import
     {
@@ -2183,7 +2183,7 @@ fn route_evpn_export_selected(
                     tunnel_endpoint: extract_tunnel_endpoint(best),
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
-                    esi: best.esi, // Phase 4D: Extracted from EVPN route
+                    esi: best.esi, // Extracted from EVPN route.
                 };
                 let _ = bgp.rib_client.send(msg);
             } else {
@@ -2195,10 +2195,10 @@ fn route_evpn_export_selected(
             }
         }
         EvpnPrefix::InclusiveMulticast { orig, .. } => {
-            // Phase 4B: Type 3 Inclusive Multicast route installation
+            // Type 3 Inclusive Multicast route installation.
             // This route indicates that a multicast group (*,G) should be replicated to
             // all VTEPs that have advertised this route.
-            // RFC 8365: VNI must come from Route Target extended community
+            // RFC 8365: VNI must come from Route Target extended community.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
                 let msg = rib::Message::MdbAdd {
                     vni,
@@ -2227,7 +2227,7 @@ fn route_evpn_export_selected(
 /// unused: `BgpRib::new` only carries a `Vpnv4Nexthop`, which is IPv4-only
 /// and RD-bound. The EVPN nexthop is recoverable from `peer.address` for
 /// display purposes; threading it through `BgpRib` is a follow-up tied to
-/// the show command (Step 5).
+/// the show command.
 pub fn route_evpn_update(
     ident: usize,
     route: &EvpnRoute,
@@ -2287,7 +2287,7 @@ pub fn route_evpn_update(
         stale,
     );
 
-    // Phase 4D: Extract ESI from EVPN Type 2 route for multi-homing support
+    // Extract ESI from EVPN Type 2 route for multi-homing support.
     if let EvpnRoute::Mac(m) = route {
         rib.esi = Some(m.esi);
     }

@@ -27,15 +27,10 @@ pub struct Vrf {
 }
 
 /// Per-VRF routing-table set. Mirrors the `table` / `table_v6` /
-/// `ilm` fields on `Rib`, so step 9's per-`ProtoId` dispatcher can
+/// `ilm` fields on `Rib`, so the per-`ProtoId` dispatcher can
 /// pick between the global table and a VRF table without branching
-/// on the field name.
-///
-/// Step 7 lands this shape (one entry per allocated VRF) and the
-/// `BTreeMap<u32, VrfRibTables>` on `Rib` that contains it; nothing
-/// writes to the inner maps yet because no protocol module is
-/// VRF-attached. Step 9 turns the inbound `RibInbound` envelope's
-/// `ProtoId` into a `vrf_id` lookup against the outer map and
+/// on the field name. The inbound `RibInbound` envelope's
+/// `ProtoId` resolves to a `vrf_id`, looks up the outer map, and
 /// routes the install into the matching inner table.
 #[derive(Debug, Default)]
 pub struct VrfRibTables {

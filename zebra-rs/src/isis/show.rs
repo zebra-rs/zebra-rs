@@ -88,8 +88,8 @@ fn show_isis_summary(
     // matches what's on the wire without having to grep the database.
     writeln!(buf, "LSP MTU: {} bytes", isis.config.lsp_mtu_size())?;
 
-    // Authentication state (Phase 5). Only the L1 area-password and
-    // L2 domain-password live at the instance scope; per-interface
+    // Authentication state. Only the L1 area-password and L2
+    // domain-password live at the instance scope; per-interface
     // hello-authentication is surfaced by `show isis interface
     // detail`. Lines suppressed entirely when the scope isn't
     // configured to keep the summary clean on un-authed nodes.
@@ -133,12 +133,11 @@ fn show_isis_summary(
     Ok(buf)
 }
 
-// RFC 5306 Graceful Restart, per adjacency. Phase 3a wires helper
-// behavior: `helper_active` reflects whether we're currently treating
-// the peer as mid-restart (suppressing hold-timer refresh, including
-// RA in outbound IIH). `last_seen` still shows the most recent
-// Restart TLV the peer sent for operator debugging of the signaling
-// path.
+// RFC 5306 Graceful Restart, per adjacency. `helper_active`
+// reflects whether we're currently treating the peer as mid-restart
+// (suppressing hold-timer refresh, including RA in outbound IIH).
+// `last_seen` still shows the most recent Restart TLV the peer sent
+// for operator debugging of the signaling path.
 #[derive(Serialize)]
 struct GrAdjJson {
     level: u8,
@@ -284,10 +283,10 @@ fn show_isis_graceful_restart(
 }
 
 /// `show isis checkpoint` — read the on-disk graceful-restart
-/// checkpoint (Phase 5b storage layer) and pretty-print its summary.
-/// Mirrors `show ip ospf checkpoint`. JSON mode emits the full
-/// CBOR-decoded struct via serde for ops inspection; the text mode
-/// is a human-friendly summary keyed off the same fields.
+/// checkpoint and pretty-print its summary. Mirrors
+/// `show ip ospf checkpoint`. JSON mode emits the full CBOR-decoded
+/// struct via serde for ops inspection; the text mode is a
+/// human-friendly summary keyed off the same fields.
 fn show_isis_checkpoint(
     _isis: &Isis,
     _args: Args,
@@ -795,9 +794,9 @@ fn show_isis_route(
 }
 
 // `show isis topology` — per-level, per-AFI SPF tree without the RIB
-// tables that `show isis route` adds. PR 2 of the multi-topology
-// series; the renderer is the existing single-topology one. PR 5 will
-// extend it to discriminate per-MT view + add a `<topology-id>` filter.
+// tables that `show isis route` adds. The renderer is the existing
+// single-topology one; a follow-up will extend it to discriminate
+// per-MT view + add a `<topology-id>` filter.
 fn show_isis_topology(
     isis: &Isis,
     _args: Args,

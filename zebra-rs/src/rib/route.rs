@@ -150,8 +150,8 @@ impl Rib {
 
     /// Decide whether the kernel-deleted address `osaddr` corresponds
     /// to a configured `LinkAddr`, and if so push it back to the
-    /// kernel — unless the per-address recovery state is in cool-down
-    /// (Step 7 hold-down).
+    /// kernel — unless the per-address recovery state is in
+    /// hold-down cool-down.
     ///
     /// Returns `true` when the caller should *skip* the normal
     /// `addr_del` teardown path: either we re-installed the address
@@ -534,13 +534,13 @@ impl Rib {
         self.schedule_rib_sync();
     }
 
-    /// Step 9 dispatcher: route an `Ipv4Add` install into the
+    /// Per-VRF dispatcher: route an `Ipv4Add` install into the
     /// matching VRF prefix tree. Best-path resolution + FIB install
-    /// inside a VRF table land in step 18; today the prefix is
-    /// recorded so the per-VRF show path and the future import
+    /// inside a VRF table are pending follow-ups; today the prefix
+    /// is recorded so the per-VRF show path and the future import
     /// pipeline see it, but the kernel install is deliberately
     /// skipped — the global nexthop map can't resolve per-VRF gw
-    /// addresses correctly without step 18's overlay.
+    /// addresses correctly without a per-VRF overlay.
     pub fn ipv4_route_add_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
         if !vrf_ipv4_insert(&mut self.vrf_tables, table_id, prefix, entry) {
             tracing::warn!(
@@ -1739,7 +1739,7 @@ pub async fn ipv6_nexthop_sync(
 
 // ---- Per-VRF table dispatch helpers ---------------------------------
 //
-// Step 9 prefers free functions over methods on `Rib` so they can be
+// Prefer free functions over methods on `Rib` so they can be
 // unit-tested against a plain `BTreeMap<u32, VrfRibTables>` without
 // having to construct a full `Rib` (which needs a live netlink
 // socket via `FibHandle::new`). Return `bool` so the wrappers on
@@ -1972,8 +1972,8 @@ mod tests {
         }
     }
 
-    /// Step 9 inbound-dispatch invariant: an install destined for
-    /// a non-default VRF lands in `vrf_tables[table_id].table`, not
+    /// Inbound-dispatch invariant: an install destined for a
+    /// non-default VRF lands in `vrf_tables[table_id].table`, not
     /// in the global table. Tested at the free-function level so we
     /// don't need to construct a `Rib` (the kernel-bound `FibHandle`
     /// makes that impractical for unit tests).

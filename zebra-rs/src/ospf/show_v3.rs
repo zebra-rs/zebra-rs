@@ -1250,9 +1250,9 @@ fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
             };
 
             // Resolve peer's SRGB / SRLB from the LSDB's label_map.
-            // Populated by `Lsdb<Ospfv3>::update_lsa_v3` (PR-3c) when
-            // the peer's SR-info E-Router-LSA arrives. Same key used
-            // by `add_prefix_sids_v3` for Index→Label resolution.
+            // Populated by `Lsdb<Ospfv3>::update_lsa_v3` when the
+            // peer's SR-info E-Router-LSA arrives. Same key used by
+            // `add_prefix_sids_v3` for Index→Label resolution.
             let key = (*area_id, advertising);
             srgb_lookup.entry(key).or_insert_with(|| {
                 if let Some(cfg) = area.lsdb.label_map.get(&advertising) {

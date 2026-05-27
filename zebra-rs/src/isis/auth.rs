@@ -1,9 +1,9 @@
 //! HMAC-MD5 sign/verify and Auth TLV plumbing for IS-IS Hello + SNP PDUs.
 //!
-//! Phase 3a: Hellos (per-link `hello-authentication`).
-//! Phase 3b: CSNP/PSNP (per-level `area-password` / `domain-password`).
-//! Phase 4 will add LSP signing, which needs additional treatment for
-//! the LSP Checksum and Remaining Lifetime fields per RFC 5304 §3.
+//! Covers Hellos (per-link `hello-authentication`), CSNP/PSNP
+//! (per-level `area-password` / `domain-password`), and LSP signing.
+//! LSP signing needs additional treatment for the LSP Checksum and
+//! Remaining Lifetime fields per RFC 5304 §3.
 //!
 //! Cleartext (auth-type 1) is just bytes-in-TLV-value: the send path
 //! appends the password bytes verbatim, and the verify path compares

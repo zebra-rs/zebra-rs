@@ -1,5 +1,4 @@
-//! Per-VRF MPLS label allocator (step 19a of the BGP MPLS/VPN
-//! refactor).
+//! Per-VRF MPLS label allocator.
 //!
 //! Hands out a single label per VRF at spawn time and reclaims it
 //! at despawn. The pool is a counter starting at 16 (the first
@@ -10,8 +9,8 @@
 //! The allocator lives on `Bgp` (one per global instance — labels
 //! are a global resource), and the allocated value is mirrored
 //! onto `BgpVrf::label` for the per-VRF runtime to stamp onto
-//! `BgpGlobalMsg::Export`. Step 19b's ILM Decap install consumes
-//! the same label to bind the netlink AF_MPLS route.
+//! `BgpGlobalMsg::Export`. The ILM Decap install consumes the
+//! same label to bind the netlink AF_MPLS route.
 //!
 //! Today the pool is unconstrained — there's no operator-visible
 //! reservation YANG. A future PR can layer that on by injecting a

@@ -7,8 +7,8 @@
 //! value args and mutates the in-memory [`BfdConfig`] held by the
 //! [`super::inst::Bfd`] instance.
 //!
-//! PR 4 wires the storage and the callback table. The PR-5 work that
-//! turns committed peer config into live sessions calls
+//! Storage and the callback table live here; turning committed peer
+//! config into live sessions calls
 //! [`crate::bfd::inst::Bfd::add_session`] from `CommitEnd` once the
 //! candidate has been folded into [`BfdConfig`].
 
@@ -95,7 +95,7 @@ impl PeerConfig {
 
 /// In-memory mirror of the `container bfd` subtree of the committed
 /// config. Updated by [`Callback`] invocations; the live session
-/// lifecycle reads from here on CommitEnd (PR 5+).
+/// lifecycle reads from here on CommitEnd.
 #[derive(Debug, Default, Clone)]
 pub struct BfdConfig {
     pub profiles: BTreeMap<String, ProfileConfig>,
@@ -400,7 +400,7 @@ mod tests {
 
     /// Linking a peer to a profile by name stores the reference;
     /// resolving the reference into effective parameters is the job
-    /// of the session-spawn path (PR 5).
+    /// of the session-spawn path.
     #[tokio::test]
     async fn peer_profile_reference_stored() {
         let mut bfd = fresh_bfd();

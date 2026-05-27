@@ -154,8 +154,8 @@ pub struct PeerTransportConfig {
 
 /// Per-neighbor BFD attachment recorded from
 /// `set router bgp neighbor <addr> bfd { enable | profile }`
-/// (zebra-bgp-bfd.yang). PR 5b stores the configuration here; PR 5c
-/// wires `enable` flips to subscribe / unsubscribe calls on the BFD
+/// (zebra-bgp-bfd.yang). The configuration is stored here; `enable`
+/// flips translate into subscribe / unsubscribe calls on the BFD
 /// instance via `bfd::inst::Bfd::client_req_tx`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PeerBfdConfig {
@@ -194,8 +194,7 @@ pub struct PeerConfig {
     /// per-peer config callbacks to decide whether a change to the
     /// group should propagate (or unset) the peer's remote-as.
     pub remote_as_inherited: bool,
-    /// BFD attachment for this neighbor. Inert in PR 5b — the
-    /// `bfd.client_req_tx` plumbing arrives in PR 5c.
+    /// BFD attachment for this neighbor.
     pub bfd: PeerBfdConfig,
 }
 
@@ -609,8 +608,8 @@ pub struct BgpTop<'a> {
     /// `BgpVrfMsg::ImportV4`. `None` inside per-VRF tasks (they
     /// never receive VPNv4 NLRI directly).
     pub vrf_import: Option<&'a super::vrf::VrfImportDispatcher<'a>>,
-    /// Colour-aware nexthop resolver inputs (Phase 3b). Optional
-    /// because per-VRF BGP runtimes don't carry them today — Color →
+    /// Colour-aware nexthop resolver inputs. Optional because
+    /// per-VRF BGP runtimes don't carry them today — Color →
     /// Flex-Algo binding is a default-VRF concept; per-VRF support
     /// is a follow-up. `None` short-circuits the resolver to
     /// "no Color-based label push".
@@ -672,7 +671,7 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
 }
 
 pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
-    // Phase 1: Compute new state (single match, only &mut Peer)
+    // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
         let prev_state = peer.state;
@@ -681,10 +680,10 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
         (prev_state, effect)
     };
 
-    // Phase 2: Execute side effects that need peer_map
+    // Execute side effects that need peer_map.
     fsm_effect(id, effect, bgp_ref, peer_map);
 
-    // Phase 3: Handle state transition consequences
+    // Handle state-transition consequences.
     {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
         if prev_state == peer.state {
@@ -700,16 +699,16 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
         timer::update_timers(peer);
     }
 
-    // Phase 4: route_clean if leaving Established (needs peer_map)
+    // route_clean if leaving Established (needs peer_map).
     if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
         route_clean(id, bgp_ref, peer_map);
     }
 
-    // Phase 5: maintain update-group membership across the
-    // Established boundary. Detach must run *after* route_clean so
-    // observability sees the peer leave the group only once routes
-    // have been torn down; attach runs after route_sync so the
-    // group reflects the post-sync state.
+    // Maintain update-group membership across the Established
+    // boundary. Detach must run *after* route_clean so observability
+    // sees the peer leave the group only once routes have been torn
+    // down; attach runs after route_sync so the group reflects the
+    // post-sync state.
     {
         let now_established = peer_map
             .get_by_idx(id)
@@ -1424,7 +1423,7 @@ pub enum BgpClearOp {
 /// (the caller asked for *that* peer specifically). EVPN soft-in is
 /// not yet wired into `route_soft_in_peer`, so a soft-in/soft-both on
 /// EVPN logs a "not yet implemented" notice and leaves the session
-/// alone — Phase 5 of the EVPN work in route.rs lifts that.
+/// alone.
 pub fn clear_bgp_action(
     bgp: &mut Bgp,
     args: &mut Args,
@@ -1498,7 +1497,7 @@ mod bfd_config_tests {
 
     /// Round-trip: setting enable + profile mirrors the CLI flow
     /// (`bfd enable true; bfd profile FAST`) producing the recorded
-    /// state the PR-5c subscribe path will read.
+    /// state the BFD subscribe path reads.
     #[test]
     fn enable_and_profile_round_trip() {
         let mut pc = PeerConfig::default();

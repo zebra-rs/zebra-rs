@@ -1978,8 +1978,8 @@ impl FibHandle {
         )
         .await;
 
-        // Phase 4D: ESI received and stored. Kernel multi-homing via NDA_NH_ID
-        // will be wired in Phase 5 when ECMP nexthop groups are supported.
+        // ESI received and stored. Kernel multi-homing via NDA_NH_ID
+        // will be wired when ECMP nexthop groups are supported.
         if let Some(esi_val) = esi
             && esi_val != [0u8; 10]
             && DEBUG_EVPN
@@ -2561,7 +2561,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 let neighbor = neighbor_from_msg(msg);
                 let _ = tx.send(FibMessage::DelNeighbor(neighbor));
             }
-            // TODO: Phase 4B - Add MDB message handling when netlink-packet-route supports it
+            // TODO: Add MDB message handling when netlink-packet-route supports it.
             // RouteNetlinkMessage::NewMdb(_) => {
             //     // Parse MDB message and send MdbAdd message
             // }

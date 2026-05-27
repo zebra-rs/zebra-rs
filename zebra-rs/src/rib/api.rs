@@ -114,8 +114,8 @@ pub enum RibRx {
     /// `table_id` and the netlink-side `ip link add` succeeded; also
     /// replayed at subscribe time so a late-subscribing protocol
     /// (e.g. BGP spawning after VRFs were configured at startup)
-    /// catches the running set. Step 15 introduces this so the global
-    /// BGP runtime can lift `BgpVrf` from the step-14 placeholder
+    /// catches the running set. The global BGP runtime uses this
+    /// signal to lift `BgpVrf` from a placeholder
     /// `ProtoContext::default_table_no_rib` to a real
     /// `ProtoContext::for_vrf(rib, table_id, name)` once the kernel
     /// has acknowledged the VRF master.
@@ -167,13 +167,12 @@ pub enum RibRx {
 
     // ---- IS-IS Flex-Algorithm route fan-out -----------------------
     //
-    // Phase 3 of the BGP ↔ IS-IS Flex-Algorithm integration: IS-IS
-    // publishes per-algo route snapshots to RIB via
-    // `Message::FlexAlgoRouteAdd/Del`; RIB shadows them in
-    // `flex_algo_routes` and re-broadcasts via the two RibRx variants
-    // below. The colour-aware nexthop resolver (next PR) is the first
-    // consumer; today the fan-out lands on every subscribed protocol
-    // and they ignore it.
+    // BGP ↔ IS-IS Flex-Algorithm integration: IS-IS publishes per-algo
+    // route snapshots to RIB via `Message::FlexAlgoRouteAdd/Del`;
+    // RIB shadows them in `flex_algo_routes` and re-broadcasts via
+    // the two RibRx variants below. The colour-aware nexthop
+    // resolver is the first consumer; today the fan-out lands on
+    // every subscribed protocol and they ignore it.
     FlexAlgoRouteAdd {
         route: FlexAlgoRoute,
     },
@@ -261,7 +260,7 @@ impl Rib {
     /// Router id is daemon-global today (one IPv4 address per
     /// instance), so this push always targets default-VRF
     /// subscribers. Per-VRF router-id arrives with the BGP-per-VRF
-    /// config in step 12 and will gain its own emit path.
+    /// config and will gain its own emit path.
     pub fn api_router_id_update(&self, router_id: Ipv4Addr) {
         for (_, sub) in self.client_registry.iter_vrf(0) {
             let _ = sub.rib_rx_tx.send(RibRx::RouterIdUpdate(router_id));
@@ -271,8 +270,7 @@ impl Rib {
     /// FDB / VXLAN events are EVPN-specific and today flow to every
     /// subscriber regardless of VRF — EVPN consumers (BGP) run as a
     /// single instance and need the full view. Per-VRF EVPN will
-    /// pick up a filter here when step 13+ introduces multi-instance
-    /// BGP.
+    /// pick up a filter here when multi-instance BGP is introduced.
     pub fn api_fdb_add(&self, entry: &FdbEntry) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::FdbAdd(entry.clone()));
@@ -315,10 +313,9 @@ impl Rib {
     }
 
     /// Push the current RT snapshot for `vrf` to default-VRF
-    /// subscribers. The plan in step 17 / 18 is to give BGP a
-    /// chance to import / export against the matching RT set;
-    /// step 17a caches the snapshot on `Bgp::rib_known_vrfs`
-    /// without using it yet.
+    /// subscribers. BGP caches the snapshot on
+    /// `Bgp::rib_known_vrfs` for import / export decisions against
+    /// the matching RT set.
     pub fn api_vrf_route_targets(&self, vrf: &crate::rib::vrf::Vrf) {
         for (_, sub) in self.client_registry.iter_vrf(0) {
             let _ = sub.rib_rx_tx.send(RibRx::VrfRouteTargets {

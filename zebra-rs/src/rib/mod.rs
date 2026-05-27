@@ -5,10 +5,10 @@ pub mod api;
 // channel reaches it as `crate::rib::api::RibRxChannel`.
 
 pub mod client;
-// Re-exports intentionally omitted until step 2's callers land — a
-// binary crate with no external consumer of these names today would
-// just trigger `unused_imports`. Use `crate::rib::client::*` from
-// callsites for now.
+// Re-exports intentionally omitted — the binary crate has no
+// external consumer that would benefit from re-exporting these
+// names; using `crate::rib::client::*` from callsites avoids
+// `unused_imports`.
 
 pub mod inst;
 pub use inst::{Message, Rib, serve};

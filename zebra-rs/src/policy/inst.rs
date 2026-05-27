@@ -237,10 +237,9 @@ pub struct Policy {
     pub ext_community_config: ExtCommunitySetConfig,
     pub large_community_config: LargeCommunitySetConfig,
     pub as_path_config: AsPathSetConfig,
-    /// Canonical RFC 8177 key-chain registry. PR 1 stores entries
-    /// but has no subscribers — OSPF and BGP still parse
-    /// `/key-chains/...` into their own per-daemon copies. PRs 2–4
-    /// migrate each protocol onto this registry.
+    /// Canonical RFC 8177 key-chain registry. Protocol modules
+    /// (OSPF, IS-IS, BGP) subscribe to it via the policy actor
+    /// rather than maintaining their own copy.
     pub key_chain_config: KeyChainSetConfig,
     pub clients: BTreeMap<String, UnboundedSender<PolicyRx>>,
     pub watch_prefix: BTreeMap<String, Vec<PolicyWatch>>,

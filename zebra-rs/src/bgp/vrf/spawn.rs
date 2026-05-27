@@ -1,22 +1,20 @@
 //! Spawn / despawn of [`BgpVrf`] tasks driven by the global Bgp's
-//! `CommitEnd` diff (step 14 of the BGP MPLS/VPN refactor).
+//! `CommitEnd` diff.
 //!
 //! The committed intent lives in [`crate::bgp::Bgp::vrfs`] (a
-//! `BTreeMap<String, BgpVrfConfig>` populated by step 12's
+//! `BTreeMap<String, BgpVrfConfig>` populated by the VRF config
 //! callbacks). The running task set lives in
 //! [`crate::bgp::Bgp::vrf_registry`]. After every commit the
 //! diff between the two maps is computed, new VRF names get a
 //! fresh [`BgpVrf`] + [`serve_vrf`], deleted names get a
 //! [`BgpVrfMsg::Shutdown`].
 //!
-//! The current cut deliberately uses a placeholder
-//! [`ProtoContext::default_table_no_rib`] for the per-VRF runtime:
-//! step 14 doesn't open any per-VRF sockets, and the
-//! `SO_BINDTODEVICE` plumbing only matters once peers exist
-//! (step 15). The same step 15 lifts the placeholder to a real
-//! [`ProtoContext::for_vrf`] built from a fresh per-VRF
-//! `RibClient` subscription that carries the kernel `table_id`
-//! through to [`crate::rib::client::ClientRegistry`].
+//! When kernel info isn't yet available the spawn falls back to a
+//! placeholder [`ProtoContext::default_table_no_rib`]; once the
+//! matching `VrfAdd` arrives the task is respawned with a real
+//! [`ProtoContext::for_vrf`] built from a fresh per-VRF `RibClient`
+//! subscription that carries the kernel `table_id` through to
+//! [`crate::rib::client::ClientRegistry`].
 
 use std::collections::BTreeMap;
 
@@ -52,19 +50,19 @@ pub struct BgpVrfHandle {
     /// FIB entries that already point at this VRF's old label.
     pub label: u32,
     /// VRF master ifindex used in the AF_MPLS DecapVrf ILM, when
-    /// step 19b's spawn site successfully installed one. `None`
-    /// when the spawn ran with no kernel info (placeholder ctx);
-    /// the next `maybe_respawn_vrf_with_kernel_ctx` after the
-    /// kernel VRF appears installs the ILM.
+    /// the spawn site successfully installed one. `None` when the
+    /// spawn ran with no kernel info (placeholder ctx); the next
+    /// `maybe_respawn_vrf_with_kernel_ctx` after the kernel VRF
+    /// appears installs the ILM.
     pub ilm_decap_ifindex: Option<u32>,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
 /// but not `running`) and which need to be despawned (in
 /// `running` but not `desired`). Names that appear in both are
-/// considered unchanged at this step — step 14 doesn't yet detect
-/// edits to `rd` / `router-id` / `label-mode`; step 15 layers
-/// edit detection on top by hashing the cfg.
+/// considered unchanged — the diff does not yet detect edits to
+/// `rd` / `router-id` / `label-mode`; a follow-up will layer edit
+/// detection on top by hashing the cfg.
 pub fn compute_vrf_diff(
     desired: &BTreeMap<String, BgpVrfConfig>,
     running: &BTreeMap<String, BgpVrfHandle>,
@@ -93,7 +91,7 @@ pub fn compute_vrf_diff(
 ///
 /// `rib_subscriber` mints the per-VRF [`RibClient`] when kernel
 /// info is present — route installs from this task flow through
-/// the matching `vrf_tables[table_id]` via step 9's inbound
+/// the matching `vrf_tables[table_id]` via the RIB inbound
 /// dispatcher. With no kernel info, the spawn uses a parked
 /// `RibClient`; routes sent through it land in the global table
 /// until the respawn happens.
@@ -120,10 +118,10 @@ pub fn spawn_bgp_vrf(
         Some(k) => {
             // Mint a fresh `RibClient` for this VRF. The
             // subscription's `vrf_id` tells RIB to route the
-            // task's route installs into `vrf_tables[table_id]`
-            // (step 9's inbound dispatcher). The `RibRx` half is
-            // leaked — per-VRF subscribers don't yet consume RIB
-            // outbound notifications; that's a future step.
+            // task's route installs into `vrf_tables[table_id]`.
+            // The `RibRx` half is leaked — per-VRF subscribers
+            // don't yet consume RIB outbound notifications; that's
+            // a follow-up.
             let proto = format!("bgp:vrf:{name}");
             let (rib_client, rib_rx) = rib_subscriber.subscribe_for_vrf(&proto, k.table_id);
             Box::leak(Box::new(rib_rx));
@@ -151,18 +149,17 @@ pub fn spawn_bgp_vrf(
     );
 
     // Materialise per-VRF peers from the BgpVrfConfig snapshot.
-    // Step 15c is scaffolding — the per-VRF FSM driver lands in
-    // step 15d, and until then `peer.start()`'s timer events get
-    // logged at debug and dropped by `BgpVrf::event_loop`. Peers
-    // without a `remote_as` are skipped: `Peer::start` gates on
-    // `remote_as != 0`, so inserting them would only litter the
-    // map with permanently-Idle entries.
+    // `peer.start()`'s timer events get logged at debug and
+    // dropped by `BgpVrf::event_loop` until the per-VRF FSM
+    // driver lands. Peers without a `remote_as` are skipped:
+    // `Peer::start` gates on `remote_as != 0`, so inserting them
+    // would only litter the map with permanently-Idle entries.
     let peer_count = materialize_peers(&mut vrf, cfg);
 
-    // Step 16: register each materialised peer with the global
-    // accept dispatcher so an inbound `:179` from that IP lands
-    // on this VRF task via `BgpVrfMsg::Accept` instead of the
-    // global instance.
+    // Register each materialised peer with the global accept
+    // dispatcher so an inbound `:179` from that IP lands on this
+    // VRF task via `BgpVrfMsg::Accept` instead of the global
+    // instance.
     for addr in vrf.peers.keys().copied().collect::<Vec<_>>() {
         let _ = vrf.global_tx.send(BgpGlobalMsg::RegisterPeer {
             vrf: name.clone(),
@@ -170,19 +167,19 @@ pub fn spawn_bgp_vrf(
         });
     }
 
-    // Step 21b: self-originated networks from
+    // Self-originated networks from
     // `router bgp vrf X afi-safi ipv4-unicast network <p>` land
     // in `vrf.local_rib.v4` as `BgpRibType::Originated` and
     // emit a `BgpGlobalMsg::Export` so the global instance
     // promotes them to VPNv4 advertisements toward PE peers.
     let network_count = materialize_self_originated_networks(&mut vrf, cfg);
 
-    // Step 19b: install the AF_MPLS DecapVrf ILM at the
-    // allocated label so a remote PE's VPNv4 packet with this
-    // label pops + lands in `vrf_tables[table_id]`. Only when
-    // we have kernel info — a placeholder-ctx spawn skips the
-    // install; the `maybe_respawn_vrf_with_kernel_ctx` path
-    // re-runs with kernel info and installs the ILM then.
+    // Install the AF_MPLS DecapVrf ILM at the allocated label so a
+    // remote PE's VPNv4 packet with this label pops + lands in
+    // `vrf_tables[table_id]`. Only when we have kernel info — a
+    // placeholder-ctx spawn skips the install; the
+    // `maybe_respawn_vrf_with_kernel_ctx` path re-runs with kernel
+    // info and installs the ILM then.
     let ilm_decap_ifindex = match (kernel_table_id, kernel_ifindex) {
         (Some(table_id), Some(vrf_ifindex)) if label != 0 => {
             let entry = crate::rib::inst::IlmEntry {
@@ -222,7 +219,7 @@ pub fn spawn_bgp_vrf(
 /// Build `Peer` objects from `cfg.neighbors` and insert them into
 /// `vrf.peers`. Calls `peer.start()` on each — that arms the
 /// idle-hold timer; once it fires the FSM event lands on
-/// `vrf.tx`, which step 15c only drains at debug.
+/// `vrf.tx`.
 fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
     use super::super::peer::Peer;
     use super::super::peer_key::PeerKey;
@@ -234,8 +231,7 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
         // free of dormant rows the show path would have to render
         // as "remote-as: unset". When the operator later types
         // the missing leaf the follow-up commit re-runs
-        // `materialize_peers` (step 15d hooks the per-VRF CM
-        // dispatch) and the peer arrives.
+        // `materialize_peers` and the peer arrives.
         let Some(remote_as) = nbr_cfg.remote_as else {
             tracing::debug!(
                 vrf = %vrf.name,
@@ -263,10 +259,10 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
     count
 }
 
-/// Step 21b: insert each prefix from
-/// `cfg.ipv4_unicast.networks` into the per-VRF Loc-RIB as a
-/// `BgpRibType::Originated` row and emit a `BgpGlobalMsg::Export`
-/// so the global instance promotes it to a VPNv4 advertisement.
+/// Insert each prefix from `cfg.ipv4_unicast.networks` into the
+/// per-VRF Loc-RIB as a `BgpRibType::Originated` row and emit a
+/// `BgpGlobalMsg::Export` so the global instance promotes it to a
+/// VPNv4 advertisement.
 ///
 /// Mirrors `Bgp::route_add` (the global-Bgp equivalent for plain
 /// IPv4-unicast `network` statements) but bypasses the
@@ -277,11 +273,11 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
 /// PE peers.
 ///
 /// We *don't* go through `route_ipv4_update` (which would also
-/// fire the step-17b-iii export hook) because that entry takes a
-/// `BgpTop` and treats the new candidate as if it came from a
-/// real peer — split-horizon and policy filters would have to
-/// be threaded through. The direct-write here is the same shape
-/// `Bgp::route_add` uses for the global case.
+/// fire the export hook) because that entry takes a `BgpTop` and
+/// treats the new candidate as if it came from a real peer —
+/// split-horizon and policy filters would have to be threaded
+/// through. The direct-write here is the same shape `Bgp::route_add`
+/// uses for the global case.
 fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
     use bgp_packet::{BgpAttr, BgpNexthop, Origin};
 
@@ -360,10 +356,9 @@ pub fn despawn_bgp_vrf(name: &str, handle: &BgpVrfHandle) {
 mod tests {
     //! Pure-function tests on [`compute_vrf_diff`]. Spawn /
     //! despawn themselves need a `Bgp` to drive end-to-end, which
-    //! is exercised by the BDD scenarios in step 14's follow-up;
-    //! the diff function is the part that's worth unit-testing in
-    //! isolation because it's where the spawn / despawn decision
-    //! actually lives.
+    //! BDD scenarios cover; the diff function is the part worth
+    //! unit-testing in isolation because it's where the spawn /
+    //! despawn decision actually lives.
     use std::net::Ipv4Addr;
 
     use tokio::sync::mpsc::unbounded_channel;
@@ -409,10 +404,10 @@ mod tests {
 
         // Construct a BgpVrf directly (no spawn) so we can inspect
         // `vrf.peers` after `materialize_peers` runs. Per-VRF FSM
-        // events go through `vrf.tx`, which we drain via the rx in
-        // step 15c's event loop — but the loop isn't running in
-        // this test, so the timer events `peer.start()` arms stay
-        // queued until the rx is dropped at end of scope.
+        // events go through `vrf.tx`, which the event loop drains
+        // in production — but the loop isn't running in this test,
+        // so the timer events `peer.start()` arms stay queued until
+        // the rx is dropped at end of scope.
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = ProtoContext::default_table_no_rib();
         let (mut vrf, _inbox) = BgpVrf::new(

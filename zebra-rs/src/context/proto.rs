@@ -10,14 +10,6 @@
 //! code calls `ctx.tcp_socket_v4()?` instead of `TcpSocket::new_v4()`
 //! and the context decides whether to set `SO_BINDTODEVICE`.
 //!
-//! Step 4 landed the type and the factory API surface with a
-//! no-op `maybe_bind_device`; step 8 lights up the real
-//! `setsockopt(SO_BINDTODEVICE)` call on Linux. The `for_vrf`
-//! constructor still has no production caller until step 13
-//! (per-VRF BGP tasks) reaches it — `default_table` is the only
-//! spawn-side constructor in tree today, which keeps every
-//! existing socket binding-free.
-//!
 //! `Clone` is intentional: the per-task FSMs, listen accept loops,
 //! and timer callbacks all take their own copies. The clone is
 //! cheap (an `Arc` inside the `UnboundedSender` in `RibClient` plus
@@ -134,8 +126,8 @@ impl ProtoContext {
 
     /// One-shot listen helper: create a TCP socket for `addr`'s
     /// family, enable `SO_REUSEADDR`, bind, and start listening.
-    /// Used by BGP's `:179` listener; the per-VRF variant in step 16
-    /// will reuse the same call against a different ctx.
+    /// Used by BGP's `:179` listener; per-VRF callers reuse the
+    /// same helper against a different ctx.
     pub async fn tcp_listen(&self, addr: SocketAddr) -> io::Result<TcpListener> {
         let sock = match addr {
             SocketAddr::V4(_) => self.tcp_socket_v4()?,

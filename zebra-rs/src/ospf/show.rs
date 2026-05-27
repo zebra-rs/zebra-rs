@@ -1812,10 +1812,10 @@ fn show_ospf_graceful_restart(
 }
 
 /// `show ip ospf checkpoint` — debug entry for the
-/// graceful-restart storage layer (Phase 5b). Reads the
-/// on-disk checkpoint at the default path and pretty-prints
-/// a summary so operators / tests can verify the write side
-/// without unpacking CBOR manually.
+/// graceful-restart storage layer. Reads the on-disk checkpoint
+/// at the default path and pretty-prints a summary so operators
+/// / tests can verify the write side without unpacking CBOR
+/// manually.
 fn show_ospf_checkpoint(
     _ospf: &Ospf,
     _args: Args,

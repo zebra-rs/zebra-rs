@@ -79,7 +79,7 @@ pub enum LsdbEvent {
 /// (`OspfLsType` enum match, `OspfLsp::OpaqueAreaRouterInfo` body
 /// shape). Those move into a generic impl when the `OspfVersion`
 /// trait grows accessor methods (`fn ls_type(&Lsa) -> u16`,
-/// `fn ls_id(&Lsa) -> Ipv4Addr`, etc.) — PR 7b.
+/// `fn ls_id(&Lsa) -> Ipv4Addr`, etc.).
 pub struct Lsdb<V: OspfVersion = Ospfv2> {
     pub tables: LsTable<V>,
     pub label_map: OspfLabelMap,

@@ -68,7 +68,7 @@ impl AreaTypeKind {
 /// - `nssa_translator_role` — RFC 3101 §2.2 election behavior.
 ///   Applies to `Nssa` only.
 ///
-/// Phase 1 wires `kind` + the N-bit / E-bit negotiation; the
+/// `kind` plus the N-bit / E-bit negotiation are wired up; the
 /// remaining knobs are stored but not yet acted on.
 #[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub struct AreaType {

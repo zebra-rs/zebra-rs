@@ -1,14 +1,11 @@
-//! VTY session tracking (Phase 1).
+//! VTY session tracking.
 //!
 //! See `book/src/ch-06-01-session-design.md` for the full design.
 //!
-//! Phase 1 introduces an in-memory [`SessionTable`] keyed by
+//! Provides an in-memory [`SessionTable`] keyed by
 //! `(peer_uid, parent_pid)`. Both components are derived from kernel-backed
 //! sources (`SO_PEERCRED` plus `/proc/{pid}/status`) and never from
 //! client-supplied data. Per-RPC integration lives in `serve.rs`.
-//!
-//! No proto changes, no behavioral changes for existing RPCs — the table
-//! merely observes and records sessions.
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
@@ -37,10 +34,10 @@ pub type SessionKey = (u32, u32);
 /// - `Operator`: intermediate (clear, restart, ping/traceroute, etc.).
 /// - `Admin`: full configuration access; required for configure/commit.
 ///
-/// Sessions start at `View`. The `enable` command (Phase 4-c) authenticates
-/// the operator via PAM and promotes them to `Admin` for a bounded window
+/// Sessions start at `View`. The `enable` command authenticates the
+/// operator via PAM and promotes them to `Admin` for a bounded window
 /// (see [`Session::enable_expires`] / [`Session::enable_hard_deadline`]).
-/// Service accounts (Phase 4-d) start at `Admin` permanently.
+/// Service accounts start at `Admin` permanently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     View,
@@ -59,10 +56,6 @@ pub struct SessionContext {
 }
 
 /// Session record.
-///
-/// Phase 1 added the identity and timing fields. Phase 4-a added the RBAC
-/// (`role`) and enable-state fields. Phase 4-c adds `username` (resolved
-/// once at session creation) and wires the consumption logic.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub bash_pid: u32,
@@ -149,8 +142,6 @@ pub enum SessionError {
 }
 
 /// Concurrent table of active sessions.
-///
-/// Phase 1 only inserts and refreshes entries; no GC yet (Phase 2 adds it).
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub struct SessionTable {
