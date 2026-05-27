@@ -65,12 +65,22 @@ pub struct RestartingState {
     /// in the Restart TLV's `Remaining Time` field so helpers can
     /// seed their T3 from a meaningful value.
     pub grace_period_secs: u32,
-    /// Drain timer armed by `gr_restart_commit`. Parked here so the
-    /// Timer's Drop doesn't cancel the wakeup before it fires. When
-    /// it fires, `Message::GrRestartExit` runs `std::process::exit
-    /// (0)` and the supervisor restarts us. `None` outside the
-    /// commit→exit window.
-    pub drain_timer: Option<crate::context::Timer>,
+    /// One-shot timer that ends the restart phase. Parked here so
+    /// its Drop doesn't cancel the wakeup before it fires. Two
+    /// concrete uses:
+    ///
+    /// - **5d commit-exit**: `gr_restart_commit` arms a
+    ///   `Timer::once_ms(DRAIN_MS)` that fires `GrRestartExit` to
+    ///   run `std::process::exit(0)` once the IIH+RR drain
+    ///   completes.
+    /// - **5e-i auto-abort**: `gr_restart_load_checkpoint` arms a
+    ///   `Timer::once(remaining_secs)` that fires `GrRestartAbort`
+    ///   when the grace window expires without 5e-ii's exit-success
+    ///   path. Prevents the restart state from pinning indefinitely
+    ///   if 5e-ii hasn't yet shipped or its success path fails.
+    ///
+    /// `None` outside both windows.
+    pub abort_timer: Option<crate::context::Timer>,
 }
 
 pub struct Isis {
@@ -583,6 +593,11 @@ impl Isis {
             };
         isis.callback_build();
         isis.show_build();
+        // Phase 5e-i: restart-aware boot. No-op when no checkpoint
+        // on disk (cold-start). When present + fresh, restores
+        // self-LSPs + sets restarting state so the first IIH on
+        // every link goes out with RR=1.
+        isis.gr_restart_load_checkpoint();
         isis
     }
 
@@ -697,6 +712,132 @@ impl Isis {
         }
     }
 
+    /// Phase 5e-i: restart-aware boot. Called from `Isis::new()`
+    /// after the default-constructed instance. If a recent
+    /// checkpoint is on disk:
+    ///   - per-level self-LSPs are restored into the LSDB verbatim
+    ///     (so re-flood on first link-up post-restart is
+    ///     byte-identical to what helpers snapshotted),
+    ///   - `self.restarting = Some(...)` so the IIH send path
+    ///     attaches RR=1 from the first Hello,
+    ///   - the checkpoint file is deleted (replay of stale state
+    ///     on a second boot would propagate the wrong LSDB),
+    ///   - an auto-abort `Timer::once` fires `GrRestartAbort` when
+    ///     the remaining grace window expires, so the restart
+    ///     state doesn't pin indefinitely until 5e-ii's
+    ///     exit-success drive lands.
+    ///
+    /// Cold-starts (returns silently) when:
+    ///   - the file is absent,
+    ///   - it's unreadable / undecodable,
+    ///   - `now - written_at > 1.5 × grace_period_secs` (locked
+    ///     freshness rule per the design doc).
+    fn gr_restart_load_checkpoint(&mut self) {
+        use super::checkpoint::{IsisCheckpoint, default_path};
+        use super::lsdb::Lsa;
+        use crate::context::Timer;
+        // `IsisLsp::parse_be` comes from nom_derive's `Parse` trait,
+        // re-exported via `isis_packet::sub::*` (sub/mod.rs has
+        // `pub use nom_derive::*`).
+        use isis_packet::{IsisLspId, Parse};
+        use std::time::{Duration, SystemTime};
+
+        let path = default_path();
+        let cp = match IsisCheckpoint::read_from_path(&path) {
+            Ok(cp) => cp,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(
+                    "[GR Restart] checkpoint at {} unreadable, cold-starting: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        // Freshness: wall-clock age must be within 1.5× the grace
+        // period the restarter requested. Beyond that, helpers
+        // have already given up on us and our LSDB is stale.
+        let max_age = Duration::from_secs((cp.grace_period_secs as u64).saturating_mul(3) / 2);
+        let age = SystemTime::now()
+            .duration_since(cp.written_at)
+            .unwrap_or(Duration::ZERO);
+        if age > max_age {
+            tracing::warn!(
+                "[GR Restart] checkpoint at {} stale (age {:?} > {:?}), cold-starting",
+                path.display(),
+                age,
+                max_age
+            );
+            let _ = IsisCheckpoint::delete(&path);
+            return;
+        }
+
+        // Replay self-LSPs verbatim. Hold/refresh timers stay None
+        // until 5e-ii completes — `process_lsdb` gates both expiry
+        // arms on `restarting.is_some()` so the entries don't age
+        // out during the restart window.
+        let mut total = 0usize;
+        for lvl_cp in &cp.levels {
+            let level = match lvl_cp.level {
+                1 => Level::L1,
+                2 => Level::L2,
+                _ => continue,
+            };
+            for snap in &lvl_cp.self_lsps {
+                let lsp = match isis_packet::IsisLsp::parse_be(&snap.body) {
+                    Ok((_, lsp)) => lsp,
+                    Err(e) => {
+                        tracing::warn!(
+                            "[GR Restart] failed to parse checkpointed LSP id={:?}, skipping: {:?}",
+                            snap.lsp_id,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let key = IsisLspId { id: snap.lsp_id };
+                let mut lsa = Lsa::new(lsp);
+                lsa.originated = true;
+                lsa.bytes = snap.body.clone();
+                self.lsdb.get_mut(&level).map.insert(key, lsa);
+                total += 1;
+            }
+        }
+
+        // Arm the auto-abort timer for whatever's left of the grace
+        // window. Phase 5e-ii will replace this with the
+        // exit-success drive.
+        let remaining = max_age.saturating_sub(age);
+        let remaining_secs = remaining.as_secs().max(1);
+        let tx = self.tx.clone();
+        let abort_timer = Timer::once(remaining_secs, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartAbort);
+            }
+        });
+
+        self.restarting = Some(RestartingState {
+            // Preserve original checkpoint write time so the show
+            // command and helpers' grace-period view stay aligned
+            // with when we actually went down.
+            started_at: cp.written_at,
+            grace_period_secs: cp.grace_period_secs,
+            abort_timer: Some(abort_timer),
+        });
+
+        let _ = IsisCheckpoint::delete(&path);
+
+        tracing::info!(
+            "[GR Restart] restored from checkpoint at {}: {} self-LSPs, grace remaining ~{}s",
+            path.display(),
+            total,
+            remaining_secs,
+        );
+    }
+
     /// `clear isis graceful-restart begin` — stage a restart per
     /// RFC 5306 §3.1. Arms `self.restarting`, freezes self-LSP
     /// refresh, and kicks an IIH on every link so the next
@@ -720,7 +861,7 @@ impl Isis {
         self.restarting = Some(RestartingState {
             started_at: std::time::SystemTime::now(),
             grace_period_secs,
-            drain_timer: None,
+            abort_timer: None,
         });
         tracing::info!(
             "[GR Restart] staged, grace period {}s; flooding IIH+RR on all links",
@@ -735,7 +876,7 @@ impl Isis {
     ///   2. Build a Phase 6 checkpoint and atomically write it to
     ///      `default_path()`.
     ///   3. Arm a `Timer::once_ms(DRAIN_MS)` parked on
-    ///      `RestartingState.drain_timer` so the IIH+RR packets
+    ///      `RestartingState.abort_timer` so the IIH+RR packets
     ///      reach the wire before the socket closes.
     ///   4. When the timer fires, `Message::GrRestartExit` runs
     ///      `std::process::exit(0)`. Supervisor (systemd /
@@ -809,7 +950,9 @@ impl Isis {
         );
 
         // Arm the drain timer. Parked on RestartingState so its
-        // Drop doesn't cancel the wakeup before it fires.
+        // Drop doesn't cancel the wakeup before it fires. Replaces
+        // any 5e-i auto-abort timer that was sitting there — once a
+        // commit fires, the auto-abort path is moot.
         let tx = self.tx.clone();
         let drain_timer = Timer::once_ms(DRAIN_MS, move || {
             let tx = tx.clone();
@@ -818,7 +961,7 @@ impl Isis {
             }
         });
         if let Some(state) = self.restarting.as_mut() {
-            state.drain_timer = Some(drain_timer);
+            state.abort_timer = Some(drain_timer);
         }
     }
 
@@ -1121,6 +1264,15 @@ impl Isis {
                 // survive because no ProtoCleanup is dispatched.
                 tracing::info!("[GR Restart] drain complete; exiting process");
                 std::process::exit(0);
+            }
+            Message::GrRestartAbort => {
+                // Auto-abort fired (5e-i grace window expired). Run
+                // the same path as `clear isis graceful-restart
+                // abort`: clear restarting, kick Hellos with RR=0.
+                tracing::warn!(
+                    "[GR Restart] grace window expired without exit-success; auto-aborting"
+                );
+                self.gr_restart_abort();
             }
         }
     }
@@ -1451,10 +1603,11 @@ impl Isis {
         // our self-LSPs at a higher sequence number — helpers
         // would treat the bump as a topology change and trip their
         // MaxSeqAdvance recovery, tearing the restart down. Skip
-        // the refresh entirely; the timer keeps ticking and the
-        // post-restart `restarting = None` path resumes normal
-        // refresh cadence on the next expiry.
-        if self.restarting.is_some() && matches!(ev, RefreshTimerExpire) {
+        // both expiry arms: refresh would bump seq, and removal
+        // would age out the restored LSPs that 5e-i parked here.
+        // Timers keep ticking; the post-restart `restarting=None`
+        // path picks up normal cadence on the next expiry.
+        if self.restarting.is_some() {
             return;
         }
         let mut top = self.top();
@@ -1930,6 +2083,12 @@ pub enum Message {
     /// operator script) restarts the process; kernel routes tagged
     /// `RibType::Isis` survive because no `ProtoCleanup` is sent.
     GrRestartExit,
+    /// `gr_restart_load_checkpoint` armed an auto-abort timer for
+    /// the remaining grace window. When it fires, we run the
+    /// `gr_restart_abort` path: clear `restarting`, kick Hellos
+    /// with RR=0, resume normal operation. Phase 5e-ii's success
+    /// path will replace this auto-abort with proper T2/T3 drive.
+    GrRestartAbort,
     /// Re-originate the self LSP at `level`. The optional seq-number
     /// floor carries §7.3.16.4 semantics: when a peer floods our own
     /// LSP back at us with a seq higher than what we hold, we must
@@ -2024,6 +2183,7 @@ impl Display for Message {
                 write!(f, "[Message::LspSeqWrapClear({}, frag={})]", level, frag_id)
             }
             Message::GrRestartExit => write!(f, "[Message::GrRestartExit]"),
+            Message::GrRestartAbort => write!(f, "[Message::GrRestartAbort]"),
         }
     }
 }
