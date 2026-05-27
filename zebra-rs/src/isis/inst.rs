@@ -62,10 +62,15 @@ pub struct RestartingState {
     /// can take.
     pub started_at: std::time::SystemTime,
     /// Grace period requested at restart begin (seconds). Carried
-    /// in the Restart TLV's `Remaining Time` field once Phase 5d's
-    /// exit path encodes the deadline; today it's the operator-
-    /// supplied or default value the begin handler captured.
+    /// in the Restart TLV's `Remaining Time` field so helpers can
+    /// seed their T3 from a meaningful value.
     pub grace_period_secs: u32,
+    /// Drain timer armed by `gr_restart_commit`. Parked here so the
+    /// Timer's Drop doesn't cancel the wakeup before it fires. When
+    /// it fires, `Message::GrRestartExit` runs `std::process::exit
+    /// (0)` and the supervisor restarts us. `None` outside the
+    /// commit→exit window.
+    pub drain_timer: Option<crate::context::Timer>,
 }
 
 pub struct Isis {
@@ -617,9 +622,11 @@ impl Isis {
                 }
                 "/clear/isis/graceful-restart/begin" => {
                     // Default grace period 120s — matches OSPF's
-                    // operator-default. Phase 5d's `commit` will
-                    // accept an optional `period N` arg.
+                    // operator-default.
                     self.gr_restart_begin(120);
+                }
+                "/clear/isis/graceful-restart/commit" => {
+                    self.gr_restart_commit();
                 }
                 "/clear/isis/graceful-restart/abort" => {
                     self.gr_restart_abort();
@@ -713,12 +720,106 @@ impl Isis {
         self.restarting = Some(RestartingState {
             started_at: std::time::SystemTime::now(),
             grace_period_secs,
+            drain_timer: None,
         });
         tracing::info!(
             "[GR Restart] staged, grace period {}s; flooding IIH+RR on all links",
             grace_period_secs,
         );
         self.kick_hello_all_links();
+    }
+
+    /// `clear isis graceful-restart commit` — stage (if not
+    /// already staged) and execute the planned restart:
+    ///   1. Originate IIH+RR on every link (Phase 5c flood).
+    ///   2. Build a Phase 6 checkpoint and atomically write it to
+    ///      `default_path()`.
+    ///   3. Arm a `Timer::once_ms(DRAIN_MS)` parked on
+    ///      `RestartingState.drain_timer` so the IIH+RR packets
+    ///      reach the wire before the socket closes.
+    ///   4. When the timer fires, `Message::GrRestartExit` runs
+    ///      `std::process::exit(0)`. Supervisor (systemd /
+    ///      operator script) restarts the process; kernel routes
+    ///      tagged `RibType::Isis` survive because no
+    ///      `ProtoCleanup` is dispatched.
+    ///
+    /// Aborts and logs (no exit) when:
+    ///   - `restarter-enabled` is off,
+    ///   - checkpoint write fails (we'd lose seq continuity on
+    ///     restart — helpers would trip MaxSeqAdvance recovery).
+    fn gr_restart_commit(&mut self) {
+        use super::checkpoint::{IsisCheckpoint, default_path};
+        use crate::context::Timer;
+
+        // Drain default — matches OSPF's locked design. YANG knob
+        // can land in a follow-up if operators report tunnel/WAN
+        // paths needing more.
+        const DRAIN_MS: u64 = 200;
+
+        if !self.config.gr_restarter_enabled {
+            tracing::warn!(
+                "[GR Restart] commit ignored: graceful-restart restarter-enabled is false"
+            );
+            return;
+        }
+
+        // Stage if not staged. `gr_restart_begin` arms `restarting`
+        // and kicks IIH+RR; calling commit on an already-staged
+        // restart skips the begin step and just adds the
+        // checkpoint + exit on top.
+        if self.restarting.is_none() {
+            self.gr_restart_begin(120);
+        } else {
+            // Already staged — re-kick Hellos so the next outbound
+            // IIH is fresh before the drain elapses.
+            self.kick_hello_all_links();
+        }
+
+        let grace_period_secs = self
+            .restarting
+            .as_ref()
+            .map(|r| r.grace_period_secs)
+            .unwrap_or(120);
+
+        let cp = IsisCheckpoint::from_instance(self, grace_period_secs);
+        let path = default_path();
+        if let Err(e) = cp.write_to_path(&path) {
+            tracing::error!(
+                "[GR Restart] commit aborted: checkpoint write to {} failed: {}",
+                path.display(),
+                e
+            );
+            return;
+        }
+        tracing::info!(
+            "[GR Restart] committed: checkpoint at {} ({} L1 self-LSPs, {} L2 self-LSPs, {} adjacencies), drain={}ms",
+            path.display(),
+            cp.levels
+                .iter()
+                .find(|l| l.level == 1)
+                .map(|l| l.self_lsps.len())
+                .unwrap_or(0),
+            cp.levels
+                .iter()
+                .find(|l| l.level == 2)
+                .map(|l| l.self_lsps.len())
+                .unwrap_or(0),
+            cp.adjacencies.len(),
+            DRAIN_MS,
+        );
+
+        // Arm the drain timer. Parked on RestartingState so its
+        // Drop doesn't cancel the wakeup before it fires.
+        let tx = self.tx.clone();
+        let drain_timer = Timer::once_ms(DRAIN_MS, move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(Message::GrRestartExit);
+            }
+        });
+        if let Some(state) = self.restarting.as_mut() {
+            state.drain_timer = Some(drain_timer);
+        }
     }
 
     /// `clear isis graceful-restart abort` — walk back a staged
@@ -1012,6 +1113,14 @@ impl Isis {
             }
             Message::BfdUnsubscribe(key) => {
                 self.process_bfd_unsubscribe(key);
+            }
+            Message::GrRestartExit => {
+                // Drain window elapsed. Per the Phase 5 design doc,
+                // we trust the supervisor (systemd / operator) to
+                // restart us. Kernel routes tagged RibType::Isis
+                // survive because no ProtoCleanup is dispatched.
+                tracing::info!("[GR Restart] drain complete; exiting process");
+                std::process::exit(0);
             }
         }
     }
@@ -1815,6 +1924,12 @@ pub enum Message {
     Ifsm(IfsmEvent, u32, Option<Level>),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
+    /// `gr_restart_commit` armed a `Timer::once_ms` for the drain
+    /// window. When it fires, this message tells the dispatcher to
+    /// run `std::process::exit(0)`. The supervisor (systemd /
+    /// operator script) restarts the process; kernel routes tagged
+    /// `RibType::Isis` survive because no `ProtoCleanup` is sent.
+    GrRestartExit,
     /// Re-originate the self LSP at `level`. The optional seq-number
     /// floor carries §7.3.16.4 semantics: when a peer floods our own
     /// LSP back at us with a seq higher than what we hold, we must
@@ -1908,6 +2023,7 @@ impl Display for Message {
             Message::LspSeqWrapClear(level, frag_id) => {
                 write!(f, "[Message::LspSeqWrapClear({}, frag={})]", level, frag_id)
             }
+            Message::GrRestartExit => write!(f, "[Message::GrRestartExit]"),
         }
     }
 }
