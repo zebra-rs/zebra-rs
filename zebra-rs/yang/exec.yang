@@ -387,6 +387,10 @@ module exec {
         ext:help "IS-IS Graceful Restart (RFC 5306) per-adjacency observation";
         type empty;
       }
+      leaf checkpoint {
+        ext:help "IS-IS graceful-restart checkpoint (on-disk state)";
+        type empty;
+      }
       leaf hostname {
         ext:help "IS-IS hostname";
         type empty;
