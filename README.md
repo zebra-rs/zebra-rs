@@ -1,4 +1,4 @@
-# <img src="docs/logo.svg" alt="Project Logo" width="30" height="30" align="middle"> zebra-rs
+# <img src="docs/logo.svg" alt="Project Logo" width="30" height="30"> zebra-rs
 
 zebra-rs is a BGP, OSPF, and IS‑IS routing stack with SRv6, SR-MPLS, L3VPN, and EVPN extensions, written from scratch in Rust. Memory‑safe, async to the core, idempotent by design — and the first routing daemon to ship with a native MCP server for AI agents.
 
