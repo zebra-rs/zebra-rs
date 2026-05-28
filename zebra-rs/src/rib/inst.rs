@@ -301,6 +301,11 @@ pub struct IlmEntry {
     /// `IlmEntry::new` from the owning `rtype`. Primary tie-break key
     /// for ILM RIB selection.
     pub distance: u8,
+    /// Path metric, the second tie-break key (after distance, before
+    /// rtype) in `ilm_next`. Defaults to 0; producers don't yet stamp
+    /// a per-label cost onto the ILM, so today it only disambiguates
+    /// same-distance candidates from the same protocol.
+    pub metric: u32,
     /// True for the winning candidate at this label — the one
     /// installed to the kernel LFIB. Set by `Rib::ilm_select_sync`.
     pub selected: bool,
@@ -313,6 +318,7 @@ impl IlmEntry {
             ilm_type: IlmType::None,
             nexthop: Nexthop::default(),
             distance: ilm_distance(rtype),
+            metric: 0,
             selected: false,
         }
     }
