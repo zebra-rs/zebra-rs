@@ -1909,6 +1909,12 @@ module config {
         type string;
       }
       leaf vrf {
+        // Highest priority among interface children so the enslave to
+        // the VRF master is applied before any address: the kernel then
+        // creates the connected route directly in the VRF table instead
+        // of in the default table (which would otherwise have to be
+        // moved on bind).
+        ext:sort "10";
         type leafref {
           path "/vrf/name";
         }
