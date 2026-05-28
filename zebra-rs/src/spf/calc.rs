@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub type Graph = BTreeMap<usize, Vertex>;
 
@@ -320,7 +320,7 @@ pub fn path_has_x(path: &[usize], x: &[usize]) -> bool {
     path.iter().any(|p| x.contains(p))
 }
 
-pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> {
+pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf(graph, s, &SpfOpt::full_path());
 
     spf.iter()
@@ -331,7 +331,7 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> HashSet<usize> 
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
             if has_valid_paths { Some(*vertex) } else { None }
         })
-        .collect::<HashSet<_>>()
+        .collect::<BTreeSet<_>>()
 }
 
 /// Compute the post-convergence paths from `s` to `d` while excluding
@@ -344,7 +344,7 @@ pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize
         .map_or_else(Vec::new, |data| data.paths)
 }
 
-pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> {
+pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf_reverse(graph, d, &SpfOpt::full_path());
 
     spf.iter()
@@ -355,7 +355,7 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> HashSet<usize> 
             let has_valid_paths = path.paths.iter().any(|p| !path_has_x(p, x));
             if has_valid_paths { Some(*vertex) } else { None }
         })
-        .collect::<HashSet<_>>()
+        .collect::<BTreeSet<_>>()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -368,8 +368,8 @@ pub struct Intersect {
 // Intersect with P and Q.
 pub fn intersect(
     pc_path: &Vec<usize>,
-    p_nodes: &HashSet<usize>,
-    q_nodes: &HashSet<usize>,
+    p_nodes: &BTreeSet<usize>,
+    q_nodes: &BTreeSet<usize>,
 ) -> Vec<Intersect> {
     let mut intersects = Vec::new();
 
@@ -409,12 +409,7 @@ pub enum SrSegment {
 /// `via` of the surrounding adjacency. The most recently traversed
 /// pseudonode is cached in `pending_via` and consumed (and reset)
 /// by the next AdjSid emission.
-pub fn make_repair_list(
-    pc_inter: &[Intersect],
-    s: usize,
-    d: usize,
-    graph: &Graph,
-) -> Vec<SrSegment> {
+pub fn make_repair_list(pc_inter: &[Intersect], s: usize, graph: &Graph) -> Vec<SrSegment> {
     enum State {
         LookingForFirst,
         InP,
@@ -490,21 +485,16 @@ pub fn make_repair_list(
     }
 
     // Close out the repair list when the loop ends mid-flight.
-    match state {
-        State::InP => {
-            // Whole PC path stayed in P-space — a single NodeSid is
-            // enough; the deepest P-node naturally reaches D.
-            if let Some(p) = deepest_p {
-                sr_segments.push(SrSegment::NodeSid(p));
-            }
+    // D is included in `pc_inter` (callers must not pop it), so the
+    // AdjSid(prev, d) emission already happened inside the loop on
+    // the last iteration — re-emitting here would produce a spurious
+    // AdjSid(d, d) self-edge.
+    if let State::InP = state {
+        // Whole PC path stayed in P-space — a single NodeSid is
+        // enough; the deepest P-node naturally reaches D.
+        if let Some(p) = deepest_p {
+            sr_segments.push(SrSegment::NodeSid(p));
         }
-        State::Walking => {
-            // Ran out of vertices without entering Q-space; emit
-            // one final AdjSid into D.
-            let from = prev.unwrap_or(s);
-            sr_segments.push(SrSegment::AdjSid(from, d, pending_via));
-        }
-        State::LookingForFirst | State::InQ => {}
     }
 
     sr_segments
@@ -569,26 +559,15 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
             .map(|(_, lid)| *lid)
             .unwrap_or(0);
 
-        // Remove D — make_repair_list adds it back via the trailing
-        // AdjSid(prev, d) emission.
-        path.pop();
-
-        // Intersect over the full PCPath including pseudonodes.
+        // Intersect over the full PCPath including pseudonodes and D.
         // make_repair_list folds each pseudonode into the `via`
-        // field of the surrounding adjacency.
+        // field of the surrounding adjacency and emits AdjSid(prev, d)
+        // for the final hop as part of the loop; the caller must not
+        // strip D from the path or that emission is lost.
         let pc_inter = intersect(path, &p_vertices, &q_vertices);
 
         // Convert PC intersects into repair list.
-        let segs = make_repair_list(&pc_inter, s, d, graph);
-
-        // `segs` may legitimately be empty — the "trivial repair"
-        // case where D is a direct neighbor of S in the modified
-        // graph (PC path was just `[D]`, becomes `[]` after the
-        // `path.pop()` above), or S and D share a LAN with no
-        // router between them. The post-conv first-hop's natural
-        // forwarding reaches D with no SR steering, so install
-        // proceeds with `nhop` and an empty label stack — see
-        // `RepairCandidate.labels` doc in isis/inst.rs.
+        let segs = make_repair_list(&pc_inter, s, graph);
 
         let repair_path = RepairPath {
             first_hop: nhop,
@@ -1035,23 +1014,20 @@ mod tests {
 
         let mut pc = pc_paths(&graph, s, d, x);
         for path in &mut pc {
-            // Remove D — make_repair_list adds it back via the trailing
-            // AdjSid(prev, d) emission.
-            path.pop();
-
-            // Intersect over the full PCPath including pseudonodes.
-            // make_repair_list folds each pseudonode into the `via`
-            // field of the surrounding adjacency.
+            // PC path keeps D as the final vertex; make_repair_list
+            // emits AdjSid(deepest_p, d) for that hop while walking
+            // the intersect, so no manual pop is needed.
             let pc_inter = intersect(path, &p, &q);
 
             // Convert PC intersects into repair list.
-            let repair_list = make_repair_list(&pc_inter, s, d, &graph);
+            let repair_list = make_repair_list(&pc_inter, s, &graph);
 
-            assert_eq!(repair_list.len(), 1);
-
-            let first_segment = repair_list.first().unwrap();
-            let first_disp = seg_disp(&graph, first_segment);
-            assert_eq!(first_disp, "NodeSid(R1)");
+            // Whole P-prefix (N2, R1) collapses to NodeSid(R1), then
+            // AdjSid(R1, R2=D) reaches the destination. Q-space here
+            // is empty so the trailing hop into D must be explicit.
+            assert_eq!(repair_list.len(), 2);
+            assert_eq!(seg_disp(&graph, &repair_list[0]), "NodeSid(R1)");
+            assert_eq!(seg_disp(&graph, &repair_list[1]), "AdjSid(R1, R2)");
         }
 
         // *  First, P(S, N1) is computed and results in [N3, N2, R1].
@@ -1102,9 +1078,8 @@ mod tests {
         // node) following PCPath (R1 -> R2 -> R3): <Adj-Sid(R1-R2),
         // Adj-Sid(R2-R3)>.
         for path in &mut pc_paths {
-            // Remove D from path.
-            path.pop();
-
+            // Keep D as the final vertex; make_repair_list emits the
+            // closing hop while walking the intersect.
             let pc_inter = intersect(path, &p, &q);
 
             print!("  ");
@@ -1150,7 +1125,7 @@ mod tests {
             // failure of node N1 is: <Node-SID(R1), Adj-Sid(R1-R2), Adj-Sid(R2-R3)>.
 
             // Make repair list.
-            let repair_list = make_repair_list(&pc_inter, s, d, &graph);
+            let repair_list = make_repair_list(&pc_inter, s, &graph);
 
             assert_eq!(repair_list.len(), 3);
             let first_segment = repair_list.first().unwrap();
@@ -1233,18 +1208,17 @@ mod tests {
         );
     }
 
-    /// Trivial-repair case: D is a direct neighbor of S in the
-    /// modified graph, so the PC path is `[D]` only. After
-    /// `path.pop()` the input to `intersect` / `make_repair_list`
-    /// is empty, yielding an empty segment list. `tilfa()` must
-    /// still emit one `RepairPath` carrying `nhop = D` so the FIB
-    /// can install the trivial backup (forward to nhop, no SR
-    /// push).
+    /// Direct-neighbor case: D is a direct neighbor of S in the
+    /// modified graph, so the PC path is `[D]` only. D itself is
+    /// reachable from S without crossing X, so it lands in P-space
+    /// and the algorithm collapses the path to a single `NodeSid(D)`
+    /// — the post-conv first-hop's natural forwarding for D's
+    /// prefix-SID carries the packet.
     ///
     /// Scenario: S→N2 is a direct link cost 1; excluding N1 doesn't
     /// touch it, so PC(S, N2, x=[N1]) = [[N2]].
     #[test]
-    fn tilfa_direct_neighbor_yields_trivial_repair() {
+    fn tilfa_direct_neighbor_yields_nodesid_d() {
         let graph = tilfa_graph();
         let s = 0;
         let d = 2; // N2
@@ -1255,11 +1229,8 @@ mod tests {
         let repair = repair_paths.first().unwrap();
 
         assert_eq!(repair.first_hop, 2, "expected first-hop = N2 (id 2)");
-        assert!(
-            repair.segs.is_empty(),
-            "expected trivial repair (no SR segments), got {:?}",
-            repair.segs
-        );
+        assert_eq!(repair.segs.len(), 1);
+        assert_eq!(seg_disp(&graph, &repair.segs[0]), "NodeSid(N2)");
     }
 
     /// Case P1 (symmetric parallel links, equal metric): SPF must
