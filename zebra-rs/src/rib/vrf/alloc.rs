@@ -51,6 +51,14 @@ impl VrfIdAllocator {
     pub fn release(&mut self, id: u32) {
         self.in_use.remove(&id);
     }
+
+    /// Mark an externally-determined ID as in use so it isn't handed
+    /// out by a later `allocate`. Used when adopting a VRF master that
+    /// already exists in the kernel: its table id is the kernel's, not
+    /// one this allocator chose.
+    pub fn reserve(&mut self, id: u32) {
+        self.in_use.insert(id);
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +104,15 @@ mod tests {
         }
         assert_eq!(a.allocate(), Some(256));
         assert_eq!(a.allocate(), Some(257));
+    }
+
+    #[test]
+    fn reserve_marks_id_so_allocate_skips_it() {
+        let mut a = VrfIdAllocator::new();
+        // Adopt a kernel VRF that already uses table 1.
+        a.reserve(1);
+        // The next freshly-allocated id must skip the reserved one.
+        assert_eq!(a.allocate(), Some(2));
     }
 
     #[test]

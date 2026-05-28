@@ -11,8 +11,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo,
-    LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags,
+    LinkInfo, LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::neighbour::{NeighbourAddress, NeighbourAttribute, NeighbourMessage};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
@@ -1635,6 +1635,46 @@ impl FibHandle {
         if let Err(e) = self.handle.clone().link().del(ifindex).execute().await {
             tracing::warn!("dummy_del({}) error: {}", name, e);
         }
+    }
+
+    /// Look up an existing kernel link by name and, if it is a VRF
+    /// master device, return `(ifindex, table_id)`. Returns `None` if
+    /// the link is absent or isn't a VRF. Lets the daemon adopt a VRF
+    /// master left over from a previous run (or pre-created by the
+    /// operator) instead of failing the create with EEXIST.
+    pub async fn vrf_index_table_by_name(&self, name: &str) -> Option<(u32, u32)> {
+        use futures::TryStreamExt;
+        let mut stream = self
+            .handle
+            .clone()
+            .link()
+            .get()
+            .match_name(name.to_string())
+            .execute();
+        let msg = match stream.try_next().await {
+            Ok(Some(msg)) => msg,
+            _ => return None,
+        };
+        let ifindex = msg.header.index;
+        for attr in msg.attributes.iter() {
+            let LinkAttribute::LinkInfo(infos) = attr else {
+                continue;
+            };
+            let is_vrf = infos
+                .iter()
+                .any(|i| matches!(i, LinkInfo::Kind(InfoKind::Vrf)));
+            let table = infos.iter().find_map(|i| match i {
+                LinkInfo::Data(InfoData::Vrf(data)) => data.iter().find_map(|d| match d {
+                    InfoVrf::TableId(t) => Some(*t),
+                    _ => None,
+                }),
+                _ => None,
+            });
+            if is_vrf && let Some(t) = table {
+                return Some((ifindex, t));
+            }
+        }
+        None
     }
 
     /// Create a Linux VRF master interface bound to `table_id`. Returns

@@ -189,7 +189,16 @@ impl Rib {
     /// slaves of non-VRF masters (e.g. bridges) — both equate to
     /// the default routing table.
     fn link_vrf_id(&self, link: &Link) -> u32 {
-        let Some(master) = link.master else {
+        self.master_vrf_id(link.master)
+    }
+
+    /// Resolve a VRF id (kernel `rtm_table` value) from a raw `master`
+    /// ifindex. Returns `0` for `None` and for masters that aren't a
+    /// known VRF device (e.g. bridges) — both equate to the default
+    /// routing table. Exposed so the link-update path can compare the
+    /// VRF id *before* and *after* a master change.
+    pub(crate) fn master_vrf_id(&self, master: Option<u32>) -> u32 {
+        let Some(master) = master else {
             return 0;
         };
         self.vrfs
@@ -212,7 +221,14 @@ impl Rib {
 
     /// Push `LinkAdd` only to subscribers bound to this link's VRF.
     pub fn api_link_add(&self, link: &Link) {
-        let vrf_id = self.link_vrf_id(link);
+        self.api_link_add_vrf(link, self.link_vrf_id(link));
+    }
+
+    /// Push `LinkAdd` to subscribers bound to an explicit `vrf_id`.
+    /// Used when an interface is re-enslaved across a VRF boundary:
+    /// the link's `master` already points at the *new* VRF, so the
+    /// target VRF must be named rather than re-derived.
+    pub fn api_link_add_vrf(&self, link: &Link, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkAdd(link.clone()));
         }
@@ -237,21 +253,42 @@ impl Rib {
     /// `ifindex_vrf_id` falls back to default VRF and the message
     /// goes to the wrong subscribers.
     pub fn api_link_del(&self, ifindex: u32) {
-        let vrf_id = self.ifindex_vrf_id(ifindex);
+        self.api_link_del_vrf(ifindex, self.ifindex_vrf_id(ifindex));
+    }
+
+    /// Push `LinkDel` to subscribers bound to an explicit `vrf_id`.
+    /// Used when an interface leaves a VRF: by the time we notify, the
+    /// link's `master` already names the *new* VRF, so the *old* VRF
+    /// id must be passed in.
+    pub fn api_link_del_vrf(&self, ifindex: u32, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkDel(ifindex));
         }
     }
 
     pub fn api_addr_add(&self, addr: &LinkAddr) {
-        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        self.api_addr_add_vrf(addr, self.ifindex_vrf_id(addr.ifindex));
+    }
+
+    /// Push `AddrAdd` to subscribers bound to an explicit `vrf_id`.
+    /// Used when an interface is re-enslaved across a VRF boundary: its
+    /// addresses must be replayed to the *new* VRF's clients, which
+    /// weren't subscribed when the addresses were first learned.
+    pub fn api_addr_add_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
         }
     }
 
     pub fn api_addr_del(&self, addr: &LinkAddr) {
-        let vrf_id = self.ifindex_vrf_id(addr.ifindex);
+        self.api_addr_del_vrf(addr, self.ifindex_vrf_id(addr.ifindex));
+    }
+
+    /// Push `AddrDel` to subscribers bound to an explicit `vrf_id`.
+    /// Used when an interface leaves a VRF: its addresses must be
+    /// withdrawn from the *old* VRF's clients, so the old VRF id must
+    /// be passed in.
+    pub fn api_addr_del_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrDel(addr.clone()));
         }

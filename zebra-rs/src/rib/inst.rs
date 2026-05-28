@@ -1423,15 +1423,36 @@ impl Rib {
                     // `ip link add` would just error.
                     return;
                 }
-                let Some(table_id) = self.vrf_id_alloc.allocate() else {
-                    tracing::warn!("vrf_add({}) failed — id space exhausted", name);
-                    return;
-                };
-                let Some(ifindex) = self.fib_handle.vrf_add(&name, table_id).await else {
-                    // Netlink rejected the create — release the id so
-                    // the next attempt isn't penalised by a leak.
-                    self.vrf_id_alloc.release(table_id);
-                    return;
+                // A VRF master of this name may already exist in the
+                // kernel — left over from a previous run that didn't
+                // clean up, or pre-created by the operator. Adopt it
+                // (taking the kernel's table id as authoritative) rather
+                // than trying to create a duplicate, which the kernel
+                // rejects with EEXIST and which would leave the VRF
+                // unusable and any pending interface binding stuck.
+                let (ifindex, table_id) = if let Some((ifindex, existing_table)) =
+                    self.fib_handle.vrf_index_table_by_name(&name).await
+                {
+                    self.vrf_id_alloc.reserve(existing_table);
+                    tracing::info!(
+                        "vrf_add: adopting existing kernel VRF {} ifindex={} table_id={}",
+                        name,
+                        ifindex,
+                        existing_table
+                    );
+                    (ifindex, existing_table)
+                } else {
+                    let Some(table_id) = self.vrf_id_alloc.allocate() else {
+                        tracing::warn!("vrf_add({}) failed — id space exhausted", name);
+                        return;
+                    };
+                    let Some(ifindex) = self.fib_handle.vrf_add(&name, table_id).await else {
+                        // Netlink rejected the create — release the id so
+                        // the next attempt isn't penalised by a leak.
+                        self.vrf_id_alloc.release(table_id);
+                        return;
+                    };
+                    (ifindex, table_id)
                 };
                 self.vrfs.insert(
                     name.clone(),
