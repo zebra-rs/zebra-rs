@@ -1320,9 +1320,27 @@ impl Rib {
     /// ILM is VRF-agnostic at the kernel (single global MPLS table),
     /// so the dispatcher ignores `table_id` for those variants and
     /// the global path runs unchanged — see `Rib::ilm_add`.
+    /// A connected route belongs in the routing table of the VRF its
+    /// interface is enslaved to. Internal `Ipv4Add`/`Ipv6Add` sends
+    /// arrive with `RT_TABLE_MAIN` and carry the interface ifindex on
+    /// the entry; redirect the connected ones onto their interface's
+    /// VRF table so they land in `vrf_tables` instead of polluting the
+    /// default table. Non-connected entries and inbound envelopes that
+    /// already name a VRF table are returned unchanged.
+    fn route_table_for(&self, entry: &RibEntry, table_id: u32) -> u32 {
+        if table_id == RT_TABLE_MAIN && entry.is_connected() {
+            let vrf_id = self.ifindex_vrf_id(entry.ifindex);
+            if vrf_id != 0 {
+                return vrf_id;
+            }
+        }
+        table_id
+    }
+
     async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
             Message::Ipv4Add { prefix, rib } => {
+                let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_add(&prefix, rib, table_id).await;
                 } else {
@@ -1330,6 +1348,7 @@ impl Rib {
                 }
             }
             Message::Ipv4Del { prefix, rib } => {
+                let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_del(&prefix, rib, table_id).await;
                 } else {
@@ -1337,6 +1356,7 @@ impl Rib {
                 }
             }
             Message::Ipv6Add { prefix, rib } => {
+                let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_add(&prefix, rib, table_id).await;
                 } else {
@@ -1344,6 +1364,7 @@ impl Rib {
                 }
             }
             Message::Ipv6Del { prefix, rib } => {
+                let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_del(&prefix, rib, table_id).await;
                 } else {
@@ -1921,14 +1942,25 @@ impl Rib {
             }
             FibMessage::NewRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_add(&prefix, route.entry, RT_TABLE_MAIN)
-                        .await;
+                    if route.table_id == RT_TABLE_MAIN {
+                        self.ipv4_route_add(&prefix, route.entry, RT_TABLE_MAIN)
+                            .await;
+                    } else if self.vrf_tables.contains_key(&route.table_id) {
+                        // A route the kernel placed in a VRF's table —
+                        // mirror it into that VRF. Tables we don't manage
+                        // are ignored rather than dumped into the default.
+                        self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry);
+                    }
                 }
             }
             FibMessage::DelRoute(route) => {
                 if let IpNet::V4(prefix) = route.prefix {
-                    self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
-                        .await;
+                    if route.table_id == RT_TABLE_MAIN {
+                        self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
+                            .await;
+                    } else if self.vrf_tables.contains_key(&route.table_id) {
+                        self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry);
+                    }
                 }
             }
             FibMessage::NewNexthop(id) => {

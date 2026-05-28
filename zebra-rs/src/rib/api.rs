@@ -212,7 +212,7 @@ impl Rib {
     /// `0` when the ifindex is unknown — fail-safe to default-VRF,
     /// matching the inbound dispatcher's behaviour for ghost
     /// `ProtoId`s.
-    fn ifindex_vrf_id(&self, ifindex: u32) -> u32 {
+    pub(crate) fn ifindex_vrf_id(&self, ifindex: u32) -> u32 {
         self.links
             .get(&ifindex)
             .map(|l| self.link_vrf_id(l))
