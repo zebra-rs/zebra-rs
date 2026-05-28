@@ -42,6 +42,20 @@ use crate::rib::{
     Vxlan, link, nexthop::NexthopMember,
 };
 
+/// Pull the nexthop-object id (`NHA_ID`) out of an inbound
+/// RTM_NEWNEXTHOP / RTM_DELNEXTHOP. The id is the same value RIB hands
+/// to the kernel as the route's `Nhid`, so it indexes `NexthopMap`
+/// directly. Returns `None` for a malformed message with no id.
+fn nexthop_id_from_msg(msg: &NexthopMessage) -> Option<u32> {
+    msg.attributes.iter().find_map(|attr| {
+        if let NexthopAttribute::Id(id) = attr {
+            Some(*id)
+        } else {
+            None
+        }
+    })
+}
+
 /// Compact one-line dump of a `Nexthop` for diagnostic logging.
 /// Surfaces the fields that matter when the kernel rejects an
 /// install — `gid` (so we can spot `Nhid(0)` mistakes), per-leg
@@ -116,6 +130,11 @@ fn fmt_group_for_trace(group: &Group) -> String {
         }
     }
 }
+
+/// Modern rtnetlink multicast group for nexthop objects
+/// (`RTNLGRP_NEXTHOP`, linux/rtnetlink.h). Numbered past the legacy
+/// `RTMGRP_*` bind mask, so it's joined via `add_membership`.
+const RTNLGRP_NEXTHOP: u32 = 32;
 
 // Flip to true to re-enable IPv6 FIB install diagnostic prints.
 const DEBUG_V6: bool = false;
@@ -288,6 +307,25 @@ impl FibHandle {
         let addr = SocketAddr::new(0, mgroup_flags);
         connection.socket_mut().socket_mut().bind(&addr)?;
 
+        // RTM_NEWNEXTHOP / RTM_DELNEXTHOP aren't covered by the legacy
+        // RTMGRP_* bind mask (that only spans the first ~20 groups).
+        // Join the modern multicast group so the kernel delivers
+        // nexthop-object add/del notifications — `process_fib_msg`
+        // uses RTM_DELNEXTHOP to reconcile NexthopMap when the kernel
+        // auto-removes a nexthop (link down / gateway unreachable),
+        // which otherwise leaves our `installed` flag stale and routes
+        // failing to reinstall against a missing nh_id. Non-fatal: a
+        // kernel without nexthop-group support just won't send these.
+        if let Err(e) = connection
+            .socket_mut()
+            .socket_mut()
+            .add_membership(RTNLGRP_NEXTHOP)
+        {
+            tracing::warn!(
+                "fib: could not join RTNLGRP_NEXTHOP ({e}); nexthop reconciliation disabled"
+            );
+        }
+
         tokio::spawn(connection);
 
         let tx = rib_tx.clone();
@@ -409,7 +447,9 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!(
-                    "NewRoute error: {prefix} {e} use_nhid={} nh={}",
+                    "NewRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
+                    entry.rtype,
+                    entry.metric,
                     self.use_nhid,
                     fmt_nexthop_for_trace(nexthop),
                 );
@@ -530,7 +570,13 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
-                tracing::info!("DelRoute error: {e} {prefix}");
+                tracing::info!(
+                    "DelRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
+                    entry.rtype,
+                    entry.metric,
+                    self.use_nhid,
+                    fmt_nexthop_for_trace(nexthop),
+                );
             }
         }
     }
@@ -893,7 +939,13 @@ impl FibHandle {
             if let NetlinkPayload::Error(e) = msg.payload
                 && DEBUG_ADDR
             {
-                tracing::info!("DelRoute IPv6 error: {e} {prefix}");
+                tracing::info!(
+                    "DelRoute IPv6 error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
+                    entry.rtype,
+                    entry.metric,
+                    self.use_nhid,
+                    fmt_nexthop_for_trace(nexthop),
+                );
             }
         }
     }
@@ -2578,6 +2630,16 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
             RouteNetlinkMessage::DelRoute(msg) => {
                 if let Some(route) = route_from_msg(msg) {
                     let _ = tx.send(FibMessage::DelRoute(route));
+                }
+            }
+            RouteNetlinkMessage::NewNexthop(msg) => {
+                if let Some(id) = nexthop_id_from_msg(&msg) {
+                    let _ = tx.send(FibMessage::NewNexthop(id));
+                }
+            }
+            RouteNetlinkMessage::DelNexthop(msg) => {
+                if let Some(id) = nexthop_id_from_msg(&msg) {
+                    let _ = tx.send(FibMessage::DelNexthop(id));
                 }
             }
             RouteNetlinkMessage::NewNeighbour(msg) => {
