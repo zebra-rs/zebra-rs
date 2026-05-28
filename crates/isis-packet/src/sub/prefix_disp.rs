@@ -1,7 +1,8 @@
 use std::fmt::{Display, Formatter, Result};
 
 use super::prefix::{
-    IsisSub2SidStructure, IsisSub2Tlv, IsisSubSrv6EndSid, IsisSubTlv, PrefixSidFlags,
+    IsisSub2SidStructure, IsisSub2Tlv, IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId,
+    IsisSubSrv6EndSid, IsisSubTlv, PrefixSidFlags,
 };
 use super::{
     IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
@@ -67,8 +68,22 @@ impl Display for IsisSubTlv {
         match self {
             PrefixSid(v) => write!(f, "{}", v),
             Srv6EndSid(v) => write!(f, "{}", v),
+            Ipv4SourceRouterId(v) => write!(f, "{}", v),
+            Ipv6SourceRouterId(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "Unknown: Code {}, Length {}", v.code, v.len),
         }
+    }
+}
+
+impl Display for IsisSubIpv4SourceRouterId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "   IPv4 Source Router ID: {}", self.router_id)
+    }
+}
+
+impl Display for IsisSubIpv6SourceRouterId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "   IPv6 Source Router ID: {}", self.router_id)
     }
 }
 
