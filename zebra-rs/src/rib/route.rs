@@ -626,17 +626,56 @@ impl Rib {
     /// `table_id` parameter, and the inbound dispatcher doesn't pass
     /// one for these variants.
     pub async fn ilm_add(&mut self, label: u32, ilm: IlmEntry) {
-        // Need to update ilm table.
-        self.ilm.insert(label, ilm.clone());
-
-        self.fib_handle.ilm_del(label, &ilm).await;
-        self.fib_handle.ilm_add(label, &ilm).await;
+        let prev = self.ilm_installed(label);
+        let entries = self.ilm.entry(label).or_default();
+        // One candidate per protocol: drop this protocol's previous
+        // entry before pushing the new one (mirrors `rib_replace`).
+        entries.retain(|e| e.rtype != ilm.rtype);
+        entries.push(ilm);
+        self.ilm_select_sync(label, prev).await;
     }
 
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
-        self.ilm.remove(&label);
+        let prev = self.ilm_installed(label);
+        if let Some(entries) = self.ilm.get_mut(&label) {
+            entries.retain(|e| e.rtype != ilm.rtype);
+            if entries.is_empty() {
+                self.ilm.remove(&label);
+            }
+        }
+        self.ilm_select_sync(label, prev).await;
+    }
 
-        self.fib_handle.ilm_del(label, &ilm).await;
+    /// The candidate currently installed in the kernel LFIB for
+    /// `label` (the `selected` one), cloned so it can be handed to the
+    /// FIB delete after the in-memory Vec has been mutated.
+    fn ilm_installed(&self, label: u32) -> Option<IlmEntry> {
+        self.ilm.get(&label)?.iter().find(|e| e.selected).cloned()
+    }
+
+    /// Re-run ILM selection for `label` and reconcile the kernel LFIB.
+    /// `prev` is the entry installed before the Vec was mutated. The
+    /// kernel holds one AF_MPLS route per label, so we delete the old
+    /// install (keyed on the label) and add the new winner. Always
+    /// del+add when a winner exists so a same-protocol content change
+    /// (e.g. OSPF nexthop churn) reaches the kernel.
+    async fn ilm_select_sync(&mut self, label: u32, prev: Option<IlmEntry>) {
+        let winner = if let Some(entries) = self.ilm.get_mut(&label) {
+            let best = ilm_next(entries);
+            for (i, e) in entries.iter_mut().enumerate() {
+                e.selected = best == Some(i);
+            }
+            best.map(|i| entries[i].clone())
+        } else {
+            None
+        };
+
+        if let Some(prev) = &prev {
+            self.fib_handle.ilm_del(label, prev).await;
+        }
+        if let Some(win) = &winner {
+            self.fib_handle.ilm_add(label, win).await;
+        }
     }
 
     pub async fn make_link_up(&mut self, ifindex: u32) {
@@ -1332,6 +1371,23 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Pick the winning ILM candidate: lowest admin distance, then
+/// protocol order as a stable tie-break. ILM entries carry no metric
+/// today (no per-label cost from the producers), so distance + rtype
+/// fully disambiguates. Returns the index into `entries`, or `None`
+/// when empty.
+fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            a.distance
+                .cmp(&b.distance)
+                .then(a.rtype.u8().cmp(&b.rtype.u8()))
+        })
+        .map(|(i, _)| i)
+}
+
 // IPv6 helper functions
 
 async fn ipv6_entry_selection(
@@ -1823,6 +1879,48 @@ mod tests {
         RecoveryDecision, SuppressReason, addr_recover_decide,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn ilm_next_picks_lowest_distance() {
+        use super::IlmEntry;
+        use super::ilm_next;
+        use crate::rib::RibType;
+
+        // Empty table has no winner.
+        assert_eq!(ilm_next(&[]), None);
+
+        // A lone candidate always wins.
+        let isis = IlmEntry::new(RibType::Isis);
+        assert_eq!(ilm_next(std::slice::from_ref(&isis)), Some(0));
+
+        // OSPF (110) beats IS-IS (115) regardless of insertion order.
+        let ospf = IlmEntry::new(RibType::Ospf);
+        assert_eq!(ilm_next(&[isis.clone(), ospf.clone()]), Some(1));
+        assert_eq!(ilm_next(&[ospf, isis]), Some(0));
+
+        // Static (1) outranks BGP (20) and OSPF (110).
+        let entries = [
+            IlmEntry::new(RibType::Bgp),
+            IlmEntry::new(RibType::Static),
+            IlmEntry::new(RibType::Ospf),
+        ];
+        assert_eq!(ilm_next(&entries), Some(1));
+    }
+
+    #[test]
+    fn ilm_next_tie_breaks_on_rtype() {
+        use super::IlmEntry;
+        use super::ilm_next;
+        use crate::rib::RibType;
+
+        // Equal distance: the lower protocol code wins. Other(10).u8()
+        // = 10 < Other(20).u8() = 20, so index 1 is selected.
+        let mut a = IlmEntry::new(RibType::Other(20));
+        let mut b = IlmEntry::new(RibType::Other(10));
+        a.distance = 50;
+        b.distance = 50;
+        assert_eq!(ilm_next(&[a, b]), Some(1));
+    }
 
     #[test]
     fn first_delete_recovers() {

@@ -1221,6 +1221,7 @@ fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> Strin
 pub struct IlmJson {
     pub protocol: String,
     pub distance: u8,
+    pub selected: bool,
     pub local_label: u32,
     pub outgoing_label: String,
     pub prefix_or_id: String,
@@ -1237,17 +1238,19 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut entries = Vec::new();
 
-        for (label, ilm) in rib.ilm.iter() {
-            match &ilm.nexthop {
-                Nexthop::Uni(uni) => {
-                    entries.push(ilm_to_json(rib, *label, ilm, uni));
-                }
-                Nexthop::Multi(multi) => {
-                    for uni in multi.nexthops.iter() {
+        for (label, ilms) in rib.ilm.iter() {
+            for ilm in ilms.iter() {
+                match &ilm.nexthop {
+                    Nexthop::Uni(uni) => {
                         entries.push(ilm_to_json(rib, *label, ilm, uni));
                     }
+                    Nexthop::Multi(multi) => {
+                        for uni in multi.nexthops.iter() {
+                            entries.push(ilm_to_json(rib, *label, ilm, uni));
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
@@ -1260,31 +1263,33 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
         // Add header
         writeln!(
             buf,
-            "P Dist Local  Outgoing    Prefix             Outgoing     Next Hop"
+            "   P Dist Local  Outgoing    Prefix             Outgoing     Next Hop"
         )
         .unwrap();
         writeln!(
             buf,
-            "       Label  Label       or ID              Interface"
+            "          Label  Label       or ID              Interface"
         )
         .unwrap();
         writeln!(
             buf,
-            "- ---- ------ ----------- ------------------ ------------ ---------------"
+            "-- - ---- ------ ----------- ------------------ ------------ ---------------"
         )
         .unwrap();
 
-        for (label, ilm) in rib.ilm.iter() {
-            match &ilm.nexthop {
-                Nexthop::Uni(uni) => {
-                    write_ilm_entry(&mut buf, rib, *label, ilm, uni);
-                }
-                Nexthop::Multi(multi) => {
-                    for uni in multi.nexthops.iter() {
+        for (label, ilms) in rib.ilm.iter() {
+            for ilm in ilms.iter() {
+                match &ilm.nexthop {
+                    Nexthop::Uni(uni) => {
                         write_ilm_entry(&mut buf, rib, *label, ilm, uni);
                     }
+                    Nexthop::Multi(multi) => {
+                        for uni in multi.nexthops.iter() {
+                            write_ilm_entry(&mut buf, rib, *label, ilm, uni);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
@@ -1300,6 +1305,7 @@ fn write_ilm_entry(
     ilm: &super::inst::IlmEntry,
     uni: &super::NexthopUni,
 ) {
+    let marker = if ilm.selected { "*>" } else { "" };
     let protocol = ilm.rtype.abbrev();
     let distance = format!("{:<4}", ilm.distance);
     let local_label = format!("{:<6}", label);
@@ -1347,8 +1353,8 @@ fn write_ilm_entry(
 
     writeln!(
         buf,
-        "{} {} {} {} {:<18} {:<12} {}",
-        protocol, distance, local_label, outgoing_label, prefix_or_id, interface, next_hop
+        "{:<2} {} {} {} {} {:<18} {:<12} {}",
+        marker, protocol, distance, local_label, outgoing_label, prefix_or_id, interface, next_hop
     )
     .unwrap();
 }
@@ -1401,6 +1407,7 @@ fn ilm_to_json(
     IlmJson {
         protocol: protocol_long_name(ilm.rtype).to_string(),
         distance: ilm.distance,
+        selected: ilm.selected,
         local_label: label,
         outgoing_label,
         prefix_or_id,
