@@ -771,20 +771,23 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        ipv6_route_sync(
+        let retry = ipv6_route_sync(
             &mut self.table_v6,
             &mut self.nmap,
             &self.fib_handle,
             RT_TABLE_MAIN,
         )
         .await;
+        if retry {
+            self.schedule_rib_sync();
+        }
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
         ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
         // `false` = not an ifdown sweep; this resolve cycle is for FIB-update
         // re-resolution, not link-down recovery.
-        ipv4_route_sync(
+        let retry = ipv4_route_sync(
             &mut self.table,
             &mut self.nmap,
             &self.fib_handle,
@@ -792,6 +795,11 @@ impl Rib {
             false,
         )
         .await;
+        // A failed install forced a nexthop recreation; arm another
+        // pass so the recreated nexthop and the pending route both land.
+        if retry {
+            self.schedule_rib_sync();
+        }
     }
 
     pub async fn rib_selection(
@@ -803,7 +811,7 @@ impl Rib {
         let Some(entries) = self.table.get_mut(prefix) else {
             return;
         };
-        ipv4_entry_selection(
+        let retry = ipv4_entry_selection(
             prefix,
             entries,
             replace,
@@ -813,6 +821,9 @@ impl Rib {
             false,
         )
         .await;
+        if retry {
+            self.schedule_rib_sync();
+        }
     }
 
     pub async fn rib_selection_v6(
@@ -824,7 +835,7 @@ impl Rib {
         let Some(entries) = self.table_v6.get_mut(prefix) else {
             return;
         };
-        ipv6_entry_selection(
+        let retry = ipv6_entry_selection(
             prefix,
             entries,
             replace,
@@ -833,6 +844,9 @@ impl Rib {
             table_id,
         )
         .await;
+        if retry {
+            self.schedule_rib_sync();
+        }
     }
 }
 
@@ -843,11 +857,11 @@ pub async fn rib_selection_ipv4(
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
-) {
+) -> bool {
     let Some(entries) = table.get_mut(prefix) else {
-        return;
+        return false;
     };
-    ipv4_entry_selection(prefix, entries, replace, nmap, fib, table_id, true).await;
+    ipv4_entry_selection(prefix, entries, replace, nmap, fib, table_id, true).await
 }
 
 pub async fn rib_selection_ipv6(
@@ -857,11 +871,11 @@ pub async fn rib_selection_ipv6(
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
-) {
+) -> bool {
     let Some(entries) = table.get_mut(prefix) else {
-        return;
+        return false;
     };
-    ipv6_entry_selection(prefix, entries, replace, nmap, fib, table_id).await;
+    ipv6_entry_selection(prefix, entries, replace, nmap, fib, table_id).await
 }
 
 pub async fn ipv4_nexthop_sync(
@@ -958,7 +972,12 @@ pub async fn ipv4_nexthop_sync(
                     fib.nexthop_add(&Group::Multi(multi.clone())).await;
                 } else if multi.valid != set {
                     // Update.
-                    println!("XXX NexthopMulti Update {:?} -> {:?}", multi.valid, set);
+                    tracing::debug!(
+                        "NexthopMulti update gid={} {:?} -> {:?}",
+                        multi.gid(),
+                        multi.valid,
+                        set
+                    );
                     multi.valid = set;
                     fib.nexthop_add(&Group::Multi(multi.clone())).await;
                 } else {
@@ -976,17 +995,19 @@ pub async fn ipv4_route_sync(
     fib: &FibHandle,
     table_id: u32,
     ifdown: bool,
-) {
+) -> bool {
     // Collect prefixes first so we don't hold the !Send `IterMut`
     // across the `ipv4_entry_selection` await.
     let prefixes: Vec<Ipv4Net> = table.iter().map(|(p, _)| p).collect();
+    let mut retry = false;
     for p in prefixes {
         let Some(entries) = table.get_mut(&p) else {
             continue;
         };
         ipv4_entry_resolve(entries, nmap, ifdown);
-        ipv4_entry_selection(&p, entries, None, nmap, fib, table_id, ifdown).await;
+        retry |= ipv4_entry_selection(&p, entries, None, nmap, fib, table_id, ifdown).await;
     }
+    retry
 }
 
 fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool) {
@@ -997,6 +1018,10 @@ fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool)
     }
 }
 
+/// Returns `true` when a route install came back from the kernel as a
+/// failure and we forced a nexthop recreation — the caller should
+/// schedule another resolve pass so the recreated nexthop and the
+/// pending route both land.
 async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
     entries: &mut RibEntries,
@@ -1005,7 +1030,7 @@ async fn ipv4_entry_selection(
     fib: &FibHandle,
     table_id: u32,
     ifdown: bool,
-) {
+) -> bool {
     if let Some(mut replace) = replace
         && replace.is_protocol()
     {
@@ -1016,45 +1041,97 @@ async fn ipv4_entry_selection(
     }
     // Selected.
     let prev = rib_prev(entries);
-
-    // New select.
-    if ifdown {
-        // println!("P: {}", prefix);
-        // for e in entries.iter() {
-        //     println!(
-        //         "E: {:?} distance {} metric {} valid {}",
-        //         e.rtype, e.distance, e.metric, e.valid
-        //     )
-        // }
-    }
-
     let next = rib_next(entries);
 
     if prev == next {
-        return;
-    }
-    if ifdown {
-        // println!("Change: {} prev: {:?} next: {:?}", prefix, prev, next);
+        // No selection change. The selected route may still be missing
+        // from the FIB — the kernel drops routes (and their nexthops)
+        // on link down without an RTM_DELROUTE, leaving it selected but
+        // `fib == false`. Re-add it once its nexthop is resolvable.
+        // Skip during an ifdown sweep (the route is on its way out).
+        if !ifdown && let Some(idx) = next {
+            let e = entries.get_mut(idx).unwrap();
+            if e.is_protocol() && e.is_valid() && !e.is_fib() {
+                e.nexthop_sync(nmap, fib).await;
+                let ok = fib.route_ipv4_add(prefix, e, table_id).await;
+                e.set_fib(ok);
+                if !ok {
+                    nexthop_force_reinstall(&e.nexthop, nmap);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
-        if ifdown {
-            // println!("Remove: {}", prefix);
-        } else {
+        if !ifdown {
             fib.route_ipv4_del(prefix, prev, table_id).await;
         }
         prev.set_fib(false);
     }
+    let mut retry = false;
     if let Some(next) = next {
         let next = entries.get_mut(next).unwrap();
         next.set_selected(true);
 
         if next.is_protocol() {
             next.nexthop_sync(nmap, fib).await;
-            fib.route_ipv4_add(prefix, next, table_id).await;
+            let ok = fib.route_ipv4_add(prefix, next, table_id).await;
+            next.set_fib(ok);
+            if !ok {
+                nexthop_force_reinstall(&next.nexthop, nmap);
+                retry = true;
+            }
+        } else {
+            next.set_fib(true);
         }
-        next.set_fib(true);
+    }
+    retry
+}
+
+/// Drop our "installed" belief for an entry's nexthop so the next
+/// `*_nexthop_sync` recreates it in the kernel. Used when a route
+/// install comes back as an error — the most common cause is the
+/// kernel having silently dropped the nexthop object on link down, so
+/// the route's `Nhid` now points at nothing. A Uni group is
+/// reinstalled while `!installed`; a Multi group while `!valid`, so
+/// clear the flag the relevant sync loop watches.
+fn nexthop_force_reinstall(nexthop: &Nexthop, nmap: &mut NexthopMap) {
+    fn force(nmap: &mut NexthopMap, gid: usize) {
+        if let Some(group) = nmap.get_mut(gid) {
+            match group {
+                Group::Uni(_) => group.set_installed(false),
+                Group::Multi(_) => {
+                    group.set_valid(false);
+                    group.set_installed(false);
+                }
+            }
+        }
+    }
+    match nexthop {
+        Nexthop::Uni(uni) => force(nmap, uni.gid),
+        Nexthop::Multi(multi) => {
+            force(nmap, multi.gid);
+            for uni in &multi.nexthops {
+                force(nmap, uni.gid);
+            }
+        }
+        Nexthop::List(list) => {
+            for member in &list.nexthops {
+                match member {
+                    NexthopMember::Uni(uni) => force(nmap, uni.gid),
+                    NexthopMember::Multi(multi) => {
+                        force(nmap, multi.gid);
+                        for uni in &multi.nexthops {
+                            force(nmap, uni.gid);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1397,7 +1474,7 @@ async fn ipv6_entry_selection(
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
-) {
+) -> bool {
     if DEBUG_V6 {
         println!(
             "[ipv6_entry_selection] prefix={} entries={} replace={}",
@@ -1431,7 +1508,7 @@ async fn ipv6_entry_selection(
             entry.set_selected(on);
             entry.set_fib(on);
         }
-        return;
+        return false;
     }
 
     // Selected.
@@ -1445,7 +1522,21 @@ async fn ipv6_entry_selection(
     }
 
     if prev == next {
-        return;
+        // No selection change — re-add a selected route the kernel
+        // dropped on link down (no RTM_DELROUTE), once it resolves.
+        if let Some(idx) = next {
+            let e = entries.get_mut(idx).unwrap();
+            if e.is_protocol() && e.is_valid() && !e.is_fib() {
+                e.nexthop_sync(nmap, fib).await;
+                let ok = fib.route_ipv6_add(prefix, e, table_id).await;
+                e.set_fib(ok);
+                if !ok {
+                    nexthop_force_reinstall(&e.nexthop, nmap);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
@@ -1454,16 +1545,24 @@ async fn ipv6_entry_selection(
         fib.route_ipv6_del(prefix, prev, table_id).await;
         prev.set_fib(false);
     }
+    let mut retry = false;
     if let Some(next) = next {
         let next = entries.get_mut(next).unwrap();
         next.set_selected(true);
 
         if next.is_protocol() {
             next.nexthop_sync(nmap, fib).await;
-            fib.route_ipv6_add(prefix, next, table_id).await;
+            let ok = fib.route_ipv6_add(prefix, next, table_id).await;
+            next.set_fib(ok);
+            if !ok {
+                nexthop_force_reinstall(&next.nexthop, nmap);
+                retry = true;
+            }
+        } else {
+            next.set_fib(true);
         }
-        next.set_fib(true);
     }
+    retry
 }
 
 fn rib_add_v6(table: &mut PrefixMap<Ipv6Net, RibEntries>, prefix: &Ipv6Net, entry: RibEntry) {
@@ -1588,17 +1687,19 @@ pub async fn ipv6_route_sync(
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
-) {
+) -> bool {
     // Collect prefixes first so we don't hold the !Send `IterMut`
     // across the `ipv6_entry_selection` await.
     let prefixes: Vec<Ipv6Net> = table.iter().map(|(p, _)| p).collect();
+    let mut retry = false;
     for p in prefixes {
         let Some(entries) = table.get_mut(&p) else {
             continue;
         };
         ipv6_entry_resolve(entries, nmap);
-        ipv6_entry_selection(&p, entries, None, nmap, fib, table_id).await;
+        retry |= ipv6_entry_selection(&p, entries, None, nmap, fib, table_id).await;
     }
+    retry
 }
 
 fn ipv6_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {

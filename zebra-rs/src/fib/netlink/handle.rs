@@ -308,22 +308,21 @@ impl FibHandle {
         connection.socket_mut().socket_mut().bind(&addr)?;
 
         // RTM_NEWNEXTHOP / RTM_DELNEXTHOP aren't covered by the legacy
-        // RTMGRP_* bind mask (that only spans the first ~20 groups).
-        // Join the modern multicast group so the kernel delivers
-        // nexthop-object add/del notifications — `process_fib_msg`
-        // uses RTM_DELNEXTHOP to reconcile NexthopMap when the kernel
-        // auto-removes a nexthop (link down / gateway unreachable),
-        // which otherwise leaves our `installed` flag stale and routes
-        // failing to reinstall against a missing nh_id. Non-fatal: a
-        // kernel without nexthop-group support just won't send these.
-        if let Err(e) = connection
+        // RTMGRP_* bind mask (it only spans the first ~20 groups). Join
+        // the modern multicast group so the kernel delivers nexthop
+        // add/del notifications — `process_fib_msg` uses RTM_DELNEXTHOP
+        // to reconcile NexthopMap when the kernel drops a nexthop. Needs
+        // netlink-packet-route's group-nexthop decode fix (see the
+        // `decodes_rtm_newnexthop_group` test). Non-fatal on join error.
+        match connection
             .socket_mut()
             .socket_mut()
             .add_membership(RTNLGRP_NEXTHOP)
         {
-            tracing::warn!(
+            Ok(()) => tracing::info!("fib: joined RTNLGRP_NEXTHOP for nexthop reconciliation"),
+            Err(e) => tracing::warn!(
                 "fib: could not join RTNLGRP_NEXTHOP ({e}); nexthop reconciliation disabled"
-            );
+            ),
         }
 
         tokio::spawn(connection);
@@ -360,7 +359,7 @@ impl FibHandle {
         entry: &RibEntry,
         nexthop: &Nexthop,
         table_id: u32,
-    ) {
+    ) -> bool {
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -443,9 +442,17 @@ impl FibHandle {
             fmt_nexthop_for_trace(nexthop),
         );
 
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
+                // EEXIST means the route is already in the FIB — treat it
+                // as installed. Otherwise the self-heal would keep
+                // re-adding it every resolve cycle, forever.
+                if e.to_io().raw_os_error() == Some(libc::EEXIST) {
+                    continue;
+                }
+                ok = false;
                 tracing::info!(
                     "NewRoute error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
                     entry.rtype,
@@ -455,30 +462,35 @@ impl FibHandle {
                 );
             }
         }
+        ok
     }
 
-    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
+    /// Returns whether the route ended up in the kernel FIB. `true` also
+    /// covers EEXIST (already present). `false` means a real netlink
+    /// error — commonly EINVAL "nexthop id does not exist" when use_nhid
+    /// points at a nexthop the kernel silently dropped on link down. The
+    /// caller leaves the route's `fib` flag
+    /// clear and forces the nexthop's recreation so the next resolve
+    /// pass re-adds it.
+    pub async fn route_ipv4_add(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) -> bool {
         if !entry.is_protocol() {
-            return;
+            return true;
         }
         match &entry.nexthop {
-            Nexthop::Uni(_) => {
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {
                 self.route_ipv4_add_uni(prefix, entry, &entry.nexthop, table_id)
-                    .await;
-            }
-            Nexthop::Multi(_) => {
-                self.route_ipv4_add_uni(prefix, entry, &entry.nexthop, table_id)
-                    .await;
+                    .await
             }
             Nexthop::List(pro) => {
+                let mut ok = true;
                 for member in pro.nexthops.iter() {
-                    self.route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
+                    ok &= self
+                        .route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
+                ok
             }
-            _ => {
-                //
-            }
+            _ => true,
         }
     }
 
@@ -607,7 +619,7 @@ impl FibHandle {
         entry: &RibEntry,
         nexthop: &Nexthop,
         table_id: u32,
-    ) {
+    ) -> bool {
         if DEBUG_V6 {
             tracing::info!(
                 "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
@@ -661,15 +673,17 @@ impl FibHandle {
 
             let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
             req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+            let mut ok = true;
             let mut response = self.handle.clone().request(req).unwrap();
             while let Some(m) = response.next().await {
                 if let NetlinkPayload::Error(e) = m.payload {
+                    ok = false;
                     tracing::warn!(
                         "NewRoute seg6local install error: prefix={prefix} action={action:?} err={e}"
                     );
                 }
             }
-            return;
+            return ok;
         }
 
         if self.use_nhid {
@@ -684,7 +698,7 @@ impl FibHandle {
                     "RTM_NEWROUTE v6 skipped for {prefix}: nexthop gid is 0 (would Nhid(0) -> ENODEV); nh={}",
                     fmt_nexthop_for_trace(nexthop),
                 );
-                return;
+                return false;
             }
             if let Nexthop::Uni(uni) = &nexthop {
                 if DEBUG_V6 {
@@ -750,7 +764,7 @@ impl FibHandle {
                         }
                         Err(e) => {
                             tracing::warn!("SRv6 embedded encap build failed for {prefix}: {e:#}");
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -796,9 +810,16 @@ impl FibHandle {
             fmt_nexthop_for_trace(nexthop),
         );
 
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
+                // EEXIST means the route is already in the FIB — treat it
+                // as installed so the self-heal doesn't re-add it forever.
+                if e.to_io().raw_os_error() == Some(libc::EEXIST) {
+                    continue;
+                }
+                ok = false;
                 tracing::info!(
                     "NewRoute IPv6 error: {prefix} {e} use_nhid={} nh={}",
                     self.use_nhid,
@@ -806,24 +827,30 @@ impl FibHandle {
                 );
             }
         }
+        ok
     }
 
-    pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) {
+    /// IPv6 sibling of [`Self::route_ipv4_add`]; returns whether the
+    /// kernel accepted the install.
+    pub async fn route_ipv6_add(&self, prefix: &Ipv6Net, entry: &RibEntry, table_id: u32) -> bool {
         if !entry.is_protocol() {
-            return;
+            return true;
         }
         match &entry.nexthop {
             Nexthop::Uni(_) | Nexthop::Multi(_) => {
                 self.route_ipv6_add_uni(prefix, entry, &entry.nexthop, table_id)
-                    .await;
+                    .await
             }
             Nexthop::List(pro) => {
+                let mut ok = true;
                 for member in pro.nexthops.iter() {
-                    self.route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
+                    ok &= self
+                        .route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
+                ok
             }
-            _ => {}
+            _ => true,
         }
     }
 
@@ -1161,20 +1188,25 @@ impl FibHandle {
                         group_summary,
                     );
                 }
+                // Non-error payloads here are mostly the RTNLGRP_NEXTHOP
+                // multicast echoes the kernel delivers on the shared
+                // socket while our request is in flight — not real
+                // responses. Keep them at debug so steady-state churn
+                // doesn't flood the log.
                 NetlinkPayload::Done(m) => {
-                    tracing::info!("NewNexthop done {m:?}");
+                    tracing::debug!("NewNexthop done {m:?}");
                 }
                 NetlinkPayload::InnerMessage(e) => {
-                    tracing::info!("NewNexthop inner message {:?}", e);
+                    tracing::debug!("NewNexthop inner message {:?}", e);
                 }
                 NetlinkPayload::Noop => {
-                    tracing::info!("NewNexthop noop");
+                    tracing::debug!("NewNexthop noop");
                 }
                 NetlinkPayload::Overrun(e) => {
-                    tracing::info!("NewNexthop Overrun {:?}", e);
+                    tracing::debug!("NewNexthop Overrun {:?}", e);
                 }
                 _ => {
-                    tracing::info!("NewNexthop other return");
+                    tracing::debug!("NewNexthop other return");
                 }
             }
         }
@@ -2665,6 +2697,29 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Guards the netlink-packet-route group-nexthop decode fix our
+    // RTNLGRP_NEXTHOP reconciliation depends on. These are the exact
+    // bytes of a kernel group notification (RTM_NEWNEXTHOP, id 15,
+    // mpath, members {2, 7}) that the unfixed library dropped with
+    // "failed to decode packet ... type 104". If this fails, the dep
+    // regressed and reconciliation is silently broken again.
+    #[test]
+    fn decodes_rtm_newnexthop_group() {
+        let bytes: &[u8] = &[
+            0x3c, 0x00, 0x00, 0x00, 0x68, 0x00, 0x05, 0x05, 0x59, 0x00, 0x00, 0x00, 0xff, 0x1f,
+            0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0x00,
+            0x0f, 0x00, 0x00, 0x00, 0x06, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x00,
+            0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let parsed = netlink_packet_core::NetlinkMessage::<RouteNetlinkMessage>::deserialize(bytes);
+        assert!(
+            parsed.is_ok(),
+            "RTM_NEWNEXTHOP decode regressed: {:?}",
+            parsed.err()
+        );
+    }
 
     #[test]
     fn set_route_table_uses_rtm_table_byte_for_ids_under_256() {
