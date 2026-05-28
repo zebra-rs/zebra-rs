@@ -183,12 +183,12 @@ pub fn spawn_bgp_vrf(
     let ilm_decap_ifindex = match (kernel_table_id, kernel_ifindex) {
         (Some(table_id), Some(vrf_ifindex)) if label != 0 => {
             let entry = crate::rib::inst::IlmEntry {
-                rtype: crate::rib::RibType::Bgp,
                 ilm_type: crate::rib::inst::IlmType::DecapVrf {
                     table_id,
                     vrf_ifindex,
                 },
                 nexthop: crate::rib::Nexthop::default(),
+                ..crate::rib::inst::IlmEntry::new(crate::rib::RibType::Bgp)
             };
             rib_subscriber.send_ilm_add(label, entry);
             Some(vrf_ifindex)

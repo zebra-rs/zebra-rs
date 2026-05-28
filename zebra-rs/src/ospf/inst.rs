@@ -7993,9 +7993,9 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     };
 
     IlmEntry {
-        rtype: RibType::Ospf,
         ilm_type: ilm.ilm_type.clone(),
         nexthop,
+        ..IlmEntry::new(RibType::Ospf)
     }
 }
 
@@ -8095,9 +8095,9 @@ fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
     };
 
     IlmEntry {
-        rtype: RibType::Ospf,
         ilm_type: ilm.ilm_type.clone(),
         nexthop,
+        ..IlmEntry::new(RibType::Ospf)
     }
 }
 
