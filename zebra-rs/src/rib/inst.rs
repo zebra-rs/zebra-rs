@@ -284,6 +284,13 @@ pub enum IlmType {
     },
 }
 
+/// All ILM candidates competing for a single incoming label. Mirrors
+/// `RibEntries` for the IP table: every protocol that claims a label
+/// contributes one entry, and `ilm_next` picks the best by admin
+/// distance. At most one entry is `selected` and installed to the
+/// kernel LFIB (the kernel holds a single AF_MPLS route per label).
+pub type IlmEntries = Vec<IlmEntry>;
+
 #[derive(Default, Debug, Clone)]
 pub struct IlmEntry {
     pub rtype: RibType,
@@ -291,10 +298,12 @@ pub struct IlmEntry {
     pub nexthop: Nexthop,
     /// Administrative distance, mirroring the IP RIB convention
     /// (static 1, OSPF 110, IS-IS 115, BGP 20). Set by
-    /// `IlmEntry::new` from the owning `rtype`. Today each incoming
-    /// label has a single owner so this is informational; it becomes
-    /// the primary tie-break key once ILM RIB selection lands.
+    /// `IlmEntry::new` from the owning `rtype`. Primary tie-break key
+    /// for ILM RIB selection.
     pub distance: u8,
+    /// True for the winning candidate at this label — the one
+    /// installed to the kernel LFIB. Set by `Rib::ilm_select_sync`.
+    pub selected: bool,
 }
 
 impl IlmEntry {
@@ -304,6 +313,7 @@ impl IlmEntry {
             ilm_type: IlmType::None,
             nexthop: Nexthop::default(),
             distance: ilm_distance(rtype),
+            selected: false,
         }
     }
 }
@@ -406,7 +416,7 @@ pub struct Rib {
     pub pending_vrf_bind: BTreeMap<String, Option<String>>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
-    pub ilm: BTreeMap<u32, IlmEntry>,
+    pub ilm: BTreeMap<u32, IlmEntries>,
     /// Per-IS-IS-Flex-Algorithm IPv4 route shadow used by the
     /// BGP ↔ IS-IS Flex-Algo integration. Outer key is the algo id
     /// (128..=255); inner map mirrors the per-algo subset of IS-IS's
@@ -1070,15 +1080,21 @@ impl Rib {
                 .await;
         }
 
-        let labels: Vec<u32> = self
+        // Withdraw this protocol's contribution to every label it owns
+        // a candidate at. `ilm_del` re-selects, so a label shared with
+        // another protocol simply falls back to the surviving entry.
+        let targets: Vec<(u32, IlmEntry)> = self
             .ilm
             .iter()
-            .filter_map(|(label, e)| (e.rtype == rtype).then_some(*label))
+            .flat_map(|(label, entries)| {
+                entries
+                    .iter()
+                    .filter(|e| e.rtype == rtype)
+                    .map(move |e| (*label, e.clone()))
+            })
             .collect();
-        for label in labels {
-            if let Some(ilm) = self.ilm.get(&label).cloned() {
-                self.ilm_del(label, ilm).await;
-            }
+        for (label, entry) in targets {
+            self.ilm_del(label, entry).await;
         }
 
         self.proto_unregister(&proto);
@@ -1627,9 +1643,14 @@ impl Rib {
                 self.nmap.shutdown(&self.fib_handle).await;
                 let ilms = self.ilm.clone();
 
-                for (&label, ilm) in ilms.iter() {
-                    self.ilm_del(label, ilm.clone()).await;
+                // One AF_MPLS route per label in the kernel — delete the
+                // installed (selected) candidate for each.
+                for (&label, entries) in ilms.iter() {
+                    if let Some(installed) = entries.iter().find(|e| e.selected) {
+                        self.fib_handle.ilm_del(label, installed).await;
+                    }
                 }
+                self.ilm.clear();
                 // Clean up EVPN-installed FDB rows on externally-managed
                 // VXLAN devices BEFORE we tear down zebra-rs-managed
                 // bridges/VXLANs. For zebra-rs-managed devices the
