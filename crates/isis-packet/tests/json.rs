@@ -125,6 +125,118 @@ pub fn json_round_trip_test() {
     println!("All round-trip JSON serialization/deserialization tests passed!");
 }
 
+/// Wire round-trip for the RFC 8570 Performance Metric sub-TLVs.
+/// Confirms every code (33–39) survives emit → parse with its
+/// fields intact and the expected on-wire size, including the
+/// 24-bit packing of delay/loss values and the A-flag bit.
+#[test]
+pub fn rfc8570_perf_metric_round_trip() {
+    use bytes::BytesMut;
+    use isis_packet::neigh::{
+        IsisSubAvailableBw, IsisSubBandwidthMetric, IsisSubDelayVariation, IsisSubLinkLoss,
+        IsisSubMinMaxLinkDelay, IsisSubResidualBw, IsisSubTlv, IsisSubUniLinkDelay,
+        IsisSubUtilizedBw,
+    };
+
+    // Sub-TLV 33 — Unidirectional Link Delay (A flag + 24-bit delay).
+    let v = IsisSubTlv::UniLinkDelay(IsisSubUniLinkDelay {
+        anomalous: true,
+        delay: 0x00_12_34_56, // < 24 bits
+    });
+    let mut buf = BytesMut::new();
+    v.emit(&mut buf);
+    assert_eq!(buf[0], 33, "type code 33");
+    assert_eq!(buf[1], 4, "length 4");
+    // High bit of value-byte 0 carries the A flag.
+    assert_eq!(buf[2] & 0x80, 0x80);
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse 33");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v);
+
+    // Sub-TLV 34 — Min/Max Unidirectional Link Delay.
+    let v = IsisSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+        anomalous: false,
+        min_delay: 100,
+        max_delay: 500,
+    });
+    let mut buf = BytesMut::new();
+    v.emit(&mut buf);
+    assert_eq!(buf[0], 34);
+    assert_eq!(buf[1], 8, "length 8");
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse 34");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v);
+
+    // Sub-TLV 35 — Unidirectional Delay Variation (no A flag).
+    let v = IsisSubTlv::DelayVariation(IsisSubDelayVariation { variation: 42 });
+    let mut buf = BytesMut::new();
+    v.emit(&mut buf);
+    assert_eq!(buf[0], 35);
+    assert_eq!(buf[1], 4);
+    // High bit must NOT be set for sub-TLV 35.
+    assert_eq!(buf[2] & 0x80, 0);
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse 35");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v);
+
+    // Sub-TLV 36 — Unidirectional Link Loss.
+    let v = IsisSubTlv::LinkLoss(IsisSubLinkLoss {
+        anomalous: true,
+        loss: 0x00_FF_FF_FE, // RFC 8570 §4.4 ceiling that still represents a measured value.
+    });
+    let mut buf = BytesMut::new();
+    v.emit(&mut buf);
+    assert_eq!(buf[0], 36);
+    assert_eq!(buf[1], 4);
+    assert_eq!(buf[2] & 0x80, 0x80);
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse 36");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v);
+
+    // Sub-TLVs 37/38/39 — bandwidth metrics, IEEE float B/s.
+    let cases: [(u8, IsisSubTlv); 3] = [
+        (
+            37,
+            IsisSubTlv::ResidualBw(IsisSubResidualBw {
+                bw: IsisSubBandwidthMetric { bw_bps: 1.25e9 },
+            }),
+        ),
+        (
+            38,
+            IsisSubTlv::AvailableBw(IsisSubAvailableBw {
+                bw: IsisSubBandwidthMetric { bw_bps: 9.5e8 },
+            }),
+        ),
+        (
+            39,
+            IsisSubTlv::UtilizedBw(IsisSubUtilizedBw {
+                bw: IsisSubBandwidthMetric { bw_bps: 5.0e7 },
+            }),
+        ),
+    ];
+    for (code, v) in &cases {
+        let mut buf = BytesMut::new();
+        v.emit(&mut buf);
+        assert_eq!(buf[0], *code, "type code {code}");
+        assert_eq!(buf[1], 4, "length 4 for code {code}");
+        let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse bw");
+        assert!(rest.is_empty());
+        assert_eq!(&parsed, v, "round-trip for code {code}");
+    }
+
+    // Reserved bits in code-33/-34/-35/-36 must NOT be reflected
+    // back as part of the parsed value — the parser must mask the
+    // top 8 bits when extracting the 24-bit metric.
+    let raw = [33u8, 4, 0x7F, 0xAB, 0xCD, 0xEF];
+    let (_, parsed) = IsisSubTlv::parse_subs(&raw).expect("parse with reserved bits set");
+    if let IsisSubTlv::UniLinkDelay(d) = parsed {
+        assert!(!d.anomalous);
+        assert_eq!(d.delay, 0x00AB_CDEF);
+    } else {
+        panic!("expected UniLinkDelay");
+    }
+}
+
 /// Wire round-trip for the RFC 7794 Source Router ID sub-TLVs.
 /// `IsisSubTlv::emit` writes <code, length, value>; `parse_subs` reads
 /// the same shape back. The new variants must come back as themselves,

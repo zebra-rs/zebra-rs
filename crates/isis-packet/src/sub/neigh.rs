@@ -173,6 +173,20 @@ pub enum IsisSubTlv {
     AdjSid(IsisSubAdjSid),
     #[nom(Selector = "IsisNeighCode::LanAdjSid")]
     LanAdjSid(IsisSubLanAdjSid),
+    #[nom(Selector = "IsisNeighCode::UniLinkDelay")]
+    UniLinkDelay(IsisSubUniLinkDelay),
+    #[nom(Selector = "IsisNeighCode::MinMaxLinkDelay")]
+    MinMaxLinkDelay(IsisSubMinMaxLinkDelay),
+    #[nom(Selector = "IsisNeighCode::DelayVariation")]
+    DelayVariation(IsisSubDelayVariation),
+    #[nom(Selector = "IsisNeighCode::LinkLoss")]
+    LinkLoss(IsisSubLinkLoss),
+    #[nom(Selector = "IsisNeighCode::ResidualBw")]
+    ResidualBw(IsisSubResidualBw),
+    #[nom(Selector = "IsisNeighCode::AvailableBw")]
+    AvailableBw(IsisSubAvailableBw),
+    #[nom(Selector = "IsisNeighCode::UtilizedBw")]
+    UtilizedBw(IsisSubUtilizedBw),
     #[nom(Selector = "IsisNeighCode::Srv6EndXSid")]
     Srv6EndXSid(IsisSubSrv6EndXSid),
     #[nom(Selector = "IsisNeighCode::Srv6LanEndXSid")]
@@ -205,6 +219,13 @@ impl IsisSubTlv {
             TeMetric(v) => v.len(),
             AdjSid(v) => v.len(),
             LanAdjSid(v) => v.len(),
+            UniLinkDelay(v) => v.len(),
+            MinMaxLinkDelay(v) => v.len(),
+            DelayVariation(v) => v.len(),
+            LinkLoss(v) => v.len(),
+            ResidualBw(v) => v.len(),
+            AvailableBw(v) => v.len(),
+            UtilizedBw(v) => v.len(),
             Srv6EndXSid(v) => v.len(),
             Srv6LanEndXSid(v) => v.len(),
             Unknown(v) => v.len,
@@ -227,6 +248,13 @@ impl IsisSubTlv {
             TeMetric(v) => v.tlv_emit(buf),
             AdjSid(v) => v.tlv_emit(buf),
             LanAdjSid(v) => v.tlv_emit(buf),
+            UniLinkDelay(v) => v.tlv_emit(buf),
+            MinMaxLinkDelay(v) => v.tlv_emit(buf),
+            DelayVariation(v) => v.tlv_emit(buf),
+            LinkLoss(v) => v.tlv_emit(buf),
+            ResidualBw(v) => v.tlv_emit(buf),
+            AvailableBw(v) => v.tlv_emit(buf),
+            UtilizedBw(v) => v.tlv_emit(buf),
             Srv6EndXSid(v) => v.tlv_emit(buf),
             Srv6LanEndXSid(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
@@ -343,6 +371,321 @@ impl TlvEmitter for IsisSubAdminGrp {
 impl From<IsisSubAdminGrp> for IsisSubTlv {
     fn from(value: IsisSubAdminGrp) -> Self {
         IsisSubTlv::AdminGrp(value)
+    }
+}
+
+/// RFC 8570 §4.1 — Unidirectional Link Delay (sub-TLV 33).
+///
+/// Wire payload is 4 octets: the high bit of byte 0 is the `A`
+/// (anomalous) flag, the next 7 bits are reserved, and the
+/// remaining 24 bits are the average one-way delay in microseconds
+/// (so the maximum representable delay is ~16.78 seconds). The
+/// `A` flag is set by the originator when the measured value
+/// crosses a configured high-water threshold and cleared again
+/// once it falls below the reuse threshold.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubUniLinkDelay {
+    pub anomalous: bool,
+    pub delay: u32,
+}
+
+impl ParseBe<IsisSubUniLinkDelay> for IsisSubUniLinkDelay {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((input, Self::from_raw(raw)))
+    }
+}
+
+impl IsisSubUniLinkDelay {
+    fn from_raw(raw: u32) -> Self {
+        Self {
+            anomalous: (raw & 0x8000_0000) != 0,
+            delay: raw & 0x00FF_FFFF,
+        }
+    }
+
+    fn to_raw(&self) -> u32 {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        a | (self.delay & 0x00FF_FFFF)
+    }
+}
+
+impl TlvEmitter for IsisSubUniLinkDelay {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::UniLinkDelay.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.to_raw());
+    }
+}
+
+impl From<IsisSubUniLinkDelay> for IsisSubTlv {
+    fn from(v: IsisSubUniLinkDelay) -> Self {
+        IsisSubTlv::UniLinkDelay(v)
+    }
+}
+
+/// RFC 8570 §4.2 — Min/Max Unidirectional Link Delay (sub-TLV 34).
+///
+/// Wire payload is 8 octets:
+///   - byte 0 bit 7: `A` flag, bits 6..0: reserved
+///   - bytes 1..3:   24-bit Min delay (microseconds)
+///   - byte 4:       reserved
+///   - bytes 5..7:   24-bit Max delay (microseconds)
+///
+/// The single `A` flag covers both Min and Max — the originator
+/// raises it if *either* measured bound crosses the configured
+/// high-water threshold.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubMinMaxLinkDelay {
+    pub anomalous: bool,
+    pub min_delay: u32,
+    pub max_delay: u32,
+}
+
+impl ParseBe<IsisSubMinMaxLinkDelay> for IsisSubMinMaxLinkDelay {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, w0) = be_u32(input)?;
+        let (input, w1) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                anomalous: (w0 & 0x8000_0000) != 0,
+                min_delay: w0 & 0x00FF_FFFF,
+                max_delay: w1 & 0x00FF_FFFF,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisSubMinMaxLinkDelay {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::MinMaxLinkDelay.into()
+    }
+    fn len(&self) -> u8 {
+        8
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        buf.put_u32(a | (self.min_delay & 0x00FF_FFFF));
+        buf.put_u32(self.max_delay & 0x00FF_FFFF);
+    }
+}
+
+impl From<IsisSubMinMaxLinkDelay> for IsisSubTlv {
+    fn from(v: IsisSubMinMaxLinkDelay) -> Self {
+        IsisSubTlv::MinMaxLinkDelay(v)
+    }
+}
+
+/// RFC 8570 §4.3 — Unidirectional Delay Variation (sub-TLV 35).
+///
+/// 4-octet payload: byte 0 reserved, bytes 1..3 carry a 24-bit
+/// delay-variation value in microseconds. No `A` flag — RFC 8570
+/// §3 explicitly drops it from this sub-TLV to avoid feedback
+/// loops between routing and the metric's own oscillation.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubDelayVariation {
+    pub variation: u32,
+}
+
+impl ParseBe<IsisSubDelayVariation> for IsisSubDelayVariation {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                variation: raw & 0x00FF_FFFF,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisSubDelayVariation {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::DelayVariation.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.variation & 0x00FF_FFFF);
+    }
+}
+
+impl From<IsisSubDelayVariation> for IsisSubTlv {
+    fn from(v: IsisSubDelayVariation) -> Self {
+        IsisSubTlv::DelayVariation(v)
+    }
+}
+
+/// RFC 8570 §4.4 — Unidirectional Link Loss (sub-TLV 36).
+///
+/// 4-octet payload: byte 0 bit 7 = `A` flag, bits 6..0 reserved;
+/// bytes 1..3 = 24-bit loss expressed in units of 0.000003 %, so
+/// the encoded ceiling 0xFFFFFE represents ~50.331642 %. The
+/// reserved value 0xFFFFFF marks the metric as unavailable.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubLinkLoss {
+    pub anomalous: bool,
+    pub loss: u32,
+}
+
+impl ParseBe<IsisSubLinkLoss> for IsisSubLinkLoss {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                anomalous: (raw & 0x8000_0000) != 0,
+                loss: raw & 0x00FF_FFFF,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisSubLinkLoss {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::LinkLoss.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        buf.put_u32(a | (self.loss & 0x00FF_FFFF));
+    }
+}
+
+impl From<IsisSubLinkLoss> for IsisSubTlv {
+    fn from(v: IsisSubLinkLoss) -> Self {
+        IsisSubTlv::LinkLoss(v)
+    }
+}
+
+/// RFC 8570 §4.5–4.7 — Unidirectional bandwidth metrics
+/// (Residual, Available, Utilized) share an identical wire shape:
+/// a single 32-bit IEEE 754 single-precision value in bytes/sec.
+/// No `A` flag, no reserved bits. The three are distinguished by
+/// sub-TLV code (37/38/39) and by semantic — see the per-type
+/// wrappers below.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubBandwidthMetric {
+    /// Bandwidth in bytes-per-second (IEEE 754 single-precision).
+    pub bw_bps: f32,
+}
+
+impl IsisSubBandwidthMetric {
+    fn parse(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                bw_bps: f32::from_bits(raw),
+            },
+        ))
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.bw_bps.to_bits());
+    }
+}
+
+/// RFC 8570 §4.5 — Unidirectional Residual Bandwidth (sub-TLV 37).
+/// Maximum bandwidth minus bandwidth currently reserved by RSVP-TE.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubResidualBw {
+    pub bw: IsisSubBandwidthMetric,
+}
+
+impl ParseBe<IsisSubResidualBw> for IsisSubResidualBw {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
+        Ok((input, Self { bw }))
+    }
+}
+
+impl TlvEmitter for IsisSubResidualBw {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::ResidualBw.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        self.bw.emit(buf);
+    }
+}
+
+impl From<IsisSubResidualBw> for IsisSubTlv {
+    fn from(v: IsisSubResidualBw) -> Self {
+        IsisSubTlv::ResidualBw(v)
+    }
+}
+
+/// RFC 8570 §4.6 — Unidirectional Available Bandwidth (sub-TLV 38).
+/// Residual minus the measured non-RSVP-TE forwarding load.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubAvailableBw {
+    pub bw: IsisSubBandwidthMetric,
+}
+
+impl ParseBe<IsisSubAvailableBw> for IsisSubAvailableBw {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
+        Ok((input, Self { bw }))
+    }
+}
+
+impl TlvEmitter for IsisSubAvailableBw {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::AvailableBw.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        self.bw.emit(buf);
+    }
+}
+
+impl From<IsisSubAvailableBw> for IsisSubTlv {
+    fn from(v: IsisSubAvailableBw) -> Self {
+        IsisSubTlv::AvailableBw(v)
+    }
+}
+
+/// RFC 8570 §4.7 — Unidirectional Utilized Bandwidth (sub-TLV 39).
+/// Actual link utilization as measured by the advertising node.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubUtilizedBw {
+    pub bw: IsisSubBandwidthMetric,
+}
+
+impl ParseBe<IsisSubUtilizedBw> for IsisSubUtilizedBw {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, bw) = IsisSubBandwidthMetric::parse(input)?;
+        Ok((input, Self { bw }))
+    }
+}
+
+impl TlvEmitter for IsisSubUtilizedBw {
+    fn typ(&self) -> u8 {
+        IsisNeighCode::UtilizedBw.into()
+    }
+    fn len(&self) -> u8 {
+        4
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        self.bw.emit(buf);
+    }
+}
+
+impl From<IsisSubUtilizedBw> for IsisSubTlv {
+    fn from(v: IsisSubUtilizedBw) -> Self {
+        IsisSubTlv::UtilizedBw(v)
     }
 }
 
