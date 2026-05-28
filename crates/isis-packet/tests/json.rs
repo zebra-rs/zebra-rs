@@ -105,5 +105,54 @@ pub fn json_round_trip_test() {
     let deserialized: IsisSysId = serde_json::from_str(&serialized).unwrap();
     assert_eq!(sys_id, deserialized);
 
+    // Test RFC 7794 Source Router ID sub-TLVs.
+    let v4_src = prefix::IsisSubIpv4SourceRouterId {
+        router_id: "10.0.0.1".parse().unwrap(),
+    };
+    let v4_tlv = prefix::IsisSubTlv::Ipv4SourceRouterId(v4_src);
+    let serialized = serde_json::to_string(&v4_tlv).unwrap();
+    let deserialized: prefix::IsisSubTlv = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(v4_tlv, deserialized);
+
+    let v6_src = prefix::IsisSubIpv6SourceRouterId {
+        router_id: "2001:db8::1".parse().unwrap(),
+    };
+    let v6_tlv = prefix::IsisSubTlv::Ipv6SourceRouterId(v6_src);
+    let serialized = serde_json::to_string(&v6_tlv).unwrap();
+    let deserialized: prefix::IsisSubTlv = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(v6_tlv, deserialized);
+
     println!("All round-trip JSON serialization/deserialization tests passed!");
+}
+
+/// Wire round-trip for the RFC 7794 Source Router ID sub-TLVs.
+/// `IsisSubTlv::emit` writes <code, length, value>; `parse_subs` reads
+/// the same shape back. The new variants must come back as themselves,
+/// not as `IsisSubTlv::Unknown`.
+#[test]
+pub fn source_router_id_wire_round_trip() {
+    use bytes::BytesMut;
+    use isis_packet::prefix::{IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId, IsisSubTlv};
+
+    let v4 = IsisSubTlv::Ipv4SourceRouterId(IsisSubIpv4SourceRouterId {
+        router_id: "10.1.2.3".parse().unwrap(),
+    });
+    let mut buf = BytesMut::new();
+    v4.emit(&mut buf);
+    // <code=11><len=4><4 octets>
+    assert_eq!(&buf[..2], &[11, 4]);
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse v4 source router id");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v4);
+
+    let v6 = IsisSubTlv::Ipv6SourceRouterId(IsisSubIpv6SourceRouterId {
+        router_id: "2001:db8::1".parse().unwrap(),
+    });
+    let mut buf = BytesMut::new();
+    v6.emit(&mut buf);
+    // <code=12><len=16><16 octets>
+    assert_eq!(&buf[..2], &[12, 16]);
+    let (rest, parsed) = IsisSubTlv::parse_subs(&buf).expect("parse v6 source router id");
+    assert!(rest.is_empty());
+    assert_eq!(parsed, v6);
 }

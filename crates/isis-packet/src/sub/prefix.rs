@@ -23,6 +23,10 @@ pub enum IsisSubTlv {
     PrefixSid(IsisSubPrefixSid),
     #[nom(Selector = "IsisPrefixCode::Srv6EndSid")]
     Srv6EndSid(IsisSubSrv6EndSid),
+    #[nom(Selector = "IsisPrefixCode::Ipv4SourceRouterId")]
+    Ipv4SourceRouterId(IsisSubIpv4SourceRouterId),
+    #[nom(Selector = "IsisPrefixCode::Ipv6SourceRouterId")]
+    Ipv6SourceRouterId(IsisSubIpv6SourceRouterId),
     #[nom(Selector = "_")]
     Unknown(IsisSubTlvUnknown),
 }
@@ -209,6 +213,8 @@ impl IsisSubTlv {
         match self {
             PrefixSid(v) => v.len(),
             Srv6EndSid(v) => v.len(),
+            Ipv4SourceRouterId(v) => v.len(),
+            Ipv6SourceRouterId(v) => v.len(),
             Unknown(v) => v.len,
         }
     }
@@ -222,8 +228,74 @@ impl IsisSubTlv {
         match self {
             PrefixSid(v) => v.tlv_emit(buf),
             Srv6EndSid(v) => v.tlv_emit(buf),
+            Ipv4SourceRouterId(v) => v.tlv_emit(buf),
+            Ipv6SourceRouterId(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
         }
+    }
+}
+
+/// RFC 7794 §3.1 — IPv4 Source Router ID sub-TLV (type 11).
+///
+/// Carries the 32-bit IPv4 TE Router ID (TLV 134) of the router that
+/// originally advertised the enclosing prefix. The originator MAY
+/// include it on first origination; once present, an L1/L2 router
+/// leaking the prefix to another level MUST carry it across unchanged
+/// so downstream routers can attribute the prefix to its true origin
+/// rather than to the leaker.
+#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubIpv4SourceRouterId {
+    pub router_id: Ipv4Addr,
+}
+
+impl TlvEmitter for IsisSubIpv4SourceRouterId {
+    fn typ(&self) -> u8 {
+        IsisPrefixCode::Ipv4SourceRouterId.into()
+    }
+
+    fn len(&self) -> u8 {
+        4
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.router_id.octets()[..]);
+    }
+}
+
+impl From<IsisSubIpv4SourceRouterId> for IsisSubTlv {
+    fn from(v: IsisSubIpv4SourceRouterId) -> Self {
+        IsisSubTlv::Ipv4SourceRouterId(v)
+    }
+}
+
+/// RFC 7794 §3.2 — IPv6 Source Router ID sub-TLV (type 12).
+///
+/// Carries the 128-bit IPv6 TE Router ID (TLV 140) of the prefix
+/// originator. Same leaking semantics as the IPv4 variant: optional
+/// at origination, mandatory to copy through on L1↔L2 leaks once
+/// present.
+#[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubIpv6SourceRouterId {
+    pub router_id: Ipv6Addr,
+}
+
+impl TlvEmitter for IsisSubIpv6SourceRouterId {
+    fn typ(&self) -> u8 {
+        IsisPrefixCode::Ipv6SourceRouterId.into()
+    }
+
+    fn len(&self) -> u8 {
+        16
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&self.router_id.octets()[..]);
+    }
+}
+
+impl From<IsisSubIpv6SourceRouterId> for IsisSubTlv {
+    fn from(v: IsisSubIpv6SourceRouterId) -> Self {
+        IsisSubTlv::Ipv6SourceRouterId(v)
     }
 }
 

@@ -8,6 +8,10 @@ pub enum IsisPrefixCode {
     #[default]
     PrefixSid = 3,
     Srv6EndSid = 5,
+    /// RFC 7794 §3.1 — 32-bit TE Router ID of the prefix originator.
+    Ipv4SourceRouterId = 11,
+    /// RFC 7794 §3.2 — 128-bit IPv6 TE Router ID of the prefix originator.
+    Ipv6SourceRouterId = 12,
     Unknown(u8),
 }
 
@@ -17,6 +21,8 @@ impl From<IsisPrefixCode> for u8 {
         match typ {
             PrefixSid => 3,
             Srv6EndSid => 5,
+            Ipv4SourceRouterId => 11,
+            Ipv6SourceRouterId => 12,
             Unknown(v) => v,
         }
     }
@@ -28,6 +34,8 @@ impl From<u8> for IsisPrefixCode {
         match typ {
             3 => PrefixSid,
             5 => Srv6EndSid,
+            11 => Ipv4SourceRouterId,
+            12 => Ipv6SourceRouterId,
             v => Unknown(v),
         }
     }
