@@ -35,6 +35,10 @@ use crate::config::RibSubscriber;
 /// [`Task`] so dropping the handle aborts the runtime cleanly.
 pub struct BgpVrfHandle {
     pub inbox: BgpVrfInbox,
+    /// Clone of the per-VRF task's show channel sender. Registered with
+    /// the config manager (`SubscribeShowVrf`) so `show bgp vrf <name>
+    /// …` is redirected into this task; deregistered on despawn.
+    pub show_tx: tokio::sync::mpsc::UnboundedSender<crate::config::DisplayRequest>,
     /// Held so dropping the handle aborts the spawned event loop
     /// even if `despawn_bgp_vrf` was never called (defence in
     /// depth — a clean teardown sends `Shutdown` first). Not
@@ -196,6 +200,10 @@ pub fn spawn_bgp_vrf(
         _ => None,
     };
 
+    // Capture the show channel before `vrf` is moved into the task, so
+    // the global instance can register it with the config manager for
+    // `show bgp vrf <name> …` redirection.
+    let show_tx = vrf.show.tx.clone();
     let task = serve_vrf(vrf);
     tracing::info!(
         vrf = %name,
@@ -210,6 +218,7 @@ pub fn spawn_bgp_vrf(
     );
     BgpVrfHandle {
         inbox,
+        show_tx,
         task,
         label,
         ilm_decap_ifindex,

@@ -282,9 +282,11 @@ impl BgpVrf {
                     // consumer is wired yet — keeps the select!
                     // arm from livelocking.
                 }
-                _msg = self.show.rx.recv() => {
-                    // `show bgp vrf <name> ...` dispatch — same
-                    // drain rationale as above.
+                Some(msg) = self.show.rx.recv() => {
+                    // `show bgp vrf <name> …` — the manager stripped the
+                    // `vrf <name>` selector and redirected the plain
+                    // command here; render against this VRF's RIB/peers.
+                    crate::bgp::show::process_vrf_show(self, msg).await;
                 }
                 Some(msg) = self.rx.recv() => {
                     self.process_msg(msg);

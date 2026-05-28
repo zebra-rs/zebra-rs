@@ -1850,6 +1850,7 @@ mod bfd_wiring_tests {
             policy_tx,
             Some(bfd_client_tx),
             None,
+            tokio::sync::mpsc::channel(1).0,
         );
         (bgp, bfd_client_rx)
     }
@@ -1908,7 +1909,15 @@ mod bfd_wiring_tests {
     async fn enable_without_bfd_handle_is_noop() {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        let mut bgp = Bgp::new(ctx, rib_rx, test_rib_subscriber(), policy_tx, None, None);
+        let mut bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            test_rib_subscriber(),
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        );
         config_peer(&mut bgp, arg_words(&["10.0.0.4"]), ConfigOp::Set).unwrap();
         // No bfd handle to assert against; the call must not panic.
         config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.4", "true"]), ConfigOp::Set).unwrap();
@@ -2075,7 +2084,15 @@ mod neighbor_group_wiring_tests {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(_policy_rx));
-        Bgp::new(ctx, rib_rx, test_rib_subscriber(), policy_tx, None, None)
+        Bgp::new(
+            ctx,
+            rib_rx,
+            test_rib_subscriber(),
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
     }
 
     fn peer_addr() -> IpAddr {

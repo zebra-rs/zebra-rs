@@ -23,6 +23,7 @@ pub fn spawn_bgp(config: &ConfigManager) {
         config.policy_tx.clone(),
         bfd_client_tx,
         nd_client_tx,
+        config.tx.clone(),
     );
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe_show("bgp", bgp.show.tx.clone());

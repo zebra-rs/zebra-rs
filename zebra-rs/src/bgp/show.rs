@@ -9,8 +9,67 @@ use serde::Serialize;
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::peer::{Peer, PeerCounter, PeerParam, State};
+use super::peer_map::PeerMap;
+use super::route::LocalRib;
+use super::vrf::inst::BgpVrf;
 use crate::bgp::{AdjRibEvpnTable, AdjRibTable, BgpRibType, RibDirection};
 use crate::config::Args;
+use crate::config::{DisplayRequest, path_from_command};
+
+/// Read-only view of the per-instance BGP state the `show bgp …`
+/// renderers need, letting the same handlers serve both the global
+/// `Bgp` and a per-VRF `BgpVrf`.
+pub trait BgpShowView {
+    fn local_rib(&self) -> &LocalRib;
+    fn peers(&self) -> &PeerMap;
+    fn router_id(&self) -> Ipv4Addr;
+    fn asn(&self) -> u32;
+}
+
+impl BgpShowView for Bgp {
+    fn local_rib(&self) -> &LocalRib {
+        &self.local_rib
+    }
+    fn peers(&self) -> &PeerMap {
+        &self.peers
+    }
+    fn router_id(&self) -> Ipv4Addr {
+        self.router_id
+    }
+    fn asn(&self) -> u32 {
+        self.asn
+    }
+}
+
+impl BgpShowView for BgpVrf {
+    fn local_rib(&self) -> &LocalRib {
+        &self.local_rib
+    }
+    fn peers(&self) -> &PeerMap {
+        &self.peers
+    }
+    fn router_id(&self) -> Ipv4Addr {
+        self.router_id
+    }
+    fn asn(&self) -> u32 {
+        self.asn
+    }
+}
+
+/// Dispatch a `show bgp …` request (already stripped of its `vrf
+/// <name>` selector by the manager) inside a per-VRF task, rendering
+/// against that VRF's RIB/peers via [`BgpShowView`].
+pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
+    let (path, args) = path_from_command(&msg.paths);
+    let out = match path.as_str() {
+        "/show/ip/bgp" => show_bgp(vrf, args, msg.json),
+        "/show/ip/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
+        "/show/ip/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
+        other => Ok(format!("% Unsupported per-VRF show command: {other}\n")),
+    };
+    let out = out.unwrap_or_else(|e| format!("Error formatting output: {e}"));
+    let _ = msg.resp.send(out).await;
+}
 
 /// Human-readable label for an (AFI, SAFI) pair, used as the "<label>
 /// Summary:" header in `show ip bgp summary`.
@@ -31,9 +90,9 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
 /// Collect the set of AFI/SAFIs that are configured on at least one peer,
 /// sorted deterministically by `(afi, safi)` ascending. Falls back to
 /// `[IPv4 Unicast]` when no peer has explicitly configured an AFI/SAFI.
-fn configured_afi_safis(bgp: &Bgp) -> Vec<AfiSafi> {
+fn configured_afi_safis<V: BgpShowView>(bgp: &V) -> Vec<AfiSafi> {
     let mut set: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
-    for (_, peer) in bgp.peers.iter() {
+    for (_, peer) in bgp.peers().iter() {
         for (afi_safi, _) in peer.config.mp.0.iter() {
             set.insert(*afi_safi);
         }
@@ -45,11 +104,11 @@ fn configured_afi_safis(bgp: &Bgp) -> Vec<AfiSafi> {
 }
 
 /// Count Loc-RIB entries for a given AFI/SAFI.
-fn rib_entries_count(bgp: &Bgp, afi_safi: &AfiSafi) -> usize {
+fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
     match (afi_safi.afi, afi_safi.safi) {
-        (Afi::Ip, Safi::Unicast) => bgp.local_rib.v4.0.len(),
-        (Afi::Ip, Safi::MplsVpn) => bgp.local_rib.v4vpn.values().map(|t| t.0.len()).sum(),
-        (Afi::L2vpn, Safi::Evpn) => bgp.local_rib.evpn.values().map(|t| t.cands.len()).sum(),
+        (Afi::Ip, Safi::Unicast) => bgp.local_rib().v4.0.len(),
+        (Afi::Ip, Safi::MplsVpn) => bgp.local_rib().v4vpn.values().map(|t| t.0.len()).sum(),
+        (Afi::L2vpn, Safi::Evpn) => bgp.local_rib().evpn.values().map(|t| t.cands.len()).sum(),
         _ => 0,
     }
 }
@@ -129,20 +188,24 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
     )
 }
 
-fn write_summary_section(buf: &mut String, bgp: &Bgp, afi_safi: AfiSafi) -> std::fmt::Result {
+fn write_summary_section<V: BgpShowView>(
+    buf: &mut String,
+    bgp: &V,
+    afi_safi: AfiSafi,
+) -> std::fmt::Result {
     let label = afi_safi_summary_label(afi_safi.afi, afi_safi.safi);
-    let router_id = if bgp.router_id.is_unspecified() {
+    let router_id = if bgp.router_id().is_unspecified() {
         "Not Configured".to_string()
     } else {
-        bgp.router_id.to_string()
+        bgp.router_id().to_string()
     };
-    let asn = if bgp.asn == 0 {
+    let asn = if bgp.asn() == 0 {
         "Not Configured".to_string()
     } else {
-        bgp.asn.to_string()
+        bgp.asn().to_string()
     };
     let rib_entries = rib_entries_count(bgp, &afi_safi);
-    let peer_count = bgp.peers.iter().count();
+    let peer_count = bgp.peers().iter().count();
 
     writeln!(buf, "{} Summary:", label)?;
     writeln!(
@@ -155,7 +218,7 @@ fn write_summary_section(buf: &mut String, bgp: &Bgp, afi_safi: AfiSafi) -> std:
     writeln!(buf)?;
 
     write_summary_header_row(buf)?;
-    for (_, peer) in bgp.peers.iter() {
+    for (_, peer) in bgp.peers().iter() {
         write_summary_peer_row(buf, peer, afi_safi.afi, afi_safi.safi)?;
     }
 
@@ -313,11 +376,15 @@ struct BgpVpnv4RouteJson {
     label: u32,
 }
 
-fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
+fn show_bgp<V: BgpShowView>(
+    bgp: &V,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
 
-        for (key, value) in bgp.local_rib.v4.0.iter() {
+        for (key, value) in bgp.local_rib().v4.0.iter() {
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
@@ -358,7 +425,7 @@ fn show_bgp(bgp: &Bgp, _args: Args, json: bool) -> std::result::Result<String, s
 
     buf.push_str(SHOW_BGP_HEADER);
 
-    for (key, value) in bgp.local_rib.v4.0.iter() {
+    for (key, value) in bgp.local_rib().v4.0.iter() {
         for rib in value.iter() {
             let stale = if rib.stale { "S" } else { " " };
             let valid = "*";
@@ -1117,20 +1184,20 @@ fn show_bgp_received(
     show_adj_rib_routes(&peer.adj_in.v4.0, bgp.router_id, json)
 }
 
-fn show_bgp_summary(
-    bgp: &Bgp,
+fn show_bgp_summary<V: BgpShowView>(
+    bgp: &V,
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        let router_id = if bgp.router_id.is_unspecified() {
+        let router_id = if bgp.router_id().is_unspecified() {
             "Not Configured".to_string()
         } else {
-            bgp.router_id.to_string()
+            bgp.router_id().to_string()
         };
 
         let mut peers = Vec::new();
-        for (_, peer) in bgp.peers.iter() {
+        for (_, peer) in bgp.peers().iter() {
             let mut msg_sent: u64 = 0;
             let mut msg_rcvd: u64 = 0;
             for counter in peer.counter.iter() {
@@ -1161,7 +1228,7 @@ fn show_bgp_summary(
 
         let summary = BgpSummaryJson {
             router_id,
-            local_as: bgp.asn,
+            local_as: bgp.asn(),
             peers,
         };
 
@@ -1171,16 +1238,16 @@ fn show_bgp_summary(
 
     let mut buf = String::new();
 
-    if bgp.peers.is_empty() {
-        let router_id = if bgp.router_id.is_unspecified() {
+    if bgp.peers().is_empty() {
+        let router_id = if bgp.router_id().is_unspecified() {
             "Not Configured".to_string()
         } else {
-            bgp.router_id.to_string()
+            bgp.router_id().to_string()
         };
-        let asn = if bgp.asn == 0 {
+        let asn = if bgp.asn() == 0 {
             "Not Configured".to_string()
         } else {
-            bgp.asn.to_string()
+            bgp.asn().to_string()
         };
         writeln!(
             buf,
@@ -1859,8 +1926,8 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
     Ok(())
 }
 
-fn show_bgp_neighbor(
-    bgp: &Bgp,
+fn show_bgp_neighbor<V: BgpShowView>(
+    bgp: &V,
     mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
@@ -1868,7 +1935,7 @@ fn show_bgp_neighbor(
 
     if args.is_empty() {
         let mut neighbors = Vec::<Neighbor>::new();
-        for (_, peer) in bgp.peers.iter() {
+        for (_, peer) in bgp.peers().iter() {
             neighbors.push(fetch(peer));
         }
         if json {
@@ -1880,7 +1947,7 @@ fn show_bgp_neighbor(
         }
     } else {
         if let Some(addr) = args.addr() {
-            if let Some(peer) = bgp.peers.get(&addr) {
+            if let Some(peer) = bgp.peers().get(&addr) {
                 let neighbor = fetch(peer);
                 if json {
                     return Ok(serde_json::to_string_pretty(&neighbor).unwrap_or_else(|e| {
@@ -2173,6 +2240,27 @@ fn show_bgp_vrf(
         show_bgp_vrf_list_json(bgp)
     } else {
         show_bgp_vrf_list_text(bgp)
+    }
+}
+
+/// Handler for `show ip bgp vrf <name> {summary,neighbors}` reached
+/// only when the manager did *not* redirect — i.e. no per-VRF BGP task
+/// is registered for `<name>`. Running VRFs are intercepted by the
+/// manager and dispatched into their own task; this just reports the
+/// miss instead of leaving the request unanswered.
+fn show_bgp_vrf_not_running(
+    _bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let name = args.string().unwrap_or_default();
+    if json {
+        Ok(format!(
+            "{{\"error\": \"BGP VRF {} is not running\"}}",
+            name
+        ))
+    } else {
+        Ok(format!("% BGP VRF {} is not running\n", name))
     }
 }
 
@@ -2519,12 +2607,12 @@ impl Bgp {
     }
 
     pub fn show_build(&mut self) {
-        self.show_add("/show/ip/bgp", show_bgp);
+        self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
         self.show_add("/show/ip/bgp/vpnv4", show_bgp_vpnv4);
         self.show_add("/show/ip/bgp/vpnv4/route", show_bgp_vpnv4_route);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
-        self.show_add("/show/ip/bgp/summary", show_bgp_summary);
-        self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor);
+        self.show_add("/show/ip/bgp/summary", show_bgp_summary::<Bgp>);
+        self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor::<Bgp>);
         self.show_add(
             "/show/ip/bgp/neighbors/advertised-routes",
             show_bgp_advertised,
@@ -2551,6 +2639,8 @@ impl Bgp {
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
+        self.show_add("/show/ip/bgp/vrf/summary", show_bgp_vrf_not_running);
+        self.show_add("/show/ip/bgp/vrf/neighbors", show_bgp_vrf_not_running);
         self.show_add("/show/ip/bgp/neighbor-group", show_bgp_neighbor_group);
         self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
         // IOS-XR style update-group observability — kept under

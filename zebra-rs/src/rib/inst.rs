@@ -1558,14 +1558,17 @@ impl Rib {
                     self.pending_vrf_bind.insert(ifname.clone(), vrf.clone());
                 }
 
-                let Some(link) = self.links.values().find(|l| l.name == ifname) else {
-                    tracing::info!(
-                        "link_vrf_bind: interface {} not present yet — pending",
-                        ifname
-                    );
-                    return;
+                let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname)
+                {
+                    Some(link) => (link.index, link.master.unwrap_or(0)),
+                    None => {
+                        tracing::info!(
+                            "link_vrf_bind: interface {} not present yet — pending",
+                            ifname
+                        );
+                        return;
+                    }
                 };
-                let ifindex = link.index;
 
                 let master = match &vrf {
                     Some(vrf_name) => match self.vrfs.get(vrf_name) {
@@ -1580,6 +1583,18 @@ impl Rib {
                     },
                     None => 0,
                 };
+
+                // Only touch the kernel when the master actually changes.
+                // `pending_vrf_bind` is kept as durable desired-state (so
+                // an interface flap re-binds), which means `link_add`
+                // replays this message on every RTM_NEWLINK for the
+                // interface. Enslaving emits a burst of those (master +
+                // operstate/flag transitions), so without this guard each
+                // one re-issues a redundant `link_set_master` — log spam
+                // and a potential feedback loop.
+                if current_master == master {
+                    return;
+                }
 
                 self.fib_handle.link_set_master(ifindex, master).await;
                 tracing::info!(
