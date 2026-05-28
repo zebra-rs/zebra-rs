@@ -178,6 +178,7 @@ module exec {
           key name;
           leaf name {
             ext:help "VRF name";
+            ext:dynamic "rib:vrf";
             type string;
           }
           leaf detail {
@@ -251,7 +252,7 @@ module exec {
           ext:presence "BGP per-VRF summary table";
           key name;
           leaf name {
-            ext:dynamic "bgp:vrf";
+            ext:dynamic "rib:vrf";
             type string;
           }
           leaf summary {
@@ -468,6 +469,7 @@ module exec {
           key name;
           leaf name {
             ext:help "VRF name";
+            ext:dynamic "rib:vrf";
             type string;
           }
           leaf detail {

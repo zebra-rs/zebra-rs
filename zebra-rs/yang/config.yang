@@ -1915,6 +1915,7 @@ module config {
         // of in the default table (which would otherwise have to be
         // moved on bind).
         ext:sort "10";
+        ext:dynamic "rib:vrf";
         type leafref {
           path "/vrf/name";
         }

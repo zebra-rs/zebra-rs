@@ -646,6 +646,12 @@ impl Rib {
         self.links.values().map(|link| link.name.clone()).collect()
     }
 
+    /// Completion candidates for the `rib:vrf` dynamic key — the names
+    /// of the VRFs currently applied (one per kernel master device).
+    pub fn vrf_comps(&self) -> Vec<String> {
+        self.vrfs.keys().cloned().collect()
+    }
+
     /// Add an IPv4 or IPv6 address to an interface link.
     ///
     /// This function validates the address before adding it to prevent invalid configurations:

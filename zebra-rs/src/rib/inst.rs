@@ -2063,7 +2063,13 @@ impl Rib {
                 self.locator_config.commit(self.tx.clone());
             }
             ConfigOp::Completion => {
-                msg.resp.unwrap().send(self.link_comps()).unwrap();
+                // `comps_dynamic` passes the dynamic handler name
+                // (`rib:<handler>`) as the first path segment.
+                let comps = match msg.paths.first().map(|p| p.name.as_str()) {
+                    Some("vrf") => self.vrf_comps(),
+                    _ => self.link_comps(),
+                };
+                msg.resp.unwrap().send(comps).unwrap();
             }
             ConfigOp::Clear => {
                 //

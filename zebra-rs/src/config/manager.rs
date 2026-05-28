@@ -645,6 +645,11 @@ impl ConfigManager {
         let Some(proto) = dynamics.first() else {
             return Vec::new();
         };
+        // The second half names which completion the protocol should
+        // answer (`interface`, `vrf`, `neighbor`, …). Carry it as a
+        // single synthetic path segment so the handler can dispatch —
+        // `ConfigOp::Completion` otherwise has no payload.
+        let handler = dynamics[1];
         // Clone the channel out of the RefCell borrow so the Ref is dropped
         // before we await — otherwise clippy::await_holding_refcell_ref flags
         // a potential deadlock if the borrowed value is touched elsewhere.
@@ -652,7 +657,10 @@ impl ConfigManager {
         if let Some(tx) = tx {
             let (comp_tx, comp_rx) = oneshot::channel();
             let req = ConfigRequest {
-                paths: Vec::new(),
+                paths: vec![CommandPath {
+                    name: handler.to_string(),
+                    ..Default::default()
+                }],
                 op: ConfigOp::Completion,
                 resp: Some(comp_tx),
             };
