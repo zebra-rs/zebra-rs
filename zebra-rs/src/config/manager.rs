@@ -13,7 +13,7 @@ use super::nd::spawn_nd;
 use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
 use super::parse::parse;
-use super::paths::{path_try_trim, paths_str};
+use super::paths::{path_try_trim, paths_str, vrf_redirect_split};
 use super::util::trim_first_line;
 use super::vty::CommandPath;
 use super::yaml::yaml_parse;
@@ -138,6 +138,11 @@ pub struct ConfigManager {
     pub rx: Receiver<Message>,
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
+    /// Per-instance show channels keyed `"<proto>:vrf:<name>"`. Populated
+    /// at runtime as protocols spawn VRF tasks (via
+    /// [`Message::SubscribeShowVrf`]); lets the manager redirect
+    /// `show <proto> vrf <name> …` into the instance task.
+    pub show_vrf_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     pub rib_tx: UnboundedSender<crate::rib::Message>,
     /// Inbound envelope channel toward RIB. Mints every `RibClient`
     /// handed out by [`Self::subscribe_to_rib`]; protocol-side sends
@@ -203,6 +208,7 @@ impl ConfigManager {
             rx,
             cm_clients: RefCell::new(HashMap::new()),
             show_clients: RefCell::new(HashMap::new()),
+            show_vrf_clients: RefCell::new(HashMap::new()),
             rib_tx,
             rib_inbound_tx,
             next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -761,28 +767,44 @@ impl ConfigManager {
                 let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {
-                let tx_option = if is_bgp(&req.paths) {
-                    self.show_clients.borrow().get("bgp").cloned()
-                } else if is_ospfv3(&req.paths) {
-                    self.show_clients.borrow().get("ospfv3").cloned()
-                } else if is_ospf(&req.paths) {
-                    self.show_clients.borrow().get("ospf").cloned()
-                } else if is_isis(&req.paths) {
-                    self.show_clients.borrow().get("isis").cloned()
-                } else if is_policy(&req.paths) {
-                    self.show_clients.borrow().get("policy").cloned()
-                } else {
-                    self.show_clients.borrow().get("rib").cloned()
-                };
+                // Generic per-VRF instance redirect: `show <proto> vrf
+                // <name> …` is rewritten to `show <proto> …` and routed
+                // to the instance task's show channel when that instance
+                // has registered one. If the name doesn't resolve to a
+                // running instance, fall through to the global proto
+                // channel with the original paths (which renders the
+                // all-VRFs list / a not-running message).
+                let mut paths_override = None;
+                let mut tx_option = None;
+                if let Some((vrf, rewritten)) = vrf_redirect_split(&req.paths) {
+                    let key = format!("{}:vrf:{}", show_proto(&req.paths), vrf);
+                    if let Some(tx) = self.show_vrf_clients.borrow().get(&key).cloned() {
+                        tx_option = Some(tx);
+                        paths_override = Some(rewritten);
+                    }
+                }
+                if tx_option.is_none() {
+                    tx_option = self
+                        .show_clients
+                        .borrow()
+                        .get(show_proto(&req.paths))
+                        .cloned();
+                }
 
                 if let Some(tx) = tx_option {
                     // Protocol is initialized, send the actual handler
-                    let reply = DisplayTxResponse { tx };
+                    let reply = DisplayTxResponse {
+                        tx,
+                        paths: paths_override,
+                    };
                     let _ = req.resp.send(reply);
                 } else {
                     // Protocol is not initialized, send a fallback handler that returns an error message
                     let (fallback_tx, fallback_rx) = mpsc::unbounded_channel();
-                    let reply = DisplayTxResponse { tx: fallback_tx };
+                    let reply = DisplayTxResponse {
+                        tx: fallback_tx,
+                        paths: None,
+                    };
                     let _ = req.resp.send(reply);
 
                     // Spawn a task to handle the fallback response
@@ -818,6 +840,12 @@ impl ConfigManager {
                     output: String::new(),
                 };
                 let _ = req.resp.send(resp);
+            }
+            Message::SubscribeShowVrf { key, tx } => {
+                self.show_vrf_clients.borrow_mut().insert(key, tx);
+            }
+            Message::UnsubscribeShowVrf { key } => {
+                self.show_vrf_clients.borrow_mut().remove(&key);
             }
         }
     }
@@ -913,6 +941,26 @@ fn is_policy(paths: &[CommandPath]) -> bool {
     paths
         .iter()
         .any(|x| x.name == "prefix-set" || x.name == "community-set" || x.name == "policy")
+}
+
+/// Map a show command to the protocol name used as its `show_clients`
+/// key (and the `<proto>` half of a `"<proto>:vrf:<name>"` instance
+/// key). Mirrors the routing order in the `DisplayTx` handler — most
+/// specific first (`ospfv3` before `ospf`).
+fn show_proto(paths: &[CommandPath]) -> &'static str {
+    if is_bgp(paths) {
+        "bgp"
+    } else if is_ospfv3(paths) {
+        "ospfv3"
+    } else if is_ospf(paths) {
+        "ospf"
+    } else if is_isis(paths) {
+        "isis"
+    } else if is_policy(paths) {
+        "policy"
+    } else {
+        "rib"
+    }
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {

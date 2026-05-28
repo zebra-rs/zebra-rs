@@ -226,6 +226,10 @@ pub struct Bgp {
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
+    /// Sender to the config manager, used to (de)register this
+    /// instance's per-VRF show channels so `show bgp vrf <name> …`
+    /// can be redirected into the matching VRF task.
+    pub manager_tx: mpsc::Sender<crate::config::Message>,
     /// Spawn-time runtime context. Bundles the `RibClient` (sends
     /// to RIB through `self.ctx.rib`) with the VRF identity the
     /// socket factories on `ctx` consult — so BGP code calls
@@ -435,6 +439,7 @@ impl Bgp {
         policy_tx: UnboundedSender<policy::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         nd_client_tx: Option<UnboundedSender<crate::nd::inst::NdClientReq>>,
+        manager_tx: mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let policy_chan = PolicyRxChannel::new();
         let msg = policy::Message::Subscribe {
@@ -476,6 +481,7 @@ impl Bgp {
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
+            manager_tx,
             callbacks: HashMap::new(),
             pcallbacks: HashMap::new(),
             listen_task: None,
@@ -779,12 +785,35 @@ impl Bgp {
     /// config callbacks) against [`Self::vrf_registry`] (running
     /// set): spawn the additions, despawn the removals. Called from
     /// `CommitEnd` once per commit.
+    /// Register a VRF task's show channel with the config manager so
+    /// `show bgp vrf <name> …` is redirected into it. Best-effort —
+    /// if the manager mailbox is momentarily full the redirect simply
+    /// isn't installed and the command falls back to the global view.
+    fn register_vrf_show(&self, name: &str, handle: &super::vrf::BgpVrfHandle) {
+        let _ = self
+            .manager_tx
+            .try_send(crate::config::Message::SubscribeShowVrf {
+                key: format!("bgp:vrf:{name}"),
+                tx: handle.show_tx.clone(),
+            });
+    }
+
+    /// Drop the manager's redirect entry for this VRF (despawn / respawn).
+    fn unregister_vrf_show(&self, name: &str) {
+        let _ = self
+            .manager_tx
+            .try_send(crate::config::Message::UnsubscribeShowVrf {
+                key: format!("bgp:vrf:{name}"),
+            });
+    }
+
     fn apply_vrf_commit_diff(&mut self) {
         let (to_spawn, to_despawn) = super::vrf::compute_vrf_diff(&self.vrfs, &self.vrf_registry);
 
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle);
+                self.unregister_vrf_show(&name);
                 // Withdraw the AF_MPLS DecapVrf ILM ahead of
                 // returning the label. The netlink delete keys off
                 // the label alone so the IlmEntry contents are
@@ -839,6 +868,7 @@ impl Bgp {
                 &self.rib_subscriber,
                 self.vrf_global_tx.clone(),
             );
+            self.register_vrf_show(&name, &handle);
             self.vrf_registry.insert(name, handle);
         }
     }
@@ -872,6 +902,7 @@ impl Bgp {
         // new handle.
         let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
             super::vrf::despawn_bgp_vrf(name, &handle);
+            self.unregister_vrf_show(name);
             // Clear stale `peer_index` entries — the spawned task
             // is about to push fresh RegisterPeer messages.
             self.peer_index.retain(|_, owner| owner != name);
@@ -890,6 +921,7 @@ impl Bgp {
             &self.rib_subscriber,
             self.vrf_global_tx.clone(),
         );
+        self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
         tracing::info!(
             vrf = %name,

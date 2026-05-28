@@ -141,6 +141,10 @@ pub struct DisplayTxRequest {
 #[derive(Debug)]
 pub struct DisplayTxResponse {
     pub tx: UnboundedSender<DisplayRequest>,
+    /// When the manager rewrote the command (e.g. stripped a
+    /// `vrf <name>` selector to redirect into an instance task), the
+    /// caller must dispatch these paths instead of the original.
+    pub paths: Option<Vec<CommandPath>>,
 }
 
 #[derive(Debug)]
@@ -150,6 +154,17 @@ pub enum Message {
     Deploy(DeployRequest),
     DisplayTx(DisplayTxRequest),
     ClearTx(ClearTxRequest),
+    /// Register a per-instance (e.g. per-VRF) show channel under a
+    /// composite key like `"bgp:vrf:<name>"`, so the manager can
+    /// redirect `show <proto> vrf <name> …` into that task.
+    SubscribeShowVrf {
+        key: String,
+        tx: UnboundedSender<DisplayRequest>,
+    },
+    /// Remove a previously-registered per-instance show channel.
+    UnsubscribeShowVrf {
+        key: String,
+    },
 }
 
 #[derive(Debug)]

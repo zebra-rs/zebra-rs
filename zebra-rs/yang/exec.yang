@@ -254,6 +254,14 @@ module exec {
             ext:dynamic "bgp:vrf";
             type string;
           }
+          leaf summary {
+            ext:help "Summary of this VRF's BGP neighbor status";
+            type empty;
+          }
+          leaf neighbors {
+            ext:help "Detailed information on this VRF's BGP neighbors";
+            type empty;
+          }
         }
         list neighbor-group {
           ext:help "BGP neighbor-group inheritance state";

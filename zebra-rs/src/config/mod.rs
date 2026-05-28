@@ -28,7 +28,7 @@ mod paths;
 pub use paths::path_from_command;
 
 mod api;
-pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
+pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Message, ShowChannel};
 
 mod bfd;
 mod bgp;

@@ -453,8 +453,11 @@ impl Show for ShowService {
         self.tx.send(Message::DisplayTx(query)).await.unwrap();
         let serve = rx.await.unwrap();
         let (bus_tx, mut bus_rx) = mpsc::channel::<String>(4);
+        // The manager may rewrite the command (e.g. stripping a
+        // `vrf <name>` selector to redirect into an instance task); use
+        // its rewritten paths when present.
         let req = DisplayRequest {
-            paths: request.paths.clone(),
+            paths: serve.paths.unwrap_or_else(|| request.paths.clone()),
             json: request.json,
             resp: bus_tx.clone(),
         };
