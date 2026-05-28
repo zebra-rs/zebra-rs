@@ -74,6 +74,11 @@ impl FibAddr {
 pub struct FibRoute {
     pub prefix: IpNet,
     pub entry: RibEntry,
+    /// Kernel routing-table id the route belongs to (`rtm_table`, or
+    /// the `RTA_TABLE` attribute for ids > 255). `RT_TABLE_MAIN` (254)
+    /// for the default table; a VRF's table id otherwise. Lets the RIB
+    /// dispatch a learned route into the matching `vrf_tables` entry.
+    pub table_id: u32,
 }
 
 /// One row from the kernel's neighbor table — covers IPv4 ARP, IPv6

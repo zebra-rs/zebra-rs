@@ -2564,8 +2564,15 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
         builder = builder.ipv4_prefix(prefix);
     }
 
+    // `rtm_table` is a single byte; ids > 255 arrive as
+    // `RT_TABLE_UNSPEC` in the header with the real id in `RTA_TABLE`.
+    let mut table_id = msg.header.table as u32;
+
     for attr in msg.attributes.into_iter() {
         match attr {
+            RouteAttribute::Table(t) => {
+                table_id = t;
+            }
             RouteAttribute::Priority(metric) => {
                 builder = builder.metric(metric);
             }
@@ -2620,7 +2627,11 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
 
     let (prefix, entry) = builder.build();
 
-    let msg = FibRoute { prefix, entry };
+    let msg = FibRoute {
+        prefix,
+        entry,
+        table_id,
+    };
 
     Some(msg)
 }

@@ -1917,8 +1917,24 @@ pub(super) fn vrf_ipv4_insert(
         return false;
     };
     let entries = t.table.entry(*prefix).or_default();
-    entries.push(entry);
+    vrf_entries_replace(entries, entry);
     true
+}
+
+/// Insert `entry`, first dropping any prior entry it should supersede,
+/// so a prefix fed from two sources (the daemon's connected-route
+/// synthesis and the kernel's RTM_NEWROUTE echo) — and re-notified on
+/// flaps — doesn't accumulate duplicates. Mirrors `rib_add_system`:
+/// same protocol replaces, except connected routes are keyed by
+/// interface so a multi-homed prefix keeps one entry per interface.
+fn vrf_entries_replace(entries: &mut RibEntries, entry: RibEntry) {
+    entries.retain(|e| {
+        if e.rtype != entry.rtype {
+            return true;
+        }
+        entry.is_connected() && e.ifindex != entry.ifindex
+    });
+    entries.push(entry);
 }
 
 pub(super) fn vrf_ipv4_remove(
@@ -1950,7 +1966,7 @@ pub(super) fn vrf_ipv6_insert(
         return false;
     };
     let entries = t.table_v6.entry(*prefix).or_default();
-    entries.push(entry);
+    vrf_entries_replace(entries, entry);
     true
 }
 
@@ -2260,6 +2276,39 @@ mod tests {
         vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, RibEntry::new(RibType::Bgp));
         vrf_ipv4_remove(&mut vrf_tables, 10, &prefix, RibType::Bgp);
         assert!(vrf_tables.get(&10).unwrap().table.get(&prefix).is_none());
+    }
+
+    #[test]
+    fn vrf_ipv4_insert_dedups_per_protocol_and_interface() {
+        use super::super::RibType;
+        use super::super::entry::RibEntry;
+        use super::super::vrf::VrfRibTables;
+        use super::vrf_ipv4_insert;
+        use ipnet::Ipv4Net;
+        use std::collections::BTreeMap;
+
+        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
+        vrf_tables.insert(10, VrfRibTables::new());
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let connected = |ifindex: u32| {
+            let mut e = RibEntry::new(RibType::Connected);
+            e.ifindex = ifindex;
+            e
+        };
+
+        // Two sources feed the same connected route (same interface):
+        // the second replaces the first rather than duplicating.
+        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(5));
+        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(5));
+        let entries = vrf_tables.get(&10).unwrap().table.get(&prefix).unwrap();
+        assert_eq!(entries.len(), 1, "same connected route dedups");
+
+        // A connected route on a different interface coexists.
+        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(6));
+        // A different protocol coexists with connected.
+        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, RibEntry::new(RibType::Bgp));
+        let entries = vrf_tables.get(&10).unwrap().table.get(&prefix).unwrap();
+        assert_eq!(entries.len(), 3, "different ifindex / rtype kept");
     }
 
     #[test]
