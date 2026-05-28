@@ -1667,11 +1667,15 @@ impl Isis {
         // per-level Auth TLV so receivers can verify it.
         let auth_cfg = super::lsp::level_auth_cfg(top.config, level).clone();
         let resolved = super::auth::resolve_send(&auth_cfg, top.key_chains, chrono::Utc::now());
-        let _buf = lsp_emit(&mut purged_lsp, level, resolved.as_ref());
-        insert_self_originate(&mut top, level, purged_lsp, None);
+        // The encoded purge MUST be handed to `insert_self_originate`
+        // — `srm_advertise` reads `lsa.bytes` to flood, and an empty
+        // bytes vector silently drops the send. Previously the buf
+        // was discarded, so the POI stamp landed in the LSDB but
+        // never reached peers.
+        let buf = lsp_emit(&mut purged_lsp, level, resolved.as_ref());
+        insert_self_originate(&mut top, level, purged_lsp, Some(buf.to_vec()));
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
-        // lsp_flood(&mut top, level, &lsp_id);
     }
 
     /// ISO 10589 §7.3.16.4 wait expired for one specific fragment:
