@@ -72,7 +72,7 @@ mod tests {
     use std::net::IpAddr;
 
     fn mk_group(uni: NexthopUni) -> GroupUni {
-        GroupUni::new(0, &uni)
+        GroupUni::new(0, &uni, 0)
     }
 
     #[test]

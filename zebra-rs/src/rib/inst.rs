@@ -844,7 +844,7 @@ impl Rib {
         }
 
         let uni = Self::sid_nexthop_uni(&sid);
-        let Some(group) = self.nmap.fetch(&uni) else {
+        let Some(group) = self.nmap.fetch(&uni, RT_TABLE_MAIN) else {
             tracing::warn!(
                 "[sid_install] addr={} NexthopMap::fetch returned None",
                 sid.addr
@@ -925,7 +925,7 @@ impl Rib {
         self.fib_handle.route_sid_uninstall(&sid).await;
 
         let uni = Self::sid_nexthop_uni(&sid);
-        let Some(group) = self.nmap.fetch(&uni) else {
+        let Some(group) = self.nmap.fetch(&uni, RT_TABLE_MAIN) else {
             return;
         };
         let gid = group.gid();
@@ -1344,7 +1344,7 @@ impl Rib {
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_add(&prefix, rib, table_id).await;
                 } else {
-                    self.ipv4_route_add_vrf(table_id, &prefix, rib);
+                    self.ipv4_route_add_vrf(table_id, &prefix, rib).await;
                 }
             }
             Message::Ipv4Del { prefix, rib } => {
@@ -1352,7 +1352,7 @@ impl Rib {
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_del(&prefix, rib, table_id).await;
                 } else {
-                    self.ipv4_route_del_vrf(table_id, &prefix, rib);
+                    self.ipv4_route_del_vrf(table_id, &prefix, rib).await;
                 }
             }
             Message::Ipv6Add { prefix, rib } => {
@@ -1360,7 +1360,7 @@ impl Rib {
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_add(&prefix, rib, table_id).await;
                 } else {
-                    self.ipv6_route_add_vrf(table_id, &prefix, rib);
+                    self.ipv6_route_add_vrf(table_id, &prefix, rib).await;
                 }
             }
             Message::Ipv6Del { prefix, rib } => {
@@ -1368,7 +1368,7 @@ impl Rib {
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_del(&prefix, rib, table_id).await;
                 } else {
-                    self.ipv6_route_del_vrf(table_id, &prefix, rib);
+                    self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
                 }
             }
             Message::IlmAdd { label, ilm } => {
@@ -1877,7 +1877,14 @@ impl Rib {
                 // LinkAddr is already present for this address, the merge in
                 // link_addr_update will flip its `fib` flag to true.
                 self.addr_add(addr, false);
-                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
+                ipv4_nexthop_sync(
+                    &mut self.nmap,
+                    &self.table,
+                    &self.vrf_tables,
+                    &self.links,
+                    &self.fib_handle,
+                )
+                .await;
                 ipv4_route_sync(
                     &mut self.table,
                     &mut self.nmap,
@@ -1889,6 +1896,7 @@ impl Rib {
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
+                    &self.vrf_tables,
                     &self.links,
                     &self.fib_handle,
                 )
@@ -1915,7 +1923,14 @@ impl Rib {
                 }
 
                 self.addr_del(addr);
-                ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
+                ipv4_nexthop_sync(
+                    &mut self.nmap,
+                    &self.table,
+                    &self.vrf_tables,
+                    &self.links,
+                    &self.fib_handle,
+                )
+                .await;
                 ipv4_route_sync(
                     &mut self.table,
                     &mut self.nmap,
@@ -1927,6 +1942,7 @@ impl Rib {
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
+                    &self.vrf_tables,
                     &self.links,
                     &self.fib_handle,
                 )
@@ -1949,7 +1965,8 @@ impl Rib {
                         // A route the kernel placed in a VRF's table —
                         // mirror it into that VRF. Tables we don't manage
                         // are ignored rather than dumped into the default.
-                        self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry);
+                        self.ipv4_route_add_vrf(route.table_id, &prefix, route.entry)
+                            .await;
                     }
                 }
             }
@@ -1959,7 +1976,8 @@ impl Rib {
                         self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
                             .await;
                     } else if self.vrf_tables.contains_key(&route.table_id) {
-                        self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry);
+                        self.ipv4_route_del_vrf(route.table_id, &prefix, route.entry)
+                            .await;
                     }
                 }
             }

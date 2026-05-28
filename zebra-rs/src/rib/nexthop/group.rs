@@ -42,6 +42,13 @@ pub struct GroupUni {
     common: GroupCommon,
     pub addr: IpAddr,
 
+    /// Routing table this nexthop's gateway resolves against
+    /// (`RT_TABLE_MAIN` for the default table, a VRF's table id
+    /// otherwise). The same gateway address in two VRFs is a distinct
+    /// nexthop, so the `NexthopMap` keys on `(table_id, addr)` and the
+    /// periodic resolve cycle walks the table this names.
+    pub table_id: u32,
+
     /// What the source said the egress ifindex was — copied verbatim
     /// from `NexthopUni::ifindex_origin` in `GroupUni::new`. Resolution
     /// must never overwrite this.
@@ -71,7 +78,7 @@ pub struct GroupUni {
 }
 
 impl GroupUni {
-    pub fn new(gid: usize, uni: &NexthopUni) -> Self {
+    pub fn new(gid: usize, uni: &NexthopUni, table_id: u32) -> Self {
         // Carry the source's ifindex_origin straight through — IGP
         // adjacencies, seg6local installs, connected routes and
         // interface-pinned static routes all set it. The resolver is
@@ -79,6 +86,7 @@ impl GroupUni {
         Self {
             common: GroupCommon::new(gid),
             addr: uni.addr,
+            table_id,
             ifindex_origin: uni.ifindex_origin,
             ifindex_resolved: None,
             labels: uni.mpls_label.clone(),
@@ -281,7 +289,7 @@ mod tests {
             addr,
             ..Default::default()
         };
-        GroupUni::new(0, &uni)
+        GroupUni::new(0, &uni, 0)
     }
 
     fn connected_v6(ifindex: u32) -> RibEntry {
@@ -380,7 +388,7 @@ mod tests {
             ifindex_origin: Some(42),
             ..Default::default()
         };
-        let group = GroupUni::new(0, &uni);
+        let group = GroupUni::new(0, &uni, 0);
         assert_eq!(group.ifindex_origin, Some(42));
         assert_eq!(group.ifindex_resolved, None);
         assert_eq!(group.ifindex(), Some(42));
@@ -404,7 +412,7 @@ mod tests {
             ifindex_origin: Some(99), // adjacency knows it's on link 99
             ..Default::default()
         };
-        let mut group = GroupUni::new(0, &uni);
+        let mut group = GroupUni::new(0, &uni, 0);
         assert_eq!(group.ifindex_origin, Some(99));
         assert_eq!(group.ifindex_resolved, None);
 
@@ -513,7 +521,7 @@ mod tests {
             encap_type: Some(EncapType::HEncap),
             ..Default::default()
         };
-        let group = GroupUni::new(7, &uni);
+        let group = GroupUni::new(7, &uni, 0);
         assert_eq!(group.segs, segs);
         assert_eq!(group.encap_type, Some(EncapType::HEncap));
     }
@@ -527,7 +535,7 @@ mod tests {
             addr: IpAddr::V6("2001:db8::1".parse().unwrap()),
             ..Default::default()
         };
-        let group = GroupUni::new(3, &uni);
+        let group = GroupUni::new(3, &uni, 0);
         assert!(group.segs.is_empty());
         assert_eq!(group.encap_type, None);
     }
