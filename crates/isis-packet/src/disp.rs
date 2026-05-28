@@ -184,6 +184,7 @@ impl Display for IsisTlv {
             Padding(v) => write!(f, "{}", v),
             LspEntries(v) => write!(f, "{}", v),
             Auth(v) => write!(f, "{}", v),
+            PurgeOrigId(v) => write!(f, "{}", v),
             LspBufferSize(v) => write!(f, "{}", v),
             ExtIsReach(v) => write!(f, "{}", v),
             MtIsReach(v) => write!(f, "{}", v),
@@ -209,6 +210,16 @@ impl Display for IsisTlv {
                 write!(f, "  {:?}", v.typ)
             }
         }
+    }
+}
+
+impl Display for crate::parser::IsisTlvPurgeOrigId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "  Purge Originator: {}", self.originator)?;
+        if let Some(rcv) = self.received_from {
+            write!(f, " (received from {})", rcv)?;
+        }
+        Ok(())
     }
 }
 

@@ -125,6 +125,81 @@ pub fn json_round_trip_test() {
     println!("All round-trip JSON serialization/deserialization tests passed!");
 }
 
+/// Wire round-trip for the RFC 6232 Purge Originator Identification
+/// TLV. Covers both the originator-only form (Number == 1, 7-octet
+/// value) and the (originator, received-from) form (Number == 2,
+/// 13-octet value), plus the malformed Number == 3 case.
+#[test]
+pub fn rfc6232_poi_round_trip() {
+    use bytes::BytesMut;
+    use isis_packet::{IsisSysId, IsisTlv, IsisTlvPurgeOrigId, IsisTlvType};
+
+    let orig = IsisSysId {
+        id: [0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+    };
+
+    // Originator-only purge.
+    let tlv = IsisTlvPurgeOrigId {
+        originator: orig,
+        received_from: None,
+    };
+    let mut buf = BytesMut::new();
+    IsisTlv::PurgeOrigId(tlv.clone()).emit(&mut buf);
+    // <type=13><length=7><num=1><6-octet sys-id>
+    assert_eq!(buf[0], u8::from(IsisTlvType::PurgeOrigId));
+    assert_eq!(buf[1], 7);
+    assert_eq!(buf[2], 1);
+    assert_eq!(&buf[3..9], &orig.id);
+    let (rest, parsed) = IsisTlv::parse_be(&buf[2..], IsisTlvType::PurgeOrigId).unwrap();
+    assert!(rest.is_empty());
+    assert!(matches!(parsed, IsisTlv::PurgeOrigId(_)));
+    if let IsisTlv::PurgeOrigId(p) = parsed {
+        assert_eq!(p, tlv);
+    }
+
+    // Forwarded purge: includes upstream system-id.
+    let upstream = IsisSysId {
+        id: [0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
+    };
+    let tlv = IsisTlvPurgeOrigId {
+        originator: orig,
+        received_from: Some(upstream),
+    };
+    let mut buf = BytesMut::new();
+    IsisTlv::PurgeOrigId(tlv.clone()).emit(&mut buf);
+    assert_eq!(buf[1], 13);
+    assert_eq!(buf[2], 2);
+    assert_eq!(&buf[3..9], &orig.id);
+    assert_eq!(&buf[9..15], &upstream.id);
+    let (rest, parsed) = IsisTlv::parse_be(&buf[2..], IsisTlvType::PurgeOrigId).unwrap();
+    assert!(rest.is_empty());
+    if let IsisTlv::PurgeOrigId(p) = parsed {
+        assert_eq!(p, tlv);
+    } else {
+        panic!("expected PurgeOrigId");
+    }
+
+    // Malformed Number byte must be rejected. RFC 6232 §3 only
+    // defines values 1 and 2; anything else means "don't trust the
+    // rest of the buffer" — return a parse error rather than guess.
+    let raw_bad = [3u8, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2];
+    assert!(IsisTlv::parse_be(&raw_bad, IsisTlvType::PurgeOrigId).is_err());
+
+    // JSON round-trip with received_from omitted (verifies the
+    // skip_serializing_if guard on the Option).
+    let serialized = serde_json::to_string(&IsisTlvPurgeOrigId {
+        originator: orig,
+        received_from: None,
+    })
+    .unwrap();
+    assert!(
+        !serialized.contains("received-from"),
+        "received-from must be elided when None; got: {serialized}"
+    );
+    let deserialized: IsisTlvPurgeOrigId = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(deserialized.received_from, None);
+}
+
 /// Wire round-trip for the RFC 8570 Performance Metric sub-TLVs.
 /// Confirms every code (33–39) survives emit → parse with its
 /// fields intact and the expected on-wire size, including the
