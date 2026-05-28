@@ -1634,6 +1634,9 @@ impl Isis {
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
+        // Capture sys-id before `self.top()` takes the mutable borrow
+        // of `self.config`; needed for the RFC 6232 POI stamp below.
+        let own_sys_id = self.config.net.sys_id();
         let mut top = self.top();
 
         // Get current LSP if it exists. `saturating_add` so the
@@ -1653,14 +1656,11 @@ impl Isis {
             return;
         };
 
-        // Create purged LSP with incremented sequence number
-        let mut purged_lsp = IsisLsp {
-            lsp_id,
-            seq_number,
-            hold_time: 0, // This purges the LSP
-            types: IsisLspTypes::from(level.digit()),
-            ..Default::default()
-        };
+        // Create purged LSP with incremented sequence number. Body
+        // construction lives in `build_self_originated_purge` so
+        // the RFC 6232 POI stamp is unit-testable without standing
+        // up the full instance.
+        let mut purged_lsp = build_self_originated_purge(lsp_id, seq_number, level, own_sys_id);
 
         // Emit and flood the purged LSP. Purge auth follows
         // RFC 6232: the zero-lifetime LSP still carries the
@@ -2278,6 +2278,30 @@ impl Isis {
     }
 }
 
+/// Build the body of a self-originated purge (LSP with Remaining
+/// Lifetime == 0). RFC 6232 §4 requires `Number == 1` POI carrying
+/// just the originator's own system-id; that's stamped here so
+/// receivers can attribute the phantom LSP back to its source
+/// instead of looking at an anonymous zero-lifetime LSP.
+fn build_self_originated_purge(
+    lsp_id: IsisLspId,
+    seq_number: u32,
+    level: Level,
+    own_sys_id: IsisSysId,
+) -> IsisLsp {
+    IsisLsp {
+        lsp_id,
+        seq_number,
+        hold_time: 0,
+        types: IsisLspTypes::from(level.digit()),
+        tlvs: vec![IsisTlv::PurgeOrigId(IsisTlvPurgeOrigId {
+            originator: own_sys_id,
+            received_from: None,
+        })],
+        ..Default::default()
+    }
+}
+
 pub fn serve(mut isis: Isis) -> Task<()> {
     Task::spawn(async move {
         isis.event_loop().await;
@@ -2582,5 +2606,69 @@ mod bfd_wiring_tests {
             State::Up,
             State::Down,
         ));
+    }
+}
+
+#[cfg(test)]
+mod purge_poi_tests {
+    use super::*;
+
+    /// RFC 6232 §4: self-originated purges MUST carry POI with the
+    /// originator's own system-id (Number == 1). Verifies the
+    /// purge-body helper that `process_lsp_purge` delegates to.
+    #[test]
+    fn self_originated_purge_carries_poi() {
+        let own = IsisSysId {
+            id: [0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+        };
+        let lsp_id = IsisLspId::new(own, 0, 0);
+
+        let purged = build_self_originated_purge(lsp_id, 42, Level::L2, own);
+
+        assert_eq!(purged.hold_time, 0, "must be a purge");
+        assert_eq!(purged.seq_number, 42);
+        assert_eq!(purged.lsp_id, lsp_id);
+
+        let poi = purged
+            .tlvs
+            .iter()
+            .find_map(|t| match t {
+                IsisTlv::PurgeOrigId(p) => Some(p),
+                _ => None,
+            })
+            .expect("POI must be present on self-originated purge");
+        assert_eq!(poi.originator, own);
+        assert_eq!(
+            poi.received_from, None,
+            "self-originated purges use Number == 1 (no received_from)"
+        );
+    }
+
+    /// The purge body must round-trip through the wire codec — a
+    /// purge with POI emitted by the daemon must come back from
+    /// the parser carrying the same POI variant, not as Unknown(13).
+    #[test]
+    fn self_originated_purge_wire_round_trip() {
+        use bytes::BytesMut;
+        let own = IsisSysId {
+            id: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
+        };
+        let lsp_id = IsisLspId::new(own, 0, 0);
+        let purged = build_self_originated_purge(lsp_id, 7, Level::L1, own);
+
+        let mut buf = BytesMut::new();
+        purged.emit(&mut buf);
+        let (rest, parsed) = IsisLsp::parse_be(&buf).expect("purge body must parse with own codec");
+        assert!(rest.is_empty());
+        let poi = parsed
+            .tlvs
+            .iter()
+            .find_map(|t| match t {
+                IsisTlv::PurgeOrigId(p) => Some(p),
+                _ => None,
+            })
+            .expect("POI must survive emit→parse");
+        assert_eq!(poi.originator, own);
+        assert_eq!(poi.received_from, None);
     }
 }
