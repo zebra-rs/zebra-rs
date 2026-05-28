@@ -86,6 +86,15 @@ pub struct SpfRoute {
     /// `build_rib_from_spf`; used by TI-LFA to join routes with
     /// per-destination repair candidates.
     pub dest_vertex: Option<usize>,
+    /// Value of `fast-reroute backup-as-primary` at the time this
+    /// route was built. Carried here — rather than read globally at
+    /// install time — so it participates in the `PartialEq` that
+    /// `spf::table_diff` uses to gate RIB updates. The flag flips the
+    /// primary/backup metric in `make_rib_entry`, so two routes with
+    /// identical SPF output but different flag values install
+    /// *differently*; without this field a toggle-then-recompute
+    /// would diff clean and never reach the RIB.
+    pub backup_as_primary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +121,10 @@ pub struct SpfRouteV6 {
     /// Same role as `SpfRoute.dest_vertex` — populated by
     /// `build_rib_from_spf_v6` for the IPv6 repair-path join.
     pub dest_vertex: Option<usize>,
+    /// Same role as `SpfRoute.backup_as_primary` — carried so the
+    /// flag is part of the `table_diff` equality that gates RIB
+    /// updates. See that field for the full rationale.
+    pub backup_as_primary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +173,7 @@ fn nhop_to_nexthop_uni(
     nhop
 }
 
-fn make_rib_entry(route: &SpfRoute, backup_as_primary: bool) -> rib::entry::RibEntry {
+fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
@@ -170,9 +183,11 @@ fn make_rib_entry(route: &SpfRoute, backup_as_primary: bool) -> rib::entry::RibE
     //
     // `backup_as_primary` flips the metric-sort offset: when set, the
     // repair installs at route.metric (sorted first) and the SPF
-    // primary installs at route.metric + BACKUP_METRIC_OFFSET.
+    // primary installs at route.metric + BACKUP_METRIC_OFFSET. The
+    // flag is read from the route (stamped at build time) so the
+    // value used to render is the same one `table_diff` compared.
     let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
-    let (primary_metric, backup_metric) = if backup_as_primary {
+    let (primary_metric, backup_metric) = if route.backup_as_primary {
         (offset_metric, route.metric)
     } else {
         (route.metric, offset_metric)
@@ -343,15 +358,11 @@ pub fn diff_apply_flex_algo(
     }
 }
 
-pub fn diff_apply(
-    rib_client: &crate::rib::client::RibClient,
-    diff: &DiffResult,
-    backup_as_primary: bool,
-) {
+pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, backup_as_primary);
+            let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Del {
                 prefix: *prefix,
                 rib,
@@ -362,7 +373,7 @@ pub fn diff_apply(
     // Add (changed).
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, backup_as_primary);
+            let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -373,7 +384,7 @@ pub fn diff_apply(
     // Add (new).
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, backup_as_primary);
+            let rib = make_rib_entry(route);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -405,12 +416,12 @@ fn nhop_to_nexthop_uni_v6(
     nhop
 }
 
-fn make_rib_entry_v6(route: &SpfRouteV6, backup_as_primary: bool) -> rib::entry::RibEntry {
+fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.distance = 115;
     rib.metric = route.metric;
     let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
-    let (primary_metric, backup_metric) = if backup_as_primary {
+    let (primary_metric, backup_metric) = if route.backup_as_primary {
         (offset_metric, route.metric)
     } else {
         (route.metric, offset_metric)
@@ -439,14 +450,10 @@ fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::Nextho
     nhop
 }
 
-pub fn diff_apply_v6(
-    rib_client: &crate::rib::client::RibClient,
-    diff: &DiffResultV6,
-    backup_as_primary: bool,
-) {
+pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResultV6) {
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, backup_as_primary);
+            let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Del {
                 prefix: *prefix,
                 rib,
@@ -456,7 +463,7 @@ pub fn diff_apply_v6(
     }
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, backup_as_primary);
+            let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -466,7 +473,7 @@ pub fn diff_apply_v6(
     }
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, backup_as_primary);
+            let rib = make_rib_entry_v6(route);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -722,6 +729,7 @@ fn build_rib_from_spf(
                     sid,
                     prefix_sid,
                     dest_vertex: Some(*node),
+                    backup_as_primary: top.config.fast_reroute_backup_as_primary,
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -960,6 +968,7 @@ fn build_rib_from_spf_v6(
                     sid: None,
                     prefix_sid: None,
                     dest_vertex: Some(*node),
+                    backup_as_primary: top.config.fast_reroute_backup_as_primary,
                 };
 
                 if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -1040,19 +1049,25 @@ fn apply_routing_updates(
     }
     *top.ilm.get_mut(&level) = ilm;
 
-    let backup_as_primary = top.config.fast_reroute_backup_as_primary;
+    // The `fast-reroute backup-as-primary` flag is stamped onto each
+    // `SpfRoute` at build time and read back in `make_rib_entry`, so
+    // the metric ordering is decided by the route, not a separate
+    // arg here. A toggle changes every route's stamped flag, which
+    // `table_diff` sees as a value change → re-render; the cache
+    // stays the delete baseline so withdrawn prefixes still get
+    // `only_curr` deletes.
 
     // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
-        diff_apply(top.rib_client, &diff, backup_as_primary);
+        diff_apply(top.rib_client, &diff);
     }
     *top.rib.get_mut(&level) = rib;
 
     // Update IPv6 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
-        diff_apply_v6(top.rib_client, &diff, backup_as_primary);
+        diff_apply_v6(top.rib_client, &diff);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1517,6 +1532,7 @@ fn build_rib_from_flex_algo(
                 sid,
                 prefix_sid,
                 dest_vertex: Some(*node),
+                backup_as_primary: top.config.fast_reroute_backup_as_primary,
             };
 
             if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
@@ -1598,6 +1614,7 @@ mod tests {
             sid,
             prefix_sid: None,
             dest_vertex: None,
+            backup_as_primary: false,
         }
     }
 
@@ -1849,8 +1866,9 @@ mod tests {
             sid: None,
             prefix_sid: None,
             dest_vertex: None,
+            backup_as_primary: false,
         };
-        let entry = make_rib_entry(&route, false);
+        let entry = make_rib_entry(&route);
         assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
     }
 
@@ -1882,8 +1900,9 @@ mod tests {
             sid: None,
             prefix_sid: None,
             dest_vertex: None,
+            backup_as_primary: false,
         };
-        let entry = make_rib_entry(&route, false);
+        let entry = make_rib_entry(&route);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -1932,8 +1951,9 @@ mod tests {
             sid: None,
             prefix_sid: None,
             dest_vertex: None,
+            backup_as_primary: true,
         };
-        let entry = make_rib_entry(&route, true);
+        let entry = make_rib_entry(&route);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -1953,6 +1973,43 @@ mod tests {
         };
         assert_eq!(p.metric, 21);
         assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
+    }
+
+    /// Regression for the `fast-reroute backup-as-primary` toggle:
+    /// two routes whose SPF output is otherwise byte-identical but
+    /// whose stamped `backup_as_primary` differs must compare
+    /// unequal, so `spf::table_diff` lands the prefix in the
+    /// `different` bucket and the new metric ordering reaches the
+    /// RIB. Before the flag was carried on `SpfRoute`, the diff saw
+    /// them as identical and pushed no update.
+    #[test]
+    fn backup_as_primary_toggle_is_detected_by_table_diff() {
+        use std::collections::BTreeMap;
+
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+
+        let mut prev: BTreeMap<Ipv4Net, SpfRoute> = BTreeMap::new();
+        let mut next: BTreeMap<Ipv4Net, SpfRoute> = BTreeMap::new();
+
+        let off = spf_route(20, None, &[("10.0.0.1", 10)]);
+        let mut on = spf_route(20, None, &[("10.0.0.1", 10)]);
+        on.backup_as_primary = true;
+
+        // Sanity: the only difference is the flag.
+        assert_eq!(off.metric, on.metric);
+        assert_ne!(off, on, "flag flip must make SpfRoutes compare unequal");
+
+        prev.insert(prefix, off);
+        next.insert(prefix, on);
+
+        let diff = crate::spf::table_diff(
+            prev.iter().map(|(&k, v)| (k, v)),
+            next.iter().map(|(&k, v)| (k, v)),
+        );
+        assert_eq!(diff.different.len(), 1, "toggle must be a `different`");
+        assert!(diff.identical.is_empty(), "toggle must not be `identical`");
+        assert!(diff.only_curr.is_empty());
+        assert!(diff.only_next.is_empty());
     }
 
     #[test]
@@ -1985,8 +2042,9 @@ mod tests {
             sid: None,
             prefix_sid: None,
             dest_vertex: None,
+            backup_as_primary: false,
         };
-        let entry = make_rib_entry_v6(&route, false);
+        let entry = make_rib_entry_v6(&route);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
