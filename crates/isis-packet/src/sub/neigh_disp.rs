@@ -1,6 +1,10 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::neigh::{IsisSubAdjSid, IsisSubAdminGrp, IsisSubAsla, IsisSubTlv};
+use super::neigh::{
+    IsisSubAdjSid, IsisSubAdminGrp, IsisSubAsla, IsisSubAvailableBw, IsisSubDelayVariation,
+    IsisSubLinkLoss, IsisSubMinMaxLinkDelay, IsisSubResidualBw, IsisSubTlv, IsisSubUniLinkDelay,
+    IsisSubUtilizedBw,
+};
 use super::{
     AdjSidFlags, IsisSubIpv4IfAddr, IsisSubIpv4NeighAddr, IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr,
     IsisSubLanAdjSid, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid, IsisSubTeMetric,
@@ -43,11 +47,98 @@ impl Display for IsisSubTlv {
             TeMetric(v) => write!(f, "{}", v),
             AdjSid(v) => write!(f, "{}", v),
             LanAdjSid(v) => write!(f, "{}", v),
+            UniLinkDelay(v) => write!(f, "{}", v),
+            MinMaxLinkDelay(v) => write!(f, "{}", v),
+            DelayVariation(v) => write!(f, "{}", v),
+            LinkLoss(v) => write!(f, "{}", v),
+            ResidualBw(v) => write!(f, "{}", v),
+            AvailableBw(v) => write!(f, "{}", v),
+            UtilizedBw(v) => write!(f, "{}", v),
             Srv6EndXSid(v) => write!(f, "{}", v),
             Asla(v) => write!(f, "{}", v),
             Srv6LanEndXSid(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "    Unknown: ({:?})", v.code),
         }
+    }
+}
+
+fn anomalous_str(a: bool) -> &'static str {
+    if a { " (A)" } else { "" }
+}
+
+impl Display for IsisSubUniLinkDelay {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Unidirectional Link Delay: {} us{}",
+            self.delay,
+            anomalous_str(self.anomalous)
+        )
+    }
+}
+
+impl Display for IsisSubMinMaxLinkDelay {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Min/Max Unidirectional Link Delay: min {} us, max {} us{}",
+            self.min_delay,
+            self.max_delay,
+            anomalous_str(self.anomalous)
+        )
+    }
+}
+
+impl Display for IsisSubDelayVariation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Unidirectional Delay Variation: {} us",
+            self.variation
+        )
+    }
+}
+
+impl Display for IsisSubLinkLoss {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        // RFC 8570 §4.4: encoded units are 0.000003 % per LSB.
+        let pct = self.loss as f64 * 0.000003;
+        write!(
+            f,
+            "    Unidirectional Link Loss: {:.6}%{}",
+            pct,
+            anomalous_str(self.anomalous)
+        )
+    }
+}
+
+impl Display for IsisSubResidualBw {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Unidirectional Residual Bandwidth: {} B/s",
+            self.bw.bw_bps
+        )
+    }
+}
+
+impl Display for IsisSubAvailableBw {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Unidirectional Available Bandwidth: {} B/s",
+            self.bw.bw_bps
+        )
+    }
+}
+
+impl Display for IsisSubUtilizedBw {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "    Unidirectional Utilized Bandwidth: {} B/s",
+            self.bw.bw_bps
+        )
     }
 }
 
