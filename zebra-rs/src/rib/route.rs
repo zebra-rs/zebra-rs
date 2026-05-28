@@ -1371,11 +1371,10 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// Pick the winning ILM candidate: lowest admin distance, then
-/// protocol order as a stable tie-break. ILM entries carry no metric
-/// today (no per-label cost from the producers), so distance + rtype
-/// fully disambiguates. Returns the index into `entries`, or `None`
-/// when empty.
+/// Pick the winning ILM candidate, mirroring `rib_next` for the IP
+/// table: lowest admin distance, then lowest metric, then protocol
+/// order as a stable final tie-break. Returns the index into
+/// `entries`, or `None` when empty.
 fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
     entries
         .iter()
@@ -1383,6 +1382,7 @@ fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
         .min_by(|(_, a), (_, b)| {
             a.distance
                 .cmp(&b.distance)
+                .then(a.metric.cmp(&b.metric))
                 .then(a.rtype.u8().cmp(&b.rtype.u8()))
         })
         .map(|(i, _)| i)
@@ -1908,13 +1908,37 @@ mod tests {
     }
 
     #[test]
+    fn ilm_next_metric_breaks_distance_tie() {
+        use super::IlmEntry;
+        use super::ilm_next;
+        use crate::rib::RibType;
+
+        // Same protocol and distance: the lower metric wins.
+        let mut hi = IlmEntry::new(RibType::Ospf);
+        let mut lo = IlmEntry::new(RibType::Ospf);
+        hi.metric = 100;
+        lo.metric = 10;
+        assert_eq!(ilm_next(&[hi, lo]), Some(1));
+
+        // Metric outranks the rtype tie-break: at equal distance, the
+        // higher-code protocol wins when it has the lower metric.
+        let mut a = IlmEntry::new(RibType::Other(10)); // lower rtype code
+        let mut b = IlmEntry::new(RibType::Other(20)); // higher rtype code
+        a.distance = 50;
+        b.distance = 50;
+        a.metric = 50;
+        b.metric = 5;
+        assert_eq!(ilm_next(&[a, b]), Some(1));
+    }
+
+    #[test]
     fn ilm_next_tie_breaks_on_rtype() {
         use super::IlmEntry;
         use super::ilm_next;
         use crate::rib::RibType;
 
-        // Equal distance: the lower protocol code wins. Other(10).u8()
-        // = 10 < Other(20).u8() = 20, so index 1 is selected.
+        // Equal distance and metric: the lower protocol code wins.
+        // Other(10).u8() = 10 < Other(20).u8() = 20, so index 1 wins.
         let mut a = IlmEntry::new(RibType::Other(20));
         let mut b = IlmEntry::new(RibType::Other(10));
         a.distance = 50;
