@@ -460,6 +460,16 @@ impl Rib {
         // calls find no entry in `vni_ifindex_map` and silently skip.
         let prev_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
 
+        // Capture master pre-state so an existing link crossing a VRF
+        // boundary (operator `interface X vrf Y`, applied by the kernel
+        // as an RTM_NEWLINK on an already-known ifindex) can be
+        // reconciled below. `link_existed` distinguishes this from a
+        // brand-new link, whose notification is handled in the `else`
+        // branch via `api_link_add`.
+        let link_existed = self.links.contains_key(&ifindex);
+        let prev_master: Option<u32> = self.links.get(&ifindex).and_then(|l| l.master);
+        let now_master: Option<u32> = fib_link.master;
+
         if let Some(link) = self.links.get_mut(&fib_link.index) {
             // When link already exists, we are going to check interface up &
             // down event handling.
@@ -512,6 +522,41 @@ impl Rib {
 
             if !link.is_up() {
                 self.make_link_up(link.index).await;
+            }
+        }
+
+        // A master change that crosses a VRF boundary moves this
+        // interface between subscriber sets: protocol clients in the
+        // *old* VRF must see it leave (DelLink), clients in the *new*
+        // VRF must see it arrive (NewLink). The kernel reports the
+        // enslave/release as an RTM_NEWLINK on an already-known
+        // ifindex, so the new-link branch above (which fires
+        // `api_link_add`) is skipped — reconcile the move here. A
+        // master change that stays within the same VRF id (e.g. bridge
+        // enslave, where the master isn't a VRF device → id 0) is a
+        // no-op.
+        if link_existed {
+            let prev_vrf_id = self.master_vrf_id(prev_master);
+            let now_vrf_id = self.master_vrf_id(now_master);
+            if prev_vrf_id != now_vrf_id
+                && let Some(link) = self.links.get(&ifindex).cloned()
+            {
+                // Withdraw from the old VRF — addresses first, then the
+                // link — so a client tearing down per-interface state
+                // sees dependents leave before the interface itself.
+                for addr in link.addr4.iter().chain(link.addr6.iter()) {
+                    self.api_addr_del_vrf(addr, prev_vrf_id);
+                }
+                self.api_link_del_vrf(ifindex, prev_vrf_id);
+                // Announce to the new VRF — link first, then its
+                // addresses — mirroring the subscribe() dump order. The
+                // addresses were originally pushed only to the VRF the
+                // interface used to sit in, so the new VRF's clients
+                // need this replay to learn them.
+                self.api_link_add_vrf(&link, now_vrf_id);
+                for addr in link.addr4.iter().chain(link.addr6.iter()) {
+                    self.api_addr_add_vrf(addr, now_vrf_id);
+                }
             }
         }
 
