@@ -792,12 +792,12 @@ impl Bgp {
                 // `rtype = Bgp` works.
                 if let Some(vrf_ifindex) = handle.ilm_decap_ifindex {
                     let entry = crate::rib::inst::IlmEntry {
-                        rtype: crate::rib::RibType::Bgp,
                         ilm_type: crate::rib::inst::IlmType::DecapVrf {
                             table_id: 0,
                             vrf_ifindex,
                         },
                         nexthop: crate::rib::Nexthop::default(),
+                        ..crate::rib::inst::IlmEntry::new(crate::rib::RibType::Bgp)
                     };
                     self.rib_subscriber.send_ilm_del(handle.label, entry);
                 }

@@ -1220,6 +1220,7 @@ fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> Strin
 #[derive(Serialize)]
 pub struct IlmJson {
     pub protocol: String,
+    pub distance: u8,
     pub local_label: u32,
     pub outgoing_label: String,
     pub prefix_or_id: String,
@@ -1259,13 +1260,17 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
         // Add header
         writeln!(
             buf,
-            "P Local  Outgoing    Prefix             Outgoing     Next Hop"
+            "P Dist Local  Outgoing    Prefix             Outgoing     Next Hop"
         )
         .unwrap();
-        writeln!(buf, "  Label  Label       or ID              Interface").unwrap();
         writeln!(
             buf,
-            "- ------ ----------- ------------------ ------------ ---------------"
+            "       Label  Label       or ID              Interface"
+        )
+        .unwrap();
+        writeln!(
+            buf,
+            "- ---- ------ ----------- ------------------ ------------ ---------------"
         )
         .unwrap();
 
@@ -1296,6 +1301,7 @@ fn write_ilm_entry(
     uni: &super::NexthopUni,
 ) {
     let protocol = ilm.rtype.abbrev();
+    let distance = format!("{:<4}", ilm.distance);
     let local_label = format!("{:<6}", label);
 
     // Determine outgoing label
@@ -1341,8 +1347,8 @@ fn write_ilm_entry(
 
     writeln!(
         buf,
-        "{} {} {} {:<18} {:<12} {}",
-        protocol, local_label, outgoing_label, prefix_or_id, interface, next_hop
+        "{} {} {} {} {:<18} {:<12} {}",
+        protocol, distance, local_label, outgoing_label, prefix_or_id, interface, next_hop
     )
     .unwrap();
 }
@@ -1394,6 +1400,7 @@ fn ilm_to_json(
 
     IlmJson {
         protocol: protocol_long_name(ilm.rtype).to_string(),
+        distance: ilm.distance,
         local_label: label,
         outgoing_label,
         prefix_or_id,

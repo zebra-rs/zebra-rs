@@ -496,9 +496,9 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             uni.mpls_label.push(label);
         }
         return IlmEntry {
-            rtype: RibType::Isis,
             ilm_type: ilm.ilm_type.clone(),
             nexthop: Nexthop::Uni(uni),
+            ..IlmEntry::new(RibType::Isis)
         };
     }
     let mut multi = NexthopMulti::default();
@@ -514,9 +514,9 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
         multi.nexthops.push(uni);
     }
     IlmEntry {
-        rtype: RibType::Isis,
         ilm_type: ilm.ilm_type.clone(),
         nexthop: Nexthop::Multi(multi),
+        ..IlmEntry::new(RibType::Isis)
     }
 }
 

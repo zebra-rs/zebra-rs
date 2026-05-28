@@ -289,6 +289,12 @@ pub struct IlmEntry {
     pub rtype: RibType,
     pub ilm_type: IlmType,
     pub nexthop: Nexthop,
+    /// Administrative distance, mirroring the IP RIB convention
+    /// (static 1, OSPF 110, IS-IS 115, BGP 20). Set by
+    /// `IlmEntry::new` from the owning `rtype`. Today each incoming
+    /// label has a single owner so this is informational; it becomes
+    /// the primary tie-break key once ILM RIB selection lands.
+    pub distance: u8,
 }
 
 impl IlmEntry {
@@ -297,7 +303,24 @@ impl IlmEntry {
             rtype,
             ilm_type: IlmType::None,
             nexthop: Nexthop::default(),
+            distance: ilm_distance(rtype),
         }
+    }
+}
+
+/// Default administrative distance for an ILM entry owned by `rtype`,
+/// following the same FRR/Cisco convention as the IP RIB. BGP uses the
+/// eBGP value (20); VPN decap labels are uniquely owned, so the
+/// eBGP/iBGP split doesn't apply at the LFIB.
+fn ilm_distance(rtype: RibType) -> u8 {
+    match rtype {
+        RibType::Kernel | RibType::Connected => 0,
+        RibType::Static => 1,
+        RibType::Ospf => 110,
+        RibType::Isis => 115,
+        RibType::Bgp => 20,
+        RibType::Dhcp => 254,
+        RibType::Other(_) => 255,
     }
 }
 
