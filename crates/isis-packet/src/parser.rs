@@ -521,6 +521,8 @@ pub enum IsisTlv {
     LspEntries(IsisTlvLspEntries),
     #[nom(Selector = "IsisTlvType::Auth")]
     Auth(IsisTlvAuth),
+    #[nom(Selector = "IsisTlvType::PurgeOrigId")]
+    PurgeOrigId(IsisTlvPurgeOrigId),
     #[nom(Selector = "IsisTlvType::LspBufferSize")]
     LspBufferSize(IsisTlvLspBufferSize),
     #[nom(Selector = "IsisTlvType::ExtIsReach")]
@@ -593,6 +595,7 @@ impl IsisTlv {
             Padding(v) => v.tlv_emit(buf),
             LspEntries(v) => v.tlv_emit(buf),
             Auth(v) => v.tlv_emit(buf),
+            PurgeOrigId(v) => v.tlv_emit(buf),
             LspBufferSize(v) => v.tlv_emit(buf),
             ExtIsReach(v) => v.tlv_emit(buf),
             MtIsReach(v) => v.tlv_emit(buf),
@@ -993,6 +996,84 @@ impl TlvEmitter for IsisTlvHostname {
 impl From<IsisTlvHostname> for IsisTlv {
     fn from(tlv: IsisTlvHostname) -> Self {
         IsisTlv::Hostname(tlv)
+    }
+}
+
+/// RFC 6232 — Purge Originator Identification (TLV 13).
+///
+/// Carried in purge LSPs (Remaining Lifetime == 0) so receivers
+/// can attribute a phantom purge back to the IS that injected it,
+/// and optionally the upstream IS the purge was learned from.
+///
+/// Wire value:
+///   - 1 octet `Number of System IDs` (1 or 2)
+///   - 6 octets `originator` system-id
+///   - 6 octets `received_from` system-id (only when Number == 2)
+///
+/// Length on the wire is 7 (Num + originator) or 13 (Num + both).
+/// An originating IS MUST set Number == 1 with just its own
+/// system-id; a forwarding IS that receives a purge without a POI
+/// MUST add Number == 2 with (own_sysid, upstream_sysid) before
+/// re-flooding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisTlvPurgeOrigId {
+    pub originator: IsisSysId,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub received_from: Option<IsisSysId>,
+}
+
+impl ParseBe<IsisTlvPurgeOrigId> for IsisTlvPurgeOrigId {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, num) = be_u8(input)?;
+        let (input, originator) = IsisSysId::parse_be(input)?;
+        let (input, received_from) = match num {
+            1 => (input, None),
+            2 => {
+                let (input, rcv) = IsisSysId::parse_be(input)?;
+                (input, Some(rcv))
+            }
+            _ => {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+        };
+        Ok((
+            input,
+            Self {
+                originator,
+                received_from,
+            },
+        ))
+    }
+}
+
+impl TlvEmitter for IsisTlvPurgeOrigId {
+    fn typ(&self) -> u8 {
+        IsisTlvType::PurgeOrigId.into()
+    }
+
+    fn len(&self) -> u8 {
+        // 1 byte count + 6 (originator) [+ 6 (received_from)].
+        if self.received_from.is_some() { 13 } else { 7 }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        if let Some(rcv) = self.received_from {
+            buf.put_u8(2);
+            buf.put(&self.originator.id[..]);
+            buf.put(&rcv.id[..]);
+        } else {
+            buf.put_u8(1);
+            buf.put(&self.originator.id[..]);
+        }
+    }
+}
+
+impl From<IsisTlvPurgeOrigId> for IsisTlv {
+    fn from(tlv: IsisTlvPurgeOrigId) -> Self {
+        IsisTlv::PurgeOrigId(tlv)
     }
 }
 

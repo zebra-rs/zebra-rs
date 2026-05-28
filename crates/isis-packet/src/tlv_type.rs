@@ -17,6 +17,13 @@ pub enum IsisTlvType {
     /// specific value (cleartext password, HMAC-MD5 digest, or RFC 5310
     /// generic-crypto Key ID + digest).
     Auth = 10,
+    /// Purge Originator Identification (RFC 6232). Carried in
+    /// purge LSPs (those with Remaining Lifetime == 0); identifies
+    /// the IS that injected the purge and optionally the upstream
+    /// IS it was received from, so operators can track a phantom
+    /// purge back to its origin instead of staring at a
+    /// systemId-anonymous zero-lifetime LSP.
+    PurgeOrigId = 13,
     LspBufferSize = 14,
     ExtIsReach = 22,
     MtIsReach = 222,
@@ -64,6 +71,7 @@ impl IsisTlvType {
                 | Padding
                 | LspEntries
                 | Auth
+                | PurgeOrigId
                 | LspBufferSize
                 | ExtIsReach
                 | MtIsReach
@@ -98,6 +106,7 @@ impl From<IsisTlvType> for u8 {
             Padding => 8,
             LspEntries => 9,
             Auth => 10,
+            PurgeOrigId => 13,
             LspBufferSize => 14,
             ExtIsReach => 22,
             MtIsReach => 222,
@@ -133,6 +142,7 @@ impl From<u8> for IsisTlvType {
             8 => Padding,
             9 => LspEntries,
             10 => Auth,
+            13 => PurgeOrigId,
             14 => LspBufferSize,
             22 => ExtIsReach,
             222 => MtIsReach,
