@@ -9,7 +9,7 @@ use crate::{
 
 use super::{
     Group, Rib, entry::RibEntry, inst::ShowCallback, link::link_show, nexthop_show,
-    types::RibSubType, types::RibType,
+    types::RibSubType, types::RibType, vrf::Vrf,
 };
 use std::fmt::Write;
 use std::net::IpAddr;
@@ -1118,6 +1118,161 @@ fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String
     buf
 }
 
+/// Resolve the VRFs a `... route vrf [NAME]` command targets: a single
+/// named VRF, or all configured VRFs when no name is given. Returns
+/// `Err` with the already-formatted (json/text) response to emit
+/// verbatim when the named VRF doesn't exist.
+fn vrf_targets<'a>(
+    rib: &'a Rib,
+    name: &Option<String>,
+    json: bool,
+) -> Result<Vec<&'a Vrf>, String> {
+    if let Some(n) = name
+        && !rib.vrfs.contains_key(n)
+    {
+        return Err(if json {
+            "{\"routes\": []}\n".to_string()
+        } else {
+            format!("% No such VRF: {n}\n")
+        });
+    }
+    Ok(rib
+        .vrfs
+        .values()
+        .filter(|v| match name {
+            Some(n) => &v.name == n,
+            None => true,
+        })
+        .collect())
+}
+
+/// IPv4 `show ip route vrf [NAME] [detail]` core. The entry formatters
+/// resolve nexthops/interfaces against the global `rib`, so per-VRF
+/// output matches the default table; only the source table differs
+/// (`rib.vrf_tables[table_id].table` instead of `rib.table`).
+fn rib_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) -> String {
+    let selected = match vrf_targets(rib, &name, json) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if json {
+        let mut routes = Vec::new();
+        for vrf in &selected {
+            if let Some(tables) = rib.vrf_tables.get(&vrf.table_id) {
+                for (prefix, entries) in tables.table.iter() {
+                    for entry in entries.iter() {
+                        routes.push(rib_entry_to_json(rib, &prefix, entry));
+                    }
+                }
+            }
+        }
+        return serde_json::to_string_pretty(&RouteTable { routes })
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
+    }
+    if selected.is_empty() {
+        return "% No VRFs configured\n".to_string();
+    }
+    let mut buf = String::new();
+    for vrf in &selected {
+        writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id).unwrap();
+        let Some(tables) = rib.vrf_tables.get(&vrf.table_id) else {
+            continue;
+        };
+        if detail {
+            for (prefix, entries) in tables.table.iter() {
+                for entry in entries.iter() {
+                    buf.push_str(&rib_entry_show_detail(rib, &prefix, entry));
+                }
+            }
+        } else {
+            buf.push_str(SHOW_IPV4_HEADER);
+            for (prefix, entries) in tables.table.iter() {
+                for entry in entries.iter() {
+                    write!(
+                        buf,
+                        "{}",
+                        rib_entry_show(rib, &prefix, entry, json).unwrap()
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    buf
+}
+
+/// IPv6 counterpart of [`rib_vrf_render`].
+fn rib6_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) -> String {
+    let selected = match vrf_targets(rib, &name, json) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if json {
+        let mut routes = Vec::new();
+        for vrf in &selected {
+            if let Some(tables) = rib.vrf_tables.get(&vrf.table_id) {
+                for (prefix, entries) in tables.table_v6.iter() {
+                    for entry in entries.iter() {
+                        routes.push(rib_entry_to_json_v6(rib, &prefix, entry));
+                    }
+                }
+            }
+        }
+        return serde_json::to_string_pretty(&RouteTable { routes })
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
+    }
+    if selected.is_empty() {
+        return "% No VRFs configured\n".to_string();
+    }
+    let mut buf = String::new();
+    for vrf in &selected {
+        writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id).unwrap();
+        let Some(tables) = rib.vrf_tables.get(&vrf.table_id) else {
+            continue;
+        };
+        if detail {
+            for (prefix, entries) in tables.table_v6.iter() {
+                for entry in entries.iter() {
+                    buf.push_str(&rib_entry_show_v6_detail(rib, &prefix, entry));
+                }
+            }
+        } else {
+            buf.push_str(SHOW_IPV6_HEADER);
+            for (prefix, entries) in tables.table_v6.iter() {
+                for entry in entries.iter() {
+                    write!(
+                        buf,
+                        "{}",
+                        rib_entry_show_v6(rib, &prefix, entry, json).unwrap()
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    buf
+}
+
+/// `show ip route vrf [NAME]` — one-line layout.
+pub fn rib_show_vrf(rib: &Rib, mut args: Args, json: bool) -> String {
+    rib_vrf_render(rib, args.string(), json, false)
+}
+
+/// `show ip route vrf [NAME] detail` — IOS-XR-style block layout.
+pub fn rib_show_vrf_detail(rib: &Rib, mut args: Args, json: bool) -> String {
+    rib_vrf_render(rib, args.string(), json, true)
+}
+
+/// `show ipv6 route vrf [NAME]` — one-line layout.
+pub fn rib6_show_vrf(rib: &Rib, mut args: Args, json: bool) -> String {
+    rib6_vrf_render(rib, args.string(), json, false)
+}
+
+/// `show ipv6 route vrf [NAME] detail` — IOS-XR-style block layout.
+pub fn rib6_show_vrf_detail(rib: &Rib, mut args: Args, json: bool) -> String {
+    rib6_vrf_render(rib, args.string(), json, true)
+}
+
 pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut routes = Vec::new();
@@ -1545,10 +1700,14 @@ impl Rib {
         self.show_add("/show/ip/route/detail", rib_show_detail);
         self.show_add("/show/ip/route/prefix", rib_show_prefix);
         self.show_add("/show/ip/route/prefix/detail", rib_show_prefix_detail);
+        self.show_add("/show/ip/route/vrf", rib_show_vrf);
+        self.show_add("/show/ip/route/vrf/detail", rib_show_vrf_detail);
         self.show_add("/show/ipv6/route", rib6_show);
         self.show_add("/show/ipv6/route/detail", rib6_show_detail);
         self.show_add("/show/ipv6/route/prefix", rib6_show_prefix);
         self.show_add("/show/ipv6/route/prefix/detail", rib6_show_prefix_detail);
+        self.show_add("/show/ipv6/route/vrf", rib6_show_vrf);
+        self.show_add("/show/ipv6/route/vrf/detail", rib6_show_vrf_detail);
         self.show_add("/show/nexthop", nexthop_show);
         self.show_add("/show/mpls/ilm", ilm_show);
         self.show_add("/show/l2/mac/table", mac_show);

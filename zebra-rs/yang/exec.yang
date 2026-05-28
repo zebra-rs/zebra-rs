@@ -172,6 +172,19 @@ module exec {
             type empty;
           }
         }
+        list vrf {
+          ext:help "IPv4 routing table for a VRF";
+          ext:presence "Show every VRF's IPv4 routes";
+          key name;
+          leaf name {
+            ext:help "VRF name";
+            type string;
+          }
+          leaf detail {
+            ext:help "Show this VRF's routes in detail format";
+            type empty;
+          }
+        }
       }
       container bgp {
         ext:help "BGP commands";
@@ -438,6 +451,19 @@ module exec {
           }
           leaf detail {
             ext:help "Show this prefix in detail format";
+            type empty;
+          }
+        }
+        list vrf {
+          ext:help "IPv6 routing table for a VRF";
+          ext:presence "Show every VRF's IPv6 routes";
+          key name;
+          leaf name {
+            ext:help "VRF name";
+            type string;
+          }
+          leaf detail {
+            ext:help "Show this VRF's routes in detail format";
             type empty;
           }
         }
