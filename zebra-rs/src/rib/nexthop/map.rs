@@ -21,7 +21,7 @@ type Seg6Key = (IpAddr, Vec<Ipv6Addr>, Option<EncapType>);
 type Seg6LocalKey = (crate::rib::SidBehavior, u32, Option<std::net::Ipv6Addr>);
 
 pub struct NexthopMap {
-    map: BTreeMap<IpAddr, usize>,
+    map: BTreeMap<(u32, IpAddr), usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
     mpls: BTreeMap<(IpAddr, Vec<u32>), usize>,
     seg6: BTreeMap<Seg6Key, usize>,
@@ -30,8 +30,8 @@ pub struct NexthopMap {
 }
 
 impl Group {
-    pub fn from_nexthop_uni(uni: &NexthopUni, gid: usize) -> Self {
-        Group::Uni(GroupUni::new(gid, uni))
+    pub fn from_nexthop_uni(uni: &NexthopUni, gid: usize, table_id: u32) -> Self {
+        Group::Uni(GroupUni::new(gid, uni, table_id))
     }
 }
 
@@ -84,35 +84,35 @@ impl NexthopMap {
         self.groups.len()
     }
 
-    pub fn fetch_uni(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
-        if let Some(&gid) = self.map.get(&uni.addr) {
+    pub fn fetch_uni(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
+        if let Some(&gid) = self.map.get(&(table_id, uni.addr)) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
-                *entry = Some(Group::from_nexthop_uni(uni, gid));
+                *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
             }
             return self.get_mut(gid);
         }
 
         let gid = self.new_gid();
-        let group = Group::from_nexthop_uni(uni, gid);
+        let group = Group::from_nexthop_uni(uni, gid, table_id);
 
-        self.map.insert(uni.addr, gid);
+        self.map.insert((table_id, uni.addr), gid);
         self.groups.push(Some(group));
 
         self.get_mut(gid)
     }
 
-    pub fn fetch_mpls(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+    pub fn fetch_mpls(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         if let Some(&gid) = self.mpls.get(&(uni.addr, uni.mpls_label.clone())) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
-                *entry = Some(Group::from_nexthop_uni(uni, gid));
+                *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
             }
             return self.get_mut(gid);
         }
 
         let gid = self.new_gid();
-        let group = Group::from_nexthop_uni(uni, gid);
+        let group = Group::from_nexthop_uni(uni, gid, table_id);
 
         self.mpls.insert((uni.addr, uni.mpls_label.clone()), gid);
         self.groups.push(Some(group));
@@ -124,18 +124,18 @@ impl NexthopMap {
     /// nexthop. Two NexthopUnis with the same (addr, segs, encap_type) share
     /// one Group — one kernel nhid is shared across every route that uses
     /// the same SRv6 policy.
-    pub fn fetch_seg6(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+    pub fn fetch_seg6(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         let key: Seg6Key = (uni.addr, uni.segs.clone(), uni.encap_type);
         if let Some(&gid) = self.seg6.get(&key) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
-                *entry = Some(Group::from_nexthop_uni(uni, gid));
+                *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
             }
             return self.get_mut(gid);
         }
 
         let gid = self.new_gid();
-        let group = Group::from_nexthop_uni(uni, gid);
+        let group = Group::from_nexthop_uni(uni, gid, table_id);
 
         self.seg6.insert(key, gid);
         self.groups.push(Some(group));
@@ -146,7 +146,7 @@ impl NexthopMap {
     /// Fetch (or create) the dedup'd nexthop entry for an SRv6 seg6local
     /// nexthop (End / End.X). Keyed on (action, oif, nh6) so two SIDs
     /// pointing at the same install target share one Group.
-    pub fn fetch_seg6local(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+    pub fn fetch_seg6local(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         let action = uni.seg6local_action?;
         let nh6 = match uni.addr {
             IpAddr::V6(a) if !a.is_unspecified() => Some(a),
@@ -156,13 +156,13 @@ impl NexthopMap {
         if let Some(&gid) = self.seg6local.get(&key) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
-                *entry = Some(Group::from_nexthop_uni(uni, gid));
+                *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
             }
             return self.get_mut(gid);
         }
 
         let gid = self.new_gid();
-        let group = Group::from_nexthop_uni(uni, gid);
+        let group = Group::from_nexthop_uni(uni, gid, table_id);
 
         self.seg6local.insert(key, gid);
         self.groups.push(Some(group));
@@ -170,23 +170,23 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
-    pub fn fetch(&mut self, uni: &NexthopUni) -> Option<&mut Group> {
+    pub fn fetch(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         // seg6local takes priority over plain unicast — `addr` for an
         // End SID is unspecified and would route through fetch_uni
         // otherwise, collapsing every End SID into a single shared
         // entry by accident.
         if uni.seg6local_action.is_some() {
-            self.fetch_seg6local(uni)
+            self.fetch_seg6local(uni, table_id)
         } else if !uni.segs.is_empty() {
             // SRv6 encap — the segment list is the dedup dimension,
             // and we want SRv6 nexthops in their own table so the FIB
             // nexthop_add path can emit seg6 attributes without
             // re-inspecting NexthopUni.
-            self.fetch_seg6(uni)
+            self.fetch_seg6(uni, table_id)
         } else if uni.mpls_label.is_empty() {
-            self.fetch_uni(uni)
+            self.fetch_uni(uni, table_id)
         } else {
-            self.fetch_mpls(uni)
+            self.fetch_mpls(uni, table_id)
         }
     }
 
@@ -294,8 +294,8 @@ mod tests {
             &["fcbb:bbbb:2:3:2::", "fcbb:bbbb:2:3:3::"],
             EncapType::HEncap,
         );
-        let gid_a = group_gid(nmap.fetch(&uni).expect("group"));
-        let gid_b = group_gid(nmap.fetch(&uni).expect("group"));
+        let gid_a = group_gid(nmap.fetch(&uni, 0).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&uni, 0).expect("group"));
         assert_eq!(gid_a, gid_b);
     }
 
@@ -312,8 +312,8 @@ mod tests {
             &["fcbb:bbbb:2:3:2::", "fcbb:bbbb:2:3:3::"],
             EncapType::HEncap,
         );
-        let gid_one = group_gid(nmap.fetch(&one).expect("group"));
-        let gid_two = group_gid(nmap.fetch(&two).expect("group"));
+        let gid_one = group_gid(nmap.fetch(&one, 0).expect("group"));
+        let gid_two = group_gid(nmap.fetch(&two, 0).expect("group"));
         assert_ne!(gid_one, gid_two);
     }
 
@@ -333,8 +333,8 @@ mod tests {
             &["fcbb:bbbb:2:3:2::", "fcbb:bbbb:2:3:3::"],
             EncapType::HEncapRed,
         );
-        let gid_a = group_gid(nmap.fetch(&h_encap).expect("group"));
-        let gid_b = group_gid(nmap.fetch(&h_red).expect("group"));
+        let gid_a = group_gid(nmap.fetch(&h_encap, 0).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&h_red, 0).expect("group"));
         assert_ne!(gid_a, gid_b);
     }
 
@@ -345,8 +345,8 @@ mod tests {
         let mut nmap = NexthopMap::default();
         let plain_a = plain_uni("2001:db8::1");
         let plain_b = plain_uni("2001:db8::1");
-        let gid_a = group_gid(nmap.fetch(&plain_a).expect("group"));
-        let gid_b = group_gid(nmap.fetch(&plain_b).expect("group"));
+        let gid_a = group_gid(nmap.fetch(&plain_a, 0).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&plain_b, 0).expect("group"));
         assert_eq!(gid_a, gid_b);
 
         // The seg6 dedupe table stays empty.
@@ -354,7 +354,7 @@ mod tests {
 
         // And a Nexthop::Uni constructed from a plain uni surfaces empty
         // segs / None encap_type on the resulting GroupUni.
-        let grp = nmap.fetch(&plain_a).expect("group");
+        let grp = nmap.fetch(&plain_a, 0).expect("group");
         if let Group::Uni(uni) = grp {
             assert!(uni.segs.is_empty());
             assert_eq!(uni.encap_type, None);
@@ -371,7 +371,7 @@ mod tests {
             &["fcbb:bbbb:2:3:2::", "fcbb:bbbb:2:3:3::"],
             EncapType::HEncap,
         );
-        let grp = nmap.fetch(&uni).expect("group");
+        let grp = nmap.fetch(&uni, 0).expect("group");
         if let Group::Uni(g) = grp {
             assert_eq!(g.addr, IpAddr::V6("fcbb:bbbb:2:3:2::".parse().unwrap()));
             assert_eq!(g.segs.len(), 2);
@@ -388,7 +388,7 @@ mod tests {
         let mut nmap = NexthopMap::default();
 
         // Plain.
-        nmap.fetch(&plain_uni("2001:db8::1"));
+        nmap.fetch(&plain_uni("2001:db8::1"), 0);
         assert_eq!(nmap.map.len(), 1);
         assert!(nmap.mpls.is_empty());
         assert!(nmap.seg6.is_empty());
@@ -399,16 +399,19 @@ mod tests {
             mpls_label: vec![100, 200],
             ..Default::default()
         };
-        nmap.fetch(&mpls_uni);
+        nmap.fetch(&mpls_uni, 0);
         assert_eq!(nmap.mpls.len(), 1);
         assert!(nmap.seg6.is_empty());
 
         // SRv6.
-        nmap.fetch(&srv6_uni(
-            "fcbb:bbbb:2:3:2::",
-            &["fcbb:bbbb:2:3:2::"],
-            EncapType::HEncap,
-        ));
+        nmap.fetch(
+            &srv6_uni(
+                "fcbb:bbbb:2:3:2::",
+                &["fcbb:bbbb:2:3:2::"],
+                EncapType::HEncap,
+            ),
+            0,
+        );
         assert_eq!(nmap.seg6.len(), 1);
     }
 
@@ -436,8 +439,8 @@ mod tests {
         // dedup table should hand back the same gid both times so we
         // create only one kernel nhid.
         let mut nmap = NexthopMap::default();
-        let gid_a = group_gid(nmap.fetch(&end_uni(1)).expect("group"));
-        let gid_b = group_gid(nmap.fetch(&end_uni(1)).expect("group"));
+        let gid_a = group_gid(nmap.fetch(&end_uni(1), 0).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&end_uni(1), 0).expect("group"));
         assert_eq!(gid_a, gid_b);
     }
 
@@ -446,8 +449,8 @@ mod tests {
         // Distinct adjacencies (different nh6 link-locals) must NOT
         // share an nh_id — each End.X install is its own kernel entry.
         let mut nmap = NexthopMap::default();
-        let gid_a = group_gid(nmap.fetch(&endx_uni(2, "fe80::1")).expect("group"));
-        let gid_b = group_gid(nmap.fetch(&endx_uni(2, "fe80::2")).expect("group"));
+        let gid_a = group_gid(nmap.fetch(&endx_uni(2, "fe80::1"), 0).expect("group"));
+        let gid_b = group_gid(nmap.fetch(&endx_uni(2, "fe80::2"), 0).expect("group"));
         assert_ne!(gid_a, gid_b);
     }
 
@@ -457,7 +460,7 @@ mod tests {
         // still different actions on the wire — keep them separate so
         // we don't accidentally emit one kernel encap for both.
         let mut nmap = NexthopMap::default();
-        let gid_end = group_gid(nmap.fetch(&end_uni(2)).expect("group"));
+        let gid_end = group_gid(nmap.fetch(&end_uni(2), 0).expect("group"));
         // End.X with empty/unspec nh6 is invalid in practice but the
         // dedup key must still discriminate by action so a bug-y caller
         // can't collapse the two.
@@ -467,7 +470,7 @@ mod tests {
             seg6local_action: Some(crate::rib::SidBehavior::EndX),
             ..Default::default()
         };
-        let gid_endx = group_gid(nmap.fetch(&endx).expect("group"));
+        let gid_endx = group_gid(nmap.fetch(&endx, 0).expect("group"));
         assert_ne!(gid_end, gid_endx);
     }
 
@@ -477,7 +480,7 @@ mod tests {
         // priority gate it would route through fetch_uni and pollute
         // the plain-unicast map.
         let mut nmap = NexthopMap::default();
-        nmap.fetch(&end_uni(1));
+        nmap.fetch(&end_uni(1), 0);
         assert_eq!(nmap.seg6local.len(), 1);
         assert!(nmap.map.is_empty());
         assert!(nmap.seg6.is_empty());

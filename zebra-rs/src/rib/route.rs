@@ -351,7 +351,14 @@ impl Rib {
         // entries have been deselected, otherwise rib_resolve_v6
         // happily walks the still-present-but-now-invalid entries.
         // The debounced Resolve scheduled below handles that.
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
+        ipv4_nexthop_sync(
+            &mut self.nmap,
+            &self.table,
+            &self.vrf_tables,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         ipv4_route_sync(
             &mut self.table,
             &mut self.nmap,
@@ -363,6 +370,7 @@ impl Rib {
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
+            &self.vrf_tables,
             &self.links,
             &self.fib_handle,
         )
@@ -504,7 +512,14 @@ impl Rib {
             self.addr_reinstall(ifindex, &link_name, &prefix).await;
         }
 
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
+        ipv4_nexthop_sync(
+            &mut self.nmap,
+            &self.table,
+            &self.vrf_tables,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         ipv4_route_sync(
             &mut self.table,
             &mut self.nmap,
@@ -516,6 +531,7 @@ impl Rib {
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
+            &self.vrf_tables,
             &self.links,
             &self.fib_handle,
         )
@@ -534,46 +550,166 @@ impl Rib {
         self.schedule_rib_sync();
     }
 
-    /// Per-VRF dispatcher: route an `Ipv4Add` install into the
-    /// matching VRF prefix tree. Best-path resolution + FIB install
-    /// inside a VRF table are pending follow-ups; today the prefix
-    /// is recorded so the per-VRF show path and the future import
-    /// pipeline see it, but the kernel install is deliberately
-    /// skipped — the global nexthop map can't resolve per-VRF gw
-    /// addresses correctly without a per-VRF overlay.
-    pub fn ipv4_route_add_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
-        if !vrf_ipv4_insert(&mut self.vrf_tables, table_id, prefix, entry) {
-            tracing::warn!(
+    /// Per-VRF dispatcher: install an `Ipv4Add` into the VRF's routing
+    /// table with best-path selection and FIB install. Nexthops resolve
+    /// against the VRF's own table (a CE gateway is reachable via the
+    /// VRF's connected routes), and the selected protocol route is
+    /// programmed into the kernel VRF table (`table_id`). Connected
+    /// routes are already in the kernel (created on enslave), so
+    /// selection marks them installed without re-programming — see
+    /// `ipv4_entry_selection`'s non-protocol arm.
+    pub async fn ipv4_route_add_vrf(
+        &mut self,
+        table_id: u32,
+        prefix: &Ipv4Net,
+        mut entry: RibEntry,
+    ) {
+        let replace = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                tracing::warn!(
+                    table_id,
+                    %prefix,
+                    "ipv4_route_add_vrf: vrf table not present; dropping install",
+                );
+                return;
+            };
+            if entry.is_protocol() {
+                let mut replace = rib_replace(&mut t.table, prefix, entry.rtype);
+                rib_resolve_nexthop(&mut entry, &t.table, &mut self.nmap, table_id);
+                rib_add(&mut t.table, prefix, entry);
+                replace.pop()
+            } else {
+                rib_add_system(&mut t.table, prefix, entry);
+                None
+            }
+        };
+        self.vrf_rib_selection(table_id, prefix, replace).await;
+    }
+
+    pub async fn ipv4_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
+        let replace = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                return;
+            };
+            if entry.is_protocol() {
+                rib_replace(&mut t.table, prefix, entry.rtype).pop()
+            } else {
+                rib_replace_system(&mut t.table, prefix, entry).pop()
+            }
+        };
+        self.vrf_rib_selection(table_id, prefix, replace).await;
+    }
+
+    pub async fn ipv6_route_add_vrf(
+        &mut self,
+        table_id: u32,
+        prefix: &Ipv6Net,
+        mut entry: RibEntry,
+    ) {
+        let replace = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                tracing::warn!(
+                    table_id,
+                    %prefix,
+                    "ipv6_route_add_vrf: vrf table not present; dropping install",
+                );
+                return;
+            };
+            if entry.is_protocol() {
+                let mut replace = rib_replace_v6(&mut t.table_v6, prefix, entry.rtype);
+                rib_resolve_nexthop_v6(&mut entry, &t.table_v6, &mut self.nmap, table_id);
+                rib_add_v6(&mut t.table_v6, prefix, entry);
+                replace.pop()
+            } else {
+                rib_add_system_v6(&mut t.table_v6, prefix, entry);
+                None
+            }
+        };
+        self.vrf_rib_selection_v6(table_id, prefix, replace).await;
+    }
+
+    pub async fn ipv6_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
+        let replace = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                return;
+            };
+            if entry.is_protocol() {
+                rib_replace_v6(&mut t.table_v6, prefix, entry.rtype).pop()
+            } else {
+                rib_replace_system_v6(&mut t.table_v6, prefix, entry).pop()
+            }
+        };
+        self.vrf_rib_selection_v6(table_id, prefix, replace).await;
+    }
+
+    /// Best-path selection + FIB reconcile for one VRF prefix. Mirrors
+    /// [`Self::rib_selection`] but on `vrf_tables[table_id]`, passing
+    /// `table_id` so the install/withdraw targets the kernel VRF table.
+    async fn vrf_rib_selection(
+        &mut self,
+        table_id: u32,
+        prefix: &Ipv4Net,
+        replace: Option<RibEntry>,
+    ) {
+        let retry = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                return;
+            };
+            // `rib_replace` leaves an empty `Vec` at a drained prefix
+            // (it doesn't remove the key), so the selector still runs
+            // and processes `replace`'s FIB withdraw.
+            let Some(entries) = t.table.get_mut(prefix) else {
+                return;
+            };
+            ipv4_entry_selection(
+                prefix,
+                entries,
+                replace,
+                &mut self.nmap,
+                &self.fib_handle,
                 table_id,
-                %prefix,
-                "ipv4_route_add_vrf: vrf table not present; dropping install",
-            );
+                false,
+            )
+            .await
+        };
+        if retry {
+            self.schedule_rib_sync();
         }
     }
 
-    pub fn ipv4_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv4Net, entry: RibEntry) {
-        vrf_ipv4_remove(&mut self.vrf_tables, table_id, prefix, entry.rtype);
-    }
-
-    pub fn ipv6_route_add_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
-        if !vrf_ipv6_insert(&mut self.vrf_tables, table_id, prefix, entry) {
-            tracing::warn!(
+    async fn vrf_rib_selection_v6(
+        &mut self,
+        table_id: u32,
+        prefix: &Ipv6Net,
+        replace: Option<RibEntry>,
+    ) {
+        let retry = {
+            let Some(t) = self.vrf_tables.get_mut(&table_id) else {
+                return;
+            };
+            let Some(entries) = t.table_v6.get_mut(prefix) else {
+                return;
+            };
+            ipv6_entry_selection(
+                prefix,
+                entries,
+                replace,
+                &mut self.nmap,
+                &self.fib_handle,
                 table_id,
-                %prefix,
-                "ipv6_route_add_vrf: vrf table not present; dropping install",
-            );
+            )
+            .await
+        };
+        if retry {
+            self.schedule_rib_sync();
         }
-    }
-
-    pub fn ipv6_route_del_vrf(&mut self, table_id: u32, prefix: &Ipv6Net, entry: RibEntry) {
-        vrf_ipv6_remove(&mut self.vrf_tables, table_id, prefix, entry.rtype);
     }
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry, table_id: u32) {
         let before = selected_v4(&self.table, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
-            rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap);
+            rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap, table_id);
             rib_add(&mut self.table, prefix, entry);
             self.rib_selection(prefix, replace.pop(), table_id).await;
         } else {
@@ -712,7 +848,7 @@ impl Rib {
         let before = selected_v6(&self.table_v6, prefix).cloned();
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
-            rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap);
+            rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);
             if DEBUG_V6 {
                 println!(
                     "[ipv6_route_add] after resolve: entry.valid={} nexthop={:?}",
@@ -767,27 +903,45 @@ impl Rib {
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
+            &self.vrf_tables,
             &self.links,
             &self.fib_handle,
         )
         .await;
-        let retry = ipv6_route_sync(
+        let mut retry = ipv6_route_sync(
             &mut self.table_v6,
             &mut self.nmap,
             &self.fib_handle,
             RT_TABLE_MAIN,
         )
         .await;
+        let table_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
+        for table_id in table_ids {
+            if let Some(t) = self.vrf_tables.get_mut(&table_id) {
+                retry |=
+                    ipv6_route_sync(&mut t.table_v6, &mut self.nmap, &self.fib_handle, table_id)
+                        .await;
+            }
+        }
         if retry {
             self.schedule_rib_sync();
         }
     }
 
     pub async fn ipv4_route_resolve(&mut self) {
-        ipv4_nexthop_sync(&mut self.nmap, &self.table, &self.links, &self.fib_handle).await;
+        // One nexthop sync handles every table: each group resolves
+        // against the table its `table_id` names (default or a VRF).
+        ipv4_nexthop_sync(
+            &mut self.nmap,
+            &self.table,
+            &self.vrf_tables,
+            &self.links,
+            &self.fib_handle,
+        )
+        .await;
         // `false` = not an ifdown sweep; this resolve cycle is for FIB-update
         // re-resolution, not link-down recovery.
-        let retry = ipv4_route_sync(
+        let mut retry = ipv4_route_sync(
             &mut self.table,
             &mut self.nmap,
             &self.fib_handle,
@@ -795,6 +949,22 @@ impl Rib {
             false,
         )
         .await;
+        // Re-sync each VRF table against its own kernel table id so a
+        // VRF route whose nexthop only just became resolvable gets
+        // installed.
+        let table_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
+        for table_id in table_ids {
+            if let Some(t) = self.vrf_tables.get_mut(&table_id) {
+                retry |= ipv4_route_sync(
+                    &mut t.table,
+                    &mut self.nmap,
+                    &self.fib_handle,
+                    table_id,
+                    false,
+                )
+                .await;
+            }
+        }
         // A failed install forced a nexthop recreation; arm another
         // pass so the recreated nexthop and the pending route both land.
         if retry {
@@ -881,6 +1051,7 @@ pub async fn rib_selection_ipv6(
 pub async fn ipv4_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
+    vrf_tables: &BTreeMap<u32, VrfRibTables>,
     links: &BTreeMap<u32, Link>,
     fib: &FibHandle,
 ) {
@@ -910,18 +1081,26 @@ pub async fn ipv4_nexthop_sync(
                 }
                 continue;
             }
-            let resolve = match uni.addr {
-                std::net::IpAddr::V4(ipv4_addr) => {
-                    rib_resolve(table, ipv4_addr, &ResolveOpt::default())
-                }
+            let ipv4_addr = match uni.addr {
+                std::net::IpAddr::V4(a) => a,
                 std::net::IpAddr::V6(_) => {
                     // IPv6 addresses should be handled by ipv6_nexthop_sync
                     continue;
                 }
             };
-
-            // Update the status of the next hop
-            let ifindex = resolve.is_valid();
+            // Resolve each gateway against the table its VRF names —
+            // a VRF nexthop's gateway lives in the VRF's connected
+            // routes, not the default table. A missing VRF table
+            // (torn down) leaves the nexthop unresolved.
+            let resolve_table = if uni.table_id == RT_TABLE_MAIN {
+                Some(table)
+            } else {
+                vrf_tables.get(&uni.table_id).map(|t| &t.table)
+            };
+            let ifindex = match resolve_table {
+                Some(rt) => rib_resolve(rt, ipv4_addr, &ResolveOpt::default()).is_valid(),
+                None => 0,
+            };
             if ifindex == 0 {
                 uni.ifindex_resolved = None;
                 uni.set_valid(false);
@@ -1192,8 +1371,9 @@ fn resolve_nexthop_uni(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv4Net, RibEntries>,
+    table_id: u32,
 ) -> bool {
-    let Some(Group::Uni(group)) = nmap.fetch(uni) else {
+    let Some(Group::Uni(group)) = nmap.fetch(uni, table_id) else {
         return false;
     };
     if group.refcnt() == 0 {
@@ -1241,18 +1421,19 @@ fn rib_resolve_nexthop(
     entry: &mut RibEntry,
     table: &PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
+    table_id: u32,
 ) {
     // Only protocol entry.
     if !entry.is_protocol() {
         return;
     }
     if let Nexthop::Uni(uni) = &mut entry.nexthop {
-        let _ = resolve_nexthop_uni(uni, nmap, table);
+        let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
     }
     if let Nexthop::Multi(multi) = &mut entry.nexthop {
         let mut set = BTreeSet::<(usize, u8)>::new();
         for uni in multi.nexthops.iter_mut() {
-            let valid = resolve_nexthop_uni(uni, nmap, table);
+            let valid = resolve_nexthop_uni(uni, nmap, table, table_id);
             if valid {
                 set.insert((uni.gid, uni.weight));
             }
@@ -1269,12 +1450,12 @@ fn rib_resolve_nexthop(
         for member in pro.nexthops.iter_mut() {
             match member {
                 NexthopMember::Uni(uni) => {
-                    let _ = resolve_nexthop_uni(uni, nmap, table);
+                    let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
                 }
                 NexthopMember::Multi(multi) => {
                     let mut set = BTreeSet::<(usize, u8)>::new();
                     for uni in multi.nexthops.iter_mut() {
-                        let valid = resolve_nexthop_uni(uni, nmap, table);
+                        let valid = resolve_nexthop_uni(uni, nmap, table, table_id);
                         if valid {
                             set.insert((uni.gid, uni.weight));
                         }
@@ -1715,18 +1896,19 @@ fn rib_resolve_nexthop_v6(
     entry: &mut RibEntry,
     table: &PrefixMap<Ipv6Net, RibEntries>,
     nmap: &mut NexthopMap,
+    table_id: u32,
 ) {
     // Only protocol entry.
     if !entry.is_protocol() {
         return;
     }
     if let Nexthop::Uni(uni) = &mut entry.nexthop {
-        let _ = resolve_nexthop_uni_v6(uni, nmap, table);
+        let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
     }
     if let Nexthop::Multi(multi) = &mut entry.nexthop {
         let mut set = BTreeSet::<(usize, u8)>::new();
         for uni in multi.nexthops.iter_mut() {
-            let valid = resolve_nexthop_uni_v6(uni, nmap, table);
+            let valid = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
             if valid {
                 set.insert((uni.gid, uni.weight));
             }
@@ -1741,12 +1923,12 @@ fn rib_resolve_nexthop_v6(
         for member in pro.nexthops.iter_mut() {
             match member {
                 NexthopMember::Uni(uni) => {
-                    let _ = resolve_nexthop_uni_v6(uni, nmap, table);
+                    let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
                 }
                 NexthopMember::Multi(multi) => {
                     let mut set = BTreeSet::<(usize, u8)>::new();
                     for uni in multi.nexthops.iter_mut() {
-                        let valid = resolve_nexthop_uni_v6(uni, nmap, table);
+                        let valid = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
                         if valid {
                             set.insert((uni.gid, uni.weight));
                         }
@@ -1764,6 +1946,7 @@ fn resolve_nexthop_uni_v6(
     uni: &mut NexthopUni,
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv6Net, RibEntries>,
+    table_id: u32,
 ) -> bool {
     if DEBUG_V6 {
         println!(
@@ -1771,7 +1954,7 @@ fn resolve_nexthop_uni_v6(
             uni.addr, uni.gid
         );
     }
-    let Some(Group::Uni(group)) = nmap.fetch(uni) else {
+    let Some(Group::Uni(group)) = nmap.fetch(uni, table_id) else {
         if DEBUG_V6 {
             println!("[resolve_nexthop_uni_v6] nmap.fetch returned None");
         }
@@ -1820,6 +2003,7 @@ fn resolve_nexthop_uni_v6(
 pub async fn ipv6_nexthop_sync(
     nmap: &mut NexthopMap,
     table: &PrefixMap<Ipv6Net, RibEntries>,
+    vrf_tables: &BTreeMap<u32, VrfRibTables>,
     links: &BTreeMap<u32, Link>,
     fib: &FibHandle,
 ) {
@@ -1859,14 +2043,20 @@ pub async fn ipv6_nexthop_sync(
                 }
                 continue;
             }
-            let resolve = match uni.addr {
+            let ipv6_addr = match uni.addr {
                 std::net::IpAddr::V4(_) => continue,
-                std::net::IpAddr::V6(ipv6_addr) => {
-                    rib_resolve_v6(table, ipv6_addr, &ResolveOpt::default())
-                }
+                std::net::IpAddr::V6(a) => a,
             };
-
-            let ifindex = resolve.is_valid();
+            // Resolve against the table the nexthop's VRF names.
+            let resolve_table = if uni.table_id == RT_TABLE_MAIN {
+                Some(table)
+            } else {
+                vrf_tables.get(&uni.table_id).map(|t| &t.table_v6)
+            };
+            let ifindex = match resolve_table {
+                Some(rt) => rib_resolve_v6(rt, ipv6_addr, &ResolveOpt::default()).is_valid(),
+                None => 0,
+            };
             if DEBUG_V6 {
                 println!(
                     "[ipv6_nexthop_sync] resolved ifindex={} (0 means unresolved)",
@@ -1894,100 +2084,7 @@ pub async fn ipv6_nexthop_sync(
     }
 }
 
-// ---- Per-VRF table dispatch helpers ---------------------------------
-//
-// Prefer free functions over methods on `Rib` so they can be
-// unit-tested against a plain `BTreeMap<u32, VrfRibTables>` without
-// having to construct a full `Rib` (which needs a live netlink
-// socket via `FibHandle::new`). Return `bool` so the wrappers on
-// `Rib` can log a `warn!` if the caller's VRF table id is not yet
-// in the map (a kernel `VrfAdd` parks an empty `VrfRibTables` for
-// every allocated VRF, so this should only fire for a torn-down or
-// never-created VRF).
-
 use super::vrf::VrfRibTables;
-
-pub(super) fn vrf_ipv4_insert(
-    vrf_tables: &mut BTreeMap<u32, VrfRibTables>,
-    table_id: u32,
-    prefix: &Ipv4Net,
-    entry: RibEntry,
-) -> bool {
-    let Some(t) = vrf_tables.get_mut(&table_id) else {
-        return false;
-    };
-    let entries = t.table.entry(*prefix).or_default();
-    vrf_entries_replace(entries, entry);
-    true
-}
-
-/// Insert `entry`, first dropping any prior entry it should supersede,
-/// so a prefix fed from two sources (the daemon's connected-route
-/// synthesis and the kernel's RTM_NEWROUTE echo) — and re-notified on
-/// flaps — doesn't accumulate duplicates. Mirrors `rib_add_system`:
-/// same protocol replaces, except connected routes are keyed by
-/// interface so a multi-homed prefix keeps one entry per interface.
-fn vrf_entries_replace(entries: &mut RibEntries, entry: RibEntry) {
-    entries.retain(|e| {
-        if e.rtype != entry.rtype {
-            return true;
-        }
-        entry.is_connected() && e.ifindex != entry.ifindex
-    });
-    entries.push(entry);
-}
-
-pub(super) fn vrf_ipv4_remove(
-    vrf_tables: &mut BTreeMap<u32, VrfRibTables>,
-    table_id: u32,
-    prefix: &Ipv4Net,
-    rtype: RibType,
-) {
-    let Some(t) = vrf_tables.get_mut(&table_id) else {
-        return;
-    };
-    if let Some(entries) = t.table.get_mut(prefix) {
-        if let Some(pos) = entries.iter().position(|e| e.rtype == rtype) {
-            entries.remove(pos);
-        }
-        if entries.is_empty() {
-            t.table.remove(prefix);
-        }
-    }
-}
-
-pub(super) fn vrf_ipv6_insert(
-    vrf_tables: &mut BTreeMap<u32, VrfRibTables>,
-    table_id: u32,
-    prefix: &Ipv6Net,
-    entry: RibEntry,
-) -> bool {
-    let Some(t) = vrf_tables.get_mut(&table_id) else {
-        return false;
-    };
-    let entries = t.table_v6.entry(*prefix).or_default();
-    vrf_entries_replace(entries, entry);
-    true
-}
-
-pub(super) fn vrf_ipv6_remove(
-    vrf_tables: &mut BTreeMap<u32, VrfRibTables>,
-    table_id: u32,
-    prefix: &Ipv6Net,
-    rtype: RibType,
-) {
-    let Some(t) = vrf_tables.get_mut(&table_id) else {
-        return;
-    };
-    if let Some(entries) = t.table_v6.get_mut(prefix) {
-        if let Some(pos) = entries.iter().position(|e| e.rtype == rtype) {
-            entries.remove(pos);
-        }
-        if entries.is_empty() {
-            t.table_v6.remove(prefix);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2189,7 +2286,7 @@ mod tests {
 
         let mut nmap = NexthopMap::default();
         let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
-        rib_resolve_nexthop(&mut entry, &table, &mut nmap);
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
 
         let Nexthop::List(pro) = &entry.nexthop else {
             panic!("entry.nexthop should still be List");
@@ -2209,129 +2306,5 @@ mod tests {
         for leg in &multi_member.nexthops {
             assert!(leg.gid != 0, "each leg also gets a gid");
         }
-    }
-
-    /// Inbound-dispatch invariant: an install destined for a
-    /// non-default VRF lands in `vrf_tables[table_id].table`, not
-    /// in the global table. Tested at the free-function level so we
-    /// don't need to construct a `Rib` (the kernel-bound `FibHandle`
-    /// makes that impractical for unit tests).
-    #[test]
-    fn vrf_ipv4_insert_lands_in_matching_table() {
-        use super::super::entry::RibEntry;
-        use super::super::vrf::VrfRibTables;
-        use super::super::{RibEntries, RibType};
-        use super::vrf_ipv4_insert;
-        use ipnet::Ipv4Net;
-        use std::collections::BTreeMap;
-
-        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
-        vrf_tables.insert(10, VrfRibTables::new());
-
-        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let entry = RibEntry::new(RibType::Bgp);
-        assert!(vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, entry));
-
-        // Lands in table 10 only.
-        let t10: &RibEntries = vrf_tables
-            .get(&10)
-            .and_then(|t| t.table.get(&prefix))
-            .expect("prefix in vrf table 10");
-        assert_eq!(t10.len(), 1);
-        assert_eq!(t10[0].rtype, RibType::Bgp);
-    }
-
-    #[test]
-    fn vrf_ipv4_insert_into_missing_table_is_noop() {
-        use super::super::RibType;
-        use super::super::entry::RibEntry;
-        use super::super::vrf::VrfRibTables;
-        use super::vrf_ipv4_insert;
-        use ipnet::Ipv4Net;
-        use std::collections::BTreeMap;
-
-        // No VRF row for `table_id = 99` — caller has to tolerate
-        // it (the warn-log path in `Rib::ipv4_route_add_vrf` covers
-        // the operator-visible side).
-        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
-        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let inserted = vrf_ipv4_insert(&mut vrf_tables, 99, &prefix, RibEntry::new(RibType::Bgp));
-        assert!(!inserted);
-        assert!(vrf_tables.is_empty());
-    }
-
-    #[test]
-    fn vrf_ipv4_remove_drops_prefix_when_last_entry_goes() {
-        use super::super::RibType;
-        use super::super::entry::RibEntry;
-        use super::super::vrf::VrfRibTables;
-        use super::{vrf_ipv4_insert, vrf_ipv4_remove};
-        use ipnet::Ipv4Net;
-        use std::collections::BTreeMap;
-
-        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
-        vrf_tables.insert(10, VrfRibTables::new());
-
-        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, RibEntry::new(RibType::Bgp));
-        vrf_ipv4_remove(&mut vrf_tables, 10, &prefix, RibType::Bgp);
-        assert!(vrf_tables.get(&10).unwrap().table.get(&prefix).is_none());
-    }
-
-    #[test]
-    fn vrf_ipv4_insert_dedups_per_protocol_and_interface() {
-        use super::super::RibType;
-        use super::super::entry::RibEntry;
-        use super::super::vrf::VrfRibTables;
-        use super::vrf_ipv4_insert;
-        use ipnet::Ipv4Net;
-        use std::collections::BTreeMap;
-
-        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
-        vrf_tables.insert(10, VrfRibTables::new());
-        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let connected = |ifindex: u32| {
-            let mut e = RibEntry::new(RibType::Connected);
-            e.ifindex = ifindex;
-            e
-        };
-
-        // Two sources feed the same connected route (same interface):
-        // the second replaces the first rather than duplicating.
-        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(5));
-        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(5));
-        let entries = vrf_tables.get(&10).unwrap().table.get(&prefix).unwrap();
-        assert_eq!(entries.len(), 1, "same connected route dedups");
-
-        // A connected route on a different interface coexists.
-        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, connected(6));
-        // A different protocol coexists with connected.
-        vrf_ipv4_insert(&mut vrf_tables, 10, &prefix, RibEntry::new(RibType::Bgp));
-        let entries = vrf_tables.get(&10).unwrap().table.get(&prefix).unwrap();
-        assert_eq!(entries.len(), 3, "different ifindex / rtype kept");
-    }
-
-    #[test]
-    fn vrf_ipv6_insert_and_remove_round_trip() {
-        use super::super::RibType;
-        use super::super::entry::RibEntry;
-        use super::super::vrf::VrfRibTables;
-        use super::{vrf_ipv6_insert, vrf_ipv6_remove};
-        use ipnet::Ipv6Net;
-        use std::collections::BTreeMap;
-
-        let mut vrf_tables: BTreeMap<u32, VrfRibTables> = BTreeMap::new();
-        vrf_tables.insert(10, VrfRibTables::new());
-
-        let prefix: Ipv6Net = "2001:db8::/64".parse().unwrap();
-        assert!(vrf_ipv6_insert(
-            &mut vrf_tables,
-            10,
-            &prefix,
-            RibEntry::new(RibType::Bgp),
-        ));
-        assert!(vrf_tables.get(&10).unwrap().table_v6.get(&prefix).is_some());
-        vrf_ipv6_remove(&mut vrf_tables, 10, &prefix, RibType::Bgp);
-        assert!(vrf_tables.get(&10).unwrap().table_v6.get(&prefix).is_none());
     }
 }
