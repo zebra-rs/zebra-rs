@@ -91,6 +91,10 @@ module exec {
       ext:help "Show VRF table";
       type empty;
     }
+    leaf task {
+      ext:help "Show spawned protocol tasks and their VRF";
+      type empty;
+    }
     container l2 {
       ext:help "Show L2 / data-link information";
       presence "Show L2";

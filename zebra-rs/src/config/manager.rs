@@ -775,6 +775,24 @@ impl ConfigManager {
                 let _ = req.resp.send(resp);
             }
             Message::DisplayTx(req) => {
+                // `show task` is answered by the manager itself — it owns
+                // the task registries (`protocol_tasks` plus the per-VRF
+                // show channels), which no single daemon can see.
+                if req.paths.iter().any(|p| p.name == "task") {
+                    let output = self.show_task();
+                    let (task_tx, task_rx) = mpsc::unbounded_channel();
+                    let _ = req.resp.send(DisplayTxResponse {
+                        tx: task_tx,
+                        paths: None,
+                    });
+                    tokio::spawn(async move {
+                        let mut task_rx = task_rx;
+                        if let Some(display_req) = task_rx.recv().await {
+                            let _ = display_req.resp.send(output).await;
+                        }
+                    });
+                    return;
+                }
                 // Generic per-VRF instance redirect: `show <proto> vrf
                 // <name> …` is rewritten to `show <proto> …` and routed
                 // to the instance task's show channel when that instance
@@ -856,6 +874,31 @@ impl ConfigManager {
                 self.show_vrf_clients.borrow_mut().remove(&key);
             }
         }
+    }
+
+    /// Render `show task`: every spawned task with its protocol and VRF.
+    /// Default-VRF tasks come from `protocol_tasks` (keyed by protocol);
+    /// per-VRF tasks come from the `"<proto>:vrf:<name>"` keys that
+    /// VRF-spawning daemons register via `SubscribeShowVrf`.
+    fn show_task(&self) -> String {
+        let mut rows: Vec<(String, String)> = self
+            .protocol_tasks
+            .borrow()
+            .keys()
+            .map(|proto| (proto.clone(), "default".to_string()))
+            .collect();
+        for key in self.show_vrf_clients.borrow().keys() {
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() == 3 && parts[1] == "vrf" {
+                rows.push((parts[0].to_string(), parts[2].to_string()));
+            }
+        }
+        rows.sort();
+        let mut buf = format!("{:<12}  {}\n", "Protocol", "VRF");
+        for (proto, vrf) in rows {
+            buf.push_str(&format!("{proto:<12}  {vrf}\n"));
+        }
+        buf
     }
 
     /// Apply a `vty service-account uid N` change to the in-memory
