@@ -334,17 +334,6 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize>
         .collect::<BTreeSet<_>>()
 }
 
-// Old single-output `pc_paths` is superseded by `pc_paths_new`,
-// which returns the `first_hop_links` set alongside the PC paths
-// from a single SPF call. Left commented as a reference until any
-// out-of-tree caller has migrated.
-//
-// pub fn pc_paths(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<Vec<usize>> {
-//     spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal)
-//         .remove(&d)
-//         .map_or_else(Vec::new, |data| data.paths)
-// }
-
 pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf_reverse(graph, d, &SpfOpt::full_path());
 
@@ -357,6 +346,22 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize>
             if has_valid_paths { Some(*vertex) } else { None }
         })
         .collect::<BTreeSet<_>>()
+}
+
+pub fn pc_paths(
+    graph: &Graph,
+    s: usize,
+    d: usize,
+    x: &[usize],
+) -> (Vec<Vec<usize>>, HashSet<(usize, u32)>) {
+    let spf = spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal);
+    let Some(d_path) = spf.get(&d) else {
+        return (vec![], HashSet::new());
+    };
+    let first_hop_links = d_path.first_hop_links.clone();
+    let pc_paths = d_path.paths.clone();
+
+    (pc_paths, first_hop_links)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -521,28 +526,12 @@ pub struct RepairPath {
     pub segs: Vec<SrSegment>,
 }
 
-pub fn pc_paths_new(
-    graph: &Graph,
-    s: usize,
-    d: usize,
-    x: &[usize],
-) -> (Vec<Vec<usize>>, HashSet<(usize, u32)>) {
-    let spf = spf_calc(graph, s, x, &SpfOpt::full_path(), &SpfDirect::Normal);
-    let Some(d_path) = spf.get(&d) else {
-        return (vec![], HashSet::new());
-    };
-    let first_hop_links = d_path.first_hop_links.clone();
-    let pc_paths = d_path.paths.clone();
-
-    (pc_paths, first_hop_links)
-}
-
 pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);
 
     // Run a SPF to get PC paths.
-    let (mut pc_paths, first_hop_links) = pc_paths_new(graph, s, d, x);
+    let (mut pc_paths, first_hop_links) = pc_paths(graph, s, d, x);
 
     // PCPaths.
     let mut repair_paths = vec![];
@@ -1013,7 +1002,7 @@ mod tests {
         }
         assert_eq!(q_vertices, BTreeSet::from([]));
 
-        let (pc, _) = pc_paths_new(&graph, s, d, x);
+        let (pc, _) = pc_paths(&graph, s, d, x);
         let pc = pc.first().unwrap();
         let mut pc_vertices = Vec::<String>::new();
         for n in pc.iter() {
@@ -1022,7 +1011,7 @@ mod tests {
         }
         assert_eq!(pc_vertices, vec!["N2", "R1", "R2"]);
 
-        let (mut pc, _) = pc_paths_new(&graph, s, d, x);
+        let (mut pc, _) = pc_paths(&graph, s, d, x);
         for path in &mut pc {
             // PC path keeps D as the final vertex; make_repair_list
             // emits AdjSid(deepest_p, d) for that hop while walking
@@ -1068,7 +1057,7 @@ mod tests {
         // *  The expected post-convergence path from S to D considering the
         // failure of N1 is <N2 -> R1 -> R2 -> R3 -> D> (we are naming it
         // PCPath in this example).
-        let (mut pc_paths, _) = pc_paths_new(&graph, s, d, x);
+        let (mut pc_paths, _) = pc_paths(&graph, s, d, x);
         assert_eq!(pc_paths.len(), 1);
         let pc_path = pc_paths.first().unwrap();
         let mut pc_vertices = Vec::<String>::new();
