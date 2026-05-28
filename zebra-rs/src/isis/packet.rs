@@ -895,11 +895,18 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
         return;
     }
 
-    // Purge the LSP.
-    if lsp.hold_time == 0 {
-        // lsdb::remove_lsp_link(top, level, lsp.lsp_id);
-        return;
-    }
+    // Purges (`hold_time == 0`) flow through the same §7.3.15.1
+    // decision tree as a normal LSP: seq comparison decides whether
+    // we install + re-flood (Greater/None), ack (Equal), or
+    // counter-flood our own newer copy (Less). The LSDB hold-timer
+    // for hold_time == 0 is mapped to ZeroAgeLifetime by
+    // `lsdb::hold_timer_secs` so the SRM flood has time to read
+    // bytes before eviction.
+    //
+    // is_self semantics (§7.3.16.4) carry over verbatim — a peer
+    // purging our LSP at higher seq triggers a re-originate at
+    // recv_seq+1 just like any other "peer holds our LSP at higher
+    // seq" case, which is the right outcome.
 
     // Detect self-originated LSPs (regular self LSP at pseudo_id 0,
     // or any pseudonode LSP we originated as DIS — both share our

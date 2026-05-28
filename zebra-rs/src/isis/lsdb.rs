@@ -33,6 +33,26 @@ pub struct Lsdb {
     pub adj: BTreeMap<u32, LspFlood>,
 }
 
+/// ISO 10589 §7.3.16.4 ZeroAgeLifetime. A purged LSP (Remaining
+/// Lifetime == 0) must stay in the LSDB for this long before being
+/// evicted, so the SRM/SSN machinery has time to flood it to peers
+/// and acknowledge it. Arming `hold_timer` for `hold_time == 0`
+/// directly would otherwise evict the entry before `srm_advertise`
+/// could read its bytes.
+const ZERO_AGE_LIFETIME: u16 = 60;
+
+/// Number of seconds the LSDB should hold an entry whose
+/// Remaining Lifetime came across the wire as 0. Returns the
+/// ZeroAgeLifetime safety window so the LSP survives long enough
+/// to reach peers; otherwise returns the value untouched.
+fn hold_timer_secs(hold_time: u16) -> u16 {
+    if hold_time == 0 {
+        ZERO_AGE_LIFETIME
+    } else {
+        hold_time
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LsdbEvent {
     RefreshTimerExpire,
@@ -517,7 +537,10 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     let mut lsa = Lsa::new(lsp);
     lsa.ifindex = top.ifindex;
     lsa.bytes = bytes;
-    lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_time));
+    // Purges (hold_time == 0) must linger for ZeroAgeLifetime so the
+    // SRM flood can read their bytes before the entry is evicted —
+    // see `hold_timer_secs`.
+    lsa.hold_timer = Some(hold_timer(top.tx, level, key, hold_timer_secs(hold_time)));
     lsa.last_received = Some(Instant::now());
 
     let prev = top.lsdb.get_mut(&level).map.insert(key, lsa);
@@ -564,11 +587,19 @@ pub fn insert_self_originate(
     let mut lsa = Lsa::new(lsp);
     lsa.originated = true;
 
-    lsa.hold_timer = Some(hold_timer(top.tx, level, key, lsa.lsp.hold_time));
+    // Same ZeroAgeLifetime treatment as `insert_lsp` for self-
+    // originated purges — `process_lsp_purge` calls in here with
+    // hold_time == 0, and the entry must survive long enough for
+    // `srm_advertise` to flood its bytes to peers.
+    lsa.hold_timer = Some(hold_timer(
+        top.tx,
+        level,
+        key,
+        hold_timer_secs(lsa.lsp.hold_time),
+    ));
 
     let mut refresh_time = top.config.refresh_time();
 
-    const ZERO_AGE_LIFETIME: u16 = 60;
     const MIN_LSP_TRANS_INTERVAL: u16 = 5;
     const DEFAULT_REFRESH_TIME: u16 = 15 * 60;
 
@@ -665,6 +696,30 @@ mod tests {
     use isis_packet::prefix::Ipv4ControlInfo;
 
     use super::*;
+
+    /// ISO 10589 §7.3.16.4: a purge (Remaining Lifetime == 0) must
+    /// linger in the LSDB for ZeroAgeLifetime so the SRM flood can
+    /// read its bytes before eviction. Without this, `hold_timer`
+    /// armed at 0 fires before `srm_advertise` and the purge is
+    /// silently dropped.
+    #[test]
+    fn purge_hold_timer_uses_zero_age_lifetime() {
+        assert_eq!(
+            hold_timer_secs(0),
+            ZERO_AGE_LIFETIME,
+            "hold_time == 0 must be remapped to ZeroAgeLifetime"
+        );
+        assert_eq!(
+            hold_timer_secs(900),
+            900,
+            "non-zero hold_time must pass through untouched"
+        );
+        assert_eq!(
+            hold_timer_secs(1),
+            1,
+            "tiny non-zero hold_time must pass through untouched"
+        );
+    }
 
     fn sys(b: u8) -> IsisSysId {
         IsisSysId {
