@@ -292,8 +292,25 @@ impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>, no_nhid: bool) -> anyhow::Result<Self> {
         let _ = sysctl_enable();
 
-        let (mut connection, handle, mut messages) = new_connection()?;
-
+        // Two sockets, by design:
+        //
+        // - The *command* socket sends requests (route/nexthop/neigh
+        //   installs) and is subscribed to NO multicast groups, so its
+        //   response stream carries only replies to our own requests.
+        //   The kernel echoes our own changes back to the RTNLGRP_*
+        //   groups with our originating sequence number; on a shared
+        //   socket those echoes match the in-flight request and get
+        //   misrouted into the request's response stream (and, on a rare
+        //   seq collision, an unrelated external notification could be
+        //   absorbed there too). Keeping the command socket out of all
+        //   groups removes both problems.
+        //
+        // - The *monitor* socket joins the multicast groups and never
+        //   sends requests, so everything it receives is unsolicited and
+        //   flows to `process_msg`. Our own echoes arrive here too but
+        //   are idempotent no-ops (our state is already updated by the
+        //   time the echo lands); genuine kernel / external changes drive
+        //   RIB + NexthopMap reconciliation.
         let mgroup_flags = RTMGRP_LINK
             | RTMGRP_IPV4_ROUTE
             | RTMGRP_IPV6_ROUTE
@@ -304,8 +321,19 @@ impl FibHandle {
             // through the same group.
             | RTMGRP_NEIGH;
 
-        let addr = SocketAddr::new(0, mgroup_flags);
-        connection.socket_mut().socket_mut().bind(&addr)?;
+        let (mut cmd_conn, handle, _cmd_messages) = new_connection()?;
+        // Bind to an auto-assigned port with no group membership.
+        cmd_conn
+            .socket_mut()
+            .socket_mut()
+            .bind(&SocketAddr::new(0, 0))?;
+        tokio::spawn(cmd_conn);
+
+        let (mut mon_conn, _mon_handle, mut messages) = new_connection()?;
+        mon_conn
+            .socket_mut()
+            .socket_mut()
+            .bind(&SocketAddr::new(0, mgroup_flags))?;
 
         // RTM_NEWNEXTHOP / RTM_DELNEXTHOP aren't covered by the legacy
         // RTMGRP_* bind mask (it only spans the first ~20 groups). Join
@@ -314,7 +342,7 @@ impl FibHandle {
         // to reconcile NexthopMap when the kernel drops a nexthop. Needs
         // netlink-packet-route's group-nexthop decode fix (see the
         // `decodes_rtm_newnexthop_group` test). Non-fatal on join error.
-        match connection
+        match mon_conn
             .socket_mut()
             .socket_mut()
             .add_membership(RTNLGRP_NEXTHOP)
@@ -325,7 +353,7 @@ impl FibHandle {
             ),
         }
 
-        tokio::spawn(connection);
+        tokio::spawn(mon_conn);
 
         let tx = rib_tx.clone();
         tokio::spawn(async move {
