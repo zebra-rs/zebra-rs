@@ -1451,7 +1451,7 @@ impl Rib {
                 // than trying to create a duplicate, which the kernel
                 // rejects with EEXIST and which would leave the VRF
                 // unusable and any pending interface binding stuck.
-                let (ifindex, table_id) = if let Some((ifindex, existing_table)) =
+                let (ifindex, table_id, owned) = if let Some((ifindex, existing_table)) =
                     self.fib_handle.vrf_index_table_by_name(&name).await
                 {
                     self.vrf_id_alloc.reserve(existing_table);
@@ -1461,7 +1461,8 @@ impl Rib {
                         ifindex,
                         existing_table
                     );
-                    (ifindex, existing_table)
+                    // Adopted, not created — leave it in place on exit.
+                    (ifindex, existing_table, false)
                 } else {
                     let Some(table_id) = self.vrf_id_alloc.allocate() else {
                         tracing::warn!("vrf_add({}) failed — id space exhausted", name);
@@ -1473,7 +1474,7 @@ impl Rib {
                         self.vrf_id_alloc.release(table_id);
                         return;
                     };
-                    (ifindex, table_id)
+                    (ifindex, table_id, true)
                 };
                 self.vrfs.insert(
                     name.clone(),
@@ -1481,6 +1482,7 @@ impl Rib {
                         name: name.clone(),
                         table_id,
                         ifindex,
+                        owned,
                         // RT sets arrive separately via
                         // `Message::VrfRouteTargets` once the VRF
                         // config builder has finished parsing
@@ -1740,6 +1742,19 @@ impl Rib {
                 }
                 for (_, vxlan) in self.vxlan.iter() {
                     self.fib_handle.vxlan_del(vxlan).await;
+                }
+                // Tear down the VRF master devices this process created
+                // (adopted ones are left for their owner). Enslaved
+                // interfaces are released back to the default VRF by the
+                // kernel automatically when the master goes.
+                let owned_vrfs: Vec<String> = self
+                    .vrfs
+                    .values()
+                    .filter(|v| v.owned)
+                    .map(|v| v.name.clone())
+                    .collect();
+                for name in owned_vrfs {
+                    self.fib_handle.vrf_del(&name).await;
                 }
                 self.cleanup_sr0_dummy().await;
                 let _ = tx.send(());

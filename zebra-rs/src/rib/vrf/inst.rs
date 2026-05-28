@@ -20,6 +20,11 @@ pub struct Vrf {
     pub name: String,
     pub table_id: u32,
     pub ifindex: u32,
+    /// `true` when this process created the kernel VRF master device,
+    /// `false` when it adopted a pre-existing one (operator-created, or
+    /// a leftover from a prior run). The shutdown path only deletes the
+    /// devices it created — same ownership rule as the sr0 dummy.
+    pub owned: bool,
     pub ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub ipv4_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
