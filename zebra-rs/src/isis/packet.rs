@@ -948,7 +948,19 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
                 };
                 let _ = link.tx.send(msg);
             } else {
-                // 7.3.15.1 e.1
+                // 7.3.15.1 e.1 — install + re-flood.
+                //
+                // RFC 6232 §3: if this is a purge without POI, we
+                // MUST insert POI Number=2 (own, sender) and re-sign
+                // before re-flooding. The augmented bytes go to the
+                // LSDB so the SRM flood ships the corrected purge.
+                let (lsp, bytes) = match link.state.adj.get(&level).as_ref() {
+                    Some((nbr_id, _)) => {
+                        poi_insert_on_forward(link, level, lsp, bytes, nbr_id.sys_id())
+                    }
+                    None => (lsp, bytes),
+                };
+
                 // 1. Store the new LSP in the database, overwriting the
                 //    existing database LSP for that source (if any) with the
                 //    received LSP.
@@ -1321,4 +1333,247 @@ pub fn process_packet(
     }
 
     Ok(())
+}
+
+/// RFC 6232 §3 — when re-flooding a received purge that lacks POI,
+/// prepend `Number=2 (own, sender)` POI and re-emit so the LSDB
+/// install and SRM flood both see the augmented purge.
+///
+/// Returns the (possibly modified) `(lsp, bytes)` pair. Non-purges,
+/// purges that already carry POI, and the empty-bytes corner case
+/// are passed through untouched.
+///
+/// Pulls own sys-id, auth config, and key chains off `link`; the
+/// sender is supplied by the caller (already resolved from
+/// `link.state.adj`).
+fn poi_insert_on_forward(
+    link: &mut crate::isis::link::LinkTop,
+    level: super::Level,
+    lsp: IsisLsp,
+    bytes: Vec<u8>,
+    sender_sys_id: IsisSysId,
+) -> (IsisLsp, Vec<u8>) {
+    let own_sys_id = link.up_config.net.sys_id();
+    let auth_cfg = crate::isis::lsp::level_auth_cfg(link.up_config, level).clone();
+    maybe_insert_poi_on_forward(
+        lsp,
+        bytes,
+        own_sys_id,
+        sender_sys_id,
+        level,
+        &auth_cfg,
+        link.key_chains,
+    )
+}
+
+/// Inner implementation kept LinkTop-free so it can be unit-tested
+/// with synthetic config and key-chain inputs.
+fn maybe_insert_poi_on_forward(
+    lsp: IsisLsp,
+    bytes: Vec<u8>,
+    own_sys_id: IsisSysId,
+    sender_sys_id: IsisSysId,
+    level: super::Level,
+    auth_cfg: &super::config::IsisAuthConfig,
+    key_chains: &BTreeMap<String, crate::policy::KeyChain>,
+) -> (IsisLsp, Vec<u8>) {
+    // Only act on purges that lack POI.
+    if lsp.hold_time != 0
+        || lsp
+            .tlvs
+            .iter()
+            .any(|t| matches!(t, IsisTlv::PurgeOrigId(_)))
+    {
+        return (lsp, bytes);
+    }
+
+    let mut new_lsp = lsp.clone();
+
+    // Strip any existing Auth TLV — `lsp_emit` appends a fresh
+    // placeholder and the sign step patches the digest in place.
+    new_lsp.tlvs.retain(|t| !matches!(t, IsisTlv::Auth(_)));
+
+    // Prepend POI Number=2: `originator` = us (the forwarding IS),
+    // `received_from` = the peer that sent us this purge.
+    new_lsp.tlvs.insert(
+        0,
+        IsisTlv::PurgeOrigId(IsisTlvPurgeOrigId {
+            originator: own_sys_id,
+            received_from: Some(sender_sys_id),
+        }),
+    );
+
+    let resolved = auth::resolve_send(auth_cfg, key_chains, chrono::Utc::now());
+    let buf = crate::isis::lsp::lsp_emit(&mut new_lsp, level, resolved.as_ref());
+
+    (new_lsp, buf.to_vec())
+}
+
+#[cfg(test)]
+mod poi_forward_tests {
+    use super::*;
+    use crate::isis::Level;
+    use crate::isis::config::IsisAuthConfig;
+
+    fn sys(b: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, b],
+        }
+    }
+
+    fn purge_lsp(originator: IsisSysId, with_poi: bool) -> IsisLsp {
+        let mut lsp = IsisLsp {
+            lsp_id: IsisLspId::new(originator, 0, 0),
+            seq_number: 7,
+            hold_time: 0,
+            ..Default::default()
+        };
+        if with_poi {
+            lsp.tlvs.push(IsisTlv::PurgeOrigId(IsisTlvPurgeOrigId {
+                originator,
+                received_from: None,
+            }));
+        }
+        lsp
+    }
+
+    /// RFC 6232 §3: a received purge with no POI must come out
+    /// re-emitted with POI Number=2 (own, sender).
+    #[test]
+    fn purge_without_poi_gets_number_2_prepended() {
+        let own = sys(0x10);
+        let sender = sys(0x20);
+        let originator = sys(0x30);
+        let lsp = purge_lsp(originator, false);
+
+        let auth_cfg = IsisAuthConfig::default();
+        let keys = BTreeMap::new();
+
+        let (new_lsp, new_bytes) = maybe_insert_poi_on_forward(
+            lsp.clone(),
+            vec![],
+            own,
+            sender,
+            Level::L2,
+            &auth_cfg,
+            &keys,
+        );
+
+        // POI must now be present.
+        let poi = new_lsp
+            .tlvs
+            .iter()
+            .find_map(|t| match t {
+                IsisTlv::PurgeOrigId(p) => Some(p),
+                _ => None,
+            })
+            .expect("forwarded purge must carry POI");
+        assert_eq!(poi.originator, own, "Number=2 first sys-id = forwarder");
+        assert_eq!(
+            poi.received_from,
+            Some(sender),
+            "Number=2 second sys-id = sender"
+        );
+
+        // Emitted bytes must parse back as an IsisLsp containing the
+        // same POI — confirms wire-level round-trip and that the
+        // checksum/auth re-emit didn't break the body.
+        let (rest, parsed) =
+            IsisLsp::parse_be(&new_bytes[8..]).expect("re-emitted purge body must parse");
+        assert!(rest.is_empty());
+        assert!(parsed.tlvs.iter().any(|t| matches!(
+            t,
+            IsisTlv::PurgeOrigId(p)
+                if p.originator == own && p.received_from == Some(sender)
+        )));
+    }
+
+    /// Purge that already carries POI must pass through untouched —
+    /// only the originating IS (or a previous forwarder) gets to
+    /// stamp it; we don't overwrite.
+    #[test]
+    fn purge_with_poi_is_passed_through() {
+        let own = sys(0x10);
+        let sender = sys(0x20);
+        let originator = sys(0x30);
+        let lsp = purge_lsp(originator, true);
+        let bytes = vec![0xde, 0xad, 0xbe, 0xef];
+
+        let auth_cfg = IsisAuthConfig::default();
+        let keys = BTreeMap::new();
+
+        let (out_lsp, out_bytes) = maybe_insert_poi_on_forward(
+            lsp.clone(),
+            bytes.clone(),
+            own,
+            sender,
+            Level::L2,
+            &auth_cfg,
+            &keys,
+        );
+
+        assert_eq!(out_lsp.tlvs, lsp.tlvs, "TLVs untouched");
+        assert_eq!(out_bytes, bytes, "bytes untouched");
+    }
+
+    /// Non-purge LSPs (hold_time != 0) must never have POI stamped
+    /// onto them — RFC 6232 §3 forbids POI on non-purge LSPs.
+    #[test]
+    fn non_purge_is_passed_through() {
+        let own = sys(0x10);
+        let sender = sys(0x20);
+        let originator = sys(0x30);
+        let mut lsp = purge_lsp(originator, false);
+        lsp.hold_time = 1200; // not a purge
+
+        let bytes = vec![0xaa, 0xbb];
+        let auth_cfg = IsisAuthConfig::default();
+        let keys = BTreeMap::new();
+
+        let (out_lsp, out_bytes) = maybe_insert_poi_on_forward(
+            lsp.clone(),
+            bytes.clone(),
+            own,
+            sender,
+            Level::L2,
+            &auth_cfg,
+            &keys,
+        );
+
+        assert_eq!(out_lsp.tlvs, lsp.tlvs);
+        assert_eq!(out_bytes, bytes);
+    }
+
+    /// If a stale Auth TLV is sitting on the received purge, it must
+    /// be stripped before re-emit so `lsp_emit` can append a fresh
+    /// placeholder. Without this the LSP would end up carrying two
+    /// Auth TLVs.
+    #[test]
+    fn existing_auth_tlv_is_stripped_before_reemit() {
+        use isis_packet::IsisTlvAuth;
+        let own = sys(0x10);
+        let sender = sys(0x20);
+        let originator = sys(0x30);
+        let mut lsp = purge_lsp(originator, false);
+        lsp.tlvs.push(IsisTlv::Auth(IsisTlvAuth {
+            auth_type: 1,
+            value: b"oldkey".to_vec(),
+        }));
+
+        let auth_cfg = IsisAuthConfig::default();
+        let keys = BTreeMap::new();
+
+        let (new_lsp, _) =
+            maybe_insert_poi_on_forward(lsp, vec![], own, sender, Level::L2, &auth_cfg, &keys);
+
+        let auth_count = new_lsp
+            .tlvs
+            .iter()
+            .filter(|t| matches!(t, IsisTlv::Auth(_)))
+            .count();
+        // With IsisAuthConfig::default() no fresh Auth TLV is appended
+        // (no auth configured), so we expect zero. The pre-existing
+        // stale Auth must be gone.
+        assert_eq!(auth_count, 0, "stale Auth TLV must be stripped");
+    }
 }
