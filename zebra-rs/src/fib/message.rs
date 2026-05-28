@@ -121,6 +121,14 @@ pub enum FibMessage {
     DelAddr(FibAddr),
     NewRoute(FibRoute),
     DelRoute(FibRoute),
+    /// Kernel nexthop-object id from RTM_NEWNEXTHOP — usually the echo
+    /// of our own install; reconciled in `Rib::process_fib_msg`.
+    NewNexthop(u32),
+    /// Kernel nexthop-object id from RTM_DELNEXTHOP. Signals the kernel
+    /// dropped a nexthop (link down / gateway unreachable / manual
+    /// delete); drives `NexthopMap` reconciliation so the group gets
+    /// reinstalled.
+    DelNexthop(u32),
     NewNeighbor(FibNeighbor),
     DelNeighbor(FibNeighbor),
 }

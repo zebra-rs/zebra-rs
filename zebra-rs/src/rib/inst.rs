@@ -1768,6 +1768,44 @@ impl Rib {
         }
     }
 
+    /// Kernel reported a nexthop object exists (RTM_NEWNEXTHOP). This
+    /// is almost always the echo of our own install. We only keep our
+    /// view consistent for a gid we own: if we thought it uninstalled,
+    /// record that the kernel now has it so the next sync doesn't issue
+    /// a redundant add. External nexthop ids we don't track are
+    /// ignored (the gid space here is RIB-managed).
+    fn fib_nexthop_added(&mut self, id: u32) {
+        if let Some(group) = self.nmap.get_mut(id as usize)
+            && !group.is_installed()
+        {
+            group.set_installed(true);
+        }
+    }
+
+    /// Kernel reported a nexthop object was removed (RTM_DELNEXTHOP).
+    /// Linux auto-deletes a nexthop object — and every route that
+    /// referenced it — when its egress link goes down or the gateway
+    /// becomes unreachable. Without this hook our `NexthopMap` keeps
+    /// the group flagged `installed`, so the next resolve cycle skips
+    /// re-creating it and routes pointing at the now-missing nh_id fail
+    /// to install with EINVAL. Clearing `installed` lets the debounced
+    /// resolve rebuild the nexthop (and re-add its dependent routes).
+    /// Our own deletes echo back here too, but by then the group is
+    /// gone or the flag already clear, so it's a no-op.
+    fn fib_nexthop_removed(&mut self, id: u32) {
+        let cleared = self.nmap.get_mut(id as usize).is_some_and(|group| {
+            let was_installed = group.is_installed();
+            if was_installed {
+                group.set_installed(false);
+            }
+            was_installed
+        });
+        if cleared {
+            tracing::info!("fib: kernel removed nexthop id {id}; scheduling reinstall");
+            self.schedule_rib_sync();
+        }
+    }
+
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         // println!("{:?}", msg);
         match msg {
@@ -1856,6 +1894,12 @@ impl Rib {
                     self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
                         .await;
                 }
+            }
+            FibMessage::NewNexthop(id) => {
+                self.fib_nexthop_added(id);
+            }
+            FibMessage::DelNexthop(id) => {
+                self.fib_nexthop_removed(id);
             }
             FibMessage::NewNeighbor(nbr) => {
                 let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
