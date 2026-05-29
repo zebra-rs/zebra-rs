@@ -290,11 +290,12 @@ fn show_nexthop(attr: &BgpAttr) -> String {
     }
 }
 
-fn show_nexthop_vpn(nexthop: &Option<Vpnv4Nexthop>) -> String {
-    if let Some(nexthop) = nexthop {
-        nexthop.nhop.to_string()
-    } else {
-        "0.0.0.0".to_string()
+fn show_nexthop_vpn(nexthop: &Option<super::route::VpnNexthop>) -> String {
+    use super::route::VpnNexthop;
+    match nexthop {
+        Some(VpnNexthop::V4(nh)) => nh.nhop.to_string(),
+        Some(VpnNexthop::V6(nh)) => nh.nhop.to_string(),
+        None => "0.0.0.0".to_string(),
     }
 }
 
