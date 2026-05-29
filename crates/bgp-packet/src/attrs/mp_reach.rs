@@ -65,6 +65,13 @@ impl MpReachAttr {
             MpReachAttr::Rtcv4(nlri) => {
                 nlri.attr_emit(buf);
             }
+            MpReachAttr::Ipv6 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                ipv6_attr_emit(nhop, updates, buf);
+            }
             MpReachAttr::Evpn {
                 snpa,
                 nhop,
@@ -434,6 +441,54 @@ impl fmt::Debug for MpReachAttr {
 /// before writing the header — extended (2-byte) length is used when
 /// the value exceeds 255 octets, matching the convention used by
 /// `Vpnv4Reach::attr_emit_mut`.
+/// Serialize an `MpReachAttr::Ipv6 { nhop, updates }` as a complete
+/// MP_REACH_NLRI path attribute (header + value). IPv6 unicast has no
+/// legacy NLRI field, so this is the only encode path.
+///
+/// Wire format (RFC 4760 §3 + RFC 2545 §3):
+/// ```text
+///   AFI  (2) = 2 (IPv6)
+///   SAFI (1) = 1 (Unicast)
+///   Next-Hop Length (1) = 16
+///   Next-Hop (16, global IPv6)
+///   SNPA (1) = 0
+///   NLRI  (one or more Ipv6Nlri encodings)
+/// ```
+pub(crate) fn ipv6_attr_emit(nhop: &IpAddr, updates: &[Ipv6Nlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip6));
+    value.put_u8(u8::from(Safi::Unicast));
+    // RFC 2545: a 16-octet global IPv6 next-hop. A v4 next-hop here is
+    // a caller bug; emit a zeroed 16-octet next-hop rather than a
+    // malformed length so the receiver drops the route cleanly.
+    value.put_u8(16);
+    match nhop {
+        IpAddr::V6(v6) => value.put(&v6.octets()[..]),
+        IpAddr::V4(_) => value.put(&[0u8; 16][..]),
+    }
+    // SNPA.
+    value.put_u8(0);
+    for nlri in updates {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
     let mut value = BytesMut::new();
     value.put_u16(u16::from(Afi::L2vpn));

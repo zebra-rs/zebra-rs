@@ -63,6 +63,12 @@ impl MpUnreachAttr {
                 let attr = Vpnv6Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
+            MpUnreachAttr::Ipv6Nlri(withdraws) => {
+                ipv6_unreach_attr_emit(withdraws, buf);
+            }
+            MpUnreachAttr::Ipv6Eor => {
+                ipv6_unreach_attr_emit(&[], buf);
+            }
             MpUnreachAttr::Rtcv4Eor => {
                 let attr = Rtcv4Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
@@ -98,6 +104,38 @@ impl MpUnreachAttr {
 /// header and the NLRI list. The NLRI body bytes are produced by
 /// `EvpnRoute::nlri_emit` (PR #399), the same encoder used by the
 /// MP_REACH advertise path.
+/// Serialize an `MpUnreachAttr::Ipv6Nlri(withdraws)` (or `Ipv6Eor`
+/// when `withdraws` is empty) as a complete MP_UNREACH_NLRI path
+/// attribute. IPv6 unicast withdrawals have no legacy field, so this
+/// is the only encode path.
+///
+/// Wire format (RFC 4760 §4): AFI=2, SAFI=1, then the NLRI list (empty
+/// for end-of-RIB).
+fn ipv6_unreach_attr_emit(withdraws: &[Ipv6Nlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip6));
+    value.put_u8(u8::from(Safi::Unicast));
+    for nlri in withdraws {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 fn evpn_unreach_attr_emit(withdraw: &[EvpnRoute], buf: &mut BytesMut) {
     let mut value = BytesMut::new();
     value.put_u16(u16::from(Afi::L2vpn));
