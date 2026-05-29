@@ -30,6 +30,17 @@ pub enum NhtDep {
     V6vpn(RouteDistinguisher, Ipv6Net),
 }
 
+/// How a tracked next-hop's resolution changed, returned by
+/// [`NexthopCache::update`]. Lets the caller react proportionally —
+/// a full re-evaluation on a reachability flip, but only a dataplane
+/// re-install on a transport-only reroute (no peer re-advertisement).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CacheChange {
+    Unchanged,
+    Reachability(Vec<NhtDep>),
+    Transport(Vec<NhtDep>),
+}
+
 #[derive(Debug, Default)]
 pub struct NhtCacheEntry {
     pub reachable: bool,
@@ -73,26 +84,33 @@ impl NexthopCache {
         }
     }
 
-    /// Apply a resolution update. Always refreshes the stored resolved
-    /// transport (`nexthops`) so a later re-eval installs against
-    /// current data. Returns the dependent routes to re-evaluate — only
-    /// on a reachability flip; a transport-only change (still reachable)
-    /// refreshes the cache but doesn't itself trigger re-eval (matching
-    /// the gate's reachability semantics; transport-reroute re-install
-    /// is a deferred refinement).
-    pub fn update(&mut self, nh: IpAddr, resolution: &NexthopResolution) -> Vec<NhtDep> {
+    /// Apply a resolution update, refreshing the stored reachability +
+    /// resolved transport. Classifies the change so the caller can react
+    /// proportionally:
+    /// - [`CacheChange::Reachability`] — the gate flipped; best-path,
+    ///   peer advertisement and the dataplane all need re-evaluation.
+    /// - [`CacheChange::Transport`] — still reachable, but the resolved
+    ///   egress/labels changed (an IGP reroute of the PE). Best-path is
+    ///   unchanged, so only the fully-resolved VPN FIB entry needs
+    ///   re-installing — no peer re-advertisement (which for VPNv4 isn't
+    ///   deduped and would flood PEs).
+    /// - [`CacheChange::Unchanged`] — nothing moved; a no-op.
+    pub fn update(&mut self, nh: IpAddr, resolution: &NexthopResolution) -> CacheChange {
         match self.entries.get_mut(&nh) {
             Some(e) => {
-                let flipped = e.reachable != resolution.reachable;
+                let reachability_flipped = e.reachable != resolution.reachable;
+                let transport_changed = e.nexthops != resolution.nexthops;
                 e.reachable = resolution.reachable;
                 e.nexthops = resolution.nexthops.clone();
-                if flipped {
-                    e.deps.iter().cloned().collect()
+                if reachability_flipped {
+                    CacheChange::Reachability(e.deps.iter().cloned().collect())
+                } else if transport_changed {
+                    CacheChange::Transport(e.deps.iter().cloned().collect())
                 } else {
-                    Vec::new()
+                    CacheChange::Unchanged
                 }
             }
-            None => Vec::new(),
+            None => CacheChange::Unchanged,
         }
     }
 
@@ -149,28 +167,41 @@ mod tests {
     }
 
     #[test]
-    fn update_returns_deps_only_on_change_and_stores_transport() {
+    fn update_classifies_reachability_vs_transport_vs_unchanged() {
         let mut c = NexthopCache::default();
         let nh: IpAddr = "10.0.0.8".parse().unwrap();
         let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
         c.track(nh, NhtDep::V4(p1));
 
-        // pending(false) -> reachable(true): change, deps returned, and
-        // the resolved transport is now retrievable.
-        let deps = c.update(nh, &reachable(vec![16800]));
-        assert_eq!(deps, vec![NhtDep::V4(p1)]);
-        assert_eq!(c.transport_for(nh).len(), 1);
+        // pending(false) -> reachable(true): reachability flip → full
+        // re-eval, and the resolved transport is now retrievable.
+        assert_eq!(
+            c.update(nh, &reachable(vec![16800])),
+            CacheChange::Reachability(vec![NhtDep::V4(p1)])
+        );
         assert_eq!(c.transport_for(nh)[0].labels, vec![16800]);
         assert_eq!(c.transport_for(nh)[0].ifindex, 3);
 
-        // still reachable, transport label changed: no reachability
-        // flip → no deps, but the stored transport refreshes.
-        assert!(c.update(nh, &reachable(vec![16801])).is_empty());
+        // still reachable, transport label changed (IGP reroute of the
+        // PE): transport-only → re-install, no advertise. Cache refreshed.
+        assert_eq!(
+            c.update(nh, &reachable(vec![16801])),
+            CacheChange::Transport(vec![NhtDep::V4(p1)])
+        );
         assert_eq!(c.transport_for(nh)[0].labels, vec![16801]);
 
-        // unknown nexthop: no deps, empty transport.
+        // identical resolution again: nothing moved.
+        assert_eq!(
+            c.update(nh, &reachable(vec![16801])),
+            CacheChange::Unchanged
+        );
+
+        // unknown nexthop: unchanged, empty transport.
         let unknown: IpAddr = "9.9.9.9".parse().unwrap();
-        assert!(c.update(unknown, &NexthopResolution::default()).is_empty());
+        assert_eq!(
+            c.update(unknown, &NexthopResolution::default()),
+            CacheChange::Unchanged
+        );
         assert!(c.transport_for(unknown).is_empty());
     }
 }
