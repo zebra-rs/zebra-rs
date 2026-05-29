@@ -6,10 +6,10 @@ use nom_derive::*;
 
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, Ipv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption,
-    Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, many0_complete,
+    Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
 };
 
-use super::{AttrEmitter, Vpnv4Unreach};
+use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpUnreachHeader {
@@ -25,8 +25,8 @@ pub enum MpUnreachAttr {
     Ipv6Eor,
     Vpnv4(Vec<Vpnv4Nlri>),
     Vpnv4Eor,
-    // Vpnv6,
-    // Vpnv6Eor,
+    Vpnv6(Vec<Vpnv6Nlri>),
+    Vpnv6Eor,
     Evpn(Vec<EvpnRoute>),
     EvpnEor,
     Rtcv4(Vec<Rtcv4>),
@@ -51,6 +51,16 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::Vpnv4Eor => {
                 let attr = Vpnv4Unreach { withdraw: vec![] };
+                attr.attr_emit(buf);
+            }
+            MpUnreachAttr::Vpnv6(withdraw) => {
+                let attr = Vpnv6Unreach {
+                    withdraw: withdraw.clone(),
+                };
+                attr.attr_emit(buf);
+            }
+            MpUnreachAttr::Vpnv6Eor => {
+                let attr = Vpnv6Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
             MpUnreachAttr::Rtcv4Eor => {
@@ -173,6 +183,16 @@ impl MpUnreachAttr {
             let mp_nlri = MpUnreachAttr::Vpnv4(withdrawal);
             return Ok((input, mp_nlri));
         }
+        if header.afi == Afi::Ip6 && header.safi == Safi::MplsVpn {
+            if input.is_empty() {
+                let mp_nlri = MpUnreachAttr::Vpnv6Eor;
+                return Ok((input, mp_nlri));
+            }
+            let (input, withdrawal) =
+                many0_complete(|i| Vpnv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let mp_nlri = MpUnreachAttr::Vpnv6(withdrawal);
+            return Ok((input, mp_nlri));
+        }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
             if input.is_empty() {
                 let mp_nlri = MpUnreachAttr::Ipv6Eor;
@@ -256,6 +276,15 @@ impl fmt::Display for MpUnreachAttr {
             }
             Vpnv4Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::MplsVpn)
+            }
+            Vpnv6(vpnv6_nlris) => {
+                for vpnv6 in vpnv6_nlris.iter() {
+                    writeln!(f, " {}:{}:{}", vpnv6.nlri.id, vpnv6.rd, vpnv6.nlri.prefix)?;
+                }
+                Ok(())
+            }
+            Vpnv6Eor => {
+                writeln!(f, " EoR: {}/{}", Afi::Ip6, Safi::MplsVpn)
             }
             Evpn(evpn_routes) => {
                 for evpn in evpn_routes.iter() {
