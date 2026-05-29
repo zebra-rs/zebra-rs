@@ -18,6 +18,8 @@ use tokio::net::TcpStream;
 
 use bgp_packet::{BgpAttr, RouteDistinguisher};
 
+use crate::rib::nht::ResolvedNexthop;
+
 /// Message from the global `Bgp` task to a per-VRF [`BgpVrf`]
 /// task. The receiver lives on `BgpVrf::global_rx`.
 #[derive(Debug)]
@@ -43,6 +45,12 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv4Net,
         attr: BgpAttr,
         label: u32,
+        /// Resolved transport egress(es) for the remote PE next-hop,
+        /// from the global NHT cache. The per-VRF task pushes the VPN
+        /// service `label` (inner) plus each egress's transport labels
+        /// (outer) and installs the result into the VRF FIB. Empty for
+        /// a label-less / unresolved transport (no FIB install).
+        transport: Vec<ResolvedNexthop>,
     },
 
     /// Withdraw a previously-imported route. RD identifies the
