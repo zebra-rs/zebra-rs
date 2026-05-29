@@ -916,12 +916,12 @@ pub fn route_ipv4_update(
         && let Some(dispatcher) = bgp.vrf_import
     {
         if let Some(winner) = selected.first() {
-            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0);
+            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0, None);
         } else {
             // best-path stripped the candidate; flood withdraw
             // using the *new* attr (the one just rejected) so
             // the matching-VRF set still resolves the same way.
-            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &rib.attr);
+            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &rib.attr, None);
         }
     }
 
@@ -1932,9 +1932,9 @@ pub fn route_ipv4_withdraw(
         && let Some(dispatcher) = bgp.vrf_import
     {
         if let Some(winner) = selected.first() {
-            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0);
+            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0, None);
         } else if let Some(gone) = removed.first() {
-            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &gone.attr);
+            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &gone.attr, None);
         }
     }
     if !selected.is_empty() || !removed.is_empty() {
@@ -2865,7 +2865,23 @@ pub fn route_update_ipv4(
         } else {
             *bgp.router_id
         };
-        attrs.nexthop = Some(BgpNexthop::Ipv4(nexthop));
+        // VPNv4 rows carry the `Vpnv4Nexthop` slot (it holds the
+        // route's RD); emit an MP_REACH-shaped next-hop so
+        // `flush_vpnv4` picks it up — writing a bare `BgpNexthop::Ipv4`
+        // here would be ignored at flush time and the MP_REACH would
+        // ship with no next-hop. The address is the local end of this
+        // peer's (i)BGP session (next-hop-self toward the remote PE,
+        // identical to the v4-unicast rule), falling back to the
+        // router-id when that local address isn't IPv4. Plain
+        // v4-unicast rows (`rib.nexthop == None`) keep the bare IPv4
+        // next-hop.
+        attrs.nexthop = match rib.nexthop {
+            Some(ref vpn_nh) => Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
+                rd: vpn_nh.rd,
+                nhop: nexthop,
+            })),
+            None => Some(BgpNexthop::Ipv4(nexthop)),
+        };
     };
 
     // 4. MED - Pass through.

@@ -160,6 +160,24 @@ pub(crate) fn matching_import_vrfs(
         .collect()
 }
 
+/// Compute the fan-out target VRFs for a VPNv4 route: every VRF
+/// [`matching_import_vrfs`] returns, minus `skip_vrf`. The skip
+/// excludes the VRF a locally-exported route originated from, so a
+/// VRF whose import-RT set overlaps its own export-RTs (e.g.
+/// `rt both 1:1`) doesn't re-import the route it just exported.
+/// `None` on the remote-VPNv4 ingress path (no originating local
+/// VRF).
+pub(crate) fn import_targets(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+    skip_vrf: Option<&str>,
+) -> Vec<String> {
+    matching_import_vrfs(vrf_index, ecom)
+        .into_iter()
+        .filter(|name| Some(name.as_str()) != skip_vrf)
+        .collect()
+}
+
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd` and the matching RT sets observed via
 /// `RibRx::VrfRouteTargets`. Used by
@@ -1495,6 +1513,29 @@ impl Bgp {
                 let (_, selected, _gen) = self.local_rib.update(Some(rd), prefix, rib);
                 let selected_len = selected.len();
 
+                // Local intra-router leak. The remote-VPNv4 ingress
+                // path (`route_ipv4_update`) fans an accepted VPNv4
+                // winner out to every importing VRF; the direct
+                // `local_rib.update` above bypasses that hook, so a
+                // route exported by one local VRF would never reach a
+                // sibling VRF on the same box. Replicate the fan-out
+                // here, skipping the originating VRF so a `rt both`
+                // config doesn't re-import what it just exported.
+                if let Some(winner) = selected.first() {
+                    let dispatcher = super::vrf::VrfImportDispatcher {
+                        rib_known_vrfs: &self.rib_known_vrfs,
+                        vrf_registry: &self.vrf_registry,
+                    };
+                    super::vrf::dispatch_import_v4(
+                        &dispatcher,
+                        rd,
+                        prefix,
+                        &winner.attr,
+                        0,
+                        Some(vrf.as_str()),
+                    );
+                }
+
                 // Fan out the new VPNv4 winner to PE peers via the
                 // existing `route_advertise_to_peers` helper. The
                 // helper iterates Established peers matching
@@ -1556,6 +1597,38 @@ impl Bgp {
                 // empty `selected` triggers the Withdraw branch
                 // there (`peer.adj_out` cleanup, MP_UNREACH emit).
                 let selected = self.local_rib.select_best_path_vpn(&rd, prefix);
+
+                // Local intra-router leak, symmetric with the Export
+                // handler. If a replacement candidate survives at
+                // (rd, prefix), re-import it into sibling VRFs with
+                // the new attr; otherwise flood a withdraw using the
+                // removed row's attr to resolve the matching-VRF set.
+                // Skip the originating VRF (self-import guard).
+                {
+                    let dispatcher = super::vrf::VrfImportDispatcher {
+                        rib_known_vrfs: &self.rib_known_vrfs,
+                        vrf_registry: &self.vrf_registry,
+                    };
+                    if let Some(winner) = selected.first() {
+                        super::vrf::dispatch_import_v4(
+                            &dispatcher,
+                            rd,
+                            prefix,
+                            &winner.attr,
+                            0,
+                            Some(vrf.as_str()),
+                        );
+                    } else if let Some(gone) = removed.first() {
+                        super::vrf::dispatch_withdraw_import_v4(
+                            &dispatcher,
+                            rd,
+                            prefix,
+                            &gone.attr,
+                            Some(vrf.as_str()),
+                        );
+                    }
+                }
+
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
                     local_rib: &mut self.local_rib,
@@ -1813,7 +1886,7 @@ mod tests {
 
         use bgp_packet::{ExtCommunity, ExtCommunityValue, RouteDistinguisher};
 
-        use super::super::{RibKnownVrf, matching_import_vrfs};
+        use super::super::{RibKnownVrf, import_targets, matching_import_vrfs};
 
         fn rt(s: &str) -> RouteDistinguisher {
             RouteDistinguisher::from_str(s).unwrap()
@@ -1878,6 +1951,39 @@ mod tests {
             index.insert("v2".to_string(), vrf_with_imports(&["65000:99"]));
             let ecom = Some(ExtCommunity(vec![rt_extcom("65000:99")]));
             let mut got = matching_import_vrfs(&index, &ecom);
+            got.sort();
+            assert_eq!(got, vec!["v1".to_string(), "v2".to_string()]);
+        }
+
+        #[test]
+        fn import_targets_skips_originating_vrf() {
+            // `rt both 1:1`: a route exported by v1 carries RT
+            // 65000:1, and v1 also imports 65000:1. On the
+            // local-leak path the originating VRF (v1) must be
+            // excluded so it doesn't re-import what it exported,
+            // while a sibling (v2) that imports the same RT still
+            // gets it.
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            index.insert("v2".to_string(), vrf_with_imports(&["65000:1"]));
+            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+
+            let mut got = import_targets(&index, &ecom, Some("v1"));
+            got.sort();
+            assert_eq!(got, vec!["v2".to_string()]);
+        }
+
+        #[test]
+        fn import_targets_none_skip_keeps_all_matches() {
+            // The remote-VPNv4 ingress path passes `skip_vrf: None`
+            // — no originating local VRF — so every matching VRF is
+            // a target, identical to `matching_import_vrfs`.
+            let mut index = BTreeMap::new();
+            index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
+            index.insert("v2".to_string(), vrf_with_imports(&["65000:1"]));
+            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+
+            let mut got = import_targets(&index, &ecom, None);
             got.sort();
             assert_eq!(got, vec!["v1".to_string(), "v2".to_string()]);
         }
