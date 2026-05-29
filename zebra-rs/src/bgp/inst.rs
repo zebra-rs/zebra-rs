@@ -54,6 +54,7 @@ pub enum Message {
     /// drain the group's pending cache, encode one UPDATE per attr
     /// bucket, and ship to each member with split-horizon pruning.
     FlushUpdateGroupIpv4(super::update_group::UpdateGroupId),
+    FlushUpdateGroupIpv6(super::update_group::UpdateGroupId),
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -746,6 +747,13 @@ impl Bgp {
                     &mut self.attr_store,
                     &group_id,
                     &self.interface_addrs,
+                );
+            }
+            Message::FlushUpdateGroupIpv6(group_id) => {
+                super::update_group::flush_ipv6(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &group_id,
                 );
             }
         }

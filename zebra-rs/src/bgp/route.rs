@@ -2115,6 +2115,10 @@ pub fn route_ipv6_update(
     let (_, selected, _next_id) = bgp.local_rib.update_v6(nlri.prefix, rib);
 
     fib_install_v6(bgp, nlri.prefix, &selected);
+
+    if !selected.is_empty() {
+        route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+    }
 }
 
 /// IPv6 unicast withdraw — the v6 counterpart of
@@ -2135,6 +2139,10 @@ pub fn route_ipv6_withdraw(
     let _removed = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
     let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
     fib_install_v6(bgp, nlri.prefix, &selected);
+
+    // Empty `selected` → withdraw to peers; a replacement winner →
+    // re-advertise. `route_advertise_to_peers_v6` handles both.
+    route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
 }
 
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
@@ -3145,6 +3153,163 @@ pub fn route_update_ipv4(
     }
 
     Some((nlri, attrs))
+}
+
+/// IPv6 unicast outbound builder — the v6 counterpart of
+/// [`route_update_ipv4`]. Applies split-horizon and the iBGP-iBGP /
+/// route-reflector filter, fixes up AS_PATH / next-hop / LOCAL_PREF /
+/// ORIGINATOR_ID / CLUSTER_LIST, and returns `(Ipv6Nlri, BgpAttr)` for
+/// the peer or `None` to suppress.
+///
+/// Outbound policy is not applied yet for v6 (the policy engine is
+/// `Ipv4Nlri`-typed) — same deferred gap as the ingest path.
+pub fn route_update_ipv6(
+    peer: &mut Peer,
+    prefix: &Ipv6Net,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    add_path: bool,
+) -> Option<(Ipv6Nlri, BgpAttr)> {
+    // Split-horizon: never send a route back to its source peer.
+    if rib.ident == peer.ident {
+        return None;
+    }
+    // iBGP→iBGP: don't re-advertise iBGP-learned routes to iBGP peers
+    // unless this peer is a route-reflector client.
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
+        return None;
+    }
+
+    let nlri = Ipv6Nlri {
+        id: if add_path { rib.local_id } else { 0 },
+        prefix: *prefix,
+    };
+
+    let mut attrs = (*rib.attr).clone();
+
+    // AS_PATH prepend for eBGP.
+    if peer.is_ebgp()
+        && let Some(ref mut aspath) = attrs.aspath
+    {
+        let local_as_path = As4Path::from(vec![peer.local_as]);
+        aspath.prepend_mut(local_as_path.clone());
+    }
+
+    // NEXT_HOP: next-hop-self for eBGP / locally-originated routes. The
+    // address is the local end of this peer's (i)BGP session when it's
+    // IPv6; otherwise the route's existing v6 next-hop is preserved
+    // (next-hop-unchanged) — a v4-transport session can't carry a
+    // sensible v6 next-hop anyway.
+    let needs_self = peer.is_ebgp() || rib.is_originated();
+    if needs_self
+        && let Some(ref local_addr) = peer.param.local_addr
+        && let IpAddr::V6(local_v6) = local_addr.ip()
+    {
+        attrs.nexthop = Some(BgpNexthop::Ipv6(local_v6));
+    }
+
+    // LOCAL_PREF for iBGP.
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+
+    // ORIGINATOR_ID / CLUSTER_LIST for route reflection (RFC 4456).
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && attrs.originator_id.is_none()
+    {
+        attrs.originator_id = Some(OriginatorId::new(rib.router_id));
+    }
+    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+        if let Some(ref mut cluster_list) = attrs.cluster_list {
+            cluster_list.list.insert(0, *bgp.router_id);
+        } else {
+            let mut cluster_list = ClusterList::new();
+            cluster_list.list.push(*bgp.router_id);
+            attrs.cluster_list = Some(cluster_list);
+        }
+    }
+
+    Some((nlri, attrs))
+}
+
+/// Per-peer IPv6 unicast withdraw — emit an MP_UNREACH(AFI=2, SAFI=1)
+/// for `prefix`. The v6 counterpart of [`route_withdraw_ipv4`]'s
+/// unicast arm; v6 has no legacy withdraw field.
+fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri { id, prefix }]));
+    peer.send_packet(update.into());
+}
+
+/// IPv6 unicast advertise — the v6 counterpart of
+/// [`route_advertise_to_peers`] (unicast only). Reach winners are
+/// bucketed into the per-group `cache_ipv6` (debounce-flushed via
+/// [`super::update_group::flush_ipv6`]); a `None` best-path emits an
+/// immediate MP_UNREACH to each member.
+///
+/// The update-group post-policy memoization, Adj-RIB-Out tracking, and
+/// outbound policy that the v4 path carries are deferred for v6 (the
+/// policy engine is IPv4-typed). Without Adj-RIB-Out, a withdraw is
+/// sent to every Established v6 peer even if it never received the
+/// route — harmless (peers ignore unknown-prefix withdraws).
+pub(super) fn route_advertise_to_peers_v6(
+    prefix: Ipv6Net,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let new_best = selected.last();
+    let (afi, safi) = (Afi::Ip6, Safi::Unicast);
+    let afi_safi = AfiSafi::new(afi, safi);
+
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, safi))
+        .filter(|(_, p)| !p.opt.is_add_path_send(afi, safi))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        let add_path = peer.opt.is_add_path_send(afi, safi);
+        let group_id = peer.update_group_id.get(&afi_safi).cloned();
+
+        match new_best {
+            Some(best) if best.ident != peer.ident => {
+                let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
+                else {
+                    continue;
+                };
+                let attr = bgp.attr_store.intern(attr);
+                let source_ident = best.ident;
+                if let Some(gid) = group_id
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::send_ipv6(group, nlri, attr, source_ident, bgp.tx, true);
+                }
+            }
+            Some(_) => {
+                // Split-horizon: the source peer receives nothing.
+            }
+            None => {
+                // Withdraw: cancel any still-pending reach for this
+                // prefix, then emit an explicit MP_UNREACH.
+                if let Some(gid) = group_id
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::cache_remove_ipv6(group, prefix, 0);
+                }
+                route_withdraw_ipv6(peer, prefix, 0);
+            }
+        }
+    }
 }
 
 impl Peer {
