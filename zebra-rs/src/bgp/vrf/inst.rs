@@ -250,6 +250,52 @@ pub fn dispatch_withdraw_import_v4(
     }
 }
 
+/// VPNv6 counterpart of [`dispatch_import_v4`] — fan a VPNv6 route out
+/// to every VRF whose `import_rts_v6` intersects the route's RTs
+/// (minus `skip_vrf`).
+pub fn dispatch_import_v6(
+    dispatcher: &VrfImportDispatcher<'_>,
+    rd: bgp_packet::RouteDistinguisher,
+    prefix: ipnet::Ipv6Net,
+    attr: &bgp_packet::BgpAttr,
+    label: u32,
+    skip_vrf: Option<&str>,
+) {
+    let matches =
+        super::super::inst::import_targets_v6(dispatcher.rib_known_vrfs, &attr.ecom, skip_vrf);
+    for vrf_name in matches {
+        let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
+            continue;
+        };
+        let _ = handle.inbox.send(BgpVrfMsg::ImportV6 {
+            rd,
+            prefix,
+            attr: attr.clone(),
+            label,
+        });
+    }
+}
+
+/// VPNv6 counterpart of [`dispatch_withdraw_import_v4`].
+pub fn dispatch_withdraw_import_v6(
+    dispatcher: &VrfImportDispatcher<'_>,
+    rd: bgp_packet::RouteDistinguisher,
+    prefix: ipnet::Ipv6Net,
+    attr: &bgp_packet::BgpAttr,
+    skip_vrf: Option<&str>,
+) {
+    let matches =
+        super::super::inst::import_targets_v6(dispatcher.rib_known_vrfs, &attr.ecom, skip_vrf);
+    for vrf_name in matches {
+        let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
+            continue;
+        };
+        let _ = handle
+            .inbox
+            .send(BgpVrfMsg::WithdrawImportV6 { rd, prefix });
+    }
+}
+
 impl BgpVrf {
     /// Build a `BgpVrf` and the matching inbound sender. The
     /// caller (`spawn_bgp_vrf`) keeps the `BgpVrfInbox`, hands the
@@ -545,6 +591,126 @@ impl BgpVrf {
         );
     }
 
+    /// VPNv6 counterpart of [`Self::handle_import_v4`]. Inserts the
+    /// imported route into the VRF's IPv6 unicast Loc-RIB and fans it
+    /// out to CE peers. Unlike v4 we don't pre-stamp a next-hop — the
+    /// VRF router-id is IPv4 and can't serve as a v6 next-hop, so
+    /// `route_update_ipv6` applies v6 next-hop-self (the CE-facing
+    /// session-local address) at advertise time since the row is
+    /// `Originated`. The direct Loc-RIB insert bypasses the inbound
+    /// `route_ipv6_update` path, so the VRF→global export hook never
+    /// fires for an imported route (no VPNv6 round-trip loop).
+    fn handle_import_v6(
+        &mut self,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+        mut attr: bgp_packet::BgpAttr,
+        label: u32,
+    ) {
+        attr.nexthop = None;
+        let interned = self.attr_store.intern(attr);
+
+        let label_obj = if label != 0 {
+            Some(bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            })
+        } else {
+            None
+        };
+
+        let rib = super::super::route::BgpRib {
+            remote_id: 0,
+            local_id: 0,
+            attr: interned,
+            ident: 0,
+            router_id: self.router_id,
+            weight: 0,
+            typ: super::super::route::BgpRibType::Originated,
+            best_path: false,
+            best_reason: super::super::route::Reason::Default,
+            label: label_obj,
+            nexthop: None,
+            egress_ifindex_v6: None,
+            stale: false,
+            esi: None,
+        };
+
+        let (_, selected, _gen) = self.local_rib.update_v6(prefix, rib);
+        let winners = selected.len();
+
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            vrf_import: None,
+        };
+        super::super::route::route_advertise_to_peers_v6(
+            prefix,
+            &selected,
+            &mut top,
+            &mut self.peers,
+        );
+
+        tracing::info!(
+            vrf = %self.name,
+            %prefix,
+            rd = %rd,
+            label,
+            winners,
+            "bgp vrf: ImportV6 written to LocRIB and advertised to CE peers",
+        );
+    }
+
+    /// VPNv6 counterpart of [`Self::handle_withdraw_import`].
+    fn handle_withdraw_import_v6(
+        &mut self,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+    ) {
+        let removed = self.local_rib.remove_v6(prefix, 0, 0);
+        let selected = self.local_rib.select_best_path_v6(prefix);
+        let removed_n = removed.len();
+        let winners = selected.len();
+
+        let mut top = super::super::peer::BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            vrf_import: None,
+        };
+        super::super::route::route_advertise_to_peers_v6(
+            prefix,
+            &selected,
+            &mut top,
+            &mut self.peers,
+        );
+
+        tracing::info!(
+            vrf = %self.name,
+            %prefix,
+            rd = %rd,
+            removed = removed_n,
+            winners,
+            "bgp vrf: WithdrawImportV6 removed from LocRIB and withdrawn from CE peers",
+        );
+    }
+
     /// Per-task handling of cross-task messages that aren't
     /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
@@ -571,6 +737,17 @@ impl BgpVrf {
             }
             BgpVrfMsg::WithdrawImport { rd, prefix } => {
                 self.handle_withdraw_import(rd, prefix);
+            }
+            BgpVrfMsg::ImportV6 {
+                rd,
+                prefix,
+                attr,
+                label,
+            } => {
+                self.handle_import_v6(rd, prefix, attr, label);
+            }
+            BgpVrfMsg::WithdrawImportV6 { rd, prefix } => {
+                self.handle_withdraw_import_v6(rd, prefix);
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

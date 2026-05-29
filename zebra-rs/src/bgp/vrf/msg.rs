@@ -53,6 +53,22 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv4Net,
     },
 
+    /// VPNv6 counterpart of [`Self::ImportV4`] — a VPNv6 route whose
+    /// RT list intersects this VRF's `import_rts_v6`; inserted into
+    /// the VRF's IPv6 unicast Loc-RIB and advertised to CE peers.
+    ImportV6 {
+        rd: RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+        attr: BgpAttr,
+        label: u32,
+    },
+
+    /// VPNv6 counterpart of [`Self::WithdrawImport`].
+    WithdrawImportV6 {
+        rd: RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+    },
+
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by
     /// `despawn_bgp_vrf` and during daemon shutdown.
