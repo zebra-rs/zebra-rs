@@ -325,6 +325,7 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
             best_reason: super::super::route::Reason::Default,
             label: None,
             nexthop: None,
+            nexthop_reachable: true,
             egress_ifindex_v6: None,
             stale: false,
             esi: None,

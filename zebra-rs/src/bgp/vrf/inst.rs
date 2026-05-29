@@ -415,6 +415,7 @@ impl BgpVrf {
                     // Per-VRF tasks never receive VPNv4 NLRI directly,
                     // so no import dispatcher to thread through.
                     vrf_import: None,
+                    nexthop_cache: None,
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
@@ -504,6 +505,7 @@ impl BgpVrf {
             // Vpnv4-shaped `nexthop` slot; FIB install pulls
             // from `attr.nexthop` set above.
             nexthop: None,
+            nexthop_reachable: true,
             egress_ifindex_v6: None,
             stale: false,
             esi: None,
@@ -526,6 +528,7 @@ impl BgpVrf {
             color_policy: None,
             flex_algo_routes: None,
             vrf_import: None,
+            nexthop_cache: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -571,6 +574,7 @@ impl BgpVrf {
             color_policy: None,
             flex_algo_routes: None,
             vrf_import: None,
+            nexthop_cache: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -632,6 +636,7 @@ impl BgpVrf {
             best_reason: super::super::route::Reason::Default,
             label: label_obj,
             nexthop: None,
+            nexthop_reachable: true,
             egress_ifindex_v6: None,
             stale: false,
             esi: None,
@@ -652,6 +657,7 @@ impl BgpVrf {
             color_policy: None,
             flex_algo_routes: None,
             vrf_import: None,
+            nexthop_cache: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,
@@ -693,6 +699,7 @@ impl BgpVrf {
             color_policy: None,
             flex_algo_routes: None,
             vrf_import: None,
+            nexthop_cache: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,

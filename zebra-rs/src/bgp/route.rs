@@ -92,7 +92,7 @@ fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
 ///
 /// VPNv4 / EVPN take their own install paths; this helper is for
 /// plain IPv4 unicast only.
-fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
+pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
     let installable = selected.first().and_then(make_bgp_rib_entry_v4);
     match installable {
         Some(mut rib_entry) => {
@@ -166,7 +166,7 @@ fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
 /// IPv6 counterpart of [`fib_install_v4`]: reconcile the kernel FIB
 /// for an IPv6 unicast prefix against the best-path outcome. Plain v6
 /// unicast only — VPNv6 will take its own install path (layer 2c+).
-fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selected: &[BgpRib]) {
+pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selected: &[BgpRib]) {
     match selected.first().and_then(make_bgp_rib_entry_v6) {
         Some(rib_entry) => {
             let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
@@ -256,6 +256,14 @@ pub struct BgpRib {
     pub label: Option<Label>,
     // VPN next-hop (v4vpn / v6vpn rows); `None` for unicast rows.
     pub nexthop: Option<VpnNexthop>,
+    /// Next-Hop Tracking gate: `false` when this path's BGP next-hop is
+    /// registered for resolution but not (yet) reachable in the RIB.
+    /// Best-path treats a reachable path as strictly better than an
+    /// unreachable one, and a prefix whose best path is unreachable is
+    /// withdrawn. Defaults to `true` — locally-originated and
+    /// not-yet-tracked paths are never gated; `route_*_update` lowers
+    /// it from the `Bgp` nexthop cache for received routes.
+    pub nexthop_reachable: bool,
     /// RFC 8950 IPv4-over-IPv6: when the route was received via
     /// MP_REACH(AFI=1) with an IPv6 next-hop, this is the local egress
     /// ifindex (the interface where we received the UPDATE). FIB
@@ -272,6 +280,7 @@ pub struct BgpRib {
 #[derive(Debug, Clone, Copy)]
 pub enum Reason {
     Default,
+    NexthopUnreachable,
     Llgr,
     Weight,
     Originated,
@@ -287,6 +296,7 @@ impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Reason::Default => write!(f, "Default selection (no other candidate)"),
+            Reason::NexthopUnreachable => write!(f, "next-hop unreachable"),
             Reason::Llgr => write!(f, "llgr-stale"),
             Reason::Weight => write!(f, "weight"),
             Reason::Originated => write!(f, "self originated route"),
@@ -324,6 +334,7 @@ impl BgpRib {
             best_reason: Reason::NotSelected,
             label,
             nexthop,
+            nexthop_reachable: true,
             egress_ifindex_v6: None,
             stale,
             esi: None,
@@ -457,13 +468,51 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             cands[best_index].clone()
         };
 
+        // NHT gate: if even the best candidate's next-hop is
+        // unreachable, every candidate is (a reachable one would have
+        // won) — the prefix has no usable path, so withdraw it.
+        if !best.nexthop_reachable {
+            self.1.remove(&prefix);
+            return selected;
+        }
+
         self.1.insert(prefix, best.clone());
         selected.push(best);
 
         selected
     }
 
+    /// Set `nexthop_reachable` on every candidate at `prefix` whose BGP
+    /// next-hop equals `nh`. Returns true if any candidate changed (the
+    /// caller then re-runs `select_best_path`). Used by the NHT update
+    /// path when a tracked next-hop's reachability flips.
+    pub fn set_nexthop_reachable(
+        &mut self,
+        prefix: P,
+        nh: std::net::IpAddr,
+        reachable: bool,
+    ) -> bool {
+        let Some(cands) = self.0.get_mut(&prefix) else {
+            return false;
+        };
+        let mut changed = false;
+        for c in cands.iter_mut() {
+            if super::nht::bgp_nexthop_ip(&c.attr) == Some(nh) && c.nexthop_reachable != reachable {
+                c.nexthop_reachable = reachable;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
+        // NHT gate: a path whose next-hop resolves is strictly better
+        // than one whose next-hop is unreachable, ahead of every other
+        // attribute. (Both-unreachable falls through; `select_best_path`
+        // withdraws the prefix if even the winner is unreachable.)
+        if cand.nexthop_reachable != incb.nexthop_reachable {
+            return (cand.nexthop_reachable, Reason::NexthopUnreachable);
+        }
         if cand.stale != incb.stale {
             return (!cand.stale, Reason::Llgr);
         }
@@ -925,6 +974,29 @@ pub fn route_apply_policy_out(
     })
 }
 
+/// Next-Hop Tracking for a received route: register its BGP next-hop
+/// with the RIB on first sight, record `dep` so a resolution change
+/// re-evaluates this prefix, and lower `rib.nexthop_reachable` from the
+/// cache (`false` while a fresh registration is pending — best-path
+/// then holds the path until the first `NexthopUpdate`). No-op outside
+/// the global instance, where `bgp.nexthop_cache` is `None`.
+fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDep) {
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return;
+    };
+    let Some(nh) = super::nht::bgp_nexthop_ip(&rib.attr) else {
+        return;
+    };
+    let (needs_register, reachable) = cache.track(nh, dep);
+    rib.nexthop_reachable = reachable;
+    if needs_register {
+        let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
+            proto: "bgp".to_string(),
+            nh,
+        });
+    }
+}
+
 pub fn route_ipv4_update(
     ident: usize,
     nlri: &Ipv4Nlri,
@@ -1029,6 +1101,14 @@ pub fn route_ipv4_update(
     };
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
+    nht_track_received(
+        bgp,
+        &mut rib,
+        match rd {
+            Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
+            None => super::nht::NhtDep::V4(nlri.prefix),
+        },
+    );
     let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
 
     // Per-VRF best-path → global VPNv4 export. The hook only
@@ -2159,6 +2239,14 @@ pub fn route_ipv6_update(
     }
 
     rib.attr = bgp.attr_store.intern(attr.clone());
+    nht_track_received(
+        bgp,
+        &mut rib,
+        match rd {
+            Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
+            None => super::nht::NhtDep::V6(nlri.prefix),
+        },
+    );
     // Kept for the rd==Some import-dispatch withdraw branch (the rib
     // itself is moved into `update_v6vpn` below); cheap Arc bump.
     let import_attr = rib.attr.clone();
@@ -4515,6 +4603,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -4554,6 +4643,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -4642,6 +4732,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -4679,6 +4770,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -4815,6 +4907,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         if !selected.is_empty() {
@@ -4938,6 +5031,7 @@ impl Bgp {
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
 
         if !selected.is_empty() {
@@ -6360,6 +6454,43 @@ mod tests {
             None,
             false,
         )
+    }
+
+    #[test]
+    fn nht_gate_prefers_reachable_and_withdraws_when_all_unreachable() {
+        use super::{BgpRib, BgpRibType, LocalRibTable};
+        let attr = BgpAttr::default();
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mk = |id: u32, weight: u32, reachable: bool| {
+            let mut r = BgpRib::new(
+                id as usize,
+                Ipv4Addr::new(10, 0, 0, id as u8),
+                BgpRibType::IBGP,
+                0,
+                weight,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            r.remote_id = id;
+            r.nexthop_reachable = reachable;
+            r
+        };
+
+        let mut t: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+        // A: unreachable next-hop but higher weight (would win without
+        // the gate). B: reachable, lower weight.
+        t.update(prefix, mk(1, 100, false));
+        let (_, selected, _) = t.update(prefix, mk(2, 10, true));
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].nexthop_reachable);
+        assert_eq!(selected[0].remote_id, 2, "reachable path wins over weight");
+
+        // Now B's next-hop also goes unreachable → no usable path →
+        // the prefix is withdrawn.
+        let (_, selected, _) = t.update(prefix, mk(2, 10, false));
+        assert!(selected.is_empty(), "all-unreachable → withdraw");
     }
 
     #[test]
