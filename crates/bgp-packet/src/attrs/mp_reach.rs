@@ -10,10 +10,10 @@ use bytes::BufMut;
 
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, Ipv4Nlri, Ipv6Nlri, MupRoute, ParseBe, ParseNlri,
-    ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, many0_complete,
+    ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
 };
 
-use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach};
+use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach, Vpnv6Reach};
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpReachHeader {
@@ -35,6 +35,7 @@ pub enum MpReachAttr {
         updates: Vec<Ipv6Nlri>,
     },
     Vpnv4(Vpnv4Reach),
+    Vpnv6(Vpnv6Reach),
     Evpn {
         snpa: u8,
         nhop: IpAddr,
@@ -56,6 +57,9 @@ impl MpReachAttr {
     pub fn attr_emit(&self, buf: &mut BytesMut) {
         match self {
             MpReachAttr::Vpnv4(nlri) => {
+                nlri.attr_emit(buf);
+            }
+            MpReachAttr::Vpnv6(nlri) => {
                 nlri.attr_emit(buf);
             }
             MpReachAttr::Rtcv4(nlri) => {
@@ -85,6 +89,9 @@ impl MpReachAttr {
     pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
         match self {
             MpReachAttr::Vpnv4(attr) => {
+                attr.attr_emit_mut(buf, max_size);
+            }
+            MpReachAttr::Vpnv6(attr) => {
                 attr.attr_emit_mut(buf, max_size);
             }
             _ => {
@@ -119,6 +126,49 @@ impl MpReachAttr {
                 updates,
             };
             let mp_nlri = MpReachAttr::Vpnv4(nlri);
+            return Ok((input, mp_nlri));
+        }
+        if header.afi == Afi::Ip6 && header.safi == Safi::MplsVpn {
+            // VPNv6 next-hop (RFC 4659 §3.2): an 8-octet RD (always
+            // zero on the wire) followed by the IPv6 address. The
+            // 48-octet form carries global || link-local, each with its
+            // own zero RD (RFC 8950 style); surface the global half.
+            let (input, nhop) = match header.nhop_len {
+                24 => {
+                    let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, addr) = be_u128(input)?;
+                    (
+                        input,
+                        Vpnv6Nexthop {
+                            rd,
+                            nhop: Ipv6Addr::from(addr),
+                        },
+                    )
+                }
+                48 => {
+                    let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, global) = be_u128(input)?;
+                    let (input, _ll_rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (
+                        input,
+                        Vpnv6Nexthop {
+                            rd,
+                            nhop: Ipv6Addr::from(global),
+                        },
+                    )
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (_, updates) =
+                many0_complete(|i| Vpnv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let nlri = Vpnv6Reach {
+                snpa,
+                nhop,
+                updates,
+            };
+            let mp_nlri = MpReachAttr::Vpnv6(nlri);
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip && header.safi == Safi::Unicast {
@@ -293,6 +343,15 @@ impl fmt::Display for MpReachAttr {
                 }
             }
             Vpnv4(nlri) => {
+                for update in nlri.updates.iter() {
+                    writeln!(
+                        f,
+                        " {}:[{}]:{}",
+                        update.nlri.id, update.rd, update.nlri.prefix,
+                    )?;
+                }
+            }
+            Vpnv6(nlri) => {
                 for update in nlri.updates.iter() {
                     writeln!(
                         f,

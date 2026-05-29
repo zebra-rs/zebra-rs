@@ -9,7 +9,7 @@ use nom_derive::*;
 
 use crate::{ParseBe, ParseNlri, nlri_psize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct Ipv6Nlri {
     pub id: u32,
     pub prefix: Ipv6Net,
