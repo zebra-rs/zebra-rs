@@ -173,14 +173,23 @@ pub struct VrfImportDispatcher<'a> {
 /// `local_rib.update(Some(rd), ...)` returns. `label = 0` means
 /// "no per-VRF label" — the receiving VRF treats it the same way
 /// the Export side does (skip the install).
+///
+/// `skip_vrf` names the VRF the route originated from on the
+/// local-leak path (`process_vrf_global_msg::Export`). It's
+/// excluded from the fan-out so a VRF whose import-RT set overlaps
+/// its own export-RTs (e.g. `rt both 1:1`) doesn't re-import the
+/// route it just exported. `None` on the remote-VPNv4 ingress path
+/// (no originating local VRF).
 pub fn dispatch_import_v4(
     dispatcher: &VrfImportDispatcher<'_>,
     rd: bgp_packet::RouteDistinguisher,
     prefix: ipnet::Ipv4Net,
     attr: &bgp_packet::BgpAttr,
     label: u32,
+    skip_vrf: Option<&str>,
 ) {
-    let matches = super::super::inst::matching_import_vrfs(dispatcher.rib_known_vrfs, &attr.ecom);
+    let matches =
+        super::super::inst::import_targets(dispatcher.rib_known_vrfs, &attr.ecom, skip_vrf);
     for vrf_name in matches {
         let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
             continue;
@@ -197,14 +206,18 @@ pub fn dispatch_import_v4(
 /// Inverse of [`dispatch_import_v4`]. Floods
 /// `BgpVrfMsg::WithdrawImport` to every VRF whose
 /// `import_rts_v4` matches; the receiver decides whether the
-/// matching imported route is one it actually holds.
+/// matching imported route is one it actually holds. `skip_vrf`
+/// is excluded for the same self-import reason as
+/// [`dispatch_import_v4`].
 pub fn dispatch_withdraw_import_v4(
     dispatcher: &VrfImportDispatcher<'_>,
     rd: bgp_packet::RouteDistinguisher,
     prefix: ipnet::Ipv4Net,
     attr: &bgp_packet::BgpAttr,
+    skip_vrf: Option<&str>,
 ) {
-    let matches = super::super::inst::matching_import_vrfs(dispatcher.rib_known_vrfs, &attr.ecom);
+    let matches =
+        super::super::inst::import_targets(dispatcher.rib_known_vrfs, &attr.ecom, skip_vrf);
     for vrf_name in matches {
         let Some(handle) = dispatcher.vrf_registry.get(&vrf_name) else {
             continue;
