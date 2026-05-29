@@ -1668,6 +1668,137 @@ impl Bgp {
                     "bgp: export withdrawn from LocalRib.v4vpn and PE peers",
                 );
             }
+            super::vrf::BgpGlobalMsg::ExportV6 {
+                vrf,
+                prefix,
+                attr,
+                label,
+            } => {
+                let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
+                    tracing::warn!(
+                        vrf = %vrf,
+                        %prefix,
+                        "bgp: v6 export dropped — VRF has no RD configured",
+                    );
+                    return;
+                };
+                let export_rts = self
+                    .rib_known_vrfs
+                    .get(&vrf)
+                    .map(|k| k.export_rts_v6.clone())
+                    .unwrap_or_default();
+
+                let tagged = tag_attr_with_export_rts(attr, &export_rts);
+                let interned = self.attr_store.intern(tagged);
+
+                let label_obj = if label != 0 {
+                    Some(bgp_packet::Label {
+                        label,
+                        exp: 0,
+                        bos: true,
+                    })
+                } else {
+                    None
+                };
+
+                // The on-wire next-hop is rewritten per-peer in
+                // `route_update_ipv6`; only the RD carried here matters,
+                // so the address is a placeholder.
+                let nexthop = bgp_packet::Vpnv6Nexthop {
+                    rd,
+                    nhop: std::net::Ipv6Addr::UNSPECIFIED,
+                };
+
+                let rib = super::route::BgpRib {
+                    remote_id: 0,
+                    local_id: 0,
+                    attr: interned,
+                    ident: 0,
+                    router_id: self.router_id,
+                    weight: 0,
+                    typ: super::route::BgpRibType::Originated,
+                    best_path: false,
+                    best_reason: super::route::Reason::Default,
+                    label: label_obj,
+                    nexthop: Some(super::route::VpnNexthop::V6(nexthop)),
+                    egress_ifindex_v6: None,
+                    stale: false,
+                    esi: None,
+                };
+
+                let (_, selected, _gen) = self.local_rib.update_v6vpn(rd, prefix, rib);
+                let winners = selected.len();
+
+                // NB: the local intra-router leak (fan-out into sibling
+                // VRFs whose import_rts_v6 match) is layer 3b. This
+                // handler only stores the row and advertises to PE.
+                let mut top = super::peer::BgpTop {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_client: &self.ctx.rib,
+                    attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
+                    color_policy: Some(&self.color_policy),
+                    flex_algo_routes: Some(&self.flex_algo_routes),
+                    vrf_export: None,
+                    vrf_import: None,
+                };
+                super::route::route_advertise_to_peers_vpnv6(
+                    rd,
+                    prefix,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
+
+                tracing::info!(
+                    vrf = %vrf,
+                    %prefix,
+                    rd = %rd,
+                    export_rts = export_rts.len(),
+                    label,
+                    winners,
+                    "bgp: v6 export written to LocalRib.v6vpn and advertised to PE peers",
+                );
+            }
+            super::vrf::BgpGlobalMsg::WithdrawExportV6 { vrf, prefix } => {
+                let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
+                    return;
+                };
+                let _removed = self.local_rib.remove_v6vpn(rd, prefix, 0, 0);
+                let selected = self.local_rib.select_best_path_vpn_v6(&rd, prefix);
+
+                let mut top = super::peer::BgpTop {
+                    router_id: &self.router_id,
+                    local_rib: &mut self.local_rib,
+                    tx: &self.tx,
+                    rib_client: &self.ctx.rib,
+                    attr_store: &mut self.attr_store,
+                    update_groups: &mut self.update_groups,
+                    interface_addrs: &self.interface_addrs,
+                    color_policy: Some(&self.color_policy),
+                    flex_algo_routes: Some(&self.flex_algo_routes),
+                    vrf_export: None,
+                    vrf_import: None,
+                };
+                super::route::route_advertise_to_peers_vpnv6(
+                    rd,
+                    prefix,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
+
+                tracing::info!(
+                    vrf = %vrf,
+                    %prefix,
+                    rd = %rd,
+                    winners = selected.len(),
+                    "bgp: v6 export withdrawn from LocalRib.v6vpn and PE peers",
+                );
+            }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
             }

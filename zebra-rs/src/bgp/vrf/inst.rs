@@ -154,6 +154,30 @@ pub fn vrf_emit_withdraw(exporter: &VrfExporter, prefix: ipnet::Ipv4Net) {
     });
 }
 
+/// VPNv6 counterpart of [`vrf_emit_export`] — push a per-VRF IPv6
+/// unicast best-path winner up to the global task as a VPNv6 export
+/// candidate.
+pub fn vrf_emit_export_v6(
+    exporter: &VrfExporter,
+    prefix: ipnet::Ipv6Net,
+    attr: &bgp_packet::BgpAttr,
+) {
+    let _ = exporter.tx.send(BgpGlobalMsg::ExportV6 {
+        vrf: exporter.name.clone(),
+        prefix,
+        attr: attr.clone(),
+        label: exporter.label,
+    });
+}
+
+/// VPNv6 counterpart of [`vrf_emit_withdraw`].
+pub fn vrf_emit_withdraw_v6(exporter: &VrfExporter, prefix: ipnet::Ipv6Net) {
+    let _ = exporter.tx.send(BgpGlobalMsg::WithdrawExportV6 {
+        vrf: exporter.name.clone(),
+        prefix,
+    });
+}
+
 /// Inverse of [`VrfExporter`] — references the global Bgp state
 /// the shared `route_ipv4_update` path needs to fan a VPNv4
 /// route out to every importing VRF task.

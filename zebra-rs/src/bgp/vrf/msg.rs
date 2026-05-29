@@ -13,7 +13,7 @@
 
 use std::net::SocketAddr;
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use tokio::net::TcpStream;
 
 use bgp_packet::{BgpAttr, RouteDistinguisher};
@@ -84,6 +84,19 @@ pub enum BgpGlobalMsg {
     /// the VPNv4 advertisement matching this VRF's RD and the
     /// given prefix.
     WithdrawExport { vrf: String, prefix: Ipv4Net },
+
+    /// VPNv6 counterpart of [`Self::Export`] — an IPv6 unicast
+    /// best-path winner in this VRF that the global task re-emits as
+    /// VPNv6 (and, once 3b lands, leaks into sibling VRFs).
+    ExportV6 {
+        vrf: String,
+        prefix: Ipv6Net,
+        attr: BgpAttr,
+        label: u32,
+    },
+
+    /// Inverse of [`Self::ExportV6`].
+    WithdrawExportV6 { vrf: String, prefix: Ipv6Net },
 
     /// Register a peer IP with the global accept dispatcher so an
     /// inbound `:179` connect from that IP is handed to this VRF

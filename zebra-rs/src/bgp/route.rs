@@ -2168,6 +2168,19 @@ pub fn route_ipv6_update(
         // Plain v6 unicast → kernel FIB + peer advertisement.
         None => {
             fib_install_v6(bgp, nlri.prefix, &selected);
+
+            // Per-VRF best-path → global VPNv6 export. Fires only
+            // inside a VRF task (`vrf_export` is Some); the global
+            // task's BgpTop has `vrf_export = None`. Empty `selected`
+            // → WithdrawExportV6 so the global v6vpn row is dropped.
+            if let Some(exporter) = bgp.vrf_export {
+                if let Some(winner) = selected.first() {
+                    super::vrf::vrf_emit_export_v6(exporter, nlri.prefix, &winner.attr);
+                } else {
+                    super::vrf::vrf_emit_withdraw_v6(exporter, nlri.prefix);
+                }
+            }
+
             if !selected.is_empty() {
                 route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
             }
@@ -2214,6 +2227,17 @@ pub fn route_ipv6_withdraw(
             let _ = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
             let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
+
+            // VRF export, symmetric with route_ipv6_update: a
+            // replacement winner re-exports; an empty result withdraws.
+            if let Some(exporter) = bgp.vrf_export {
+                if let Some(winner) = selected.first() {
+                    super::vrf::vrf_emit_export_v6(exporter, nlri.prefix, &winner.attr);
+                } else {
+                    super::vrf::vrf_emit_withdraw_v6(exporter, nlri.prefix);
+                }
+            }
+
             // Empty `selected` → withdraw to peers; a replacement
             // winner → re-advertise. Both handled by the helper.
             route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
