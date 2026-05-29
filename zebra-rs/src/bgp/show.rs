@@ -283,6 +283,7 @@ fn show_nexthop(attr: &BgpAttr) -> String {
             BgpNexthop::Ipv4(v) => v.to_string(),
             BgpNexthop::Ipv6(v) => v.to_string(),
             BgpNexthop::Vpnv4(v) => v.to_string(),
+            BgpNexthop::Vpnv6(v) => v.to_string(),
             BgpNexthop::Evpn(v) => v.to_string(),
         }
     } else {

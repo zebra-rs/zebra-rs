@@ -138,6 +138,11 @@ pub fn start_adv_timer_vpnv4(peer: &Peer) -> Timer {
     start_timer!(peer, secs, Event::AdvTimerVpnv4Expires)
 }
 
+pub fn start_adv_timer_vpnv6(peer: &Peer) -> Timer {
+    let secs = peer.adv_interval.secs_for(peer.peer_type);
+    start_timer!(peer, secs, Event::AdvTimerVpnv6Expires)
+}
+
 /// EVPN advertise debounce — same iBGP/eBGP cadence as the IPv4 /
 /// VPNv4 timers. Buffers a burst of FDB learns into one MP_REACH
 /// UPDATE per attribute group.

@@ -210,6 +210,9 @@ impl fmt::Display for BgpAttr {
                 BgpNexthop::Vpnv4(v) => {
                     writeln!(f, " Nexthop: {}", v)?;
                 }
+                BgpNexthop::Vpnv6(v) => {
+                    writeln!(f, " Nexthop: {}", v)?;
+                }
                 BgpNexthop::Evpn(v) => {
                     writeln!(f, " Nexthop: {}", v)?;
                 }
