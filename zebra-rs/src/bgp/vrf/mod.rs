@@ -24,7 +24,7 @@ pub use label::VrfLabelAllocator;
 // inside `vrf::spawn` only.
 pub use inst::{
     VrfExporter, VrfImportDispatcher, dispatch_import_v4, dispatch_withdraw_import_v4,
-    vrf_emit_export, vrf_emit_withdraw,
+    vrf_emit_export, vrf_emit_export_v6, vrf_emit_withdraw, vrf_emit_withdraw_v6,
 };
 pub use msg::BgpGlobalMsg;
 pub use spawn::{BgpVrfHandle, compute_vrf_diff, despawn_bgp_vrf, spawn_bgp_vrf};
