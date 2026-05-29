@@ -69,6 +69,9 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv6Net,
         attr: BgpAttr,
         label: u32,
+        /// Resolved transport egress(es) for the remote PE next-hop —
+        /// VPNv6 counterpart of [`Self::ImportV4`]'s `transport`.
+        transport: Vec<ResolvedNexthop>,
     },
 
     /// VPNv6 counterpart of [`Self::WithdrawImport`].
