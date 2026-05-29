@@ -2159,6 +2159,9 @@ pub fn route_ipv6_update(
     }
 
     rib.attr = bgp.attr_store.intern(attr.clone());
+    // Kept for the rd==Some import-dispatch withdraw branch (the rib
+    // itself is moved into `update_v6vpn` below); cheap Arc bump.
+    let import_attr = rib.attr.clone();
     let (_, selected, _next_id) = match rd {
         Some(rd) => bgp.local_rib.update_v6vpn(rd, nlri.prefix, rib),
         None => bgp.local_rib.update_v6(nlri.prefix, rib),
@@ -2188,6 +2191,30 @@ pub fn route_ipv6_update(
         // VPNv6 → advertise the winner to PE peers. No kernel FIB here
         // (mirrors VPNv4, which keeps its v4vpn rows out of the FIB).
         Some(rd) => {
+            // Remote VPNv6 → per-VRF import. `vrf_import` is Some only
+            // in the global task; per-VRF runtimes never receive VPNv6
+            // directly. `skip_vrf` is None — no originating local VRF
+            // on the remote ingress path.
+            if let Some(dispatcher) = bgp.vrf_import {
+                if let Some(winner) = selected.first() {
+                    super::vrf::dispatch_import_v6(
+                        dispatcher,
+                        rd,
+                        nlri.prefix,
+                        &winner.attr,
+                        0,
+                        None,
+                    );
+                } else {
+                    super::vrf::dispatch_withdraw_import_v6(
+                        dispatcher,
+                        rd,
+                        nlri.prefix,
+                        &import_attr,
+                        None,
+                    );
+                }
+            }
             if !selected.is_empty() {
                 route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
             }
@@ -2217,8 +2244,34 @@ pub fn route_ipv6_withdraw(
 
     match rd {
         Some(rd) => {
-            let _ = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+            let removed = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
             let selected = bgp.local_rib.select_best_path_vpn_v6(&rd, nlri.prefix);
+
+            // Remote VPNv6 withdraw → per-VRF import update/withdraw
+            // (global task only). A surviving winner re-imports with
+            // the new attr; otherwise flood a withdraw resolved from
+            // the removed row's RTs.
+            if let Some(dispatcher) = bgp.vrf_import {
+                if let Some(winner) = selected.first() {
+                    super::vrf::dispatch_import_v6(
+                        dispatcher,
+                        rd,
+                        nlri.prefix,
+                        &winner.attr,
+                        0,
+                        None,
+                    );
+                } else if let Some(gone) = removed.first() {
+                    super::vrf::dispatch_withdraw_import_v6(
+                        dispatcher,
+                        rd,
+                        nlri.prefix,
+                        &gone.attr,
+                        None,
+                    );
+                }
+            }
+
             // Empty `selected` → MP_UNREACH to PE peers; a replacement
             // winner → re-advertise. Both handled by the helper.
             route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
