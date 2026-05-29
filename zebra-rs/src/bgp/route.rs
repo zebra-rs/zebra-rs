@@ -85,22 +85,108 @@ fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     Some(entry)
 }
 
+/// Build the VRF FIB entry for an imported VPN route. The label stack
+/// is transport-labels (outer, from the resolved egress) with the VPN
+/// service `service_label` pushed innermost (bottom of stack) — the
+/// order the netlink encoder treats as top-of-stack-first. One
+/// `NexthopUni` per resolved egress (`Multi` for transport ECMP),
+/// installed as a `Bgp` route at iBGP administrative distance (imported
+/// VPN routes arrive via MP-iBGP). Address-family-agnostic: the egress
+/// `addr` is v4 for VPNv4 and v6 for VPNv6.
+///
+/// Returns `None` when there's no resolved transport — nothing is
+/// installable and the caller withdraws instead. The label-less
+/// baseline (`labels` empty, `service_label == 0`) yields a bare
+/// `via addr dev ifindex`.
+fn build_vpn_fib_entry(
+    service_label: u32,
+    transport: &[rib::nht::ResolvedNexthop],
+) -> Option<rib::entry::RibEntry> {
+    if transport.is_empty() {
+        return None;
+    }
+    let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
+        let mut labels: Vec<rib::Label> = egress
+            .labels
+            .iter()
+            .copied()
+            .map(rib::Label::Explicit)
+            .collect();
+        if service_label != 0 {
+            labels.push(rib::Label::Explicit(service_label));
+        }
+        let mut uni = rib::NexthopUni::new(egress.addr, 0, labels);
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        rib::Nexthop::Uni(mk_uni(&transport[0]))
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk_uni(egress));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = 200;
+    entry.metric = 0;
+    entry.valid = true;
+    entry.nexthop = nexthop;
+    Some(entry)
+}
+
+/// Whether `best` should install as a labelled VPN tunnel entry: an
+/// imported route (`Originated`) for which the VRF holds a resolved
+/// `transport`. `transport` is `None` outside a VRF (global instance),
+/// so this is always `false` there.
+fn is_vpn_fib_winner(best: &BgpRib, transport: Option<&[rib::nht::ResolvedNexthop]>) -> bool {
+    best.typ == BgpRibType::Originated && transport.is_some_and(|t| !t.is_empty())
+}
+
+/// Choose the IPv4 FIB entry for a best-path winner in a (possibly VRF)
+/// context. An imported VPN winner installs the `{transport,service}`
+/// labelled tunnel entry; a CE-learned / locally-originated / global
+/// route installs the plain next-hop entry. `transport` is `None`
+/// outside a VRF, so this reduces to `make_bgp_rib_entry_v4`.
+fn select_fib_entry_v4(
+    best: &BgpRib,
+    transport: Option<&[rib::nht::ResolvedNexthop]>,
+) -> Option<rib::entry::RibEntry> {
+    if is_vpn_fib_winner(best, transport) {
+        build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
+    } else {
+        make_bgp_rib_entry_v4(best)
+    }
+}
+
 /// Reconcile the kernel FIB state for `prefix` with the BGP best-path
 /// outcome. `selected` is the `select_best_path` return: at most one
 /// `BgpRib` after best-path selection. Empty means every candidate
 /// just disappeared — emit a withdraw.
 ///
-/// VPNv4 / EVPN take their own install paths; this helper is for
-/// plain IPv4 unicast only.
+/// In a per-VRF task this is the single install path for `rd == None`
+/// winners: imported VPN routes (carried in `bgp.vrf_transport_v4`)
+/// install their labelled tunnel entry, CE-learned routes install the
+/// plain next-hop entry, so whichever wins best-path is programmed
+/// correctly. On the global instance `vrf_transport_v4` is `None`, so
+/// this is plain IPv4 unicast install (VPNv4 / EVPN take other paths).
 pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
-    let installable = selected.first().and_then(make_bgp_rib_entry_v4);
-    match installable {
+    let transport = bgp
+        .vrf_transport_v4
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    let best = selected.first();
+    let entry = best.and_then(|b| select_fib_entry_v4(b, transport));
+    match entry {
         Some(mut rib_entry) => {
-            // Colour-aware Flex-Algo label push. When the route
-            // carries a Color extcomm bound to a configured IS-IS
-            // Flex-Algorithm, append the per-algo outer MPLS label
-            // IS-IS published via RIB.
-            if let Some(best) = selected.first()
+            // Colour-aware Flex-Algo label push — plain-path only; a
+            // VPN tunnel entry already carries its full label stack.
+            if let Some(best) = best
+                && !is_vpn_fib_winner(best, transport)
                 && let Some(BgpNexthop::Ipv4(nh)) = best.attr.nexthop.as_ref()
                 && let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh)
                 && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
@@ -163,11 +249,30 @@ fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     Some(entry)
 }
 
-/// IPv6 counterpart of [`fib_install_v4`]: reconcile the kernel FIB
-/// for an IPv6 unicast prefix against the best-path outcome. Plain v6
-/// unicast only — VPNv6 will take its own install path (layer 2c+).
+/// IPv6 counterpart of [`select_fib_entry_v4`].
+fn select_fib_entry_v6(
+    best: &BgpRib,
+    transport: Option<&[rib::nht::ResolvedNexthop]>,
+) -> Option<rib::entry::RibEntry> {
+    if is_vpn_fib_winner(best, transport) {
+        build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
+    } else {
+        make_bgp_rib_entry_v6(best)
+    }
+}
+
+/// IPv6 counterpart of [`fib_install_v4`]: the single install path for
+/// `rd == None` v6 winners in a VRF (imported VPNv6 labelled entry vs
+/// CE plain entry), and plain v6 unicast install on the global instance.
 pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selected: &[BgpRib]) {
-    match selected.first().and_then(make_bgp_rib_entry_v6) {
+    let transport = bgp
+        .vrf_transport_v6
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    match selected
+        .first()
+        .and_then(|b| select_fib_entry_v6(b, transport))
+    {
         Some(rib_entry) => {
             let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
                 prefix,
@@ -4662,6 +4767,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -4702,6 +4809,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -4791,6 +4900,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -4829,6 +4940,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -4966,6 +5079,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         if !selected.is_empty() {
@@ -5090,6 +5205,8 @@ impl Bgp {
             flex_algo_routes: Some(&self.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
 
         if !selected.is_empty() {
@@ -6591,6 +6708,166 @@ mod tests {
     fn fib_entry_skipped_when_nexthop_missing() {
         let rib = bgp_rib_with_nexthop(None, super::BgpRibType::EBGP);
         assert!(super::make_bgp_rib_entry_v4(&rib).is_none());
+    }
+
+    // --- VRF FIB arbitration: select_fib_entry_v4 -----------------------
+
+    #[test]
+    fn select_fib_entry_v4_imported_with_transport_is_labelled() {
+        use crate::rib::nht::ResolvedNexthop;
+        // Imported (`Originated`) row: its `attr.nexthop` was rewritten
+        // to the VRF router-id (ignored here), the service label rides
+        // on `.label`, and the transport map supplies the real egress.
+        let mut rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 255, 0, 1))),
+            super::BgpRibType::Originated,
+        );
+        rib.label = Some(bgp_packet::Label {
+            label: 24001,
+            exp: 0,
+            bos: true,
+        });
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![16800],
+        }];
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("labelled");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "172.16.0.2".parse::<IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(5));
+                assert_eq!(uni.mpls_label, vec![16800, 24001]);
+            }
+            other => panic!("expected Uni, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fib_entry_v4_ce_winner_is_plain_even_with_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+        // A CE (EBGP) winner installs the plain next-hop entry even when
+        // the prefix also has an imported transport — the arbitration
+        // guarantee that CE routes are never mis-labelled.
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            super::BgpRibType::EBGP,
+        );
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![16800],
+        }];
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("plain");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+                assert!(uni.mpls_label.is_empty(), "CE route carries no VPN labels");
+            }
+            other => panic!("expected Uni, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_fib_entry_v4_originated_without_transport_is_plain() {
+        // `Originated` but absent from the transport map (a locally-
+        // originated VRF route, not an import) → plain path, no self-loop.
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 9))),
+            super::BgpRibType::Originated,
+        );
+        let entry = super::select_fib_entry_v4(&rib, None).expect("plain");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+                assert!(uni.mpls_label.is_empty());
+            }
+            other => panic!("expected Uni, got {other:?}"),
+        }
+    }
+
+    // --- build_vpn_fib_entry (moved from bgp/vrf/inst.rs) ----------------
+
+    #[test]
+    fn vpn_fib_entry_pushes_service_label_below_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![16800],
+        }];
+        let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
+        assert_eq!(entry.distance, 200, "imported VPN routes arrive via iBGP");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "172.16.0.2".parse::<IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(5));
+                // Top-of-stack first: transport (outer) then service (bottom).
+                assert_eq!(uni.mpls_label, vec![16800, 24001]);
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vpn_fib_entry_label_less_baseline_and_empty_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![],
+        }];
+        let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => assert_eq!(uni.mpls_label, vec![24001]),
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+        assert!(super::build_vpn_fib_entry(24001, &[]).is_none());
+    }
+
+    #[test]
+    fn vpn_fib_entry_ecmp_builds_multi() {
+        use crate::rib::nht::ResolvedNexthop;
+        let transport = vec![
+            ResolvedNexthop {
+                addr: "172.16.0.2".parse().unwrap(),
+                ifindex: 5,
+                labels: vec![16800],
+            },
+            ResolvedNexthop {
+                addr: "172.16.1.2".parse().unwrap(),
+                ifindex: 6,
+                labels: vec![16801],
+            },
+        ];
+        let entry = super::build_vpn_fib_entry(24001, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Multi(multi) => {
+                assert_eq!(multi.nexthops.len(), 2);
+                assert_eq!(multi.nexthops[0].mpls_label, vec![16800, 24001]);
+                assert_eq!(multi.nexthops[1].mpls_label, vec![16801, 24001]);
+            }
+            other => panic!("expected Multi nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vpn_fib_entry_v6_egress() {
+        use crate::rib::nht::ResolvedNexthop;
+        let transport = vec![ResolvedNexthop {
+            addr: "2001:db8::2".parse().unwrap(),
+            ifindex: 7,
+            labels: vec![16900],
+        }];
+        let entry = super::build_vpn_fib_entry(24002, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "2001:db8::2".parse::<IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(7));
+                assert_eq!(uni.mpls_label, vec![16900, 24002]);
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
     }
 
     #[test]

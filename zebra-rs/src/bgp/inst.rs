@@ -749,6 +749,8 @@ impl Bgp {
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_import: Some(&import_dispatcher),
                     nexthop_cache: Some(&mut self.nexthop_cache),
+                    vrf_transport_v4: None,
+                    vrf_transport_v6: None,
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -1369,6 +1371,8 @@ impl Bgp {
             vrf_export: None,
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
         match &dep {
             NhtDep::V4(p) => {
@@ -1773,6 +1777,8 @@ impl Bgp {
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
+                    vrf_transport_v4: None,
+                    vrf_transport_v6: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1860,6 +1866,8 @@ impl Bgp {
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
+                    vrf_transport_v4: None,
+                    vrf_transport_v6: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1977,6 +1985,8 @@ impl Bgp {
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
+                    vrf_transport_v4: None,
+                    vrf_transport_v6: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
@@ -2046,6 +2056,8 @@ impl Bgp {
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
+                    vrf_transport_v4: None,
+                    vrf_transport_v6: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,

@@ -100,8 +100,10 @@ impl ProtoContext {
     }
 
     /// Read-only accessor for the VRF id (= the kernel `table_id`,
-    /// `0` for the default table). The per-VRF BGP import path consults
-    /// it to gate the VPN dataplane install on having a real VRF table.
+    /// `0` for the default table). Only same-file tests consult it
+    /// today; the bin target reaches the field through
+    /// `maybe_bind_device` instead, so the lint requires the allow.
+    #[allow(dead_code)]
     pub fn vrf_id(&self) -> u32 {
         self.vrf_id
     }

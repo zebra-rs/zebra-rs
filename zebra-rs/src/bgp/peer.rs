@@ -669,6 +669,18 @@ pub struct BgpTop<'a> {
     /// in per-VRF tasks and the local-origination/advertise BgpTops
     /// (no gating there).
     pub nexthop_cache: Option<&'a mut super::nht::NexthopCache>,
+    /// Per-VRF imported-route transport maps, keyed by prefix. `Some`
+    /// only inside a `BgpVrf` task; they let `fib_install_v4`/`v6`
+    /// program an imported VPN winner's `{transport,service}` labelled
+    /// tunnel entry instead of the plain next-hop entry, so CE-learned
+    /// and imported routes arbitrate through one install path. `None`
+    /// on the global instance (plain unicast / VPN take other paths).
+    pub vrf_transport_v4: Option<
+        &'a std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::rib::nht::ResolvedNexthop>>,
+    >,
+    pub vrf_transport_v6: Option<
+        &'a std::collections::BTreeMap<ipnet::Ipv6Net, Vec<crate::rib::nht::ResolvedNexthop>>,
+    >,
     /// Colour-aware nexthop resolver inputs. Optional because
     /// per-VRF BGP runtimes don't carry them today — Color →
     /// Flex-Algo binding is a default-VRF concept; per-VRF support
@@ -1648,6 +1660,8 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             flex_algo_routes: Some(&bgp.flex_algo_routes),
             vrf_import: None,
             nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1682,6 +1696,8 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         flex_algo_routes: Some(&bgp.flex_algo_routes),
         vrf_import: None,
         nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }
