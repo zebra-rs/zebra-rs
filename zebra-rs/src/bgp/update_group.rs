@@ -26,7 +26,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bgp_packet::{
-    Afi, AfiSafi, BgpAttr, CapExtendedNextHop, Ipv4MpReachNextHop, Ipv4Nlri, Safi, UpdatePacket,
+    Afi, AfiSafi, BgpAttr, BgpNexthop, CapExtendedNextHop, Ipv4MpReachNextHop, Ipv4Nlri, Ipv6Nlri,
+    MpReachAttr, Safi, UpdatePacket,
 };
 use tokio::sync::mpsc;
 
@@ -149,6 +150,15 @@ pub struct UpdateGroup {
     /// Adv-debounce timer. Started on first send; on fire,
     /// `Bgp::serve` drains the cache and ships UPDATEs to members.
     pub cache_ipv4_timer: Option<Timer>,
+
+    // ── IPv6 unicast pending advertisement cache ──
+    //
+    // Same shape as the IPv4 cache above. IPv6 unicast has no legacy
+    // NLRI field, so every advert is an MP_REACH(AFI=2, SAFI=1); the
+    // next-hop rides in the bucket key attr (`BgpNexthop::Ipv6`).
+    pub cache_ipv6: HashMap<Arc<BgpAttr>, HashMap<Ipv6Nlri, usize>>,
+    pub cache_ipv6_rev: HashMap<Ipv6Nlri, Arc<BgpAttr>>,
+    pub cache_ipv6_timer: Option<Timer>,
 
     /// Snapshot of `Bgp::adv_interval` captured at group creation
     /// (`attach`) and refreshed by the global config callback. Used
@@ -285,6 +295,9 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
+                cache_ipv6: HashMap::new(),
+                cache_ipv6_rev: HashMap::new(),
+                cache_ipv6_timer: None,
                 adv_interval,
             }
         });
@@ -686,6 +699,213 @@ fn encode_ipv4_update(
     out
 }
 
+// ── IPv6 unicast send / cache_remove / flush ──
+//
+// Mirror of the IPv4 block above. IPv6 unicast has no legacy NLRI
+// field, so the encode path is always MP_REACH(AFI=2, SAFI=1) and
+// there is no RFC 8950 ENHE special-case — the next-hop is a native
+// v6 address carried on the bucket-key attr.
+
+/// Bucket the `(nlri, attr, source_ident)` into the group's IPv6
+/// pending-advert cache, kicking the debounce timer if idle.
+pub fn send_ipv6(
+    group: &mut UpdateGroup,
+    nlri: Ipv6Nlri,
+    attr: Arc<BgpAttr>,
+    source_ident: usize,
+    tx: &mpsc::Sender<Message>,
+    kick_timer: bool,
+) {
+    group
+        .cache_ipv6
+        .entry(attr.clone())
+        .or_default()
+        .insert(nlri.clone(), source_ident);
+    group.cache_ipv6_rev.insert(nlri, attr);
+    if kick_timer && group.cache_ipv6_timer.is_none() {
+        let secs = group.adv_interval.secs_for(group.sig.peer_type);
+        group.cache_ipv6_timer = Some(start_adv_timer_ipv6(tx, &group.id, secs));
+    }
+}
+
+/// Remove an NLRI from the group's IPv6 pending-advert cache.
+/// Idempotent; the flush timer keeps running.
+pub fn cache_remove_ipv6(group: &mut UpdateGroup, prefix: ipnet::Ipv6Net, id: u32) {
+    let nlri = Ipv6Nlri { id, prefix };
+    if let Some(attr) = group.cache_ipv6_rev.remove(&nlri)
+        && let Some(bucket) = group.cache_ipv6.get_mut(&attr)
+    {
+        bucket.remove(&nlri);
+        if bucket.is_empty() {
+            group.cache_ipv6.remove(&attr);
+        }
+    }
+}
+
+fn start_adv_timer_ipv6(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u64) -> Timer {
+    let tx = tx.clone();
+    let id = id.clone();
+    Timer::once(secs, move || {
+        let tx = tx.clone();
+        let id = id.clone();
+        async move {
+            let _ = tx.send(Message::FlushUpdateGroupIpv6(id)).await;
+        }
+    })
+}
+
+/// Drain the IPv6 cache and ship UPDATEs to every member. Called from
+/// `Bgp::serve` on `Message::FlushUpdateGroupIpv6`. Same canonical /
+/// split-horizon-pruned encoding as [`flush_ipv4`], minus the ENHE
+/// per-member next-hop step (v6 unicast next-hops are native and ride
+/// on the bucket-key attr).
+pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &UpdateGroupId) {
+    let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+    let Some(af) = update_groups.get_mut(&afi_safi) else {
+        return;
+    };
+    let Some(group) = af.group_by_id_mut(id) else {
+        return;
+    };
+
+    group.cache_ipv6_timer = None;
+    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv6Nlri, usize)>)> = group
+        .cache_ipv6
+        .drain()
+        .map(|(attr, set)| (attr, set.into_iter().collect()))
+        .collect();
+    group.cache_ipv6_rev.clear();
+    if buckets.is_empty() {
+        return;
+    }
+
+    let max_packet_size = if group.sig.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    let member_idents: Vec<usize> = group.members.iter().copied().collect();
+
+    struct MemberCtx {
+        ident: usize,
+        tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
+    }
+    let members: Vec<MemberCtx> = member_idents
+        .iter()
+        .map(|ident| MemberCtx {
+            ident: *ident,
+            tx: peers.get_by_idx(*ident).and_then(|p| p.packet_tx.clone()),
+        })
+        .collect();
+
+    for (attr, entries) in buckets {
+        let source_idents: BTreeSet<usize> = entries.iter().map(|(_, src)| *src).collect();
+        let pruned_members: Vec<usize> = member_idents
+            .iter()
+            .copied()
+            .filter(|m| source_idents.contains(m))
+            .collect();
+
+        // Canonical UPDATE: every NLRI in the bucket, sent to members
+        // that did not source any of them.
+        let canonical: Vec<Ipv6Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let canonical_bytes = encode_ipv6_update(&attr, &canonical, max_packet_size);
+        let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
+        if let Some(group) = af.group_by_id_mut(id) {
+            group.counters.messages_formatted += canonical_bytes.len() as u64;
+            group.counters.bytes_formatted += canonical_byte_total as u64;
+        }
+        for ctx in &members {
+            if pruned_members.contains(&ctx.ident) {
+                continue;
+            }
+            if let Some(tx) = ctx.tx.as_ref() {
+                for bytes in &canonical_bytes {
+                    let _ = tx.send(bytes.clone());
+                }
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.messages_replicated += canonical_bytes.len() as u64;
+                }
+            }
+        }
+
+        // Per pruned member: the bucket minus its own sourced NLRIs.
+        for prune_ident in pruned_members {
+            let nlris: Vec<Ipv6Nlri> = entries
+                .iter()
+                .filter(|(_, src)| *src != prune_ident)
+                .map(|(n, _)| n.clone())
+                .collect();
+            if nlris.is_empty() {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.split_horizon_excluded += 1;
+                }
+                continue;
+            }
+            let pruned_bytes = encode_ipv6_update(&attr, &nlris, max_packet_size);
+            let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
+            if let Some(group) = af.group_by_id_mut(id) {
+                group.counters.messages_formatted += pruned_bytes.len() as u64;
+                group.counters.bytes_formatted += pruned_byte_total as u64;
+                group.counters.split_horizon_excluded += 1;
+            }
+            if let Some(tx) = members
+                .iter()
+                .find(|c| c.ident == prune_ident)
+                .and_then(|c| c.tx.as_ref())
+            {
+                for bytes in &pruned_bytes {
+                    let _ = tx.send(bytes.clone());
+                }
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.messages_replicated += pruned_bytes.len() as u64;
+                }
+            }
+        }
+    }
+}
+
+/// Encode one or more UPDATE PDUs carrying `nlris` under `attr` as
+/// MP_REACH(AFI=2, SAFI=1). The next-hop is read from `attr.nexthop`
+/// (`BgpNexthop::Ipv6`); a non-v6 next-hop degrades to the
+/// unspecified address, which the receiver drops. NLRIs are chunked
+/// so each PDU stays within `max_packet_size`.
+fn encode_ipv6_update(
+    attr: &Arc<BgpAttr>,
+    nlris: &[Ipv6Nlri],
+    max_packet_size: usize,
+) -> Vec<bytes::BytesMut> {
+    if nlris.is_empty() {
+        return Vec::new();
+    }
+    let nhop = match attr.nexthop.as_ref() {
+        Some(BgpNexthop::Ipv6(v6)) => IpAddr::V6(*v6),
+        _ => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    };
+
+    // Chunk by a conservative per-NLRI worst case (4 AddPath + 1 plen
+    // + 16 prefix = 21 octets) against the packet budget minus a fixed
+    // reserve for the BGP header, path attributes, and MP_REACH fixed
+    // fields. Errs toward smaller PDUs rather than risking overflow.
+    let per_nlri_max = 21usize;
+    let reserve = 256usize;
+    let budget = max_packet_size.saturating_sub(reserve).max(per_nlri_max);
+    let chunk = (budget / per_nlri_max).max(1);
+
+    let mut out = Vec::new();
+    for nlri_chunk in nlris.chunks(chunk) {
+        let mut update = UpdatePacket::with_max_packet_size(max_packet_size);
+        update.bgp_attr = Some((**attr).clone());
+        update.mp_update = Some(MpReachAttr::Ipv6 {
+            snpa: 0,
+            nhop,
+            updates: nlri_chunk.to_vec(),
+        });
+        out.push(update.into());
+    }
+    out
+}
+
 /// Build the `Ipv4MpReachNextHop` to advertise to `peer` for an
 /// RFC 8950 IPv4-over-IPv6 UPDATE. Returns `None` when the peer
 /// has no link-local on its egress interface — without a link-local
@@ -812,6 +1032,9 @@ mod tests {
                 cache_ipv4: HashMap::new(),
                 cache_ipv4_rev: HashMap::new(),
                 cache_ipv4_timer: None,
+                cache_ipv6: HashMap::new(),
+                cache_ipv6_rev: HashMap::new(),
+                cache_ipv6_timer: None,
                 adv_interval: AdvInterval::default(),
             },
         );

@@ -371,6 +371,13 @@ impl BgpVrf {
                     &self.interface_addrs,
                 );
             }
+            Message::FlushUpdateGroupIpv6(group_id) => {
+                super::super::update_group::flush_ipv6(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &group_id,
+                );
+            }
         }
     }
 
