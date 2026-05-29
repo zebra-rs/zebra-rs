@@ -116,6 +116,7 @@ pub enum Event {
     RouteRefreshMsg(u16, u8),
     StaleTimerExipires(AfiSafi),
     AdvTimerVpnv4Expires,
+    AdvTimerVpnv6Expires,
     AdvTimerEvpnExpires,
 }
 
@@ -424,6 +425,11 @@ pub struct Peer {
     pub first_start: bool,
     pub cache_vpnv4: HashMap<Arc<BgpAttr>, HashSet<Vpnv4Nlri>>,
     pub cache_vpnv4_rev: HashMap<Vpnv4Nlri, Arc<BgpAttr>>,
+    /// VPNv6 advertise cache — same per-attribute batching shape as
+    /// `cache_vpnv4`.
+    pub cache_vpnv6: HashMap<Arc<BgpAttr>, HashSet<Vpnv6Nlri>>,
+    pub cache_vpnv6_rev: HashMap<Vpnv6Nlri, Arc<BgpAttr>>,
+    pub cache_vpnv6_timer: Option<Timer>,
     /// EVPN advertise cache. Mirrors `cache_vpnv4` shape — NLRIs
     /// grouped by attribute so a single MP_REACH UPDATE on flush can
     /// carry every route that shares one attr set. Withdraw path uses
@@ -506,6 +512,9 @@ impl Peer {
             first_start: true,
             cache_vpnv4: HashMap::default(),
             cache_vpnv4_rev: HashMap::default(),
+            cache_vpnv6: HashMap::default(),
+            cache_vpnv6_rev: HashMap::default(),
+            cache_vpnv6_timer: None,
             cache_evpn: HashMap::default(),
             cache_evpn_rev: HashMap::default(),
             cache_vpnv4_timer: None,
@@ -698,6 +707,7 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             (peer.state, FsmEffect::StaleExpire(afi_safi))
         }
         Event::AdvTimerVpnv4Expires => (fsm_adv_timer_vpnv4_expires(peer), FsmEffect::None),
+        Event::AdvTimerVpnv6Expires => (fsm_adv_timer_vpnv6_expires(peer), FsmEffect::None),
         Event::AdvTimerEvpnExpires => (fsm_adv_timer_evpn_expires(peer), FsmEffect::None),
     }
 }
@@ -772,6 +782,12 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
 pub fn fsm_adv_timer_vpnv4_expires(peer: &mut Peer) -> State {
     peer.cache_vpnv4_timer = None;
     peer.flush_vpnv4();
+    State::Established
+}
+
+pub fn fsm_adv_timer_vpnv6_expires(peer: &mut Peer) -> State {
+    peer.cache_vpnv6_timer = None;
+    peer.flush_vpnv6();
     State::Established
 }
 

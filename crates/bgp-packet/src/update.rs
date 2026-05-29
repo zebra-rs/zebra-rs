@@ -308,6 +308,41 @@ impl UpdatePacket {
         Some(buf.get())
     }
 
+    pub fn pop_vpnv6(&mut self) -> Option<BytesMut> {
+        match &self.mp_update {
+            Some(MpReachAttr::Vpnv6(vpnv6)) if !vpnv6.updates.is_empty() => {}
+            _ => return None,
+        }
+        let mp_update = self.mp_update.as_mut().unwrap();
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+
+        // No legacy IPv4 withdraw on a VPNv6 UPDATE.
+        let _ = buf.put_u16(0u16);
+
+        // Attributes length placeholder.
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16);
+
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(buf.get_mut());
+        }
+
+        // MP reach (dispatches to Vpnv6Reach::attr_emit_mut, which
+        // paginates the NLRI list across calls).
+        mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        Some(buf.get())
+    }
+
     pub fn pop_vpnv4(&mut self) -> Option<BytesMut> {
         match &self.mp_update {
             Some(MpReachAttr::Vpnv4(vpnv4)) if !vpnv4.updates.is_empty() => {}

@@ -15,7 +15,7 @@ use crate::rib::{self, MacAddr, api::FdbEntry};
 use super::cap::CapAfiMap;
 use super::peer::{BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
-use super::timer::start_adv_timer_vpnv4;
+use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
 use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -773,6 +773,14 @@ impl LocalRib {
         ident: usize,
     ) -> Vec<BgpRib> {
         self.v6vpn.entry(rd).or_default().remove(prefix, id, ident)
+    }
+
+    pub fn select_best_path_vpn_v6(
+        &mut self,
+        rd: &RouteDistinguisher,
+        prefix: Ipv6Net,
+    ) -> Vec<BgpRib> {
+        self.v6vpn.entry(*rd).or_default().select_best_path(prefix)
     }
 
     // EVPN dispatch ----------------------------------------------------------
@@ -2156,13 +2164,20 @@ pub fn route_ipv6_update(
         None => bgp.local_rib.update_v6(nlri.prefix, rib),
     };
 
-    // Plain v6 unicast → kernel FIB + peer advertisement. VPNv6 lives
-    // in `local_rib.v6vpn` with a deferred install/advertise path
-    // (layer 2c-ii) — skip both for `rd == Some`.
-    if rd.is_none() {
-        fib_install_v6(bgp, nlri.prefix, &selected);
-        if !selected.is_empty() {
-            route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+    match rd {
+        // Plain v6 unicast → kernel FIB + peer advertisement.
+        None => {
+            fib_install_v6(bgp, nlri.prefix, &selected);
+            if !selected.is_empty() {
+                route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+            }
+        }
+        // VPNv6 → advertise the winner to PE peers. No kernel FIB here
+        // (mirrors VPNv4, which keeps its v4vpn rows out of the FIB).
+        Some(rd) => {
+            if !selected.is_empty() {
+                route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
+            }
         }
     }
 }
@@ -2190,6 +2205,10 @@ pub fn route_ipv6_withdraw(
     match rd {
         Some(rd) => {
             let _ = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+            let selected = bgp.local_rib.select_best_path_vpn_v6(&rd, nlri.prefix);
+            // Empty `selected` → MP_UNREACH to PE peers; a replacement
+            // winner → re-advertise. Both handled by the helper.
+            route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
         }
         None => {
             let _ = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
@@ -3302,7 +3321,16 @@ pub fn route_update_ipv6(
         && let Some(ref local_addr) = peer.param.local_addr
         && let IpAddr::V6(local_v6) = local_addr.ip()
     {
-        attrs.nexthop = Some(BgpNexthop::Ipv6(local_v6));
+        // VPNv6 rows carry a `VpnNexthop::V6` (the route's RD); emit a
+        // VPNv6-shaped next-hop so `flush_vpnv6` picks it up. Plain
+        // v6-unicast rows get a bare IPv6 next-hop.
+        attrs.nexthop = match rib.nexthop {
+            Some(VpnNexthop::V6(ref v6nh)) => Some(BgpNexthop::Vpnv6(Vpnv6Nexthop {
+                rd: v6nh.rd,
+                nhop: local_v6,
+            })),
+            _ => Some(BgpNexthop::Ipv6(local_v6)),
+        };
     }
 
     // LOCAL_PREF for iBGP.
@@ -3401,6 +3429,79 @@ pub(super) fn route_advertise_to_peers_v6(
                     super::update_group::cache_remove_ipv6(group, prefix, 0);
                 }
                 route_withdraw_ipv6(peer, prefix, 0);
+            }
+        }
+    }
+}
+
+/// Per-peer VPNv6 withdraw — emit an MP_UNREACH(AFI=2, SAFI=128) for
+/// `(rd, prefix)`. The v6 counterpart of the VPNv4 withdraw arm of
+/// [`route_withdraw_ipv4`].
+fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net, id: u32) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let vpnv6_nlri = Vpnv6Nlri {
+        label: Label::default(),
+        rd,
+        nlri: Ipv6Nlri { id, prefix },
+    };
+    update.mp_withdraw = Some(MpUnreachAttr::Vpnv6(vec![vpnv6_nlri]));
+    peer.send_packet(update.into());
+}
+
+/// VPNv6 advertise — the v6 counterpart of the `rd.is_some()` branch
+/// of [`route_advertise_to_peers`]. Reach winners are batched into the
+/// per-peer `cache_vpnv6` (flushed via the VPNv6 adv timer); a `None`
+/// best-path emits an immediate MP_UNREACH. The next-hop-self rewrite
+/// to `BgpNexthop::Vpnv6` happens in [`route_update_ipv6`].
+///
+/// Like the v6-unicast advertise, the update-group memoization,
+/// Adj-RIB-Out tracking, and outbound policy of the v4 path are
+/// deferred for v6.
+pub(super) fn route_advertise_to_peers_vpnv6(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let new_best = selected.last();
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, safi))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        match new_best {
+            Some(best) if best.ident != peer.ident => {
+                let add_path = peer.opt.is_add_path_send(afi, safi);
+                let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
+                else {
+                    continue;
+                };
+                let attr = bgp.attr_store.intern(attr);
+                // RTC: skip without withdrawing when the peer's
+                // route-target constraint set doesn't admit this route.
+                if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+                    continue;
+                }
+                let vpnv6_nlri = Vpnv6Nlri {
+                    label: best.label.unwrap_or_default(),
+                    rd,
+                    nlri,
+                };
+                peer.send_vpnv6(vpnv6_nlri, attr, true);
+            }
+            Some(_) => {
+                // Split-horizon: the source peer receives nothing.
+            }
+            None => {
+                peer.cache_remove_vpnv6(rd, prefix, 0);
+                route_withdraw_vpnv6(peer, rd, prefix, 0);
             }
         }
     }
@@ -3516,6 +3617,60 @@ impl Peer {
             }
         }
         self.cache_vpnv4_rev.clear();
+    }
+
+    // VPNv6 advertise cache — mirror of the VPNv4 trio above.
+
+    pub fn send_vpnv6(&mut self, nlri: Vpnv6Nlri, attr: Arc<BgpAttr>, timer: bool) {
+        self.cache_vpnv6
+            .entry(attr.clone())
+            .or_default()
+            .insert(nlri.clone());
+        self.cache_vpnv6_rev.insert(nlri, attr);
+        if timer && self.cache_vpnv6_timer.is_none() {
+            self.cache_vpnv6_timer = Some(start_adv_timer_vpnv6(self));
+        }
+    }
+
+    pub fn cache_remove_vpnv6(&mut self, rd: RouteDistinguisher, prefix: Ipv6Net, id: u32) {
+        let nlri = Vpnv6Nlri {
+            label: Label::default(),
+            rd,
+            nlri: Ipv6Nlri { id, prefix },
+        };
+        if let Some(attr) = self.cache_vpnv6_rev.remove(&nlri)
+            && let Some(set) = self.cache_vpnv6.get_mut(&attr)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv6.remove(&attr);
+            }
+        }
+    }
+
+    pub fn flush_vpnv6(&mut self) {
+        let packet_tx = self.packet_tx.clone();
+        let max_size = self.max_packet_size();
+        for (attr, nlris) in self.cache_vpnv6.drain() {
+            let mut update = UpdatePacket::with_max_packet_size(max_size);
+
+            if let Some(BgpNexthop::Vpnv6(nhop)) = attr.nexthop.as_ref() {
+                let vpnv6reach = Vpnv6Reach {
+                    snpa: 0,
+                    nhop: nhop.clone(),
+                    updates: nlris.into_iter().collect(),
+                };
+                update.mp_update = Some(MpReachAttr::Vpnv6(vpnv6reach));
+            }
+            update.bgp_attr = Some((*attr).clone());
+
+            while let Some(bytes) = update.pop_vpnv6() {
+                if let Some(ref tx) = packet_tx {
+                    let _ = tx.send(bytes);
+                }
+            }
+        }
+        self.cache_vpnv6_rev.clear();
     }
 }
 
