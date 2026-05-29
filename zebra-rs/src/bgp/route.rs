@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bgp_packet::*;
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
-use prefix_trie::PrefixMap;
+use prefix_trie::{Prefix, PrefixMap};
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
 use crate::policy::{AsPathPrependConfig, CommunityMatcher, PolicyList, StandardMatcher};
@@ -267,14 +267,38 @@ impl BgpRib {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct LocalRibTable(
-    pub PrefixMap<Ipv4Net, Vec<BgpRib>>, // Cands.
-    pub PrefixMap<Ipv4Net, BgpRib>,      // Selected.
+/// AFI-generic Loc-RIB table: candidate paths and the selected
+/// best path per prefix, both keyed by the prefix type `P`
+/// (`Ipv4Net` today; `Ipv6Net` once the v6 ingest path lands). The
+/// best-path machinery below is NLRI-agnostic — it compares only
+/// `BgpRib` fields — so the same engine serves every unicast AFI.
+///
+/// `Debug`/`Default` are hand-written rather than derived: `PrefixMap`
+/// derives neither for an arbitrary `P` (its `Debug` needs
+/// `P: Prefix + Debug`, and `derive` would instead demand the wrong
+/// `P: Debug`/`P: Default` bounds on `LocalRibTable`).
+pub struct LocalRibTable<P>(
+    pub PrefixMap<P, Vec<BgpRib>>, // Cands.
+    pub PrefixMap<P, BgpRib>,      // Selected.
 );
 
-impl LocalRibTable {
-    pub fn update(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+impl<P> Default for LocalRibTable<P> {
+    fn default() -> Self {
+        LocalRibTable(PrefixMap::default(), PrefixMap::default())
+    }
+}
+
+impl<P: Prefix> std::fmt::Debug for LocalRibTable<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LocalRibTable")
+            .field(&self.0)
+            .field(&self.1)
+            .finish()
+    }
+}
+
+impl<P: Prefix + Copy> LocalRibTable<P> {
+    pub fn update(&mut self, prefix: P, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
         let cands = self.0.entry(prefix).or_default();
 
         // Find if we're replacing an existing route (same peer ident and path ID)
@@ -314,7 +338,7 @@ impl LocalRibTable {
         (replaced, selected, next_id)
     }
 
-    pub fn remove(&mut self, prefix: Ipv4Net, id: u32, ident: usize) -> Vec<BgpRib> {
+    pub fn remove(&mut self, prefix: P, id: u32, ident: usize) -> Vec<BgpRib> {
         let cands = self.0.entry(prefix).or_default();
         let removed: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
@@ -323,7 +347,7 @@ impl LocalRibTable {
     }
 
     // Return selected best path, not the change history.
-    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
+    pub fn select_best_path(&mut self, prefix: P) -> Vec<BgpRib> {
         let mut selected = Vec::new();
 
         if !self.0.contains_key(&prefix) {
@@ -566,9 +590,11 @@ impl LocalRibEvpnTable {
             let mut best_index = 0usize;
             let mut best_reason = Reason::Default;
             for index in 1..cands.len() {
-                // Reuse the IPv4 best-path comparator — it operates only on
-                // BgpRib fields and is NLRI-agnostic.
-                let (better, reason) = LocalRibTable::is_better(&cands[index], &cands[best_index]);
+                // Reuse the best-path comparator — it operates only on
+                // BgpRib fields and is NLRI-agnostic. The type parameter
+                // is irrelevant (the fn ignores it); name a concrete one.
+                let (better, reason) =
+                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
                 if better {
                     best_index = index;
                 }
@@ -593,9 +619,9 @@ impl LocalRibEvpnTable {
 
 #[derive(Debug, Default)]
 pub struct LocalRib {
-    pub v4: LocalRibTable,
+    pub v4: LocalRibTable<Ipv4Net>,
 
-    pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable>,
+    pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
 
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
