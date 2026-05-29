@@ -221,6 +221,17 @@ fn resolve_flex_algo_label_inner(
     None
 }
 
+/// VPN next-hop carried on a `BgpRib` for routes living in the
+/// `v4vpn` / `v6vpn` Loc-RIB tables. A route belongs to exactly one
+/// of those tables, so it has exactly one VPN next-hop — modelled as
+/// a sum type rather than parallel `Option` slots. `None` on a
+/// `BgpRib` means a plain unicast (or otherwise non-VPN) row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VpnNexthop {
+    V4(Vpnv4Nexthop),
+    V6(Vpnv6Nexthop),
+}
+
 #[derive(Debug, Clone)]
 pub struct BgpRib {
     // AddPath ID from peer.
@@ -243,8 +254,8 @@ pub struct BgpRib {
     pub best_reason: Reason,
     // Label.
     pub label: Option<Label>,
-    // Nexthop.
-    pub nexthop: Option<Vpnv4Nexthop>,
+    // VPN next-hop (v4vpn / v6vpn rows); `None` for unicast rows.
+    pub nexthop: Option<VpnNexthop>,
     /// RFC 8950 IPv4-over-IPv6: when the route was received via
     /// MP_REACH(AFI=1) with an IPv6 next-hop, this is the local egress
     /// ifindex (the interface where we received the UPDATE). FIB
@@ -298,7 +309,7 @@ impl BgpRib {
         weight: u32,
         attr: &BgpAttr,
         label: Option<Label>,
-        nexthop: Option<Vpnv4Nexthop>,
+        nexthop: Option<VpnNexthop>,
         stale: bool,
     ) -> Self {
         BgpRib {
@@ -682,6 +693,8 @@ pub struct LocalRib {
 
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
 
+    pub v6vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv6Net>>,
+
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 }
@@ -739,6 +752,27 @@ impl LocalRib {
 
     pub fn select_best_path_v6(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
         self.v6.select_best_path(prefix)
+    }
+
+    // VPNv6 accessors — per-RD `v6vpn` tables, mirroring the v4vpn
+    // ones. (Best-path-for-advertise of VPNv6 winners lands in 2c-ii.)
+    pub fn update_v6vpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: Ipv6Net,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.v6vpn.entry(rd).or_default().update(prefix, rib)
+    }
+
+    pub fn remove_v6vpn(
+        &mut self,
+        rd: RouteDistinguisher,
+        prefix: Ipv6Net,
+        id: u32,
+        ident: usize,
+    ) -> Vec<BgpRib> {
+        self.v6vpn.entry(rd).or_default().remove(prefix, id, ident)
     }
 
     // EVPN dispatch ----------------------------------------------------------
@@ -889,7 +923,7 @@ pub fn route_ipv4_update(
     rd: Option<RouteDistinguisher>,
     label: Option<Label>,
     attr: &BgpAttr,
-    nexthop: Option<Vpnv4Nexthop>,
+    nexthop: Option<VpnNexthop>,
     egress_ifindex_v6: Option<u32>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
@@ -2057,7 +2091,9 @@ pub fn route_ipv4_withdraw(
 pub fn route_ipv6_update(
     ident: usize,
     nlri: &Ipv6Nlri,
+    rd: Option<RouteDistinguisher>,
     attr: &BgpAttr,
+    nexthop: Option<VpnNexthop>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
     stale: bool,
@@ -2099,8 +2135,8 @@ pub fn route_ipv6_update(
         nlri.id,
         0,
         attr,
-        None, // no label (labeled-unicast / VPN out of scope here)
-        None, // Vpnv4Nexthop slot unused for v6 unicast
+        None,    // no label here (the VPNv6 label rides on the NLRI)
+        nexthop, // VpnNexthop::V6 for VPNv6 rows; None for unicast
         stale,
     );
 
@@ -2108,41 +2144,62 @@ pub fn route_ipv6_update(
     // sweep these. (No inbound policy yet — see the doc comment.)
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.add_v6(nlri.prefix, rib.clone());
+        match rd {
+            Some(rd) => peer.adj_in.add_v6vpn(rd, nlri.prefix, rib.clone()),
+            None => peer.adj_in.add_v6(nlri.prefix, rib.clone()),
+        };
     }
 
     rib.attr = bgp.attr_store.intern(attr.clone());
-    let (_, selected, _next_id) = bgp.local_rib.update_v6(nlri.prefix, rib);
+    let (_, selected, _next_id) = match rd {
+        Some(rd) => bgp.local_rib.update_v6vpn(rd, nlri.prefix, rib),
+        None => bgp.local_rib.update_v6(nlri.prefix, rib),
+    };
 
-    fib_install_v6(bgp, nlri.prefix, &selected);
-
-    if !selected.is_empty() {
-        route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+    // Plain v6 unicast → kernel FIB + peer advertisement. VPNv6 lives
+    // in `local_rib.v6vpn` with a deferred install/advertise path
+    // (layer 2c-ii) — skip both for `rd == Some`.
+    if rd.is_none() {
+        fib_install_v6(bgp, nlri.prefix, &selected);
+        if !selected.is_empty() {
+            route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+        }
     }
 }
 
-/// IPv6 unicast withdraw — the v6 counterpart of
-/// [`route_ipv4_withdraw`], reduced to the 2b-i surface (no VRF
-/// hooks, no peer re-advertisement).
+/// IPv6 withdraw — the v6 counterpart of [`route_ipv4_withdraw`].
+/// `rd == Some` targets the VPNv6 Loc-RIB; `None` is plain unicast
+/// (FIB reconcile + peer re-advertisement). VPNv6 peer
+/// advertise/withdraw is layer 2c-ii.
 pub fn route_ipv6_withdraw(
     ident: usize,
     nlri: &Ipv6Nlri,
+    rd: Option<RouteDistinguisher>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
     rib_in: bool,
 ) {
     if rib_in {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.remove_v6(nlri.prefix, nlri.id);
+        match rd {
+            Some(rd) => peer.adj_in.remove_v6vpn(rd, nlri.prefix, nlri.id),
+            None => peer.adj_in.remove_v6(nlri.prefix, nlri.id),
+        };
     }
 
-    let _removed = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
-    let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
-    fib_install_v6(bgp, nlri.prefix, &selected);
-
-    // Empty `selected` → withdraw to peers; a replacement winner →
-    // re-advertise. `route_advertise_to_peers_v6` handles both.
-    route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+    match rd {
+        Some(rd) => {
+            let _ = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+        }
+        None => {
+            let _ = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
+            let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
+            fib_install_v6(bgp, nlri.prefix, &selected);
+            // Empty `selected` → withdraw to peers; a replacement
+            // winner → re-advertise. Both handled by the helper.
+            route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
+        }
+    }
 }
 
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
@@ -2580,7 +2637,7 @@ pub fn route_from_peer(
                         Some(update.rd),
                         Some(update.label),
                         bgp_attr,
-                        Some(nlri.nhop.clone()),
+                        Some(VpnNexthop::V4(nlri.nhop.clone())),
                         None,
                         bgp,
                         peers,
@@ -2653,13 +2710,29 @@ pub fn route_from_peer(
                     let mut attr_v6 = bgp_attr.clone();
                     attr_v6.nexthop = Some(BgpNexthop::Ipv6(nh6));
                     for update in updates.iter() {
-                        route_ipv6_update(peer_id, update, &attr_v6, bgp, peers, false);
+                        route_ipv6_update(peer_id, update, None, &attr_v6, None, bgp, peers, false);
                     }
                 } else {
                     tracing::warn!(
                         "IPv6 unicast MP_REACH from peer {} carried a non-v6 next-hop {} — dropping",
                         peer_id,
                         nhop,
+                    );
+                }
+            }
+            MpReachAttr::Vpnv6(nlri) => {
+                // VPNv6: store each route under its RD in the global
+                // v6vpn Loc-RIB, carrying the route's Vpnv6 next-hop.
+                for update in nlri.updates.iter() {
+                    route_ipv6_update(
+                        peer_id,
+                        &update.nlri,
+                        Some(update.rd),
+                        bgp_attr,
+                        Some(VpnNexthop::V6(nlri.nhop.clone())),
+                        bgp,
+                        peers,
+                        false,
                     );
                 }
             }
@@ -2706,11 +2779,29 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Ipv6Nlri(withdrawals) => {
                 for withdraw in withdrawals.iter() {
-                    route_ipv6_withdraw(peer_id, withdraw, bgp, peers, true);
+                    route_ipv6_withdraw(peer_id, withdraw, None, bgp, peers, true);
                 }
             }
             MpUnreachAttr::Ipv6Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
+            MpUnreachAttr::Vpnv6(withdrawals) => {
+                for withdraw in withdrawals.iter() {
+                    route_ipv6_withdraw(
+                        peer_id,
+                        &withdraw.nlri,
+                        Some(withdraw.rd),
+                        bgp,
+                        peers,
+                        true,
+                    );
+                }
+            }
+            MpUnreachAttr::Vpnv6Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsVpn);
                 let _ = bgp
                     .tx
                     .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
@@ -2785,7 +2876,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             Ipv4Nlri,
             Option<Label>,
             BgpAttr,
-            Option<Vpnv4Nexthop>,
+            Option<VpnNexthop>,
         )> = {
             let mut updates = Vec::new();
             for (rd, table) in peer.adj_in.v4vpn.iter() {
@@ -3109,11 +3200,14 @@ pub fn route_update_ipv4(
         // v4-unicast rows (`rib.nexthop == None`) keep the bare IPv4
         // next-hop.
         attrs.nexthop = match rib.nexthop {
-            Some(ref vpn_nh) => Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
-                rd: vpn_nh.rd,
+            Some(VpnNexthop::V4(ref v4nh)) => Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
+                rd: v4nh.rd,
                 nhop: nexthop,
             })),
-            None => Some(BgpNexthop::Ipv4(nexthop)),
+            // A V6 VPN next-hop never reaches the v4 advertise path
+            // (v6vpn rows advertise via route_update_ipv6); plain
+            // v4-unicast rows keep the bare IPv4 next-hop.
+            _ => Some(BgpNexthop::Ipv4(nexthop)),
         };
     };
 

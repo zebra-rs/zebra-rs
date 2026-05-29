@@ -1512,7 +1512,7 @@ impl Bgp {
                     best_path: false,
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
-                    nexthop: Some(nexthop),
+                    nexthop: Some(super::route::VpnNexthop::V4(nexthop)),
                     egress_ifindex_v6: None,
                     stale: false,
                     esi: None,
