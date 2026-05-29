@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bgp_packet::*;
 use bytes::BytesMut;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::{Prefix, PrefixMap};
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
@@ -123,6 +123,63 @@ fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib
             let _ = bgp
                 .rib_client
                 .send(rib::Message::Ipv4Del { prefix, rib: stub });
+        }
+    }
+}
+
+/// IPv6 counterpart of [`make_bgp_rib_entry_v4`]. Reads the IPv6
+/// next-hop from `attr.nexthop` (`BgpNexthop::Ipv6`); there's no
+/// RFC 8950 ENHE case for native v6 unicast. Returns `None` when the
+/// best path lacks a usable v6 next-hop.
+fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
+    let distance = match best.typ {
+        BgpRibType::EBGP => 20,
+        BgpRibType::IBGP | BgpRibType::Originated => 200,
+    };
+    let metric = best.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+
+    let nh = match best.attr.nexthop.as_ref()? {
+        BgpNexthop::Ipv6(addr) => *addr,
+        // VPNv6 / VPNv4 / EVPN nexthops install via their own paths;
+        // the plain v6 Loc-RIB shouldn't carry them.
+        _ => return None,
+    };
+    if nh.is_unspecified() {
+        return None;
+    }
+    let nexthop = rib::Nexthop::Uni(rib::NexthopUni {
+        addr: IpAddr::V6(nh),
+        metric,
+        weight: 1,
+        valid: true,
+        ..Default::default()
+    });
+
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = distance;
+    entry.metric = metric;
+    entry.valid = true;
+    entry.nexthop = nexthop;
+    Some(entry)
+}
+
+/// IPv6 counterpart of [`fib_install_v4`]: reconcile the kernel FIB
+/// for an IPv6 unicast prefix against the best-path outcome. Plain v6
+/// unicast only — VPNv6 will take its own install path (layer 2c+).
+fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selected: &[BgpRib]) {
+    match selected.first().and_then(make_bgp_rib_entry_v6) {
+        Some(rib_entry) => {
+            let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
+                prefix,
+                rib: rib_entry,
+            });
+        }
+        None => {
+            let mut stub = rib::entry::RibEntry::new(rib::RibType::Bgp);
+            stub.valid = false;
+            let _ = bgp
+                .rib_client
+                .send(rib::Message::Ipv6Del { prefix, rib: stub });
         }
     }
 }
@@ -621,6 +678,8 @@ impl LocalRibEvpnTable {
 pub struct LocalRib {
     pub v4: LocalRibTable<Ipv4Net>,
 
+    pub v6: LocalRibTable<Ipv6Net>,
+
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
 
     /// Per-RD EVPN Loc-RIB tables.
@@ -666,6 +725,20 @@ impl LocalRib {
         prefix: Ipv4Net,
     ) -> Vec<BgpRib> {
         self.v4vpn.entry(*rd).or_default().select_best_path(prefix)
+    }
+
+    // IPv6 unicast accessors. VPNv6 (`v6vpn`) lands with layer 2c, so
+    // these take no RD — the global/default v6 unicast Loc-RIB only.
+    pub fn update_v6(&mut self, prefix: Ipv6Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.v6.update(prefix, rib)
+    }
+
+    pub fn remove_v6(&mut self, prefix: Ipv6Net, id: u32, ident: usize) -> Vec<BgpRib> {
+        self.v6.remove(prefix, id, ident)
+    }
+
+    pub fn select_best_path_v6(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
+        self.v6.select_best_path(prefix)
     }
 
     // EVPN dispatch ----------------------------------------------------------
@@ -1971,6 +2044,99 @@ pub fn route_ipv4_withdraw(
     }
 }
 
+/// IPv6 unicast receive path — the v6 counterpart of
+/// [`route_ipv4_update`]. The MP_REACH next-hop is carried in
+/// `attr.nexthop` as `BgpNexthop::Ipv6` (stamped by the dispatch
+/// site), drives the FIB install, and the route lands in
+/// `local_rib.v6`.
+///
+/// Scope (layer 2b-i): receive → Adj-RIB-In → Loc-RIB → FIB. Inbound
+/// policy is **not** applied yet (the policy engine is IPv4-typed),
+/// peer re-advertisement is layer 2b-ii, and the per-VRF export/import
+/// hooks are layer 3. None of those are wired here.
+pub fn route_ipv6_update(
+    ident: usize,
+    nlri: &Ipv6Nlri,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        // RFC 4271 / 4456 loop detection — identical to the v4 path.
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        nlri.id,
+        0,
+        attr,
+        None, // no label (labeled-unicast / VPN out of scope here)
+        None, // Vpnv4Nexthop slot unused for v6 unicast
+        stale,
+    );
+
+    // Adj-RIB-In, so session teardown and future soft-reconfig can
+    // sweep these. (No inbound policy yet — see the doc comment.)
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_v6(nlri.prefix, rib.clone());
+    }
+
+    rib.attr = bgp.attr_store.intern(attr.clone());
+    let (_, selected, _next_id) = bgp.local_rib.update_v6(nlri.prefix, rib);
+
+    fib_install_v6(bgp, nlri.prefix, &selected);
+}
+
+/// IPv6 unicast withdraw — the v6 counterpart of
+/// [`route_ipv4_withdraw`], reduced to the 2b-i surface (no VRF
+/// hooks, no peer re-advertisement).
+pub fn route_ipv6_withdraw(
+    ident: usize,
+    nlri: &Ipv6Nlri,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    rib_in: bool,
+) {
+    if rib_in {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_v6(nlri.prefix, nlri.id);
+    }
+
+    let _removed = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
+    let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
+    fib_install_v6(bgp, nlri.prefix, &selected);
+}
+
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
@@ -2467,6 +2633,28 @@ pub fn route_from_peer(
                     );
                 }
             }
+            MpReachAttr::Ipv6 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                // Native IPv6 unicast: the MP_REACH next-hop replaces
+                // the (unused) v4 NEXT_HOP attribute. Stamp it into the
+                // attr so best-path / FIB read a v6 next-hop.
+                if let IpAddr::V6(nh6) = nhop {
+                    let mut attr_v6 = bgp_attr.clone();
+                    attr_v6.nexthop = Some(BgpNexthop::Ipv6(nh6));
+                    for update in updates.iter() {
+                        route_ipv6_update(peer_id, update, &attr_v6, bgp, peers, false);
+                    }
+                } else {
+                    tracing::warn!(
+                        "IPv6 unicast MP_REACH from peer {} carried a non-v6 next-hop {} — dropping",
+                        peer_id,
+                        nhop,
+                    );
+                }
+            }
             _ => {
                 //
             }
@@ -2504,6 +2692,17 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::EvpnEor => {
                 let afi_safi = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
+            MpUnreachAttr::Ipv6Nlri(withdrawals) => {
+                for withdraw in withdrawals.iter() {
+                    route_ipv6_withdraw(peer_id, withdraw, bgp, peers, true);
+                }
+            }
+            MpUnreachAttr::Ipv6Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
                 let _ = bgp
                     .tx
                     .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
@@ -5745,5 +5944,56 @@ mod tests {
             crate::rib::Nexthop::Link(ifindex) => assert_eq!(ifindex, 11),
             other => panic!("expected Nexthop::Link, got {:?}", other),
         }
+    }
+
+    // IPv6 counterpart: `make_bgp_rib_entry_v6` installs only when the
+    // best-path carries a usable `BgpNexthop::Ipv6`.
+
+    #[test]
+    fn fib_entry_v6_built_for_ebgp_route() {
+        let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(Some(BgpNexthop::Ipv6(nh)), super::BgpRibType::EBGP);
+        let entry = super::make_bgp_rib_entry_v6(&rib).expect("must build");
+        assert_eq!(entry.distance, 20);
+        assert!(entry.valid);
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(ref uni) => assert_eq!(uni.addr, IpAddr::V6(nh)),
+            _ => panic!("expected NexthopUni"),
+        }
+    }
+
+    #[test]
+    fn fib_entry_v6_uses_ibgp_distance() {
+        let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let rib = bgp_rib_with_nexthop(Some(BgpNexthop::Ipv6(nh)), super::BgpRibType::IBGP);
+        let entry = super::make_bgp_rib_entry_v6(&rib).expect("must build");
+        assert_eq!(entry.distance, 200);
+    }
+
+    #[test]
+    fn fib_entry_v6_skipped_for_unspecified() {
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv6(std::net::Ipv6Addr::UNSPECIFIED)),
+            super::BgpRibType::EBGP,
+        );
+        assert!(super::make_bgp_rib_entry_v6(&rib).is_none());
+    }
+
+    #[test]
+    fn fib_entry_v6_skipped_for_v4_nexthop() {
+        // A v4 next-hop on a row reaching the v6 installer is a bug
+        // upstream; the builder defensively declines rather than
+        // install a mismatched entry.
+        let rib = bgp_rib_with_nexthop(
+            Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1))),
+            super::BgpRibType::EBGP,
+        );
+        assert!(super::make_bgp_rib_entry_v6(&rib).is_none());
+    }
+
+    #[test]
+    fn fib_entry_v6_skipped_when_nexthop_missing() {
+        let rib = bgp_rib_with_nexthop(None, super::BgpRibType::EBGP);
+        assert!(super::make_bgp_rib_entry_v6(&rib).is_none());
     }
 }

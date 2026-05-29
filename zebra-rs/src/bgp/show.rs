@@ -281,6 +281,7 @@ fn show_nexthop(attr: &BgpAttr) -> String {
     if let Some(nexthop) = &attr.nexthop {
         match nexthop {
             BgpNexthop::Ipv4(v) => v.to_string(),
+            BgpNexthop::Ipv6(v) => v.to_string(),
             BgpNexthop::Vpnv4(v) => v.to_string(),
             BgpNexthop::Evpn(v) => v.to_string(),
         }

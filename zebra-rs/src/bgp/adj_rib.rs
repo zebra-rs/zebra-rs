@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use bgp_packet::*;
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 
 use super::BgpRib;
 
@@ -30,16 +30,20 @@ impl RibDirection for Out {
     }
 }
 
+/// Per-AFI Adj-RIB table, generic over the prefix type `P` (defaults
+/// to `Ipv4Net` so existing `AdjRibTable<D>` uses are unchanged). The
+/// direction marker `D` selects which path-id field disambiguates
+/// AddPath candidates; both are independent of `P`.
 #[derive(Debug)]
-pub struct AdjRibTable<D: RibDirection>(pub BTreeMap<Ipv4Net, Vec<BgpRib>>, PhantomData<D>);
+pub struct AdjRibTable<D: RibDirection, P = Ipv4Net>(pub BTreeMap<P, Vec<BgpRib>>, PhantomData<D>);
 
-impl<D: RibDirection> AdjRibTable<D> {
+impl<D: RibDirection, P: Ord> AdjRibTable<D, P> {
     pub fn new() -> Self {
         Self(BTreeMap::new(), PhantomData)
     }
 
     // Add a route using the direction-specific ID field
-    pub fn add(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
+    pub fn add(&mut self, prefix: P, route: BgpRib) -> Option<BgpRib> {
         let candidates = self.0.entry(prefix).or_default();
 
         let route_id = D::get_id(&route);
@@ -57,7 +61,7 @@ impl<D: RibDirection> AdjRibTable<D> {
     }
 
     // Remove a route using the direction-specific ID field
-    pub fn remove(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+    pub fn remove(&mut self, prefix: P, id: u32) -> Option<BgpRib> {
         let candidates = self.0.get_mut(&prefix)?;
 
         // Find and remove route with matching ID
@@ -137,6 +141,8 @@ impl<D: RibDirection> Default for AdjRibEvpnTable<D> {
 pub struct AdjRib<D: RibDirection> {
     // IPv4 unicast
     pub v4: AdjRibTable<D>,
+    // IPv6 unicast
+    pub v6: AdjRibTable<D, Ipv6Net>,
     // IPv4 VPN
     pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
     // EVPN, per Route Distinguisher
@@ -147,14 +153,15 @@ impl<D: RibDirection> AdjRib<D> {
     pub fn new() -> Self {
         Self {
             v4: AdjRibTable::new(),
+            v6: AdjRibTable::new(),
             v4vpn: BTreeMap::new(),
             evpn: BTreeMap::new(),
         }
     }
 }
 
-// Default implementation for AdjRibTable<D> - needed for or_default()
-impl<D: RibDirection> Default for AdjRibTable<D> {
+// Default implementation for AdjRibTable<D, P> - needed for or_default()
+impl<D: RibDirection, P: Ord> Default for AdjRibTable<D, P> {
     fn default() -> Self {
         Self::new()
     }
@@ -187,6 +194,16 @@ impl AdjRib<In> {
         }
     }
 
+    // IPv6 unicast add/remove (no VPN table yet — VPNv6 lands with 2c)
+
+    pub fn add_v6(&mut self, prefix: Ipv6Net, route: BgpRib) -> Option<BgpRib> {
+        self.v6.add(prefix, route)
+    }
+
+    pub fn remove_v6(&mut self, prefix: Ipv6Net, id: u32) -> Option<BgpRib> {
+        self.v6.remove(prefix, id)
+    }
+
     // EVPN add/remove ---------------------------------------------------------
 
     pub fn add_evpn(
@@ -210,6 +227,7 @@ impl AdjRib<In> {
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
+            (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (_, _) => 0,
@@ -247,6 +265,7 @@ impl AdjRib<Out> {
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
+            (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (_, _) => 0,
