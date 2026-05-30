@@ -55,7 +55,7 @@ router bgp {
     neighbor 10.100.0.2 {
       remote-as 65001;
     }
-    afi-safi ipv4-unicast {
+    afi-safi ipv4 {
       network 192.168.5.0/24;
     }
   }

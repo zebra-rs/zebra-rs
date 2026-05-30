@@ -22,6 +22,6 @@ router:
     - name: vrf-blue
       rd: 65001:100
       afi-safi:
-        ipv4-unicast:
+        ipv4:
           network:
           - prefix: 10.1.0.0/24

@@ -3,7 +3,7 @@
 Feature: BGP per-VRF VPNv4 export to a remote PE
   As a network operator
   I want to advertise a network configured under `router bgp vrf X
-  afi-safi ipv4-unicast` as a VPNv4 NLRI toward a remote PE
+  afi-safi ipv4` as a VPNv4 NLRI toward a remote PE
   Using a two-namespace topology where z1 originates the prefix
   inside vrf-blue and z2 peers with z1 over VPNv4 only.
 

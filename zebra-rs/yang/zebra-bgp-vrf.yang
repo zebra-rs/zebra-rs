@@ -46,10 +46,10 @@ module zebra-bgp-vrf {
              description \"CE1\";
            }
            afi-safi {
-             ipv4-unicast {
+             ipv4 {
                network 10.10.0.0/16;
              }
-             ipv6-unicast { /* same shape */ }
+             ipv6 { /* same shape */ }
            }
          }
        }
@@ -176,19 +176,18 @@ module zebra-bgp-vrf {
 
   grouping bgp-vrf-afi-safi {
     description
-      "Per-VRF address-family configuration. Only IPv4-unicast and
-       IPv6-unicast SAFIs are exposed here — VPNv4 / VPNv6 / EVPN
+      "Per-VRF address-family configuration. Only the IPv4 and IPv6
+       unicast families are exposed here — VPNv4 / VPNv6 / EVPN
        advertisements remain anchored on the top-level `router bgp`
-       block and are driven by the cross-VRF import/export pipeline
-       in step 17 / 18.
+       block and are driven by the cross-VRF import/export pipeline.
 
-       Modeled as a container of two presence containers (one per
-       SAFI) rather than a list keyed by SAFI name: the surface is
-       fixed and small, and the container shape makes path-based
-       config more ergonomic (`set ... afi-safi ipv4-unicast ...`).";
+       The family names match the IS-IS afi-safi convention (`ipv4`,
+       `ipv6`) so a VRF reads the same as `router isis`; modeled as a
+       container of two presence containers (one per family) for
+       path-based config ergonomics (`set ... afi-safi ipv4 ...`).";
     container afi-safi {
-      container ipv4-unicast {
-        presence "Enables IPv4-unicast for this VRF";
+      container ipv4 {
+        presence "Enables the IPv4 unicast family for this VRF";
         list network {
           key "prefix";
           description
@@ -201,8 +200,8 @@ module zebra-bgp-vrf {
           }
         }
       }
-      container ipv6-unicast {
-        presence "Enables IPv6-unicast for this VRF";
+      container ipv6 {
+        presence "Enables the IPv6 unicast family for this VRF";
         list network {
           key "prefix";
           leaf prefix {
