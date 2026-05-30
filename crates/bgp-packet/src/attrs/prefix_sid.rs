@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::Ipv6Addr;
 
 use bytes::{BufMut, BytesMut};
 use nom::IResult;
@@ -7,6 +8,12 @@ use nom::number::complete::{be_u8, be_u16, be_u32};
 use crate::{AttrType, ParseBe};
 
 use super::{AttrEmitter, AttrFlags};
+
+/// SRv6 Endpoint Behavior codepoints (IANA "SRv6 Endpoint Behaviors",
+/// RFC 8986). Only the L3VPN-relevant decap behaviors are named here.
+pub const SRV6_BEHAVIOR_END_DT6: u16 = 0x0012;
+pub const SRV6_BEHAVIOR_END_DT4: u16 = 0x0013;
+pub const SRV6_BEHAVIOR_END_DT46: u16 = 0x0014;
 
 /// BGP Prefix-SID path attribute (type 40, RFC 8669) plus SRv6 service
 /// extensions (RFC 9252).
@@ -35,21 +42,52 @@ pub enum PrefixSidTlv {
     /// resolve a Label-Index against the originator's label block.
     OriginatorSrgb { flags: u16, srgbs: Vec<SrgbRange> },
 
-    /// RFC 9252 §2 SRv6 L3 Service TLV. Opaque bytes for v1 — the
-    /// nested sub-TLV / sub-sub-TLV structure (SRv6 Services SID
-    /// Information, SID Structure) is decoded by the SRv6-services
-    /// PR. Storing the raw payload here keeps round-trip exact and
-    /// lets policy / show layers surface the attribute today.
-    Srv6L3Service(Vec<u8>),
+    /// RFC 9252 §2 SRv6 L3 Service TLV — carries the per-prefix /
+    /// per-VRF SRv6 SID(s) for L3 services (L3VPN, 6PE). Decoded into
+    /// the SID Information sub-TLVs; unknown sub-/sub-sub-TLVs are not
+    /// preserved (we re-emit in canonical form).
+    Srv6L3Service(Srv6ServiceTlv),
 
-    /// RFC 9252 §2 SRv6 L2 Service TLV. Same parse-and-store
-    /// treatment as the L3 variant.
-    Srv6L2Service(Vec<u8>),
+    /// RFC 9252 §2 SRv6 L2 Service TLV — same shape, used for EVPN.
+    Srv6L2Service(Srv6ServiceTlv),
 
     /// Unknown TLV type — preserved verbatim so a router that doesn't
     /// understand a new IANA codepoint can still propagate the
     /// attribute byte-for-byte.
     Unknown { typ: u8, value: Vec<u8> },
+}
+
+/// An SRv6 Service TLV body (RFC 9252 §2): an ordered list of SRv6 SID
+/// Information sub-TLVs. The L3VPN case carries exactly one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Srv6ServiceTlv {
+    pub sids: Vec<Srv6SidInfo>,
+}
+
+/// SRv6 SID Information Sub-TLV (RFC 9252 §3.1).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Srv6SidInfo {
+    /// The 16-byte SRv6 SID value (e.g. an End.DT46 SID).
+    pub sid: Ipv6Addr,
+    /// SRv6 Service SID Flags.
+    pub flags: u8,
+    /// SRv6 Endpoint Behavior (one of the `SRV6_BEHAVIOR_*` codepoints).
+    pub behavior: u16,
+    /// SRv6 SID Structure Sub-Sub-TLV, when present.
+    pub structure: Option<Srv6SidStructure>,
+}
+
+/// SRv6 SID Structure Sub-Sub-TLV (RFC 9252 §3.2.1) — the bit-length
+/// breakdown of the SID. Lets a receiver locate the function/argument
+/// for label transposition (transposition len 0 here = full SID).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Srv6SidStructure {
+    pub locator_block_len: u8,
+    pub locator_node_len: u8,
+    pub function_len: u8,
+    pub argument_len: u8,
+    pub transposition_len: u8,
+    pub transposition_offset: u8,
 }
 
 /// One SRGB range advertised inside the Originator SRGB TLV. Both
@@ -114,8 +152,14 @@ fn decode_tlv(typ: u8, value: &[u8]) -> IResult<&[u8], PrefixSidTlv> {
             }
             Ok((rest, PrefixSidTlv::OriginatorSrgb { flags, srgbs }))
         }
-        5 => Ok((&[], PrefixSidTlv::Srv6L3Service(value.to_vec()))),
-        6 => Ok((&[], PrefixSidTlv::Srv6L2Service(value.to_vec()))),
+        5 => {
+            let (_, svc) = decode_srv6_service(value)?;
+            Ok((&[], PrefixSidTlv::Srv6L3Service(svc)))
+        }
+        6 => {
+            let (_, svc) = decode_srv6_service(value)?;
+            Ok((&[], PrefixSidTlv::Srv6L2Service(svc)))
+        }
         other => Ok((
             &[],
             PrefixSidTlv::Unknown {
@@ -123,6 +167,92 @@ fn decode_tlv(typ: u8, value: &[u8]) -> IResult<&[u8], PrefixSidTlv> {
                 value: value.to_vec(),
             },
         )),
+    }
+}
+
+/// Decode an SRv6 Service TLV body (RFC 9252 §2): a leading RESERVED
+/// byte then SRv6 SID Information sub-TLVs. Unknown sub-/sub-sub-TLVs
+/// are skipped (we re-emit canonically), but their length is honoured
+/// so the walk stays aligned.
+fn decode_srv6_service(value: &[u8]) -> IResult<&[u8], Srv6ServiceTlv> {
+    let (mut rest, _reserved) = be_u8(value)?;
+    let mut sids = Vec::new();
+    while !rest.is_empty() {
+        let (r, sub_type) = be_u8(rest)?;
+        let (r, sub_len) = be_u16(r)?;
+        let (r, sub_val) = nom::bytes::complete::take(sub_len as usize)(r)?;
+        rest = r;
+        if sub_type != 1 {
+            continue; // only SID Information sub-TLVs are modelled
+        }
+        // SID Information: RESERVED1(1) SID(16) Flags(1) Behavior(2) RESERVED2(1).
+        let (sv, _reserved1) = be_u8(sub_val)?;
+        let (sv, sid_bytes) = nom::bytes::complete::take(16usize)(sv)?;
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(sid_bytes);
+        let sid = Ipv6Addr::from(octets);
+        let (sv, flags) = be_u8(sv)?;
+        let (sv, behavior) = be_u16(sv)?;
+        let (mut sv, _reserved2) = be_u8(sv)?;
+        let mut structure = None;
+        while !sv.is_empty() {
+            let (s, ss_type) = be_u8(sv)?;
+            let (s, ss_len) = be_u16(s)?;
+            let (s, ss_val) = nom::bytes::complete::take(ss_len as usize)(s)?;
+            sv = s;
+            if ss_type == 1 && ss_val.len() >= 6 {
+                structure = Some(Srv6SidStructure {
+                    locator_block_len: ss_val[0],
+                    locator_node_len: ss_val[1],
+                    function_len: ss_val[2],
+                    argument_len: ss_val[3],
+                    transposition_len: ss_val[4],
+                    transposition_offset: ss_val[5],
+                });
+            }
+        }
+        sids.push(Srv6SidInfo {
+            sid,
+            flags,
+            behavior,
+            structure,
+        });
+    }
+    Ok((&[], Srv6ServiceTlv { sids }))
+}
+
+/// Encoded length of an SRv6 Service TLV body: RESERVED(1) + each SID
+/// Information sub-TLV (header 3 + 21 body + optional 9-byte structure
+/// sub-sub-TLV).
+fn srv6_service_len(svc: &Srv6ServiceTlv) -> usize {
+    let mut len = 1;
+    for sid in &svc.sids {
+        len += 3 + 21 + if sid.structure.is_some() { 9 } else { 0 };
+    }
+    len
+}
+
+fn emit_srv6_service(buf: &mut BytesMut, svc: &Srv6ServiceTlv) {
+    buf.put_u8(0); // RESERVED
+    for sid in &svc.sids {
+        let sub_len = 21 + if sid.structure.is_some() { 9 } else { 0 };
+        buf.put_u8(1); // SID Information sub-TLV
+        buf.put_u16(sub_len as u16);
+        buf.put_u8(0); // RESERVED1
+        buf.put(&sid.sid.octets()[..]);
+        buf.put_u8(sid.flags);
+        buf.put_u16(sid.behavior);
+        buf.put_u8(0); // RESERVED2
+        if let Some(st) = sid.structure {
+            buf.put_u8(1); // SID Structure sub-sub-TLV
+            buf.put_u16(6);
+            buf.put_u8(st.locator_block_len);
+            buf.put_u8(st.locator_node_len);
+            buf.put_u8(st.function_len);
+            buf.put_u8(st.argument_len);
+            buf.put_u8(st.transposition_len);
+            buf.put_u8(st.transposition_offset);
+        }
     }
 }
 
@@ -153,7 +283,9 @@ fn tlv_encoded_len(tlv: &PrefixSidTlv) -> usize {
     let body = match tlv {
         PrefixSidTlv::LabelIndex { .. } => 7,
         PrefixSidTlv::OriginatorSrgb { srgbs, .. } => 2 + srgbs.len() * 6,
-        PrefixSidTlv::Srv6L3Service(v) | PrefixSidTlv::Srv6L2Service(v) => v.len(),
+        PrefixSidTlv::Srv6L3Service(svc) | PrefixSidTlv::Srv6L2Service(svc) => {
+            srv6_service_len(svc)
+        }
         PrefixSidTlv::Unknown { value, .. } => value.len(),
     };
     3 + body
@@ -163,8 +295,8 @@ fn emit_tlv(buf: &mut BytesMut, tlv: &PrefixSidTlv) {
     let (typ, body_len) = match tlv {
         PrefixSidTlv::LabelIndex { .. } => (1u8, 7u16),
         PrefixSidTlv::OriginatorSrgb { srgbs, .. } => (3u8, (2 + srgbs.len() * 6) as u16),
-        PrefixSidTlv::Srv6L3Service(v) => (5u8, v.len() as u16),
-        PrefixSidTlv::Srv6L2Service(v) => (6u8, v.len() as u16),
+        PrefixSidTlv::Srv6L3Service(svc) => (5u8, srv6_service_len(svc) as u16),
+        PrefixSidTlv::Srv6L2Service(svc) => (6u8, srv6_service_len(svc) as u16),
         PrefixSidTlv::Unknown { typ, value } => (*typ, value.len() as u16),
     };
     buf.put_u8(typ);
@@ -182,8 +314,8 @@ fn emit_tlv(buf: &mut BytesMut, tlv: &PrefixSidTlv) {
                 put_be_u24(buf, srgb.range & 0x00ff_ffff);
             }
         }
-        PrefixSidTlv::Srv6L3Service(v) | PrefixSidTlv::Srv6L2Service(v) => {
-            buf.put(&v[..]);
+        PrefixSidTlv::Srv6L3Service(svc) | PrefixSidTlv::Srv6L2Service(svc) => {
+            emit_srv6_service(buf, svc);
         }
         PrefixSidTlv::Unknown { value, .. } => {
             buf.put(&value[..]);
@@ -233,11 +365,18 @@ impl fmt::Display for PrefixSid {
                     }
                     write!(f, ")")?;
                 }
-                PrefixSidTlv::Srv6L3Service(v) => {
-                    write!(f, "SRv6L3Service({} bytes)", v.len())?;
+                PrefixSidTlv::Srv6L3Service(svc) => {
+                    write!(f, "SRv6L3Service(")?;
+                    for (j, s) in svc.sids.iter().enumerate() {
+                        if j > 0 {
+                            write!(f, ",")?;
+                        }
+                        write!(f, "{} behavior={:#06x}", s.sid, s.behavior)?;
+                    }
+                    write!(f, ")")?;
                 }
-                PrefixSidTlv::Srv6L2Service(v) => {
-                    write!(f, "SRv6L2Service({} bytes)", v.len())?;
+                PrefixSidTlv::Srv6L2Service(svc) => {
+                    write!(f, "SRv6L2Service({} SIDs)", svc.sids.len())?;
                 }
                 PrefixSidTlv::Unknown { typ, value } => {
                     write!(f, "Unknown(type={typ}, {} bytes)", value.len())?;
@@ -327,12 +466,52 @@ mod tests {
     }
 
     #[test]
-    fn srv6_service_tlvs_parse_as_opaque() {
+    fn srv6_l3_service_round_trips_structured() {
+        // One End.DT46 SID with a full SID-structure sub-sub-TLV — the
+        // L3VPN-over-SRv6 advertise shape.
         let sid = PrefixSid {
-            tlvs: vec![
-                PrefixSidTlv::Srv6L3Service(vec![0u8, 0x01, 0x02, 0x03]),
-                PrefixSidTlv::Srv6L2Service(vec![0xaa, 0xbb]),
-            ],
+            tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                sids: vec![Srv6SidInfo {
+                    sid: "2001:db8:1:1::".parse().unwrap(),
+                    flags: 0,
+                    behavior: SRV6_BEHAVIOR_END_DT46,
+                    structure: Some(Srv6SidStructure {
+                        locator_block_len: 32,
+                        locator_node_len: 16,
+                        function_len: 16,
+                        argument_len: 0,
+                        transposition_len: 0,
+                        transposition_offset: 0,
+                    }),
+                }],
+            })],
+        };
+        let rt = round_trip(sid.clone());
+        assert_eq!(rt, sid);
+        // The SID + behavior decode back out.
+        match &rt.tlvs[0] {
+            PrefixSidTlv::Srv6L3Service(svc) => {
+                assert_eq!(svc.sids[0].behavior, SRV6_BEHAVIOR_END_DT46);
+                assert_eq!(
+                    svc.sids[0].sid,
+                    "2001:db8:1:1::".parse::<Ipv6Addr>().unwrap()
+                );
+            }
+            _ => panic!("expected SRv6 L3 Service TLV"),
+        }
+    }
+
+    #[test]
+    fn srv6_sid_without_structure_round_trips() {
+        let sid = PrefixSid {
+            tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                sids: vec![Srv6SidInfo {
+                    sid: "2001:db8::1".parse().unwrap(),
+                    flags: 0,
+                    behavior: SRV6_BEHAVIOR_END_DT4,
+                    structure: None,
+                }],
+            })],
         };
         assert_eq!(round_trip(sid.clone()), sid);
     }
