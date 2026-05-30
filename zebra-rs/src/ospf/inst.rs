@@ -8041,16 +8041,12 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
 
-    apply_routing_updates_v3(top, area_id, source, &spf_result);
-
-    top.spf_result = Some(spf_result);
-    top.graph = Some(graph);
-
     // Per-algo IPv6 RIBs from the per-algo SPF results (top borrowed
     // immutably, so collect locally then swap the field). Single
     // (last-computed-area) snapshot, like `spf_result` — fine for the
     // common single-area flex-algo deployment. Mirror of v2's
-    // apply_spf_result.
+    // apply_spf_result. Built BEFORE apply_routing_updates_v3 so the
+    // ILM merge there can read `top.rib6_flex_algo`.
     let mut rib6_flex_algo = BTreeMap::new();
     for o in &flex_algos {
         let algo_rib = match &o.spf_result {
@@ -8061,8 +8057,12 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     }
     top.rib6_flex_algo = rib6_flex_algo;
 
-    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`. Per-algo
-    // Prefix-SID ILM install (ilm6) is the next v3 slice.
+    apply_routing_updates_v3(top, area_id, source, &spf_result);
+
+    top.spf_result = Some(spf_result);
+    top.graph = Some(graph);
+
+    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`.
     top.spf_flex_algo = flex_algos
         .into_iter()
         .map(|o| (o.algo, o.spf_result))
@@ -8547,6 +8547,18 @@ fn apply_routing_updates_v3(
     // pop and self-Adj-SID / LAN-Adj-SID pop entries are layered in
     // here, mirroring the v2 ordering.
     let mut new_ilm = build_ilm_from_rib6(&new_rib);
+    // Per-Flexible-Algorithm Prefix-SID labels (RFC 9350 §7). The label
+    // space is shared with algo-0 (Prefix-SIDs are globally unique), so
+    // the per-algo entries coexist in the single ILM map and install
+    // into the kernel MPLS LFIB alongside algo-0 via the same diff
+    // below. Per-algo IPv6 stays in-memory; only the labels forward,
+    // mirroring v2 / IS-IS. `top.rib6_flex_algo` was populated by
+    // `apply_v3_spf_result` before this call.
+    for algo_rib in top.rib6_flex_algo.values() {
+        for (label, spf_ilm) in build_ilm_from_rib6(algo_rib) {
+            new_ilm.insert(label, spf_ilm);
+        }
+    }
     add_self_prefix_sids_to_ilm_v3(top, &mut new_ilm);
     add_self_adj_sids_to_ilm_v3(top, &mut new_ilm);
     let ilm_diff = spf::table_diff(
