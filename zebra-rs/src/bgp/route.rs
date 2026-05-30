@@ -139,6 +139,57 @@ fn build_vpn_fib_entry(
     Some(entry)
 }
 
+/// Build the VRF FIB entry for an imported SRv6 L3VPN route (RFC 9252).
+/// The remote PE's End.DT46 `sid` is the single SRv6 segment: the kernel
+/// H.Encaps matched traffic (outer IPv6 destination = the SID, SRH =
+/// `[sid]`) and L2-forwards the encapped packet to the resolved on-link
+/// underlay next-hop, which routes it on toward the SID's locator. One
+/// `NexthopUni` per resolved underlay egress (`Multi` for ECMP), where
+/// `addr` / `ifindex_origin` are the underlay next-hop and egress link
+/// (exactly like [`build_vpn_fib_entry`]) and `segs` carries the SID for
+/// the seg6 encap.
+///
+/// Returns `None` when the underlay next-hop hasn't resolved — nothing
+/// is installable and the caller withdraws instead. This is the SRv6
+/// analogue of [`build_vpn_fib_entry`]; the SID + seg6 encap replace the
+/// `{transport,service}` MPLS label stack.
+fn build_srv6_vpn_fib_entry(
+    sid: std::net::Ipv6Addr,
+    transport: &[rib::nht::ResolvedNexthop],
+) -> Option<rib::entry::RibEntry> {
+    if transport.is_empty() {
+        return None;
+    }
+    let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
+        // `via egress.addr dev egress.ifindex encap seg6 segs [sid]`:
+        // the on-link underlay next-hop carries the packet, the seg6
+        // encap sets the outer IPv6 DA + SRH to the SID.
+        let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
+        uni.segs = vec![sid];
+        uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        rib::Nexthop::Uni(mk_uni(&transport[0]))
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk_uni(egress));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = 200;
+    entry.metric = 0;
+    entry.valid = true;
+    entry.nexthop = nexthop;
+    Some(entry)
+}
+
 /// Whether `best` should install as a labelled VPN tunnel entry: an
 /// imported route (`Originated`) for which the VRF holds a resolved
 /// `transport`. `transport` is `None` outside a VRF (global instance),
@@ -156,6 +207,18 @@ fn select_fib_entry_v4(
     best: &BgpRib,
     transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
+    // SRv6 L3VPN: an imported route carrying an SRv6 L3 Service SID
+    // installs an H.Encap entry toward that SID instead of an MPLS
+    // label stack — gated on the underlay next-hop resolving, like the
+    // MPLS path. CE-learned routes carry no Prefix-SID, so this never
+    // fires for them.
+    if best.typ == BgpRibType::Originated
+        && let Some((sid, _behavior)) = best.attr.srv6_l3_sid()
+    {
+        return transport
+            .filter(|t| !t.is_empty())
+            .and_then(|t| build_srv6_vpn_fib_entry(sid, t));
+    }
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
     } else {
@@ -254,6 +317,14 @@ fn select_fib_entry_v6(
     best: &BgpRib,
     transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
+    // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`.
+    if best.typ == BgpRibType::Originated
+        && let Some((sid, _behavior)) = best.attr.srv6_l3_sid()
+    {
+        return transport
+            .filter(|t| !t.is_empty())
+            .and_then(|t| build_srv6_vpn_fib_entry(sid, t));
+    }
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
     } else {
@@ -6914,6 +6985,92 @@ mod tests {
             crate::rib::Nexthop::Uni(uni) => {
                 assert_eq!(uni.addr, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
                 assert!(uni.mpls_label.is_empty());
+            }
+            other => panic!("expected Uni, got {other:?}"),
+        }
+    }
+
+    // --- SRv6 L3VPN ingress (build_srv6_vpn_fib_entry) -------------------
+
+    fn srv6_l3_attr(sid: std::net::Ipv6Addr) -> BgpAttr {
+        BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, 1))),
+            prefix_sid: Some(bgp_packet::PrefixSid {
+                tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
+                    bgp_packet::Srv6ServiceTlv {
+                        sids: vec![bgp_packet::Srv6SidInfo {
+                            sid,
+                            flags: 0,
+                            behavior: bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                            structure: None,
+                        }],
+                    },
+                )],
+            }),
+            ..BgpAttr::default()
+        }
+    }
+
+    #[test]
+    fn srv6_vpn_fib_entry_carries_seg6_encap_over_resolved_underlay() {
+        use crate::rib::nht::ResolvedNexthop;
+        let sid: std::net::Ipv6Addr = "2001:db8:1:40::".parse().unwrap();
+        // SRv6 underlay: the resolved transport has an on-link v6
+        // next-hop + egress link and no MPLS labels.
+        let transport = vec![ResolvedNexthop {
+            addr: "fe80::1".parse().unwrap(),
+            ifindex: 7,
+            labels: vec![],
+        }];
+        let entry = super::build_srv6_vpn_fib_entry(sid, &transport).expect("srv6 entry");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                // `via fe80::1 dev 7 encap seg6 segs [sid]`.
+                assert_eq!(uni.addr, "fe80::1".parse::<IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(7));
+                assert_eq!(uni.segs, vec![sid]);
+                assert_eq!(uni.encap_type, Some(isis_packet::srv6::EncapType::HEncap));
+                assert!(uni.mpls_label.is_empty(), "no MPLS labels on an SRv6 entry");
+            }
+            other => panic!("expected Uni, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srv6_vpn_fib_entry_none_without_resolved_underlay() {
+        let sid: std::net::Ipv6Addr = "2001:db8:1:40::".parse().unwrap();
+        assert!(super::build_srv6_vpn_fib_entry(sid, &[]).is_none());
+    }
+
+    #[test]
+    fn select_fib_entry_v4_srv6_import_builds_seg6_encap() {
+        use crate::rib::nht::ResolvedNexthop;
+        // An imported (`Originated`) VPNv4 route carrying an SRv6 L3
+        // Service SID installs an H.Encap entry toward the SID, not an
+        // MPLS-labelled one — keyed on the Prefix-SID attr.
+        let sid: std::net::Ipv6Addr = "2001:db8:1:40::".parse().unwrap();
+        let attr = srv6_l3_attr(sid);
+        let rib = super::BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            super::BgpRibType::Originated,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let transport = vec![ResolvedNexthop {
+            addr: "fe80::1".parse().unwrap(),
+            ifindex: 7,
+            labels: vec![],
+        }];
+        let entry = super::select_fib_entry_v4(&rib, Some(&transport)).expect("srv6 entry");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.segs, vec![sid]);
+                assert_eq!(uni.encap_type, Some(isis_packet::srv6::EncapType::HEncap));
             }
             other => panic!("expected Uni, got {other:?}"),
         }
