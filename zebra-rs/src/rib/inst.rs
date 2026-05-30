@@ -121,6 +121,27 @@ pub enum Message {
         proto: String,
         name: String,
     },
+    /// Next-Hop Tracking: register interest in resolving `nh` against
+    /// the global table. Triggers an immediate `RibRx::NexthopUpdate`
+    /// back to `proto` and subsequent updates whenever the covering
+    /// route changes. Registrations are deduplicated + refcounted per
+    /// nexthop in `Rib::nht`.
+    //
+    // `allow(dead_code)`: the handler is wired and tested, but the
+    // producers (BGP / static clients via `RibClient`) land in the
+    // next PR — remove the allow then.
+    #[allow(dead_code)]
+    NexthopRegister {
+        proto: String,
+        nh: std::net::IpAddr,
+    },
+    /// Drop `proto`'s interest in `nh`; the tracking entry is removed
+    /// once its last watcher unregisters.
+    #[allow(dead_code)]
+    NexthopUnregister {
+        proto: String,
+        nh: std::net::IpAddr,
+    },
     /// Register an allocated SRv6 SID. Owners (IS-IS, OSPF, BGP) push
     /// one of these whenever they carve a function out of a locator;
     /// the RIB stores it for `show segment-routing srv6 sid`.
@@ -476,6 +497,10 @@ pub struct Rib {
     /// updates to that block.
     pub block_watch: BTreeMap<String, BTreeSet<String>>,
     pub locator_watch: BTreeMap<String, BTreeSet<String>>,
+    /// Next-Hop Tracking registry — per-nexthop watcher sets + cached
+    /// resolution. Driven by `Message::NexthopRegister`/`Unregister`
+    /// and re-resolved on global-table route changes.
+    pub nht: super::nht::NhtRegistry,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 
@@ -572,6 +597,7 @@ impl Rib {
             sr_clients: BTreeMap::new(),
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
+            nht: super::nht::NhtRegistry::default(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
@@ -603,6 +629,61 @@ impl Rib {
 
     /// Push the current value of `blocks[name]` (Some / None) to every
     /// protocol that has registered a watch on this name.
+    /// Resolve `nh` against the appropriate global (default-VRF) table.
+    fn nht_resolve(&self, nh: IpAddr) -> super::nht::NexthopResolution {
+        match nh {
+            IpAddr::V4(a) => super::nht::resolve_v4(&self.table, a),
+            IpAddr::V6(a) => super::nht::resolve_v6(&self.table_v6, a),
+        }
+    }
+
+    /// Handle `Message::NexthopRegister`: add the watcher, resolve,
+    /// cache, and push the current resolution to the registering
+    /// client immediately (the "synchronous-first" reply — even on a
+    /// non-fresh register, so a late joiner gets the state).
+    fn nht_register(&mut self, proto: String, nh: IpAddr) {
+        self.nht.register(proto.clone(), nh);
+        let resolution = self.nht_resolve(nh);
+        if let Some(entry) = self.nht.entries.get_mut(&nh) {
+            entry.resolution = resolution.clone();
+        }
+        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+            let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate { nh, resolution });
+        }
+    }
+
+    /// Re-resolve every tracked nexthop; where the resolution changed,
+    /// update the cache and notify all its watchers. Called after a
+    /// global-table route change. (Recompute-all for now; narrowing to
+    /// only the affected nexthops is a follow-up, as is firing on
+    /// link/addr changes.)
+    fn nht_recompute_and_notify(&mut self) {
+        if self.nht.entries.is_empty() {
+            return;
+        }
+        let mut updates: Vec<(IpAddr, super::nht::NexthopResolution, Vec<String>)> = Vec::new();
+        for nh in self.nht.tracked() {
+            let resolution = self.nht_resolve(nh);
+            if let Some(entry) = self.nht.entries.get_mut(&nh)
+                && entry.resolution != resolution
+            {
+                entry.resolution = resolution.clone();
+                let watchers = entry.watchers.iter().cloned().collect();
+                updates.push((nh, resolution, watchers));
+            }
+        }
+        for (nh, resolution, watchers) in updates {
+            for proto in watchers {
+                if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+                    let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate {
+                        nh,
+                        resolution: resolution.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     fn notify_block_watchers(&self, name: &str) {
         let Some(watchers) = self.block_watch.get(name) else {
             return;
@@ -1343,6 +1424,7 @@ impl Rib {
                 let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_add(&prefix, rib, table_id).await;
+                    self.nht_recompute_and_notify();
                 } else {
                     self.ipv4_route_add_vrf(table_id, &prefix, rib).await;
                 }
@@ -1351,6 +1433,7 @@ impl Rib {
                 let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv4_route_del(&prefix, rib, table_id).await;
+                    self.nht_recompute_and_notify();
                 } else {
                     self.ipv4_route_del_vrf(table_id, &prefix, rib).await;
                 }
@@ -1359,6 +1442,7 @@ impl Rib {
                 let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_add(&prefix, rib, table_id).await;
+                    self.nht_recompute_and_notify();
                 } else {
                     self.ipv6_route_add_vrf(table_id, &prefix, rib).await;
                 }
@@ -1367,9 +1451,16 @@ impl Rib {
                 let table_id = self.route_table_for(&rib, table_id);
                 if table_id == RT_TABLE_MAIN {
                     self.ipv6_route_del(&prefix, rib, table_id).await;
+                    self.nht_recompute_and_notify();
                 } else {
                     self.ipv6_route_del_vrf(table_id, &prefix, rib).await;
                 }
+            }
+            Message::NexthopRegister { proto, nh } => {
+                self.nht_register(proto, nh);
+            }
+            Message::NexthopUnregister { proto, nh } => {
+                self.nht.unregister(&proto, nh);
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;

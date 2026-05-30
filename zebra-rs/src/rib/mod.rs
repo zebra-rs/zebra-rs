@@ -50,6 +50,8 @@ pub use mpls::*;
 
 pub mod resolve;
 
+pub mod nht;
+
 // pub mod nanomsg;
 
 pub mod router_id;

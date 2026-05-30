@@ -101,7 +101,7 @@ fn entry_nexthop_addr(entry: &RibEntry) -> Option<IpAddr> {
 // route whose group went invalid because its egress link is down. Without
 // this filter a recursive static would resolve through the dead route and
 // look reachable when it isn't.
-fn entry_resolvable(entry: &RibEntry) -> bool {
+pub(crate) fn entry_resolvable(entry: &RibEntry) -> bool {
     entry.is_valid()
         && matches!(
             entry.rtype,

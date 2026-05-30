@@ -180,6 +180,18 @@ pub enum RibRx {
         algo: u8,
         prefix: Ipv4Net,
     },
+
+    // ---- Next-Hop Tracking ----------------------------------------
+    //
+    // Resolution result for a nexthop a client registered via
+    // `Message::NexthopRegister`. The first update is pushed
+    // immediately on registration; subsequent updates fire whenever
+    // the covering route changes. `reachable == false` means the
+    // nexthop no longer resolves.
+    NexthopUpdate {
+        nh: IpAddr,
+        resolution: super::nht::NexthopResolution,
+    },
 }
 
 impl Rib {
