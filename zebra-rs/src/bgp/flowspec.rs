@@ -25,8 +25,7 @@ use bgp_packet::{
 };
 use ipnet::{IpNet, Ipv6Net};
 
-use super::inst::Bgp;
-use super::route::BgpRib;
+use super::route::{BgpRib, LocalRib};
 
 /// Outcome of validating a received flow spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,9 +125,15 @@ fn originator_matches(unicast: &BgpRib, fs: &BgpRib) -> bool {
 }
 
 /// Validate one received flow spec against the unicast Loc-RIB per
-/// RFC 9117. `rib` is the flow spec's Adj-RIB-In entry, carrying its
-/// path attributes and advertising peer.
-pub fn flowspec_validate(bgp: &Bgp, nlri: &FlowspecNlri, rib: &BgpRib) -> FlowspecValidation {
+/// RFC 9117. `rib` is the flow spec's Adj-RIB-In / Loc-RIB entry,
+/// carrying its path attributes and advertising peer. Takes `&LocalRib`
+/// directly so both the show path (`&Bgp`) and the route layer
+/// (`&mut BgpTop`) can call it.
+pub fn flowspec_validate(
+    local_rib: &LocalRib,
+    nlri: &FlowspecNlri,
+    rib: &BgpRib,
+) -> FlowspecValidation {
     if !has_dest_prefix(nlri) {
         return FlowspecValidation::InvalidNoDestPrefix;
     }
@@ -142,8 +147,8 @@ pub fn flowspec_validate(bgp: &Bgp, nlri: &FlowspecNlri, rib: &BgpRib) -> Flowsp
         return FlowspecValidation::InvalidNoUnicastRoute;
     };
     let best = match dst {
-        IpNet::V4(p) => bgp.local_rib.v4.1.get_lpm(&p).map(|(_, r)| r),
-        IpNet::V6(p) => bgp.local_rib.v6.1.get_lpm(&p).map(|(_, r)| r),
+        IpNet::V4(p) => local_rib.v4.1.get_lpm(&p).map(|(_, r)| r),
+        IpNet::V6(p) => local_rib.v6.1.get_lpm(&p).map(|(_, r)| r),
     };
     match best {
         None => FlowspecValidation::InvalidNoUnicastRoute,

@@ -429,4 +429,18 @@ impl AdjRib<Out> {
     ) -> Option<BgpRib> {
         self.evpn.entry(rd).or_default().remove(prefix, id)
     }
+
+    pub fn add_flowspec(&mut self, afi: Afi, nlri: FlowspecNlri, route: BgpRib) -> Option<BgpRib> {
+        match afi {
+            Afi::Ip6 => self.flowspec_v6.add(nlri, route),
+            _ => self.flowspec_v4.add(nlri, route),
+        }
+    }
+
+    pub fn remove_flowspec(&mut self, afi: Afi, nlri: &FlowspecNlri, id: u32) -> Option<BgpRib> {
+        match afi {
+            Afi::Ip6 => self.flowspec_v6.remove(nlri, id),
+            _ => self.flowspec_v4.remove(nlri, id),
+        }
+    }
 }
