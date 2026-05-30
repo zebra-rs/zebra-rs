@@ -50,6 +50,7 @@ ospf-packet = { path = "../crates/ospf-packet" }
 ospf-macros = { path = "../crates/ospf-macros" }
 isis-packet = { path = "../crates/isis-packet" }
 isis-macros = { path = "../crates/isis-macros" }
+packet-utils = { path = "../crates/packet-utils" }
 bfd-packet = { path = "../crates/bfd-packet" }
 nd-packet = { path = "../crates/nd-packet" }
 bitfield-struct = "0.13"

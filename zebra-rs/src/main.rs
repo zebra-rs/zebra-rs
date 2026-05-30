@@ -13,6 +13,7 @@ mod config;
 mod context;
 use config::{Cli, ConfigManager};
 mod fib;
+mod flex_algo;
 mod fmt;
 mod isis;
 mod nd;

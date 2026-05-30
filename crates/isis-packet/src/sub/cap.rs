@@ -378,52 +378,10 @@ impl FadSubCode {
     }
 }
 
-/// Extended Admin Group bitmap payload (RFC 7308): a sequence of
-/// 32-bit big-endian words holding 32 group bits each. Word N covers
-/// group ids `(N*32)..((N+1)*32)`; within a word, bit 0 is the LSB
-/// and the word is serialized big-endian. Used by the three FAD
-/// admin-group constraint sub-TLVs below.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtAdminGroup {
-    pub words: Vec<u32>,
-}
-
-impl ExtAdminGroup {
-    /// Set bit `n` (RFC 7308 group id). Grows the bitmap as needed.
-    pub fn set(&mut self, n: u16) {
-        let word = (n / 32) as usize;
-        let bit = (n % 32) as u32;
-        if word >= self.words.len() {
-            self.words.resize(word + 1, 0);
-        }
-        self.words[word] |= 1u32 << bit;
-    }
-
-    /// True iff bit `n` is set.
-    pub fn get(&self, n: u16) -> bool {
-        let word = (n / 32) as usize;
-        let bit = (n % 32) as u32;
-        self.words
-            .get(word)
-            .is_some_and(|w| (*w & (1u32 << bit)) != 0)
-    }
-
-    /// Byte length on the wire (4 per word).
-    pub fn byte_len(&self) -> usize {
-        self.words.len() * 4
-    }
-}
-
-fn parse_ext_admin_group(input: &[u8]) -> IResult<&[u8], ExtAdminGroup> {
-    let (input, words) = many0_complete(be_u32).parse(input)?;
-    Ok((input, ExtAdminGroup { words }))
-}
-
-fn emit_ext_admin_group(g: &ExtAdminGroup, buf: &mut BytesMut) {
-    for w in &g.words {
-        buf.put_u32(*w);
-    }
-}
+/// Extended Admin Group bitmap payload (RFC 7308). Defined in
+/// `packet-utils` and re-exported here so IS-IS callers keep using
+/// `isis_packet::ExtAdminGroup`; OSPF shares the same type.
+pub use packet_utils::ExtAdminGroup;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubFadExcludeAg {
@@ -432,7 +390,7 @@ pub struct IsisSubFadExcludeAg {
 
 impl ParseBe<IsisSubFadExcludeAg> for IsisSubFadExcludeAg {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, group) = parse_ext_admin_group(input)?;
+        let (input, group) = ExtAdminGroup::parse_be(input)?;
         Ok((input, Self { group }))
     }
 }
@@ -445,7 +403,7 @@ impl TlvEmitter for IsisSubFadExcludeAg {
         self.group.byte_len().min(255) as u8
     }
     fn emit(&self, buf: &mut BytesMut) {
-        emit_ext_admin_group(&self.group, buf);
+        self.group.emit(buf);
     }
 }
 
@@ -456,7 +414,7 @@ pub struct IsisSubFadIncludeAnyAg {
 
 impl ParseBe<IsisSubFadIncludeAnyAg> for IsisSubFadIncludeAnyAg {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, group) = parse_ext_admin_group(input)?;
+        let (input, group) = ExtAdminGroup::parse_be(input)?;
         Ok((input, Self { group }))
     }
 }
@@ -469,7 +427,7 @@ impl TlvEmitter for IsisSubFadIncludeAnyAg {
         self.group.byte_len().min(255) as u8
     }
     fn emit(&self, buf: &mut BytesMut) {
-        emit_ext_admin_group(&self.group, buf);
+        self.group.emit(buf);
     }
 }
 
@@ -480,7 +438,7 @@ pub struct IsisSubFadIncludeAllAg {
 
 impl ParseBe<IsisSubFadIncludeAllAg> for IsisSubFadIncludeAllAg {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, group) = parse_ext_admin_group(input)?;
+        let (input, group) = ExtAdminGroup::parse_be(input)?;
         Ok((input, Self { group }))
     }
 }
@@ -493,7 +451,7 @@ impl TlvEmitter for IsisSubFadIncludeAllAg {
         self.group.byte_len().min(255) as u8
     }
     fn emit(&self, buf: &mut BytesMut) {
-        emit_ext_admin_group(&self.group, buf);
+        self.group.emit(buf);
     }
 }
 
