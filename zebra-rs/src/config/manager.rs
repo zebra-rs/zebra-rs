@@ -346,8 +346,11 @@ impl ConfigManager {
 
         let entry = self.load_mode(&mut yang, "configure")?;
         entry.dir.borrow_mut().push(run_from_exec(exec.clone()));
-        if let Some(exec_show) = show_from_exec(exec) {
+        if let Some(exec_show) = top_from_exec(&exec, "show") {
             entry.dir.borrow_mut().push(exec_show);
+        }
+        if let Some(exec_cli) = top_from_exec(&exec, "cli") {
+            entry.dir.borrow_mut().push(exec_cli);
         }
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
@@ -1059,9 +1062,13 @@ fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
     Rc::new(run)
 }
 
-fn show_from_exec(exec: Rc<Entry>) -> Option<Rc<Entry>> {
+/// Graft a top-level command container from exec mode (e.g. `show`,
+/// `cli`) into configure mode so it can be typed directly at the
+/// configure prompt — without the `run` prefix. Returns a clonable
+/// handle, or `None` if exec mode has no such container.
+fn top_from_exec(exec: &Rc<Entry>, name: &str) -> Option<Rc<Entry>> {
     for dir in exec.dir.borrow().iter() {
-        if dir.name == "show" {
+        if dir.name == name {
             return Some(dir.clone());
         }
     }
