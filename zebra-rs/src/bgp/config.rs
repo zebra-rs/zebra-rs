@@ -545,13 +545,24 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     let network = args.v4net()?;
-    if afi_safi.afi != Afi::Ip || afi_safi.safi != Safi::Unicast {
-        return None;
-    }
-    if op.is_set() {
-        bgp.route_add(network);
-    } else {
-        bgp.route_del(network);
+    // `network` carries an ipv4-prefix, so it applies to the IPv4
+    // unicast and IPv4 Labeled-Unicast (SAFI 4) families.
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => {
+            if op.is_set() {
+                bgp.route_add(network);
+            } else {
+                bgp.route_del(network);
+            }
+        }
+        (Afi::Ip, Safi::MplsLabel) => {
+            if op.is_set() {
+                bgp.route_add_label_v4(network);
+            } else {
+                bgp.route_del_label_v4(network);
+            }
+        }
+        _ => return None,
     }
     Some(())
 }
