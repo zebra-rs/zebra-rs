@@ -3675,11 +3675,16 @@ pub fn route_flowspec_update(
     // (Phase 2 / RFC 9117) gates re-advertise and install, not Loc-RIB
     // membership, so the selected best path is recorded regardless of
     // the validation verdict.
-    let _ = bgp.local_rib.update_flowspec(afi, nlri.clone(), rib);
+    let (_, selected, _) = bgp.local_rib.update_flowspec(afi, nlri.clone(), rib);
+
+    // Phase 3b: re-advertise (or withdraw) the new best path to flowspec
+    // peers, gated on RFC 9117 validity.
+    route_flowspec_propagate(afi, nlri, &selected, bgp, peers);
 }
 
 /// Withdraw one Flow Specification NLRI from the peer's Adj-RIB-In and
-/// the Loc-RIB, then re-run best-path selection.
+/// the Loc-RIB, re-run best-path selection, then propagate the result
+/// (re-advertise a surviving path, or withdraw from peers).
 pub fn route_flowspec_withdraw(
     ident: usize,
     nlri: &FlowspecNlri,
@@ -3692,7 +3697,150 @@ pub fn route_flowspec_withdraw(
         peer.adj_in.remove_flowspec(afi, nlri, nlri.id);
     }
     bgp.local_rib.remove_flowspec(afi, nlri, nlri.id, ident);
-    bgp.local_rib.select_best_path_flowspec(afi, nlri);
+    let selected = bgp.local_rib.select_best_path_flowspec(afi, nlri);
+    route_flowspec_propagate(afi, nlri, &selected, bgp, peers);
+}
+
+/// Propagate a flow spec's selected best path to peers: re-advertise it
+/// when a valid (RFC 9117) best path exists, otherwise withdraw any
+/// prior advertisement. Invalid best paths are kept in the Loc-RIB (and
+/// shown) but never propagated.
+fn route_flowspec_propagate(
+    afi: Afi,
+    nlri: &FlowspecNlri,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    match selected.last() {
+        Some(best) if super::flowspec::flowspec_validate(bgp.local_rib, nlri, best).is_valid() => {
+            route_advertise_flowspec_to_peers(afi, nlri, best, bgp, peers);
+        }
+        _ => {
+            route_withdraw_flowspec_to_peers(afi, nlri, peers);
+        }
+    }
+}
+
+/// Build the per-peer flow spec NLRI + path attributes for a re-advertise.
+/// Returns `None` to suppress the advertisement: split horizon (never
+/// reflect back to the path's source) and iBGP-to-iBGP without route
+/// reflection. eBGP prepends the local AS; iBGP supplies a default
+/// LOCAL_PREF. Flow specs carry no next-hop (RFC 8955 §4.2.2), so the
+/// NEXT_HOP attribute is cleared.
+pub fn route_update_flowspec(
+    peer: &mut Peer,
+    nlri: &FlowspecNlri,
+    rib: &BgpRib,
+    add_path: bool,
+) -> Option<(FlowspecNlri, BgpAttr)> {
+    if rib.ident == peer.ident {
+        return None;
+    }
+    if peer.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !peer.is_reflector_client()
+    {
+        return None;
+    }
+
+    let mut out = nlri.clone();
+    out.id = if add_path { rib.local_id } else { 0 };
+
+    let mut attrs = (*rib.attr).clone();
+    if peer.is_ebgp()
+        && let Some(ref mut aspath) = attrs.aspath
+    {
+        let local_as_path = As4Path::from(vec![peer.local_as]);
+        aspath.prepend_mut(local_as_path);
+    }
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+    // Flow specs have no next-hop in MP_REACH; don't emit a NEXT_HOP.
+    attrs.nexthop = None;
+
+    Some((out, attrs))
+}
+
+fn send_flowspec_one(peer: &mut Peer, afi: Afi, nlri: FlowspecNlri, attr: Arc<BgpAttr>) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_update = Some(MpReachAttr::Flowspec {
+        afi,
+        updates: vec![nlri],
+    });
+    update.bgp_attr = Some((*attr).clone());
+    peer.send_packet(update.into());
+}
+
+/// Advertise a flow spec's best path to every Established peer that has
+/// negotiated the matching `(afi, Flowspec)` family. Records the
+/// advertisement in each peer's Adj-RIB-Out so a later change can
+/// withdraw it.
+pub fn route_advertise_flowspec_to_peers(
+    afi: Afi,
+    nlri: &FlowspecNlri,
+    best: &BgpRib,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
+
+        let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path) else {
+            continue;
+        };
+
+        let attr = bgp.attr_store.intern(attr);
+        let mut adj = best.clone();
+        adj.attr = attr.clone();
+        peer.adj_out.add_flowspec(afi, out_nlri.clone(), adj);
+        send_flowspec_one(peer, afi, out_nlri, attr);
+    }
+}
+
+/// Withdraw a flow spec from every peer to which it was advertised
+/// (tracked via Adj-RIB-Out), sending one MP_UNREACH UPDATE each.
+pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &mut PeerMap) {
+    let peer_addrs: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    for peer_addr in peer_addrs {
+        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+        // Only withdraw what we actually advertised (skips the source
+        // peer and any peer the announce-side policy suppressed).
+        let advertised = {
+            let table = if afi == Afi::Ip6 {
+                &peer.adj_out.flowspec_v6
+            } else {
+                &peer.adj_out.flowspec_v4
+            };
+            table.0.contains_key(nlri)
+        };
+        if !advertised {
+            continue;
+        }
+        peer.adj_out.remove_flowspec(afi, nlri, 0);
+
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.mp_withdraw = Some(MpUnreachAttr::Flowspec {
+            afi,
+            withdraws: vec![nlri.clone()],
+        });
+        peer.send_packet(update.into());
+    }
 }
 
 pub fn route_from_peer(

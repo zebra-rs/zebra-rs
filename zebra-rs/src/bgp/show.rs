@@ -2238,7 +2238,7 @@ fn show_bgp_flowspec(
         // RFC 9117 validity, computed live against the current unicast
         // Loc-RIB (it gates re-advertise/install in later slices; here
         // it annotates the output). `*` marks a valid flow spec.
-        let validation = super::flowspec::flowspec_validate(bgp, nlri, rib);
+        let validation = super::flowspec::flowspec_validate(&bgp.local_rib, nlri, rib);
         let mark = if validation.is_valid() { "*" } else { " " };
         let from = bgp
             .peers
