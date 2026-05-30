@@ -28,6 +28,9 @@ module ietf-bgp {
     reference
       "RFC XXXX: YANG Model for Border Gateway Protocol (BGP-4).";
   }
+  import zebra-afi-safi {
+    prefix zas;
+  }
   import ietf-inet-types {
     prefix inet;
     reference
@@ -273,13 +276,7 @@ module ietf-bgp {
         description
           "AFI,SAFI configuration available for the
                neighbor or group.";
-        leaf name {
-          type identityref {
-            base bt:afi-safi-type;
-          }
-          description
-            "AFI,SAFI";
-        }
+        uses zas:afi-safi;
 
         list network {
           key "prefix";

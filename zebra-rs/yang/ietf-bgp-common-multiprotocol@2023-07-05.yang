@@ -4,8 +4,8 @@ submodule ietf-bgp-common-multiprotocol {
     prefix bgp;
   }
 
-  import iana-bgp-types {
-    prefix bt;
+  import zebra-afi-safi {
+    prefix zas;
   }
   import ietf-routing-types {
     prefix rt-types;
@@ -138,13 +138,7 @@ submodule ietf-bgp-common-multiprotocol {
   grouping mp-afi-safi-config {
     description
       "Configuration parameters used for all BGP AFI-SAFIs";
-    leaf name {
-      type identityref {
-        base bt:afi-safi-type;
-      }
-      description
-        "AFI,SAFI";
-    }
+    uses zas:afi-safi;
     leaf enabled {
       ext:sort "50";
       mandatory true;
@@ -163,7 +157,7 @@ submodule ietf-bgp-common-multiprotocol {
     // import and export policy included for the afi/safi
     uses rt-pol:apply-policy-group;
     container ipv4 {
-      when "../name = 'bt:ipv4'" {
+      when "../name = 'ipv4'" {
         description
           "Include this container for IPv4 Unicast specific
            configuration";
@@ -175,7 +169,7 @@ submodule ietf-bgp-common-multiprotocol {
       // placeholder for IPv4 unicast specific configuration
     }
     container ipv6 {
-      when "../name = 'bt:ipv6'" {
+      when "../name = 'ipv6'" {
         description
           "Include this container for IPv6 Unicast specific
            configuration";
@@ -188,7 +182,7 @@ submodule ietf-bgp-common-multiprotocol {
       // options
     }
     container vpnv4 {
-      when "../name = 'bt:vpnv4'" {
+      when "../name = 'vpnv4'" {
         description
           "Include this container for IPv4 Unicast L3VPN specific
            configuration";
@@ -200,7 +194,7 @@ submodule ietf-bgp-common-multiprotocol {
       // placeholder for IPv4 Unicast L3VPN specific config options.
     }
     container vpnv6 {
-      when "../name = 'bt:vpnv6'" {
+      when "../name = 'vpnv6'" {
         description
           "Include this container for unicast IPv6 L3VPN specific
            configuration";
@@ -213,7 +207,7 @@ submodule ietf-bgp-common-multiprotocol {
       // options
     }
     container evpn {
-      when "../name = 'bt:evpn'" {
+      when "../name = 'evpn'" {
         description
           "Include this container for BGP EVPN specific
            configuration";

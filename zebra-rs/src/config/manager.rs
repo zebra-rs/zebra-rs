@@ -1178,3 +1178,36 @@ pub fn config_format_type(config_str: &str) -> ConfigFormat {
         ConfigFormat::Yaml
     }
 }
+
+#[cfg(test)]
+mod yang_load_tests {
+    use libyang::YangStore;
+
+    /// Load the two root YANG modes (`exec`, `configure`) from the
+    /// shipped `yang/` tree exactly as `ConfigManager::init` does, so a
+    /// broken schema — an unresolved import, a bad `uses` / `when`, a
+    /// dangling identity — fails here instead of at daemon startup
+    /// (which CI's unit suite never reaches). This is the regression
+    /// guard for hand-edited YANG (afi-safi groupings, augments, ...).
+    fn load_mode(mode: &str) {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve(mode)
+            .unwrap_or_else(|e| panic!("yang `{mode}` failed to load: {e:#}"));
+        yang.identity_resolve();
+        assert!(
+            yang.find_module(mode).is_some(),
+            "yang `{mode}` module missing after load",
+        );
+    }
+
+    #[test]
+    fn configure_mode_loads() {
+        load_mode("configure");
+    }
+
+    #[test]
+    fn exec_mode_loads() {
+        load_mode("exec");
+    }
+}
