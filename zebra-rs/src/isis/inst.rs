@@ -167,7 +167,7 @@ pub struct Isis {
     /// config builder in rib/static/config.rs.
     pub flex_algo: super::flex_algo::FlexAlgoConfig,
     /// Affinity (admin-group) name table local to this IS-IS instance,
-    /// from /router/isis/affinity-map. Resolves the per-link `affinity`
+    /// from /affinity-map. Resolves the per-link `affinity`
     /// leaf-list names into 256-bit Extended Admin Group bit positions
     /// (RFC 7308) at LSP-build time.
     pub affinity_map: super::affinity_map::AffinityMap,
@@ -377,7 +377,7 @@ pub struct Isis {
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
     pub redist_v6: BTreeMap<(crate::rib::RibType, Ipv6Net), crate::rib::RouteEntryV6>,
 
-    /// In-flight `/router/isis/srlg/group/*` config staged by libyang
+    /// In-flight `/srlg/group/*` config staged by libyang
     /// callbacks and folded into `srlg_groups` on `ConfigOp::CommitEnd`.
     pub srlg_config: SrlgGroupBuilder,
 
@@ -727,11 +727,12 @@ impl Isis {
             return;
         }
 
-        // `/router/isis/srlg/group/...` is dispatched through the
-        // SRLG builder's own path → handler table (the same shape the
-        // RIB uses for `/segment-routing/block`); the applied
-        // snapshot lands in `srlg_groups` at CommitEnd.
-        if path.starts_with("/router/isis/srlg/group") {
+        // `/srlg/group/...` is the global SRLG table (shared with
+        // OSPF), dispatched through the SRLG builder's own path →
+        // handler table (the same shape the RIB uses for
+        // `/segment-routing/block`); the applied snapshot lands in
+        // `srlg_groups` at CommitEnd.
+        if path.starts_with("/srlg/group") {
             let _ = self.srlg_config.exec(path, args, msg.op);
             return;
         }
@@ -2257,7 +2258,7 @@ impl Isis {
         }
     }
 
-    /// Fold the staged `/router/isis/srlg/group/*` cache into the
+    /// Fold the staged `/srlg/group/*` cache into the
     /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
     /// actually moved, re-originate both LSP levels so the new
     /// name→value mapping reaches peers without waiting for the

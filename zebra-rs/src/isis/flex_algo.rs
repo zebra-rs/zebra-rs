@@ -124,7 +124,7 @@ const SABM_FLEX_ALGO: u8 = 0x10;
 /// Build the per-link Extended Admin Group bitmap from a set of
 /// affinity names by resolving each name to its bit position via the
 /// affinity-map and packing the bits into RFC 7308 32-bit words.
-/// Names with no matching `/router/isis/affinity-map/affinity` entry
+/// Names with no matching `/affinity-map/affinity` entry
 /// are silently dropped (best-effort emit, matches `build_fad_subs`).
 fn link_admin_group_words(affinity: &BTreeSet<String>, am: &AffinityMap) -> Vec<u32> {
     let mut g = ExtAdminGroup::default();
@@ -834,7 +834,7 @@ mod tests {
         let mut am = AffinityMap::new();
         for (name, bit) in [("blue", "0"), ("red", "200")] {
             am.exec(
-                "/router/isis/affinity-map/affinity/bit-position".into(),
+                "/affinity-map/affinity/bit-position".into(),
                 args(&[name, bit]),
                 ConfigOp::Set,
             )
@@ -868,7 +868,7 @@ mod tests {
         let mut am = AffinityMap::new();
         for (name, bit) in [("blue", "0"), ("low-lat", "4"), ("red", "31")] {
             am.exec(
-                "/router/isis/affinity-map/affinity/bit-position".into(),
+                "/affinity-map/affinity/bit-position".into(),
                 args(&[name, bit]),
                 ConfigOp::Set,
             )
@@ -904,7 +904,7 @@ mod tests {
         let mut am = AffinityMap::new();
         for (name, bit) in [("a", "0"), ("b", "32"), ("c", "200")] {
             am.exec(
-                "/router/isis/affinity-map/affinity/bit-position".into(),
+                "/affinity-map/affinity/bit-position".into(),
                 args(&[name, bit]),
                 ConfigOp::Set,
             )
@@ -1000,7 +1000,7 @@ mod tests {
 
         let mut am = AffinityMap::new();
         am.exec(
-            "/router/isis/affinity-map/affinity/bit-position".into(),
+            "/affinity-map/affinity/bit-position".into(),
             args(&["blue", "4"]),
             ConfigOp::Set,
         )

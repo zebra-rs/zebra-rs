@@ -310,6 +310,71 @@ module config {
       uses "vty:vty";
     }
 
+    container affinity-map {
+      ext:help "Named affinity (admin-group) table";
+      // Global named affinity table (RFC 7308 Extended Admin Group).
+      // Each entry binds an operator-friendly name to a bit position
+      // in the 256-bit bitmap. Shared by every IGP: per-link
+      // `affinity` leaf-lists (under `router isis` / `router ospf` /
+      // `router ospfv3` interfaces) and per-flex-algo include-any /
+      // include-all / exclude-any constraints reference these names.
+      // Each protocol task keeps its own copy fed by the config
+      // broadcast.
+      list affinity {
+        key "name";
+        leaf name {
+          type string;
+        }
+        leaf bit-position {
+          type uint16 { range "0..255"; }
+          mandatory true;
+          description
+            "Bit index in the 256-bit Extended Admin Group
+             (RFC 7308). The on-the-wire bitmap is the union of
+             bit positions referenced by all `affinity` names
+             attached to a given link, advertised inside the
+             ASLA sub-TLV (RFC 9479 for IS-IS, RFC 9492 for OSPF)
+             when at least one flex-algo references the attribute.";
+        }
+      }
+    }
+
+    container srlg {
+      ext:help "Shared Risk Link Group configuration";
+      description
+        "Global Shared Risk Link Group (SRLG) table. Each named group
+         binds an operator-friendly identifier to the 32-bit SRLG value
+         advertised by the IGPs (IS-IS TLV 138/139, RFC 5307/6119;
+         OSPF SRLG sub-TLV, RFC 9492). Each IGP resolves its
+         per-interface SRLG name references against this table when
+         building LSPs/LSAs.";
+
+      list group {
+        key "name";
+        description
+          "Named SRLG group. The name is the handle used by the
+           per-interface `srlg` leaf-list under an IGP's interface
+           subtree; the value is the 32-bit identifier emitted on the
+           wire.";
+        leaf name {
+          type string;
+          description
+            "Operator-assigned SRLG group identifier.";
+        }
+        leaf value {
+          type uint32;
+          mandatory true;
+          description
+            "32-bit SRLG value advertised in IGP TE extensions. Two
+             links share fate (are in the same shared risk group) iff
+             they carry a common value here. The numeric space is
+             operator-defined; uniqueness is not enforced — different
+             group names may intentionally share a value (e.g. as
+             aliases) or accidentally collide.";
+        }
+      }
+    }
+
     container router {
       ext:help "Router configuration";
       uses "ietf-bgp:bgp";
@@ -790,35 +855,6 @@ module config {
           }
         }
 
-        container affinity-map {
-          // Named affinity (admin-group) table local to this IS-IS
-          // instance. Each entry binds an operator-friendly name to a
-          // bit position in the 256-bit Extended Admin Group bitmap
-          // (RFC 7308). Per-link `affinity` leaf-lists and per-flex-
-          // algo include-any / include-all / exclude-any constraints
-          // reference these names. Held inside /router/isis to match
-          // IOS-XR's `router isis / affinity-map` placement; if/when
-          // OSPF flex-algo arrives the table can be promoted to a
-          // global sibling of /srlg.
-          list affinity {
-            key "name";
-            leaf name {
-              type string;
-            }
-            leaf bit-position {
-              type uint16 { range "0..255"; }
-              mandatory true;
-              description
-                "Bit index in the 256-bit Extended Admin Group
-                 (RFC 7308). The on-the-wire bitmap is the union of
-                 bit positions referenced by all `affinity` names
-                 attached to a given link, advertised inside the
-                 ASLA sub-TLV (RFC 9479) when at least one flex-algo
-                 references the attribute.";
-            }
-          }
-        }
-
         list flex-algo {
           // IS-IS Flexible Algorithm (RFC 9350) definition. Each list
           // entry describes one algorithm this router participates in
@@ -1194,43 +1230,6 @@ module config {
              multiple LSPs so each fragment stays at or below this value.
              Default 1492 matches ISO 10589 and is the value every IS-IS
              peer is required to accept.";
-        }
-
-        container srlg {
-          ext:help "Shared Risk Link Group configuration";
-          description
-            "IS-IS Shared Risk Link Group (SRLG) table. Each named group
-             binds an operator-friendly identifier to the 32-bit SRLG
-             value advertised in the IS-IS top-level Shared Risk Link
-             Group TLVs (TLV 138 for IPv4, RFC 5307; TLV 139 for IPv6,
-             RFC 6119). IS-IS resolves the per-interface SRLG name
-             references against this table when building LSPs.";
-
-          list group {
-            key "name";
-            description
-              "Named SRLG group. The name is the handle used by the
-               per-interface `srlg` leaf-list under
-               `router isis / interface`; the value is the 32-bit
-               identifier emitted on the wire.";
-            leaf name {
-              type string;
-              description
-                "Operator-assigned SRLG group identifier.";
-            }
-            leaf value {
-              type uint32;
-              mandatory true;
-              description
-                "32-bit SRLG value advertised in IS-IS TE extensions
-                 (TLVs 138/139 per RFC 5307 / RFC 6119). Two links
-                 share fate (are in the same shared risk group) iff
-                 they carry a common value here. The numeric space is
-                 operator-defined; uniqueness is not enforced —
-                 different group names may intentionally share a
-                 value (e.g. as aliases) or accidentally collide.";
-            }
-          }
         }
 
         list interface {
