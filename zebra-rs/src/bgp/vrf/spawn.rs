@@ -17,6 +17,7 @@
 //! [`crate::rib::client::ClientRegistry`].
 
 use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -26,6 +27,7 @@ use super::super::inst::RibKnownVrf;
 use super::super::vrf_config::{BgpVrfConfig, BgpVrfEncapsulation};
 use super::inst::{BgpVrf, BgpVrfInbox, serve_vrf};
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
+use super::sid::Srv6VrfSid;
 
 use crate::config::RibSubscriber;
 
@@ -59,6 +61,13 @@ pub struct BgpVrfHandle {
     /// `maybe_respawn_vrf_with_kernel_ctx` after the kernel VRF
     /// appears installs the ILM.
     pub ilm_decap_ifindex: Option<u32>,
+    /// SRv6 End.DT46 service SID `(addr, locator-function)` allocated
+    /// for an `encapsulation srv6` VRF. The function is preserved
+    /// across kernel-ctx / relabel respawns and freed back to
+    /// `Bgp::srv6_sid_pool` at despawn; the addr drives the
+    /// `Message::SidDel` withdrawal. `None` for MPLS-mode VRFs and for
+    /// srv6 VRFs spawned before their locator resolved.
+    pub srv6_sid: Option<(Ipv6Addr, u16)>,
 }
 
 /// Pure diff: which VRF names need to be spawned (in `desired`
@@ -111,6 +120,7 @@ pub fn spawn_bgp_vrf(
     label: u32,
     kernel: Option<RibKnownVrf>,
     rib_subscriber: &RibSubscriber,
+    srv6: Option<Srv6VrfSid>,
     global_tx: UnboundedSender<BgpGlobalMsg>,
 ) -> BgpVrfHandle {
     // Snapshot for logging + ILM install so we can move
@@ -208,6 +218,35 @@ pub fn spawn_bgp_vrf(
         _ => None,
     };
 
+    // SRv6 egress decap: program the per-VRF End.DT46 service SID into
+    // the VRF's kernel table via a seg6local `End.DT46 vrftable`. Like
+    // the MPLS ILM this is gated on kernel info (the decap needs the
+    // VRF table id); a placeholder-ctx spawn defers to
+    // `maybe_respawn_vrf_with_kernel_ctx`, which re-runs with the
+    // preserved SID once the kernel VRF appears. The 16-byte SID is the
+    // full address (no transposition); `ifindex: 0` lets the RIB
+    // resolve a loopback oif, the same as IS-IS End / uN.
+    if let (Some(s), Some(table_id)) = (srv6.as_ref(), kernel_table_id) {
+        let sid = crate::rib::Sid {
+            addr: s.addr,
+            behavior: crate::rib::SidBehavior::EndDT46,
+            context: crate::rib::SidContext::None,
+            owner: crate::rib::SidOwner::new("bgp", 0),
+            locator: s.locator.clone(),
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id,
+        };
+        rib_subscriber.send_sid_add(sid);
+    }
+    // Keep the SID `(addr, function)` on the handle whether or not it
+    // was installed this spawn — the function must be freed at despawn
+    // and the addr withdrawn, and a placeholder spawn re-installs it on
+    // respawn.
+    let srv6_sid = srv6.as_ref().map(|s| (s.addr, s.function));
+
     // Capture the show channel before `vrf` is moved into the task, so
     // the global instance can register it with the config manager for
     // `show bgp vrf <name> …` redirection.
@@ -220,6 +259,7 @@ pub fn spawn_bgp_vrf(
         table_id = ?kernel_table_id,
         label,
         ilm_installed = ilm_decap_ifindex.is_some(),
+        srv6_sid = ?srv6_sid.map(|(addr, _)| addr),
         peers = peer_count,
         networks = network_count,
         "bgp: spawned per-VRF task",
@@ -230,6 +270,7 @@ pub fn spawn_bgp_vrf(
         task,
         label,
         ilm_decap_ifindex,
+        srv6_sid,
     }
 }
 
@@ -398,6 +439,7 @@ mod tests {
             /* label */ 16,
             None,
             &subscriber,
+            /* srv6 */ None,
             global_tx,
         )
     }
