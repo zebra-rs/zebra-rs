@@ -286,10 +286,19 @@ pub fn e_router_v3_lsa_build(
 /// configured range here.
 pub const SR_INFO_LSID: u32 = 0;
 
-pub fn e_router_v3_sr_info_lsa_build(router_id: Ipv4Addr) -> Ospfv3Lsa {
-    let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv {
-        algos: vec![Algo::Spf],
-    });
+/// `algos` lists every algorithm this router participates in (regular
+/// SPF + configured flex-algos), advertised in the SR-Algorithm TLV
+/// (RFC 8666 §3.1). `fads` carries the Flexible Algorithm Definitions
+/// (RFC 9350 §7.1) this router originates — one `Ospfv3ExtTlv::Fad`
+/// each, appended after the SR capability TLVs in the same per-router
+/// E-Router-LSA (the v3 home of the FAD, mirroring how the v2 FAD rides
+/// the Router Information Opaque LSA).
+pub fn e_router_v3_sr_info_lsa_build(
+    router_id: Ipv4Addr,
+    algos: Vec<Algo>,
+    fads: Vec<Ospfv3FadTlv>,
+) -> Ospfv3Lsa {
+    let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv { algos });
     let sid_range = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
         range: SRGB_RANGE,
         sid_label: SidLabelTlv::Label(SRGB_START),
@@ -299,9 +308,10 @@ pub fn e_router_v3_sr_info_lsa_build(router_id: Ipv4Addr) -> Ospfv3Lsa {
         sid_label: SidLabelTlv::Label(SRLB_START),
     });
 
-    let body = Ospfv3ELsaBody {
-        tlvs: vec![sr_algo, sid_range, local_block],
-    };
+    let mut tlvs = vec![sr_algo, sid_range, local_block];
+    tlvs.extend(fads.into_iter().map(Ospfv3ExtTlv::Fad));
+
+    let body = Ospfv3ELsaBody { tlvs };
 
     let mut lsa = Ospfv3Lsa {
         h: Ospfv3LsaHeader {
@@ -593,5 +603,48 @@ mod tests {
             })
             .collect();
         assert_eq!(algos, vec![Algo::FlexAlgo(128)]);
+    }
+
+    /// The OSPFv3 per-router SR-info E-Router-LSA advertises every
+    /// participating algo in the SR-Algorithm TLV and carries each
+    /// passed FAD as an `Ospfv3ExtTlv::Fad` (RFC 9350 §7.1).
+    #[test]
+    fn e_router_v3_sr_info_lsa_advertises_flex_algos_and_fads() {
+        let fad = Ospfv3FadTlv {
+            flex_algorithm: 128,
+            metric_type: 0,
+            calc_type: 0,
+            priority: 128,
+            subs: Vec::new(),
+        };
+        let lsa = e_router_v3_sr_info_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)],
+            vec![fad.clone()],
+        );
+        let Ospfv3LsBody::ERouter(body) = &lsa.body else {
+            panic!("expected ERouter body");
+        };
+        let algos = body
+            .tlvs
+            .iter()
+            .find_map(|t| match t {
+                Ospfv3ExtTlv::SrAlgorithm(a) => Some(a.algos.clone()),
+                _ => None,
+            })
+            .expect("SR-Algorithm TLV present");
+        assert_eq!(
+            algos,
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)]
+        );
+        let fads: Vec<_> = body
+            .tlvs
+            .iter()
+            .filter_map(|t| match t {
+                Ospfv3ExtTlv::Fad(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fads, vec![fad]);
     }
 }
