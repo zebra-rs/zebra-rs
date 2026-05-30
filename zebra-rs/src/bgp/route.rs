@@ -4940,22 +4940,46 @@ fn send_eor_vpnv4_unicast(peer: &mut Peer) {
     peer.send_packet(update.into());
 }
 
-// Send wildcard RTCv4.
-fn send_default_rtcv4_unicast(peer: &mut Peer) {
-    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+// Advertise our Route Target Constraint membership (RFC 4684): one
+// NLRI per IPv4 import Route-Target across all local VRFs, so the peer
+// only sends us the VPNv4 routes we actually import. With no local
+// import RTs the membership is empty, which emits the zero-length
+// "default" NLRI — the wildcard "send me everything" — preserving the
+// behaviour of a router that has RTC enabled but no VRFs configured.
+fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
+    let mut updates = Vec::new();
+    if let Some(dispatcher) = bgp.vrf_import {
+        // Union the per-VRF import-RT sets so a Route-Target shared by
+        // several VRFs is advertised once.
+        let mut rts: BTreeSet<RouteDistinguisher> = BTreeSet::new();
+        for vrf in dispatcher.rib_known_vrfs.values() {
+            rts.extend(vrf.import_rts_v4.iter().copied());
+        }
+        for rt in rts {
+            // RTs are stored as RouteDistinguisher; the `From` impl sets
+            // high_type per ASN-vs-IPv4 RD but leaves the sub-type 0, so
+            // mark it as a Route Target (RFC 4360 §4, sub-type 0x02).
+            let mut val: ExtCommunityValue = rt.into();
+            val.low_type = 0x02;
+            updates.push(Rtcv4 {
+                id: 0,
+                asn: peer.local_as,
+                rt: val,
+            });
+        }
+    }
 
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     let mut attrs = BgpAttr::new();
     if peer.is_ibgp() {
         attrs.local_pref = Some(LocalPref::default());
     }
     update.bgp_attr = Some(attrs);
-
-    let nlri = Rtcv4Reach {
+    update.mp_update = Some(MpReachAttr::Rtcv4(Rtcv4Reach {
         snpa: 0,
         nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        updates: vec![],
-    };
-    update.mp_update = Some(MpReachAttr::Rtcv4(nlri));
+        updates,
+    }));
     peer.send_packet(update.into());
 }
 
@@ -5031,16 +5055,21 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
 
 // Called when peer has been established.
 pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
-    // Advertize.
-    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
-        route_sync_ipv4(peer, bgp);
-    }
-    // We want all RTC.
+    // RFC 4684: advertise our Route Target Constraint membership BEFORE
+    // any other AFI/SAFI, so the peer can apply RTC filtering to every
+    // route it sends us from the start of the session. The membership
+    // carries our local VRFs' import RTs (or the wildcard when none are
+    // configured); marking the RTC EoR in `peer.eor` defers our own
+    // VPNv4 advertisement until the peer has sent us its membership.
     if peer.is_afi_safi(Afi::Ip, Safi::Rtc) {
         let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
         peer.eor.insert(key, true);
-        send_default_rtcv4_unicast(peer);
+        send_rtcv4_membership(peer, bgp);
         send_eor_rtcv4_unicast(peer);
+    }
+    // Advertize.
+    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
+        route_sync_ipv4(peer, bgp);
     }
     if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
         let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
