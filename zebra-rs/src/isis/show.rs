@@ -800,8 +800,11 @@ fn show_isis_route(
 fn show_isis_topology(
     isis: &Isis,
     _args: Args,
-    _json: bool,
+    json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(show_isis_topology_json(isis));
+    }
     let mut buf = String::new();
     let local_sys_id = isis.config.net.sys_id();
     writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
@@ -869,6 +872,215 @@ fn show_isis_topology(
         writeln!(buf, "(no SPF result yet)")?;
     }
     Ok(buf)
+}
+
+// JSON view for `show isis topology`. Mirrors the columns rendered by
+// `write_spf_tree`: one entry per SPF vertex, with the prefixes that
+// hang off it, grouped per level and per address-family.
+#[derive(Serialize)]
+struct TopologyJson {
+    area: String,
+    levels: Vec<TopologyLevelJson>,
+}
+
+#[derive(Serialize)]
+struct TopologyLevelJson {
+    level: usize,
+    ipv4: Vec<TopoVertexJson>,
+    ipv6: Vec<TopoVertexJson>,
+    // True when the IPv6 tree was computed from the MT 2 (IPv6
+    // unicast) SPF rather than the legacy single-topology run.
+    ipv6_mt2: bool,
+}
+
+#[derive(Serialize)]
+struct TopoVertexJson {
+    vertex: String,
+    system_id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_self: bool,
+    metric: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    nexthop: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    interface: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    parent: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    prefixes: Vec<TopoPrefixJson>,
+}
+
+#[derive(Serialize)]
+struct TopoPrefixJson {
+    prefix: String,
+    #[serde(rename = "type")]
+    prefix_type: String,
+    metric: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    nexthop: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    interface: String,
+}
+
+/// JSON sibling of `show_isis_topology`. Walks the same per-level,
+/// per-AFI SPF results as the text path but emits structured data.
+fn show_isis_topology_json(isis: &Isis) -> String {
+    let local_sys_id = isis.config.net.sys_id();
+    let mut levels = Vec::new();
+    for level in &[Level::L1, Level::L2] {
+        let Some(spf_result) = isis.spf_result.get(level).as_ref() else {
+            continue;
+        };
+        if spf_result.is_empty() {
+            continue;
+        }
+
+        let ipv4 = spf_tree_json(isis, level, &local_sys_id, spf_result, false, false);
+
+        // Match the text path: in MT 2 mode the IPv6 tree comes from
+        // the MT 2 SPF result; otherwise the legacy NLPID-gated tree.
+        let mt2 = mt2_v6_active(isis);
+        let ipv6 = if mt2 {
+            match isis.mt2_spf_result.get(level).as_ref() {
+                Some(mt2_spf) => spf_tree_json(isis, level, &local_sys_id, mt2_spf, true, true),
+                None => Vec::new(),
+            }
+        } else {
+            spf_tree_json(isis, level, &local_sys_id, spf_result, true, false)
+        };
+
+        levels.push(TopologyLevelJson {
+            level: match level {
+                Level::L1 => 1,
+                Level::L2 => 2,
+            },
+            ipv4,
+            ipv6,
+            ipv6_mt2: mt2,
+        });
+    }
+
+    let view = TopologyJson {
+        area: format_area_id(&isis.config.net),
+        levels,
+    };
+    serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+}
+
+/// Structured sibling of `write_spf_tree`. Walks the same SPF result
+/// and reach maps and returns one entry per vertex; kept separate from
+/// the text renderer so the FRR-validated column output stays
+/// untouched.
+fn spf_tree_json(
+    isis: &Isis,
+    level: &Level,
+    local_sys_id: &IsisSysId,
+    spf_result: &std::collections::BTreeMap<usize, spf::Path>,
+    ipv6: bool,
+    mt2_mode: bool,
+) -> Vec<TopoVertexJson> {
+    let ipv6_capable = if ipv6 && !mt2_mode {
+        Some(ipv6_capable_set_show(isis, level))
+    } else {
+        None
+    };
+
+    let mut nodes: Vec<(usize, &spf::Path)> = spf_result.iter().map(|(k, v)| (*k, v)).collect();
+    nodes.sort_by_key(|(_, p)| (p.cost, p.id));
+
+    let local_hostname = hostname_for(isis, level, local_sys_id);
+
+    let mut vertices = Vec::new();
+    for (node_id, path) in &nodes {
+        let Some(node_sys_id) = isis.lsp_map.get(level).resolve(*node_id) else {
+            continue;
+        };
+        let node_sys_id = *node_sys_id;
+        let is_self = node_sys_id == *local_sys_id;
+        if let Some(set) = &ipv6_capable
+            && !set.contains(&node_sys_id)
+        {
+            continue;
+        }
+        let node_hostname = hostname_for(isis, level, &node_sys_id);
+
+        // First-hop hostname / interface / parent (blank for self).
+        let (nexthop_str, iface_str, parent_str) = if is_self {
+            (String::new(), String::new(), String::new())
+        } else {
+            let p = path.paths.first().cloned().unwrap_or_default();
+            if p.is_empty() {
+                (String::new(), String::new(), local_hostname.clone())
+            } else {
+                let first_hop_sys_id = isis
+                    .lsp_map
+                    .get(level)
+                    .resolve(p[0])
+                    .copied()
+                    .unwrap_or(node_sys_id);
+                let parent_sys_id = if p.len() <= 1 {
+                    *local_sys_id
+                } else {
+                    isis.lsp_map
+                        .get(level)
+                        .resolve(p[p.len() - 2])
+                        .copied()
+                        .unwrap_or(*local_sys_id)
+                };
+                (
+                    hostname_for(isis, level, &first_hop_sys_id),
+                    ifname_for_neighbor(isis, level, &first_hop_sys_id),
+                    hostname_for(isis, level, &parent_sys_id),
+                )
+            }
+        };
+
+        // Prefix rows hanging off this node. nexthop_str / iface_str
+        // are already empty for self, matching the blanked text cells.
+        let mut prefixes = Vec::new();
+        if !ipv6 {
+            if let Some(entries) = isis.reach_map.get(level).get(&Afi::Ip).get(&node_sys_id) {
+                for entry in entries.iter() {
+                    let prefix_type = if is_self { "IP internal" } else { "IP TE" };
+                    prefixes.push(TopoPrefixJson {
+                        prefix: entry.prefix.trunc().to_string(),
+                        prefix_type: prefix_type.to_string(),
+                        metric: path.cost + entry.metric,
+                        nexthop: nexthop_str.clone(),
+                        interface: iface_str.clone(),
+                    });
+                }
+            }
+        } else if let Some(entries) = (if mt2_mode {
+            isis.mt2_reach_map_v6.get(level)
+        } else {
+            isis.reach_map_v6.get(level)
+        })
+        .get(&node_sys_id)
+        {
+            for entry in entries.iter() {
+                prefixes.push(TopoPrefixJson {
+                    prefix: entry.prefix.trunc().to_string(),
+                    prefix_type: "IP6 internal".to_string(),
+                    metric: path.cost + entry.metric,
+                    nexthop: nexthop_str.clone(),
+                    interface: iface_str.clone(),
+                });
+            }
+        }
+
+        vertices.push(TopoVertexJson {
+            vertex: node_hostname,
+            system_id: node_sys_id.to_string(),
+            is_self,
+            metric: path.cost,
+            nexthop: nexthop_str,
+            interface: iface_str,
+            parent: parent_str,
+            prefixes,
+        });
+    }
+    vertices
 }
 
 fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::fmt::Error> {
