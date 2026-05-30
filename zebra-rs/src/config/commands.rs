@@ -57,6 +57,10 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
     mode.install_func(String::from("/clear/isis/spf"), clear_isis_spf);
+    // Same operator command as exec mode, so the output format can be
+    // switched without leaving the configure prompt.
+    mode.install_func(String::from("/cli/format/json"), cli_format_json);
+    mode.install_func(String::from("/cli/format/terminal"), cli_format_terminal);
     mode
 }
 
