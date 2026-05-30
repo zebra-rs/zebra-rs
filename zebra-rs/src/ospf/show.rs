@@ -179,6 +179,7 @@ impl Ospf {
         self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
         self.show_add("/show/ip/ospf/route", show_ospf_route);
         self.show_add("/show/ip/ospf/spf", show_ospf_spf);
+        self.show_add("/show/ip/ospf/flex-algo", show_ospf_flex_algo);
         self.show_add("/show/ip/ospf/graph", show_ospf_graph);
         self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
         self.show_add("/show/ip/ospf/graceful-restart", show_ospf_graceful_restart);
@@ -1640,6 +1641,66 @@ fn show_ospf_spf(
     let mut buf = String::new();
     if let Some(spf) = &ospf.spf_result {
         spf::disp_out(&mut buf, spf, false);
+    }
+    Ok(buf)
+}
+
+/// `show ip ospf flex-algo` — for each configured Flexible Algorithm
+/// (RFC 9350): its local definition plus the FAD-filtered per-algo SPF
+/// tree (the routers reachable under that algorithm's constraints).
+fn show_ospf_flex_algo(
+    ospf: &Ospf,
+    _args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    use crate::flex_algo::FadMetricType;
+    use std::fmt::Write;
+
+    let mut buf = String::new();
+    if ospf.flex_algo.config.is_empty() {
+        writeln!(buf, "No Flexible Algorithms configured")?;
+        return Ok(buf);
+    }
+
+    let names =
+        |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
+
+    for (algo, entry) in &ospf.flex_algo.config {
+        writeln!(buf, "Flex-Algorithm {algo}")?;
+        let metric = match entry.metric_type.unwrap_or(FadMetricType::Igp) {
+            FadMetricType::Igp => "igp",
+            FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
+            FadMetricType::TeDefault => "te-default",
+        };
+        writeln!(buf, "  Metric-Type: {metric}")?;
+        writeln!(buf, "  Priority: {}", entry.priority.unwrap_or(128))?;
+        writeln!(
+            buf,
+            "  Advertise-Definition: {}",
+            entry.advertise_definition.unwrap_or(false)
+        )?;
+        if !entry.include_any.is_empty() {
+            writeln!(buf, "  Affinity Include-Any: {}", names(&entry.include_any))?;
+        }
+        if !entry.include_all.is_empty() {
+            writeln!(buf, "  Affinity Include-All: {}", names(&entry.include_all))?;
+        }
+        if !entry.exclude_any.is_empty() {
+            writeln!(buf, "  Affinity Exclude-Any: {}", names(&entry.exclude_any))?;
+        }
+        if !entry.srlg_exclude.is_empty() {
+            writeln!(buf, "  SRLG Exclude: {}", names(&entry.srlg_exclude))?;
+        }
+
+        match ospf.spf_flex_algo.get(algo) {
+            Some(Some(spf_res)) => {
+                writeln!(buf, "  SPF: {} reachable node(s)", spf_res.len())?;
+                spf::disp_out(&mut buf, spf_res, false);
+            }
+            Some(None) => writeln!(buf, "  SPF: no source vertex in per-algo topology")?,
+            None => writeln!(buf, "  SPF: not yet computed")?,
+        }
+        writeln!(buf)?;
     }
     Ok(buf)
 }
