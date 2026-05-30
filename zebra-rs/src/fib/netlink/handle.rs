@@ -225,11 +225,12 @@ fn sid_route_target(
             )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
-        // End.DT4 / End.DT6 are terminal decap+lookup actions. Same
-        // FIB shape as End.X — a /128 host route in table=main with
-        // kind=Unicast, pointed at sr0 by the static route's
-        // ifindex_origin.
-        SidBehavior::EndDT4 | SidBehavior::EndDT6 => {
+        // End.DT4 / End.DT6 / End.DT46 are terminal decap+lookup
+        // actions. Same FIB shape as End.X — a /128 host route in
+        // table=main with kind=Unicast, pointed at sr0 by the static
+        // route's ifindex_origin. (The inner decap lookup table for
+        // End.DT* rides inside the seg6local encap, not here.)
+        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndDT46 => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
     }
@@ -664,7 +665,10 @@ impl FibHandle {
                 msg.attributes.push(RouteAttribute::Oif(ifindex));
             }
             if let Some((encap, encap_type)) =
-                super::srv6::build_seg6local_attrs(action, None, None)
+                // Static seg6local action routes keep the legacy
+                // RT_TABLE_MAIN decap (table_id 0); per-VRF table
+                // selection arrives via the protocol SID path.
+                super::srv6::build_seg6local_attrs(action, None, None, 0)
             {
                 msg.attributes.push(encap);
                 msg.attributes.push(encap_type);
@@ -1303,7 +1307,7 @@ impl FibHandle {
             msg.attributes.push(RouteAttribute::Oif(ifindex));
         }
         let Some((encap, encap_type)) =
-            super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6, sid.structure)
+            super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6, sid.structure, sid.table_id)
         else {
             tracing::warn!(
                 "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",

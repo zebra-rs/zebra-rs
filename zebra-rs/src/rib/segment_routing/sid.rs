@@ -39,6 +39,12 @@ pub enum SidBehavior {
     /// End.DT6 — RFC 8986 §4.7. Decapsulates and looks up the inner
     /// IPv6 packet in a configured table. Same caveat as End.DT4.
     EndDT6,
+    /// End.DT46 — RFC 8986 §4.8. Dual-family decap: pops the outer
+    /// IPv6 / SRH and looks the inner IPv4 *or* IPv6 packet up in a
+    /// VRF table (`SEG6_LOCAL_VRFTABLE`). One SID serves both AFIs,
+    /// which is how BGP L3VPN-over-SRv6 binds a single per-VRF SID;
+    /// the table-id is carried in [`Sid::table_id`].
+    EndDT46,
 }
 
 impl fmt::Display for SidBehavior {
@@ -50,6 +56,7 @@ impl fmt::Display for SidBehavior {
             Self::UA => write!(f, "uA"),
             Self::EndDT4 => write!(f, "End.DT4"),
             Self::EndDT6 => write!(f, "End.DT6"),
+            Self::EndDT46 => write!(f, "End.DT46"),
         }
     }
 }
@@ -68,6 +75,7 @@ impl FromStr for SidBehavior {
             "uA" => Ok(Self::UA),
             "End.DT4" => Ok(Self::EndDT4),
             "End.DT6" => Ok(Self::EndDT6),
+            "End.DT46" => Ok(Self::EndDT46),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
     }
@@ -178,6 +186,13 @@ pub struct Sid {
     /// Partitioning of the SID's bits. Required for `UN`/`UA`; ignored
     /// for classic `End`/`EndX` (left `None`).
     pub structure: Option<SidStructure>,
+    /// Kernel routing-table id the decap looks the inner packet up in,
+    /// for the End.DT* behaviors. `0` means `RT_TABLE_MAIN` (the
+    /// default IS-IS / static path lands inner traffic in the main
+    /// table); BGP L3VPN-over-SRv6 sets it to the VRF's table so an
+    /// End.DT46 decap lands in the right VRF. Ignored by End / End.X /
+    /// uN / uA.
+    pub table_id: u32,
 }
 
 impl Sid {
@@ -195,7 +210,8 @@ impl Sid {
             | SidBehavior::EndX
             | SidBehavior::UA
             | SidBehavior::EndDT4
-            | SidBehavior::EndDT6 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndDT6
+            | SidBehavior::EndDT46 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UN => {
                 let plen = self
                     .structure
@@ -230,6 +246,7 @@ mod tests {
         assert_eq!(SidBehavior::EndX.to_string(), "End.X");
         assert_eq!(SidBehavior::EndDT4.to_string(), "End.DT4");
         assert_eq!(SidBehavior::EndDT6.to_string(), "End.DT6");
+        assert_eq!(SidBehavior::EndDT46.to_string(), "End.DT46");
     }
 
     #[test]
@@ -243,6 +260,7 @@ mod tests {
             SidBehavior::UA,
             SidBehavior::EndDT4,
             SidBehavior::EndDT6,
+            SidBehavior::EndDT46,
         ] {
             let s = variant.to_string();
             let parsed: SidBehavior = s.parse().expect("round-trip");

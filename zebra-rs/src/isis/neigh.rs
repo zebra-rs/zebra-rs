@@ -158,6 +158,8 @@ impl Neighbor {
             ifindex: self.ifindex,
             nh6,
             structure,
+            // End.X is a local cross-connect, not a table decap.
+            table_id: 0,
         };
         let _ = rib_client.send(rib::Message::SidAdd { sid });
         self.endx_sid = Some((function, addr));

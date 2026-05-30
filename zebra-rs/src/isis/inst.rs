@@ -2220,6 +2220,8 @@ impl Isis {
                 ifindex: 0,
                 nh6: None,
                 structure,
+                // End / uN is local-processing, no table decap.
+                table_id: 0,
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_end_sid = Some(addr);

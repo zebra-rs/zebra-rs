@@ -2014,6 +2014,7 @@ mod tests {
             ifindex: 0,
             nh6: None,
             structure: None,
+            table_id: 0,
         }
     }
 
