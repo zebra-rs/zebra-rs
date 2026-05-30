@@ -138,6 +138,8 @@ pub enum Attr {
     PrefixSid(PrefixSid),
     #[nom(Selector = "AttrSelector(AttrType::TunnelEncap, None)")]
     TunnelEncap(TunnelEncap),
+    #[nom(Selector = "AttrSelector(AttrType::BgpLsAttr, None)")]
+    BgpLs(BgpLsAttr),
 }
 
 impl Attr {
@@ -161,6 +163,7 @@ impl Attr {
             Attr::Aigp(v) => v.attr_emit(buf),
             Attr::PrefixSid(v) => v.attr_emit(buf),
             Attr::TunnelEncap(v) => v.attr_emit(buf),
+            Attr::BgpLs(v) => v.attr_emit(buf),
             _ => {
                 //
             }
@@ -190,6 +193,7 @@ impl fmt::Display for Attr {
             Attr::Aigp(v) => write!(f, "{}", v),
             Attr::PrefixSid(v) => write!(f, "{}", v),
             Attr::TunnelEncap(v) => write!(f, "{}", v),
+            Attr::BgpLs(v) => write!(f, "{}", v),
             _ => write!(f, "Unknown"),
         }
     }
@@ -217,6 +221,7 @@ impl fmt::Debug for Attr {
             Attr::Aigp(v) => write!(f, "{:?}", v),
             Attr::PrefixSid(v) => write!(f, "{:?}", v),
             Attr::TunnelEncap(v) => write!(f, "{:?}", v),
+            Attr::BgpLs(v) => write!(f, "{:?}", v),
             _ => write!(f, "Unknown"),
         }
     }
@@ -406,6 +411,9 @@ pub fn parse_bgp_update_attribute(
             }
             Attr::TunnelEncap(v) => {
                 bgp_attr.tunnel_encap = Some(v);
+            }
+            Attr::BgpLs(v) => {
+                bgp_attr.bgp_ls = Some(v);
             }
         }
         remaining = new_remaining;

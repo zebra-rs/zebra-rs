@@ -6,7 +6,7 @@ use nom::bytes::complete::take;
 use nom::number::complete::be_u16;
 use serde::Serialize;
 
-use crate::{AttrEmitter, AttrFlags, AttrType};
+use crate::{AttrEmitter, AttrFlags, AttrType, ParseBe};
 
 // BGP-LS Attribute (BGP path attribute type 29, RFC 9552 Section 4).
 //
@@ -121,6 +121,12 @@ impl BgpLsAttr {
             rest = next;
         }
         Ok((rest, BgpLsAttr { tlvs }))
+    }
+}
+
+impl ParseBe<BgpLsAttr> for BgpLsAttr {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        Self::parse(input)
     }
 }
 

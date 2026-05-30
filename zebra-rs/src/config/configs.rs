@@ -138,6 +138,7 @@ impl Args {
             "flowspec-ipv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec)),
             "sr-policy-v4" => Some(AfiSafi::new(Afi::Ip, Safi::SrTePolicy)),
             "sr-policy-v6" => Some(AfiSafi::new(Afi::Ip6, Safi::SrTePolicy)),
+            "link-state" => Some(AfiSafi::new(Afi::LinkState, Safi::LinkState)),
             _ => None,
         }
     }

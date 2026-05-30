@@ -1,6 +1,6 @@
 # BGP Link-State (BGP-LS, AFI 16388 / SAFI 71) — Design & Implementation Plan
 
-Status: Phase 2 (BGP-LS Attribute codec) in progress. Phase 1 (NLRI codec) merged in #1064.
+Status: Phase 3 (AFI/SAFI plumbing) complete. Phases 1–2 merged (#1064, #1067).
 
 RFC 9552 (obsoletes RFC 7752).
 

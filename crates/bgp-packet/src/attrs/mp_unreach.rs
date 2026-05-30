@@ -5,9 +5,9 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri, Labelv6Nlri,
-    MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6, Rtcv6Unreach, Safi,
-    SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri,
+    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6,
+    Rtcv6Unreach, Safi, SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -60,6 +60,11 @@ pub enum MpUnreachAttr {
     SrPolicy {
         afi: Afi,
         withdraws: Vec<SrPolicyNlri>,
+    },
+    /// BGP Link-State withdrawals (RFC 9552), AFI 16388 / SAFI 71. An empty
+    /// `withdraws` list represents end-of-RIB.
+    LinkState {
+        withdraws: Vec<BgpLsNlri>,
     },
 }
 
@@ -126,6 +131,9 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::SrPolicy { afi, withdraws } => {
                 srpolicy_unreach_attr_emit(*afi, withdraws, buf);
+            }
+            MpUnreachAttr::LinkState { withdraws } => {
+                linkstate_unreach_attr_emit(withdraws, buf);
             }
             _ => {
                 //
@@ -368,6 +376,34 @@ fn srpolicy_unreach_attr_emit(afi: Afi, withdraws: &[SrPolicyNlri], buf: &mut By
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpUnreachAttr::LinkState { withdraws }` (empty `withdraws`
+/// encodes an end-of-RIB marker) as a complete `MP_UNREACH_NLRI` path
+/// attribute: AFI 16388, SAFI 71, then the Link-State NLRI list (RFC 9552).
+fn linkstate_unreach_attr_emit(withdraws: &[BgpLsNlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::LinkState));
+    value.put_u8(u8::from(Safi::LinkState));
+    for w in withdraws {
+        crate::bgpls_nlri_emit(&mut value, w);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 impl MpUnreachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
         // AFI + SAFI = 3.
@@ -517,6 +553,14 @@ impl MpUnreachAttr {
                 },
             ));
         }
+        if header.afi == Afi::LinkState && header.safi == Safi::LinkState {
+            if input.is_empty() {
+                return Ok((input, MpUnreachAttr::LinkState { withdraws: vec![] }));
+            }
+            let (input, withdraws) =
+                many0_complete(|i| BgpLsNlri::parse(i, add_path)).parse(input)?;
+            return Ok((input, MpUnreachAttr::LinkState { withdraws }));
+        }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
@@ -659,6 +703,20 @@ impl fmt::Display for MpUnreachAttr {
                         f,
                         " {afi}/SR-Policy color={} endpoint={} disc={}",
                         r.color, r.endpoint, r.distinguisher,
+                    )?;
+                }
+                Ok(())
+            }
+            LinkState { withdraws } => {
+                if withdraws.is_empty() {
+                    return writeln!(f, " EoR: {}/{}", Afi::LinkState, Safi::LinkState);
+                }
+                for nlri in withdraws {
+                    writeln!(
+                        f,
+                        " LS type={} proto={:?}",
+                        nlri.nlri_type(),
+                        nlri.protocol_id()
                     )?;
                 }
                 Ok(())
@@ -855,6 +913,43 @@ mod tests {
                 assert!(withdraws.is_empty());
             }
             other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linkstate_unreach_emit_round_trips_through_parser() {
+        use crate::{LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsProtocolId};
+        let withdraws = vec![BgpLsNlri::Node(LsNodeNlri {
+            protocol_id: LsProtocolId::IsisL2,
+            identifier: 0,
+            local_node: LsNodeDescriptor {
+                subs: vec![LsNodeDescSub::IgpRouterId(vec![0, 0, 0, 0, 0, 1])],
+            },
+        })];
+        let mut buf = BytesMut::new();
+        linkstate_unreach_attr_emit(&withdraws, &mut buf);
+        // Strip the attr header: flags(1) + type(1) + length(1).
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpUnreachAttr::LinkState { withdraws: parsed } => {
+                assert_eq!(parsed, withdraws);
+            }
+            other => panic!("expected LinkState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linkstate_unreach_emit_eor_round_trips() {
+        // Empty withdraws encodes an end-of-RIB marker (header only).
+        let mut buf = BytesMut::new();
+        linkstate_unreach_attr_emit(&[], &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(value, None).expect("EoR must round-trip");
+        match mp {
+            MpUnreachAttr::LinkState { withdraws } => assert!(withdraws.is_empty()),
+            other => panic!("expected LinkState, got {other:?}"),
         }
     }
 

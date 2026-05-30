@@ -3,9 +3,9 @@ use std::fmt;
 use bytes::BytesMut;
 
 use crate::{
-    Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpNexthop, ClusterList, Color,
-    Community, ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId,
-    PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap,
+    Aggregator, Aigp, As4Path, AtomicAggregate, AttrEmitter, BgpLsAttr, BgpNexthop, ClusterList,
+    Color, Community, ExtCommunity, LargeCommunity, LocalPref, Med, NexthopAttr, Origin,
+    OriginatorId, PmsiTunnel, PrefixSid, PrefixSidTlv, TunnelEncap,
 };
 
 // BGP Attribute for quick access to each attribute. This would be used for
@@ -50,6 +50,8 @@ pub struct BgpAttr {
     /// Sub-TLV bodies are opaque in v1; structural framing is bit-
     /// exact for forward-propagation.
     pub tunnel_encap: Option<TunnelEncap>,
+    /// BGP-LS Attribute (path attribute type 29, RFC 9552).
+    pub bgp_ls: Option<BgpLsAttr>,
     // TODO: Unknown Attributes.
 }
 
