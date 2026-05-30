@@ -18,6 +18,8 @@ use std::net::IpAddr;
 use bgp_packet::{BgpAttr, BgpNexthop, RouteDistinguisher};
 use ipnet::{Ipv4Net, Ipv6Net};
 
+use crate::rib::nht::{NexthopResolution, ResolvedNexthop};
+
 /// A route that depends on a tracked next-hop — enough to locate its
 /// candidates and re-run best-path on a resolution change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,6 +33,11 @@ pub enum NhtDep {
 #[derive(Debug, Default)]
 pub struct NhtCacheEntry {
     pub reachable: bool,
+    /// Resolved transport egress(es) for this next-hop, from the last
+    /// `RibRx::NexthopUpdate`. Consumed by the VPN dataplane install to
+    /// build the `{service-label, transport-labels}` stack. Empty while
+    /// a registration is pending or the next-hop is unreachable.
+    pub nexthops: Vec<ResolvedNexthop>,
     pub deps: BTreeSet<NhtDep>,
 }
 
@@ -58,6 +65,7 @@ impl NexthopCache {
                 deps.insert(dep);
                 v.insert(NhtCacheEntry {
                     reachable: false,
+                    nexthops: Vec::new(),
                     deps,
                 });
                 (true, false)
@@ -65,17 +73,37 @@ impl NexthopCache {
         }
     }
 
-    /// Apply a resolution update. Returns the dependent routes to
-    /// re-evaluate — empty when `nh` isn't tracked or its reachability
-    /// is unchanged (so a no-op update costs nothing downstream).
-    pub fn update(&mut self, nh: IpAddr, reachable: bool) -> Vec<NhtDep> {
+    /// Apply a resolution update. Always refreshes the stored resolved
+    /// transport (`nexthops`) so a later re-eval installs against
+    /// current data. Returns the dependent routes to re-evaluate — only
+    /// on a reachability flip; a transport-only change (still reachable)
+    /// refreshes the cache but doesn't itself trigger re-eval (matching
+    /// the gate's reachability semantics; transport-reroute re-install
+    /// is a deferred refinement).
+    pub fn update(&mut self, nh: IpAddr, resolution: &NexthopResolution) -> Vec<NhtDep> {
         match self.entries.get_mut(&nh) {
-            Some(e) if e.reachable != reachable => {
-                e.reachable = reachable;
-                e.deps.iter().cloned().collect()
+            Some(e) => {
+                let flipped = e.reachable != resolution.reachable;
+                e.reachable = resolution.reachable;
+                e.nexthops = resolution.nexthops.clone();
+                if flipped {
+                    e.deps.iter().cloned().collect()
+                } else {
+                    Vec::new()
+                }
             }
-            _ => Vec::new(),
+            None => Vec::new(),
         }
+    }
+
+    /// The resolved transport egress(es) for `nh` — what the VPN
+    /// dataplane install pushes the service label over. Empty slice
+    /// when `nh` isn't tracked or hasn't resolved yet.
+    pub fn transport_for(&self, nh: IpAddr) -> &[ResolvedNexthop] {
+        self.entries
+            .get(&nh)
+            .map(|e| e.nexthops.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -108,19 +136,41 @@ mod tests {
         assert_eq!(c.track(nh, NhtDep::V4(p2)), (false, false));
     }
 
+    fn reachable(labels: Vec<u32>) -> NexthopResolution {
+        NexthopResolution {
+            reachable: true,
+            metric: 10,
+            nexthops: vec![ResolvedNexthop {
+                addr: "172.16.0.2".parse().unwrap(),
+                ifindex: 3,
+                labels,
+            }],
+        }
+    }
+
     #[test]
-    fn update_returns_deps_only_on_change() {
+    fn update_returns_deps_only_on_change_and_stores_transport() {
         let mut c = NexthopCache::default();
         let nh: IpAddr = "10.0.0.8".parse().unwrap();
         let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
         c.track(nh, NhtDep::V4(p1));
 
-        // pending(false) -> reachable(true): change, deps returned.
-        let deps = c.update(nh, true);
+        // pending(false) -> reachable(true): change, deps returned, and
+        // the resolved transport is now retrievable.
+        let deps = c.update(nh, &reachable(vec![16800]));
         assert_eq!(deps, vec![NhtDep::V4(p1)]);
-        // same value again: no change, no deps.
-        assert!(c.update(nh, true).is_empty());
-        // unknown nexthop: no deps.
-        assert!(c.update("9.9.9.9".parse().unwrap(), false).is_empty());
+        assert_eq!(c.transport_for(nh).len(), 1);
+        assert_eq!(c.transport_for(nh)[0].labels, vec![16800]);
+        assert_eq!(c.transport_for(nh)[0].ifindex, 3);
+
+        // still reachable, transport label changed: no reachability
+        // flip → no deps, but the stored transport refreshes.
+        assert!(c.update(nh, &reachable(vec![16801])).is_empty());
+        assert_eq!(c.transport_for(nh)[0].labels, vec![16801]);
+
+        // unknown nexthop: no deps, empty transport.
+        let unknown: IpAddr = "9.9.9.9".parse().unwrap();
+        assert!(c.update(unknown, &NexthopResolution::default()).is_empty());
+        assert!(c.transport_for(unknown).is_empty());
     }
 }

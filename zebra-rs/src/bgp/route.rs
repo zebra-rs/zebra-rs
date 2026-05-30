@@ -505,6 +505,17 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         changed
     }
 
+    /// A representative candidate's attr for `prefix`. Used by the NHT
+    /// re-eval to resolve the importing-VRF set for a VPN withdraw when
+    /// the prefix has no winner left (the gate withdrew it), so the RT
+    /// extcomms are still available.
+    pub fn candidate_attr(&self, prefix: P) -> Option<Arc<BgpAttr>> {
+        self.0
+            .get(&prefix)
+            .and_then(|c| c.first())
+            .map(|r| r.attr.clone())
+    }
+
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
         // NHT gate: a path whose next-hop resolves is strictly better
         // than one whose next-hop is unreachable, ahead of every other
@@ -997,6 +1008,27 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
     }
 }
 
+/// The VPN service label + resolved transport for a winning VPNv4
+/// route, for the per-VRF dataplane install. The service label rides
+/// on `winner.label` (the received NLRI label); the transport egress(es)
+/// come from the global NHT cache keyed by the remote-PE next-hop.
+/// Returns `(0, &[])` outside the global instance (no `nexthop_cache`)
+/// or when the PE next-hop hasn't resolved — yielding no FIB install.
+fn vpn_import_transport<'a>(
+    bgp: &'a BgpTop,
+    winner: &BgpRib,
+) -> (u32, &'a [rib::nht::ResolvedNexthop]) {
+    let label = winner.label.map(|l| l.label).unwrap_or(0);
+    let transport = match (
+        bgp.nexthop_cache.as_deref(),
+        super::nht::bgp_nexthop_ip(&winner.attr),
+    ) {
+        (Some(cache), Some(nh)) => cache.transport_for(nh),
+        _ => &[][..],
+    };
+    (label, transport)
+}
+
 pub fn route_ipv4_update(
     ident: usize,
     nlri: &Ipv4Nlri,
@@ -1137,7 +1169,16 @@ pub fn route_ipv4_update(
         && let Some(dispatcher) = bgp.vrf_import
     {
         if let Some(winner) = selected.first() {
-            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0, None);
+            let (label, transport) = vpn_import_transport(bgp, winner);
+            super::vrf::dispatch_import_v4(
+                dispatcher,
+                rd,
+                nlri.prefix,
+                &winner.attr,
+                label,
+                transport,
+                None,
+            );
         } else {
             // best-path stripped the candidate; flood withdraw
             // using the *new* attr (the one just rejected) so
@@ -2153,7 +2194,16 @@ pub fn route_ipv4_withdraw(
         && let Some(dispatcher) = bgp.vrf_import
     {
         if let Some(winner) = selected.first() {
-            super::vrf::dispatch_import_v4(dispatcher, rd, nlri.prefix, &winner.attr, 0, None);
+            let (label, transport) = vpn_import_transport(bgp, winner);
+            super::vrf::dispatch_import_v4(
+                dispatcher,
+                rd,
+                nlri.prefix,
+                &winner.attr,
+                label,
+                transport,
+                None,
+            );
         } else if let Some(gone) = removed.first() {
             super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &gone.attr, None);
         }

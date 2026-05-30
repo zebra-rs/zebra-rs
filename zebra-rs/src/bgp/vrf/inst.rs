@@ -210,6 +210,7 @@ pub fn dispatch_import_v4(
     prefix: ipnet::Ipv4Net,
     attr: &bgp_packet::BgpAttr,
     label: u32,
+    transport: &[crate::rib::nht::ResolvedNexthop],
     skip_vrf: Option<&str>,
 ) {
     let matches =
@@ -223,8 +224,62 @@ pub fn dispatch_import_v4(
             prefix,
             attr: attr.clone(),
             label,
+            transport: transport.to_vec(),
         });
     }
+}
+
+/// Build the VRF FIB entry for an imported VPNv4 route. The label
+/// stack is transport-labels (outer, from the resolved egress) with
+/// the VPN service `label` pushed innermost (bottom of stack) — the
+/// order the netlink encoder treats as top-of-stack-first. One
+/// `NexthopUni` per resolved egress (`Multi` for transport ECMP),
+/// installed as a `Bgp` route at iBGP administrative distance (imported
+/// VPN routes arrive via MP-iBGP).
+///
+/// Returns `None` when there's no resolved transport — nothing is
+/// installable and the caller withdraws instead. The label-less
+/// baseline (`labels` empty, `service_label == 0`) yields a bare
+/// `via addr dev ifindex`.
+fn build_vpn_fib_entry(
+    service_label: u32,
+    transport: &[crate::rib::nht::ResolvedNexthop],
+) -> Option<crate::rib::entry::RibEntry> {
+    if transport.is_empty() {
+        return None;
+    }
+    let mk_uni = |egress: &crate::rib::nht::ResolvedNexthop| {
+        let mut labels: Vec<crate::rib::Label> = egress
+            .labels
+            .iter()
+            .copied()
+            .map(crate::rib::Label::Explicit)
+            .collect();
+        if service_label != 0 {
+            labels.push(crate::rib::Label::Explicit(service_label));
+        }
+        let mut uni = crate::rib::NexthopUni::new(egress.addr, 0, labels);
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        crate::rib::Nexthop::Uni(mk_uni(&transport[0]))
+    } else {
+        let mut multi = crate::rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk_uni(egress));
+        }
+        crate::rib::Nexthop::Multi(multi)
+    };
+    let mut entry = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+    entry.distance = 200;
+    entry.metric = 0;
+    entry.valid = true;
+    entry.nexthop = nexthop;
+    Some(entry)
 }
 
 /// Inverse of [`dispatch_import_v4`]. Floods
@@ -474,6 +529,7 @@ impl BgpVrf {
         prefix: ipnet::Ipv4Net,
         mut attr: bgp_packet::BgpAttr,
         label: u32,
+        transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
         // Rewrite the next-hop to "self" (the VRF's router-id)
         // so CE peers receive a reachable v4 address.
@@ -547,6 +603,41 @@ impl BgpVrf {
             winners,
             "bgp vrf: ImportV4 written to LocRIB and advertised to CE peers",
         );
+
+        // VPN dataplane install. Only the global Bgp task gates the
+        // remote-PE transport and stamps `transport`; a real VRF task's
+        // `ctx.rib` is bound to the VRF table (`vrf_id != 0`), so this
+        // `Ipv4Add` auto-lands there. Install only when the imported
+        // route is the VRF best-path *and* we have a resolved
+        // transport; otherwise withdraw any stale FIB entry. The
+        // placeholder (no-kernel) context has `vrf_id == 0` — skip it
+        // so installs never leak into the default table.
+        if self.ctx.vrf_id() != 0 {
+            let imported_won = selected
+                .first()
+                .is_some_and(|w| matches!(w.typ, super::super::route::BgpRibType::Originated));
+            let entry = if imported_won {
+                build_vpn_fib_entry(label, transport)
+            } else {
+                None
+            };
+            match entry {
+                Some(rib) => {
+                    let _ = self
+                        .ctx
+                        .rib
+                        .send(crate::rib::Message::Ipv4Add { prefix, rib });
+                }
+                None => {
+                    let mut stub = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+                    stub.valid = false;
+                    let _ = self
+                        .ctx
+                        .rib
+                        .send(crate::rib::Message::Ipv4Del { prefix, rib: stub });
+                }
+            }
+        }
     }
 
     /// Drop an imported route from the per-VRF LocRIB
@@ -593,6 +684,20 @@ impl BgpVrf {
             winners,
             "bgp vrf: WithdrawImport removed from LocRIB and withdrawn from CE peers",
         );
+
+        // Remove the VRF FIB entry. WithdrawImport only arrives when the
+        // VPNv4 route truly went away (a replacement winner re-imports
+        // via ImportV4 instead), so the imported dataplane entry should
+        // go. A no-op for a never-installed prefix — the RIB ignores a
+        // Del it never saw.
+        if self.ctx.vrf_id() != 0 {
+            let mut stub = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+            stub.valid = false;
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::Ipv4Del { prefix, rib: stub });
+        }
     }
 
     /// VPNv6 counterpart of [`Self::handle_import_v4`]. Inserts the
@@ -739,8 +844,9 @@ impl BgpVrf {
                 prefix,
                 attr,
                 label,
+                transport,
             } => {
-                self.handle_import_v4(rd, prefix, attr, label);
+                self.handle_import_v4(rd, prefix, attr, label, &transport);
             }
             BgpVrfMsg::WithdrawImport { rd, prefix } => {
                 self.handle_withdraw_import(rd, prefix);
@@ -890,6 +996,80 @@ mod tests {
                 assert_eq!(p, prefix);
             }
             other => panic!("expected WithdrawExport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vpn_fib_entry_pushes_service_label_below_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+
+        // Remote PE resolves to one on-link egress with an SR-MPLS
+        // transport label 16800; VPN service label is 24001.
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![16800],
+        }];
+        let entry = build_vpn_fib_entry(24001, &transport).expect("installable");
+        assert_eq!(entry.rtype, crate::rib::RibType::Bgp);
+        assert_eq!(entry.distance, 200, "imported VPN routes arrive via iBGP");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "172.16.0.2".parse::<std::net::IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(5));
+                // Top-of-stack first: transport (outer) then service
+                // (inner / bottom of stack).
+                assert_eq!(uni.mpls_label, vec![16800, 24001]);
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vpn_fib_entry_label_less_baseline_and_empty_transport() {
+        use crate::rib::nht::ResolvedNexthop;
+
+        // Plain-IP transport (no SR labels) still carries the VPN
+        // service label as the only (bottom-of-stack) label.
+        let transport = vec![ResolvedNexthop {
+            addr: "172.16.0.2".parse().unwrap(),
+            ifindex: 5,
+            labels: vec![],
+        }];
+        let entry = build_vpn_fib_entry(24001, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => assert_eq!(uni.mpls_label, vec![24001]),
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+
+        // No resolved transport → nothing installable (caller withdraws).
+        assert!(build_vpn_fib_entry(24001, &[]).is_none());
+    }
+
+    #[test]
+    fn vpn_fib_entry_ecmp_builds_multi() {
+        use crate::rib::nht::ResolvedNexthop;
+
+        let transport = vec![
+            ResolvedNexthop {
+                addr: "172.16.0.2".parse().unwrap(),
+                ifindex: 5,
+                labels: vec![16800],
+            },
+            ResolvedNexthop {
+                addr: "172.16.1.2".parse().unwrap(),
+                ifindex: 6,
+                labels: vec![16801],
+            },
+        ];
+        let entry = build_vpn_fib_entry(24001, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Multi(multi) => {
+                assert_eq!(multi.nexthops.len(), 2);
+                assert_eq!(multi.nexthops[0].mpls_label, vec![16800, 24001]);
+                assert_eq!(multi.nexthops[1].mpls_label, vec![16801, 24001]);
+            }
+            other => panic!("expected Multi nexthop, got {other:?}"),
         }
     }
 }
