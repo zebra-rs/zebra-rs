@@ -114,6 +114,23 @@ impl NexthopCache {
         }
     }
 
+    /// Drop `dep`'s interest in `nh` (a withdrawal). Returns `true` when
+    /// that was the last dep for `nh` — the entry is removed and the
+    /// caller should send `Message::NexthopUnregister` so the RIB drops
+    /// its watcher. Callers must only untrack a next-hop no surviving
+    /// route still uses (a `NhtDep` can be tracked under several
+    /// next-hops via multiple paths). A no-op for an untracked `nh`.
+    pub fn untrack(&mut self, nh: IpAddr, dep: &NhtDep) -> bool {
+        if let Some(e) = self.entries.get_mut(&nh) {
+            e.deps.remove(dep);
+            if e.deps.is_empty() {
+                self.entries.remove(&nh);
+                return true;
+            }
+        }
+        false
+    }
+
     /// The resolved transport egress(es) for `nh` — what the VPN
     /// dataplane install pushes the service label over. Empty slice
     /// when `nh` isn't tracked or hasn't resolved yet.
@@ -203,5 +220,26 @@ mod tests {
             CacheChange::Unchanged
         );
         assert!(c.transport_for(unknown).is_empty());
+    }
+
+    #[test]
+    fn untrack_unregisters_only_on_last_dep() {
+        let mut c = NexthopCache::default();
+        let nh: IpAddr = "10.0.0.8".parse().unwrap();
+        let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
+        let p2: Ipv4Net = "2.0.0.0/24".parse().unwrap();
+        c.track(nh, NhtDep::V4(p1));
+        c.track(nh, NhtDep::V4(p2));
+
+        // First withdrawal: a dep remains, so the next-hop stays tracked.
+        assert!(!c.untrack(nh, &NhtDep::V4(p1)));
+        assert!(c.entries.contains_key(&nh));
+
+        // Last dep gone: entry dropped, caller should unregister.
+        assert!(c.untrack(nh, &NhtDep::V4(p2)));
+        assert!(!c.entries.contains_key(&nh));
+
+        // Untracking an already-gone next-hop is a no-op (not "last").
+        assert!(!c.untrack(nh, &NhtDep::V4(p1)));
     }
 }

@@ -132,11 +132,6 @@ pub enum Message {
     },
     /// Drop `proto`'s interest in `nh`; the tracking entry is removed
     /// once its last watcher unregisters.
-    //
-    // `allow(dead_code)`: the handler is wired and tested, but the
-    // producer (untrack-on-withdrawal in the BGP/static clients) is a
-    // follow-up — remove the allow then.
-    #[allow(dead_code)]
     NexthopUnregister {
         proto: String,
         nh: std::net::IpAddr,

@@ -621,6 +621,13 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             .map(|r| r.attr.clone())
     }
 
+    /// The surviving candidates for `prefix` (after a removal). Used by
+    /// NHT untrack to tell whether another path still keeps a withdrawn
+    /// path's next-hop alive.
+    pub fn candidates(&self, prefix: P) -> &[BgpRib] {
+        self.0.get(&prefix).map(|c| c.as_slice()).unwrap_or(&[])
+    }
+
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
         // NHT gate: a path whose next-hop resolves is strictly better
         // than one whose next-hop is unreachable, ahead of every other
@@ -948,6 +955,42 @@ impl LocalRib {
         self.v6vpn.entry(*rd).or_default().select_best_path(prefix)
     }
 
+    /// Distinct BGP next-hops still in use by surviving candidates for a
+    /// v4 (`rd == None`) / VPNv4 (`rd == Some`) prefix — for NHT untrack
+    /// to avoid releasing a next-hop another path still needs.
+    pub fn candidate_nexthops_v4(
+        &self,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+    ) -> std::collections::BTreeSet<IpAddr> {
+        let cands = match rd {
+            Some(rd) => self.v4vpn.get(&rd).map(|t| t.candidates(prefix)),
+            None => Some(self.v4.candidates(prefix)),
+        };
+        cands
+            .into_iter()
+            .flatten()
+            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .collect()
+    }
+
+    /// IPv6 counterpart of [`Self::candidate_nexthops_v4`].
+    pub fn candidate_nexthops_v6(
+        &self,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+    ) -> std::collections::BTreeSet<IpAddr> {
+        let cands = match rd {
+            Some(rd) => self.v6vpn.get(&rd).map(|t| t.candidates(prefix)),
+            None => Some(self.v6.candidates(prefix)),
+        };
+        cands
+            .into_iter()
+            .flatten()
+            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
+            .collect()
+    }
+
     // EVPN dispatch ----------------------------------------------------------
 
     pub fn update_evpn(
@@ -1107,6 +1150,45 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
     rib.nexthop_reachable = reachable;
     if needs_register {
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
+            proto: "bgp".to_string(),
+            nh,
+        });
+    }
+}
+
+/// Symmetric to [`nht_track_received`]: on a withdrawal, drop `dep` from
+/// each distinct next-hop the `removed` paths used, and unregister a
+/// next-hop from the RIB once it has no deps left. `survivor_nhs` are
+/// the next-hops still in use by surviving candidates for the same
+/// prefix (a `NhtDep` is tracked under every path's next-hop, so a
+/// partial withdrawal must not release a next-hop another path keeps).
+/// No-op outside the global instance (`bgp.nexthop_cache` is `None`).
+fn nht_untrack_withdrawn(
+    bgp: &mut BgpTop,
+    removed: &[BgpRib],
+    survivor_nhs: &std::collections::BTreeSet<IpAddr>,
+    dep: super::nht::NhtDep,
+) {
+    if bgp.nexthop_cache.is_none() {
+        return;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut to_unregister = Vec::new();
+    for r in removed {
+        let Some(nh) = super::nht::bgp_nexthop_ip(&r.attr) else {
+            continue;
+        };
+        if survivor_nhs.contains(&nh) || !seen.insert(nh) {
+            continue;
+        }
+        if let Some(cache) = bgp.nexthop_cache.as_deref_mut()
+            && cache.untrack(nh, &dep)
+        {
+            to_unregister.push(nh);
+        }
+    }
+    for nh in to_unregister {
+        let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh,
         });
@@ -2261,6 +2343,17 @@ pub fn route_ipv4_withdraw(
     // BGP Path selection - this may select a new best path
     let mut removed = bgp.local_rib.remove(rd, nlri.prefix, nlri.id, ident);
 
+    // NHT untrack: release the withdrawn path's next-hop(s) unless a
+    // surviving candidate still uses them.
+    if bgp.nexthop_cache.is_some() {
+        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4(rd, nlri.prefix);
+        let dep = match rd {
+            Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
+            None => super::nht::NhtDep::V4(nlri.prefix),
+        };
+        nht_untrack_withdrawn(bgp, &removed, &survivor_nhs, dep);
+    }
+
     // Re-run best path selection and advertise changes
     let selected = if let Some(ref rd) = rd {
         bgp.local_rib.select_best_path_vpn(rd, nlri.prefix)
@@ -2491,6 +2584,15 @@ pub fn route_ipv6_withdraw(
     match rd {
         Some(rd) => {
             let removed = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+            if bgp.nexthop_cache.is_some() {
+                let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(Some(rd), nlri.prefix);
+                nht_untrack_withdrawn(
+                    bgp,
+                    &removed,
+                    &survivor_nhs,
+                    super::nht::NhtDep::V6vpn(rd, nlri.prefix),
+                );
+            }
             let selected = bgp.local_rib.select_best_path_vpn_v6(&rd, nlri.prefix);
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
@@ -2525,7 +2627,16 @@ pub fn route_ipv6_withdraw(
             route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
         }
         None => {
-            let _ = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
+            let removed = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
+            if bgp.nexthop_cache.is_some() {
+                let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(None, nlri.prefix);
+                nht_untrack_withdrawn(
+                    bgp,
+                    &removed,
+                    &survivor_nhs,
+                    super::nht::NhtDep::V6(nlri.prefix),
+                );
+            }
             let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
