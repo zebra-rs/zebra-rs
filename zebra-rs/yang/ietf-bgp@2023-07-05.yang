@@ -281,7 +281,12 @@ module ietf-bgp {
         list network {
           key "prefix";
           leaf prefix {
-            type inet:ipv4-prefix;
+            // IPv4 prefix for ipv4 / label-v4 families; IPv6 prefix for
+            // label-v6. The Rust config layer parses per the afi-safi.
+            type union {
+              type inet:ipv4-prefix;
+              type inet:ipv6-prefix;
+            }
           }
         }
       }
