@@ -13,11 +13,30 @@ use crate::{Afi, AttrType, Label, ParseNlri, RouteDistinguisher, Safi, nlri_psiz
 
 use super::{AttrEmitter, AttrFlags, Ipv6Nlri};
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Vpnv6Nlri {
     pub label: Label,
     pub rd: RouteDistinguisher,
     pub nlri: Ipv6Nlri,
+}
+
+// Identity excludes the MPLS `label` — see [`super::nlri_vpnv4::Vpnv4Nlri`].
+// A VPNv6 route is identified by (RD, prefix, path-id); the label is a
+// forwarding property, and the advertise-cache removal path
+// (`cache_remove_vpnv6`) doesn't carry it.
+impl PartialEq for Vpnv6Nlri {
+    fn eq(&self, other: &Self) -> bool {
+        self.rd == other.rd && self.nlri == other.nlri
+    }
+}
+
+impl Eq for Vpnv6Nlri {}
+
+impl std::hash::Hash for Vpnv6Nlri {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rd.hash(state);
+        self.nlri.hash(state);
+    }
 }
 
 impl ParseNlri<Vpnv6Nlri> for Vpnv6Nlri {
@@ -392,5 +411,18 @@ mod tests {
         // label/RD reads.
         let input = [0x00u8, 0x00, 0x00, 0x00];
         assert!(Vpnv6Nlri::parse_nlri(&input, false).is_err());
+    }
+
+    #[test]
+    fn identity_ignores_label() {
+        use std::collections::HashSet;
+        // Same (RD, prefix), different label → equal, so a route cached
+        // under its real label is removed by the default-label key.
+        let advertised = nlri("65000:1", "2001:db8::/64", 80);
+        let remove_key = nlri("65000:1", "2001:db8::/64", 0);
+        assert_eq!(advertised, remove_key);
+        let mut set = HashSet::new();
+        set.insert(advertised);
+        assert!(set.remove(&remove_key));
     }
 }

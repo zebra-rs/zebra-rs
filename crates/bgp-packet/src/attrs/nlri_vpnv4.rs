@@ -13,11 +13,32 @@ use crate::{Afi, AttrType, Label, ParseNlri, RouteDistinguisher, Safi, nlri_psiz
 
 use super::{AttrEmitter, AttrFlags, Ipv4Nlri};
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Vpnv4Nlri {
     pub label: Label,
     pub rd: RouteDistinguisher,
     pub nlri: Ipv4Nlri,
+}
+
+// Identity excludes the MPLS `label`: a VPNv4 route is identified by its
+// (RD, prefix, path-id), and the label is a forwarding property attached
+// to it (and may not be known at every comparison site — e.g. an
+// advertise cache removal keyed by RD+prefix). Equality/hash over the
+// label too would make `cache_remove_vpnv4` (which doesn't carry the
+// label) fail to match the cached `send_vpnv4` entry.
+impl PartialEq for Vpnv4Nlri {
+    fn eq(&self, other: &Self) -> bool {
+        self.rd == other.rd && self.nlri == other.nlri
+    }
+}
+
+impl Eq for Vpnv4Nlri {}
+
+impl std::hash::Hash for Vpnv4Nlri {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rd.hash(state);
+        self.nlri.hash(state);
+    }
 }
 
 impl ParseNlri<Vpnv4Nlri> for Vpnv4Nlri {
@@ -272,5 +293,37 @@ impl AttrEmitter for Vpnv4Unreach {
             let plen = nlri_psize(withdraw.nlri.prefix.prefix_len());
             buf.put(&withdraw.nlri.prefix.addr().octets()[0..plen]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_ignores_label() {
+        use std::collections::HashSet;
+        let rd = RouteDistinguisher::default();
+        let nlri = Ipv4Nlri {
+            id: 0,
+            prefix: "10.0.0.0/24".parse().unwrap(),
+        };
+        // Same (RD, prefix), different label → equal + same hash, so a
+        // route advertised+cached under its real label is still found
+        // and removed by `cache_remove_vpnv4`'s default-label key.
+        let advertised = Vpnv4Nlri {
+            label: Label::new(80, 0, true),
+            rd,
+            nlri: nlri.clone(),
+        };
+        let remove_key = Vpnv4Nlri {
+            label: Label::default(),
+            rd,
+            nlri,
+        };
+        assert_eq!(advertised, remove_key);
+        let mut set = HashSet::new();
+        set.insert(advertised);
+        assert!(set.remove(&remove_key), "default-label key matches");
     }
 }

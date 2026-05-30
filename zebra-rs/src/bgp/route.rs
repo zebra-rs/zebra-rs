@@ -1454,7 +1454,7 @@ fn route_advertise_to_addpath(
             peer.adj_out.add(rd, nlri.prefix, rib_clone);
             if let Some(ref rd) = rd {
                 let vpnv4_nlri = Vpnv4Nlri {
-                    label: Label::default(),
+                    label: rib.label.unwrap_or_default(),
                     rd: *rd,
                     nlri,
                 };
@@ -1664,7 +1664,7 @@ pub(super) fn route_advertise_to_peers(
                 }
                 if let Some(ref rd) = rd {
                     let vpnv4_nlri = Vpnv4Nlri {
-                        label: Label::default(),
+                        label: new_best.and_then(|b| b.label).unwrap_or_default(),
                         rd: *rd,
                         nlri,
                     };
@@ -2082,7 +2082,7 @@ fn route_soft_out_peer_table(
 
         if let Some(rd_val) = rd {
             let vpnv4_nlri = Vpnv4Nlri {
-                label: Label::default(),
+                label: rib.label.unwrap_or_default(),
                 rd: rd_val,
                 nlri,
             };
@@ -4711,13 +4711,10 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             // Register to AdjOut.
             rib.attr = bgp.attr_store.intern(attr);
             let arc_attr = rib.attr.clone();
+            let label = rib.label.unwrap_or_default();
             peer.adj_out.add(Some(rd), nlri.prefix, rib);
 
-            let vpnv4_nlri = Vpnv4Nlri {
-                label: Label::default(),
-                rd,
-                nlri,
-            };
+            let vpnv4_nlri = Vpnv4Nlri { label, rd, nlri };
 
             // Send the routes.
             peer.send_vpnv4(vpnv4_nlri, arc_attr, false);
