@@ -402,7 +402,7 @@ pub struct Isis {
     /// BGP-LS objects last advertised to BGP, so the producer emits only
     /// deltas (add/withdraw) on each SPF trigger rather than the full set
     /// (RFC 9552 §5.2 — withdraw-old-on-change).
-    pub bgp_ls_advertised: std::collections::BTreeSet<bgp_packet::BgpLsNlri>,
+    pub bgp_ls_advertised: std::collections::BTreeMap<bgp_packet::BgpLsNlri, bgp_packet::BgpLsAttr>,
     /// Sender half of the per-instance `BfdEvent` channel, cloned and
     /// handed to BFD as the `notifier` on every `Subscribe`.
     pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
@@ -658,7 +658,7 @@ impl Isis {
                 srlg_groups: BTreeMap::new(),
                 bfd_client_tx,
                 bgp_tx,
-                bgp_ls_advertised: std::collections::BTreeSet::new(),
+                bgp_ls_advertised: std::collections::BTreeMap::new(),
                 bfd_event_tx,
                 bfd_event_rx,
                 key_chains: BTreeMap::new(),

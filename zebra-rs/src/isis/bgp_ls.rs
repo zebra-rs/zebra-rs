@@ -20,11 +20,12 @@
 // prefix attributes ride in the BGP-LS Attribute (type 29) and are a later
 // phase; this slice emits NLRIs only.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use bgp_packet::{
-    BgpLsNlri, LsLinkDescriptor, LsLinkNlri, LsNodeDescSub, LsNodeDescriptor, LsNodeNlri,
-    LsPrefixDescriptor, LsPrefixNlri, LsProtocolId,
+    BGPLS_ATTR_ADMIN_GROUP, BGPLS_ATTR_IGP_METRIC, BGPLS_ATTR_PREFIX_METRIC,
+    BGPLS_ATTR_TE_DEFAULT_METRIC, BgpLsAttr, BgpLsNlri, LsLinkDescriptor, LsLinkNlri,
+    LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri, LsProtocolId,
 };
 use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::{
@@ -73,11 +74,43 @@ fn ipv6_reach(net: &Ipv6Net) -> LsPrefixDescriptor {
     }
 }
 
+/// The BGP-LS Attribute (path attribute type 29) carried alongside an NLRI.
+/// Empty when the source TLV had no translatable attributes.
+type Object = (BgpLsNlri, BgpLsAttr);
+
+/// Build the Link Attribute TLVs (RFC 9552 §4.2) for one IS-IS adjacency:
+/// IGP metric (1095, the base TLV-22 metric), and — when the entry carries
+/// the corresponding sub-TLVs — admin-group (1088) and TE default metric
+/// (1092). Max-link-bandwidth (1089) is omitted: the IS-IS link sub-TLV set
+/// parsed here has no max-bandwidth variant (only residual/available/
+/// utilized), so there is nothing to translate yet.
+fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
+    let mut attr = BgpLsAttr::new();
+    // IGP metric is a 3-octet value in BGP-LS (RFC 9552 §4.2; 1, 2, or 3
+    // octets are allowed — IS-IS wide metrics use 3).
+    attr.push(BGPLS_ATTR_IGP_METRIC, e.metric.to_be_bytes()[1..].to_vec());
+    if let Some(ag) = e.admin_group() {
+        attr.push(BGPLS_ATTR_ADMIN_GROUP, ag.to_be_bytes().to_vec());
+    }
+    if let Some(te) = e.te_metric() {
+        attr.push(BGPLS_ATTR_TE_DEFAULT_METRIC, te.to_be_bytes().to_vec());
+    }
+    attr
+}
+
+/// Build the Prefix Attribute TLVs (RFC 9552 §4.3): the Prefix Metric
+/// (1155), a 4-octet value carrying the IS-IS reachability metric.
+fn prefix_attr(metric: u32) -> BgpLsAttr {
+    let mut attr = BgpLsAttr::new();
+    attr.push(BGPLS_ATTR_PREFIX_METRIC, metric.to_be_bytes().to_vec());
+    attr
+}
+
 /// Translate one Extended IS Reachability entry (the same entry type backs
-/// TLV 22 and TLV 222) into a Link NLRI. The link descriptors carry whatever
-/// interface/neighbor addresses the entry advertises, so parallel links to
-/// the same neighbor stay distinct.
-fn link_nlri(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvExtIsReachEntry) -> BgpLsNlri {
+/// TLV 22 and TLV 222) into a Link NLRI plus its Link Attribute. The link
+/// descriptors carry whatever interface/neighbor addresses the entry
+/// advertises, so parallel links to the same neighbor stay distinct.
+fn link_object(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvExtIsReachEntry) -> Object {
     let remote = e.neighbor_id.sys_id();
     let mut link_descs = Vec::new();
     if let Some(a) = e.ipv4_if_addr() {
@@ -92,39 +125,38 @@ fn link_nlri(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvExtIsReachEntry)
     if let Some(a) = e.ipv6_neigh_addr() {
         link_descs.push(LsLinkDescriptor::Ipv6NeighborAddr(a));
     }
-    BgpLsNlri::Link(LsLinkNlri {
+    let nlri = BgpLsNlri::Link(LsLinkNlri {
         protocol_id: proto,
         identifier: 0,
         local_node: node_descriptor(local),
         remote_node: node_descriptor(&remote),
         link_descs,
-    })
+    });
+    (nlri, link_attr(e))
 }
 
-fn ipv4_prefix_nlri(
+fn ipv4_prefix_object(
     proto: LsProtocolId,
     local: &IsisSysId,
     e: &IsisTlvExtIpReachEntry,
-) -> BgpLsNlri {
-    BgpLsNlri::Ipv4Prefix(LsPrefixNlri {
+) -> Object {
+    let nlri = BgpLsNlri::Ipv4Prefix(LsPrefixNlri {
         protocol_id: proto,
         identifier: 0,
         local_node: node_descriptor(local),
         prefix_descs: vec![ipv4_reach(&e.prefix)],
-    })
+    });
+    (nlri, prefix_attr(e.metric))
 }
 
-fn ipv6_prefix_nlri(
-    proto: LsProtocolId,
-    local: &IsisSysId,
-    e: &IsisTlvIpv6ReachEntry,
-) -> BgpLsNlri {
-    BgpLsNlri::Ipv6Prefix(LsPrefixNlri {
+fn ipv6_prefix_object(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvIpv6ReachEntry) -> Object {
+    let nlri = BgpLsNlri::Ipv6Prefix(LsPrefixNlri {
         protocol_id: proto,
         identifier: 0,
         local_node: node_descriptor(local),
         prefix_descs: vec![ipv6_reach(&e.prefix)],
-    })
+    });
+    (nlri, prefix_attr(e.metric))
 }
 
 /// Translate every Link-State object implied by one IS-IS LSP into BGP-LS
@@ -132,58 +164,72 @@ fn ipv6_prefix_nlri(
 /// non-pseudonode LSP; Link and Prefix NLRIs are emitted from whichever
 /// fragment carries them. The caller walks the LSDB and unions the results
 /// across all of a node's fragments.
-pub fn lsp_to_nlris(level: Level, lsp: &IsisLsp) -> Vec<BgpLsNlri> {
+pub fn lsp_to_objects(level: Level, lsp: &IsisLsp) -> Vec<Object> {
     let proto = protocol_id(level);
     let local = lsp.lsp_id.sys_id();
     let mut out = Vec::new();
 
     // Node NLRI: the node's own LSP (fragment 0, not a pseudonode).
     // Pseudonode LSPs (pseudo-id != 0) describe a LAN, not a node, and
-    // their link TLVs are still translated below.
+    // their link TLVs are still translated below. Node attributes (hostname,
+    // SR capabilities, …) are a later slice, so the attr is empty for now.
     if !lsp.lsp_id.is_pseudo() && lsp.lsp_id.fragment_id() == 0 {
-        out.push(BgpLsNlri::Node(LsNodeNlri {
+        let node = BgpLsNlri::Node(LsNodeNlri {
             protocol_id: proto,
             identifier: 0,
             local_node: node_descriptor(&local),
-        }));
+        });
+        out.push((node, BgpLsAttr::new()));
     }
 
     for tlv in &lsp.tlvs {
         match tlv {
             IsisTlv::ExtIsReach(t) => {
                 for e in &t.entries {
-                    out.push(link_nlri(proto, &local, e));
+                    out.push(link_object(proto, &local, e));
                 }
             }
             IsisTlv::MtIsReach(t) => {
                 for e in &t.entries {
-                    out.push(link_nlri(proto, &local, e));
+                    out.push(link_object(proto, &local, e));
                 }
             }
             IsisTlv::ExtIpReach(t) => {
                 for e in &t.entries {
-                    out.push(ipv4_prefix_nlri(proto, &local, e));
+                    out.push(ipv4_prefix_object(proto, &local, e));
                 }
             }
             IsisTlv::MtIpReach(t) => {
                 for e in &t.entries {
-                    out.push(ipv4_prefix_nlri(proto, &local, e));
+                    out.push(ipv4_prefix_object(proto, &local, e));
                 }
             }
             IsisTlv::Ipv6Reach(t) => {
                 for e in &t.entries {
-                    out.push(ipv6_prefix_nlri(proto, &local, e));
+                    out.push(ipv6_prefix_object(proto, &local, e));
                 }
             }
             IsisTlv::MtIpv6Reach(t) => {
                 for e in &t.entries {
-                    out.push(ipv6_prefix_nlri(proto, &local, e));
+                    out.push(ipv6_prefix_object(proto, &local, e));
                 }
             }
             _ => {}
         }
     }
     out
+}
+
+/// NLRI-only view of [`lsp_to_objects`], discarding the BGP-LS Attribute.
+/// Only the tests need the topology keys without attributes today (the
+/// producer consumes `lsp_to_objects` directly), so this is test-gated to
+/// avoid a dead-code lint in the binary build.
+#[cfg(test)]
+fn lsp_to_nlris(level: Level, lsp: &IsisLsp) -> Vec<BgpLsNlri> {
+    lsp_to_objects(level, lsp)
+        .into_iter()
+        .map(|(nlri, _attr)| nlri)
+        .collect()
 }
 
 /// Walk both IS-IS levels' LSDBs, translate every LSP to its BGP-LS NLRIs,
@@ -201,24 +247,38 @@ pub fn lsp_to_nlris(level: Level, lsp: &IsisLsp) -> Vec<BgpLsNlri> {
 /// LSP lists the adjacency.
 pub fn produce(
     lsdb: &super::level::Levels<super::lsdb::Lsdb>,
-    advertised: &mut BTreeSet<BgpLsNlri>,
+    advertised: &mut BTreeMap<BgpLsNlri, BgpLsAttr>,
     bgp_tx: Option<&Sender<crate::bgp::inst::Message>>,
 ) {
     let Some(tx) = bgp_tx else {
         return;
     };
 
-    let mut current: BTreeSet<BgpLsNlri> = BTreeSet::new();
+    let mut current: BTreeMap<BgpLsNlri, BgpLsAttr> = BTreeMap::new();
     for level in [super::level::Level::L1, super::level::Level::L2] {
         for lsa in lsdb.get(&level).values() {
-            for nlri in lsp_to_nlris(level, &lsa.lsp) {
-                current.insert(nlri);
+            for (nlri, attr) in lsp_to_objects(level, &lsa.lsp) {
+                // A node spans multiple LSP fragments; the same NLRI key may
+                // recur. Keep the first non-empty attr (fragment 0 carries
+                // the node/link attrs); later duplicates don't override it.
+                current.entry(nlri).or_insert(attr);
             }
         }
     }
 
-    let add: Vec<BgpLsNlri> = current.difference(advertised).cloned().collect();
-    let withdraw: Vec<BgpLsNlri> = advertised.difference(&current).cloned().collect();
+    // Add when the NLRI is new OR its attribute changed (re-advertise on a
+    // metric/admin-group change — RFC 9552 §5.2 treats an attr change as a
+    // new advertisement). Withdraw when the NLRI is gone entirely.
+    let add: Vec<Object> = current
+        .iter()
+        .filter(|(nlri, attr)| advertised.get(*nlri) != Some(*attr))
+        .map(|(nlri, attr)| (nlri.clone(), attr.clone()))
+        .collect();
+    let withdraw: Vec<BgpLsNlri> = advertised
+        .keys()
+        .filter(|nlri| !current.contains_key(*nlri))
+        .cloned()
+        .collect();
     if add.is_empty() && withdraw.is_empty() {
         return;
     }
@@ -226,7 +286,7 @@ pub fn produce(
     // BGP's inbox is a bounded channel and the IS-IS event loop is sync, so
     // use `try_send`. On the rare full-channel case, skip the update without
     // touching `advertised` so the next trigger re-diffs and retries the
-    // whole delta (idempotent — add/withdraw are set operations).
+    // whole delta (idempotent — add/withdraw are keyed operations).
     match tx.try_send(crate::bgp::inst::Message::BgpLs { add, withdraw }) {
         Ok(()) => *advertised = current,
         Err(e) => {
@@ -263,8 +323,8 @@ mod tests {
     #[test]
     fn produce_emits_add_then_diff_then_withdraw() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let mut advertised: std::collections::BTreeSet<BgpLsNlri> =
-            std::collections::BTreeSet::new();
+        let mut advertised: std::collections::BTreeMap<BgpLsNlri, BgpLsAttr> =
+            std::collections::BTreeMap::new();
 
         // First trigger: one node LSP → one add, nothing withdrawn.
         let levels = levels_with_l2(lsp(sysid(1), 0, 0, vec![]));
@@ -295,10 +355,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn produce_readvertises_on_attr_change() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut advertised: std::collections::BTreeMap<BgpLsNlri, BgpLsAttr> =
+            std::collections::BTreeMap::new();
+
+        // A link with metric 10 → one add carrying an IGP-metric attr.
+        let entry = |metric| {
+            IsisTlv::ExtIsReach(IsisTlvExtIsReach {
+                entries: vec![IsisTlvExtIsReachEntry {
+                    neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+                    metric,
+                    subs: vec![],
+                }],
+            })
+        };
+        let levels = levels_with_l2(lsp(sysid(1), 0, 0, vec![entry(10)]));
+        produce(&levels, &mut advertised, Some(&tx));
+        let _ = rx.try_recv().expect("first add");
+
+        // Same NLRI keys, but the link metric changed → re-advertise the
+        // link (its attr differs). The Node NLRI is unchanged (empty attr)
+        // so it must NOT re-advertise.
+        let levels2 = levels_with_l2(lsp(sysid(1), 0, 0, vec![entry(20)]));
+        produce(&levels2, &mut advertised, Some(&tx));
+        match rx.try_recv() {
+            Ok(crate::bgp::inst::Message::BgpLs { add, withdraw }) => {
+                assert_eq!(add.len(), 1, "only the changed link re-advertises");
+                assert!(matches!(add[0].0, BgpLsNlri::Link(_)));
+                assert!(withdraw.is_empty());
+            }
+            other => panic!("expected BgpLs re-advertise, got {other:?}"),
+        }
+    }
+
     /// `produce` is a no-op when BGP isn't wired (`bgp_tx` is `None`).
     #[test]
     fn produce_noop_without_bgp() {
-        let mut advertised = std::collections::BTreeSet::new();
+        let mut advertised = std::collections::BTreeMap::new();
         let levels = levels_with_l2(lsp(sysid(1), 0, 0, vec![]));
         produce(&levels, &mut advertised, None);
         assert!(advertised.is_empty());
