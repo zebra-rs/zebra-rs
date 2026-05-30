@@ -927,17 +927,26 @@ impl Ospf<Ospfv2> {
             && let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback())
         {
             let our_addr = addr.prefix.addr();
+            // Per-link ASLA carrying this link's flex-algo affinity
+            // (RFC 9492 / RFC 9350 §6.3), independent of Adj-SID: a link
+            // with affinity but no Adj-SID still originates an
+            // Extended-Link LSA so peers can run the FAD constraints.
+            let asla = super::flex_algo::build_link_asla(&link.config.affinity, &self.affinity_map);
             match link.network_type {
                 OspfNetworkType::PointToPoint => {
-                    if let Some(adjacency_sid) = link.config.adjacency_sid
-                        && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
-                    {
-                        Some((
-                            1u8,
-                            nbr.ident.router_id,
-                            our_addr,
-                            vec![super::srmpls::build_p2p_adj_sub(&adjacency_sid)],
-                        ))
+                    if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
+                        let mut subs = Vec::new();
+                        if let Some(adjacency_sid) = link.config.adjacency_sid {
+                            subs.push(super::srmpls::build_p2p_adj_sub(&adjacency_sid));
+                        }
+                        if let Some(asla) = asla {
+                            subs.push(asla);
+                        }
+                        if subs.is_empty() {
+                            None
+                        } else {
+                            Some((1u8, nbr.ident.router_id, our_addr, subs))
+                        }
                     } else {
                         None
                     }
@@ -950,7 +959,7 @@ impl Ospf<Ospfv2> {
                         // pointing at a `link_id` we can no longer name.
                         None
                     } else {
-                        let subs: Vec<_> = link
+                        let mut subs: Vec<_> = link
                             .nbrs
                             .values()
                             .filter(|n| n.state == NfsmState::Full)
@@ -960,8 +969,11 @@ impl Ospf<Ospfv2> {
                                 Some(super::srmpls::build_lan_adj_sub(nbr.ident.router_id, label))
                             })
                             .collect();
+                        if let Some(asla) = asla {
+                            subs.push(asla);
+                        }
                         if subs.is_empty() {
-                            // No Full neighbor has a label allocated yet.
+                            // No Adj-SID labels and no affinity yet.
                             None
                         } else {
                             Some((2u8, dr, our_addr, subs))
