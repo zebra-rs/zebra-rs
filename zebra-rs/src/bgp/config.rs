@@ -1618,6 +1618,14 @@ impl Bgp {
             "/router/bgp/vrf/afi-safi/ipv6/network",
             super::vrf_config::config_vrf_afi_ipv6_network,
         );
+        self.callback_add(
+            "/router/bgp/vrf/evpn/advertise-ipv4",
+            super::vrf_config::config_vrf_evpn_advertise_ipv4,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/evpn/advertise-ipv6",
+            super::vrf_config::config_vrf_evpn_advertise_ipv6,
+        );
 
         // `set router bgp interface-neighbor <name> [...]`.
         self.callback_add(

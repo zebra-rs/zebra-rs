@@ -292,6 +292,33 @@ module zebra-bgp-vrf {
           "VPN data-plane encapsulation for routes originated from /
            imported into this VRF.";
       }
+      container evpn {
+        description
+          "EVPN (RFC 9136 Type-5 / IP Prefix) service for this VRF.
+           When advertise-ipv4 / advertise-ipv6 is enabled, the VRF's
+           IPv4 / IPv6 unicast routes are additionally advertised as
+           EVPN Type-5 (IP Prefix) routes carrying the per-VRF RD,
+           export route-targets and encapsulation (MPLS service label
+           or SRv6 End.DT46 SID) — the same per-VRF state already used
+           for VPNv4 / VPNv6. A peer receives Type-5 only if it
+           negotiated the L2VPN/EVPN AFI/SAFI, so this composes with
+           VPNv4/VPNv6 rather than replacing it. Named to match the
+           `evpn` family in zebra-afi-safi.yang.";
+        leaf advertise-ipv4 {
+          type boolean;
+          default false;
+          description
+            "Advertise this VRF's IPv4 unicast routes as EVPN Type-5
+             (IP Prefix) routes. Requires `rd` to be set.";
+        }
+        leaf advertise-ipv6 {
+          type boolean;
+          default false;
+          description
+            "Advertise this VRF's IPv6 unicast routes as EVPN Type-5
+             (IP Prefix) routes. Requires `rd` to be set.";
+        }
+      }
       uses bgp-vrf-neighbor;
       uses bgp-vrf-afi-safi;
     }

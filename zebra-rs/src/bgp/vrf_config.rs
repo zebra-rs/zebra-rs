@@ -131,6 +131,11 @@ pub struct BgpVrfConfig {
     pub neighbors: BTreeMap<IpAddr, BgpVrfNeighborConfig>,
     pub ipv4_unicast: Option<BgpVrfAfConfig<Ipv4Net>>,
     pub ipv6_unicast: Option<BgpVrfAfConfig<Ipv6Net>>,
+    /// Advertise this VRF's IPv4 routes as EVPN Type-5 (RFC 9136).
+    /// Mirrors `evpn advertise-ipv4` in zebra-bgp-vrf.yang.
+    pub evpn_advertise_v4: bool,
+    /// Advertise this VRF's IPv6 routes as EVPN Type-5 (RFC 9136).
+    pub evpn_advertise_v6: bool,
 }
 
 /// Borrow-or-create the per-VRF entry on `Bgp::vrfs`. Used by every
@@ -350,6 +355,30 @@ pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
+/// `set router bgp vrf <NAME> evpn advertise-ipv4 <bool>`.
+pub fn config_vrf_evpn_advertise_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => cfg.evpn_advertise_v4 = args.boolean()?,
+        ConfigOp::Delete => cfg.evpn_advertise_v4 = false,
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> evpn advertise-ipv6 <bool>`.
+pub fn config_vrf_evpn_advertise_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => cfg.evpn_advertise_v6 = args.boolean()?,
+        ConfigOp::Delete => cfg.evpn_advertise_v6 = false,
+        _ => {}
+    }
+    Some(())
+}
+
 /// Commit-time observation hook. Emits a single `debug!` line per
 /// VRF entry so operators can see the staged intent at the boundary
 /// where spawn / despawn logic consumes `Bgp::vrfs`.
@@ -366,6 +395,8 @@ pub fn log_commit_diff(bgp: &Bgp) {
             neighbors = cfg.neighbors.len(),
             ipv4_unicast = cfg.ipv4_unicast.is_some(),
             ipv6_unicast = cfg.ipv6_unicast.is_some(),
+            evpn_advertise_v4 = cfg.evpn_advertise_v4,
+            evpn_advertise_v6 = cfg.evpn_advertise_v6,
             "bgp: per-VRF intent staged",
         );
     }
