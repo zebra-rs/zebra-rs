@@ -88,6 +88,9 @@ pub use nlri_vpnv6::*;
 pub mod nlri_bgpls;
 pub use nlri_bgpls::*;
 
+pub mod bgpls_attr;
+pub use bgpls_attr::*;
+
 pub mod nlri_evpn;
 pub use nlri_evpn::*;
 

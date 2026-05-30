@@ -1,8 +1,8 @@
 # BGP Link-State (BGP-LS, AFI 16388 / SAFI 71) — Design & Implementation Plan
 
-# Status: Phase 1 (NLRI codec) in progress
+Status: Phase 2 (BGP-LS Attribute codec) in progress. Phase 1 (NLRI codec) merged in #1064.
 
-# RFC 9552 (obsoletes RFC 7752)
+RFC 9552 (obsoletes RFC 7752).
 
 ## Overview
 
@@ -83,23 +83,30 @@ ID (263). Prefix Descriptor TLVs: Multi-Topology ID (263), OSPF Route Type
 Unknown/odd-length codepoints are preserved verbatim and re-emitted so a
 collector/reflector round-trips and propagates them unchanged.
 
-### BGP-LS Attribute (BGP path attribute type 29) — *Phase 2*
+### BGP-LS Attribute (BGP path attribute type 29)
 
-An optional non-transitive attribute carrying Node (1024–1031), Link
-(1088–1098), and Prefix (1152–1158) attribute TLVs. Modeled as a preserved TLV
-list so unknown TLVs round-trip; typed accessors for the ones the producer emits.
+An optional, non-transitive attribute carrying Node (1024–1031), Link
+(1088–1098), and Prefix (1152–1158) attribute TLVs (plus the SR codepoints from
+RFC 9085). Modeled as a preserved TLV list (`BgpLsAttr` / `BgpLsAttrTlv`) so
+unknown TLVs round-trip; typed construction/decoding is layered on by the
+producer and show path in later phases.
 
 ## Phased plan (branch per phase, smallest reviewable PR first)
 
-1. **NLRI codec** *(this PR)* — `crates/bgp-packet/src/attrs/nlri_bgpls.rs`:
+1. **NLRI codec** *(merged #1064)* — `crates/bgp-packet/src/attrs/nlri_bgpls.rs`:
    `BgpLsNlri` (Node/Link/IPv4Prefix/IPv6Prefix) + descriptor TLVs/sub-TLVs,
-   `LsProtocolId`, parse + `bgpls_nlri_emit`, `ParseNlri` impl, round-trip
-   tests. Derives `Ord`/`Hash` for exact-match RIB keying. No behavior change.
-2. **BGP-LS Attribute codec** — `attrs/bgpls_attr.rs`, `AttrType::BgpLsAttr=29`.
+   `LsProtocolId`, parse + `bgpls_nlri_emit`, round-trip tests. Derives
+   `Ord`/`Hash` for exact-match RIB keying. No behavior change.
+2. **BGP-LS Attribute codec** *(this PR)* — `attrs/bgpls_attr.rs`,
+   `AttrType::BgpLsAttr=29`. Optional non-transitive (type 29); value is a
+   preserved TLV list (`BgpLsAttr` / `BgpLsAttrTlv`) so unknown codepoints
+   round-trip. `AttrEmitter` impl picks (extended) length automatically. The
+   `Attr`-enum / `parse_attr` / `BgpAttr` wiring lands in Phase 3 alongside
+   negotiation (a type-29 attribute is only received once BGP-LS is negotiated).
 3. **AFI/SAFI plumbing** — `Afi::LinkState=16388` / `Safi::LinkState=71` enum
    variants (+ exhaustive-match fallout across show/route/config), MP_REACH /
-   MP_UNREACH `LinkState` branches, MP capability negotiation
-   (`bgp/cap.rs`), YANG `enum link-state` in `zebra-afi-safi.yang`,
+   MP_UNREACH `LinkState` branches, `Attr::BgpLs` wiring, MP capability
+   negotiation (`bgp/cap.rs`), YANG `enum link-state` in `zebra-afi-safi.yang`,
    `Args::afi_safi()` (`"link-state"`).
 4. **Receive-side RIB** — `LocalRib.bgpls` exact-match table (like flowspec),
    `route_bgpls_update` / `route_bgpls_withdraw`, dispatch in `route_from_peer`,
