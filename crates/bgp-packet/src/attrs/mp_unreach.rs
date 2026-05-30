@@ -5,8 +5,9 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, MupRoute, ParseBe, ParseNlri,
-    ParseOption, Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri, Labelv6Nlri,
+    MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri,
+    many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -45,6 +46,12 @@ pub enum MpUnreachAttr {
         afi: Afi,
         withdraws: Vec<FlowspecNlri>,
     },
+    /// IPv4 Labeled-Unicast withdrawals (RFC 3107 / RFC 8277), SAFI 4.
+    Labelv4(Vec<Labelv4Nlri>),
+    Labelv4Eor,
+    /// IPv6 Labeled-Unicast withdrawals (RFC 3107 / RFC 8277), SAFI 4.
+    Labelv6(Vec<Labelv6Nlri>),
+    Labelv6Eor,
 }
 
 impl MpUnreachAttr {
@@ -91,6 +98,18 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::Flowspec { afi, withdraws } => {
                 flowspec_unreach_attr_emit(*afi, withdraws, buf);
+            }
+            MpUnreachAttr::Labelv4(withdraws) => {
+                labelv4_unreach_attr_emit(withdraws, buf);
+            }
+            MpUnreachAttr::Labelv4Eor => {
+                labelv4_unreach_attr_emit(&[], buf);
+            }
+            MpUnreachAttr::Labelv6(withdraws) => {
+                labelv6_unreach_attr_emit(withdraws, buf);
+            }
+            MpUnreachAttr::Labelv6Eor => {
+                labelv6_unreach_attr_emit(&[], buf);
             }
             _ => {
                 //
@@ -237,6 +256,67 @@ fn flowspec_unreach_attr_emit(afi: Afi, withdraws: &[FlowspecNlri], buf: &mut By
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpUnreachAttr::Labelv4(withdraws)` (or `Labelv4Eor`
+/// when `withdraws` is empty) as a complete `MP_UNREACH_NLRI` path
+/// attribute. The label is carried on the wire (RFC 3107) but ignored
+/// for identity; `Labelv4Nlri::nlri_emit` writes whatever label the
+/// withdraw entry holds.
+///
+/// Wire format (RFC 4760 §4): AFI=1, SAFI=4, then the NLRI list (empty
+/// for end-of-RIB).
+fn labelv4_unreach_attr_emit(withdraws: &[Labelv4Nlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip));
+    value.put_u8(u8::from(Safi::MplsLabel));
+    for nlri in withdraws {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpUnreachAttr::Labelv6(withdraws)` (or `Labelv6Eor`
+/// when empty) as a complete `MP_UNREACH_NLRI` path attribute, AFI=2,
+/// SAFI=4.
+fn labelv6_unreach_attr_emit(withdraws: &[Labelv6Nlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip6));
+    value.put_u8(u8::from(Safi::MplsLabel));
+    for nlri in withdraws {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 impl MpUnreachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
         // AFI + SAFI = 3.
@@ -281,6 +361,22 @@ impl MpUnreachAttr {
                 many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpUnreachAttr::Ipv6Nlri(withdrawal);
             return Ok((input, mp_nlri));
+        }
+        if header.afi == Afi::Ip && header.safi == Safi::MplsLabel {
+            if input.is_empty() {
+                return Ok((input, MpUnreachAttr::Labelv4Eor));
+            }
+            let (input, withdrawal) =
+                many0_complete(|i| Labelv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            return Ok((input, MpUnreachAttr::Labelv4(withdrawal)));
+        }
+        if header.afi == Afi::Ip6 && header.safi == Safi::MplsLabel {
+            if input.is_empty() {
+                return Ok((input, MpUnreachAttr::Labelv6Eor));
+            }
+            let (input, withdrawal) =
+                many0_complete(|i| Labelv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            return Ok((input, MpUnreachAttr::Labelv6(withdrawal)));
         }
         if header.afi == Afi::L2vpn && header.safi == Safi::Evpn {
             if input.is_empty() {
@@ -446,6 +542,24 @@ impl fmt::Display for MpUnreachAttr {
                     writeln!(f, " {afi}/flowspec {w}")?;
                 }
                 Ok(())
+            }
+            Labelv4(nlris) => {
+                for nlri in nlris.iter() {
+                    writeln!(f, " {nlri}")?;
+                }
+                Ok(())
+            }
+            Labelv4Eor => {
+                writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::MplsLabel)
+            }
+            Labelv6(nlris) => {
+                for nlri in nlris.iter() {
+                    writeln!(f, " {nlri}")?;
+                }
+                Ok(())
+            }
+            Labelv6Eor => {
+                writeln!(f, " EoR: {}/{}", Afi::Ip6, Safi::MplsLabel)
             }
         }
     }
