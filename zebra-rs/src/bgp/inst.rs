@@ -1314,10 +1314,73 @@ impl Bgp {
         nh: std::net::IpAddr,
         resolution: &crate::rib::nht::NexthopResolution,
     ) {
+        use super::nht::CacheChange;
         let reachable = resolution.reachable;
-        let deps = self.nexthop_cache.update(nh, resolution);
-        for dep in deps {
-            self.nht_reeval_dep(nh, reachable, dep);
+        match self.nexthop_cache.update(nh, resolution) {
+            CacheChange::Unchanged => {}
+            // Gate flipped → full re-eval: best-path, advertise, install.
+            CacheChange::Reachability(deps) => {
+                for dep in deps {
+                    self.nht_reeval_dep(nh, reachable, dep);
+                }
+            }
+            // PE still reachable but its transport rerouted → only the
+            // fully-resolved VPN FIB entry is stale; re-install it
+            // without re-advertising (best-path is unchanged).
+            CacheChange::Transport(deps) => {
+                for dep in deps {
+                    self.nht_reinstall_transport(nh, dep);
+                }
+            }
+        }
+    }
+
+    /// Re-install the dataplane for a VPN dep after its PE next-hop's
+    /// transport rerouted (reachability unchanged). Re-dispatches the
+    /// per-VRF import with the freshly-resolved transport, so each
+    /// importing VRF re-programs its `{transport,service}`-labelled FIB
+    /// entry. Unicast deps are a no-op: BGP installs the BGP next-hop
+    /// and the RIB recursively re-resolves it, so there's nothing here
+    /// to refresh.
+    fn nht_reinstall_transport(&mut self, nh: std::net::IpAddr, dep: super::nht::NhtDep) {
+        use super::nht::NhtDep;
+        let dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let transport = self.nexthop_cache.transport_for(nh);
+        match dep {
+            NhtDep::V4vpn(rd, p) => {
+                let selected = self.local_rib.select_best_path_vpn(&rd, p);
+                if let Some(winner) = selected.first() {
+                    let label = winner.label.map(|l| l.label).unwrap_or(0);
+                    super::vrf::dispatch_import_v4(
+                        &dispatcher,
+                        rd,
+                        p,
+                        &winner.attr,
+                        label,
+                        transport,
+                        None,
+                    );
+                }
+            }
+            NhtDep::V6vpn(rd, p) => {
+                let selected = self.local_rib.select_best_path_vpn_v6(&rd, p);
+                if let Some(winner) = selected.first() {
+                    let label = winner.label.map(|l| l.label).unwrap_or(0);
+                    super::vrf::dispatch_import_v6(
+                        &dispatcher,
+                        rd,
+                        p,
+                        &winner.attr,
+                        label,
+                        transport,
+                        None,
+                    );
+                }
+            }
+            NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
 
