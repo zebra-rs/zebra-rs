@@ -3712,13 +3712,24 @@ fn route_flowspec_propagate(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    match selected.last() {
-        Some(best) if super::flowspec::flowspec_validate(bgp.local_rib, nlri, best).is_valid() => {
-            route_advertise_flowspec_to_peers(afi, nlri, best, bgp, peers);
-        }
-        _ => {
-            route_withdraw_flowspec_to_peers(afi, nlri, peers);
-        }
+    let Some(best) = selected.last() else {
+        route_withdraw_flowspec_to_peers(afi, nlri, peers);
+        return;
+    };
+    // RFC 9117 validity, honouring the source neighbor's per-neighbor
+    // validation toggle. Invalid (or otherwise-suppressed) flow specs
+    // are withdrawn from peers rather than advertised.
+    let validation_enabled = peers
+        .get_by_idx(best.ident)
+        .map(|p| p.config.flowspec_validation)
+        .unwrap_or(true);
+    let valid =
+        super::flowspec::flowspec_validate_with_mode(bgp.local_rib, nlri, best, validation_enabled)
+            .is_valid();
+    if valid {
+        route_advertise_flowspec_to_peers(afi, nlri, best, bgp, peers);
+    } else {
+        route_withdraw_flowspec_to_peers(afi, nlri, peers);
     }
 }
 

@@ -34,6 +34,9 @@ pub enum FlowspecValidation {
     ValidAsPathLocal,
     /// b.1 — originator matches the best-match unicast route.
     ValidOriginatorMatch,
+    /// Validation administratively disabled for this neighbor — the
+    /// flow spec is treated as feasible without RFC 9117 checks.
+    ValidDisabled,
     /// No destination-prefix component (RFC 8955 requires one).
     InvalidNoDestPrefix,
     /// No unicast route covers the destination prefix.
@@ -44,7 +47,10 @@ pub enum FlowspecValidation {
 
 impl FlowspecValidation {
     pub fn is_valid(&self) -> bool {
-        matches!(self, Self::ValidAsPathLocal | Self::ValidOriginatorMatch)
+        matches!(
+            self,
+            Self::ValidAsPathLocal | Self::ValidOriginatorMatch | Self::ValidDisabled
+        )
     }
 }
 
@@ -53,6 +59,7 @@ impl fmt::Display for FlowspecValidation {
         let s = match self {
             Self::ValidAsPathLocal => "valid (as-path local)",
             Self::ValidOriginatorMatch => "valid (originator match)",
+            Self::ValidDisabled => "valid (validation disabled)",
             Self::InvalidNoDestPrefix => "invalid (no destination prefix)",
             Self::InvalidNoUnicastRoute => "invalid (no unicast route)",
             Self::InvalidOriginatorMismatch => "invalid (originator mismatch)",
@@ -157,6 +164,21 @@ pub fn flowspec_validate(
     }
 }
 
+/// As [`flowspec_validate`], but honours the per-neighbor validation
+/// toggle (RFC 9117 §6, configurable). When `validation_enabled` is
+/// false the flow spec is accepted without checks (trusted neighbor).
+pub fn flowspec_validate_with_mode(
+    local_rib: &LocalRib,
+    nlri: &FlowspecNlri,
+    rib: &BgpRib,
+    validation_enabled: bool,
+) -> FlowspecValidation {
+    if !validation_enabled {
+        return FlowspecValidation::ValidDisabled;
+    }
+    flowspec_validate(local_rib, nlri, rib)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +192,45 @@ mod tests {
                 nlri.parse().unwrap(),
             ))],
         )
+    }
+
+    fn ebgp_rib(attr: &BgpAttr) -> BgpRib {
+        use super::super::route::BgpRibType;
+        BgpRib::new(
+            1,
+            std::net::Ipv4Addr::UNSPECIFIED,
+            BgpRibType::EBGP,
+            0,
+            0,
+            attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn validate_with_mode_disabled_accepts_anything() {
+        // Validation off ⇒ feasible without any RFC 9117 check (even a
+        // flow spec with no destination prefix).
+        let local_rib = LocalRib::default();
+        let nlri = FlowspecNlri::new(Afi::Ip, vec![]);
+        let rib = ebgp_rib(&BgpAttr::default());
+        let v = flowspec_validate_with_mode(&local_rib, &nlri, &rib, false);
+        assert_eq!(v, FlowspecValidation::ValidDisabled);
+        assert!(v.is_valid());
+    }
+
+    #[test]
+    fn validate_with_mode_enabled_runs_rfc9117() {
+        // Validation on, dest prefix present, empty AS_PATH ⇒ b.2 valid.
+        let local_rib = LocalRib::default();
+        let nlri = v4_dst("10.0.0.0/24");
+        let rib = ebgp_rib(&BgpAttr::default());
+        assert_eq!(
+            flowspec_validate_with_mode(&local_rib, &nlri, &rib, true),
+            FlowspecValidation::ValidAsPathLocal
+        );
     }
 
     #[test]

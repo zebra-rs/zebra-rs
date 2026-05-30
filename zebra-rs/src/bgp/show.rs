@@ -2236,13 +2236,18 @@ fn show_bgp_flowspec(
     // applied in the dataplane.
     for (nlri, rib) in table.selected.iter() {
         // RFC 9117 validity, computed live against the current unicast
-        // Loc-RIB (it gates re-advertise/install in later slices; here
-        // it annotates the output). `*` marks a valid flow spec.
-        let validation = super::flowspec::flowspec_validate(&bgp.local_rib, nlri, rib);
+        // Loc-RIB and honouring the source neighbor's validation toggle.
+        // `*` marks a valid flow spec.
+        let source = bgp.peers.get_by_idx(rib.ident);
+        let validation_enabled = source.map(|p| p.config.flowspec_validation).unwrap_or(true);
+        let validation = super::flowspec::flowspec_validate_with_mode(
+            &bgp.local_rib,
+            nlri,
+            rib,
+            validation_enabled,
+        );
         let mark = if validation.is_valid() { "*" } else { " " };
-        let from = bgp
-            .peers
-            .get_by_idx(rib.ident)
+        let from = source
             .map(|p| p.address.to_string())
             .unwrap_or_else(|| rib.router_id.to_string());
         writeln!(buf, " {mark} match:  {nlri}")?;

@@ -1,0 +1,103 @@
+module zebra-bgp-flowspec {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-flowspec";
+  prefix "zbfs";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Per-neighbor BGP Flow Specification knobs (RFC 8955 / RFC 8956,
+     validation per RFC 9117).
+
+     Currently exposes the per-neighbor validation toggle:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           flowspec {
+             validation false;   // trust this neighbor's flow specs
+           }
+         }
+       }
+
+     Local flow-spec rule origination (match criteria + traffic-filtering
+     action) is a planned extension to this module.";
+
+  revision 2026-05-30 {
+    description "Initial revision: per-neighbor validation toggle.";
+    reference
+      "RFC 9117: Revised Validation Procedure for BGP Flow
+       Specifications.";
+  }
+
+  grouping bgp-neighbor-flowspec-extension {
+    description
+      "Flow Specification knobs on a BGP neighbor.";
+
+    container flowspec {
+      description
+        "BGP Flow Specification knobs for this neighbor.";
+
+      leaf validation {
+        ext:help "Validate received flow specs against the unicast RIB (RFC 9117)";
+        type boolean;
+        default "true";
+        description
+          "When true (default), flow specs received from this neighbor
+           are validated per RFC 9117: a flow spec is feasible only if
+           it embeds a destination-prefix component and either
+           originated inside our AS (empty / confederation-only
+           AS_PATH) or its originator matches the best-match unicast
+           route for the destination prefix. Flow specs that fail
+           validation are kept in the RIB but never re-advertised (and,
+           once the dataplane lands, never installed).
+
+           When false, validation is skipped and every flow spec from
+           this neighbor is treated as feasible. Use only for a trusted
+           neighbor such as a central flow-spec controller.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach flowspec knobs to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-flowspec-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X flowspec validation` is
+       path-valid.";
+    uses bgp-neighbor-flowspec-extension;
+  }
+}
