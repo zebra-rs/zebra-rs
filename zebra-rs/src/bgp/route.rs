@@ -1320,15 +1320,21 @@ pub fn route_ipv4_update(
     };
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
-    nht_track_received(
-        bgp,
-        &mut rib,
-        match rd {
-            Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
-            None => super::nht::NhtDep::V4(nlri.prefix),
-        },
-    );
-    let (_, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
+    let dep = match rd {
+        Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
+        None => super::nht::NhtDep::V4(nlri.prefix),
+    };
+    nht_track_received(bgp, &mut rib, dep.clone());
+    let (replaced, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
+    // If this update changed the path's next-hop, the displaced row's
+    // old next-hop is no longer tracked by it; release it (unless
+    // another surviving path still uses it). Survivors are read *after*
+    // the update, so the new next-hop is in the set and an unchanged
+    // next-hop is correctly skipped.
+    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4(rd, nlri.prefix);
+        nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
+    }
 
     // Per-VRF best-path → global VPNv4 export. The hook only
     // fires for IPv4 unicast (rd==None) inside a VRF task
@@ -2488,21 +2494,24 @@ pub fn route_ipv6_update(
     }
 
     rib.attr = bgp.attr_store.intern(attr.clone());
-    nht_track_received(
-        bgp,
-        &mut rib,
-        match rd {
-            Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
-            None => super::nht::NhtDep::V6(nlri.prefix),
-        },
-    );
+    let dep = match rd {
+        Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
+        None => super::nht::NhtDep::V6(nlri.prefix),
+    };
+    nht_track_received(bgp, &mut rib, dep.clone());
     // Kept for the rd==Some import-dispatch withdraw branch (the rib
     // itself is moved into `update_v6vpn` below); cheap Arc bump.
     let import_attr = rib.attr.clone();
-    let (_, selected, _next_id) = match rd {
+    let (replaced, selected, _next_id) = match rd {
         Some(rd) => bgp.local_rib.update_v6vpn(rd, nlri.prefix, rib),
         None => bgp.local_rib.update_v6(nlri.prefix, rib),
     };
+    // Release the displaced row's old next-hop if this update changed it
+    // (see the v4 path). Survivors read after the update.
+    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+        let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(rd, nlri.prefix);
+        nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
+    }
 
     match rd {
         // Plain v6 unicast → kernel FIB + peer advertisement.
@@ -6979,6 +6988,46 @@ mod tests {
             }
             other => panic!("expected Uni nexthop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn candidate_nexthops_v4_collects_distinct_survivors() {
+        use super::{BgpRib, BgpRibType, LocalRib};
+        let mk = |ident: usize, nh: Ipv4Addr| {
+            let attr = BgpAttr {
+                nexthop: Some(BgpNexthop::Ipv4(nh)),
+                ..BgpAttr::default()
+            };
+            BgpRib::new(
+                ident,
+                Ipv4Addr::new(10, 0, 0, 1),
+                BgpRibType::EBGP,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            )
+        };
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let mut rib = LocalRib::default();
+        rib.update(None, prefix, mk(1, Ipv4Addr::new(192, 0, 2, 1)));
+        rib.update(None, prefix, mk(2, Ipv4Addr::new(192, 0, 2, 2)));
+
+        // Two peers, two next-hops → both survive.
+        let nhs = rib.candidate_nexthops_v4(None, prefix);
+        assert_eq!(nhs.len(), 2);
+        assert!(nhs.contains(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))));
+
+        // Withdraw peer 1's path → only peer 2's next-hop survives. This
+        // is what stops a partial withdrawal / next-hop change from
+        // releasing a next-hop another path still uses.
+        rib.remove(None, prefix, 0, 1);
+        assert_eq!(
+            rib.candidate_nexthops_v4(None, prefix),
+            std::collections::BTreeSet::from([IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))])
+        );
     }
 
     #[test]
