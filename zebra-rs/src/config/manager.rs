@@ -128,6 +128,21 @@ impl RibSubscriber {
         let _ = self.rib_tx.send(crate::rib::Message::IlmDel { label, ilm });
     }
 
+    /// Install an SRv6 SID via the RIB SID registry — the per-VRF BGP
+    /// spawn site uses this to program an `encapsulation srv6` VRF's
+    /// End.DT46 seg6local decap into the VRF table. Like
+    /// [`Self::send_ilm_add`], a SID install is a global RIB mutation,
+    /// so it rides the legacy `rib_tx` channel.
+    pub fn send_sid_add(&self, sid: crate::rib::Sid) {
+        let _ = self.rib_tx.send(crate::rib::Message::SidAdd { sid });
+    }
+
+    /// Withdraw a previously-installed SID by its address — the inverse
+    /// of [`Self::send_sid_add`], used at despawn / locator-change.
+    pub fn send_sid_del(&self, addr: std::net::Ipv6Addr) {
+        let _ = self.rib_tx.send(crate::rib::Message::SidDel { addr });
+    }
+
     /// Request a dynamic MPLS label block of `size` labels for `proto`
     /// from the RIB label manager. The RIB replies asynchronously with
     /// a `RibRx::LabelBlock` on `proto`'s subscriber channel.

@@ -412,9 +412,18 @@ pub struct Bgp {
     pub srv6_locator_name: Option<String>,
     /// SRv6 locator updates from the RIB segment-routing manager,
     /// established once via `Message::SrSubscribe` in [`Self::new`].
-    /// Drained in the event loop; resolution is currently logged and
-    /// the resolved `Locator` + SID allocation land in a follow-up.
+    /// Drained in the event loop; resolution drives per-VRF End.DT46
+    /// SID (re)allocation.
     pub srv6_locator_rx: UnboundedReceiver<crate::rib::RibSrRx>,
+    /// Resolved [`crate::rib::Locator`] for [`Self::srv6_locator_name`],
+    /// `None` until it resolves (or after withdrawal). `encapsulation
+    /// srv6` VRFs carve their per-VRF End.DT46 SID from this locator's
+    /// prefix; a prefix change re-seeds the pool and re-allocates.
+    pub srv6_locator: Option<crate::rib::Locator>,
+    /// First-fit function allocator for the per-VRF End.DT46 service
+    /// SIDs carved from [`Self::srv6_locator`]. Reset when the locator
+    /// prefix changes (every prior SID address is then invalid).
+    pub srv6_sid_pool: super::vrf::BgpSidPool,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -590,6 +599,8 @@ impl Bgp {
             vrf_label_request_pending: false,
             srv6_locator_name: None,
             srv6_locator_rx,
+            srv6_locator: None,
+            srv6_sid_pool: super::vrf::BgpSidPool::new(),
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -678,10 +689,10 @@ impl Bgp {
     }
 
     /// Handle an SRv6 locator update from the RIB segment-routing
-    /// manager. v1 logs the resolution so operators can confirm the
-    /// configured `srv6 locator` bound to a real prefix; storing the
-    /// resolved [`Locator`] and allocating per-VRF End.DT46 service
-    /// SIDs lands in a follow-up.
+    /// manager. Stores the resolved [`crate::rib::Locator`] and, when
+    /// the usable *prefix* changes (resolved / withdrawn / moved),
+    /// re-seeds the SID pool and re-allocates every `encapsulation
+    /// srv6` VRF's End.DT46 service SID so it tracks the new locator.
     fn process_sr_rx(&mut self, msg: crate::rib::RibSrRx) {
         match msg {
             crate::rib::RibSrRx::Locator { name, locator } => {
@@ -689,20 +700,138 @@ impl Bgp {
                 if self.srv6_locator_name.as_deref() != Some(name.as_str()) {
                     return;
                 }
-                match locator.as_ref().and_then(|l| l.prefix) {
+                let new_prefix = locator.as_ref().and_then(|l| l.prefix);
+                let old_prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix);
+                // Always store the latest (behavior may change without
+                // the prefix moving), but only reconcile SIDs on a
+                // material prefix change — the RIB re-sends the same
+                // locator on every watcher add, and a needless respawn
+                // would bounce CE sessions.
+                self.srv6_locator = locator;
+                if new_prefix == old_prefix {
+                    return;
+                }
+                match new_prefix {
                     Some(prefix) => {
                         tracing::info!(locator = %name, %prefix, "bgp: SRv6 locator resolved");
                     }
                     None => {
-                        tracing::info!(
-                            locator = %name,
-                            "bgp: SRv6 locator unresolved / withdrawn",
-                        );
+                        tracing::info!(locator = %name, "bgp: SRv6 locator withdrawn");
                     }
                 }
+                self.reconcile_srv6_vrfs();
             }
             crate::rib::RibSrRx::Block { .. } => {}
         }
+    }
+
+    /// Is `name` configured as an `encapsulation srv6` VRF?
+    fn is_srv6_vrf(&self, name: &str) -> bool {
+        self.vrfs.get(name).map(|c| c.encapsulation)
+            == Some(super::vrf_config::BgpVrfEncapsulation::Srv6)
+    }
+
+    /// Allocate a per-VRF End.DT46 service SID from the resolved
+    /// locator. `None` when the VRF isn't srv6-mode, the locator hasn't
+    /// resolved, or the function space is exhausted — the VRF then
+    /// spawns SID-less and is reconciled on the next locator update.
+    fn alloc_vrf_sid(
+        &mut self,
+        cfg: &super::vrf_config::BgpVrfConfig,
+    ) -> Option<super::vrf::Srv6VrfSid> {
+        if cfg.encapsulation != super::vrf_config::BgpVrfEncapsulation::Srv6 {
+            return None;
+        }
+        let loc_name = self.srv6_locator_name.clone()?;
+        let prefix = self.srv6_locator.as_ref().and_then(|l| l.prefix)?;
+        let function = self.srv6_sid_pool.allocate()?;
+        match crate::isis::srv6::function_addr(prefix, function) {
+            Some(addr) => Some(super::vrf::Srv6VrfSid {
+                addr,
+                function,
+                locator: loc_name,
+            }),
+            None => {
+                // Prefix too long to carry a 16-bit function — give the
+                // function back so it isn't leaked.
+                self.srv6_sid_pool.release(function);
+                None
+            }
+        }
+    }
+
+    /// Rebuild a [`super::vrf::Srv6VrfSid`] from a handle's preserved
+    /// `(addr, function)` so a relabel / kernel-ctx respawn re-installs
+    /// the *same* SID rather than churning the address.
+    fn preserved_srv6(
+        &self,
+        sid: Option<(std::net::Ipv6Addr, u16)>,
+    ) -> Option<super::vrf::Srv6VrfSid> {
+        let loc = self.srv6_locator_name.clone().unwrap_or_default();
+        sid.map(|(addr, function)| super::vrf::Srv6VrfSid {
+            addr,
+            function,
+            locator: loc.clone(),
+        })
+    }
+
+    /// Re-seed the SID pool and re-allocate every running srv6 VRF's
+    /// End.DT46 SID against the current locator. Driven by
+    /// [`Self::process_sr_rx`] on a locator prefix change.
+    fn reconcile_srv6_vrfs(&mut self) {
+        // The locator prefix moved, so every previously-issued function
+        // maps to a now-invalid address. Throw the pool away and
+        // re-allocate from the base under the new prefix.
+        self.srv6_sid_pool.reset();
+        let srv6_vrfs: Vec<String> = self
+            .vrf_registry
+            .keys()
+            .filter(|name| self.is_srv6_vrf(name))
+            .cloned()
+            .collect();
+        for name in srv6_vrfs {
+            self.resid_vrf(&name);
+        }
+    }
+
+    /// Respawn `name`'s per-VRF task with a freshly-allocated End.DT46
+    /// SID (or none, if the locator is now unresolved). Withdraws the
+    /// old SID first. Mirrors [`Self::relabel_vrf`] but swaps the
+    /// service SID rather than the MPLS label. Assumes the SID pool was
+    /// already reset by the caller, so it does not free the old
+    /// function (it no longer exists in the pool).
+    fn resid_vrf(&mut self, name: &str) {
+        let Some(cfg) = self.vrfs.get(name).cloned() else {
+            return;
+        };
+        let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
+            super::vrf::despawn_bgp_vrf(name, &handle);
+            self.unregister_vrf_show(name);
+            self.peer_index.retain(|_, owner| owner != name);
+            // Withdraw the stale SID by its (old-prefix) address.
+            if let Some((addr, _function)) = handle.srv6_sid {
+                self.rib_subscriber.send_sid_del(addr);
+            }
+            handle.label
+        } else {
+            return;
+        };
+        let kernel = self.rib_known_vrfs.get(name).cloned();
+        let srv6 = self.alloc_vrf_sid(&cfg);
+        let new_handle = super::vrf::spawn_bgp_vrf(
+            name.to_string(),
+            &cfg,
+            self.router_id,
+            self.asn,
+            preserved_label,
+            kernel,
+            &self.rib_subscriber,
+            srv6,
+            self.vrf_global_tx.clone(),
+        );
+        self.register_vrf_show(name, &new_handle);
+        self.vrf_registry.insert(name.to_string(), new_handle);
+        tracing::info!(vrf = %name, "bgp: reconciled SRv6 service SID for VRF");
     }
 
     /// Update the BGP router-id and propagate it to every peer's
@@ -1003,6 +1132,12 @@ impl Bgp {
                     self.rib_subscriber
                         .send_label_block_release("bgp", start, end - start);
                 }
+                // Withdraw the SRv6 End.DT46 service SID and return its
+                // function to the pool (srv6-mode VRFs only).
+                if let Some((addr, function)) = handle.srv6_sid {
+                    self.rib_subscriber.send_sid_del(addr);
+                    self.srv6_sid_pool.release(function);
+                }
                 // Drop every `peer_index` entry that pointed at
                 // this VRF — defensive cleanup against the VRF
                 // task exiting before its `UnregisterPeer`
@@ -1026,6 +1161,10 @@ impl Bgp {
             // downstream, which the Export handler already treats
             // as "skip label install" — a safe degradation.
             let label = self.alloc_vrf_label();
+            // Allocate the per-VRF End.DT46 service SID for srv6-mode
+            // VRFs (None for MPLS-mode, or srv6 before the locator
+            // resolves — reconciled on the next locator update).
+            let srv6 = self.alloc_vrf_sid(&cfg);
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
@@ -1034,6 +1173,7 @@ impl Bgp {
                 label,
                 kernel,
                 &self.rib_subscriber,
+                srv6,
                 self.vrf_global_tx.clone(),
             );
             self.register_vrf_show(&name, &handle);
@@ -1068,16 +1208,21 @@ impl Bgp {
         // the respawn stays addressable from any PE that already
         // cached it; the original allocation stays held on the
         // new handle.
-        let preserved_label = if let Some(handle) = self.vrf_registry.remove(name) {
+        let (preserved_label, preserved_sid) = if let Some(handle) = self.vrf_registry.remove(name)
+        {
             super::vrf::despawn_bgp_vrf(name, &handle);
             self.unregister_vrf_show(name);
             // Clear stale `peer_index` entries — the spawned task
             // is about to push fresh RegisterPeer messages.
             self.peer_index.retain(|_, owner| owner != name);
-            handle.label
+            (handle.label, handle.srv6_sid)
         } else {
-            self.alloc_vrf_label()
+            (self.alloc_vrf_label(), None)
         };
+        // Preserve the same End.DT46 SID across the respawn so a PE that
+        // already learned it stays valid; this respawn is what actually
+        // installs the decap, now that the kernel table id is known.
+        let srv6 = self.preserved_srv6(preserved_sid);
         let table_id = kernel.table_id;
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
@@ -1087,6 +1232,7 @@ impl Bgp {
             preserved_label,
             Some(kernel),
             &self.rib_subscriber,
+            srv6,
             self.vrf_global_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
@@ -1480,11 +1626,17 @@ impl Bgp {
             return;
         };
         let kernel = self.rib_known_vrfs.get(name).cloned();
-        if let Some(handle) = self.vrf_registry.remove(name) {
+        let preserved_sid = if let Some(handle) = self.vrf_registry.remove(name) {
             super::vrf::despawn_bgp_vrf(name, &handle);
             self.unregister_vrf_show(name);
             self.peer_index.retain(|_, owner| owner != name);
-        }
+            handle.srv6_sid
+        } else {
+            None
+        };
+        // A relabel swaps only the MPLS label; the End.DT46 SID (for an
+        // srv6-mode VRF) is preserved and re-installed unchanged.
+        let srv6 = self.preserved_srv6(preserved_sid);
         let new_handle = super::vrf::spawn_bgp_vrf(
             name.to_string(),
             &cfg,
@@ -1493,6 +1645,7 @@ impl Bgp {
             label,
             kernel,
             &self.rib_subscriber,
+            srv6,
             self.vrf_global_tx.clone(),
         );
         self.register_vrf_show(name, &new_handle);
