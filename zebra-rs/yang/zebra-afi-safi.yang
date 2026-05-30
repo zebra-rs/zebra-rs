@@ -19,10 +19,10 @@ module zebra-afi-safi {
      Two flavors are provided as groupings supplying the `name` key of
      an `afi-safi` list:
 
-       * `afi-safi`         — the full BGP set (ipv4, ipv6, label-v4,
-                              label-v6, vpnv4, vpnv6, evpn, rtcv4, rtcv6,
-                              flowspec-ipv4, flowspec-ipv6). Used by
-                              `router bgp` (global + per-neighbor
+       * `afi-safi`         — the full BGP set (ipv4, ipv6, vpnv4,
+                              vpnv6, rtcv4, rtcv6, evpn, label-v4,
+                              label-v6, flowspec-ipv4, flowspec-ipv6).
+                              Used by `router bgp` (global + per-neighbor
                               afi-safi).
        * `afi-safi-unicast` — the unicast subset (ipv4, ipv6). Used by
                               `router isis` and the per-VRF BGP afi-safi
@@ -37,12 +37,30 @@ module zebra-afi-safi {
       "The `name` key for a BGP `afi-safi` list — the full set of
        families zebra-rs's BGP supports.";
     leaf name {
+      ext:no-sort "true";
       type enumeration {
         enum ipv4 {
           description "IPv4 unicast (AFI 1, SAFI 1).";
         }
         enum ipv6 {
           description "IPv6 unicast (AFI 2, SAFI 1).";
+        }
+        enum vpnv4 {
+          description "MPLS-labeled VPN-IPv4 (AFI 1, SAFI 128).";
+        }
+        enum vpnv6 {
+          description "MPLS-labeled VPN-IPv6 (AFI 2, SAFI 128).";
+        }
+        enum rtcv4 {
+          description
+            "IPv4 Route Target Constraint (AFI 1, SAFI 132).";
+        }
+        enum rtcv6 {
+          description
+            "IPv6 Route Target Constraint (AFI 2, SAFI 132).";
+        }
+        enum evpn {
+          description "BGP EVPN (AFI 25, SAFI 70).";
         }
         enum label-v4 {
           description
@@ -52,23 +70,6 @@ module zebra-afi-safi {
           description
             "IPv6 Labeled Unicast (AFI 2, SAFI 4); RFC 3107 / RFC 8277,
              incl. 6PE (RFC 4798).";
-        }
-        enum vpnv4 {
-          description "MPLS-labeled VPN-IPv4 (AFI 1, SAFI 128).";
-        }
-        enum vpnv6 {
-          description "MPLS-labeled VPN-IPv6 (AFI 2, SAFI 128).";
-        }
-        enum evpn {
-          description "BGP EVPN (AFI 25, SAFI 70).";
-        }
-        enum rtcv4 {
-          description
-            "IPv4 Route Target Constraint (AFI 1, SAFI 132).";
-        }
-        enum rtcv6 {
-          description
-            "IPv6 Route Target Constraint (AFI 2, SAFI 132).";
         }
         enum flowspec-ipv4 {
           description
@@ -80,7 +81,9 @@ module zebra-afi-safi {
         }
       }
       description
-        "Address family / sub-address family this list entry configures.";
+        "Address family / sub-address family this list entry configures.
+         The `ext:no-sort` tag keeps CLI completion in this declared
+         order rather than alphabetizing it.";
     }
   }
 
