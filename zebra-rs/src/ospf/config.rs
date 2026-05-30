@@ -117,6 +117,14 @@ impl Ospf {
             config_ospf_interface_prefix_sid_absolute,
         );
         self.ospf_add(
+            "/area/interface/flex-algo-prefix-sid/index",
+            config_ospf_interface_flex_algo_prefix_sid_index,
+        );
+        self.ospf_add(
+            "/area/interface/flex-algo-prefix-sid/absolute",
+            config_ospf_interface_flex_algo_prefix_sid_absolute,
+        );
+        self.ospf_add(
             "/area/interface/adjacency-sid/index",
             config_ospf_interface_adjacency_sid_index,
         );
@@ -868,6 +876,62 @@ fn config_ospf_interface_prefix_sid_absolute(
         link.config.prefix_sid = Some(super::link::PrefixSid::Absolute(absolute));
     } else {
         link.config.prefix_sid = None;
+    }
+    let ifindex = link.index;
+
+    ospf.ext_prefix_lsa_originate(ifindex);
+
+    Some(())
+}
+
+// `/router/ospf/area/interface/flex-algo-prefix-sid/<algo>/index` —
+// per-algo Index-form Prefix-SID for this interface's prefix
+// (RFC 9350 §7). Stored keyed by algo and re-originates the
+// Extended-Prefix Opaque LSA so the extra Prefix-SID sub-TLV appears.
+fn config_ospf_interface_flex_algo_prefix_sid_index(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let algo = args.u8()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config
+            .flex_algo_prefix_sids
+            .insert(algo, super::link::PrefixSid::Index(index));
+    } else {
+        link.config.flex_algo_prefix_sids.remove(&algo);
+    }
+    let ifindex = link.index;
+
+    ospf.ext_prefix_lsa_originate(ifindex);
+
+    Some(())
+}
+
+// `/router/ospf/area/interface/flex-algo-prefix-sid/<algo>/absolute` —
+// per-algo Absolute (label) Prefix-SID sibling of the index form.
+fn config_ospf_interface_flex_algo_prefix_sid_absolute(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let algo = args.u8()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config
+            .flex_algo_prefix_sids
+            .insert(algo, super::link::PrefixSid::Absolute(absolute));
+    } else {
+        link.config.flex_algo_prefix_sids.remove(&algo);
     }
     let ifindex = link.index;
 

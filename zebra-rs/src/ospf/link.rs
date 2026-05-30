@@ -78,6 +78,11 @@ pub struct LinkConfig {
     pub transmit_delay: Option<u16>,
     pub mtu_ignore: bool,
     pub prefix_sid: Option<PrefixSid>,
+    /// Per-Flexible-Algorithm Prefix-SIDs for this interface's prefix
+    /// (RFC 9350 §7), keyed by algo id (128..=255). Emitted as extra
+    /// Prefix-SID sub-TLVs (Algorithm = FlexAlgo(N)) in the
+    /// Extended-Prefix Opaque LSA alongside the algo-0 `prefix_sid`.
+    pub flex_algo_prefix_sids: BTreeMap<u8, PrefixSid>,
     pub adjacency_sid: Option<AdjacencySid>,
     pub network_type: Option<OspfNetworkType>,
     /// RFC 2328 §D authentication mode. `None` = inherit (Null

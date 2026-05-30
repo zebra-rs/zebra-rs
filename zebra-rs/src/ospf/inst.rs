@@ -1045,19 +1045,26 @@ impl Ospf<Ospfv2> {
 
         let link = self.links.get(&ifindex);
         let should_originate = self.segment_routing == SegmentRoutingMode::Mpls
-            && link.is_some_and(|l| l.enabled && l.config.prefix_sid.is_some());
+            && link.is_some_and(|l| {
+                l.enabled
+                    && (l.config.prefix_sid.is_some() || !l.config.flex_algo_prefix_sids.is_empty())
+            });
 
         if should_originate {
             let link = link.unwrap();
-            let prefix_sid = link.config.prefix_sid.unwrap();
             // Use the first non-loopback address as a /32 host prefix.
             let Some(addr) = link.addr.iter().find(|a| !a.prefix.addr().is_loopback()) else {
                 return;
             };
             let prefix = ipnet::Ipv4Net::new(addr.prefix.addr(), 32).unwrap_or(addr.prefix);
 
-            let mut lsa =
-                super::srmpls::ext_prefix_lsa_build(self.router_id, prefix, &prefix_sid, opaque_id);
+            let mut lsa = super::srmpls::ext_prefix_lsa_build(
+                self.router_id,
+                prefix,
+                link.config.prefix_sid.as_ref(),
+                &link.config.flex_algo_prefix_sids,
+                opaque_id,
+            );
 
             // Preserve sequence number if re-originating.
             if let Some(area) = self.areas.get(AREA0)
