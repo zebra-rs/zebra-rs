@@ -21,7 +21,7 @@ module zebra-afi-safi {
 
        * `afi-safi`         — the full BGP set (ipv4, ipv6, label-v4,
                               label-v6, vpnv4, vpnv6, evpn, rtcv4, rtcv6,
-                              ipv4-flowspec, ipv6-flowspec). Used by
+                              flowspec-ipv4, flowspec-ipv6). Used by
                               `router bgp` (global + per-neighbor
                               afi-safi).
        * `afi-safi-unicast` — the unicast subset (ipv4, ipv6). Used by
@@ -70,11 +70,11 @@ module zebra-afi-safi {
           description
             "IPv6 Route Target Constraint (AFI 2, SAFI 132).";
         }
-        enum ipv4-flowspec {
+        enum flowspec-ipv4 {
           description
             "IPv4 Flow Specification (AFI 1, SAFI 133, RFC 8955).";
         }
-        enum ipv6-flowspec {
+        enum flowspec-ipv6 {
           description
             "IPv6 Flow Specification (AFI 2, SAFI 133, RFC 8956).";
         }

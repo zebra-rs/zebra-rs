@@ -134,8 +134,8 @@ impl Args {
             "evpn" => Some(AfiSafi::new(Afi::L2vpn, Safi::Evpn)),
             "rtcv4" => Some(AfiSafi::new(Afi::Ip, Safi::Rtc)),
             "rtcv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Rtc)),
-            "ipv4-flowspec" => Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)),
-            "ipv6-flowspec" => Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec)),
+            "flowspec-ipv4" => Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)),
+            "flowspec-ipv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec)),
             _ => None,
         }
     }
@@ -735,9 +735,9 @@ mod tests {
 
     #[test]
     fn afi_safi_parses_flowspec_families() {
-        let mut args = Args(["ipv4-flowspec".to_string()].into_iter().collect());
+        let mut args = Args(["flowspec-ipv4".to_string()].into_iter().collect());
         assert_eq!(args.afi_safi(), Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)));
-        let mut args = Args(["ipv6-flowspec".to_string()].into_iter().collect());
+        let mut args = Args(["flowspec-ipv6".to_string()].into_iter().collect());
         assert_eq!(
             args.afi_safi(),
             Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec))
