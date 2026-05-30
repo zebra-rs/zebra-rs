@@ -12,7 +12,7 @@ use super::peer::{Peer, PeerCounter, PeerParam, State};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use super::vrf::inst::BgpVrf;
-use crate::bgp::{AdjRibEvpnTable, AdjRibTable, BgpRibType, RibDirection};
+use crate::bgp::{AdjRibEvpnTable, AdjRibTable, BgpRib, BgpRibType, RibDirection};
 use crate::config::Args;
 use crate::config::{DisplayRequest, path_from_command};
 
@@ -110,6 +110,9 @@ fn configured_afi_safis<V: BgpShowView>(bgp: &V) -> Vec<AfiSafi> {
 fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
     match (afi_safi.afi, afi_safi.safi) {
         (Afi::Ip, Safi::Unicast) => bgp.local_rib().v4.0.len(),
+        (Afi::Ip6, Safi::Unicast) => bgp.local_rib().v6.0.len(),
+        (Afi::Ip, Safi::MplsLabel) => bgp.local_rib().v4lu.0.len(),
+        (Afi::Ip6, Safi::MplsLabel) => bgp.local_rib().v6lu.0.len(),
         (Afi::Ip, Safi::MplsVpn) => bgp.local_rib().v4vpn.values().map(|t| t.0.len()).sum(),
         (Afi::L2vpn, Safi::Evpn) => bgp.local_rib().evpn.values().map(|t| t.cands.len()).sum(),
         _ => 0,
@@ -464,6 +467,72 @@ fn show_bgp<V: BgpShowView>(
         }
     }
     Ok(buf)
+}
+
+/// `show ip bgp labeled-unicast` — render the IPv4 and IPv6
+/// Labeled-Unicast (SAFI 4) Loc-RIBs. Same columns as `show ip bgp`
+/// plus a Label column carrying the per-prefix MPLS label. JSON output
+/// is not yet defined (mirrors `show_bgp_evpn`); returns an empty array.
+fn show_bgp_labeled(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok("[]".to_string());
+    }
+
+    let mut buf = String::new();
+    buf.push_str(SHOW_BGP_HEADER);
+
+    writeln!(buf, "IPv4 Labeled Unicast:")?;
+    for (key, value) in bgp.local_rib.v4lu.0.iter() {
+        for rib in value.iter() {
+            show_labeled_row(&mut buf, &key.to_string(), rib)?;
+        }
+    }
+    writeln!(buf, "IPv6 Labeled Unicast:")?;
+    for (key, value) in bgp.local_rib.v6lu.0.iter() {
+        for rib in value.iter() {
+            show_labeled_row(&mut buf, &key.to_string(), rib)?;
+        }
+    }
+    Ok(buf)
+}
+
+/// One labeled-unicast row: the unicast columns from `show ip bgp` plus
+/// the per-prefix label (or `-` when absent).
+fn show_labeled_row(
+    buf: &mut String,
+    prefix: &str,
+    rib: &BgpRib,
+) -> std::result::Result<(), std::fmt::Error> {
+    let stale = if rib.stale { "S" } else { " " };
+    let valid = "*";
+    let best = if rib.best_path { ">" } else { " " };
+    let internal = if rib.typ == BgpRibType::IBGP {
+        "i"
+    } else {
+        " "
+    };
+    let nexthop = show_nexthop(&rib.attr);
+    let label = rib
+        .label
+        .map(|l| l.label.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let med = show_med(&rib.attr);
+    let local_pref = show_local_pref(&rib.attr);
+    let weight = rib.weight;
+    let mut aspath = show_aspath(&rib.attr);
+    if !aspath.is_empty() {
+        aspath.push(' ');
+    }
+    let origin = show_origin(&rib.attr);
+    writeln!(
+        buf,
+        "{stale}{valid}{best}{internal} {:18} {:18} {:>8} {:>7} {:>6} {:>6} {}{}",
+        prefix, nexthop, label, med, local_pref, weight, aspath, origin,
+    )
 }
 
 fn show_bgp_vpnv4(
@@ -2761,6 +2830,7 @@ impl Bgp {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
+        self.show_add("/show/ip/bgp/labeled-unicast", show_bgp_labeled);
         self.show_add("/show/ip/bgp/vpnv4", show_bgp_vpnv4);
         self.show_add("/show/ip/bgp/vpnv4/route", show_bgp_vpnv4_route);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
