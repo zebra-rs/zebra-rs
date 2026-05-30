@@ -4054,6 +4054,7 @@ pub fn route_srpolicy_update(
     };
     let delta = bgp.local_rib.sr_policy.insert(key, cp);
     apply_srpolicy_fib(delta, bgp);
+    sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
 /// Withdraw one SR Policy NLRI from the headend database, re-run active
@@ -4064,12 +4065,15 @@ pub fn route_srpolicy_withdraw(ident: usize, nlri: &SrPolicyNlri, bgp: &mut BgpT
             .sr_policy
             .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
     apply_srpolicy_fib(delta, bgp);
+    sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
 /// Realize an SR Policy active-path change in the dataplane: remove the
 /// previous SRv6 Binding SID and/or install the new one as an
 /// End.B6.Encaps local SID (RFC 8986 §4.14) pushing the policy's
-/// segment list. SR-MPLS Binding SIDs are a later phase.
+/// segment list, plus tear down an SR-MPLS Binding-SID ILM when a whole
+/// policy is withdrawn. (The live SR-MPLS install/update is driven by
+/// `sr_policy_mpls_sync` / `sr_policy_reconcile_mpls`, gated on NHT.)
 fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTop) {
     if let Some(addr) = delta.remove {
         let _ = bgp.rib_client.send(rib::Message::SidDel { addr });
@@ -4090,6 +4094,122 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTo
         };
         let _ = bgp.rib_client.send(rib::Message::SidAdd { sid });
     }
+    if let Some(label) = delta.mpls_remove {
+        srpolicy_ilm_remove(bgp.rib_client, label);
+    }
+}
+
+/// Track/untrack the policy endpoint with NHT and reconcile its SR-MPLS
+/// Binding-SID ILM. The ILM forwards toward the endpoint's resolved
+/// next-hop (an exact first hop for single-segment / endpoint-rooted
+/// policies; an approximation when a multi-segment list's first waypoint
+/// differs from the endpoint). Global instance only; a null endpoint
+/// (color-only policy) has nothing to resolve.
+fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
+    if bgp.nexthop_cache.is_none() || endpoint.is_unspecified() {
+        return;
+    }
+    let dep = super::nht::NhtDep::SrPolicy { color, endpoint };
+    let wants = bgp.local_rib.sr_policy.wants_mpls(color, endpoint);
+
+    if wants && let Some(cache) = bgp.nexthop_cache.as_deref_mut() {
+        let (needs_register, _reachable) = cache.track(endpoint, dep.clone());
+        if needs_register {
+            let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
+                proto: "bgp".to_string(),
+                nh: endpoint,
+            });
+        }
+    }
+
+    if let Some(cache) = bgp.nexthop_cache.as_deref() {
+        sr_policy_reconcile_mpls(
+            bgp.rib_client,
+            cache,
+            &mut bgp.local_rib.sr_policy,
+            color,
+            endpoint,
+        );
+    }
+
+    if !wants
+        && let Some(cache) = bgp.nexthop_cache.as_deref_mut()
+        && cache.untrack(endpoint, &dep)
+    {
+        let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
+            proto: "bgp".to_string(),
+            nh: endpoint,
+        });
+    }
+}
+
+/// Reconcile the SR-MPLS Binding-SID ILM for `<color, endpoint>` against
+/// the active path and the endpoint's NHT resolution. Callable from the
+/// receive path and from the NHT re-eval in `inst.rs`, so it takes the
+/// RIB client + cache directly rather than a `BgpTop`.
+pub(super) fn sr_policy_reconcile_mpls(
+    rib_client: &crate::rib::client::RibClient,
+    cache: &super::nht::NexthopCache,
+    db: &mut super::sr_policy::SrPolicyDb,
+    color: u32,
+    endpoint: IpAddr,
+) {
+    let reachable = !cache.transport_for(endpoint).is_empty();
+    let action = db.mpls_reconcile(color, endpoint, reachable);
+    if let Some(label) = action.remove {
+        srpolicy_ilm_remove(rib_client, label);
+    }
+    if let Some(install) = action.install {
+        srpolicy_ilm_install(
+            rib_client,
+            install.bsid,
+            &install.segments,
+            cache.transport_for(endpoint),
+        );
+    }
+}
+
+/// Install the SR-MPLS Binding-SID ILM: incoming `bsid` label → push the
+/// policy's `stack` (the explicit segment list) toward the resolved
+/// `transport` egress(es). The transport's own labels are ignored — the
+/// SR Policy stack is the explicit path; only the L2 next-hop is reused.
+fn srpolicy_ilm_install(
+    rib_client: &crate::rib::client::RibClient,
+    bsid: u32,
+    stack: &[u32],
+    transport: &[rib::nht::ResolvedNexthop],
+) {
+    if transport.is_empty() {
+        return;
+    }
+    let mk = |egress: &rib::nht::ResolvedNexthop| {
+        let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
+        uni.mpls_label = stack.to_vec();
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        rib::Nexthop::Uni(mk(&transport[0]))
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk(egress));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+    let mut ilm = rib::inst::IlmEntry::new(rib::RibType::Bgp);
+    ilm.ilm_type = rib::inst::IlmType::Swap;
+    ilm.nexthop = nexthop;
+    let _ = rib_client.send(rib::Message::IlmAdd { label: bsid, ilm });
+}
+
+/// Tear down the SR-MPLS Binding-SID ILM at `bsid`.
+fn srpolicy_ilm_remove(rib_client: &crate::rib::client::RibClient, bsid: u32) {
+    let ilm = rib::inst::IlmEntry::new(rib::RibType::Bgp);
+    let _ = rib_client.send(rib::Message::IlmDel { label: bsid, ilm });
 }
 
 /// Propagate a flow spec's selected best path to peers: re-advertise it
