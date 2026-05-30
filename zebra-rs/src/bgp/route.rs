@@ -1258,6 +1258,12 @@ pub struct LocalRib {
     /// `<color, endpoint>` (the endpoint's family is the NLRI AFI, so a
     /// single table holds both IPv4 and IPv6 policies).
     pub sr_policy: super::sr_policy::SrPolicyDb,
+
+    /// Locally-configured SR Policies to originate as SAFI 73
+    /// (zebra-bgp-sr-policy.yang). Lives here so both the config
+    /// callbacks (`&mut Bgp`) and the establish-time advertise
+    /// (`BgpTop`) reach it without threading a new `BgpTop` field.
+    pub sr_policy_local: super::sr_policy::LocalSrPolicies,
 }
 
 impl LocalRib {
@@ -4125,6 +4131,136 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTo
     }
 }
 
+// =======================================================================
+// Originator: advertise locally-configured SR Policies as SAFI 73.
+// =======================================================================
+
+/// Re-evaluate a locally-configured SR Policy after a config edit and
+/// (re)advertise it to SAFI-73 peers, or withdraw it if it is no longer
+/// complete. Called from the `sr-policy` config callbacks.
+pub(super) fn srpolicy_origin_sync(bgp: &mut Bgp, name: &str) {
+    let router_id = bgp.router_id;
+    // Resolve to an owned action first so the `local_rib` borrow is
+    // released before we touch `peers`.
+    let action: Option<Result<(SrPolicyNlri, BgpAttr), SrPolicyNlri>> = bgp
+        .local_rib
+        .sr_policy_local
+        .policies
+        .get(name)
+        .map(|p| match p.advert(router_id) {
+            Some(pair) => Ok(pair),
+            None => Err(p.nlri(router_id)),
+        })
+        .map(|r| match r {
+            Ok(pair) => Ok(pair),
+            // Incomplete: withdraw if an NLRI can still be formed.
+            Err(Some(nlri)) => Err(nlri),
+            Err(None) => Err(SrPolicyNlri {
+                id: 0,
+                distinguisher: 0,
+                color: 0,
+                endpoint: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            }),
+        });
+    match action {
+        Some(Ok((nlri, attr))) => srpolicy_origin_reach(bgp, nlri, attr),
+        // A synthetic all-zero NLRI means "nothing was ever advertisable"
+        // — color/endpoint unset — so there is nothing to withdraw.
+        Some(Err(nlri)) if nlri.color != 0 => srpolicy_origin_withdraw(bgp, nlri),
+        _ => {}
+    }
+}
+
+/// Addresses of established peers that negotiated SAFI 73 for `afi`.
+fn srpolicy_peer_addrs(bgp: &Bgp, afi: Afi) -> Vec<IpAddr> {
+    bgp.peers
+        .iter()
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
+        .map(|(addr, _)| *addr)
+        .collect()
+}
+
+/// Advertise one local SR Policy NLRI + attribute to every established
+/// SAFI-73 peer of the endpoint's family (direct emit, no Adj-RIB-Out).
+pub(super) fn srpolicy_origin_reach(bgp: &mut Bgp, nlri: SrPolicyNlri, attr: BgpAttr) {
+    let afi = nlri.afi();
+    let nhop = IpAddr::V4(bgp.router_id);
+    for paddr in srpolicy_peer_addrs(bgp, afi) {
+        let Some(peer) = bgp.peers.get_mut(&paddr) else {
+            continue;
+        };
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.mp_update = Some(MpReachAttr::SrPolicy {
+            afi,
+            snpa: 0,
+            nhop,
+            updates: vec![nlri.clone()],
+        });
+        update.bgp_attr = Some(attr.clone());
+        if let Some(bytes) = update.pop_srpolicy()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
+/// Withdraw one local SR Policy NLRI from every established SAFI-73 peer.
+pub(super) fn srpolicy_origin_withdraw(bgp: &mut Bgp, nlri: SrPolicyNlri) {
+    let afi = nlri.afi();
+    for paddr in srpolicy_peer_addrs(bgp, afi) {
+        let Some(peer) = bgp.peers.get_mut(&paddr) else {
+            continue;
+        };
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.mp_withdraw = Some(MpUnreachAttr::SrPolicy {
+            afi,
+            withdraws: vec![nlri.clone()],
+        });
+        if let Some(bytes) = update.pop_srpolicy_withdraw()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
+/// On peer establishment, advertise every complete local SR Policy to
+/// the new peer (the SAFI-73 analogue of `route_sync_evpn`).
+pub fn route_sync_srpolicy(peer: &mut Peer, bgp: &BgpTop) {
+    let router_id = *bgp.router_id;
+    let max = peer.max_packet_size();
+    let adverts: Vec<(Afi, SrPolicyNlri, BgpAttr)> = bgp
+        .local_rib
+        .sr_policy_local
+        .policies
+        .values()
+        .filter_map(|p| {
+            p.advert(router_id)
+                .map(|(nlri, attr)| (nlri.afi(), nlri, attr))
+        })
+        .collect();
+    for (afi, nlri, attr) in adverts {
+        if !peer.is_afi_safi(afi, Safi::SrTePolicy) {
+            continue;
+        }
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.mp_update = Some(MpReachAttr::SrPolicy {
+            afi,
+            snpa: 0,
+            nhop: IpAddr::V4(router_id),
+            updates: vec![nlri],
+        });
+        update.bgp_attr = Some(attr);
+        if let Some(bytes) = update.pop_srpolicy()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
 /// Track/untrack the policy endpoint with NHT and reconcile its SR-MPLS
 /// Binding-SID ILM. The ILM forwards toward the endpoint's resolved
 /// next-hop (an exact first hop for single-segment / endpoint-rooted
@@ -6694,6 +6830,10 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     }
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);
+    }
+    // SAFI 73: dump our locally-originated SR Policies to the new peer.
+    if peer.is_afi_safi(Afi::Ip, Safi::SrTePolicy) || peer.is_afi_safi(Afi::Ip6, Safi::SrTePolicy) {
+        route_sync_srpolicy(peer, bgp);
     }
 }
 

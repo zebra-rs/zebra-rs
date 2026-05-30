@@ -308,6 +308,78 @@ impl UpdatePacket {
         Some(buf.get())
     }
 
+    /// Serialize an SR Policy (SAFI 73, RFC 9830) MP_REACH UPDATE for
+    /// the originator. Mirrors [`pop_evpn`](Self::pop_evpn): emits the
+    /// path attributes (incl. the Tunnel-Type-15 Tunnel Encapsulation
+    /// attribute and NO_ADVERTISE / Route Target) followed by the
+    /// MP_REACH NLRI, and drains `updates` so a second call returns
+    /// `None`.
+    pub fn pop_srpolicy(&mut self) -> Option<BytesMut> {
+        let (afi, snpa, nhop, updates) = match &self.mp_update {
+            Some(MpReachAttr::SrPolicy {
+                afi,
+                snpa,
+                nhop,
+                updates,
+            }) if !updates.is_empty() => (*afi, *snpa, *nhop, updates.clone()),
+            _ => return None,
+        };
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+        let _ = buf.put_u16(0u16); // no IPv4 withdraw
+
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16); // placeholder
+
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit(buf.get_mut());
+        }
+        super::attrs::mp_reach::srpolicy_attr_emit(afi, snpa, &nhop, &updates, buf.get_mut());
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        if let Some(MpReachAttr::SrPolicy { updates, .. }) = self.mp_update.as_mut() {
+            updates.clear();
+        }
+        Some(buf.get())
+    }
+
+    /// Serialize an SR Policy MP_UNREACH (withdraw) UPDATE. Drains
+    /// `withdraws` so a second call returns `None`.
+    pub fn pop_srpolicy_withdraw(&mut self) -> Option<BytesMut> {
+        match &self.mp_withdraw {
+            Some(MpUnreachAttr::SrPolicy { withdraws, .. }) if !withdraws.is_empty() => {}
+            _ => return None,
+        }
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+        let _ = buf.put_u16(0u16); // no IPv4 withdraw
+
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16); // placeholder
+
+        if let Some(mp) = &self.mp_withdraw {
+            mp.attr_emit(buf.get_mut());
+        }
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        if let Some(MpUnreachAttr::SrPolicy { withdraws, .. }) = self.mp_withdraw.as_mut() {
+            withdraws.clear();
+        }
+        Some(buf.get())
+    }
+
     pub fn pop_vpnv6(&mut self) -> Option<BytesMut> {
         match &self.mp_update {
             Some(MpReachAttr::Vpnv6(vpnv6)) if !vpnv6.updates.is_empty() => {}
