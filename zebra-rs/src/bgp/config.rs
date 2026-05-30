@@ -51,6 +51,20 @@ fn config_global_hostname(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
+/// `set router bgp global srv6 locator <name>` — names the SRv6
+/// locator BGP carves per-VRF End.DT46 service SIDs from for L3VPN
+/// over SRv6 (RFC 9252). Drives the RIB locator watch; SID
+/// allocation off the resolved locator lands in a follow-up.
+fn config_global_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op == ConfigOp::Set {
+        let name = args.string()?;
+        bgp.set_srv6_locator(Some(name));
+    } else {
+        bgp.set_srv6_locator(None);
+    }
+    Some(())
+}
+
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
@@ -1506,6 +1520,10 @@ impl Bgp {
         self.callback_add("/router/bgp/global/as", config_global_asn);
         self.callback_add("/router/bgp/global/identifier", config_global_identifier);
         self.callback_add("/router/bgp/global/hostname", config_global_hostname);
+        self.callback_add(
+            "/router/bgp/global/srv6/locator",
+            config_global_srv6_locator,
+        );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);
         // Per-peer reference to a `neighbor-group`. Storage only —
@@ -1559,6 +1577,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/label-mode",
             super::vrf_config::config_vrf_label_mode,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/encapsulation",
+            super::vrf_config::config_vrf_encapsulation,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor",

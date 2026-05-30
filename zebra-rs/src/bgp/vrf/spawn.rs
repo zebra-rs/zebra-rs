@@ -23,7 +23,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::context::{ProtoContext, Task};
 
 use super::super::inst::RibKnownVrf;
-use super::super::vrf_config::BgpVrfConfig;
+use super::super::vrf_config::{BgpVrfConfig, BgpVrfEncapsulation};
 use super::inst::{BgpVrf, BgpVrfInbox, serve_vrf};
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
 
@@ -184,8 +184,16 @@ pub fn spawn_bgp_vrf(
     // placeholder-ctx spawn skips the install; the
     // `maybe_respawn_vrf_with_kernel_ctx` path re-runs with kernel
     // info and installs the ILM then.
+    //
+    // SRv6-mode VRFs (`encapsulation srv6`) skip the MPLS decap
+    // entirely: their per-VRF End.DT46 service SID replaces the
+    // label-bound ILM (programmed in a follow-up). Guarding here keeps
+    // the kernel MPLS table clean of entries that would never be
+    // advertised.
     let ilm_decap_ifindex = match (kernel_table_id, kernel_ifindex) {
-        (Some(table_id), Some(vrf_ifindex)) if label != 0 => {
+        (Some(table_id), Some(vrf_ifindex))
+            if label != 0 && cfg.encapsulation == BgpVrfEncapsulation::Mpls =>
+        {
             let entry = crate::rib::inst::IlmEntry {
                 ilm_type: crate::rib::inst::IlmType::DecapVrf {
                     table_id,
