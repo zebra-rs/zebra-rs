@@ -395,6 +395,14 @@ pub struct Isis {
     /// `ConfigManager::bfd_client_tx`; not refreshed if BFD respawns
     /// later (late-binding refresh is a follow-up).
     pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// BGP task inbox, for pushing BGP Link-State (RFC 9552) producer
+    /// routes. `None` when no BGP task exists (BGP not configured, or
+    /// configured in a later commit than `router isis`).
+    pub bgp_tx: Option<mpsc::Sender<crate::bgp::inst::Message>>,
+    /// BGP-LS objects last advertised to BGP, so the producer emits only
+    /// deltas (add/withdraw) on each SPF trigger rather than the full set
+    /// (RFC 9552 §5.2 — withdraw-old-on-change).
+    pub bgp_ls_advertised: std::collections::BTreeSet<bgp_packet::BgpLsNlri>,
     /// Sender half of the per-instance `BfdEvent` channel, cloned and
     /// handed to BFD as the `notifier` on every `Subscribe`.
     pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
@@ -548,6 +556,7 @@ impl Isis {
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        bgp_tx: Option<mpsc::Sender<crate::bgp::inst::Message>>,
         policy_tx: UnboundedSender<crate::policy::Message>,
     ) -> Self {
         let policy_chan = crate::policy::PolicyRxChannel::new();
@@ -648,6 +657,8 @@ impl Isis {
                 srlg_config: SrlgGroupBuilder::new(),
                 srlg_groups: BTreeMap::new(),
                 bfd_client_tx,
+                bgp_tx,
+                bgp_ls_advertised: std::collections::BTreeSet::new(),
                 bfd_event_tx,
                 bfd_event_rx,
                 key_chains: BTreeMap::new(),
@@ -1398,6 +1409,11 @@ impl Isis {
                 if std::mem::take(top.spf_pending.get_mut(&level)) {
                     let _ = self.tx.send(Message::SpfCalc(level));
                 }
+                // The LSDB is settled after SPF — push the BGP-LS producer's
+                // delta to BGP (RFC 9552). `top` is no longer used, so its
+                // mutable borrow of `self` has ended (NLL) and the disjoint
+                // field borrows inside `bgp_ls_produce` are free.
+                self.bgp_ls_produce();
             }
             Message::Recv(packet, ifindex, mac) => {
                 let Some(mut top) = self.link_top(ifindex) else {
@@ -1493,6 +1509,18 @@ impl Isis {
 
     /// Forward a `Subscribe` to the BFD instance with `"isis"` as the
     /// ClientId. No-op when BFD is not configured.
+    /// Drive the BGP-LS producer (RFC 9552): re-walk the LSDB, diff against
+    /// the last-advertised set, and push add/withdraw deltas to BGP. The
+    /// three field borrows are disjoint, so this `&mut self` method composes
+    /// cleanly. No-op when BGP isn't wired (`bgp_tx` is `None`).
+    fn bgp_ls_produce(&mut self) {
+        super::bgp_ls::produce(
+            &self.lsdb,
+            &mut self.bgp_ls_advertised,
+            self.bgp_tx.as_ref(),
+        );
+    }
+
     fn process_bfd_subscribe(&self, key: crate::bfd::session::SessionKey) {
         let Some(tx) = self.bfd_client_tx.as_ref() else {
             tracing::debug!(?key, "isis: bfd not configured; skipping subscribe");
@@ -2498,7 +2526,7 @@ mod bfd_wiring_tests {
         // Park the policy_rx so the Subscribe send in `new` doesn't
         // drop and panic on its own send.
         Box::leak(Box::new(policy_rx));
-        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx), policy_tx);
+        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx), None, policy_tx);
         (isis, bfd_client_rx)
     }
 
@@ -2544,7 +2572,7 @@ mod bfd_wiring_tests {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, policy_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(policy_rx));
-        let isis = Isis::new(ctx, rib_rx, None, policy_tx);
+        let isis = Isis::new(ctx, rib_rx, None, None, policy_tx);
         let key = loopback_key();
         isis.process_bfd_subscribe(key);
         isis.process_bfd_unsubscribe(key);

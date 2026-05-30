@@ -12,9 +12,15 @@ pub fn spawn_isis(config: &ConfigManager) {
     // (the IS-IS arm there pre-spawns BFD on the will-set flag).
     // Callers that bypass `commit_config` may still see `None`.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    // BGP-LS producer (RFC 9552): the IS-IS task pushes Link-State routes
+    // to BGP over this sender. Captured by value — `None` if `router bgp`
+    // is committed after `router isis` (cross-commit), matching the
+    // `bfd_client_tx` limitation; `commit_config` pre-spawns BGP first
+    // within a single commit.
+    let bgp_tx = config.bgp_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("isis");
     let ctx = ProtoContext::default_table(rib_client);
-    let isis = inst::Isis::new(ctx, rib_rx, bfd_client_tx, config.policy_tx.clone());
+    let isis = inst::Isis::new(ctx, rib_rx, bfd_client_tx, bgp_tx, config.policy_tx.clone());
     config.subscribe("isis", isis.cm.tx.clone());
     config.subscribe_show("isis", isis.show.tx.clone());
     let task = inst::serve(isis);

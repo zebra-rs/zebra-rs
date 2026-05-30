@@ -20,12 +20,7 @@
 // prefix attributes ride in the BGP-LS Attribute (type 29) and are a later
 // phase; this slice emits NLRIs only.
 
-// Phase 6a is the translation only; the IS-IS event loop does not call
-// `lsp_to_nlris` until the producer wiring lands in 6b. `zebra-rs` is a
-// binary crate, so these not-yet-called items would trip `dead_code` under
-// CI's `-D warnings`. Allow it here with this note rather than scatter
-// per-item attributes; 6b removes the need.
-#![allow(dead_code)]
+use std::collections::BTreeSet;
 
 use bgp_packet::{
     BgpLsNlri, LsLinkDescriptor, LsLinkNlri, LsNodeDescSub, LsNodeDescriptor, LsNodeNlri,
@@ -36,6 +31,7 @@ use isis_packet::{
     IsisLsp, IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvExtIsReachEntry,
     IsisTlvIpv6ReachEntry,
 };
+use tokio::sync::mpsc::Sender;
 
 use super::level::Level;
 
@@ -190,9 +186,123 @@ pub fn lsp_to_nlris(level: Level, lsp: &IsisLsp) -> Vec<BgpLsNlri> {
     out
 }
 
+/// Walk both IS-IS levels' LSDBs, translate every LSP to its BGP-LS NLRIs,
+/// diff the resulting set against `advertised` (what we last pushed to BGP),
+/// and send only the add/withdraw deltas over `bgp_tx`. `advertised` is
+/// updated to the new set. No-op when BGP is not wired (`bgp_tx` is `None`)
+/// or nothing changed.
+///
+/// This is the producer trigger, called from the IS-IS event loop on
+/// `SpfDone` (the LSDB is settled at that point). The diff gives RFC 9552
+/// §5.2 withdraw-old-on-change for free: an object that disappears from the
+/// LSDB (or whose descriptors change, making it a different NLRI key) shows
+/// up in `withdraw`. The two-way connectivity check on Link NLRIs is a
+/// deferred follow-up; today a link is advertised as soon as one endpoint's
+/// LSP lists the adjacency.
+pub fn produce(
+    lsdb: &super::level::Levels<super::lsdb::Lsdb>,
+    advertised: &mut BTreeSet<BgpLsNlri>,
+    bgp_tx: Option<&Sender<crate::bgp::inst::Message>>,
+) {
+    let Some(tx) = bgp_tx else {
+        return;
+    };
+
+    let mut current: BTreeSet<BgpLsNlri> = BTreeSet::new();
+    for level in [super::level::Level::L1, super::level::Level::L2] {
+        for lsa in lsdb.get(&level).values() {
+            for nlri in lsp_to_nlris(level, &lsa.lsp) {
+                current.insert(nlri);
+            }
+        }
+    }
+
+    let add: Vec<BgpLsNlri> = current.difference(advertised).cloned().collect();
+    let withdraw: Vec<BgpLsNlri> = advertised.difference(&current).cloned().collect();
+    if add.is_empty() && withdraw.is_empty() {
+        return;
+    }
+
+    // BGP's inbox is a bounded channel and the IS-IS event loop is sync, so
+    // use `try_send`. On the rare full-channel case, skip the update without
+    // touching `advertised` so the next trigger re-diffs and retries the
+    // whole delta (idempotent — add/withdraw are set operations).
+    match tx.try_send(crate::bgp::inst::Message::BgpLs { add, withdraw }) {
+        Ok(()) => *advertised = current,
+        Err(e) => {
+            tracing::warn!("bgp-ls producer: BGP inbox send failed, will retry: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a one-entry L2 LSDB level wrapper from a single LSP.
+    fn levels_with_l2(lsp: IsisLsp) -> crate::isis::level::Levels<crate::isis::lsdb::Lsdb> {
+        let mut l2 = crate::isis::lsdb::Lsdb::default();
+        l2.map.insert(
+            lsp.lsp_id,
+            crate::isis::lsdb::Lsa {
+                lsp,
+                originated: true,
+                hold_timer: None,
+                refresh_timer: None,
+                ifindex: 0,
+                bytes: vec![],
+                last_received: None,
+            },
+        );
+        crate::isis::level::Levels {
+            l1: crate::isis::lsdb::Lsdb::default(),
+            l2,
+        }
+    }
+
+    #[test]
+    fn produce_emits_add_then_diff_then_withdraw() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut advertised: std::collections::BTreeSet<BgpLsNlri> =
+            std::collections::BTreeSet::new();
+
+        // First trigger: one node LSP → one add, nothing withdrawn.
+        let levels = levels_with_l2(lsp(sysid(1), 0, 0, vec![]));
+        produce(&levels, &mut advertised, Some(&tx));
+        assert_eq!(advertised.len(), 1);
+        match rx.try_recv() {
+            Ok(crate::bgp::inst::Message::BgpLs { add, withdraw }) => {
+                assert_eq!(add.len(), 1);
+                assert!(withdraw.is_empty());
+            }
+            other => panic!("expected BgpLs add, got {other:?}"),
+        }
+
+        // Second trigger, identical LSDB: no delta, no message.
+        produce(&levels, &mut advertised, Some(&tx));
+        assert!(rx.try_recv().is_err(), "no message expected on no-op diff");
+
+        // Topology gone: the node is withdrawn.
+        let empty = crate::isis::level::Levels::<crate::isis::lsdb::Lsdb>::default();
+        produce(&empty, &mut advertised, Some(&tx));
+        assert!(advertised.is_empty());
+        match rx.try_recv() {
+            Ok(crate::bgp::inst::Message::BgpLs { add, withdraw }) => {
+                assert!(add.is_empty());
+                assert_eq!(withdraw.len(), 1);
+            }
+            other => panic!("expected BgpLs withdraw, got {other:?}"),
+        }
+    }
+
+    /// `produce` is a no-op when BGP isn't wired (`bgp_tx` is `None`).
+    #[test]
+    fn produce_noop_without_bgp() {
+        let mut advertised = std::collections::BTreeSet::new();
+        let levels = levels_with_l2(lsp(sysid(1), 0, 0, vec![]));
+        produce(&levels, &mut advertised, None);
+        assert!(advertised.is_empty());
+    }
     use isis_packet::{
         IsisLspId, IsisNeighborId, IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
     };

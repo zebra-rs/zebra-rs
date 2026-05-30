@@ -468,6 +468,10 @@ impl BgpVrf {
                     &group_id,
                 );
             }
+            Message::BgpLs { .. } => {
+                // BGP-LS (RFC 9552) is produced and stored only by the
+                // global BGP instance — per-VRF tasks never see it.
+            }
         }
     }
 
