@@ -15,10 +15,10 @@
 //! selection algorithm so they stay unit-testable.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::{
-    BgpAttr, BindingSid, CommunityValue, ExtCommunitySubType, SegmentList, SrPolicyTlvs,
+    BgpAttr, BindingSid, CommunityValue, ExtCommunitySubType, Segment, SegmentList, SrPolicyTlvs,
     Srv6BindingSid,
 };
 
@@ -79,6 +79,88 @@ pub struct SrPolicy {
     pub candidates: BTreeMap<CandidatePathKey, CandidatePath>,
     /// Active candidate path (RFC 9256 §2.9), if any valid path exists.
     pub active: Option<CandidatePathKey>,
+    /// SRv6 Binding SID currently programmed in the FIB for this policy
+    /// (the active path's End.B6.Encaps install). Tracked so a change of
+    /// active path tears the old one down.
+    installed: Option<Srv6Bsid>,
+}
+
+impl SrPolicy {
+    /// Diff the active path's desired SRv6 Binding-SID install against
+    /// what is currently programmed, update the record, and return the
+    /// FIB delta the caller applies via the RIB.
+    fn reconcile_fib(&mut self) -> SrPolicyFibDelta {
+        let desired = self
+            .active
+            .as_ref()
+            .and_then(|k| self.candidates.get(k))
+            .and_then(srv6_bsid);
+        let mut delta = SrPolicyFibDelta::default();
+        match (&self.installed, &desired) {
+            // Same Binding SID address: re-install only if its segment
+            // list changed (SidAdd is a replace).
+            (Some(prev), Some(new)) if prev.bsid == new.bsid => {
+                if prev.segments != new.segments {
+                    delta.install = Some(new.clone());
+                }
+            }
+            (prev, new) => {
+                delta.remove = prev.as_ref().map(|b| b.bsid);
+                delta.install = new.clone();
+            }
+        }
+        self.installed = desired;
+        delta
+    }
+}
+
+/// An SRv6 Binding SID install: the BSID address and the segment list
+/// (Type-B SIDs in forwarding order) that End.B6.Encaps pushes onto it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Srv6Bsid {
+    pub bsid: Ipv6Addr,
+    pub segments: Vec<Ipv6Addr>,
+}
+
+/// The FIB change produced by an insert/withdraw: remove an old Binding
+/// SID and/or install a new one. Both `None` means no dataplane change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SrPolicyFibDelta {
+    pub remove: Option<Ipv6Addr>,
+    pub install: Option<Srv6Bsid>,
+}
+
+/// The SRv6 Binding-SID install an active candidate path realizes, or
+/// `None` if it isn't an installable SRv6 policy (not valid, no SRv6
+/// Binding SID, or its first segment list isn't an all-Type-B list).
+fn srv6_bsid(cp: &CandidatePath) -> Option<Srv6Bsid> {
+    if !cp.valid {
+        return None;
+    }
+    let bsid = cp
+        .srv6_binding_sid
+        .as_ref()
+        .map(|s| s.sid)
+        .or(match &cp.binding_sid {
+            Some(BindingSid::Srv6(addr)) => Some(*addr),
+            _ => None,
+        })?;
+    let first = cp.segment_lists.first()?;
+    let segments: Vec<Ipv6Addr> = first
+        .segments
+        .iter()
+        .filter_map(|seg| match seg {
+            Segment::TypeB { sid, .. } => Some(*sid),
+            _ => None,
+        })
+        .collect();
+    // Only an all-SRv6 (Type B) list maps to an End.B6.Encaps push; a
+    // mixed or SR-MPLS list is out of scope here (an SR-MPLS Binding SID
+    // is the later ILM phase).
+    if segments.is_empty() || segments.len() != first.segments.len() {
+        return None;
+    }
+    Some(Srv6Bsid { bsid, segments })
 }
 
 /// The SR Policy database (one per BGP instance, lives on the Loc-RIB).
@@ -88,30 +170,45 @@ pub struct SrPolicyDb {
 }
 
 impl SrPolicyDb {
-    /// Insert or replace a candidate path and re-run active selection.
-    pub fn insert(&mut self, key: SrPolicyKey, cp: CandidatePath) {
+    /// Insert or replace a candidate path, re-run active selection, and
+    /// return the resulting FIB delta.
+    pub fn insert(&mut self, key: SrPolicyKey, cp: CandidatePath) -> SrPolicyFibDelta {
         let policy = self.policies.entry(key).or_default();
         let prev = policy.active.clone();
         policy.candidates.insert(cp.key.clone(), cp);
         policy.active = select_active(&policy.candidates, prev.as_ref());
+        policy.reconcile_fib()
     }
 
     /// Remove the candidate path advertised by `peer` for the NLRI
-    /// `<color, endpoint, discriminator>` and re-run selection. Drops the
-    /// whole policy when its last candidate is withdrawn.
-    pub fn withdraw(&mut self, color: u32, endpoint: IpAddr, discriminator: u32, peer: usize) {
+    /// `<color, endpoint, discriminator>`, re-run selection, and return
+    /// the FIB delta. Drops the whole policy (tearing down any installed
+    /// Binding SID) when its last candidate is withdrawn.
+    pub fn withdraw(
+        &mut self,
+        color: u32,
+        endpoint: IpAddr,
+        discriminator: u32,
+        peer: usize,
+    ) -> SrPolicyFibDelta {
         let key = SrPolicyKey { color, endpoint };
         let Some(policy) = self.policies.get_mut(&key) else {
-            return;
+            return SrPolicyFibDelta::default();
         };
         let prev = policy.active.clone();
         policy
             .candidates
             .retain(|k, cp| !(k.discriminator == discriminator && cp.peer == peer));
         if policy.candidates.is_empty() {
+            let remove = policy.installed.take().map(|b| b.bsid);
             self.policies.remove(&key);
+            SrPolicyFibDelta {
+                remove,
+                install: None,
+            }
         } else {
             policy.active = select_active(&policy.candidates, prev.as_ref());
+            policy.reconcile_fib()
         }
     }
 }
@@ -238,10 +335,34 @@ fn ipv4_route_targets(attr: &BgpAttr) -> Vec<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bgp_packet::Segment;
 
     fn endpoint(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    fn v6(s: &str) -> Ipv6Addr {
+        s.parse().unwrap()
+    }
+
+    /// A valid SRv6 candidate path: an SRv6 Binding SID plus a one-hop
+    /// Type-B segment list.
+    fn srv6_cp(disc: u32, pref: u32, peer: usize, bsid: &str, seg: &str) -> CandidatePath {
+        let mut c = cp(20, "10.0.0.1", disc, pref, true);
+        c.peer = peer;
+        c.srv6_binding_sid = Some(Srv6BindingSid {
+            flags: 0,
+            sid: v6(bsid),
+            structure: None,
+        });
+        c.segment_lists = vec![SegmentList {
+            weight: None,
+            segments: vec![Segment::TypeB {
+                flags: 0,
+                sid: v6(seg),
+                structure: None,
+            }],
+        }];
+        c
     }
 
     fn cp(proto: u8, originator_ip: &str, disc: u32, pref: u32, valid: bool) -> CandidatePath {
@@ -385,5 +506,72 @@ mod tests {
         tlvs.segment_lists.push(SegmentList::default());
         let cp2 = candidate_path(&tlvs, (65000, endpoint("10.0.0.1")), 1, 3);
         assert!(!cp2.valid);
+    }
+
+    #[test]
+    fn srv6_policy_installs_binding_sid() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let delta = db.insert(key, srv6_cp(1, 100, 1, "fc00:0:9::100", "fc00:0:2::"));
+        assert_eq!(delta.remove, None);
+        let install = delta.install.expect("install");
+        assert_eq!(install.bsid, v6("fc00:0:9::100"));
+        assert_eq!(install.segments, vec![v6("fc00:0:2::")]);
+    }
+
+    #[test]
+    fn better_path_swaps_binding_sid_then_falls_back() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: ep,
+        };
+        db.insert(key.clone(), srv6_cp(1, 100, 1, "fc00:0:9::1", "fc00:0:2::"));
+        // A higher-preference path swaps the installed Binding SID.
+        let delta = db.insert(key, srv6_cp(2, 200, 2, "fc00:0:9::2", "fc00:0:3::"));
+        assert_eq!(delta.remove, Some(v6("fc00:0:9::1")));
+        assert_eq!(delta.install.unwrap().bsid, v6("fc00:0:9::2"));
+        // Withdrawing the winner falls back to the remaining path's BSID.
+        let delta = db.withdraw(100, ep, 2, 2);
+        assert_eq!(delta.remove, Some(v6("fc00:0:9::2")));
+        assert_eq!(delta.install.unwrap().bsid, v6("fc00:0:9::1"));
+    }
+
+    #[test]
+    fn withdrawing_last_path_removes_binding_sid() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        let key = SrPolicyKey {
+            color: 5,
+            endpoint: ep,
+        };
+        db.insert(key.clone(), srv6_cp(1, 100, 1, "fc00:0:9::1", "fc00:0:2::"));
+        let delta = db.withdraw(5, ep, 1, 1);
+        assert_eq!(delta.remove, Some(v6("fc00:0:9::1")));
+        assert_eq!(delta.install, None);
+        assert!(!db.policies.contains_key(&key));
+    }
+
+    #[test]
+    fn sr_mpls_or_no_bsid_does_not_install() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 7,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        // SR-MPLS (Type A) segment, no SRv6 Binding SID → no SRv6 install.
+        let mut c = cp(20, "10.0.0.1", 1, 100, true);
+        c.segment_lists = vec![SegmentList {
+            weight: None,
+            segments: vec![Segment::TypeA {
+                flags: 0,
+                label: 16001,
+            }],
+        }];
+        assert_eq!(db.insert(key, c), SrPolicyFibDelta::default());
     }
 }

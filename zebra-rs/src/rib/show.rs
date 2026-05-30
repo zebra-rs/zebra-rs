@@ -2017,6 +2017,7 @@ mod tests {
             nh6: None,
             structure: None,
             table_id: 0,
+            segs: Vec::new(),
         }
     }
 

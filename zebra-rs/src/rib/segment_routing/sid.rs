@@ -45,6 +45,12 @@ pub enum SidBehavior {
     /// which is how BGP L3VPN-over-SRv6 binds a single per-VRF SID;
     /// the table-id is carried in [`Sid::table_id`].
     EndDT46,
+    /// End.B6.Encaps — RFC 8986 §4.14 (IANA codepoint 14). The SID is a
+    /// Binding SID for an SR Policy: a packet arriving with this SID is
+    /// encapsulated (outer IPv6 + SRH) onto the policy's segment list
+    /// (carried in [`Sid::segs`]) and forwarded. BGP SR Policy
+    /// (SAFI 73) installs the advertised SRv6 Binding SID this way.
+    EndB6Encap,
 }
 
 impl fmt::Display for SidBehavior {
@@ -57,6 +63,7 @@ impl fmt::Display for SidBehavior {
             Self::EndDT4 => write!(f, "End.DT4"),
             Self::EndDT6 => write!(f, "End.DT6"),
             Self::EndDT46 => write!(f, "End.DT46"),
+            Self::EndB6Encap => write!(f, "End.B6.Encaps"),
         }
     }
 }
@@ -76,6 +83,7 @@ impl FromStr for SidBehavior {
             "End.DT4" => Ok(Self::EndDT4),
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
+            "End.B6.Encaps" => Ok(Self::EndB6Encap),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
     }
@@ -193,6 +201,9 @@ pub struct Sid {
     /// End.DT46 decap lands in the right VRF. Ignored by End / End.X /
     /// uN / uA.
     pub table_id: u32,
+    /// SRH segment list pushed by `End.B6.Encaps` (RFC 8986 §4.14), in
+    /// forwarding order. Empty for every other behavior.
+    pub segs: Vec<Ipv6Addr>,
 }
 
 impl Sid {
@@ -211,7 +222,10 @@ impl Sid {
             | SidBehavior::UA
             | SidBehavior::EndDT4
             | SidBehavior::EndDT6
-            | SidBehavior::EndDT46 => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
+            | SidBehavior::EndDT46
+            | SidBehavior::EndB6Encap => {
+                Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
+            }
             SidBehavior::UN => {
                 let plen = self
                     .structure
