@@ -437,6 +437,12 @@ pub struct Bgp {
     /// initial request and any on-demand extension so a burst of
     /// label-less VRFs asks the RIB label manager for only one block.
     vrf_label_request_pending: bool,
+    /// Per-prefix local labels assigned to received Labeled-Unicast
+    /// (SAFI 4) routes we re-advertise with next-hop-self. Drawn from the
+    /// same dynamic pool as `vrf_label_alloc`. The label is advertised in
+    /// the NLRI and swap-programmed via an ILM (`local → received`).
+    pub lu_label_v4: std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
+    pub lu_label_v6: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
     /// Configured global SRv6 locator name (`router bgp global srv6
     /// locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
@@ -629,6 +635,8 @@ impl Bgp {
             rib_subscriber,
             vrf_label_alloc: None,
             vrf_label_request_pending: false,
+            lu_label_v4: BTreeMap::new(),
+            lu_label_v6: BTreeMap::new(),
             srv6_locator_name: None,
             srv6_locator_rx,
             srv6_locator: None,
@@ -1002,6 +1010,11 @@ impl Bgp {
                     nexthop_cache: Some(&mut self.nexthop_cache),
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
+                    lu_labels: Some(super::peer::LuLabels {
+                        alloc: &mut self.vrf_label_alloc,
+                        v4: &mut self.lu_label_v4,
+                        v6: &mut self.lu_label_v6,
+                    }),
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -1625,7 +1638,7 @@ impl Bgp {
     /// Send a `LabelBlockRequest` to the RIB label manager unless one is
     /// already outstanding. Dedup keeps a burst of label-less VRFs from
     /// each requesting a block.
-    fn request_label_block(&mut self) {
+    pub(super) fn request_label_block(&mut self) {
         if self.vrf_label_request_pending {
             return;
         }
@@ -1790,6 +1803,27 @@ impl Bgp {
                     }
                 }
             }
+            // Labeled-Unicast: the next-hop's transport rerouted but it's
+            // still reachable; re-install the FIB label-push entry with
+            // the fresh transport. No re-advertise (best-path unchanged).
+            NhtDep::V4lu(p) => {
+                let selected = self.local_rib.select_best_path_v4lu(p);
+                super::route::fib_install_labelv4(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    p,
+                    &selected,
+                );
+            }
+            NhtDep::V6lu(p) => {
+                let selected = self.local_rib.select_best_path_v6lu(p);
+                super::route::fib_install_labelv6(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    p,
+                    &selected,
+                );
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
@@ -1812,6 +1846,14 @@ impl Bgp {
             NhtDep::V6(p) => {
                 self.local_rib.v6.set_nexthop_reachable(*p, nh, reachable);
                 self.local_rib.v6.select_best_path(*p)
+            }
+            NhtDep::V4lu(p) => {
+                self.local_rib.v4lu.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v4lu.select_best_path(*p)
+            }
+            NhtDep::V6lu(p) => {
+                self.local_rib.v6lu.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v6lu.select_best_path(*p)
             }
             NhtDep::V4vpn(rd, p) => {
                 self.local_rib
@@ -1850,6 +1892,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
         match &dep {
             NhtDep::V4(p) => {
@@ -1866,6 +1909,38 @@ impl Bgp {
             NhtDep::V6(p) => {
                 super::route::fib_install_v6(&top, *p, &selected);
                 super::route::route_advertise_to_peers_v6(*p, &selected, &mut top, &mut self.peers);
+            }
+            // Labeled-Unicast reachability flip: re-install the FIB
+            // label-push entry (or withdraw) and re-advertise. The cache
+            // is passed directly (not via `top`, whose `nexthop_cache` is
+            // `None`) — `top`'s borrows don't include it.
+            NhtDep::V4lu(p) => {
+                super::route::fib_install_labelv4(
+                    top.rib_client,
+                    Some(&self.nexthop_cache),
+                    *p,
+                    &selected,
+                );
+                super::route::route_advertise_to_peers_labelv4(
+                    *p,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
+            }
+            NhtDep::V6lu(p) => {
+                super::route::fib_install_labelv6(
+                    top.rib_client,
+                    Some(&self.nexthop_cache),
+                    *p,
+                    &selected,
+                );
+                super::route::route_advertise_to_peers_labelv6(
+                    *p,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
             }
             NhtDep::V4vpn(rd, p) => {
                 super::route::route_advertise_to_peers(
@@ -2346,6 +2421,7 @@ impl Bgp {
                     best_path: false,
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
+                    local_label: None,
                     nexthop: Some(super::route::VpnNexthop::V4(nexthop)),
                     nexthop_reachable: true,
                     egress_ifindex_v6: None,
@@ -2406,6 +2482,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
+                    lu_labels: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -2509,6 +2586,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
+                    lu_labels: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -2603,6 +2681,7 @@ impl Bgp {
                     best_path: false,
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
+                    local_label: None,
                     nexthop: Some(super::route::VpnNexthop::V6(nexthop)),
                     nexthop_reachable: true,
                     egress_ifindex_v6: None,
@@ -2651,6 +2730,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
+                    lu_labels: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
@@ -2733,6 +2813,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
+                    lu_labels: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,

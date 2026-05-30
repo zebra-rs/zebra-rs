@@ -701,6 +701,63 @@ pub struct BgpTop<'a> {
             prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>,
         >,
     >,
+    /// BGP Labeled-Unicast (SAFI 4) local-label allocation context.
+    /// `Some` only in the receive `BgpTop` (the site that ingests
+    /// received routes); `None` in every advertise / originate / NHT
+    /// BgpTop — self-originated FECs advertise implicit-null and need no
+    /// local label. A received route advertised with next-hop-self gets
+    /// a local label here, swap-programmed via an ILM.
+    pub lu_labels: Option<LuLabels<'a>>,
+}
+
+/// Per-prefix local-label state for BGP Labeled Unicast, borrowed into
+/// the receive [`BgpTop`]. Labels are drawn from the shared dynamic-label
+/// allocator (the same pool that serves per-VRF labels).
+pub struct LuLabels<'a> {
+    pub alloc: &'a mut Option<super::vrf::VrfLabelAllocator>,
+    pub v4: &'a mut std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
+    pub v6: &'a mut std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
+}
+
+impl LuLabels<'_> {
+    /// Local label for an IPv4 LU prefix, allocating one on first use.
+    /// `None` if the dynamic pool is empty (the caller advertises the
+    /// received label as a fallback until a block is granted).
+    pub fn label_v4(&mut self, prefix: ipnet::Ipv4Net) -> Option<u32> {
+        if let Some(l) = self.v4.get(&prefix) {
+            return Some(*l);
+        }
+        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
+        self.v4.insert(prefix, label);
+        Some(label)
+    }
+
+    pub fn label_v6(&mut self, prefix: ipnet::Ipv6Net) -> Option<u32> {
+        if let Some(l) = self.v6.get(&prefix) {
+            return Some(*l);
+        }
+        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
+        self.v6.insert(prefix, label);
+        Some(label)
+    }
+
+    /// Release the label for a withdrawn IPv4 LU prefix; returns it so
+    /// the caller can tear down the swap ILM.
+    pub fn free_v4(&mut self, prefix: ipnet::Ipv4Net) -> Option<u32> {
+        let label = self.v4.remove(&prefix)?;
+        if let Some(a) = self.alloc.as_mut() {
+            a.free(label);
+        }
+        Some(label)
+    }
+
+    pub fn free_v6(&mut self, prefix: ipnet::Ipv6Net) -> Option<u32> {
+        let label = self.v6.remove(&prefix)?;
+        if let Some(a) = self.alloc.as_mut() {
+            a.free(label);
+        }
+        Some(label)
+    }
 }
 
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
@@ -1670,6 +1727,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1706,6 +1764,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
+        lu_labels: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

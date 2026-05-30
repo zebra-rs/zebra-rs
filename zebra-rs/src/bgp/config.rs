@@ -106,6 +106,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
         bgp.peers.remove(&addr);
@@ -537,6 +538,10 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let enabled: bool = args.boolean()?;
 
     let ipv4_unicast = key.afi == Afi::Ip && key.safi == Safi::Unicast;
+    // Enabling a Labeled-Unicast family means we may re-advertise routes
+    // with next-hop-self and need per-prefix local labels; request a
+    // dynamic label block eagerly so one is granted before routes arrive.
+    let lu_enabled = key.safi == Safi::MplsLabel && op.is_set() && enabled;
 
     let peer = bgp.peers.get_mut(&addr)?;
 
@@ -552,6 +557,9 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         } else {
             peer.config.mp.remove(&key);
         }
+    }
+    if lu_enabled {
+        bgp.request_label_block();
     }
     Some(())
 }

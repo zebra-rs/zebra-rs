@@ -315,6 +315,13 @@ pub enum IlmType {
         table_id: u32,
         vrf_ifindex: u32,
     },
+    /// BGP Labeled-Unicast transit swap (RFC 3107 / RFC 8277): the
+    /// kernel swaps the incoming local label for the next-hop's outgoing
+    /// label stack (`nexthop.mpls_label`) and forwards toward the
+    /// resolved egress. The netlink action is the generic `NewDestination`
+    /// swap (same path as Node/Adjacency); this variant only labels the
+    /// owner for show output and ILM selection.
+    Swap,
 }
 
 /// All ILM candidates competing for a single incoming label. Mirrors
