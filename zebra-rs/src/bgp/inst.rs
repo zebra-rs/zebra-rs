@@ -18,6 +18,12 @@ use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+/// Size of the dynamic MPLS label block BGP requests from the RIB
+/// label manager at startup, for per-VRF L3VPN labels. One label per
+/// VRF, so 1024 covers any realistic deployment; on-demand extension
+/// for larger fleets is a follow-up.
+const VRF_LABEL_BLOCK_SIZE: u32 = 1024;
+
 /// Map a `/clear/bgp/<afi>/neighbor[/soft[/in|out]]` path (from
 /// zebra-bgp-clear.yang) to the (AFI, SAFI, op) triple the BGP runtime
 /// understands. Returns None for unrecognised paths.
@@ -390,7 +396,11 @@ pub struct Bgp {
     /// `spawn_bgp_vrf` call; reclaims at despawn. The label gets
     /// stamped onto every `BgpGlobalMsg::Export` the VRF emits and
     /// drives the matching ILM Decap install on the PE.
-    pub vrf_label_alloc: super::vrf::VrfLabelAllocator,
+    /// Per-VRF label allocator, bounded to the dynamic block the RIB
+    /// label manager hands BGP at startup. `None` until that
+    /// `RibRx::LabelBlock` arrives — VRFs spawned before then take
+    /// label 0 (degraded) and are reconciled on arrival.
+    pub vrf_label_alloc: Option<super::vrf::VrfLabelAllocator>,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -557,7 +567,7 @@ impl Bgp {
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
             rib_subscriber,
-            vrf_label_alloc: super::vrf::VrfLabelAllocator::new(),
+            vrf_label_alloc: None,
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -901,7 +911,9 @@ impl Bgp {
                 // can pick it back up. Reclaim before the handle
                 // drops — handle drop aborts the task but doesn't
                 // know about the allocator.
-                self.vrf_label_alloc.free(handle.label);
+                if let Some(alloc) = self.vrf_label_alloc.as_mut() {
+                    alloc.free(handle.label);
+                }
                 // Drop every `peer_index` entry that pointed at
                 // this VRF — defensive cleanup against the VRF
                 // task exiting before its `UnregisterPeer`
@@ -924,7 +936,11 @@ impl Bgp {
             // effectively never fires; 0 would mean "no label"
             // downstream, which the Export handler already treats
             // as "skip label install" — a safe degradation.
-            let label = self.vrf_label_alloc.alloc().unwrap_or(0);
+            let label = self
+                .vrf_label_alloc
+                .as_mut()
+                .and_then(|a| a.alloc())
+                .unwrap_or(0);
             let handle = super::vrf::spawn_bgp_vrf(
                 name.clone(),
                 &cfg,
@@ -975,7 +991,10 @@ impl Bgp {
             self.peer_index.retain(|_, owner| owner != name);
             handle.label
         } else {
-            self.vrf_label_alloc.alloc().unwrap_or(0)
+            self.vrf_label_alloc
+                .as_mut()
+                .and_then(|a| a.alloc())
+                .unwrap_or(0)
         };
         let table_id = kernel.table_id;
         let new_handle = super::vrf::spawn_bgp_vrf(
@@ -1300,10 +1319,69 @@ impl Bgp {
             RibRx::NexthopUpdate { nh, resolution } => {
                 self.nht_handle_update(nh, &resolution);
             }
+            RibRx::LabelBlock { start, size } => {
+                self.label_block_arrived(start, size);
+            }
             _ => {
                 //
             }
         }
+    }
+
+    /// The RIB label manager granted BGP a dynamic block `[start,
+    /// start+size)`. Bind the per-VRF allocator to it, then reconcile
+    /// any VRF that spawned label-less before the block arrived:
+    /// give it a real label and respawn so it stamps exports and
+    /// installs its decap ILM.
+    fn label_block_arrived(&mut self, start: u32, size: u32) {
+        self.vrf_label_alloc = Some(super::vrf::VrfLabelAllocator::bounded(start, start + size));
+        tracing::info!(
+            start,
+            size,
+            "bgp: bound per-VRF label allocator to dynamic block"
+        );
+
+        let unlabelled: Vec<String> = self
+            .vrf_registry
+            .iter()
+            .filter(|(_, h)| h.label == 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in unlabelled {
+            self.relabel_vrf(&name);
+        }
+    }
+
+    /// Respawn `name`'s per-VRF task with a freshly-allocated label.
+    /// Used to fix up a VRF that spawned with label 0 (the block hadn't
+    /// arrived yet). Mirrors [`Self::maybe_respawn_vrf_with_kernel_ctx`]
+    /// but swaps the label rather than the `ProtoContext`.
+    fn relabel_vrf(&mut self, name: &str) {
+        let Some(cfg) = self.vrfs.get(name).cloned() else {
+            return;
+        };
+        let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
+            return;
+        };
+        let kernel = self.rib_known_vrfs.get(name).cloned();
+        if let Some(handle) = self.vrf_registry.remove(name) {
+            super::vrf::despawn_bgp_vrf(name, &handle);
+            self.unregister_vrf_show(name);
+            self.peer_index.retain(|_, owner| owner != name);
+        }
+        let new_handle = super::vrf::spawn_bgp_vrf(
+            name.to_string(),
+            &cfg,
+            self.router_id,
+            self.asn,
+            label,
+            kernel,
+            &self.rib_subscriber,
+            self.vrf_global_tx.clone(),
+        );
+        self.register_vrf_show(name, &new_handle);
+        self.vrf_registry.insert(name.to_string(), new_handle);
+        tracing::info!(vrf = %name, label, "bgp: assigned dynamic label to VRF");
     }
 
     /// Apply a NHT resolution change: refresh the cached resolution
@@ -1671,6 +1749,13 @@ impl Bgp {
     }
 
     pub async fn event_loop(&mut self) {
+        // Request our dynamic MPLS label block from the RIB label
+        // manager up front. The reply (`RibRx::LabelBlock`) binds
+        // `vrf_label_alloc` before per-VRF tasks start asking for
+        // labels; a VRF spawned before it lands takes label 0 and is
+        // reconciled on arrival.
+        self.rib_subscriber
+            .send_label_block_request("bgp", VRF_LABEL_BLOCK_SIZE);
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
         }

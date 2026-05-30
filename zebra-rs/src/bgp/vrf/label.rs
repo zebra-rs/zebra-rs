@@ -32,33 +32,44 @@ pub const LAST_USABLE_LABEL: u32 = 0x000F_FFFF;
 /// don't bleed the space.
 #[derive(Debug)]
 pub struct VrfLabelAllocator {
-    /// Next never-allocated label. Bumped on each fresh alloc;
-    /// the free list is preferred so the counter only grows when
-    /// every freed label has already been re-issued.
+    /// Inclusive lower bound of the block this allocator draws from —
+    /// the start of the dynamic block the RIB label manager handed BGP.
+    start: u32,
+    /// Next never-allocated label within the block.
     next: u32,
+    /// Exclusive upper bound of the block.
+    end: u32,
     /// Released labels, sorted so the lowest-numbered ones come
     /// out first — predictable for tests and operator readability.
     free: BTreeSet<u32>,
 }
 
 impl VrfLabelAllocator {
-    pub fn new() -> Self {
+    /// Allocator bound to the half-open block `[start, end)` — the
+    /// dynamic block the RIB label manager reserved for BGP.
+    pub fn bounded(start: u32, end: u32) -> Self {
         Self {
-            next: FIRST_USABLE_LABEL,
+            start,
+            next: start,
+            end,
             free: BTreeSet::new(),
         }
     }
 
-    /// Hand out the next available label. Returns `None` only
-    /// when the entire 20-bit space is exhausted, which would
-    /// mean ~1M live VRFs — well past any deployment ceiling.
-    /// Callers can `expect("label space exhausted")` if they
-    /// want to assert that bound.
+    /// Unbounded over the whole usable label space — kept for tests
+    /// and as a fallback; the running BGP instance uses [`Self::bounded`]
+    /// with the RIB-allocated block.
+    pub fn new() -> Self {
+        Self::bounded(FIRST_USABLE_LABEL, LAST_USABLE_LABEL + 1)
+    }
+
+    /// Hand out the next available label, preferring reclaimed ones.
+    /// Returns `None` when the block is exhausted.
     pub fn alloc(&mut self) -> Option<u32> {
         if let Some(reused) = self.free.pop_first() {
             return Some(reused);
         }
-        if self.next > LAST_USABLE_LABEL {
+        if self.next >= self.end {
             return None;
         }
         let label = self.next;
@@ -66,15 +77,12 @@ impl VrfLabelAllocator {
         Some(label)
     }
 
-    /// Return `label` to the pool. Idempotent — double-frees are
-    /// silently ignored (the second insert into `BTreeSet` is a
-    /// no-op). Reserved labels (`< FIRST_USABLE_LABEL`) are
-    /// rejected because they were never ours to start with.
+    /// Return `label` to the pool. Idempotent. Labels outside this
+    /// allocator's block are rejected — they were never ours.
     pub fn free(&mut self, label: u32) {
-        if !(FIRST_USABLE_LABEL..=LAST_USABLE_LABEL).contains(&label) {
-            return;
+        if (self.start..self.end).contains(&label) {
+            self.free.insert(label);
         }
-        self.free.insert(label);
     }
 }
 
@@ -146,5 +154,20 @@ mod tests {
         assert_eq!(a.alloc(), Some(l));
         // No third return; counter resumes.
         assert_eq!(a.alloc(), Some(l + 1));
+    }
+
+    #[test]
+    fn bounded_allocator_stays_within_its_block() {
+        // [100, 103) — three labels.
+        let mut a = VrfLabelAllocator::bounded(100, 103);
+        assert_eq!(a.alloc(), Some(100));
+        assert_eq!(a.alloc(), Some(101));
+        assert_eq!(a.alloc(), Some(102));
+        assert_eq!(a.alloc(), None, "block exhausted");
+        a.free(101);
+        assert_eq!(a.alloc(), Some(101), "freed label reused");
+        // A label outside the block was never ours — rejected.
+        a.free(200);
+        assert_eq!(a.alloc(), None);
     }
 }

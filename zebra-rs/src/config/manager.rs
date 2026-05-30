@@ -127,6 +127,16 @@ impl RibSubscriber {
     pub fn send_ilm_del(&self, label: u32, ilm: crate::rib::inst::IlmEntry) {
         let _ = self.rib_tx.send(crate::rib::Message::IlmDel { label, ilm });
     }
+
+    /// Request a dynamic MPLS label block of `size` labels for `proto`
+    /// from the RIB label manager. The RIB replies asynchronously with
+    /// a `RibRx::LabelBlock` on `proto`'s subscriber channel.
+    pub fn send_label_block_request(&self, proto: &str, size: u32) {
+        let _ = self.rib_tx.send(crate::rib::Message::LabelBlockRequest {
+            proto: proto.to_string(),
+            size,
+        });
+    }
 }
 
 pub struct ConfigManager {

@@ -141,9 +141,6 @@ pub enum Message {
     /// from the central [`super::label_manager::LabelManager`]. The RIB
     /// replies synchronously with a `RibRx::LabelBlock`. Used by BGP for
     /// L3VPN per-VRF labels (LDP / others later).
-    //
-    // `allow(dead_code)`: the producer (BGP) lands in the next PR.
-    #[allow(dead_code)]
     LabelBlockRequest {
         proto: String,
         size: u32,
@@ -152,7 +149,8 @@ pub enum Message {
     /// the pool. `proto_cleanup` is the backstop for a proto that exits
     /// without releasing.
     //
-    // `allow(dead_code)`: the producer (BGP) lands in the next PR.
+    // `allow(dead_code)`: the live release path is `proto_cleanup`; an
+    // explicit per-block release while running is a follow-up.
     #[allow(dead_code)]
     LabelBlockRelease {
         proto: String,
