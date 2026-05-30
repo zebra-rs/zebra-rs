@@ -173,6 +173,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub affinity_map: crate::flex_algo::AffinityMap,
     /// This instance's staging of the global `/srlg` table.
     pub srlg_config: crate::flex_algo::SrlgGroupBuilder,
+    /// Applied snapshot of the global `/srlg` table (name → 32-bit
+    /// value), folded from `srlg_config` at CommitEnd. Read by FAD
+    /// origination to resolve `srlg-exclude` names.
+    pub srlg_groups: std::collections::BTreeMap<String, crate::flex_algo::SrlgGroup>,
     /// v3-only outbound packet channel. `Ospf<Ospfv3>::new` spawns
     /// `network_v6::write_packet_v6` consuming the matching receiver;
     /// producers of v3 outgoing packets clone this sender to push
@@ -287,7 +291,9 @@ impl<V: OspfVersion> Ospf<V> {
     fn commit_flex_algo_tables(&mut self) {
         self.flex_algo.commit();
         self.affinity_map.commit();
-        let _ = self.srlg_config.commit();
+        if let Some(groups) = self.srlg_config.commit() {
+            self.srlg_groups = groups;
+        }
     }
 
     pub fn ospf_interface<'a>(
@@ -524,6 +530,7 @@ impl Ospf<Ospfv2> {
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
+            srlg_groups: BTreeMap::new(),
             sock,
             v3_send_tx: None,
             v3_recv_rx: None,
@@ -844,7 +851,10 @@ impl Ospf<Ospfv2> {
         if self.segment_routing == SegmentRoutingMode::Mpls {
             let gr_capable = self.restarting.is_some();
             let algos = crate::flex_algo::sr_algorithms(&self.flex_algo);
-            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id, gr_capable, algos);
+            let fads =
+                super::flex_algo::build_fad(&self.flex_algo, &self.affinity_map, &self.srlg_groups);
+            let mut lsa =
+                super::srmpls::router_info_lsa_build(self.router_id, gr_capable, algos, fads);
 
             // Preserve sequence number if re-originating.
             if let Some(area) = self.areas.get(AREA0)
@@ -3626,6 +3636,7 @@ impl Ospf<Ospfv3> {
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
+            srlg_groups: BTreeMap::new(),
             sock,
             v3_send_tx: Some(v3_send_tx),
             v3_recv_rx: Some(v3_recv_rx),

@@ -54,6 +54,8 @@ pub use flood::*;
 
 pub mod srmpls;
 
+pub mod flex_algo;
+
 pub mod tracing;
 
 pub mod reach_map;
