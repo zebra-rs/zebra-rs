@@ -343,7 +343,7 @@ mod tests {
 
         // Withdraw the last candidate → policy gone.
         db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
-        assert!(db.policies.get(&key).is_none());
+        assert!(!db.policies.contains_key(&key));
     }
 
     #[test]
