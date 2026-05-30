@@ -6,8 +6,8 @@ use nom_derive::*;
 
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri, Labelv6Nlri,
-    MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri,
-    many0_complete,
+    MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6, Rtcv6Unreach, Safi,
+    Vpnv4Nlri, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -32,6 +32,8 @@ pub enum MpUnreachAttr {
     EvpnEor,
     Rtcv4(Vec<Rtcv4>),
     Rtcv4Eor,
+    Rtcv6(Vec<Rtcv6>),
+    Rtcv6Eor,
     /// BGP MUP withdraws (RFC 9833 §11). The outer AFI is preserved
     /// so the emitter can re-encode it without a separate Eor
     /// variant; an empty `withdraws` list represents end-of-RIB.
@@ -85,6 +87,10 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::Rtcv4Eor => {
                 let attr = Rtcv4Unreach { withdraw: vec![] };
+                attr.attr_emit(buf);
+            }
+            MpUnreachAttr::Rtcv6Eor => {
+                let attr = Rtcv6Unreach { withdraw: vec![] };
                 attr.attr_emit(buf);
             }
             MpUnreachAttr::Evpn(withdraw) => {
@@ -437,6 +443,15 @@ impl MpUnreachAttr {
                 },
             ));
         }
+        if header.afi == Afi::Ip6 && header.safi == Safi::Rtc {
+            if input.is_empty() {
+                let mp_nlri = MpUnreachAttr::Rtcv6Eor;
+                return Ok((input, mp_nlri));
+            }
+            let (input, rtcv6) = many0_complete(|i| Rtcv6::parse_nlri(i, add_path)).parse(input)?;
+            let mp_nlri = MpUnreachAttr::Rtcv6(rtcv6);
+            return Ok((input, mp_nlri));
+        }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
@@ -519,6 +534,15 @@ impl fmt::Display for MpUnreachAttr {
             }
             Rtcv4Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip, Safi::Rtc)
+            }
+            Rtcv6(rtcv6s) => {
+                for rtcv6 in rtcv6s {
+                    writeln!(f, " ASN:{} {}", rtcv6.asn, rtcv6.rt)?;
+                }
+                Ok(())
+            }
+            Rtcv6Eor => {
+                writeln!(f, " EoR: {}/{}", Afi::Ip6, Safi::Rtc)
             }
             Mup { afi, withdraws } => {
                 if withdraws.is_empty() {

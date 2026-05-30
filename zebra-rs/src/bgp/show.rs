@@ -79,6 +79,7 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ip, Safi::MplsLabel) => "IPv4 Labeled Unicast",
         (Afi::Ip, Safi::MplsVpn) => "VPNv4 Unicast",
         (Afi::Ip, Safi::Rtc) => "IPv4 Route Target Constrain",
+        (Afi::Ip6, Safi::Rtc) => "IPv6 Route Target Constrain",
         (Afi::Ip6, Safi::Unicast) => "IPv6 Unicast",
         (Afi::Ip6, Safi::MplsLabel) => "IPv6 Labeled Unicast",
         (Afi::Ip6, Safi::MplsVpn) => "VPNv6 Unicast",
@@ -1614,6 +1615,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
                     (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
                     (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    (Afi::Ip6, Safi::Rtc) => "IPv6/RTC",
                     _ => continue, // Skip unknown combinations
                 };
 
@@ -1662,6 +1664,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     (Afi::Ip6, Safi::MplsVpn) => "IPv6/MPLS VPN",
                     (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
                     (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    (Afi::Ip6, Safi::Rtc) => "IPv6/RTC",
                     _ => continue, // Skip unknown combinations
                 };
 
@@ -1718,6 +1721,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     (Afi::Ip6, Safi::Unicast) => "IPv6/Unicast",
                     (Afi::L2vpn, Safi::Evpn) => "L2VPN/EVPN",
                     (Afi::Ip, Safi::Rtc) => "IPv4/RTC",
+                    (Afi::Ip6, Safi::Rtc) => "IPv6/RTC",
                     _ => continue, // Skip unknown combinations
                 };
 
@@ -2327,8 +2331,14 @@ fn show_bgp_rtcv4(
     };
 
     if !peer.rtcv4.is_empty() {
-        writeln!(buf, "Route Target Constraints for {}", addr)?;
+        writeln!(buf, "IPv4 Route Target Constraints for {}", addr)?;
         for rt in peer.rtcv4.iter() {
+            writeln!(buf, " {}", rt)?;
+        }
+    }
+    if !peer.rtcv6.is_empty() {
+        writeln!(buf, "IPv6 Route Target Constraints for {}", addr)?;
+        for rt in peer.rtcv6.iter() {
             writeln!(buf, " {}", rt)?;
         }
     }

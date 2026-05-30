@@ -2782,6 +2782,13 @@ pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap)
     peer.rtcv4.insert(rtcv4.rt.clone());
 }
 
+pub fn route_ipv6_rtc_update(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) {
+    let Some(peer) = peers.get_mut_by_idx(peer_id) else {
+        return;
+    };
+    peer.rtcv6.insert(rtcv6.rt.clone());
+}
+
 pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
@@ -3355,6 +3362,11 @@ pub fn route_from_peer(
                     route_ipv4_rtc_update(peer_id, update, peers);
                 }
             }
+            MpReachAttr::Rtcv6(nlri) => {
+                for update in nlri.updates.iter() {
+                    route_ipv6_rtc_update(peer_id, update, peers);
+                }
+            }
             MpReachAttr::Evpn {
                 snpa: _,
                 nhop,
@@ -3478,6 +3490,13 @@ pub fn route_from_peer(
             MpUnreachAttr::Rtcv4Eor => {
                 // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
+            }
+            MpUnreachAttr::Rtcv6Eor => {
+                // The peer's VPNv6 import-RT membership (collected in
+                // `peer.rtcv6` from the preceding MP_REACH) now gates our
+                // event-driven VPNv6 advertise. There is no VPNv6
+                // sync-on-establish replay to trigger here (unlike the
+                // VPNv4 path), so the EoR is purely informational.
             }
             MpUnreachAttr::Evpn(withdrawals) => {
                 for route in withdrawals.iter() {
@@ -3773,8 +3792,9 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
 
-    // IPv4 RTC.
+    // IPv4 / IPv6 RTC.
     peer.rtcv4.clear();
+    peer.rtcv6.clear();
     peer.eor.clear();
 }
 
@@ -4217,9 +4237,9 @@ pub(super) fn route_advertise_to_peers_vpnv6(
                     continue;
                 };
                 let attr = bgp.attr_store.intern(attr);
-                // RTC: skip without withdrawing when the peer's
+                // RTC: skip without withdrawing when the peer's IPv6
                 // route-target constraint set doesn't admit this route.
-                if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+                if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
                     continue;
                 }
                 let vpnv6_nlri = Vpnv6Nlri {
@@ -5075,6 +5095,50 @@ fn send_eor_rtcv4_unicast(peer: &mut Peer) {
     peer.send_packet(update.into());
 }
 
+// IPv6 counterpart of `send_rtcv4_membership`: advertise our Route
+// Target Constraint membership for the `(Ip6, Rtc)` family from the
+// union of every local VRF's IPv6 import Route-Targets, so the peer
+// only sends us the VPNv6 routes we import. Empty membership emits the
+// zero-length "default" NLRI (the wildcard "send me everything").
+fn send_rtcv6_membership(peer: &mut Peer, bgp: &BgpTop) {
+    let mut updates = Vec::new();
+    if let Some(dispatcher) = bgp.vrf_import {
+        let mut rts: BTreeSet<RouteDistinguisher> = BTreeSet::new();
+        for vrf in dispatcher.rib_known_vrfs.values() {
+            rts.extend(vrf.import_rts_v6.iter().copied());
+        }
+        for rt in rts {
+            let mut val: ExtCommunityValue = rt.into();
+            val.low_type = 0x02;
+            updates.push(Rtcv6 {
+                id: 0,
+                asn: peer.local_as,
+                rt: val,
+            });
+        }
+    }
+
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    let mut attrs = BgpAttr::new();
+    if peer.is_ibgp() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+    update.bgp_attr = Some(attrs);
+    update.mp_update = Some(MpReachAttr::Rtcv6(Rtcv6Reach {
+        snpa: 0,
+        nhop: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        updates,
+    }));
+    peer.send_packet(update.into());
+}
+
+// Send End-of-RIB marker for RTCv6.
+fn send_eor_rtcv6_unicast(peer: &mut Peer) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Rtcv6Eor);
+    peer.send_packet(update.into());
+}
+
 // Send End-of-RIB marker for L2VPN/EVPN. RFC 4724 §2 represents EoR
 // as an empty UPDATE; the multiprotocol form (RFC 7606 §3) carries
 // it as an MP_UNREACH with empty NLRI for the AFI/SAFI in question.
@@ -5151,6 +5215,15 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
         peer.eor.insert(key, true);
         send_rtcv4_membership(peer, bgp);
         send_eor_rtcv4_unicast(peer);
+    }
+    // IPv6 RTC: advertise our VPNv6 import-RT membership so the peer
+    // constrains the VPNv6 routes it sends us. Unlike VPNv4 there is no
+    // VPNv6 sync-on-establish to defer (VPNv6 is advertised event-driven
+    // only), so the membership exchange stands alone — the peer's own
+    // membership we learn here gates our event-driven VPNv6 advertise.
+    if peer.is_afi_safi(Afi::Ip6, Safi::Rtc) {
+        send_rtcv6_membership(peer, bgp);
+        send_eor_rtcv6_unicast(peer);
     }
     // Advertize.
     if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {

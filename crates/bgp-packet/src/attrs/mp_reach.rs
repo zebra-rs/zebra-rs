@@ -11,11 +11,11 @@ use bytes::BufMut;
 
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
-    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri,
-    Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
+    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, Vpnv4Nexthop,
+    Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
 };
 
-use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach, Vpnv6Reach};
+use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Rtcv6Reach, Vpnv4Reach, Vpnv6Reach};
 
 #[derive(Clone, Debug, NomBE)]
 pub struct MpReachHeader {
@@ -44,6 +44,7 @@ pub enum MpReachAttr {
         updates: Vec<EvpnRoute>,
     },
     Rtcv4(Rtcv4Reach),
+    Rtcv6(Rtcv6Reach),
     /// BGP MUP (RFC 9833), SAFI 85. The outer AFI distinguishes the
     /// IPv4 from the IPv6 MUP address family; per-route-type bodies
     /// stay opaque at this phase.
@@ -86,6 +87,9 @@ impl MpReachAttr {
                 nlri.attr_emit(buf);
             }
             MpReachAttr::Rtcv4(nlri) => {
+                nlri.attr_emit(buf);
+            }
+            MpReachAttr::Rtcv6(nlri) => {
                 nlri.attr_emit(buf);
             }
             MpReachAttr::Ipv6 {
@@ -469,6 +473,31 @@ impl MpReachAttr {
                 updates,
             };
             return Ok((input, mp_nlri));
+        }
+        if header.afi == Afi::Ip6 && header.safi == Safi::Rtc {
+            // Nexthop can be IPv4 or IPv6 address.
+            if header.nhop_len != 4 && header.nhop_len != 16 {
+                return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+            }
+            let (input, nhop) = if header.nhop_len == 4 {
+                let (input, addr) = be_u32(input)?;
+                let nhop: IpAddr = IpAddr::V4(Ipv4Addr::from(addr));
+                (input, nhop)
+            } else {
+                let (input, addr) = be_u128(input)?;
+                let nhop: IpAddr = IpAddr::V6(Ipv6Addr::from(addr));
+                (input, nhop)
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (input, updates) =
+                many0_complete(|i| Rtcv6::parse_nlri(i, add_path)).parse(input)?;
+            let nlri = Rtcv6Reach {
+                snpa,
+                nhop,
+                updates,
+            };
+            let rtc_nlri = MpReachAttr::Rtcv6(nlri);
+            return Ok((input, rtc_nlri));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }

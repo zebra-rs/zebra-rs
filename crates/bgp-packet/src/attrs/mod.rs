@@ -91,6 +91,9 @@ pub use nlri_evpn::*;
 pub mod nlri_rtcv4;
 pub use nlri_rtcv4::*;
 
+pub mod nlri_rtcv6;
+pub use nlri_rtcv6::*;
+
 pub mod nlri_mup;
 pub use nlri_mup::*;
 
