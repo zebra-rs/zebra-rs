@@ -7531,4 +7531,31 @@ mod tests {
             _ => panic!("expected Type-5 Prefix route"),
         }
     }
+
+    /// A Type-5 route imported over an SRv6 underlay installs an
+    /// H.Encap next-hop toward the End.DT46 service SID (no MPLS label
+    /// stack) — the shared `build_srv6_vpn_fib_entry` the EVPN import
+    /// reuses, so an SRv6-mode Type-5 forwards with zero extra code.
+    #[test]
+    fn srv6_vpn_fib_entry_encaps_to_service_sid() {
+        use crate::rib::nht::ResolvedNexthop;
+        let sid: std::net::Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+        let transport = vec![ResolvedNexthop {
+            addr: "fe80::1".parse().unwrap(),
+            ifindex: 7,
+            labels: vec![],
+        }];
+        let entry = super::build_srv6_vpn_fib_entry(sid, &transport).expect("installable");
+        assert_eq!(entry.distance, 200, "imported VPN routes arrive via iBGP");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.segs, vec![sid]);
+                assert_eq!(uni.encap_type, Some(isis_packet::srv6::EncapType::HEncap));
+                assert_eq!(uni.ifindex_origin, Some(7));
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
+        }
+        // Unresolved underlay → nothing to install.
+        assert!(super::build_srv6_vpn_fib_entry(sid, &[]).is_none());
+    }
 }
