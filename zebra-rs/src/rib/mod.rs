@@ -52,6 +52,8 @@ pub mod resolve;
 
 pub mod nht;
 
+pub mod label_manager;
+
 // pub mod nanomsg;
 
 pub mod router_id;

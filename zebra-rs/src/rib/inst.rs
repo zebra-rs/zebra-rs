@@ -137,6 +137,28 @@ pub enum Message {
         proto: String,
         nh: std::net::IpAddr,
     },
+    /// Reserve a dynamic MPLS label block of `size` labels for `proto`
+    /// from the central [`super::label_manager::LabelManager`]. The RIB
+    /// replies synchronously with a `RibRx::LabelBlock`. Used by BGP for
+    /// L3VPN per-VRF labels (LDP / others later).
+    //
+    // `allow(dead_code)`: the producer (BGP) lands in the next PR.
+    #[allow(dead_code)]
+    LabelBlockRequest {
+        proto: String,
+        size: u32,
+    },
+    /// Return a previously-reserved label block `[start, start+size)` to
+    /// the pool. `proto_cleanup` is the backstop for a proto that exits
+    /// without releasing.
+    //
+    // `allow(dead_code)`: the producer (BGP) lands in the next PR.
+    #[allow(dead_code)]
+    LabelBlockRelease {
+        proto: String,
+        start: u32,
+        size: u32,
+    },
     /// Register an allocated SRv6 SID. Owners (IS-IS, OSPF, BGP) push
     /// one of these whenever they carve a function out of a locator;
     /// the RIB stores it for `show segment-routing srv6 sid`.
@@ -496,6 +518,10 @@ pub struct Rib {
     /// resolution. Driven by `Message::NexthopRegister`/`Unregister`
     /// and re-resolved on global-table route changes.
     pub nht: super::nht::NhtRegistry,
+
+    /// Central dynamic MPLS label-block manager. Hands out non-
+    /// overlapping label blocks to protocols (BGP L3VPN today).
+    pub label_manager: super::label_manager::LabelManager,
     pub nmap: NexthopMap,
     pub router_id: Ipv4Addr,
 
@@ -593,6 +619,7 @@ impl Rib {
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
             nht: super::nht::NhtRegistry::default(),
+            label_manager: super::label_manager::LabelManager::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             rib_sync_timer: None,
@@ -644,6 +671,23 @@ impl Rib {
         }
         if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
             let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate { nh, resolution });
+        }
+    }
+
+    /// Handle `Message::LabelBlockRequest`: reserve a dynamic label
+    /// block for `proto` and reply synchronously with it. An exhausted
+    /// pool gets no reply (the requester degrades to label-less); a
+    /// missing subscriber returns the block rather than stranding it.
+    fn label_block_request(&mut self, proto: String, size: u32) {
+        let Some(block) = self.label_manager.alloc(&proto, size) else {
+            tracing::warn!(%proto, size, "label block request: dynamic pool exhausted");
+            return;
+        };
+        let (start, size) = (block.start, block.end - block.start);
+        if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
+            let _ = sub.rib_rx_tx.send(RibRx::LabelBlock { start, size });
+        } else {
+            self.label_manager.release(&proto, start, size);
         }
     }
 
@@ -1131,6 +1175,10 @@ impl Rib {
     }
 
     async fn proto_cleanup(&mut self, proto: String) {
+        // Reclaim any dynamic label blocks the protocol held — done
+        // before the rtype gate so it covers every requester.
+        self.label_manager.release_all(&proto);
+
         let rtype = match proto.as_str() {
             "bgp" => RibType::Bgp,
             "isis" => RibType::Isis,
@@ -1456,6 +1504,12 @@ impl Rib {
             }
             Message::NexthopUnregister { proto, nh } => {
                 self.nht.unregister(&proto, nh);
+            }
+            Message::LabelBlockRequest { proto, size } => {
+                self.label_block_request(proto, size);
+            }
+            Message::LabelBlockRelease { proto, start, size } => {
+                self.label_manager.release(&proto, start, size);
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;
