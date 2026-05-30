@@ -8,11 +8,13 @@
 //! `<protocol-origin, originator, discriminator>` (RFC 9256 §2.4) and the
 //! active path is chosen by the RFC 9256 §2.9 selection ladder.
 //!
-//! This is control-plane only: it selects and exposes the active path for
-//! `show`, but does not install anything in the dataplane or steer
-//! traffic yet. The receive plumbing (usability filter, attribute
-//! decode) lives in `route.rs`; this module owns the data model and the
-//! selection algorithm so they stay unit-testable.
+//! The active path is exposed via `show`, realized in the dataplane (an
+//! SRv6 End.B6.Encaps local SID or an SR-MPLS Binding-SID ILM), and used
+//! for automated steering of colour-tagged service routes (RFC 9256 §8).
+//! The receive plumbing (usability filter, attribute decode), the RIB
+//! installs, and the steering hook live in `route.rs`; this module owns
+//! the data model, the §2.9 selection, and the install/steer *decisions*
+//! so they stay unit-testable.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -152,17 +154,15 @@ pub struct MplsBsid {
     pub segments: Vec<u32>,
 }
 
-/// The SR-MPLS Binding-SID install an active candidate path realizes, or
-/// `None` if it isn't an installable SR-MPLS policy (not valid, no MPLS
-/// Binding SID, or its first segment list isn't an all-Type-A list).
-fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
+/// The all-SR-MPLS (Type A) label stack of a candidate path's first
+/// segment list — the SID list a headend imposes when steering traffic
+/// onto the policy or (with a Binding SID) when building the BSID ILM.
+/// `None` unless the path is valid and its first segment list is
+/// entirely Type-A.
+fn mpls_segments(cp: &CandidatePath) -> Option<Vec<u32>> {
     if !cp.valid {
         return None;
     }
-    let bsid = match &cp.binding_sid {
-        Some(BindingSid::MplsLabel(label)) => *label,
-        _ => return None,
-    };
     let first = cp.segment_lists.first()?;
     let segments: Vec<u32> = first
         .segments
@@ -172,10 +172,21 @@ fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
             _ => None,
         })
         .collect();
-    // Only an all-SR-MPLS (Type A) list maps to an ILM label push.
     if segments.is_empty() || segments.len() != first.segments.len() {
         return None;
     }
+    Some(segments)
+}
+
+/// The SR-MPLS Binding-SID install an active candidate path realizes, or
+/// `None` if it isn't an installable SR-MPLS policy (not valid, no MPLS
+/// Binding SID, or its first segment list isn't an all-Type-A list).
+fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
+    let bsid = match &cp.binding_sid {
+        Some(BindingSid::MplsLabel(label)) => *label,
+        _ => return None,
+    };
+    let segments = mpls_segments(cp)?;
     Some(MplsBsid { bsid, segments })
 }
 
@@ -280,6 +291,57 @@ impl SrPolicyDb {
             .and_then(|p| p.active_cp())
             .and_then(mpls_bsid)
             .is_some()
+    }
+
+    /// Steer a service route carrying Color `color` and next-hop
+    /// `endpoint` onto an SR-MPLS policy: return the active path's SID
+    /// list (the label stack to impose), applying the RFC 9256 §8.8.1
+    /// CO-bit endpoint fallback. `None` when no matching SR-MPLS policy
+    /// has a usable Type-A path.
+    ///
+    /// CO bits (RFC 9830 §3): `00` exact `<color, endpoint>` only; `01`
+    /// also falls back to the color-only (null-endpoint) policy; `10`
+    /// additionally to any policy with this color; `11` is reserved and
+    /// treated as `00`. The same-AF / any-AF sub-ordering of §8.8.1 is
+    /// simplified to "same-family null endpoint, then any endpoint".
+    pub fn steer_mpls(&self, color: u32, endpoint: IpAddr, co_bits: u8) -> Option<Vec<u32>> {
+        if let Some(stack) = self.steer_at(color, endpoint) {
+            return Some(stack);
+        }
+        let co = if co_bits == 0b11 { 0 } else { co_bits };
+        if co >= 0b01 {
+            let null = match endpoint {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            };
+            if let Some(stack) = self.steer_at(color, null) {
+                return Some(stack);
+            }
+        }
+        if co >= 0b10 {
+            // SrPolicyKey is color-major (derived Ord), so one color's
+            // policies are a contiguous range.
+            let from = SrPolicyKey {
+                color,
+                endpoint: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            };
+            for (key, policy) in self.policies.range(from..) {
+                if key.color != color {
+                    break;
+                }
+                if let Some(stack) = policy.active_cp().and_then(mpls_segments) {
+                    return Some(stack);
+                }
+            }
+        }
+        None
+    }
+
+    fn steer_at(&self, color: u32, endpoint: IpAddr) -> Option<Vec<u32>> {
+        self.policies
+            .get(&SrPolicyKey { color, endpoint })
+            .and_then(|p| p.active_cp())
+            .and_then(mpls_segments)
     }
 
     /// Reconcile the SR-MPLS Binding-SID ILM for a *live* policy against
@@ -753,5 +815,54 @@ mod tests {
         // Withdrawing the last path reports the LFIB label to tear down.
         let delta = db.withdraw(9, ep, 1, 1);
         assert_eq!(delta.mpls_remove, Some(1000));
+    }
+
+    #[test]
+    fn steer_mpls_exact_match() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        db.insert(
+            SrPolicyKey {
+                color: 100,
+                endpoint: ep,
+            },
+            mpls_cp(1, 100, 1, 1000, 16001),
+        );
+        // Exact <color, endpoint> works regardless of CO bits.
+        assert_eq!(db.steer_mpls(100, ep, 0), Some(vec![16001]));
+        // Wrong color / wrong endpoint with CO=00 → no steer.
+        assert_eq!(db.steer_mpls(200, ep, 0), None);
+        assert_eq!(db.steer_mpls(100, endpoint("10.0.0.1"), 0), None);
+    }
+
+    #[test]
+    fn steer_mpls_co_bit_fallback() {
+        let mut db = SrPolicyDb::default();
+        let nh = endpoint("10.0.0.9");
+        // A color-only (null-endpoint) policy and an unrelated-endpoint one.
+        db.insert(
+            SrPolicyKey {
+                color: 100,
+                endpoint: endpoint("0.0.0.0"),
+            },
+            mpls_cp(1, 100, 1, 1000, 17001),
+        );
+        db.insert(
+            SrPolicyKey {
+                color: 200,
+                endpoint: endpoint("10.0.0.5"),
+            },
+            mpls_cp(1, 100, 2, 2000, 18001),
+        );
+        // CO=00: no exact <100, 10.0.0.9> → no steer.
+        assert_eq!(db.steer_mpls(100, nh, 0), None);
+        // CO=01: falls back to the null-endpoint color-100 policy.
+        assert_eq!(db.steer_mpls(100, nh, 0b01), Some(vec![17001]));
+        // CO=10: also reaches any endpoint of color 200.
+        assert_eq!(db.steer_mpls(200, nh, 0b10), Some(vec![18001]));
+        // CO=01 for color 200 stays strict-or-null only → no match.
+        assert_eq!(db.steer_mpls(200, nh, 0b01), None);
+        // CO=11 is reserved → treated as 00 (exact only) → no match.
+        assert_eq!(db.steer_mpls(100, nh, 0b11), None);
     }
 }
