@@ -16,6 +16,9 @@ pub enum Afi {
     Ip6 = 2,
     #[strum(serialize = "L2VPN")]
     L2vpn = 25,
+    /// BGP Link-State (RFC 9552). Used with SAFI 71 (non-VPN).
+    #[strum(serialize = "Link-State")]
+    LinkState = 16388,
     #[strum(to_string = "Unknown({0})")]
     Unknown(u16),
 }
@@ -42,6 +45,9 @@ pub enum Safi {
     /// (IPv4 endpoint) or AFI 2 (IPv6 endpoint).
     #[strum(serialize = "SR Policy")]
     SrTePolicy = 73,
+    /// BGP Link-State (RFC 9552), non-VPN. Used with AFI 16388.
+    #[strum(serialize = "Link-State")]
+    LinkState = 71,
     #[strum(to_string = "Unknown({0})")]
     Unknown(u8),
 }
@@ -123,6 +129,7 @@ impl From<Afi> for u16 {
             Ip => 1,
             Ip6 => 2,
             L2vpn => 25,
+            LinkState => 16388,
             Unknown(v) => v,
         }
     }
@@ -135,6 +142,7 @@ impl From<u16> for Afi {
             1 => Ip,
             2 => Ip6,
             25 => L2vpn,
+            16388 => LinkState,
             v => Unknown(v),
         }
     }
@@ -154,6 +162,7 @@ impl From<Safi> for u8 {
             Flowspec => 133,
             Mup => 85,
             SrTePolicy => 73,
+            LinkState => 71,
             Unknown(v) => v,
         }
     }
@@ -169,6 +178,7 @@ impl From<u8> for Safi {
             7 => Encap,
             70 => Evpn,
             73 => SrTePolicy,
+            71 => LinkState,
             85 => Mup,
             128 => MplsVpn,
             132 => Rtc,
@@ -210,6 +220,7 @@ mod tests {
             Safi::Evpn,
             Safi::Mup,
             Safi::SrTePolicy,
+            Safi::LinkState,
             Safi::MplsVpn,
             Safi::Rtc,
             Safi::Flowspec,

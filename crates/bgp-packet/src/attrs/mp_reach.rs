@@ -10,7 +10,7 @@ use nom_derive::*;
 use bytes::BufMut;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
+    Afi, AttrFlags, AttrType, BgpLsNlri, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
     Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, SrPolicyNlri,
     Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
 };
@@ -84,6 +84,13 @@ pub enum MpReachAttr {
         nhop: IpAddr,
         updates: Vec<SrPolicyNlri>,
     },
+    /// BGP Link-State (RFC 9552), AFI 16388 / SAFI 71. Carries Node/Link/
+    /// Prefix NLRIs; the companion attributes ride in the BGP-LS Attribute
+    /// (path attribute type 29), not here.
+    LinkState {
+        nhop: IpAddr,
+        updates: Vec<BgpLsNlri>,
+    },
 }
 
 impl MpReachAttr {
@@ -147,6 +154,9 @@ impl MpReachAttr {
                 updates,
             } => {
                 srpolicy_attr_emit(*afi, *snpa, nhop, updates, buf);
+            }
+            MpReachAttr::LinkState { nhop, updates } => {
+                linkstate_attr_emit(nhop, updates, buf);
             }
             _ => {
                 //
@@ -548,6 +558,23 @@ impl MpReachAttr {
             };
             return Ok((input, mp_nlri));
         }
+        if header.afi == Afi::LinkState && header.safi == Safi::LinkState {
+            // Next-hop is a 4-octet (IPv4) or 16-octet (IPv6) address.
+            if header.nhop_len != 4 && header.nhop_len != 16 {
+                return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
+            }
+            let (input, nhop) = if header.nhop_len == 4 {
+                let (input, addr) = be_u32(input)?;
+                (input, IpAddr::V4(Ipv4Addr::from(addr)))
+            } else {
+                let (input, addr) = be_u128(input)?;
+                (input, IpAddr::V6(Ipv6Addr::from(addr)))
+            };
+            let (input, _snpa) = be_u8(input)?;
+            let (input, updates) =
+                many0_complete(|i| BgpLsNlri::parse(i, add_path)).parse(input)?;
+            return Ok((input, MpReachAttr::LinkState { nhop, updates }));
+        }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
@@ -679,6 +706,16 @@ impl fmt::Display for MpReachAttr {
                         f,
                         " {afi}/SR-Policy color={} endpoint={} disc={} => {nhop}",
                         update.color, update.endpoint, update.distinguisher,
+                    )?;
+                }
+            }
+            LinkState { nhop, updates } => {
+                for nlri in updates.iter() {
+                    writeln!(
+                        f,
+                        " LS type={} proto={:?} => {nhop}",
+                        nlri.nlri_type(),
+                        nlri.protocol_id()
                     )?;
                 }
             }
@@ -1049,6 +1086,45 @@ pub(crate) fn srpolicy_attr_emit(
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpReachAttr::LinkState { nhop, updates }` as a complete
+/// `MP_REACH_NLRI` path attribute (RFC 9552 §3.4): AFI 16388, SAFI 71, the
+/// next-hop (4 or 16 octets), a zero SNPA count, then the Link-State NLRIs.
+pub(crate) fn linkstate_attr_emit(nhop: &IpAddr, updates: &[BgpLsNlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::LinkState));
+    value.put_u8(u8::from(Safi::LinkState));
+    match nhop {
+        IpAddr::V4(a) => {
+            value.put_u8(4);
+            value.put_slice(&a.octets());
+        }
+        IpAddr::V6(a) => {
+            value.put_u8(16);
+            value.put_slice(&a.octets());
+        }
+    }
+    value.put_u8(0); // Reserved (SNPA count).
+    for nlri in updates {
+        crate::bgpls_nlri_emit(&mut value, nlri);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1353,6 +1429,37 @@ mod tests {
                 MpReachAttr::parse_nlri_opt(&value, None).is_err(),
                 "expected parse error for nhop_len={bad}",
             );
+        }
+    }
+
+    #[test]
+    fn linkstate_emit_round_trips_through_parser() {
+        use crate::{LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsProtocolId};
+        // A Node NLRI with one IGP Router-ID descriptor. The codec preserves
+        // descriptors verbatim, so the exact value is arbitrary.
+        let updates = vec![BgpLsNlri::Node(LsNodeNlri {
+            protocol_id: LsProtocolId::IsisL2,
+            identifier: 0,
+            local_node: LsNodeDescriptor {
+                subs: vec![LsNodeDescSub::IgpRouterId(vec![0, 0, 0, 0, 0, 1])],
+            },
+        })];
+        let nhop = IpAddr::V4("192.0.2.1".parse().unwrap());
+        let mut buf = BytesMut::new();
+        linkstate_attr_emit(&nhop, &updates, &mut buf);
+        // Strip the attr header: flags(1) + type(1) + length(1).
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpReachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpReachAttr::LinkState {
+                nhop: parsed_nhop,
+                updates: parsed,
+            } => {
+                assert_eq!(parsed_nhop, nhop);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("expected LinkState, got {other:?}"),
         }
     }
 

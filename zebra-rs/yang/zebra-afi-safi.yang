@@ -85,6 +85,9 @@ module zebra-afi-safi {
         enum sr-policy-v6 {
           description "BGP SR Policy with IPv6 endpoint (AFI 2, SAFI 73).";
         }
+        enum link-state {
+          description "BGP Link-State (AFI 16388, SAFI 71, RFC 9552).";
+        }
       }
       description
         "Address family / sub-address family this list entry configures.
