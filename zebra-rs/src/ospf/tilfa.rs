@@ -15,9 +15,13 @@
 //! segment is a plain `(from, to)` pair.
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ospf_packet::{Algo, ExtLinkSubTlv, ExtPrefixSubTlv, OspfLsType, OspfLsp, SidLabelTlv};
+use ospf_packet::{
+    Algo, ExtLinkSubTlv, ExtPrefixSubTlv, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+    OSPFV3_E_ROUTER_LSA_TYPE, OspfLsType, OspfLsp, Ospfv3ExtTlv, Ospfv3LsBody,
+    Ospfv3RouterLinkType, Ospfv3SubTlv, SidLabelTlv,
+};
 
 use crate::rib;
 use crate::spf;
@@ -26,6 +30,7 @@ use crate::spf::label_block::LabelConfig;
 use super::area::OspfArea;
 use super::inst::Ospf;
 use super::lsdb::OSPF_MAX_AGE;
+use super::version::Ospfv3;
 
 /// TI-LFA SR-MPLS repair path: the post-convergence first-hop egress
 /// (ifindex + neighbor address) plus the MPLS label stack that steers
@@ -245,6 +250,178 @@ fn adj_sid_label_for_link(
                     for sub in &tlv.subs {
                         if let ExtLinkSubTlv::LanAdjSid(lan) = sub
                             && lan.neighbor_id == to_router
+                        {
+                            return resolve_sid(&lan.sid, srgb);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+// =====================================================================
+// OSPFv3 (RFC 5340) — SR-MPLS repair resolution.
+//
+// Same shape as the v2 functions above, but the SR data lives in v3's
+// extended LSAs: Node-SIDs in E-Intra-Area-Prefix LSAs (RFC 8362 §3.7 /
+// RFC 8666), Adj-SIDs in E-Router-LSA RouterLink TLVs. Next-hops are
+// IPv6 link-locals resolved by neighbor router-id (mirrors
+// `collect_v3_nexthops`). The graph-level `tilfa_repair_path` above is
+// protocol-agnostic and reused for v3 unchanged.
+// =====================================================================
+
+/// v3 sibling of [`RepairPathMpls`]: the post-convergence first-hop
+/// egress (ifindex + neighbor link-local) plus the SR-MPLS label stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathMplsV3 {
+    pub ifindex: u32,
+    pub addr: Ipv6Addr,
+    pub labels: Vec<rib::Label>,
+}
+
+/// v3 sibling of [`build_repair_path_mpls`]. Resolves the SR segment
+/// list to an MPLS label stack from v3's extended LSAs and pins the
+/// post-convergence first-hop's IPv6 link-local egress.
+pub(super) fn build_repair_path_mpls_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    rp: &spf::RepairPath,
+) -> Option<RepairPathMplsV3> {
+    let labels = repair_segments_to_mpls_labels_v3(top, area, &rp.segs)?;
+    let first_hop_router = *top.lsp_map.resolve(rp.first_hop)?;
+    let (ifindex, addr) = resolve_first_hop_egress_v3(top, first_hop_router)?;
+    Some(RepairPathMplsV3 {
+        ifindex,
+        addr,
+        labels,
+    })
+}
+
+/// Resolve the repair's first-hop egress to (ifindex, link-local addr).
+/// v3 keys neighbors by router-id and learns the egress from the
+/// adjacency, so — unlike v2 — `first_hop_link_id` isn't consulted;
+/// this mirrors `collect_v3_nexthops`.
+fn resolve_first_hop_egress_v3(
+    top: &Ospf<Ospfv3>,
+    first_hop_router: Ipv4Addr,
+) -> Option<(u32, Ipv6Addr)> {
+    for link in top.links.values() {
+        if let Some(nbr) = link.nbrs.get(&first_hop_router) {
+            let ll = nbr.ident.prefix.addr();
+            if !ll.is_unspecified() {
+                return Some((nbr.ifindex, ll));
+            }
+        }
+    }
+    None
+}
+
+fn repair_segments_to_mpls_labels_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    segments: &[spf::SrSegment],
+) -> Option<Vec<rib::Label>> {
+    let mut labels = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let resolved = match seg {
+            spf::SrSegment::NodeSid(v) => node_sid_label_for_vertex_v3(top, area, *v),
+            spf::SrSegment::AdjSid(from, to, _via) => {
+                adj_sid_label_for_link_v3(top, area, *from, *to)
+            }
+        };
+        labels.push(rib::Label::Explicit(resolved?));
+    }
+    Some(labels)
+}
+
+/// v3 Node-SID lookup: scan the vertex router's E-Intra-Area-Prefix
+/// LSAs for a base-algo (SPF) Prefix-SID, preferring a host (/128)
+/// prefix (the loopback / Node-SID). Index-form SIDs resolve against
+/// the advertiser's SRGB.
+fn node_sid_label_for_vertex_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    vertex: usize,
+) -> Option<u32> {
+    let router_id = *top.lsp_map.resolve(vertex)?;
+    let srgb = area.lsdb.label_map.get(&router_id);
+
+    let mut fallback: Option<u32> = None;
+    for ((_ls_id, adv_router), lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE || adv_router != router_id {
+            continue;
+        }
+        let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
+            continue;
+        };
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
+                continue;
+            };
+            for sub in &prefix_tlv.subs {
+                let Ospfv3SubTlv::PrefixSid(ps) = sub else {
+                    continue;
+                };
+                if ps.algo != Algo::Spf {
+                    continue;
+                }
+                let Some(label) = resolve_sid(&ps.sid, srgb) else {
+                    continue;
+                };
+                if prefix_tlv.prefix_length == 128 {
+                    return Some(label);
+                }
+                fallback.get_or_insert(label);
+            }
+        }
+    }
+    fallback
+}
+
+/// v3 Adj-SID lookup: scan `from`'s E-Router-LSAs (one per interface)
+/// for the RouterLink toward `to` and take its Adj-SID / LAN-Adj-SID.
+fn adj_sid_label_for_link_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    from_vertex: usize,
+    to_vertex: usize,
+) -> Option<u32> {
+    let from_router = *top.lsp_map.resolve(from_vertex)?;
+    let to_router = *top.lsp_map.resolve(to_vertex)?;
+    let srgb = area.lsdb.label_map.get(&from_router);
+
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE || adv_router != from_router {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
+                continue;
+            };
+            match rl.link.link_type {
+                Ospfv3RouterLinkType::PointToPoint => {
+                    if rl.link.neighbor_router_id != to_router {
+                        continue;
+                    }
+                    for sub in &rl.subs {
+                        if let Ospfv3SubTlv::AdjSid(adj) = sub {
+                            return resolve_sid(&adj.sid, srgb);
+                        }
+                    }
+                }
+                Ospfv3RouterLinkType::Transit => {
+                    for sub in &rl.subs {
+                        if let Ospfv3SubTlv::LanAdjSid(lan) = sub
+                            && lan.neighbor_router_id == to_router
                         {
                             return resolve_sid(&lan.sid, srgb);
                         }

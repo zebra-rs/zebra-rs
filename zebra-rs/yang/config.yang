@@ -1037,10 +1037,28 @@ module config {
           container fast-reroute {
             // Per-algo TI-LFA toggle. Empty container is a no-op; the
             // child presence container turns the per-algo TI-LFA
-            // computation on (deferred — no OSPF TI-LFA yet).
+            // computation on (deferred — no OSPF per-algo TI-LFA yet).
             container ti-lfa {
               presence "Enable Topology-Independent LFA for this flex-algo";
             }
+          }
+        }
+
+        container fast-reroute {
+          // OSPFv3 fast-reroute mechanisms (RFC 7490 LFA family).
+          // Same shape as `router ospf / fast-reroute`; the repair is
+          // expressed as SR-MPLS labels, so segment-routing/mpls must
+          // also be enabled for the dataplane install.
+          container ti-lfa {
+            // Topology-Independent Loop-Free Alternate (TI-LFA,
+            // RFC 9490). Post-convergence repair over the v3 LSDB.
+            presence "Enable Topology-Independent LFA (TI-LFA)";
+          }
+          container backup-as-primary {
+            // Swap the metric-sort offset between the SPF primary and
+            // the TI-LFA repair so the repair installs first. Protection
+            // testing knob; see `router ospf` for the full rationale.
+            presence "Install TI-LFA backup as the primary nexthop";
           }
         }
       }

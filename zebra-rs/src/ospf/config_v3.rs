@@ -94,11 +94,54 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_flex_algo_prefix_sid_absolute,
             ),
             ("/segment-routing/mpls", config_ospfv3_sr_mpls),
+            ("/fast-reroute/ti-lfa", config_ospfv3_ti_lfa),
+            (
+                "/fast-reroute/backup-as-primary",
+                config_ospfv3_fast_reroute_backup_as_primary,
+            ),
         ];
         for (path, cb) in entries {
             self.callbacks.insert(format!("{}{}", prefix, path), *cb);
         }
     }
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa` — v3 sibling of the v2
+/// `config_ospf_ti_lfa`. Gates the per-destination TI-LFA repair
+/// computation (RFC 9490); on a state change, kick an SPF recompute
+/// for every area so the v6 RIB picks up or drops repair backups. No
+/// LSA re-origination — the repair is a local install-side decision.
+fn config_ospfv3_ti_lfa(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
+    let prev = ospf.ti_lfa_enabled;
+    ospf.ti_lfa_enabled = op.is_set();
+    if ospf.ti_lfa_enabled == prev {
+        return Some(());
+    }
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/fast-reroute/backup-as-primary` — v3 sibling of the
+/// v2 callback. Inverts the primary/backup metric ordering at install
+/// time; re-run SPF so the v6 RIB rebuilds with the swapped offset.
+fn config_ospfv3_fast_reroute_backup_as_primary(
+    ospf: &mut Ospf<Ospfv3>,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let prev = ospf.fast_reroute_backup_as_primary;
+    ospf.fast_reroute_backup_as_primary = op.is_set();
+    if ospf.fast_reroute_backup_as_primary == prev {
+        return Some(());
+    }
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
 }
 
 /// `/router/ospfv3/area/<id>/area-type` — same shape as the v2
