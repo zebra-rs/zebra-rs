@@ -30,30 +30,50 @@ pub const LAST_USABLE_LABEL: u32 = 0x000F_FFFF;
 /// Counter-based allocator that hands out one label per VRF.
 /// Released labels are queued back onto `free` so churned VRFs
 /// don't bleed the space.
+/// One contiguous dynamic block the RIB label manager handed BGP.
+#[derive(Debug)]
+struct Block {
+    /// Inclusive lower bound.
+    start: u32,
+    /// Next never-allocated label in this block.
+    next: u32,
+    /// Exclusive upper bound.
+    end: u32,
+}
+
 #[derive(Debug)]
 pub struct VrfLabelAllocator {
-    /// Inclusive lower bound of the block this allocator draws from —
-    /// the start of the dynamic block the RIB label manager handed BGP.
-    start: u32,
-    /// Next never-allocated label within the block.
-    next: u32,
-    /// Exclusive upper bound of the block.
-    end: u32,
+    /// The dynamic blocks this allocator draws from, in grant order.
+    /// More are appended via [`Self::extend`] when BGP outgrows the
+    /// first block (an on-demand request to the RIB label manager).
+    blocks: Vec<Block>,
     /// Released labels, sorted so the lowest-numbered ones come
     /// out first — predictable for tests and operator readability.
     free: BTreeSet<u32>,
 }
 
 impl VrfLabelAllocator {
-    /// Allocator bound to the half-open block `[start, end)` — the
-    /// dynamic block the RIB label manager reserved for BGP.
+    /// Allocator seeded with the half-open block `[start, end)` — the
+    /// first dynamic block the RIB label manager reserved for BGP.
     pub fn bounded(start: u32, end: u32) -> Self {
         Self {
+            blocks: vec![Block {
+                start,
+                next: start,
+                end,
+            }],
+            free: BTreeSet::new(),
+        }
+    }
+
+    /// Append another granted block `[start, end)` (on-demand
+    /// extension when the existing blocks are spent).
+    pub fn extend(&mut self, start: u32, end: u32) {
+        self.blocks.push(Block {
             start,
             next: start,
             end,
-            free: BTreeSet::new(),
-        }
+        });
     }
 
     /// Unbounded over the whole usable label space — kept for tests
@@ -63,24 +83,30 @@ impl VrfLabelAllocator {
         Self::bounded(FIRST_USABLE_LABEL, LAST_USABLE_LABEL + 1)
     }
 
-    /// Hand out the next available label, preferring reclaimed ones.
-    /// Returns `None` when the block is exhausted.
+    /// Hand out the next available label, preferring reclaimed ones,
+    /// then the first block with room. `None` when every block is spent.
     pub fn alloc(&mut self) -> Option<u32> {
         if let Some(reused) = self.free.pop_first() {
             return Some(reused);
         }
-        if self.next >= self.end {
-            return None;
+        for block in self.blocks.iter_mut() {
+            if block.next < block.end {
+                let label = block.next;
+                block.next += 1;
+                return Some(label);
+            }
         }
-        let label = self.next;
-        self.next += 1;
-        Some(label)
+        None
     }
 
-    /// Return `label` to the pool. Idempotent. Labels outside this
-    /// allocator's block are rejected — they were never ours.
+    /// Return `label` to the pool. Idempotent. Labels outside every
+    /// block are rejected — they were never ours.
     pub fn free(&mut self, label: u32) {
-        if (self.start..self.end).contains(&label) {
+        if self
+            .blocks
+            .iter()
+            .any(|b| (b.start..b.end).contains(&label))
+        {
             self.free.insert(label);
         }
     }
@@ -169,5 +195,23 @@ mod tests {
         // A label outside the block was never ours — rejected.
         a.free(200);
         assert_eq!(a.alloc(), None);
+    }
+
+    #[test]
+    fn extend_appends_a_second_block() {
+        let mut a = VrfLabelAllocator::bounded(100, 102); // [100, 102)
+        assert_eq!(a.alloc(), Some(100));
+        assert_eq!(a.alloc(), Some(101));
+        assert_eq!(a.alloc(), None, "first block spent");
+        // On-demand extension with a fresh, disjoint block.
+        a.extend(500, 502); // [500, 502)
+        assert_eq!(a.alloc(), Some(500), "allocs from the new block");
+        assert_eq!(a.alloc(), Some(501));
+        assert_eq!(a.alloc(), None);
+        // Free works across both blocks; lowest freed comes out first.
+        a.free(100);
+        a.free(501);
+        assert_eq!(a.alloc(), Some(100));
+        assert_eq!(a.alloc(), Some(501));
     }
 }
