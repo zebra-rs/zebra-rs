@@ -192,6 +192,16 @@ pub enum RibRx {
         nh: IpAddr,
         resolution: super::nht::NexthopResolution,
     },
+    /// Reply to [`crate::rib::inst::Message::LabelBlockRequest`]: a
+    /// dynamic MPLS label block `[start, start+size)` reserved for the
+    /// requesting protocol. Delivered synchronously on the request.
+    //
+    // `allow(dead_code)`: the consumer (BGP) lands in the next PR.
+    #[allow(dead_code)]
+    LabelBlock {
+        start: u32,
+        size: u32,
+    },
 }
 
 impl Rib {
