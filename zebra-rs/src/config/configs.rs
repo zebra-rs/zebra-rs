@@ -132,6 +132,8 @@ impl Args {
             "evpn" => Some(AfiSafi::new(Afi::L2vpn, Safi::Evpn)),
             "rtcv4" => Some(AfiSafi::new(Afi::Ip, Safi::Rtc)),
             "rtcv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Rtc)),
+            "ipv4-flowspec" => Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)),
+            "ipv6-flowspec" => Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec)),
             _ => None,
         }
     }
@@ -728,6 +730,17 @@ pub fn config_match(config: &Rc<Config>, input: &str, mx: &mut Match) {
 mod tests {
     use super::*;
     use crate::config::vty::CommandPath;
+
+    #[test]
+    fn afi_safi_parses_flowspec_families() {
+        let mut args = Args(["ipv4-flowspec".to_string()].into_iter().collect());
+        assert_eq!(args.afi_safi(), Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)));
+        let mut args = Args(["ipv6-flowspec".to_string()].into_iter().collect());
+        assert_eq!(
+            args.afi_safi(),
+            Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec))
+        );
+    }
 
     #[test]
     fn test_leaf_list_round_trip() {

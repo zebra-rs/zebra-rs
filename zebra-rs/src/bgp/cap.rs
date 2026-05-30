@@ -35,6 +35,8 @@ impl CapAfiMap {
         let mp6vpn = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
         let mp6rtc = CapMultiProtocol::new(&Afi::Ip6, &Safi::Rtc);
         let mpevpn = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
+        let mp4fs = CapMultiProtocol::new(&Afi::Ip, &Safi::Flowspec);
+        let mp6fs = CapMultiProtocol::new(&Afi::Ip6, &Safi::Flowspec);
 
         let mut cmap = Self::default();
         cmap.entries.insert(mp4uni, SendRecv::default());
@@ -44,6 +46,8 @@ impl CapAfiMap {
         cmap.entries.insert(mp6vpn, SendRecv::default());
         cmap.entries.insert(mp6rtc, SendRecv::default());
         cmap.entries.insert(mpevpn, SendRecv::default());
+        cmap.entries.insert(mp4fs, SendRecv::default());
+        cmap.entries.insert(mp6fs, SendRecv::default());
         cmap
     }
 
