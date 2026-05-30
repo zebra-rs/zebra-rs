@@ -117,6 +117,38 @@ pub(crate) fn tag_attr_with_export_rts(
     attr
 }
 
+/// Build a BGP Prefix-SID attribute carrying one SRv6 L3 Service TLV
+/// (RFC 9252 §2) for a per-VRF End.DT46 service `sid`. The full SID is
+/// in the TLV (transposition length 0 — no label transposition), with
+/// an optional SID Structure sub-sub-TLV derived from the locator when
+/// known. This is the attribute an `encapsulation srv6` VRF attaches to
+/// every VPNv4 / VPNv6 route it originates.
+fn srv6_l3_service_prefix_sid(
+    sid: std::net::Ipv6Addr,
+    structure: Option<crate::rib::SidStructure>,
+) -> bgp_packet::PrefixSid {
+    let structure = structure.map(|s| bgp_packet::Srv6SidStructure {
+        locator_block_len: s.lb_bits,
+        locator_node_len: s.ln_bits,
+        function_len: s.fun_bits,
+        argument_len: s.arg_bits,
+        transposition_len: 0,
+        transposition_offset: 0,
+    });
+    bgp_packet::PrefixSid {
+        tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
+            bgp_packet::Srv6ServiceTlv {
+                sids: vec![bgp_packet::Srv6SidInfo {
+                    sid,
+                    flags: 0,
+                    behavior: bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                    structure,
+                }],
+            },
+        )],
+    }
+}
+
 /// Walk `vrf_index` and return every VRF name whose
 /// `import_rts_v4` intersects the route's Route-Target extended
 /// communities in `ecom`. RTs on the wire are distinguished from
@@ -2077,6 +2109,24 @@ impl Bgp {
         }
     }
 
+    /// If `vrf` is an `encapsulation srv6` VRF with an allocated
+    /// End.DT46 SID and a resolved locator, attach the SRv6 L3 Service
+    /// TLV (RFC 9252) to `attr` and return the IPv6 next-hop the VPN
+    /// route should advertise — the PE's locator node address. Returns
+    /// `None` for MPLS-mode VRFs (the caller keeps the MPLS service
+    /// label and next-hop-self), and leaves `attr` untouched.
+    fn srv6_export_nexthop(
+        &self,
+        vrf: &str,
+        attr: &mut bgp_packet::BgpAttr,
+    ) -> Option<std::net::Ipv6Addr> {
+        let (sid, _function) = self.vrf_registry.get(vrf)?.srv6_sid?;
+        let locator = self.srv6_locator.as_ref()?;
+        let nexthop = locator.node_sid_addr()?;
+        attr.prefix_sid = Some(srv6_l3_service_prefix_sid(sid, locator.sid_structure()));
+        Some(nexthop)
+    }
+
     fn process_vrf_global_msg(&mut self, msg: super::vrf::BgpGlobalMsg) {
         match msg {
             super::vrf::BgpGlobalMsg::Export {
@@ -2099,6 +2149,14 @@ impl Bgp {
                     .map(|k| k.export_rts_v4.clone())
                     .unwrap_or_default();
 
+                // SRv6 L3VPN: for an `encapsulation srv6` VRF, attach
+                // the SRv6 L3 Service TLV (End.DT46 SID) and advertise
+                // the PE's locator as the IPv6 next-hop; the MPLS
+                // service label is suppressed (the SID carries
+                // forwarding). MPLS-mode VRFs are unaffected.
+                let mut attr = attr;
+                let srv6_nexthop = self.srv6_export_nexthop(&vrf, &mut attr);
+
                 // Tag with export-RT extcommunities, then intern
                 // the result in the global attr_store. The VRF
                 // task sent us `attr` by value so it could be
@@ -2112,8 +2170,9 @@ impl Bgp {
                 // treat as "no label allocated yet":
                 // `make_bgp_rib_entry_v4` and the VPNv4 emit path
                 // interpret it as "skip install / advertise" rather
-                // than emit the explicit-null label.
-                let label_obj = if label != 0 {
+                // than emit the explicit-null label. SRv6-mode routes
+                // carry no MPLS label (label 0 in the NLRI).
+                let label_obj = if label != 0 && srv6_nexthop.is_none() {
                     Some(bgp_packet::Label {
                         label,
                         exp: 0,
@@ -2125,7 +2184,10 @@ impl Bgp {
 
                 let nexthop = bgp_packet::Vpnv4Nexthop {
                     rd,
-                    nhop: std::net::IpAddr::V4(self.router_id),
+                    nhop: match srv6_nexthop {
+                        Some(v6) => std::net::IpAddr::V6(v6),
+                        None => std::net::IpAddr::V4(self.router_id),
+                    },
                 };
 
                 let rib = super::route::BgpRib {
@@ -2327,10 +2389,16 @@ impl Bgp {
                     .map(|k| k.export_rts_v6.clone())
                     .unwrap_or_default();
 
+                // SRv6 L3VPN (VPNv6 over an SRv6 underlay): attach the
+                // End.DT46 SID + advertise the locator next-hop; the
+                // service label is suppressed. See the VPNv4 arm.
+                let mut attr = attr;
+                let srv6_nexthop = self.srv6_export_nexthop(&vrf, &mut attr);
+
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
                 let interned = self.attr_store.intern(tagged);
 
-                let label_obj = if label != 0 {
+                let label_obj = if label != 0 && srv6_nexthop.is_none() {
                     Some(bgp_packet::Label {
                         label,
                         exp: 0,
@@ -2341,11 +2409,12 @@ impl Bgp {
                 };
 
                 // The on-wire next-hop is rewritten per-peer in
-                // `route_update_ipv6`; only the RD carried here matters,
-                // so the address is a placeholder.
+                // `route_update_ipv6` (next-hop-self), except SRv6
+                // service routes, which carry the PE's locator address;
+                // only the RD matters for the MPLS-mode placeholder.
                 let nexthop = bgp_packet::Vpnv6Nexthop {
                     rd,
-                    nhop: std::net::Ipv6Addr::UNSPECIFIED,
+                    nhop: srv6_nexthop.unwrap_or(std::net::Ipv6Addr::UNSPECIFIED),
                 };
 
                 let rib = super::route::BgpRib {
@@ -2593,6 +2662,35 @@ mod tests {
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn srv6_l3_service_prefix_sid_round_trips_to_end_dt46() {
+        use bgp_packet::{AttrEmitter, ParseBe};
+        use bytes::BytesMut;
+
+        let sid: std::net::Ipv6Addr = "2001:db8:1:40::".parse().unwrap();
+        let structure = crate::rib::SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 0,
+        };
+        let ps = super::srv6_l3_service_prefix_sid(sid, Some(structure));
+
+        // Emit the attribute body and parse it back; the SID + behavior
+        // must survive so a remote PE reads End.DT46.
+        let mut buf = BytesMut::new();
+        ps.emit(&mut buf);
+        let (_, parsed) = bgp_packet::PrefixSid::parse_be(&buf).expect("parse");
+        let attr = bgp_packet::BgpAttr {
+            prefix_sid: Some(parsed),
+            ..Default::default()
+        };
+        assert_eq!(
+            attr.srv6_l3_sid(),
+            Some((sid, bgp_packet::SRV6_BEHAVIOR_END_DT46))
+        );
     }
 
     #[test]
