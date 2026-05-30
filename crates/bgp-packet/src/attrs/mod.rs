@@ -93,3 +93,9 @@ pub use nlri_rtcv4::*;
 
 pub mod nlri_mup;
 pub use nlri_mup::*;
+
+pub mod nlri_flowspec;
+pub use nlri_flowspec::*;
+
+pub mod flowspec_action;
+pub use flowspec_action::*;

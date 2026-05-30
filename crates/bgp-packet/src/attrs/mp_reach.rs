@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::BytesMut;
+use nom::bytes::complete::take;
 use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u32, be_u128};
 use nom_derive::*;
@@ -9,8 +10,9 @@ use nom_derive::*;
 use bytes::BufMut;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, Ipv4Nlri, Ipv6Nlri, MupRoute, ParseBe, ParseNlri,
-    ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, MupRoute, ParseBe,
+    ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri,
+    many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach, Vpnv6Reach};
@@ -51,6 +53,13 @@ pub enum MpReachAttr {
         nhop: IpAddr,
         updates: Vec<MupRoute>,
     },
+    /// BGP Flow Specification (RFC 8955 IPv4 / RFC 8956 IPv6), SAFI 133.
+    /// The outer AFI selects the v4 vs v6 NLRI encoding. Flow specs
+    /// carry no usable next-hop, so none is retained.
+    Flowspec {
+        afi: Afi,
+        updates: Vec<FlowspecNlri>,
+    },
 }
 
 impl MpReachAttr {
@@ -86,6 +95,9 @@ impl MpReachAttr {
                 updates,
             } => {
                 mup_attr_emit(*afi, *snpa, nhop, updates, buf);
+            }
+            MpReachAttr::Flowspec { afi, updates } => {
+                flowspec_attr_emit(*afi, updates, buf);
             }
             _ => {
                 //
@@ -356,6 +368,23 @@ impl MpReachAttr {
             let rtc_nlri = MpReachAttr::Rtcv4(nlri);
             return Ok((input, rtc_nlri));
         }
+        if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::Flowspec {
+            // RFC 8955 §4.2.2 / RFC 8956 §4: a Flow Specification
+            // MP_REACH carries no useful next-hop (the sender sets
+            // Next-Hop Length to 0). RFC 4760 §3 still mandates the
+            // Next-Hop-Length octet and the reserved (SNPA count) octet,
+            // so honour whatever length was advertised, then the
+            // reserved octet, then parse the NLRIs.
+            let (input, _nhop) = take(header.nhop_len as usize).parse(input)?;
+            let (input, _snpa) = be_u8(input)?;
+            let (input, updates) =
+                many0_complete(|i| FlowspecNlri::parse(i, add_path, header.afi)).parse(input)?;
+            let mp_nlri = MpReachAttr::Flowspec {
+                afi: header.afi,
+                updates,
+            };
+            return Ok((input, mp_nlri));
+        }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
@@ -451,6 +480,11 @@ impl fmt::Display for MpReachAttr {
                         update.architecture(),
                         update.body_len()
                     )?;
+                }
+            }
+            Flowspec { afi, updates } => {
+                for update in updates.iter() {
+                    writeln!(f, " {afi}/flowspec {update}")?;
                 }
             }
             _ => {
@@ -609,6 +643,45 @@ pub(crate) fn mup_attr_emit(
     value.put_u8(0);
     for r in updates {
         r.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpReachAttr::Flowspec { afi, updates }` as a complete
+/// `MP_REACH_NLRI` path attribute (header + value).
+///
+/// Wire format (RFC 4760 §3 + RFC 8955 §4.2.2):
+/// ```text
+///   AFI  (2 octets) = 1 (IPv4) or 2 (IPv6)
+///   SAFI (1 octet)  = 133 (Flow Specification)
+///   Next-Hop Length (1 octet) = 0   (no next-hop for flow specs)
+///   Reserved / SNPA (1 octet) = 0
+///   NLRIs (one or more FlowspecNlri encodings)
+/// ```
+pub(crate) fn flowspec_attr_emit(afi: Afi, updates: &[FlowspecNlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(Safi::Flowspec));
+    // Next-Hop Length = 0 (no next-hop), then the reserved/SNPA octet.
+    value.put_u8(0);
+    value.put_u8(0);
+    for nlri in updates {
+        nlri.nlri_emit(&mut value);
     }
 
     let len = value.len();
@@ -848,6 +921,71 @@ mod tests {
                 assert_eq!(parsed, updates);
             }
             other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flowspec_v4_emit_round_trips_through_parser() {
+        use crate::{FlowspecComponent, FlowspecNlri, FlowspecOp, FlowspecPrefix};
+        let updates = vec![FlowspecNlri::new(
+            Afi::Ip,
+            vec![
+                FlowspecComponent::DestinationPrefix(FlowspecPrefix::V4(
+                    "10.0.0.0/24".parse().unwrap(),
+                )),
+                FlowspecComponent::DestinationPort(vec![FlowspecOp::numeric(
+                    false, false, false, true, 80,
+                )]),
+            ],
+        )];
+        let mut buf = BytesMut::new();
+        flowspec_attr_emit(Afi::Ip, &updates, &mut buf);
+        // Strip the attr header: flags(1) + type(1) + length(1).
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpReachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpReachAttr::Flowspec {
+                afi,
+                updates: parsed,
+            } => {
+                assert_eq!(afi, Afi::Ip);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("expected Flowspec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flowspec_v6_emit_round_trips_through_parser() {
+        use crate::{FlowspecComponent, FlowspecNlri, FlowspecOp, FlowspecPrefix};
+        let updates = vec![FlowspecNlri::new(
+            Afi::Ip6,
+            vec![
+                FlowspecComponent::DestinationPrefix(FlowspecPrefix::V6 {
+                    length: 64,
+                    offset: 0,
+                    pattern: "2001:db8::".parse::<Ipv6Addr>().unwrap().octets()[..8].to_vec(),
+                }),
+                FlowspecComponent::FlowLabel(vec![FlowspecOp::numeric(
+                    false, false, false, true, 42,
+                )]),
+            ],
+        )];
+        let mut buf = BytesMut::new();
+        flowspec_attr_emit(Afi::Ip6, &updates, &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpReachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpReachAttr::Flowspec {
+                afi,
+                updates: parsed,
+            } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("expected Flowspec, got {other:?}"),
         }
     }
 

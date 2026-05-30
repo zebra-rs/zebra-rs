@@ -5,8 +5,8 @@ use nom::error::{ErrorKind, make_error};
 use nom_derive::*;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, Ipv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption,
-    Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, MupRoute, ParseBe, ParseNlri,
+    ParseOption, Rtcv4, Rtcv4Unreach, Safi, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -37,6 +37,13 @@ pub enum MpUnreachAttr {
     Mup {
         afi: Afi,
         withdraws: Vec<MupRoute>,
+    },
+    /// BGP Flow Specification withdraws (RFC 8955 / RFC 8956), SAFI 133.
+    /// As with MUP, the outer AFI is preserved and an empty `withdraws`
+    /// list represents end-of-RIB.
+    Flowspec {
+        afi: Afi,
+        withdraws: Vec<FlowspecNlri>,
     },
 }
 
@@ -81,6 +88,9 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::Mup { afi, withdraws } => {
                 mup_unreach_attr_emit(*afi, withdraws, buf);
+            }
+            MpUnreachAttr::Flowspec { afi, withdraws } => {
+                flowspec_unreach_attr_emit(*afi, withdraws, buf);
             }
             _ => {
                 //
@@ -196,6 +206,37 @@ fn mup_unreach_attr_emit(afi: Afi, withdraws: &[MupRoute], buf: &mut BytesMut) {
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpUnreachAttr::Flowspec { afi, withdraws }` (empty
+/// `withdraws` encodes an end-of-RIB marker) as a complete
+/// `MP_UNREACH_NLRI` path attribute.
+///
+/// Wire format (RFC 4760 §4 + RFC 8955 §4.2.2): AFI, SAFI=133, then the
+/// NLRI list. MP_UNREACH carries neither next-hop nor SNPA.
+fn flowspec_unreach_attr_emit(afi: Afi, withdraws: &[FlowspecNlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(Safi::Flowspec));
+    for w in withdraws {
+        w.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 impl MpUnreachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
         // AFI + SAFI = 3.
@@ -279,6 +320,26 @@ impl MpUnreachAttr {
             let (input, rtcv4) = many0_complete(|i| Rtcv4::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpUnreachAttr::Rtcv4(rtcv4);
             return Ok((input, mp_nlri));
+        }
+        if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::Flowspec {
+            if input.is_empty() {
+                return Ok((
+                    input,
+                    MpUnreachAttr::Flowspec {
+                        afi: header.afi,
+                        withdraws: vec![],
+                    },
+                ));
+            }
+            let (input, withdraws) =
+                many0_complete(|i| FlowspecNlri::parse(i, add_path, header.afi)).parse(input)?;
+            return Ok((
+                input,
+                MpUnreachAttr::Flowspec {
+                    afi: header.afi,
+                    withdraws,
+                },
+            ));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
@@ -374,6 +435,15 @@ impl fmt::Display for MpUnreachAttr {
                         r.route_type(),
                         r.architecture()
                     )?;
+                }
+                Ok(())
+            }
+            Flowspec { afi, withdraws } => {
+                if withdraws.is_empty() {
+                    return writeln!(f, " EoR: {}/{}", afi, Safi::Flowspec);
+                }
+                for w in withdraws {
+                    writeln!(f, " {afi}/flowspec {w}")?;
                 }
                 Ok(())
             }
@@ -508,6 +578,52 @@ mod tests {
                 assert_eq!(parsed, withdraws);
             }
             other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flowspec_unreach_emit_round_trips_through_parser() {
+        use crate::{FlowspecComponent, FlowspecNlri, FlowspecOp, FlowspecPrefix};
+        let withdraws = vec![FlowspecNlri::new(
+            Afi::Ip,
+            vec![
+                FlowspecComponent::DestinationPrefix(FlowspecPrefix::V4(
+                    "192.0.2.0/24".parse().unwrap(),
+                )),
+                FlowspecComponent::IpProtocol(vec![FlowspecOp::numeric(
+                    false, false, false, true, 6,
+                )]),
+            ],
+        )];
+        let mut buf = BytesMut::new();
+        flowspec_unreach_attr_emit(Afi::Ip, &withdraws, &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpUnreachAttr::Flowspec {
+                afi,
+                withdraws: parsed,
+            } => {
+                assert_eq!(afi, Afi::Ip);
+                assert_eq!(parsed, withdraws);
+            }
+            other => panic!("expected Flowspec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flowspec_unreach_emit_eor_round_trips() {
+        let mut buf = BytesMut::new();
+        flowspec_unreach_attr_emit(Afi::Ip6, &[], &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(value, None).expect("EoR must round-trip");
+        match mp {
+            MpUnreachAttr::Flowspec { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert!(withdraws.is_empty());
+            }
+            other => panic!("expected Flowspec, got {other:?}"),
         }
     }
 
