@@ -191,6 +191,59 @@ impl<D: RibDirection> Default for AdjRibFlowspecTable<D> {
     }
 }
 
+/// Adj-RIB-In/Out table for BGP Link-State routes (RFC 9552, AFI 16388 /
+/// SAFI 71), keyed on `BgpLsNlri` (exact match — every Node/Link/Prefix
+/// object is a distinct key). Mirrors `AdjRibFlowspecTable<D>`. BGP-LS has
+/// no AddPath, so the path-id is always 0 and there is one candidate per
+/// NLRI per peer.
+#[derive(Debug)]
+pub struct AdjRibBgpLsTable<D: RibDirection>(pub BTreeMap<BgpLsNlri, Vec<BgpRib>>, PhantomData<D>);
+
+impl<D: RibDirection> AdjRibBgpLsTable<D> {
+    pub fn new() -> Self {
+        Self(BTreeMap::new(), PhantomData)
+    }
+
+    pub fn add(&mut self, nlri: BgpLsNlri, route: BgpRib) -> Option<BgpRib> {
+        let candidates = self.0.entry(nlri).or_default();
+
+        let route_id = D::get_id(&route);
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == route_id) {
+            let old_route = candidates[pos].clone();
+            candidates[pos] = route;
+            Some(old_route)
+        } else {
+            candidates.push(route);
+            None
+        }
+    }
+
+    pub fn remove(&mut self, nlri: &BgpLsNlri, id: u32) -> Option<BgpRib> {
+        let candidates = self.0.get_mut(nlri)?;
+
+        if let Some(pos) = candidates.iter().position(|r| D::get_id(r) == id) {
+            let removed_route = candidates.remove(pos);
+
+            if candidates.is_empty() {
+                self.0.remove(nlri);
+            }
+
+            Some(removed_route)
+        } else if id == 0 {
+            self.0.remove(nlri);
+            None
+        } else {
+            None
+        }
+    }
+}
+
+impl<D: RibDirection> Default for AdjRibBgpLsTable<D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // BGP Adj-RIB - stores routes with direction-specific ID handling
 #[derive(Debug)]
 pub struct AdjRib<D: RibDirection> {
@@ -212,6 +265,8 @@ pub struct AdjRib<D: RibDirection> {
     pub flowspec_v4: AdjRibFlowspecTable<D>,
     // IPv6 Flow Specification (AFI 2, SAFI 133)
     pub flowspec_v6: AdjRibFlowspecTable<D>,
+    // BGP Link-State (AFI 16388, SAFI 71)
+    pub bgp_ls: AdjRibBgpLsTable<D>,
 }
 
 impl<D: RibDirection> AdjRib<D> {
@@ -226,6 +281,7 @@ impl<D: RibDirection> AdjRib<D> {
             evpn: BTreeMap::new(),
             flowspec_v4: AdjRibFlowspecTable::new(),
             flowspec_v6: AdjRibFlowspecTable::new(),
+            bgp_ls: AdjRibBgpLsTable::new(),
         }
     }
 }
@@ -346,6 +402,16 @@ impl AdjRib<In> {
         }
     }
 
+    // BGP Link-State add/remove ----------------------------------------------
+
+    pub fn add_bgpls(&mut self, nlri: BgpLsNlri, route: BgpRib) -> Option<BgpRib> {
+        self.bgp_ls.add(nlri, route)
+    }
+
+    pub fn remove_bgpls(&mut self, nlri: &BgpLsNlri, id: u32) -> Option<BgpRib> {
+        self.bgp_ls.remove(nlri, id)
+    }
+
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
@@ -357,6 +423,7 @@ impl AdjRib<In> {
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),
+            (Afi::LinkState, Safi::LinkState) => self.bgp_ls.0.len(),
             (_, _) => 0,
         }
     }
@@ -400,6 +467,7 @@ impl AdjRib<Out> {
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),
+            (Afi::LinkState, Safi::LinkState) => self.bgp_ls.0.len(),
             (_, _) => 0,
         }
     }
