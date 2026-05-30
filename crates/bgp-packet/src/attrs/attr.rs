@@ -31,6 +31,7 @@ pub enum AttrType {
     LargeCom = 32,
     PrefixSid = 40,
     TunnelEncap = 23,
+    BgpLsAttr = 29,
     Unknown(u8),
 }
 
@@ -57,6 +58,7 @@ impl From<u8> for AttrType {
             32 => LargeCom,
             40 => PrefixSid,
             23 => TunnelEncap,
+            29 => BgpLsAttr,
             v => Unknown(v),
         }
     }
@@ -85,6 +87,7 @@ impl From<AttrType> for u8 {
             LargeCom => 32,
             PrefixSid => 40,
             TunnelEncap => 23,
+            BgpLsAttr => 29,
             Unknown(v) => v,
         }
     }
