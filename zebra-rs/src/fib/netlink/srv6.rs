@@ -86,6 +86,7 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         SidBehavior::EndX | SidBehavior::UA => Seg6LocalAction::EndX,
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
         SidBehavior::EndDT6 => Seg6LocalAction::EndDt6,
+        SidBehavior::EndDT46 => Seg6LocalAction::EndDt46,
     }
 }
 
@@ -121,11 +122,13 @@ fn build_seg6local_flavors(
 // Flavors block). End.X / uA also nests Nh6 (the IPv6 nexthop).
 // End.DT4 / End.DT6 nest a Table id — `iproute2`'s `table N` keyword,
 // `SEG6_LOCAL_TABLE` on the wire — telling the kernel which IPv4 /
-// IPv6 fib to look up the decapsulated inner packet in. We default
-// to RT_TABLE_MAIN; once zebra-rs grows VRF support, the operator-
-// set table id flows through here. (End.DT46 is the dual-family
-// variant and uses `SEG6_LOCAL_VRFTABLE` instead — not modeled
-// yet.) The kernel's required oif rides on the outer route /
+// IPv6 fib to look up the decapsulated inner packet in. `table_id`
+// of 0 means RT_TABLE_MAIN (the static / IS-IS default); a non-zero
+// id (a VRF's kernel table) flows straight through. End.DT46 is the
+// dual-family variant: it carries the table as `SEG6_LOCAL_VRFTABLE`
+// (`iproute2`'s `vrftable N`) so the kernel resolves the inner v4 or
+// v6 packet in the VRF — this is the per-VRF SID BGP L3VPN-over-SRv6
+// programs. The kernel's required oif rides on the outer route /
 // nexthop message rather than inside the encap, so we don't add it
 // here.
 //
@@ -137,6 +140,7 @@ fn build_seg6local_lwtunnel(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
     structure: Option<SidStructure>,
+    table_id: u32,
 ) -> Option<Vec<RouteLwTunnelEncap>> {
     let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
@@ -145,9 +149,20 @@ fn build_seg6local_lwtunnel(
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
     }
     if matches!(behavior, SidBehavior::EndDT4 | SidBehavior::EndDT6) {
-        attrs.push(RouteSeg6LocalIpTunnel::Table(
-            RouteHeader::RT_TABLE_MAIN as u32,
-        ));
+        // `SEG6_LOCAL_TABLE`: 0 maps to RT_TABLE_MAIN to preserve the
+        // existing static / IS-IS terminal behavior.
+        let table = if table_id == 0 {
+            RouteHeader::RT_TABLE_MAIN as u32
+        } else {
+            table_id
+        };
+        attrs.push(RouteSeg6LocalIpTunnel::Table(table));
+    }
+    if matches!(behavior, SidBehavior::EndDT46) {
+        // `SEG6_LOCAL_VRFTABLE`: the dual-family decap resolves the
+        // inner packet in a VRF table, so it needs a real (non-MAIN)
+        // table id — BGP passes the VRF's kernel table.
+        attrs.push(RouteSeg6LocalIpTunnel::VrfTable(table_id));
     }
     if let Some(flavors) = build_seg6local_flavors(behavior, structure) {
         attrs.push(flavors);
@@ -161,13 +176,16 @@ fn build_seg6local_lwtunnel(
 }
 
 // Build seg6local route-attribute pair (Encap + EncapType) for the
-// embedded-encap route install path.
+// embedded-encap route install path. `table_id` selects the decap
+// lookup table for the End.DT* behaviors (0 = RT_TABLE_MAIN); see
+// `build_seg6local_lwtunnel`.
 pub fn build_seg6local_attrs(
     behavior: SidBehavior,
     nh6: Option<Ipv6Addr>,
     structure: Option<SidStructure>,
+    table_id: u32,
 ) -> Option<(RouteAttribute, RouteAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure)?;
+    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id)?;
     Some((
         RouteAttribute::Encap(encaps),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),
@@ -177,3 +195,57 @@ pub fn build_seg6local_attrs(
 // (build_seg6local_nh_attrs removed: the kernel rejects seg6local
 // lwtunnel encaps in the nexthop table, so we always embed the encap
 // on the route message via build_seg6local_attrs.)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_attr(encaps: &[RouteLwTunnelEncap]) -> Option<u32> {
+        encaps.iter().find_map(|e| match e {
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Table(t)) => Some(*t),
+            _ => None,
+        })
+    }
+
+    fn vrftable_attr(encaps: &[RouteLwTunnelEncap]) -> Option<u32> {
+        encaps.iter().find_map(|e| match e {
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::VrfTable(t)) => Some(*t),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn end_dt46_uses_vrftable_with_given_table() {
+        // BGP L3VPN-over-SRv6: an End.DT46 SID decaps into the VRF's
+        // kernel table via SEG6_LOCAL_VRFTABLE, never a plain table.
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100).expect("encap built");
+        assert!(
+            encaps.iter().any(|e| matches!(
+                e,
+                RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(
+                    Seg6LocalAction::EndDt46
+                ))
+            )),
+            "End.DT46 action present"
+        );
+        assert_eq!(vrftable_attr(&encaps), Some(100));
+        assert_eq!(table_attr(&encaps), None, "no plain SEG6_LOCAL_TABLE");
+    }
+
+    #[test]
+    fn end_dt6_table_zero_maps_to_main() {
+        // table_id 0 must preserve the legacy static / IS-IS default.
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0).expect("encap built");
+        assert_eq!(table_attr(&encaps), Some(RouteHeader::RT_TABLE_MAIN as u32));
+        assert_eq!(vrftable_attr(&encaps), None);
+    }
+
+    #[test]
+    fn end_dt4_honors_nonzero_table() {
+        let encaps =
+            build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42).expect("encap built");
+        assert_eq!(table_attr(&encaps), Some(42));
+    }
+}
