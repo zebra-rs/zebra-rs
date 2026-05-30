@@ -591,7 +591,7 @@ impl Isis {
                 restarting: None,
                 overloaded: false,
                 overload_clear_timer: None,
-                flex_algo: super::flex_algo::FlexAlgoConfig::new(),
+                flex_algo: super::flex_algo::FlexAlgoConfig::new("/router/isis/flex-algo"),
                 affinity_map: super::affinity_map::AffinityMap::new(),
                 tracing: IsisTracing::default(),
                 lsdb: Levels::<Lsdb>::default(),
