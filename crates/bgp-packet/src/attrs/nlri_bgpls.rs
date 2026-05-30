@@ -3,6 +3,7 @@ use nom::IResult;
 use nom::bytes::complete::take;
 use nom::number::complete::{be_u8, be_u16, be_u64};
 use serde::Serialize;
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 // BGP Link-State NLRI codec (RFC 9552, obsoletes RFC 7752).
@@ -520,6 +521,143 @@ fn emit_prefix_body(buf: &mut BytesMut, p: &LsPrefixNlri) {
 }
 
 // ----------------------------------------------------------------------------
+// Display
+// ----------------------------------------------------------------------------
+
+/// Format an IGP Router-ID for display. 6/7-octet values are IS-IS
+/// System-IDs (`xxxx.xxxx.xxxx`, with a trailing `.xx` pseudonode byte);
+/// 4-octet values are OSPF Router-IDs (dotted-quad); anything else is hex.
+fn fmt_igp_router_id(b: &[u8]) -> String {
+    match b.len() {
+        6 | 7 => {
+            let mut s = String::new();
+            for (i, chunk) in b.chunks(2).enumerate() {
+                if i != 0 {
+                    s.push('.');
+                }
+                for byte in chunk {
+                    s.push_str(&format!("{byte:02x}"));
+                }
+            }
+            s
+        }
+        4 => format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]),
+        _ => b.iter().map(|x| format!("{x:02x}")).collect(),
+    }
+}
+
+/// Reconstruct a prefix from BGP-LS IP Reachability (the address is carried
+/// in the minimum number of octets). `<=4` octets renders as IPv4, otherwise
+/// IPv6 — matching the enclosing NLRI's family.
+fn fmt_ip_reach(prefix_len: u8, prefix: &[u8]) -> String {
+    if prefix.len() <= 4 {
+        let mut octets = [0u8; 4];
+        octets[..prefix.len()].copy_from_slice(prefix);
+        format!("{}/{}", Ipv4Addr::from(octets), prefix_len)
+    } else {
+        let mut octets = [0u8; 16];
+        let n = prefix.len().min(16);
+        octets[..n].copy_from_slice(&prefix[..n]);
+        format!("{}/{}", Ipv6Addr::from(octets), prefix_len)
+    }
+}
+
+impl fmt::Display for LsNodeDescSub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LsNodeDescSub::AutonomousSystem(v) => write!(f, "as {v}"),
+            LsNodeDescSub::BgpLsIdentifier(v) => write!(f, "bgp-ls-id {v}"),
+            LsNodeDescSub::OspfAreaId(v) => write!(f, "area {v}"),
+            LsNodeDescSub::IgpRouterId(b) => write!(f, "router-id {}", fmt_igp_router_id(b)),
+            LsNodeDescSub::BgpRouterId(a) => write!(f, "bgp-router-id {a}"),
+            LsNodeDescSub::MemberAs(v) => write!(f, "member-as {v}"),
+            LsNodeDescSub::Unknown { typ, value } => write!(f, "tlv{typ}({}o)", value.len()),
+        }
+    }
+}
+
+impl fmt::Display for LsNodeDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, s) in self.subs.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{s}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for LsLinkDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LsLinkDescriptor::LinkLocalRemoteId { local, remote } => {
+                write!(f, "link-id {local}/{remote}")
+            }
+            LsLinkDescriptor::Ipv4InterfaceAddr(a) => write!(f, "ipv4-iface {a}"),
+            LsLinkDescriptor::Ipv4NeighborAddr(a) => write!(f, "ipv4-nbr {a}"),
+            LsLinkDescriptor::Ipv6InterfaceAddr(a) => write!(f, "ipv6-iface {a}"),
+            LsLinkDescriptor::Ipv6NeighborAddr(a) => write!(f, "ipv6-nbr {a}"),
+            LsLinkDescriptor::MultiTopologyId(v) => write!(f, "mt {v}"),
+            LsLinkDescriptor::Unknown { typ, value } => write!(f, "tlv{typ}({}o)", value.len()),
+        }
+    }
+}
+
+impl fmt::Display for LsPrefixDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LsPrefixDescriptor::MultiTopologyId(v) => write!(f, "mt {v}"),
+            LsPrefixDescriptor::OspfRouteType(v) => write!(f, "ospf-route-type {v}"),
+            LsPrefixDescriptor::IpReachability { prefix_len, prefix } => {
+                write!(f, "{}", fmt_ip_reach(*prefix_len, prefix))
+            }
+            LsPrefixDescriptor::Unknown { typ, value } => write!(f, "tlv{typ}({}o)", value.len()),
+        }
+    }
+}
+
+/// Render the descriptor list of a Prefix NLRI (shared by the IPv4 and IPv6
+/// variants, which differ only in the address family of the IP Reachability).
+fn fmt_prefix_nlri(f: &mut fmt::Formatter<'_>, family: &str, p: &LsPrefixNlri) -> fmt::Result {
+    write!(f, "{family} proto={:?} [{}]", p.protocol_id, p.local_node)?;
+    for d in &p.prefix_descs {
+        write!(f, " {d}")?;
+    }
+    Ok(())
+}
+
+impl fmt::Display for BgpLsNlri {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BgpLsNlri::Node(n) => {
+                write!(f, "Node proto={:?} [{}]", n.protocol_id, n.local_node)
+            }
+            BgpLsNlri::Link(l) => {
+                write!(
+                    f,
+                    "Link proto={:?} [{}] -> [{}]",
+                    l.protocol_id, l.local_node, l.remote_node
+                )?;
+                if !l.link_descs.is_empty() {
+                    f.write_str(" {")?;
+                    for (i, d) in l.link_descs.iter().enumerate() {
+                        if i != 0 {
+                            f.write_str(", ")?;
+                        }
+                        write!(f, "{d}")?;
+                    }
+                    f.write_str("}")?;
+                }
+                Ok(())
+            }
+            BgpLsNlri::Ipv4Prefix(p) => fmt_prefix_nlri(f, "IPv4-Prefix", p),
+            BgpLsNlri::Ipv6Prefix(p) => fmt_prefix_nlri(f, "IPv6-Prefix", p),
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Small helpers
 // ----------------------------------------------------------------------------
 
@@ -603,6 +741,44 @@ mod tests {
             local_node: isis_l2_node([0x00, 0x00, 0x00, 0x00, 0x00, 0x01]),
         });
         roundtrip(&nlri);
+    }
+
+    #[test]
+    fn display_renders_node_link_and_prefix() {
+        let node = BgpLsNlri::Node(LsNodeNlri {
+            protocol_id: LsProtocolId::IsisL2,
+            identifier: 0,
+            local_node: isis_l2_node([0x00, 0x00, 0x00, 0x00, 0x00, 0x01]),
+        });
+        let s = node.to_string();
+        assert!(s.starts_with("Node proto=IsisL2"), "got: {s}");
+        assert!(s.contains("router-id 0000.0000.0001"), "got: {s}");
+
+        let link = BgpLsNlri::Link(LsLinkNlri {
+            protocol_id: LsProtocolId::IsisL2,
+            identifier: 0,
+            local_node: isis_l2_node([0, 0, 0, 0, 0, 1]),
+            remote_node: isis_l2_node([0, 0, 0, 0, 0, 2]),
+            link_descs: vec![LsLinkDescriptor::Ipv4InterfaceAddr(Ipv4Addr::new(
+                10, 0, 0, 1,
+            ))],
+        });
+        let s = link.to_string();
+        assert!(s.starts_with("Link proto=IsisL2"), "got: {s}");
+        assert!(s.contains("ipv4-iface 10.0.0.1"), "got: {s}");
+
+        let prefix = BgpLsNlri::Ipv4Prefix(LsPrefixNlri {
+            protocol_id: LsProtocolId::IsisL2,
+            identifier: 0,
+            local_node: isis_l2_node([0, 0, 0, 0, 0, 1]),
+            prefix_descs: vec![LsPrefixDescriptor::IpReachability {
+                prefix_len: 24,
+                prefix: vec![10, 0, 0],
+            }],
+        });
+        let s = prefix.to_string();
+        assert!(s.starts_with("IPv4-Prefix proto=IsisL2"), "got: {s}");
+        assert!(s.contains("10.0.0.0/24"), "got: {s}");
     }
 
     #[test]
