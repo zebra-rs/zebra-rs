@@ -60,6 +60,10 @@ module config {
     prefix zbcp;
   }
 
+  import zebra-bgp-sr-policy {
+    prefix zbsp;
+  }
+
   import zebra-bgp-soft-reconfiguration {
     prefix zbsr;
   }

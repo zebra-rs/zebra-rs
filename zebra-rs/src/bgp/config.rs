@@ -1598,6 +1598,50 @@ impl Bgp {
             "/router/bgp/color-policy/color/flex-algorithm",
             super::color_policy::config_color_flex_algorithm,
         );
+        // `set router bgp sr-policy policy <NAME> [...]`
+        // (zebra-bgp-sr-policy.yang). Locally-originated SR Policies,
+        // advertised as SAFI 73; callbacks stage onto
+        // `Bgp::local_rib.sr_policy_local` and re-advertise.
+        self.callback_add(
+            "/router/bgp/sr-policy/policy",
+            super::sr_policy::config_srp_policy,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/color",
+            super::sr_policy::config_srp_color,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/endpoint",
+            super::sr_policy::config_srp_endpoint,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/preference",
+            super::sr_policy::config_srp_preference,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/binding-sid-label",
+            super::sr_policy::config_srp_binding_sid_label,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/binding-sid-sid",
+            super::sr_policy::config_srp_binding_sid_sid,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/route-target",
+            super::sr_policy::config_srp_route_target,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/segment",
+            super::sr_policy::config_srp_segment,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/segment/mpls-label",
+            super::sr_policy::config_srp_segment_mpls_label,
+        );
+        self.callback_add(
+            "/router/bgp/sr-policy/policy/segment/srv6-sid",
+            super::sr_policy::config_srp_segment_srv6_sid,
+        );
         // `set router bgp vrf <name> [...]` (zebra-bgp-vrf.yang).
         // The callbacks populate `Bgp::vrfs`; the CommitEnd hook in
         // `process_cm_msg` emits a debug log per VRF entry and

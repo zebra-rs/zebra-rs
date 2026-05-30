@@ -20,9 +20,14 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::{
-    BgpAttr, BindingSid, CommunityValue, ExtCommunitySubType, Segment, SegmentList, SrPolicyTlvs,
-    Srv6BindingSid,
+    BgpAttr, BindingSid, Community, CommunityValue, ExtCommunity, ExtCommunitySubType,
+    ExtCommunityValue, Origin, Segment, SegmentList, SrPolicyNlri, SrPolicyTlvs, Srv6BindingSid,
+    TunnelEncap,
 };
+
+use crate::config::{Args, ConfigOp};
+
+use super::Bgp;
 
 /// Protocol-Origin value for a BGP-distributed SR Policy candidate path
 /// (RFC 9256 §2.3, Table 1).
@@ -500,6 +505,252 @@ fn ipv4_route_targets(attr: &BgpAttr) -> Vec<Ipv4Addr> {
     out
 }
 
+// =======================================================================
+// Originator: locally-configured SR Policies advertised as SAFI 73.
+// =======================================================================
+
+/// Locally-configured SR Policies (zebra-bgp-sr-policy.yang), keyed by
+/// the configuration name.
+#[derive(Clone, Debug, Default)]
+pub struct LocalSrPolicies {
+    pub policies: BTreeMap<String, LocalSrPolicy>,
+}
+
+/// One configured local SR Policy. Fields are `Option` because the
+/// config arrives leaf-by-leaf; a policy is only advertised once
+/// [`LocalSrPolicy::advert`] can build a complete NLRI + attribute.
+#[derive(Clone, Debug, Default)]
+pub struct LocalSrPolicy {
+    pub color: Option<u32>,
+    pub endpoint: Option<IpAddr>,
+    pub preference: Option<u32>,
+    pub binding_sid_label: Option<u32>,
+    pub binding_sid_sid: Option<Ipv6Addr>,
+    pub route_target: Option<Ipv4Addr>,
+    pub segments: BTreeMap<u32, LocalSegment>,
+}
+
+/// One explicit segment of a local policy (exactly one of the two is set
+/// for a usable segment).
+#[derive(Clone, Debug, Default)]
+pub struct LocalSegment {
+    pub mpls_label: Option<u32>,
+    pub srv6_sid: Option<Ipv6Addr>,
+}
+
+impl LocalSrPolicy {
+    /// The NLRI for this policy, if its color and endpoint are set. The
+    /// distinguisher is the originating router-id (RFC 9830 §2.1 — it
+    /// only needs to make the NLRI unique within `<color, endpoint>`).
+    pub fn nlri(&self, router_id: Ipv4Addr) -> Option<SrPolicyNlri> {
+        Some(SrPolicyNlri {
+            id: 0,
+            distinguisher: u32::from(router_id),
+            color: self.color?,
+            endpoint: self.endpoint?,
+        })
+    }
+
+    /// Build the `(NLRI, attribute)` to advertise this policy, or `None`
+    /// if it isn't complete (needs color, endpoint, and an all-one-type
+    /// segment list). The attribute carries the Tunnel-Type-15 encoding
+    /// plus, per RFC 9830 §4.1, an IPv4-address Route Target when one is
+    /// configured, else the NO_ADVERTISE community.
+    pub fn advert(&self, router_id: Ipv4Addr) -> Option<(SrPolicyNlri, BgpAttr)> {
+        let nlri = self.nlri(router_id)?;
+
+        // Segments, in ascending index order; reject mixed / empty lists.
+        let mut segments = Vec::new();
+        for seg in self.segments.values() {
+            if let Some(label) = seg.mpls_label {
+                segments.push(Segment::TypeA { flags: 0, label });
+            } else if let Some(sid) = seg.srv6_sid {
+                segments.push(Segment::TypeB {
+                    flags: 0,
+                    sid,
+                    structure: None,
+                });
+            } else {
+                return None;
+            }
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        let has_a = segments.iter().any(|s| matches!(s, Segment::TypeA { .. }));
+        let has_b = segments.iter().any(|s| matches!(s, Segment::TypeB { .. }));
+        if has_a && has_b {
+            return None;
+        }
+
+        let tlvs = SrPolicyTlvs {
+            preference: Some(self.preference.unwrap_or(DEFAULT_PREFERENCE)),
+            binding_sid: self.binding_sid_label.map(BindingSid::MplsLabel),
+            srv6_binding_sid: self.binding_sid_sid.map(|sid| Srv6BindingSid {
+                flags: 0,
+                sid,
+                structure: None,
+            }),
+            enlp: None,
+            priority: None,
+            segment_lists: vec![SegmentList {
+                weight: None,
+                segments,
+            }],
+            policy_name: None,
+            cp_name: None,
+            unknown: Vec::new(),
+        };
+
+        let mut attr = BgpAttr {
+            origin: Some(Origin::Igp),
+            tunnel_encap: Some(TunnelEncap {
+                tunnels: vec![tlvs.to_tunnel()],
+            }),
+            ..Default::default()
+        };
+        // RFC 9830 §4.1: a Route Target identifies the intended
+        // headend(s); without one, NO_ADVERTISE keeps the policy local.
+        match self.route_target {
+            Some(rt) => attr.ecom = Some(ExtCommunity(vec![ipv4_route_target(rt)])),
+            None => attr.com = Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+        }
+        Some((nlri, attr))
+    }
+}
+
+/// An IPv4-address-format Route Target extended community (RFC 4360 §4
+/// type 0x01, sub-type Route Target) with local-administrator 0.
+fn ipv4_route_target(addr: Ipv4Addr) -> ExtCommunityValue {
+    let mut val = [0u8; 6];
+    val[0..4].copy_from_slice(&addr.octets());
+    ExtCommunityValue {
+        high_type: 0x01,
+        low_type: ExtCommunitySubType::RouteTarget as u8,
+        val,
+    }
+}
+
+// --- config callbacks (zebra-bgp-sr-policy.yang) ---------------------
+
+fn local_policy<'a>(bgp: &'a mut Bgp, name: &str) -> &'a mut LocalSrPolicy {
+    bgp.local_rib
+        .sr_policy_local
+        .policies
+        .entry(name.to_string())
+        .or_default()
+}
+
+/// `set router bgp sr-policy policy <NAME>` — ensure the entry exists;
+/// `delete` removes it and withdraws any advertised NLRI.
+pub fn config_srp_policy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    match op {
+        ConfigOp::Set => {
+            local_policy(bgp, &name);
+        }
+        ConfigOp::Delete => {
+            if let Some(policy) = bgp.local_rib.sr_policy_local.policies.remove(&name)
+                && let Some(nlri) = policy.nlri(bgp.router_id)
+            {
+                super::route::srpolicy_origin_withdraw(bgp, nlri);
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// Generic leaf setter: mutate the named policy, then re-sync the
+/// dataplane advertisement.
+fn config_srp_leaf<F>(bgp: &mut Bgp, name: &str, f: F) -> Option<()>
+where
+    F: FnOnce(&mut LocalSrPolicy),
+{
+    f(local_policy(bgp, name));
+    super::route::srpolicy_origin_sync(bgp, name);
+    Some(())
+}
+
+pub fn config_srp_color(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.u32()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.color = value)
+}
+
+pub fn config_srp_endpoint(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.addr()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.endpoint = value)
+}
+
+pub fn config_srp_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.u32()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.preference = value)
+}
+
+pub fn config_srp_binding_sid_label(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.u32()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.binding_sid_label = value)
+}
+
+pub fn config_srp_binding_sid_sid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.v6addr()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.binding_sid_sid = value)
+}
+
+pub fn config_srp_route_target(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = op.is_set().then(|| args.v4addr()).flatten();
+    config_srp_leaf(bgp, &name, |p| p.route_target = value)
+}
+
+/// `set router bgp sr-policy policy <NAME> segment <INDEX>` presence.
+pub fn config_srp_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let index = args.u32()?;
+    match op {
+        ConfigOp::Set => {
+            local_policy(bgp, &name).segments.entry(index).or_default();
+        }
+        ConfigOp::Delete => {
+            local_policy(bgp, &name).segments.remove(&index);
+        }
+        _ => {}
+    }
+    super::route::srpolicy_origin_sync(bgp, &name);
+    Some(())
+}
+
+pub fn config_srp_segment_mpls_label(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let index = args.u32()?;
+    let value = op.is_set().then(|| args.u32()).flatten();
+    local_policy(bgp, &name)
+        .segments
+        .entry(index)
+        .or_default()
+        .mpls_label = value;
+    super::route::srpolicy_origin_sync(bgp, &name);
+    Some(())
+}
+
+pub fn config_srp_segment_srv6_sid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let index = args.u32()?;
+    let value = op.is_set().then(|| args.v6addr()).flatten();
+    local_policy(bgp, &name)
+        .segments
+        .entry(index)
+        .or_default()
+        .srv6_sid = value;
+    super::route::srpolicy_origin_sync(bgp, &name);
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,5 +1115,121 @@ mod tests {
         assert_eq!(db.steer_mpls(200, nh, 0b01), None);
         // CO=11 is reserved → treated as 00 (exact only) → no match.
         assert_eq!(db.steer_mpls(100, nh, 0b11), None);
+    }
+
+    #[test]
+    fn local_policy_advert_builds_nlri_and_tunnel() {
+        let rid: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        let mut policy = LocalSrPolicy {
+            color: Some(100),
+            endpoint: Some(endpoint("10.0.0.9")),
+            preference: Some(200),
+            binding_sid_label: Some(16100),
+            ..Default::default()
+        };
+        // Incomplete (no segments) → not advertisable.
+        assert!(policy.advert(rid).is_none());
+
+        policy.segments.insert(
+            1,
+            LocalSegment {
+                mpls_label: Some(16002),
+                srv6_sid: None,
+            },
+        );
+        policy.segments.insert(
+            2,
+            LocalSegment {
+                mpls_label: Some(16009),
+                srv6_sid: None,
+            },
+        );
+
+        let (nlri, attr) = policy.advert(rid).expect("advertisable");
+        assert_eq!(nlri.color, 100);
+        assert_eq!(nlri.endpoint, endpoint("10.0.0.9"));
+        assert_eq!(nlri.distinguisher, u32::from(rid));
+        // No route-target → NO_ADVERTISE attached, no ext-comms.
+        assert!(
+            attr.com
+                .as_ref()
+                .is_some_and(|c| c.contains(&CommunityValue::NO_ADVERTISE.value()))
+        );
+        assert!(attr.ecom.is_none());
+        // The Tunnel-Type-15 attribute decodes back to the policy content.
+        let te = attr.tunnel_encap.expect("tunnel encap");
+        let tlvs = bgp_packet::sr_policy_tlvs(&te)
+            .expect("type 15")
+            .expect("decode");
+        assert_eq!(tlvs.preference, Some(200));
+        assert_eq!(tlvs.binding_sid, Some(BindingSid::MplsLabel(16100)));
+        assert_eq!(tlvs.segment_lists.len(), 1);
+        assert_eq!(
+            tlvs.segment_lists[0].segments,
+            vec![
+                Segment::TypeA {
+                    flags: 0,
+                    label: 16002
+                },
+                Segment::TypeA {
+                    flags: 0,
+                    label: 16009
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn local_policy_advert_route_target_replaces_no_advertise() {
+        let rid: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        let policy = LocalSrPolicy {
+            color: Some(7),
+            endpoint: Some(endpoint("2001:db8::9")),
+            route_target: Some("10.0.0.1".parse().unwrap()),
+            segments: BTreeMap::from([(
+                1,
+                LocalSegment {
+                    mpls_label: None,
+                    srv6_sid: Some("fc00:0:9::".parse().unwrap()),
+                },
+            )]),
+            ..Default::default()
+        };
+        let (nlri, attr) = policy.advert(rid).expect("advertisable");
+        assert_eq!(nlri.afi(), bgp_packet::Afi::Ip6);
+        // RT present → no NO_ADVERTISE; one IPv4-address-format RT.
+        assert!(attr.com.is_none());
+        let ecom = attr.ecom.expect("ext-comm");
+        assert_eq!(ecom.0.len(), 1);
+        assert_eq!(ecom.0[0].high_type, 0x01);
+        assert_eq!(ecom.0[0].low_type, ExtCommunitySubType::RouteTarget as u8);
+        assert_eq!(&ecom.0[0].val[0..4], &[10, 0, 0, 1]);
+    }
+
+    #[test]
+    fn local_policy_advert_rejects_mixed_segments() {
+        let rid: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        let policy = LocalSrPolicy {
+            color: Some(1),
+            endpoint: Some(endpoint("10.0.0.9")),
+            segments: BTreeMap::from([
+                (
+                    1,
+                    LocalSegment {
+                        mpls_label: Some(16002),
+                        srv6_sid: None,
+                    },
+                ),
+                (
+                    2,
+                    LocalSegment {
+                        mpls_label: None,
+                        srv6_sid: Some("fc00::1".parse().unwrap()),
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        assert!(policy.advert(rid).is_none());
     }
 }

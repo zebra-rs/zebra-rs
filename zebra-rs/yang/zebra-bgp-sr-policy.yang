@@ -1,0 +1,149 @@
+module zebra-bgp-sr-policy {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-sr-policy";
+  prefix "zbsp";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Locally-originated BGP SR Policies (SAFI 73, RFC 9830). Each
+     configured policy is advertised to SR-Policy peers as an SR Policy
+     NLRI plus a Tunnel Encapsulation attribute (Tunnel-Type 15)
+     carrying the Preference, Binding SID, and an explicit Segment List.
+
+     A policy is advertised once it is complete (a color, an endpoint,
+     and at least one segment). When a `route-target` is configured it
+     is attached as an IPv4-address-format Route Target (RFC 9830 §4.1);
+     otherwise the NO_ADVERTISE community is attached so the policy stays
+     between directly-connected speakers.
+
+     Example:
+
+       router bgp 65000 {
+         sr-policy {
+           policy GREEN {
+             color 100;
+             endpoint 10.0.0.9;
+             preference 200;
+             binding-sid-label 16100;
+             segment 1 { mpls-label 16002; }
+             segment 2 { mpls-label 16009; }
+           }
+         }
+       }";
+
+  revision 2026-05-30 {
+    description
+      "Initial revision — config-defined local SR Policies advertised
+       as SAFI 73. Flat shape (one explicit segment list per policy);
+       the candidate-path / named-segment-list tree is a follow-up.";
+    reference
+      "RFC 9830 (Advertising SR Policies in BGP),
+       RFC 9256 (SR Policy Architecture).";
+  }
+
+  grouping bgp-sr-policy-extension {
+    description
+      "Container `sr-policy` under the BGP top-level holding the
+       locally-originated policies, keyed by a configuration name.";
+
+    container sr-policy {
+      ext:help "Locally-originated BGP SR Policies (SAFI 73)";
+      presence "Configure local SR Policies";
+
+      list policy {
+        ext:help "A local SR Policy, advertised as SAFI 73";
+        key name;
+        leaf name {
+          ext:help "Policy configuration name";
+          type string;
+        }
+        leaf color {
+          ext:help "Policy color (RFC 9256 §2.1, non-zero)";
+          type uint32;
+        }
+        leaf endpoint {
+          ext:help "Policy endpoint (IPv4 or IPv6; selects the NLRI AFI)";
+          type inet:ip-address;
+        }
+        leaf preference {
+          ext:help "Candidate-path preference (RFC 9256 default 100)";
+          type uint32;
+        }
+        leaf binding-sid-label {
+          ext:help "SR-MPLS Binding SID (MPLS label)";
+          type uint32;
+        }
+        leaf binding-sid-sid {
+          ext:help "SRv6 Binding SID";
+          type inet:ipv6-address;
+        }
+        leaf route-target {
+          ext:help "IPv4-address-format Route Target identifying the
+                    intended headend(s); when absent, NO_ADVERTISE is
+                    attached instead (RFC 9830 §4.1)";
+          type inet:ipv4-address;
+        }
+        list segment {
+          ext:help "Explicit segment, imposed in ascending index order";
+          key index;
+          leaf index {
+            ext:help "Segment position in the list";
+            type uint32;
+          }
+          leaf mpls-label {
+            ext:help "SR-MPLS label (Segment Type A)";
+            type uint32;
+          }
+          leaf srv6-sid {
+            ext:help "SRv6 SID (Segment Type B)";
+            type inet:ipv6-address;
+          }
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the sr-policy block to the BGP top-level in the
+       candidate-set subtree.";
+    uses bgp-sr-policy-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp sr-policy policy NAME ...` is path-valid.";
+    uses bgp-sr-policy-extension;
+  }
+}
