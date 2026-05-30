@@ -886,6 +886,31 @@ module config {
                 type uint32;
               }
             }
+            list flex-algo-prefix-sid {
+              // Per-Flexible-Algorithm Prefix-SID for this interface's
+              // prefix (RFC 9350 §7). Emitted as an extra Prefix-SID
+              // sub-TLV (Algorithm = the keyed algo) in the
+              // E-Intra-Area-Prefix-LSA, alongside the algo-0
+              // `prefix-sid` above. Mirrors `router ospf` interface.
+              key "algo";
+              leaf algo {
+                type uint8 { range "128..255"; }
+              }
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
+            leaf-list affinity {
+              // Names of /affinity-map entries this link carries.
+              // Advertised as an Extended Admin Group bitmap inside the
+              // RFC 9492 ASLA sub-TLV on the E-Router-LSA Router-Link
+              // TLV and tested against each FAD's include/exclude
+              // constraints at flex-algo SPF time.
+              type string;
+            }
           }
         }
         container segment-routing {
@@ -906,6 +931,91 @@ module config {
               // global locator is committed — matches the IS-IS
               // staging convention (config.yang L524).
               type string;
+            }
+          }
+        }
+
+        list flex-algo {
+          // OSPFv3 Flexible Algorithm (RFC 9350 §7) definition. Shape
+          // mirrors `router ospf / flex-algo`; keyed by the on-the-wire
+          // numeric identifier (128..255). `advertise-definition true`
+          // causes this router to originate the FAD TLV in its
+          // E-Router-LSA (RFC 9350 §7.1, OSPFv3 FAD TLV 16); without it
+          // the router participates using a FAD learned from another
+          // node. At least one (preferably two) routers per area MUST
+          // advertise the definition.
+          key "algo";
+          leaf algo {
+            type uint8 { range "128..255"; }
+            description
+              "Flex-Algorithm identifier (RFC 9350 §4). 0..127 are
+               reserved by IANA; 128..255 are user-defined.";
+          }
+
+          leaf advertise-definition {
+            type boolean;
+            default false;
+            description
+              "When true, originate the FAD TLV for this algorithm in
+               the E-Router-LSA. If no router in the area advertises the
+               FAD, every participant fails to compute paths.";
+          }
+
+          leaf metric-type {
+            type enumeration {
+              enum igp;                   // FAD Metric-Type 0
+              enum min-unidir-link-delay; // FAD Metric-Type 1 (RFC 8570)
+              enum te-default;            // FAD Metric-Type 2 (RFC 5305)
+            }
+            default igp;
+          }
+
+          leaf priority {
+            // FAD Priority (RFC 9350 §6.5). Tie-breaker when more than
+            // one router originates a FAD for the same algo; higher
+            // priority wins.
+            type uint8;
+            default 128;
+          }
+
+          leaf prefix-metric {
+            // M-flag in the FAD Flags sub-TLV (RFC 9350 §6.4). When set,
+            // the computed path metric to a prefix includes the
+            // advertised Flexible Algorithm Prefix Metric.
+            type boolean;
+            default false;
+          }
+
+          container dataplane {
+            // Per-algorithm dataplane participation. OSPFv3 flex-algo
+            // forwards over SR-MPLS (per-algo Prefix-SID labels); the
+            // `ip` flag selects plain IPv6 forwarding for the algo's
+            // computed paths.
+            leaf sr-mpls { type boolean; default false; }
+            leaf ip      { type boolean; default false; }
+          }
+
+          container affinity {
+            // FAD Exclude / Include-Any / Include-All Admin Group
+            // sub-TLVs (RFC 9350 §6.2-6.4). Each leaf-list value is a
+            // name from the global /affinity-map table.
+            leaf-list include-any { type string; }
+            leaf-list include-all { type string; }
+            leaf-list exclude-any { type string; }
+          }
+
+          leaf-list srlg-exclude {
+            // FAD Exclude SRLG sub-TLV (RFC 9350 §6.5). Each entry
+            // references a /srlg/group name.
+            type string;
+          }
+
+          container fast-reroute {
+            // Per-algo TI-LFA toggle. Empty container is a no-op; the
+            // child presence container turns the per-algo TI-LFA
+            // computation on (deferred — no OSPF TI-LFA yet).
+            container ti-lfa {
+              presence "Enable Topology-Independent LFA for this flex-algo";
             }
           }
         }

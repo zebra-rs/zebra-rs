@@ -3688,6 +3688,14 @@ impl Ospf<Ospfv3> {
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
 
+        // Apply the flex-algo / affinity-map / SRLG staging at the end
+        // of a commit cycle (mirrors the v2 sibling). Nothing else
+        // handles CommitEnd on the v3 instance today.
+        if msg.op == ConfigOp::CommitEnd {
+            self.commit_flex_algo_tables();
+            return;
+        }
+
         // Clear ops bypass the YANG callback table; see the v2
         // sibling. Path-filter so the v3 instance ignores the v2
         // `/clear/ospf/spf` broadcast (and vice versa).
@@ -3695,6 +3703,18 @@ impl Ospf<Ospfv3> {
             if path == "/clear/ospfv3/spf" {
                 self.clear_spf();
             }
+            return;
+        }
+
+        // Flex-algo definitions (`/router/ospfv3/flex-algo`) and the
+        // global `/affinity-map` / `/srlg` tables stage into their
+        // builders here and apply at CommitEnd; the registry callbacks
+        // below don't cover them.
+        if path.starts_with(Ospfv3::FLEX_ALGO_PREFIX)
+            || path.starts_with("/affinity-map")
+            || path.starts_with("/srlg/group")
+        {
+            self.flex_algo_table_exec(path, args, msg.op);
             return;
         }
 

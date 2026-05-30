@@ -84,6 +84,15 @@ impl Ospf<Ospfv3> {
                 "/area/interface/adjacency-sid/absolute",
                 config_ospfv3_interface_adjacency_sid_absolute,
             ),
+            ("/area/interface/affinity", config_ospfv3_interface_affinity),
+            (
+                "/area/interface/flex-algo-prefix-sid/index",
+                config_ospfv3_interface_flex_algo_prefix_sid_index,
+            ),
+            (
+                "/area/interface/flex-algo-prefix-sid/absolute",
+                config_ospfv3_interface_flex_algo_prefix_sid_absolute,
+            ),
             ("/segment-routing/mpls", config_ospfv3_sr_mpls),
         ];
         for (path, cb) in entries {
@@ -433,6 +442,87 @@ fn config_ospfv3_interface_adjacency_sid_absolute(
     let ifindex = link.index;
 
     ospf.e_router_v3_lsa_originate(ifindex);
+
+    Some(())
+}
+
+// `/router/ospfv3/area/interface/affinity` — one call per affinity
+// name on the leaf-list. Each name references a global `/affinity-map`
+// entry; bit positions are resolved at LSA-build time, so we only
+// stage the names here. Mirrors v2's `config_ospf_interface_affinity`
+// (the RFC 9492 ASLA origination that reads them lands with v3
+// flex-algo origination).
+fn config_ospfv3_interface_affinity(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let affinity = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.affinity.insert(affinity);
+    } else {
+        link.config.affinity.remove(&affinity);
+    }
+    Some(())
+}
+
+// `/router/ospfv3/area/interface/flex-algo-prefix-sid/<algo>/index` —
+// per-algo Index-form Prefix-SID for this interface's prefix
+// (RFC 9350 §7). Stored keyed by algo and re-originates the
+// E-Intra-Area-Prefix-LSA. Mirrors v2's
+// `config_ospf_interface_flex_algo_prefix_sid_index`.
+fn config_ospfv3_interface_flex_algo_prefix_sid_index(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let algo = args.u8()?;
+    let index = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config
+            .flex_algo_prefix_sids
+            .insert(algo, super::link::PrefixSid::Index(index));
+    } else {
+        link.config.flex_algo_prefix_sids.remove(&algo);
+    }
+    let ifindex = link.index;
+
+    ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+
+    Some(())
+}
+
+// `/router/ospfv3/area/interface/flex-algo-prefix-sid/<algo>/absolute`
+// — per-algo Absolute (label) Prefix-SID sibling of the index form.
+fn config_ospfv3_interface_flex_algo_prefix_sid_absolute(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let algo = args.u8()?;
+    let absolute = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config
+            .flex_algo_prefix_sids
+            .insert(algo, super::link::PrefixSid::Absolute(absolute));
+    } else {
+        link.config.flex_algo_prefix_sids.remove(&algo);
+    }
+    let ifindex = link.index;
+
+    ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
 
     Some(())
 }
