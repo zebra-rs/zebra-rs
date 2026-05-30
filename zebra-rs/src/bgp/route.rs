@@ -4052,15 +4052,44 @@ pub fn route_srpolicy_update(
         color: nlri.color,
         endpoint: nlri.endpoint,
     };
-    bgp.local_rib.sr_policy.insert(key, cp);
+    let delta = bgp.local_rib.sr_policy.insert(key, cp);
+    apply_srpolicy_fib(delta, bgp);
 }
 
-/// Withdraw one SR Policy NLRI from the headend database and re-run
-/// active candidate-path selection.
+/// Withdraw one SR Policy NLRI from the headend database, re-run active
+/// candidate-path selection, and apply the dataplane delta.
 pub fn route_srpolicy_withdraw(ident: usize, nlri: &SrPolicyNlri, bgp: &mut BgpTop) {
-    bgp.local_rib
-        .sr_policy
-        .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
+    let delta =
+        bgp.local_rib
+            .sr_policy
+            .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
+    apply_srpolicy_fib(delta, bgp);
+}
+
+/// Realize an SR Policy active-path change in the dataplane: remove the
+/// previous SRv6 Binding SID and/or install the new one as an
+/// End.B6.Encaps local SID (RFC 8986 §4.14) pushing the policy's
+/// segment list. SR-MPLS Binding SIDs are a later phase.
+fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, bgp: &mut BgpTop) {
+    if let Some(addr) = delta.remove {
+        let _ = bgp.rib_client.send(rib::Message::SidDel { addr });
+    }
+    if let Some(install) = delta.install {
+        let sid = rib::Sid {
+            addr: install.bsid,
+            behavior: rib::SidBehavior::EndB6Encap,
+            context: rib::SidContext::None,
+            owner: rib::SidOwner::new("bgp", 0),
+            locator: String::new(),
+            allocation_type: rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: 0,
+            segs: install.segments,
+        };
+        let _ = bgp.rib_client.send(rib::Message::SidAdd { sid });
+    }
 }
 
 /// Propagate a flow spec's selected best path to peers: re-advertise it

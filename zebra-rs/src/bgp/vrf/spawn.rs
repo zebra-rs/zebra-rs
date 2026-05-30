@@ -238,6 +238,7 @@ pub fn spawn_bgp_vrf(
             nh6: None,
             structure: None,
             table_id,
+            segs: Vec::new(),
         };
         rib_subscriber.send_sid_add(sid);
     }

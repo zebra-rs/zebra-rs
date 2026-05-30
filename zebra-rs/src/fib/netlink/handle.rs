@@ -233,6 +233,10 @@ fn sid_route_target(
         SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndDT46 => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
+        // End.B6.Encaps (SR Policy Binding SID): a /128 host route in
+        // table=main; the SRH it pushes rides inside the seg6local
+        // encap, not in the route header.
+        SidBehavior::EndB6Encap => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
     }
 }
 
@@ -668,7 +672,7 @@ impl FibHandle {
                 // Static seg6local action routes keep the legacy
                 // RT_TABLE_MAIN decap (table_id 0); per-VRF table
                 // selection arrives via the protocol SID path.
-                super::srv6::build_seg6local_attrs(action, None, None, 0)
+                super::srv6::build_seg6local_attrs(action, None, None, 0, &[])
             {
                 msg.attributes.push(encap);
                 msg.attributes.push(encap_type);
@@ -1306,9 +1310,13 @@ impl FibHandle {
         if ifindex != 0 {
             msg.attributes.push(RouteAttribute::Oif(ifindex));
         }
-        let Some((encap, encap_type)) =
-            super::srv6::build_seg6local_attrs(sid.behavior, sid.nh6, sid.structure, sid.table_id)
-        else {
+        let Some((encap, encap_type)) = super::srv6::build_seg6local_attrs(
+            sid.behavior,
+            sid.nh6,
+            sid.structure,
+            sid.table_id,
+            &sid.segs,
+        ) else {
             tracing::warn!(
                 "seg6local route encap build skipped for {} (End.X / uA without IPv6 nexthop)",
                 sid.addr

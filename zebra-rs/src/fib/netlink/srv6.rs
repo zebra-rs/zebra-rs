@@ -37,18 +37,7 @@ pub fn build_seg6_lwtunnel(
         other => bail!("unsupported SRv6 encap type: {other}"),
     };
 
-    let n = sr_segments.len() as u8;
-    let ipv6_sr_hdr = Ipv6SrHdr {
-        nexthdr: 0,
-        hdrlen: n.saturating_mul(2),
-        typ: 4,
-        segments_left: n - 1,
-        first_segment: n - 1,
-        flags: 0,
-        tag: 0,
-        segments: sr_segments,
-        ..Default::default()
-    };
+    let ipv6_sr_hdr = build_srh(&sr_segments);
     let seg6 = Seg6IpTunnelEncap {
         mode: Seg6IpTunnelMode::Encap,
         ipv6_sr_hdr: VecIpv6SrHdr(vec![ipv6_sr_hdr]),
@@ -73,6 +62,24 @@ pub fn build_seg6_attrs(
     ))
 }
 
+// Build the SRH (`Ipv6SrHdr`) carrying `segments` in forwarding order,
+// shared by the H.Encap encap path and the End.B6.Encaps seg6local
+// push. `segments` must be non-empty (callers guarantee it).
+fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
+    let n = segments.len() as u8;
+    Ipv6SrHdr {
+        nexthdr: 0,
+        hdrlen: n.saturating_mul(2),
+        typ: 4,
+        segments_left: n - 1,
+        first_segment: n - 1,
+        flags: 0,
+        tag: 0,
+        segments: segments.to_vec(),
+        ..Default::default()
+    }
+}
+
 // Map a SidBehavior to its kernel SEG6_LOCAL_ACTION_*. uSID variants
 // reuse the same kernel actions as their classic counterparts; the
 // NEXT-C-SID flavor rides as a separate Flavors attribute. End.DT4 /
@@ -87,6 +94,7 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
         SidBehavior::EndDT6 => Seg6LocalAction::EndDt6,
         SidBehavior::EndDT46 => Seg6LocalAction::EndDt46,
+        SidBehavior::EndB6Encap => Seg6LocalAction::EndB6Encap,
     }
 }
 
@@ -141,12 +149,22 @@ fn build_seg6local_lwtunnel(
     nh6: Option<Ipv6Addr>,
     structure: Option<SidStructure>,
     table_id: u32,
+    segs: &[Ipv6Addr],
 ) -> Option<Vec<RouteLwTunnelEncap>> {
     let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
     if matches!(behavior, SidBehavior::EndX | SidBehavior::UA) {
         let nh = nh6?;
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
+    }
+    if matches!(behavior, SidBehavior::EndB6Encap) {
+        // `SEG6_LOCAL_SRH`: the SR Policy segment list this Binding SID
+        // encapsulates onto. No segments → nothing to push, so skip the
+        // FIB install (the registry row is harmless).
+        if segs.is_empty() {
+            return None;
+        }
+        attrs.push(RouteSeg6LocalIpTunnel::Srh(build_srh(segs)));
     }
     if matches!(behavior, SidBehavior::EndDT4 | SidBehavior::EndDT6) {
         // `SEG6_LOCAL_TABLE`: 0 maps to RT_TABLE_MAIN to preserve the
@@ -184,8 +202,9 @@ pub fn build_seg6local_attrs(
     nh6: Option<Ipv6Addr>,
     structure: Option<SidStructure>,
     table_id: u32,
+    segs: &[Ipv6Addr],
 ) -> Option<(RouteAttribute, RouteAttribute)> {
-    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id)?;
+    let encaps = build_seg6local_lwtunnel(behavior, nh6, structure, table_id, segs)?;
     Some((
         RouteAttribute::Encap(encaps),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6Local),
@@ -218,8 +237,8 @@ mod tests {
     fn end_dt46_uses_vrftable_with_given_table() {
         // BGP L3VPN-over-SRv6: an End.DT46 SID decaps into the VRF's
         // kernel table via SEG6_LOCAL_VRFTABLE, never a plain table.
-        let encaps =
-            build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100).expect("encap built");
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT46, None, None, 100, &[])
+            .expect("encap built");
         assert!(
             encaps.iter().any(|e| matches!(
                 e,
@@ -237,15 +256,41 @@ mod tests {
     fn end_dt6_table_zero_maps_to_main() {
         // table_id 0 must preserve the legacy static / IS-IS default.
         let encaps =
-            build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0).expect("encap built");
+            build_seg6local_lwtunnel(SidBehavior::EndDT6, None, None, 0, &[]).expect("encap built");
         assert_eq!(table_attr(&encaps), Some(RouteHeader::RT_TABLE_MAIN as u32));
         assert_eq!(vrftable_attr(&encaps), None);
     }
 
     #[test]
     fn end_dt4_honors_nonzero_table() {
-        let encaps =
-            build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42).expect("encap built");
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42, &[])
+            .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(42));
+    }
+
+    #[test]
+    fn end_b6_encaps_pushes_srh_segment_list() {
+        // SR Policy Binding SID: End.B6.Encaps carries the policy's
+        // segment list as a SEG6_LOCAL_SRH attribute.
+        let segs = vec!["fc00:0:2::".parse().unwrap(), "fc00:0:9::".parse().unwrap()];
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &segs)
+            .expect("encap built");
+        assert!(encaps.iter().any(|e| matches!(
+            e,
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(
+                Seg6LocalAction::EndB6Encap
+            ))
+        )));
+        let srh = encaps.iter().find_map(|e| match e {
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Srh(h)) => Some(h),
+            _ => None,
+        });
+        assert_eq!(srh.expect("SRH present").segments, segs);
+    }
+
+    #[test]
+    fn end_b6_encaps_without_segments_skips_install() {
+        // No segment list → no SRH to push → skip the FIB install.
+        assert!(build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &[]).is_none());
     }
 }
