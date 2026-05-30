@@ -127,6 +127,8 @@ impl Args {
         match item.as_str() {
             "ipv4" => Some(AfiSafi::new(Afi::Ip, Safi::Unicast)),
             "ipv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Unicast)),
+            "label-v4" => Some(AfiSafi::new(Afi::Ip, Safi::MplsLabel)),
+            "label-v6" => Some(AfiSafi::new(Afi::Ip6, Safi::MplsLabel)),
             "vpnv4" => Some(AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
             "vpnv6" => Some(AfiSafi::new(Afi::Ip6, Safi::MplsVpn)),
             "evpn" => Some(AfiSafi::new(Afi::L2vpn, Safi::Evpn)),
