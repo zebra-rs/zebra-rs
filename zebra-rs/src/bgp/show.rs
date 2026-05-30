@@ -2219,38 +2219,40 @@ fn show_bgp_flowspec(
 
     let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
     let mut buf = String::new();
-    writeln!(buf, "{family} Flow Specification (Adj-RIB-In, received):")?;
+    writeln!(buf, "{family} Flow Specification (Loc-RIB):")?;
 
-    let mut any = false;
-    for (addr, peer) in bgp.peers.iter() {
-        let table = if afi == Afi::Ip6 {
-            &peer.adj_in.flowspec_v6
-        } else {
-            &peer.adj_in.flowspec_v4
-        };
-        // BTreeMap iteration yields the flow specs in RFC 8955 §5.1
-        // precedence order (most-specific first).
-        for (nlri, ribs) in table.0.iter() {
-            for rib in ribs.iter() {
-                any = true;
-                // RFC 9117 validity, computed live against the current
-                // unicast Loc-RIB (Phase 2 neither stores nor gates on
-                // it yet). `*` marks a valid flow spec.
-                let validation = super::flowspec::flowspec_validate(bgp, nlri, rib);
-                let mark = if validation.is_valid() { "*" } else { " " };
-                writeln!(buf, " {mark} match:  {nlri}")?;
-                writeln!(
-                    buf,
-                    "   action: {}   from {}   [{}]",
-                    show_flowspec_actions(&rib.attr),
-                    addr,
-                    validation
-                )?;
-            }
-        }
+    let table = if afi == Afi::Ip6 {
+        &bgp.local_rib.flowspec_v6
+    } else {
+        &bgp.local_rib.flowspec_v4
+    };
+    if table.selected.is_empty() {
+        writeln!(buf, "  (no flow specifications)")?;
+        return Ok(buf);
     }
-    if !any {
-        writeln!(buf, "  (no flow specifications received)")?;
+
+    // BTreeMap iteration yields the flow specs in RFC 8955 §5.1
+    // precedence order (most-specific first) — the order rules are
+    // applied in the dataplane.
+    for (nlri, rib) in table.selected.iter() {
+        // RFC 9117 validity, computed live against the current unicast
+        // Loc-RIB (it gates re-advertise/install in later slices; here
+        // it annotates the output). `*` marks a valid flow spec.
+        let validation = super::flowspec::flowspec_validate(bgp, nlri, rib);
+        let mark = if validation.is_valid() { "*" } else { " " };
+        let from = bgp
+            .peers
+            .get_by_idx(rib.ident)
+            .map(|p| p.address.to_string())
+            .unwrap_or_else(|| rib.router_id.to_string());
+        writeln!(buf, " {mark} match:  {nlri}")?;
+        writeln!(
+            buf,
+            "   action: {}   from {}   [{}]",
+            show_flowspec_actions(&rib.attr),
+            from,
+            validation
+        )?;
     }
     Ok(buf)
 }

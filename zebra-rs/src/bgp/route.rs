@@ -928,6 +928,112 @@ impl LocalRibEvpnTable {
     }
 }
 
+/// Loc-RIB table for Flow Specification routes — candidate paths and the
+/// selected best path per `FlowspecNlri`, exact-match (overlapping flow
+/// specs coexist, so no prefix trie). Mirrors `LocalRibEvpnTable`;
+/// best-path reuses the NLRI-agnostic `BgpRib` comparator. Validity
+/// (RFC 9117) gates re-advertise/install, not Loc-RIB membership, so the
+/// selected best path is recorded here regardless of validation.
+#[derive(Debug, Default)]
+pub struct LocalRibFlowspecTable {
+    pub cands: BTreeMap<FlowspecNlri, Vec<BgpRib>>,
+    pub selected: BTreeMap<FlowspecNlri, BgpRib>,
+}
+
+impl LocalRibFlowspecTable {
+    pub fn update(&mut self, nlri: FlowspecNlri, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        let cands = self.cands.entry(nlri.clone()).or_default();
+
+        let existing_local_id = cands
+            .iter()
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .map(|r| r.local_id);
+
+        let replaced: Vec<BgpRib> = cands
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .collect();
+
+        let mut next_id = 1u32;
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            new_rib.local_id = local_id;
+        } else {
+            let used_ids: std::collections::HashSet<u32> =
+                cands.iter().map(|r| r.local_id).collect();
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        next_id = new_rib.local_id;
+
+        cands.push(new_rib);
+
+        let selected = self.select_best_path(&nlri);
+
+        (replaced, selected, next_id)
+    }
+
+    pub fn remove(&mut self, nlri: &FlowspecNlri, id: u32, ident: usize) -> Vec<BgpRib> {
+        let cands = self.cands.entry(nlri.clone()).or_default();
+        cands
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
+            .collect()
+    }
+
+    pub fn select_best_path(&mut self, nlri: &FlowspecNlri) -> Vec<BgpRib> {
+        let mut selected = Vec::new();
+
+        if !self.cands.contains_key(nlri) {
+            self.selected.remove(nlri);
+            return selected;
+        }
+
+        let is_empty = self
+            .cands
+            .get(nlri)
+            .map(|cands| cands.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.cands.remove(nlri);
+            self.selected.remove(nlri);
+            return selected;
+        }
+
+        let best = {
+            let cands = self.cands.get_mut(nlri).expect("nlri checked above");
+
+            let mut best_index = 0usize;
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                // NLRI-agnostic comparator (operates only on BgpRib
+                // fields); the type parameter is irrelevant.
+                let (better, reason) =
+                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
+                if better {
+                    best_index = index;
+                }
+                best_reason = reason;
+            }
+
+            for rib in cands.iter_mut() {
+                rib.best_path = false;
+                rib.best_reason = Reason::NotSelected;
+            }
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
+        };
+
+        self.selected.insert(nlri.clone(), best.clone());
+        selected.push(best);
+
+        selected
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LocalRib {
     pub v4: LocalRibTable<Ipv4Net>,
@@ -946,6 +1052,10 @@ pub struct LocalRib {
 
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
+
+    /// IPv4 / IPv6 Flow Specification Loc-RIB (SAFI 133).
+    pub flowspec_v4: LocalRibFlowspecTable,
+    pub flowspec_v6: LocalRibFlowspecTable,
 }
 
 impl LocalRib {
@@ -1121,6 +1231,38 @@ impl LocalRib {
         prefix: &EvpnPrefix,
     ) -> Vec<BgpRib> {
         self.evpn.entry(*rd).or_default().select_best_path(prefix)
+    }
+
+    // Flow Specification dispatch --------------------------------------------
+
+    fn flowspec_table_mut(&mut self, afi: Afi) -> &mut LocalRibFlowspecTable {
+        match afi {
+            Afi::Ip6 => &mut self.flowspec_v6,
+            _ => &mut self.flowspec_v4,
+        }
+    }
+
+    pub fn update_flowspec(
+        &mut self,
+        afi: Afi,
+        nlri: FlowspecNlri,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.flowspec_table_mut(afi).update(nlri, rib)
+    }
+
+    pub fn remove_flowspec(
+        &mut self,
+        afi: Afi,
+        nlri: &FlowspecNlri,
+        id: u32,
+        ident: usize,
+    ) -> Vec<BgpRib> {
+        self.flowspec_table_mut(afi).remove(nlri, id, ident)
+    }
+
+    pub fn select_best_path_flowspec(&mut self, afi: Afi, nlri: &FlowspecNlri) -> Vec<BgpRib> {
+        self.flowspec_table_mut(afi).select_best_path(nlri)
     }
 }
 
@@ -3524,14 +3666,33 @@ pub fn route_flowspec_update(
     );
     rib.attr = bgp.attr_store.intern(attr.clone());
 
-    let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-    peer.adj_in.add_flowspec(afi, nlri.clone(), rib);
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_flowspec(afi, nlri.clone(), rib.clone());
+    }
+
+    // Phase 3: run best-path selection into the Loc-RIB. Validity
+    // (Phase 2 / RFC 9117) gates re-advertise and install, not Loc-RIB
+    // membership, so the selected best path is recorded regardless of
+    // the validation verdict.
+    let _ = bgp.local_rib.update_flowspec(afi, nlri.clone(), rib);
 }
 
-/// Withdraw one Flow Specification NLRI from the peer's Adj-RIB-In.
-pub fn route_flowspec_withdraw(ident: usize, nlri: &FlowspecNlri, afi: Afi, peers: &mut PeerMap) {
-    let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-    peer.adj_in.remove_flowspec(afi, nlri, nlri.id);
+/// Withdraw one Flow Specification NLRI from the peer's Adj-RIB-In and
+/// the Loc-RIB, then re-run best-path selection.
+pub fn route_flowspec_withdraw(
+    ident: usize,
+    nlri: &FlowspecNlri,
+    afi: Afi,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_flowspec(afi, nlri, nlri.id);
+    }
+    bgp.local_rib.remove_flowspec(afi, nlri, nlri.id, ident);
+    bgp.local_rib.select_best_path_flowspec(afi, nlri);
 }
 
 pub fn route_from_peer(
@@ -3781,7 +3942,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::Flowspec { afi, withdraws } => {
                 for nlri in withdraws.iter() {
-                    route_flowspec_withdraw(peer_id, nlri, afi, peers);
+                    route_flowspec_withdraw(peer_id, nlri, afi, bgp, peers);
                 }
                 // An empty `withdraws` is End-of-RIB. Graceful-restart
                 // stale handling for flow specs is deferred (no Loc-RIB
@@ -7416,6 +7577,41 @@ mod tests {
         AsPathPrependConfig, CommunityMatcher, CommunitySet, NumericSet, PolicyList, PrefixSet,
         SetCommunityConfig, SetCommunityMode, SetNextHop,
     };
+
+    #[test]
+    fn flowspec_locrib_select_then_remove() {
+        use bgp_packet::{Afi, FlowspecComponent, FlowspecNlri, FlowspecPrefix};
+
+        let nlri = FlowspecNlri::new(
+            Afi::Ip,
+            vec![FlowspecComponent::DestinationPrefix(FlowspecPrefix::V4(
+                "10.0.0.0/24".parse().unwrap(),
+            ))],
+        );
+        let attr = BgpAttr::default();
+        let mut table = super::LocalRibFlowspecTable::default();
+        let rib = super::BgpRib::new(
+            1,
+            Ipv4Addr::new(1, 1, 1, 1),
+            super::BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+
+        let (_, selected, _) = table.update(nlri.clone(), rib);
+        assert_eq!(selected.len(), 1);
+        assert!(table.selected.contains_key(&nlri));
+
+        // Remove the only path, then re-run selection — the selected
+        // entry drops out of the Loc-RIB.
+        table.remove(&nlri, 0, 1);
+        assert!(table.select_best_path(&nlri).is_empty());
+        assert!(!table.selected.contains_key(&nlri));
+    }
 
     /// Test wrapper that preserves the legacy `Option<BgpAttr>`
     /// shape; weight defaults to 0, local_addr to 0.0.0.0.
