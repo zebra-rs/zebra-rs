@@ -1231,6 +1231,112 @@ impl LocalRibFlowspecTable {
     }
 }
 
+/// BGP Link-State Loc-RIB table (RFC 9552, AFI 16388 / SAFI 71), keyed on
+/// `BgpLsNlri` (exact match — every Node/Link/Prefix object is a distinct
+/// key, so no prefix trie). Mirrors `LocalRibFlowspecTable`; best-path reuses
+/// the NLRI-agnostic `BgpRib` comparator to elect a single path per object.
+/// BGP-LS has no AddPath, so candidates carry `remote_id == 0` and are
+/// disambiguated purely by `ident` — one candidate per peer.
+#[derive(Debug, Default)]
+pub struct LocalRibBgpLsTable {
+    pub cands: BTreeMap<BgpLsNlri, Vec<BgpRib>>,
+    pub selected: BTreeMap<BgpLsNlri, BgpRib>,
+}
+
+impl LocalRibBgpLsTable {
+    pub fn update(&mut self, nlri: BgpLsNlri, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        let cands = self.cands.entry(nlri.clone()).or_default();
+
+        let existing_local_id = cands
+            .iter()
+            .find(|r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .map(|r| r.local_id);
+
+        let replaced: Vec<BgpRib> = cands
+            .extract_if(.., |r| r.ident == rib.ident && r.remote_id == rib.remote_id)
+            .collect();
+
+        let mut next_id = 1u32;
+        let mut new_rib = rib.clone();
+        if let Some(local_id) = existing_local_id {
+            new_rib.local_id = local_id;
+        } else {
+            let used_ids: std::collections::HashSet<u32> =
+                cands.iter().map(|r| r.local_id).collect();
+            while used_ids.contains(&next_id) {
+                next_id += 1;
+            }
+            new_rib.local_id = next_id;
+        }
+
+        next_id = new_rib.local_id;
+
+        cands.push(new_rib);
+
+        let selected = self.select_best_path(&nlri);
+
+        (replaced, selected, next_id)
+    }
+
+    pub fn remove(&mut self, nlri: &BgpLsNlri, id: u32, ident: usize) -> Vec<BgpRib> {
+        let cands = self.cands.entry(nlri.clone()).or_default();
+        cands
+            .extract_if(.., |r| r.ident == ident && r.remote_id == id)
+            .collect()
+    }
+
+    pub fn select_best_path(&mut self, nlri: &BgpLsNlri) -> Vec<BgpRib> {
+        let mut selected = Vec::new();
+
+        if !self.cands.contains_key(nlri) {
+            self.selected.remove(nlri);
+            return selected;
+        }
+
+        let is_empty = self
+            .cands
+            .get(nlri)
+            .map(|cands| cands.is_empty())
+            .unwrap_or(true);
+
+        if is_empty {
+            self.cands.remove(nlri);
+            self.selected.remove(nlri);
+            return selected;
+        }
+
+        let best = {
+            let cands = self.cands.get_mut(nlri).expect("nlri checked above");
+
+            let mut best_index = 0usize;
+            let mut best_reason = Reason::Default;
+            for index in 1..cands.len() {
+                // NLRI-agnostic comparator (operates only on BgpRib
+                // fields); the type parameter is irrelevant.
+                let (better, reason) =
+                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
+                if better {
+                    best_index = index;
+                }
+                best_reason = reason;
+            }
+
+            for rib in cands.iter_mut() {
+                rib.best_path = false;
+                rib.best_reason = Reason::NotSelected;
+            }
+            cands[best_index].best_path = true;
+            cands[best_index].best_reason = best_reason;
+            cands[best_index].clone()
+        };
+
+        self.selected.insert(nlri.clone(), best.clone());
+        selected.push(best);
+
+        selected
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LocalRib {
     pub v4: LocalRibTable<Ipv4Net>,
@@ -1264,6 +1370,11 @@ pub struct LocalRib {
     /// callbacks (`&mut Bgp`) and the establish-time advertise
     /// (`BgpTop`) reach it without threading a new `BgpTop` field.
     pub sr_policy_local: super::sr_policy::LocalSrPolicies,
+
+    /// BGP Link-State (AFI 16388, SAFI 71) Loc-RIB. A single exact-match
+    /// table keyed by `BgpLsNlri`; the v4/v6 prefix distinction lives inside
+    /// the NLRI, so one table holds Node, Link, and Prefix objects.
+    pub bgp_ls: LocalRibBgpLsTable,
 }
 
 impl LocalRib {
@@ -1490,6 +1601,24 @@ impl LocalRib {
 
     pub fn select_best_path_flowspec(&mut self, afi: Afi, nlri: &FlowspecNlri) -> Vec<BgpRib> {
         self.flowspec_table_mut(afi).select_best_path(nlri)
+    }
+
+    // BGP Link-State dispatch ------------------------------------------------
+
+    pub fn update_bgpls(
+        &mut self,
+        nlri: BgpLsNlri,
+        rib: BgpRib,
+    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.bgp_ls.update(nlri, rib)
+    }
+
+    pub fn remove_bgpls(&mut self, nlri: &BgpLsNlri, id: u32, ident: usize) -> Vec<BgpRib> {
+        self.bgp_ls.remove(nlri, id, ident)
+    }
+
+    pub fn select_best_path_bgpls(&mut self, nlri: &BgpLsNlri) -> Vec<BgpRib> {
+        self.bgp_ls.select_best_path(nlri)
     }
 }
 
@@ -4100,6 +4229,91 @@ pub fn route_srpolicy_withdraw(ident: usize, nlri: &SrPolicyNlri, bgp: &mut BgpT
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
+/// Consume one received BGP Link-State NLRI (RFC 9552, AFI 16388 / SAFI 71)
+/// into the BGP-LS Loc-RIB.
+///
+/// Receive + best-path only: the NLRI is stored in the peer's Adj-RIB-In and
+/// selected into the Loc-RIB exact-match table (a single best path per NLRI,
+/// reusing the NLRI-agnostic `BgpRib` comparator). Re-advertisement /
+/// reflection, install, and `show` are later phases — the selected best path
+/// is recorded but not propagated. The companion BGP-LS Attribute (path
+/// attribute type 29) is already captured in `attr.bgp_ls`. Loop detection
+/// mirrors `route_flowspec_update`: a route carrying our own AS /
+/// ORIGINATOR_ID / CLUSTER_LIST is dropped silently. BGP-LS has no AddPath,
+/// so the path-id is always 0.
+pub fn route_bgpls_update(
+    ident: usize,
+    nlri: &BgpLsNlri,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        0,    // remote_id — BGP-LS has no AddPath
+        0,    // weight
+        attr, // interned just below
+        None, // label
+        None, // nexthop — re-advertise next-hop is a later phase
+        stale,
+    );
+    rib.attr = bgp.attr_store.intern(attr.clone());
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_bgpls(nlri.clone(), rib.clone());
+    }
+
+    // Select the single best path into the Loc-RIB. Reflection / install are
+    // later phases, so the result is recorded but not propagated.
+    let _ = bgp.local_rib.update_bgpls(nlri.clone(), rib);
+}
+
+/// Withdraw one BGP Link-State NLRI from the peer's Adj-RIB-In and the
+/// Loc-RIB, then re-run best-path selection for that object. Propagation is
+/// a later phase, so the re-selected result is recorded but not advertised.
+pub fn route_bgpls_withdraw(ident: usize, nlri: &BgpLsNlri, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_bgpls(nlri, 0);
+    }
+    bgp.local_rib.remove_bgpls(nlri, 0, ident);
+    let _ = bgp.local_rib.select_best_path_bgpls(nlri);
+}
+
 /// Realize an SR Policy active-path change in the dataplane: remove the
 /// previous SRv6 Binding SID and/or install the new one as an
 /// End.B6.Encaps local SID (RFC 8986 §4.14) pushing the policy's
@@ -4681,6 +4895,17 @@ pub fn route_from_peer(
                     route_srpolicy_update(peer_id, nlri, bgp_attr, bgp, peers);
                 }
             }
+            MpReachAttr::LinkState { updates, .. } => {
+                // AFI 16388 / SAFI 71: Node/Link/Prefix objects. The
+                // companion attributes ride in the BGP-LS Attribute
+                // (type 29), already captured in `bgp_attr.bgp_ls`. The
+                // MP_REACH next-hop is informational here; re-advertisement
+                // is a later phase. The v4/v6 split lives inside the NLRI,
+                // so a single Loc-RIB table holds every object.
+                for nlri in updates.iter() {
+                    route_bgpls_update(peer_id, nlri, bgp_attr, bgp, peers, false);
+                }
+            }
             MpReachAttr::Labelv4 {
                 snpa: _,
                 nhop,
@@ -4791,6 +5016,12 @@ pub fn route_from_peer(
             MpUnreachAttr::SrPolicy { withdraws, .. } => {
                 for nlri in withdraws.iter() {
                     route_srpolicy_withdraw(peer_id, nlri, bgp);
+                }
+                // An empty `withdraws` is End-of-RIB; nothing to flush.
+            }
+            MpUnreachAttr::LinkState { withdraws } => {
+                for nlri in withdraws.iter() {
+                    route_bgpls_withdraw(peer_id, nlri, bgp, peers);
                 }
                 // An empty `withdraws` is End-of-RIB; nothing to flush.
             }
