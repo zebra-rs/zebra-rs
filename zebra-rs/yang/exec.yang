@@ -220,6 +220,14 @@ module exec {
             type empty;
           }
         }
+        container sr-policy {
+          ext:help "BGP IPv4 SR Policy (SAFI 73) RIB";
+          presence "BGP IPv4 SR Policy RIB";
+          leaf ipv6 {
+            ext:help "BGP IPv6 SR Policy (SAFI 73) RIB";
+            type empty;
+          }
+        }
         leaf summary {
           ext:help "BGP summary information";
           type empty;

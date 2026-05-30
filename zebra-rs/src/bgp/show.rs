@@ -2278,6 +2278,125 @@ fn show_bgp_flowspec_v6(
     show_bgp_flowspec(bgp, Afi::Ip6, json)
 }
 
+/// `show bgp ipv4|ipv6 sr-policy` — the headend SR Policy database
+/// (SAFI 73). One block per `<color, endpoint>`; each candidate path
+/// shows its origin/discriminator/preference, an `*` on the RFC 9256 §2.9
+/// active path, its binding SID, and its segment list(s).
+fn show_bgp_sr_policy(
+    bgp: &Bgp,
+    afi: Afi,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        // Rich JSON is deferred (mirrors flowspec); the SR Policy types
+        // do not derive Serialize yet.
+        return Ok(String::from("[]"));
+    }
+
+    let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
+    let want_v6 = afi == Afi::Ip6;
+    let mut buf = String::new();
+    writeln!(buf, "{family} SR Policy (SAFI 73):")?;
+
+    let mut shown = 0usize;
+    for (key, policy) in bgp.local_rib.sr_policy.policies.iter() {
+        if key.endpoint.is_ipv6() != want_v6 {
+            continue;
+        }
+        shown += 1;
+        writeln!(
+            buf,
+            " SR Policy color {} endpoint {}",
+            key.color, key.endpoint
+        )?;
+        for (cpkey, cp) in policy.candidates.iter() {
+            let mark = if policy.active.as_ref() == Some(cpkey) {
+                "*"
+            } else {
+                " "
+            };
+            let validity = if cp.valid { "valid" } else { "invalid" };
+            writeln!(
+                buf,
+                "  {mark} candidate-path origin {} disc {} pref {} prio {} [{validity}]",
+                show_sr_protocol_origin(cpkey.protocol_origin),
+                cpkey.discriminator,
+                cp.preference,
+                cp.priority,
+            )?;
+            if let Some(name) = &cp.cp_name {
+                writeln!(buf, "      name: {name}")?;
+            }
+            if let Some(bsid) = show_sr_binding_sid(cp) {
+                writeln!(buf, "      binding-sid: {bsid}")?;
+            }
+            for sl in &cp.segment_lists {
+                match sl.weight {
+                    Some(w) => writeln!(buf, "      segment-list weight {w}:")?,
+                    None => writeln!(buf, "      segment-list:")?,
+                }
+                for seg in &sl.segments {
+                    writeln!(buf, "        {}", show_sr_segment(seg))?;
+                }
+            }
+        }
+    }
+    if shown == 0 {
+        writeln!(buf, "  (no SR policies)")?;
+    }
+    Ok(buf)
+}
+
+fn show_sr_protocol_origin(proto: u8) -> String {
+    // RFC 9256 §2.3 Table 1 recommended values.
+    match proto {
+        10 => "PCEP(10)".to_string(),
+        20 => "BGP(20)".to_string(),
+        30 => "Config(30)".to_string(),
+        other => format!("origin({other})"),
+    }
+}
+
+fn show_sr_binding_sid(cp: &super::sr_policy::CandidatePath) -> Option<String> {
+    if let Some(s) = &cp.srv6_binding_sid {
+        return Some(format!("SRv6 {}", s.sid));
+    }
+    match &cp.binding_sid {
+        Some(BindingSid::MplsLabel(l)) => Some(format!("MPLS {l}")),
+        Some(BindingSid::Srv6(s)) => Some(format!("SRv6 {s}")),
+        Some(BindingSid::None) | None => None,
+    }
+}
+
+fn show_sr_segment(seg: &Segment) -> String {
+    match seg {
+        Segment::TypeA { label, .. } => format!("MPLS label {label}"),
+        Segment::TypeB { sid, structure, .. } => match structure {
+            Some(st) => format!("SRv6 {sid} (behavior {})", st.endpoint_behavior),
+            None => format!("SRv6 {sid}"),
+        },
+        Segment::Unknown { code, value } => {
+            format!("segment type {code} ({} bytes)", value.len())
+        }
+    }
+}
+
+fn show_bgp_sr_policy_v4(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_sr_policy(bgp, Afi::Ip, json)
+}
+
+fn show_bgp_sr_policy_v6(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_sr_policy(bgp, Afi::Ip6, json)
+}
+
 #[cfg(test)]
 mod flowspec_show_tests {
     use super::*;
@@ -2874,6 +2993,8 @@ impl Bgp {
         self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);
         self.show_add("/show/ip/bgp/flowspec", show_bgp_flowspec_v4);
         self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
+        self.show_add("/show/ip/bgp/sr-policy", show_bgp_sr_policy_v4);
+        self.show_add("/show/ip/bgp/sr-policy/ipv6", show_bgp_sr_policy_v6);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);

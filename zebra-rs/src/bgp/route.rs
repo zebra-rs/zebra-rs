@@ -1227,6 +1227,11 @@ pub struct LocalRib {
     /// IPv4 / IPv6 Flow Specification Loc-RIB (SAFI 133).
     pub flowspec_v4: LocalRibFlowspecTable,
     pub flowspec_v6: LocalRibFlowspecTable,
+
+    /// BGP SR Policy (SAFI 73) headend-consumer database, keyed by
+    /// `<color, endpoint>` (the endpoint's family is the NLRI AFI, so a
+    /// single table holds both IPv4 and IPv6 policies).
+    pub sr_policy: super::sr_policy::SrPolicyDb,
 }
 
 impl LocalRib {
@@ -3980,6 +3985,84 @@ pub fn route_flowspec_withdraw(
     route_flowspec_propagate(afi, nlri, &selected, bgp, peers);
 }
 
+/// Consume one received SR Policy NLRI (RFC 9830, SAFI 73) into the
+/// headend SR Policy database.
+///
+/// Control-plane only: the candidate path is decoded from the Tunnel
+/// Encapsulation attribute (Tunnel-Type 15), selected per RFC 9256 §2.9,
+/// and exposed via `show`; nothing is installed or steered yet. The
+/// endpoint's address family (carried in the NLRI) keys the policy, so
+/// IPv4 and IPv6 share one path. Loop detection mirrors
+/// `route_flowspec_update`.
+pub fn route_srpolicy_update(
+    ident: usize,
+    nlri: &SrPolicyNlri,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    use super::sr_policy::{self, Usability};
+
+    // RFC 9830 §4.2 distribution rules: a malformed or non-usable update
+    // is not consumed locally (reflection is a later phase).
+    if sr_policy::usability(attr, bgp.router_id) != Usability::Usable {
+        return;
+    }
+
+    let originator = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        // RFC 9256 §2.4 originator = <ASN, node-address>: the ORIGINATOR_ID
+        // when route-reflected, else the advertising peer's router-id.
+        let node = attr
+            .originator_id
+            .as_ref()
+            .map(|o| IpAddr::V4(o.id))
+            .unwrap_or(IpAddr::V4(peer.remote_id));
+        (peer.remote_as, node)
+    };
+
+    let tlvs = attr
+        .tunnel_encap
+        .as_ref()
+        .and_then(sr_policy_tlvs)
+        .and_then(|res| res.ok())
+        .unwrap_or_default();
+
+    let cp = sr_policy::candidate_path(&tlvs, originator, nlri.distinguisher, ident);
+    let key = sr_policy::SrPolicyKey {
+        color: nlri.color,
+        endpoint: nlri.endpoint,
+    };
+    bgp.local_rib.sr_policy.insert(key, cp);
+}
+
+/// Withdraw one SR Policy NLRI from the headend database and re-run
+/// active candidate-path selection.
+pub fn route_srpolicy_withdraw(ident: usize, nlri: &SrPolicyNlri, bgp: &mut BgpTop) {
+    bgp.local_rib
+        .sr_policy
+        .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
+}
+
 /// Propagate a flow spec's selected best path to peers: re-advertise it
 /// when a valid (RFC 9117) best path exists, otherwise withdraw any
 /// prior advertisement. Invalid best paths are kept in the Loc-RIB (and
@@ -4279,6 +4362,14 @@ pub fn route_from_peer(
                     route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
                 }
             }
+            MpReachAttr::SrPolicy { updates, .. } => {
+                // SAFI 73: candidate-path content rides in the Tunnel
+                // Encapsulation attribute; the NLRI endpoint carries the
+                // AFI, so v4/v6 share one path.
+                for nlri in updates.iter() {
+                    route_srpolicy_update(peer_id, nlri, bgp_attr, bgp, peers);
+                }
+            }
             MpReachAttr::Labelv4 {
                 snpa: _,
                 nhop,
@@ -4385,6 +4476,12 @@ pub fn route_from_peer(
                 // An empty `withdraws` is End-of-RIB. Graceful-restart
                 // stale handling for flow specs is deferred (no Loc-RIB
                 // yet), so there is nothing to flush.
+            }
+            MpUnreachAttr::SrPolicy { withdraws, .. } => {
+                for nlri in withdraws.iter() {
+                    route_srpolicy_withdraw(peer_id, nlri, bgp);
+                }
+                // An empty `withdraws` is End-of-RIB; nothing to flush.
             }
             MpUnreachAttr::Labelv4(withdrawals) => {
                 for withdraw in withdrawals.iter() {
