@@ -136,6 +136,8 @@ impl Args {
             "rtcv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Rtc)),
             "flowspec-ipv4" => Some(AfiSafi::new(Afi::Ip, Safi::Flowspec)),
             "flowspec-ipv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Flowspec)),
+            "sr-policy-v4" => Some(AfiSafi::new(Afi::Ip, Safi::SrTePolicy)),
+            "sr-policy-v6" => Some(AfiSafi::new(Afi::Ip6, Safi::SrTePolicy)),
             _ => None,
         }
     }

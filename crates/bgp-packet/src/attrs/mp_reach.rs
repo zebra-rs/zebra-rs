@@ -11,8 +11,8 @@ use bytes::BufMut;
 
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
-    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, Vpnv4Nexthop,
-    Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
+    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv6, Safi, SrPolicyNlri,
+    Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Rtcv6Reach, Vpnv4Reach, Vpnv6Reach};
@@ -75,6 +75,15 @@ pub enum MpReachAttr {
         nhop: IpAddr,
         updates: Vec<Labelv6Nlri>,
     },
+    /// BGP SR Policy (RFC 9830), SAFI 73. The outer AFI selects the
+    /// endpoint family (IPv4 vs IPv6); the candidate-path content rides
+    /// in the Tunnel Encapsulation attribute (Tunnel-Type 15), not here.
+    SrPolicy {
+        afi: Afi,
+        snpa: u8,
+        nhop: IpAddr,
+        updates: Vec<SrPolicyNlri>,
+    },
 }
 
 impl MpReachAttr {
@@ -130,6 +139,14 @@ impl MpReachAttr {
                 updates,
             } => {
                 labelv6_attr_emit(*snpa, nhop, updates, buf);
+            }
+            MpReachAttr::SrPolicy {
+                afi,
+                snpa,
+                nhop,
+                updates,
+            } => {
+                srpolicy_attr_emit(*afi, *snpa, nhop, updates, buf);
             }
             _ => {
                 //
@@ -499,6 +516,38 @@ impl MpReachAttr {
             let rtc_nlri = MpReachAttr::Rtcv6(nlri);
             return Ok((input, rtc_nlri));
         }
+        if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::SrTePolicy {
+            // RFC 9830 §2.1: the MP_REACH next-hop is a 4-octet IPv4 or
+            // 16-octet IPv6 address, independent of the SR Policy AFI.
+            // Accept the RFC 8950 32-octet (global || link-local) form
+            // too and surface the global half, mirroring the other SAFIs.
+            let (input, nhop): (&[u8], IpAddr) = match header.nhop_len {
+                4 => {
+                    let (input, addr) = be_u32(input)?;
+                    (input, IpAddr::V4(Ipv4Addr::from(addr)))
+                }
+                16 => {
+                    let (input, addr) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(addr)))
+                }
+                32 => {
+                    let (input, global) = be_u128(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(global)))
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (input, updates) =
+                many0_complete(|i| SrPolicyNlri::parse(i, add_path, header.afi)).parse(input)?;
+            let mp_nlri = MpReachAttr::SrPolicy {
+                afi: header.afi,
+                snpa,
+                nhop,
+                updates,
+            };
+            return Ok((input, mp_nlri));
+        }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
 }
@@ -617,6 +666,20 @@ impl fmt::Display for MpReachAttr {
             } => {
                 for update in updates.iter() {
                     writeln!(f, " {update} => {nhop}")?;
+                }
+            }
+            SrPolicy {
+                afi,
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for update in updates.iter() {
+                    writeln!(
+                        f,
+                        " {afi}/SR-Policy color={} endpoint={} disc={} => {nhop}",
+                        update.color, update.endpoint, update.distinguisher,
+                    )?;
                 }
             }
             _ => {
@@ -910,6 +973,63 @@ pub(crate) fn labelv6_attr_emit(
     value.put_u8(0);
     for nlri in updates {
         nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpReachAttr::SrPolicy { afi, snpa, nhop, updates }` as
+/// a complete `MP_REACH_NLRI` path attribute (header + value).
+///
+/// Wire format (RFC 4760 §3 + RFC 9830 §2.1):
+/// ```text
+///   AFI  (2 octets) = 1 (IPv4 endpoint) or 2 (IPv6 endpoint)
+///   SAFI (1 octet)  = 73 (SR Policy)
+///   Nexthop Length (1 octet) = 4 or 16
+///   Nexthop Address
+///   Reserved / SNPA (1 octet) = 0
+///   NLRIs (zero or more SrPolicyNlri encodings)
+/// ```
+///
+/// The next-hop family follows `nhop` (`IpAddr::V4` → 4 octets,
+/// `IpAddr::V6` → 16 octets) and is independent of the SR Policy AFI.
+pub(crate) fn srpolicy_attr_emit(
+    afi: Afi,
+    _snpa: u8,
+    nhop: &IpAddr,
+    updates: &[SrPolicyNlri],
+    buf: &mut BytesMut,
+) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(Safi::SrTePolicy));
+    match nhop {
+        IpAddr::V4(v4) => {
+            value.put_u8(4);
+            value.put(&v4.octets()[..]);
+        }
+        IpAddr::V6(v6) => {
+            value.put_u8(16);
+            value.put(&v6.octets()[..]);
+        }
+    }
+    value.put_u8(0); // SNPA
+    for r in updates {
+        r.nlri_emit(&mut value, false);
     }
 
     let len = value.len();
@@ -1233,6 +1353,75 @@ mod tests {
                 MpReachAttr::parse_nlri_opt(&value, None).is_err(),
                 "expected parse error for nhop_len={bad}",
             );
+        }
+    }
+
+    #[test]
+    fn srpolicy_ipv4_emit_round_trips_through_parser() {
+        let nhop = IpAddr::V4("192.0.2.1".parse().unwrap());
+        let updates = vec![
+            SrPolicyNlri {
+                id: 0,
+                distinguisher: 1,
+                color: 100,
+                endpoint: IpAddr::V4("10.0.0.9".parse().unwrap()),
+            },
+            SrPolicyNlri {
+                id: 0,
+                distinguisher: 2,
+                color: 100,
+                endpoint: IpAddr::V4("10.0.0.10".parse().unwrap()),
+            },
+        ];
+        let mut buf = BytesMut::new();
+        srpolicy_attr_emit(Afi::Ip, 0, &nhop, &updates, &mut buf);
+        // Strip flags(1) + type(1) + length(1) header.
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpReachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpReachAttr::SrPolicy {
+                afi,
+                nhop: parsed_nhop,
+                updates: parsed,
+                ..
+            } => {
+                assert_eq!(afi, Afi::Ip);
+                assert_eq!(parsed_nhop, nhop);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("expected SrPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srpolicy_ipv6_endpoint_with_v4_nexthop_round_trips() {
+        // SR Policy AFI (endpoint family) is independent of the
+        // next-hop family: IPv6 endpoints, IPv4 next-hop.
+        let nhop = IpAddr::V4("203.0.113.1".parse().unwrap());
+        let updates = vec![SrPolicyNlri {
+            id: 0,
+            distinguisher: 7,
+            color: 200,
+            endpoint: IpAddr::V6("2001:db8::9".parse().unwrap()),
+        }];
+        let mut buf = BytesMut::new();
+        srpolicy_attr_emit(Afi::Ip6, 0, &nhop, &updates, &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpReachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpReachAttr::SrPolicy {
+                afi,
+                nhop: parsed_nhop,
+                updates: parsed,
+                ..
+            } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert_eq!(parsed_nhop, nhop);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("expected SrPolicy, got {other:?}"),
         }
     }
 }

@@ -105,3 +105,6 @@ pub use flowspec_action::*;
 
 pub mod nlri_labeled_unicast;
 pub use nlri_labeled_unicast::*;
+
+pub mod nlri_srpolicy;
+pub use nlri_srpolicy::*;

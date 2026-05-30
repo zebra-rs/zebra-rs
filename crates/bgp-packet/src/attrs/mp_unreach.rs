@@ -7,7 +7,7 @@ use nom_derive::*;
 use crate::{
     Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv6Nlri, Labelv4Nlri, Labelv6Nlri,
     MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Rtcv4Unreach, Rtcv6, Rtcv6Unreach, Safi,
-    Vpnv4Nlri, Vpnv6Nlri, many0_complete,
+    SrPolicyNlri, Vpnv4Nlri, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, Vpnv4Unreach, Vpnv6Unreach};
@@ -54,6 +54,13 @@ pub enum MpUnreachAttr {
     /// IPv6 Labeled-Unicast withdrawals (RFC 3107 / RFC 8277), SAFI 4.
     Labelv6(Vec<Labelv6Nlri>),
     Labelv6Eor,
+    /// BGP SR Policy withdraws (RFC 9830), SAFI 73. The outer AFI is
+    /// preserved so the emitter can re-encode it; an empty `withdraws`
+    /// list represents end-of-RIB.
+    SrPolicy {
+        afi: Afi,
+        withdraws: Vec<SrPolicyNlri>,
+    },
 }
 
 impl MpUnreachAttr {
@@ -116,6 +123,9 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::Labelv6Eor => {
                 labelv6_unreach_attr_emit(&[], buf);
+            }
+            MpUnreachAttr::SrPolicy { afi, withdraws } => {
+                srpolicy_unreach_attr_emit(*afi, withdraws, buf);
             }
             _ => {
                 //
@@ -323,6 +333,41 @@ fn labelv6_unreach_attr_emit(withdraws: &[Labelv6Nlri], buf: &mut BytesMut) {
     buf.put(&value[..]);
 }
 
+/// Serialize an `MpUnreachAttr::SrPolicy { afi, withdraws }` (empty
+/// `withdraws` encodes an end-of-RIB marker) as a complete
+/// `MP_UNREACH_NLRI` path attribute.
+///
+/// Wire format (RFC 4760 §4 + RFC 9830 §2.1):
+/// ```text
+///   AFI  (2 octets) = 1 (IPv4 endpoint) or 2 (IPv6 endpoint)
+///   SAFI (1 octet)  = 73 (SR Policy)
+///   Withdrawn Routes (zero or more SrPolicyNlri encodings)
+/// ```
+fn srpolicy_unreach_attr_emit(afi: Afi, withdraws: &[SrPolicyNlri], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(Safi::SrTePolicy));
+    for r in withdraws {
+        r.nlri_emit(&mut value, false);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
 impl MpUnreachAttr {
     pub fn parse_nlri_opt(input: &[u8], opt: Option<ParseOption>) -> nom::IResult<&[u8], Self> {
         // AFI + SAFI = 3.
@@ -451,6 +496,26 @@ impl MpUnreachAttr {
             let (input, rtcv6) = many0_complete(|i| Rtcv6::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpUnreachAttr::Rtcv6(rtcv6);
             return Ok((input, mp_nlri));
+        }
+        if (header.afi == Afi::Ip || header.afi == Afi::Ip6) && header.safi == Safi::SrTePolicy {
+            if input.is_empty() {
+                return Ok((
+                    input,
+                    MpUnreachAttr::SrPolicy {
+                        afi: header.afi,
+                        withdraws: vec![],
+                    },
+                ));
+            }
+            let (input, withdraws) =
+                many0_complete(|i| SrPolicyNlri::parse(i, add_path, header.afi)).parse(input)?;
+            return Ok((
+                input,
+                MpUnreachAttr::SrPolicy {
+                    afi: header.afi,
+                    withdraws,
+                },
+            ));
         }
         Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf)))
     }
@@ -584,6 +649,19 @@ impl fmt::Display for MpUnreachAttr {
             }
             Labelv6Eor => {
                 writeln!(f, " EoR: {}/{}", Afi::Ip6, Safi::MplsLabel)
+            }
+            SrPolicy { afi, withdraws } => {
+                if withdraws.is_empty() {
+                    return writeln!(f, " EoR: {}/{}", afi, Safi::SrTePolicy);
+                }
+                for r in withdraws {
+                    writeln!(
+                        f,
+                        " {afi}/SR-Policy color={} endpoint={} disc={}",
+                        r.color, r.endpoint, r.distinguisher,
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -777,6 +855,56 @@ mod tests {
                 assert!(withdraws.is_empty());
             }
             other => panic!("expected Mup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srpolicy_unreach_emit_round_trips_through_parser() {
+        use std::net::IpAddr;
+        let withdraws = vec![
+            SrPolicyNlri {
+                id: 0,
+                distinguisher: 1,
+                color: 100,
+                endpoint: IpAddr::V4("10.0.0.9".parse().unwrap()),
+            },
+            SrPolicyNlri {
+                id: 0,
+                distinguisher: 2,
+                color: 100,
+                endpoint: IpAddr::V4("10.0.0.10".parse().unwrap()),
+            },
+        ];
+        let mut buf = BytesMut::new();
+        srpolicy_unreach_attr_emit(Afi::Ip, &withdraws, &mut buf);
+        // Strip header: flags(1) + type(1) + length(1).
+        let value = &buf[3..];
+        let (_rest, mp) =
+            MpUnreachAttr::parse_nlri_opt(value, None).expect("emitter must round-trip");
+        match mp {
+            MpUnreachAttr::SrPolicy {
+                afi,
+                withdraws: parsed,
+            } => {
+                assert_eq!(afi, Afi::Ip);
+                assert_eq!(parsed, withdraws);
+            }
+            other => panic!("expected SrPolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srpolicy_unreach_emit_eor_round_trips() {
+        let mut buf = BytesMut::new();
+        srpolicy_unreach_attr_emit(Afi::Ip6, &[], &mut buf);
+        let value = &buf[3..];
+        let (_rest, mp) = MpUnreachAttr::parse_nlri_opt(value, None).expect("EoR must round-trip");
+        match mp {
+            MpUnreachAttr::SrPolicy { afi, withdraws } => {
+                assert_eq!(afi, Afi::Ip6);
+                assert!(withdraws.is_empty());
+            }
+            other => panic!("expected SrPolicy, got {other:?}"),
         }
     }
 }

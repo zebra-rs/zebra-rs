@@ -78,6 +78,12 @@ module zebra-afi-safi {
           description
             "IPv6 Flow Specification (AFI 2, SAFI 133, RFC 8956).";
         }
+        enum sr-policy-v4 {
+          description "BGP SR Policy with IPv4 endpoint (AFI 1, SAFI 73).";
+        }
+        enum sr-policy-v6 {
+          description "BGP SR Policy with IPv6 endpoint (AFI 2, SAFI 73).";
+        }
       }
       description
         "Address family / sub-address family this list entry configures.";
