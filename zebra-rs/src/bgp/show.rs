@@ -115,6 +115,7 @@ fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
         (Afi::Ip6, Safi::MplsLabel) => bgp.local_rib().v6lu.0.len(),
         (Afi::Ip, Safi::MplsVpn) => bgp.local_rib().v4vpn.values().map(|t| t.0.len()).sum(),
         (Afi::L2vpn, Safi::Evpn) => bgp.local_rib().evpn.values().map(|t| t.cands.len()).sum(),
+        (Afi::LinkState, Safi::LinkState) => bgp.local_rib().bgp_ls.selected.len(),
         _ => 0,
     }
 }
@@ -2397,6 +2398,42 @@ fn show_bgp_sr_policy_v6(
     show_bgp_sr_policy(bgp, Afi::Ip6, json)
 }
 
+/// `show ip bgp link-state` — the BGP-LS Loc-RIB (RFC 9552, AFI 16388 /
+/// SAFI 71). One line per selected Node/Link/Prefix object with the
+/// advertising neighbor. BGP-LS is a single exact-match family (the v4/v6
+/// distinction is inside the NLRI), so there is no per-AFI split. The
+/// BTreeMap yields objects grouped by NLRI type then descriptors.
+fn show_bgp_link_state(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        // Rich JSON deferred (mirrors flowspec / sr-policy); rendered as the
+        // human view for now.
+        return Ok(String::from("[]"));
+    }
+
+    let mut buf = String::new();
+    writeln!(buf, "BGP Link-State (Loc-RIB):")?;
+
+    let table = &bgp.local_rib.bgp_ls;
+    if table.selected.is_empty() {
+        writeln!(buf, "  (no link-state objects)")?;
+        return Ok(buf);
+    }
+
+    for (nlri, rib) in table.selected.iter() {
+        let from = bgp
+            .peers
+            .get_by_idx(rib.ident)
+            .map(|p| p.address.to_string())
+            .unwrap_or_else(|| rib.router_id.to_string());
+        writeln!(buf, " {nlri}   from {from}")?;
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod flowspec_show_tests {
     use super::*;
@@ -2995,6 +3032,7 @@ impl Bgp {
         self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
         self.show_add("/show/ip/bgp/sr-policy", show_bgp_sr_policy_v4);
         self.show_add("/show/ip/bgp/sr-policy/ipv6", show_bgp_sr_policy_v6);
+        self.show_add("/show/ip/bgp/link-state", show_bgp_link_state);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
