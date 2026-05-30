@@ -10,9 +10,9 @@ use nom_derive::*;
 use bytes::BufMut;
 
 use crate::{
-    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, MupRoute, ParseBe,
-    ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri, Vpnv6Nexthop, Vpnv6Nlri,
-    many0_complete,
+    Afi, AttrFlags, AttrType, EvpnRoute, FlowspecNlri, Ipv4Nlri, Ipv6Nlri, Labelv4Nlri,
+    Labelv6Nlri, MupRoute, ParseBe, ParseNlri, ParseOption, Rtcv4, Safi, Vpnv4Nexthop, Vpnv4Nlri,
+    Vpnv6Nexthop, Vpnv6Nlri, many0_complete,
 };
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Vpnv4Reach, Vpnv6Reach};
@@ -60,6 +60,20 @@ pub enum MpReachAttr {
         afi: Afi,
         updates: Vec<FlowspecNlri>,
     },
+    /// IPv4 Labeled-Unicast (RFC 3107 / RFC 8277), AFI 1, SAFI 4.
+    Labelv4 {
+        snpa: u8,
+        nhop: IpAddr,
+        updates: Vec<Labelv4Nlri>,
+    },
+    /// IPv6 Labeled-Unicast (RFC 3107 / RFC 8277), AFI 2, SAFI 4. Also
+    /// carries 6PE (RFC 4798): an IPv4 `nhop` is emitted as an
+    /// IPv4-mapped IPv6 next-hop.
+    Labelv6 {
+        snpa: u8,
+        nhop: IpAddr,
+        updates: Vec<Labelv6Nlri>,
+    },
 }
 
 impl MpReachAttr {
@@ -98,6 +112,20 @@ impl MpReachAttr {
             }
             MpReachAttr::Flowspec { afi, updates } => {
                 flowspec_attr_emit(*afi, updates, buf);
+            }
+            MpReachAttr::Labelv4 {
+                snpa,
+                nhop,
+                updates,
+            } => {
+                labelv4_attr_emit(*snpa, nhop, updates, buf);
+            }
+            MpReachAttr::Labelv6 {
+                snpa,
+                nhop,
+                updates,
+            } => {
+                labelv6_attr_emit(*snpa, nhop, updates, buf);
             }
             _ => {
                 //
@@ -278,6 +306,63 @@ impl MpReachAttr {
             let (_, updates) =
                 many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
             let mp_nlri = MpReachAttr::Ipv6 {
+                snpa,
+                nhop,
+                updates,
+            };
+            return Ok((input, mp_nlri));
+        }
+        if header.afi == Afi::Ip && header.safi == Safi::MplsLabel {
+            // RFC 3107 / RFC 8277 IPv4 Labeled-Unicast. The next-hop is
+            // normally IPv4 (4 octets); RFC 8950 permits an IPv6
+            // next-hop (16, or 32 carrying global || link-local — we
+            // surface the global half).
+            let (input, nhop): (&[u8], IpAddr) = match header.nhop_len {
+                4 => {
+                    let (input, addr) = be_u32(input)?;
+                    (input, IpAddr::V4(Ipv4Addr::from(addr)))
+                }
+                16 => {
+                    let (input, addr) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(addr)))
+                }
+                32 => {
+                    let (input, global) = be_u128(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(global)))
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (_, updates) =
+                many0_complete(|i| Labelv4Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let mp_nlri = MpReachAttr::Labelv4 {
+                snpa,
+                nhop,
+                updates,
+            };
+            return Ok((input, mp_nlri));
+        }
+        if header.afi == Afi::Ip6 && header.safi == Safi::MplsLabel {
+            // RFC 3107 / RFC 8277 IPv6 Labeled-Unicast, including RFC
+            // 4798 6PE where the next-hop is an IPv4-mapped IPv6 address.
+            // 16 octets, or 32 carrying global || link-local.
+            let (input, nhop): (&[u8], IpAddr) = match header.nhop_len {
+                16 => {
+                    let (input, addr) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(addr)))
+                }
+                32 => {
+                    let (input, global) = be_u128(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (input, IpAddr::V6(Ipv6Addr::from(global)))
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let (input, snpa) = be_u8(input)?;
+            let (_, updates) =
+                many0_complete(|i| Labelv6Nlri::parse_nlri(i, add_path)).parse(input)?;
+            let mp_nlri = MpReachAttr::Labelv6 {
                 snpa,
                 nhop,
                 updates,
@@ -487,6 +572,24 @@ impl fmt::Display for MpReachAttr {
                     writeln!(f, " {afi}/flowspec {update}")?;
                 }
             }
+            Labelv4 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for update in updates.iter() {
+                    writeln!(f, " {update} => {nhop}")?;
+                }
+            }
+            Labelv6 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                for update in updates.iter() {
+                    writeln!(f, " {update} => {nhop}")?;
+                }
+            }
             _ => {
                 //
             }
@@ -679,6 +782,102 @@ pub(crate) fn flowspec_attr_emit(afi: Afi, updates: &[FlowspecNlri], buf: &mut B
     value.put_u8(u8::from(Safi::Flowspec));
     // Next-Hop Length = 0 (no next-hop), then the reserved/SNPA octet.
     value.put_u8(0);
+    value.put_u8(0);
+    for nlri in updates {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpReachAttr::Labelv4 { snpa, nhop, updates }` as a
+/// complete `MP_REACH_NLRI` path attribute (header + value).
+///
+/// Wire format (RFC 4760 §3 + RFC 3107 / RFC 8277):
+/// ```text
+///   AFI  (2 octets) = 1 (IPv4)
+///   SAFI (1 octet)  = 4 (MPLS Label)
+///   Nexthop Length (1 octet) = 4 (IPv4) or 16 (IPv6, RFC 8950)
+///   Nexthop Address
+///   Reserved / SNPA (1 octet) = 0
+///   NLRIs (one or more Labelv4Nlri encodings: label + prefix)
+/// ```
+pub(crate) fn labelv4_attr_emit(
+    _snpa: u8,
+    nhop: &IpAddr,
+    updates: &[Labelv4Nlri],
+    buf: &mut BytesMut,
+) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip));
+    value.put_u8(u8::from(Safi::MplsLabel));
+    match nhop {
+        IpAddr::V4(v4) => {
+            value.put_u8(4);
+            value.put(&v4.octets()[..]);
+        }
+        IpAddr::V6(v6) => {
+            value.put_u8(16);
+            value.put(&v6.octets()[..]);
+        }
+    }
+    // Reserved / SNPA byte, always zero per RFC 4760 §3.
+    value.put_u8(0);
+    for nlri in updates {
+        nlri.nlri_emit(&mut value);
+    }
+
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(&value[..]);
+}
+
+/// Serialize an `MpReachAttr::Labelv6 { snpa, nhop, updates }` as a
+/// complete `MP_REACH_NLRI` path attribute (header + value), AFI 2 /
+/// SAFI 4. Per RFC 4798 (6PE), an IPv4 `nhop` is emitted as its
+/// IPv4-mapped IPv6 form (`::ffff:a.b.c.d`), so the next-hop is always
+/// 16 octets on the wire.
+pub(crate) fn labelv6_attr_emit(
+    _snpa: u8,
+    nhop: &IpAddr,
+    updates: &[Labelv6Nlri],
+    buf: &mut BytesMut,
+) {
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(Afi::Ip6));
+    value.put_u8(u8::from(Safi::MplsLabel));
+    value.put_u8(16);
+    match nhop {
+        IpAddr::V6(v6) => value.put(&v6.octets()[..]),
+        IpAddr::V4(v4) => value.put(&v4.to_ipv6_mapped().octets()[..]),
+    }
+    // Reserved / SNPA byte, always zero per RFC 4760 §3.
     value.put_u8(0);
     for nlri in updates {
         nlri.nlri_emit(&mut value);

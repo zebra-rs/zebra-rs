@@ -99,3 +99,6 @@ pub use nlri_flowspec::*;
 
 pub mod flowspec_action;
 pub use flowspec_action::*;
+
+pub mod nlri_labeled_unicast;
+pub use nlri_labeled_unicast::*;
