@@ -2015,24 +2015,50 @@ impl Bgp {
     }
 
     fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let source = Self::redist_source(rtype);
         match batch {
             crate::rib::RouteBatch::V4(entries) => {
                 for e in entries {
                     let prefix = e.prefix;
                     let rib_metric = e.metric;
                     self.redist_v4.insert((rtype, prefix), e);
-                    // Lower into Loc-RIB. Per-AFI override metric beats
-                    // the RIB cost; no override → use RIB cost as MED.
-                    let metric = self
-                        .redist_metric_v4_override(rtype, prefix)
-                        .unwrap_or(rib_metric);
-                    self.route_redist_inject(rtype, prefix, metric);
+                    let Some(source) = source else { continue };
+                    // One RIB subscription (per AFI) can feed several
+                    // configured families: inject into each that has this
+                    // (afi-safi, source) redistribute row. Per-row metric
+                    // override beats the RIB cost; else RIB cost → MED.
+                    let uni = AfiSafi::new(Afi::Ip, Safi::Unicast);
+                    if self.redistribute.contains_key(&(uni, source)) {
+                        let metric = self
+                            .redist_metric_override(uni, source)
+                            .unwrap_or(rib_metric);
+                        self.route_redist_inject(rtype, prefix, metric);
+                    }
+                    let lu = AfiSafi::new(Afi::Ip, Safi::MplsLabel);
+                    if self.redistribute.contains_key(&(lu, source)) {
+                        let metric = self
+                            .redist_metric_override(lu, source)
+                            .unwrap_or(rib_metric);
+                        self.route_redist_inject_labelv4(rtype, prefix, metric);
+                    }
                 }
             }
             crate::rib::RouteBatch::V6(entries) => {
-                // v6 stays storage-only until LocalRib grows a v6 path.
                 for e in entries {
-                    self.redist_v6.insert((rtype, e.prefix), e);
+                    let prefix = e.prefix;
+                    let rib_metric = e.metric;
+                    self.redist_v6.insert((rtype, prefix), e);
+                    let Some(source) = source else { continue };
+                    // IPv6 labeled-unicast. (IPv6 *unicast* redistribute
+                    // delivery is still storage-only — a separate gap.)
+                    let lu = AfiSafi::new(Afi::Ip6, Safi::MplsLabel);
+                    if self.redistribute.contains_key(&(lu, source)) {
+                        let metric = self
+                            .redist_metric_override(lu, source)
+                            .unwrap_or(rib_metric);
+                        self.route_redist_inject_labelv6(rtype, prefix, metric);
+                    }
                 }
             }
         }
@@ -2042,41 +2068,48 @@ impl Bgp {
         match batch {
             crate::rib::RouteBatch::V4(entries) => {
                 for e in entries {
-                    self.redist_v4.remove(&(rtype, e.prefix));
-                    self.route_redist_withdraw(rtype, e.prefix);
+                    let prefix = e.prefix;
+                    self.redist_v4.remove(&(rtype, prefix));
+                    // Withdraw from both v4 targets unconditionally: the
+                    // config row may already be gone (this RouteDel can be
+                    // the RIB's response to a RedistDel), and a withdraw of
+                    // a prefix never injected is a harmless no-op + an
+                    // ignored peer withdraw. Mirrors the v4-unicast path.
+                    self.route_redist_withdraw(rtype, prefix);
+                    self.route_redist_withdraw_labelv4(rtype, prefix);
                 }
             }
             crate::rib::RouteBatch::V6(entries) => {
-                // v6 storage-only — see route_redist_add.
                 for e in entries {
-                    self.redist_v6.remove(&(rtype, e.prefix));
+                    let prefix = e.prefix;
+                    self.redist_v6.remove(&(rtype, prefix));
+                    self.route_redist_withdraw_labelv6(rtype, prefix);
                 }
             }
         }
     }
 
-    /// Pull the `metric` static override from any `Bgp.redistribute`
-    /// row matching `(rtype, ipv4-unicast)`. Iterates because the map
-    /// is keyed by full `AfiSafi`, and we only care about the IPv4
-    /// unicast row here. `None` means "no override, use RIB cost".
-    fn redist_metric_v4_override(
-        &self,
-        rtype: crate::rib::RibType,
-        _prefix: ipnet::Ipv4Net,
-    ) -> Option<u32> {
+    /// Map a RIB route type to the `BgpRedistSource` it redistributes as,
+    /// or `None` for RIB types BGP doesn't redistribute (e.g. Kernel,
+    /// Bgp itself).
+    fn redist_source(rtype: crate::rib::RibType) -> Option<crate::bgp::config::BgpRedistSource> {
         use crate::bgp::config::BgpRedistSource;
-        use bgp_packet::{Afi, Safi};
-        let source = match rtype {
-            crate::rib::RibType::Connected => BgpRedistSource::Connected,
-            crate::rib::RibType::Static => BgpRedistSource::Static,
-            crate::rib::RibType::Isis => BgpRedistSource::Isis,
-            crate::rib::RibType::Ospf => BgpRedistSource::Ospf,
-            _ => return None,
-        };
-        let afi_safi = bgp_packet::AfiSafi {
-            afi: Afi::Ip,
-            safi: Safi::Unicast,
-        };
+        match rtype {
+            crate::rib::RibType::Connected => Some(BgpRedistSource::Connected),
+            crate::rib::RibType::Static => Some(BgpRedistSource::Static),
+            crate::rib::RibType::Isis => Some(BgpRedistSource::Isis),
+            crate::rib::RibType::Ospf => Some(BgpRedistSource::Ospf),
+            _ => None,
+        }
+    }
+
+    /// The static `metric` override for an `(afi-safi, source)`
+    /// redistribute row, or `None` (use the RIB cost as MED).
+    fn redist_metric_override(
+        &self,
+        afi_safi: bgp_packet::AfiSafi,
+        source: crate::bgp::config::BgpRedistSource,
+    ) -> Option<u32> {
         self.redistribute
             .get(&(afi_safi, source))
             .and_then(|c| c.metric)

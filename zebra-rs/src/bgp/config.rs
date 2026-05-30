@@ -544,11 +544,13 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
 fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
-    let network = args.v4net()?;
-    // `network` carries an ipv4-prefix, so it applies to the IPv4
-    // unicast and IPv4 Labeled-Unicast (SAFI 4) families.
+    // The `network` key is a union of ipv4-prefix / ipv6-prefix; parse it
+    // as the address family the afi-safi selects. An ipv6-prefix under a
+    // v4 family (or vice versa) fails to parse and the command is
+    // rejected, which is the desired behavior.
     match (afi_safi.afi, afi_safi.safi) {
         (Afi::Ip, Safi::Unicast) => {
+            let network = args.v4net()?;
             if op.is_set() {
                 bgp.route_add(network);
             } else {
@@ -556,10 +558,19 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             }
         }
         (Afi::Ip, Safi::MplsLabel) => {
+            let network = args.v4net()?;
             if op.is_set() {
                 bgp.route_add_label_v4(network);
             } else {
                 bgp.route_del_label_v4(network);
+            }
+        }
+        (Afi::Ip6, Safi::MplsLabel) => {
+            let network = args.v6net()?;
+            if op.is_set() {
+                bgp.route_add_label_v6(network);
+            } else {
+                bgp.route_del_label_v6(network);
             }
         }
         _ => return None,
@@ -663,7 +674,10 @@ fn redist_afi_valid(afi_safi: &bgp_packet::AfiSafi) -> bool {
     use bgp_packet::{Afi, Safi};
     matches!(
         (afi_safi.afi, afi_safi.safi),
-        (Afi::Ip, Safi::Unicast) | (Afi::Ip6, Safi::Unicast)
+        (Afi::Ip, Safi::Unicast)
+            | (Afi::Ip6, Safi::Unicast)
+            | (Afi::Ip, Safi::MplsLabel)
+            | (Afi::Ip6, Safi::MplsLabel)
     )
 }
 
