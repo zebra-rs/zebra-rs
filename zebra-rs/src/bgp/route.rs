@@ -4030,20 +4030,23 @@ pub fn route_srpolicy_update(
     ident: usize,
     nlri: &SrPolicyNlri,
     attr: &BgpAttr,
+    nhop: IpAddr,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
     use super::sr_policy::{self, Usability};
 
-    // RFC 9830 §4.2 distribution rules: a malformed or non-usable update
-    // is not consumed locally (reflection is a later phase).
-    if sr_policy::usability(attr, bgp.router_id) != Usability::Usable {
+    // RFC 9830 §4.2.1: an update carrying neither NO_ADVERTISE nor an
+    // IPv4-address Route Target is malformed — drop it entirely.
+    let usability = sr_policy::usability(attr, bgp.router_id);
+    if usability == Usability::Malformed {
         return;
     }
 
-    let originator = {
+    // RFC 4456 loop prevention — drop a looped update before reflecting
+    // or consuming it.
+    {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-
         if let Some(ref aspath) = attr.aspath {
             for segment in &aspath.segs {
                 if segment.asn.contains(&peer.local_as) {
@@ -4061,9 +4064,22 @@ pub fn route_srpolicy_update(
         {
             return;
         }
+    }
 
-        // RFC 9256 §2.4 originator = <ASN, node-address>: the ORIGINATOR_ID
-        // when route-reflected, else the advertising peer's router-id.
+    // Route-reflector pass-through: a valid update (usable or not) is
+    // reflected to other SAFI-73 peers per RR rules (unless NO_ADVERTISE).
+    srpolicy_reflect(ident, nlri, attr, nhop, bgp, peers);
+
+    // Consume into the local headend DB only when usable here (RFC 9830
+    // §4.2.2: an RT must match our BGP Identifier).
+    if usability != Usability::Usable {
+        return;
+    }
+
+    // RFC 9256 §2.4 originator = <ASN, node-address>: the ORIGINATOR_ID
+    // when route-reflected, else the advertising peer's router-id.
+    let originator = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
         let node = attr
             .originator_id
             .as_ref()
@@ -4089,15 +4105,114 @@ pub fn route_srpolicy_update(
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
 }
 
-/// Withdraw one SR Policy NLRI from the headend database, re-run active
-/// candidate-path selection, and apply the dataplane delta.
-pub fn route_srpolicy_withdraw(ident: usize, nlri: &SrPolicyNlri, bgp: &mut BgpTop) {
+/// Withdraw one SR Policy NLRI from the headend database, reflect the
+/// withdrawal to other SAFI-73 peers, and apply the dataplane delta.
+pub fn route_srpolicy_withdraw(
+    ident: usize,
+    nlri: &SrPolicyNlri,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    srpolicy_reflect_withdraw(ident, nlri, peers);
     let delta =
         bgp.local_rib
             .sr_policy
             .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
     apply_srpolicy_fib(delta, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
+}
+
+/// Reflect a received SR Policy update to every other established
+/// SAFI-73 peer the RR rules permit (RFC 4456 / RFC 9830 §4). The
+/// received next-hop is preserved (an RR does not change it).
+fn srpolicy_reflect(
+    source_ident: usize,
+    nlri: &SrPolicyNlri,
+    attr: &BgpAttr,
+    nhop: IpAddr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let our_rid = *bgp.router_id;
+    let afi = nlri.afi();
+    let Some(src) = peers.get_by_idx(source_ident) else {
+        return;
+    };
+    let (source_ibgp, source_rid) = (src.is_ibgp(), src.remote_id);
+
+    let dests: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.ident != source_ident)
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
+        .map(|(addr, _)| *addr)
+        .collect();
+    for daddr in dests {
+        let Some(peer) = peers.get_mut(&daddr) else {
+            continue;
+        };
+        let Some(out_attr) = super::sr_policy::reflect_attr(
+            attr,
+            source_ibgp,
+            source_rid,
+            peer.is_ibgp(),
+            peer.is_reflector_client(),
+            our_rid,
+        ) else {
+            continue;
+        };
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.mp_update = Some(MpReachAttr::SrPolicy {
+            afi,
+            snpa: 0,
+            nhop,
+            updates: vec![nlri.clone()],
+        });
+        update.bgp_attr = Some(out_attr);
+        if let Some(bytes) = update.pop_srpolicy()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
+/// Reflect a received SR Policy withdrawal to the RR-eligible peers.
+fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &mut PeerMap) {
+    let afi = nlri.afi();
+    let Some(src) = peers.get_by_idx(source_ident) else {
+        return;
+    };
+    let source_ibgp = src.is_ibgp();
+    let dests: Vec<IpAddr> = peers
+        .iter()
+        .filter(|(_, p)| p.ident != source_ident)
+        .filter(|(_, p)| p.state.is_established())
+        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
+        .map(|(addr, _)| *addr)
+        .collect();
+    for daddr in dests {
+        let Some(peer) = peers.get_mut(&daddr) else {
+            continue;
+        };
+        if !super::sr_policy::reflect_withdraw_to(
+            source_ibgp,
+            peer.is_ibgp(),
+            peer.is_reflector_client(),
+        ) {
+            continue;
+        }
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.mp_withdraw = Some(MpUnreachAttr::SrPolicy {
+            afi,
+            withdraws: vec![nlri.clone()],
+        });
+        if let Some(bytes) = update.pop_srpolicy_withdraw()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
 }
 
 /// Realize an SR Policy active-path change in the dataplane: remove the
@@ -4673,12 +4788,12 @@ pub fn route_from_peer(
                     route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
                 }
             }
-            MpReachAttr::SrPolicy { updates, .. } => {
+            MpReachAttr::SrPolicy { nhop, updates, .. } => {
                 // SAFI 73: candidate-path content rides in the Tunnel
                 // Encapsulation attribute; the NLRI endpoint carries the
                 // AFI, so v4/v6 share one path.
                 for nlri in updates.iter() {
-                    route_srpolicy_update(peer_id, nlri, bgp_attr, bgp, peers);
+                    route_srpolicy_update(peer_id, nlri, bgp_attr, nhop, bgp, peers);
                 }
             }
             MpReachAttr::Labelv4 {
@@ -4790,7 +4905,7 @@ pub fn route_from_peer(
             }
             MpUnreachAttr::SrPolicy { withdraws, .. } => {
                 for nlri in withdraws.iter() {
-                    route_srpolicy_withdraw(peer_id, nlri, bgp);
+                    route_srpolicy_withdraw(peer_id, nlri, bgp, peers);
                 }
                 // An empty `withdraws` is End-of-RIB; nothing to flush.
             }
