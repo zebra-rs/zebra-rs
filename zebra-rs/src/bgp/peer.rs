@@ -214,6 +214,11 @@ pub struct PeerConfig {
     // bounce when the peer doesn't support RFC 2918, at the cost of
     // keeping received UPDATEs in memory.
     pub soft_reconfig_in: bool,
+    /// Per-neighbor BGP Flow Specification validation toggle (RFC 9117).
+    /// `true` (default) validates received flow specs against the
+    /// unicast RIB before re-advertising them; `false` accepts every
+    /// flow spec from this neighbor as feasible (trusted controller).
+    pub flowspec_validation: bool,
     pub timer: timer::Config,
     pub sub: BTreeMap<AfiSafi, PeerSubConfig>,
     /// Reference to a `neighbor-group` (zebra-bgp-neighbor-group.yang)
@@ -245,6 +250,7 @@ impl Default for PeerConfig {
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
             soft_reconfig_in: Default::default(),
+            flowspec_validation: true,
             timer: Default::default(),
             sub: Default::default(),
             neighbor_group: None,

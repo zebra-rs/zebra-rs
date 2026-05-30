@@ -436,6 +436,20 @@ fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `set router bgp neighbor X flowspec validation true|false` — per
+/// RFC 9117, toggle whether flow specs received from this neighbor are
+/// validated against the unicast RIB before re-advertising. Defaults to
+/// enabled; `delete` (or no config) restores the default.
+fn config_flowspec_validation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let flag = args.boolean()?;
+
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    peer.config.flowspec_validation = if op.is_set() { flag } else { true };
+    Some(())
+}
+
 /// `set router bgp neighbor X bfd enable true|false` — flips the
 /// BFD attachment for this neighbor. Stores the bit on
 /// `peer.config.bfd.enable` and wires the same flip into a
@@ -1822,6 +1836,9 @@ impl Bgp {
         // Stored-mode soft-in: retain pre-policy Adj-RIB-In so `clear soft in`
         // can replay locally without sending a Route Refresh.
         self.callback_peer("/soft-reconfiguration/inbound", config_soft_reconfig_in);
+
+        // Per-neighbor Flowspec validation toggle (zebra-bgp-flowspec.yang).
+        self.callback_peer("/flowspec/validation", config_flowspec_validation);
     }
 }
 
