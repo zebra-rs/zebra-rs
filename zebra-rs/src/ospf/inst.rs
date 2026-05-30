@@ -7635,6 +7635,210 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
     (graph, source_node)
 }
 
+/// OSPFv3 analog of `flex_algo_participants`: the set of routers that
+/// advertise participation in `algo` via the SR-Algorithm TLV in their
+/// E-Router-LSA (the per-router SR-info LSA at `SR_INFO_LSID`).
+fn flex_algo_participants_v3(area: &OspfArea<Ospfv3>, algo: u8) -> BTreeSet<Ipv4Addr> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
+
+    let mut set = BTreeSet::new();
+    for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        let participates = body.tlvs.iter().any(|tlv| {
+            matches!(tlv, Ospfv3ExtTlv::SrAlgorithm(a) if a.algos.contains(&Algo::FlexAlgo(algo)))
+        });
+        if participates {
+            set.insert(lsa.data.h.advertising_router);
+        }
+    }
+    set
+}
+
+/// OSPFv3 analog of `flex_algo_link_affinity`: per-link affinity
+/// (Extended Admin Group) advertised in this area's E-Router-LSA
+/// Router-Link TLVs via the flex-algo ASLA sub-TLV, keyed by
+/// `(adv_router, interface_id)` so a standard Router-LSA link can be
+/// joined to its affinity during graph build.
+///
+/// Unlike v2 (where the affinity rides a separate Extended-Link Opaque
+/// LSA keyed by link_id/link_data), OSPFv3 carries the ASLA on the
+/// E-Router-LSA Router-Link TLV, whose `interface_id` matches the
+/// owning router's standard Router-LSA link `interface_id`.
+fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32), ExtAdminGroup> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv};
+
+    let mut map = BTreeMap::new();
+    for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        let adv_router = lsa.data.h.advertising_router;
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
+                continue;
+            };
+            for sub in &rl.subs {
+                if let Ospfv3SubTlv::Asla(asla) = sub
+                    && asla.is_flex_algo()
+                    && let Some(group) = asla.ext_admin_group()
+                {
+                    map.insert((adv_router, rl.link.interface_id), group.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Build the per-algo OSPFv3 SPF graph for `area_id`. Mirrors
+/// `graph_v3` but (a) includes only routers participating in `algo`
+/// (plus self), and (b) admits each Router-LSA link only if it passes
+/// the FAD constraints in `entry` (RFC 9350 §7), the link's affinity
+/// coming from the E-Router-LSA ASLA join table. Same deferrals as the
+/// v2 `graph_flex_algo` (local FAD config, IGP metric, no SRLG/TI-LFA).
+fn graph_v3_flex_algo(
+    top: &mut Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    algo: u8,
+    entry: &crate::flex_algo::FlexAlgoEntry,
+) -> (spf::Graph, Option<usize>) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{
+        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody, Ospfv3RouterLinkType,
+    };
+
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return (graph, source_node);
+    };
+
+    let participants = flex_algo_participants_v3(area, algo);
+    let link_affinity = flex_algo_link_affinity_v3(area);
+
+    // Router-LSAs of participating routers (self always kept — it is
+    // the SPF source).
+    let mut router_lsas = Vec::new();
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if !lsa.originated && !participants.contains(&adv_router) {
+            continue;
+        }
+        router_lsas.push((adv_router, lsa.originated, lsa.data.clone()));
+    }
+
+    let mut router_lsa_by_id: HashMap<Ipv4Addr, &ospf_packet::Ospfv3RouterLsa> = HashMap::new();
+    for (adv_router, _, lsa_data) in &router_lsas {
+        if let Ospfv3LsBody::Router(ref router_body) = lsa_data.body {
+            router_lsa_by_id.insert(*adv_router, router_body);
+        }
+    }
+
+    let mut network_lsas: HashMap<(u32, Ipv4Addr), Vec<Ipv4Addr>> = HashMap::new();
+    for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_NETWORK_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if let Ospfv3LsBody::Network(ref net_body) = lsa.data.body {
+            network_lsas.insert((ls_id, adv_router), net_body.attached_routers.clone());
+        }
+    }
+
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = top.lsp_map.get(*adv_router);
+        if *originated {
+            source_node = Some(node_id);
+        }
+        let mut vertex = spf::Vertex {
+            id: node_id,
+            name: adv_router.to_string(),
+            sys_id: adv_router.to_string(),
+            ..Default::default()
+        };
+
+        if let Ospfv3LsBody::Router(ref router_body) = lsa_data.body {
+            for link in &router_body.links {
+                // FAD admissibility for the owning router's link. A
+                // link with no advertised ASLA resolves to `None` =
+                // empty bitmap (rejected by include-any, passed by
+                // exclude-only), per RFC 9350 §7.
+                let affinity = link_affinity.get(&(*adv_router, link.interface_id));
+                if !crate::flex_algo::link_passes_fad(affinity, entry, &top.affinity_map) {
+                    continue;
+                }
+                match link.link_type {
+                    Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
+                        if !participants.contains(&link.neighbor_router_id) {
+                            continue;
+                        }
+                        let Some(peer_lsa) = router_lsa_by_id.get(&link.neighbor_router_id) else {
+                            continue;
+                        };
+                        let has_backlink = peer_lsa.links.iter().any(|l| {
+                            matches!(
+                                l.link_type,
+                                Ospfv3RouterLinkType::PointToPoint
+                                    | Ospfv3RouterLinkType::VirtualLink
+                            ) && l.neighbor_router_id == *adv_router
+                        });
+                        if !has_backlink {
+                            continue;
+                        }
+                        let to_id = top.lsp_map.get(link.neighbor_router_id);
+                        vertex.olinks.push(spf::Link {
+                            from: node_id,
+                            to: to_id,
+                            cost: link.metric as u32,
+                            link_id: 0,
+                        });
+                    }
+                    Ospfv3RouterLinkType::Transit => {
+                        let net_key = (link.neighbor_interface_id, link.neighbor_router_id);
+                        let Some(attached) = network_lsas.get(&net_key) else {
+                            continue;
+                        };
+                        if !attached.iter().any(|r| r == adv_router) {
+                            continue;
+                        }
+                        for peer in attached {
+                            if peer == adv_router {
+                                continue;
+                            }
+                            if !participants.contains(peer) {
+                                continue;
+                            }
+                            let to_id = top.lsp_map.get(*peer);
+                            vertex.olinks.push(spf::Link {
+                                from: node_id,
+                                to: to_id,
+                                cost: link.metric as u32,
+                                link_id: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        graph.insert(node_id, vertex);
+    }
+
+    (graph, source_node)
+}
+
 /// Reconstruct an `Ipv6Net` from the v3 wire-format prefix bytes.
 /// RFC 5340 §A.4.10 packs the address into `ceil(prefix_length / 8)`
 /// octets at the front, padded out to a 32-bit boundary by the
@@ -7659,12 +7863,34 @@ fn ospfv3_prefix_to_ipv6net(prefix_length: u8, address_prefix: &[u8]) -> Option<
 /// originated yet — nothing to compute.
 fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfInput> {
     let (graph, source_node) = graph_v3(top, area_id);
-    source_node.map(|source| SpfInput {
+    let source = source_node?;
+
+    // Snapshot the configured algos so the per-algo graph build can
+    // take `&mut top` without holding a borrow on `top.flex_algo`
+    // (mirrors v2's `build_spf_input`).
+    let algos: Vec<(u8, crate::flex_algo::FlexAlgoEntry)> = top
+        .flex_algo
+        .config
+        .iter()
+        .map(|(algo, entry)| (*algo, entry.clone()))
+        .collect();
+    let flex_algos = algos
+        .iter()
+        .map(|(algo, entry)| {
+            let (graph, source) = graph_v3_flex_algo(top, area_id, *algo, entry);
+            FlexAlgoSpfInput {
+                algo: *algo,
+                graph,
+                source,
+            }
+        })
+        .collect();
+
+    Some(SpfInput {
         area_id,
         graph,
         source,
-        // OSPFv3 flex-algo is a later phase; no per-algo graphs yet.
-        flex_algos: Vec::new(),
+        flex_algos,
     })
 }
 
@@ -7680,7 +7906,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
         spf_result,
         duration,
         last,
-        flex_algos: _,
+        flex_algos,
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
@@ -7689,6 +7915,13 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
 
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
+
+    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`. Per-algo v6
+    // RIB + Prefix-SID ILM install are the next v3 slices.
+    top.spf_flex_algo = flex_algos
+        .into_iter()
+        .map(|o| (o.algo, o.spf_result))
+        .collect();
 }
 
 /// Build a `PrefixMap<Ipv6Net, SpfRouteV3>` from the area's
