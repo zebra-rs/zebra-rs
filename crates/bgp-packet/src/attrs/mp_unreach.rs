@@ -344,6 +344,9 @@ impl fmt::Display for MpUnreachAttr {
                         EvpnRoute::Multicast(v) => {
                             writeln!(f, " [{}]{}", v.rd, v.addr)?;
                         }
+                        EvpnRoute::Prefix(v) => {
+                            writeln!(f, " [{}]{}", v.rd, v.prefix)?;
+                        }
                     }
                 }
                 Ok(())

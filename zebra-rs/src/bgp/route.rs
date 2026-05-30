@@ -1849,6 +1849,25 @@ pub fn route_update_evpn(
             ether_tag: *eth_tag,
             addr: *orig,
         }),
+        EvpnPrefix::IpPrefix { eth_tag, prefix } => {
+            // Type-5: the MPLS service label rides on the BgpRib; the
+            // gateway IP defaults to the prefix family's unspecified
+            // address (interface-less model — forwarding recurses on the
+            // BGP next-hop).
+            let gw = match prefix.addr() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            };
+            EvpnRoute::Prefix(EvpnIpPrefix {
+                id,
+                rd: *rd,
+                esi: rib.esi.unwrap_or([0; 10]),
+                ether_tag: *eth_tag,
+                prefix: *prefix,
+                gw,
+                label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
+            })
+        }
     };
 
     let mut attrs = (*rib.attr).clone();
@@ -1956,6 +1975,25 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
             ether_tag: *eth_tag,
             addr: *orig,
         }),
+        EvpnPrefix::IpPrefix { eth_tag, prefix } => {
+            // Withdraw-side reconstruction: no inbound attr, so the label
+            // is 0 (a Type-5 withdrawal is matched on the NLRI key, not
+            // the label) and the gateway defaults to the family's
+            // unspecified address.
+            let gw = match prefix.addr() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            };
+            EvpnRoute::Prefix(EvpnIpPrefix {
+                id,
+                rd: *rd,
+                esi: [0; 10],
+                ether_tag: *eth_tag,
+                prefix: *prefix,
+                gw,
+                label: 0,
+            })
+        }
     }
 }
 
@@ -2803,15 +2841,15 @@ fn extract_vni_from_attr(attr: &BgpAttr) -> Option<u32> {
 }
 
 /// Map a parsed `EvpnRoute` to the policy-side `EvpnRouteType`
-/// discriminator. Only Type-2 (MAC-IP) and Type-3 (Inclusive
-/// Multicast) parse into `EvpnRoute` today; Type-1/4/5 NLRIs are
-/// either dropped at parse or never reach this evaluator, so they
-/// are not represented here.
+/// discriminator. Type-2 (MAC-IP), Type-3 (Inclusive Multicast) and
+/// Type-5 (IP Prefix) parse into `EvpnRoute`; Type-1/4 NLRIs are
+/// dropped at parse, so they are not represented here.
 fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
     use crate::policy::EvpnRouteType;
     match route {
         EvpnRoute::Mac(_) => EvpnRouteType::MacIp,
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
+        EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
     }
 }
 
@@ -2825,6 +2863,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
     match route {
         EvpnRoute::Mac(m) => (m.vni != 0).then_some(m.vni),
         EvpnRoute::Multicast(_) => extract_vni_from_attr(attr),
+        // Type-5 (IP Prefix) is an L3VPN-style route: forwarding rides
+        // the per-route MPLS label / SRv6 SID, not a bridge VNI. No VNI.
+        EvpnRoute::Prefix(_) => None,
     }
 }
 
@@ -2948,6 +2989,10 @@ fn route_evpn_export_selected(
                     );
                 }
             }
+            EvpnPrefix::IpPrefix { .. } => {
+                // Type-5 withdrawal drives a VRF route un-import, not an
+                // FDB/MDB delete. Wired in a later phase.
+            }
         }
         return;
     }
@@ -3008,6 +3053,12 @@ fn route_evpn_export_selected(
                 );
             }
         }
+        EvpnPrefix::IpPrefix { .. } => {
+            // Type-5 (IP Prefix) drives a VRF route import, not an FDB/MDB
+            // install. The import + dataplane path is wired in a later
+            // phase; until then a received Type-5 best-path is held in the
+            // Loc-RIB without a dataplane action.
+        }
     }
 }
 
@@ -3033,6 +3084,7 @@ pub fn route_evpn_update(
     let id = match route {
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
+        EvpnRoute::Prefix(p) => p.id,
     };
 
     // Loop detection mirrors route_ipv4_update — drop the route silently
@@ -3119,6 +3171,7 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     let id = match route {
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
+        EvpnRoute::Prefix(p) => p.id,
     };
 
     {
@@ -3622,6 +3675,21 @@ fn build_evpn_route(
                 rd: *rd,
                 ether_tag: *eth_tag,
                 addr: *orig,
+            }))
+        }
+        EvpnPrefix::IpPrefix { eth_tag, prefix } => {
+            let gw = match prefix.addr() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            };
+            Some(EvpnRoute::Prefix(EvpnIpPrefix {
+                id: rib.remote_id,
+                rd: *rd,
+                esi: rib.esi.unwrap_or([0; 10]),
+                ether_tag: *eth_tag,
+                prefix: *prefix,
+                gw,
+                label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             }))
         }
     }
