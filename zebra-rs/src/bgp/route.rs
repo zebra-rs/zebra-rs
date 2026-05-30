@@ -246,15 +246,22 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport));
     match entry {
         Some(mut rib_entry) => {
-            // Colour-aware Flex-Algo label push — plain-path only; a
-            // VPN tunnel entry already carries its full label stack.
+            // Colour-aware steering — plain-path only; a VPN tunnel
+            // entry already carries its full label stack. An SR Policy
+            // match (RFC 9256 §8) takes precedence over a Flex-Algo
+            // binding; Flex-Algo is the fallback.
             if let Some(best) = best
                 && !is_vpn_fib_winner(best, transport)
                 && let Some(BgpNexthop::Ipv4(nh)) = best.attr.nexthop.as_ref()
-                && let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh)
                 && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
             {
-                uni.mpls.push(rib::Label::Explicit(label));
+                if let Some(stack) = sr_policy_steer_mpls(bgp, &best.attr, IpAddr::V4(*nh)) {
+                    for label in stack {
+                        uni.mpls.push(rib::Label::Explicit(label));
+                    }
+                } else if let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh) {
+                    uni.mpls.push(rib::Label::Explicit(label));
+                }
             }
             let _ = bgp.rib_client.send(rib::Message::Ipv4Add {
                 prefix,
@@ -529,6 +536,25 @@ pub(super) fn fib_install_labelv6(
 /// shadow, return the first hit's outer label.
 fn resolve_flex_algo_label(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: Ipv4Addr) -> Option<u32> {
     resolve_flex_algo_label_inner(bgp.color_policy?, bgp.flex_algo_routes?, attr, nh)
+}
+
+/// SR Policy automated steering (RFC 9256 §8) for a plain IPv4 unicast
+/// service route: if one of the route's Color extended communities maps
+/// to an active SR-MPLS policy for `<color, next-hop>` (honouring the
+/// CO-bit endpoint fallback), return that policy's SID list to impose on
+/// the packet. Colors are tried in attribute order; the first SR Policy
+/// match wins and takes precedence over any Flex-Algo binding.
+fn sr_policy_steer_mpls(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: IpAddr) -> Option<Vec<u32>> {
+    for color in attr.colors() {
+        if let Some(stack) = bgp
+            .local_rib
+            .sr_policy
+            .steer_mpls(color.color, nh, color.co_bits())
+        {
+            return Some(stack);
+        }
+    }
+    None
 }
 
 /// Pure-function inner for `resolve_flex_algo_label` — testable
