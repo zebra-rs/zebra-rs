@@ -83,6 +83,8 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::Ip6, Safi::MplsLabel) => "IPv6 Labeled Unicast",
         (Afi::Ip6, Safi::MplsVpn) => "VPNv6 Unicast",
         (Afi::L2vpn, Safi::Evpn) => "L2VPN EVPN",
+        (Afi::Ip, Safi::Flowspec) => "IPv4 Flowspec",
+        (Afi::Ip6, Safi::Flowspec) => "IPv6 Flowspec",
         _ => "Unknown AFI/SAFI",
     }
 }
