@@ -431,6 +431,9 @@ impl fmt::Display for MpReachAttr {
                         EvpnRoute::Multicast(v) => {
                             writeln!(f, " [{}] {}:{}", v.rd, v.ether_tag, v.addr)?;
                         }
+                        EvpnRoute::Prefix(v) => {
+                            writeln!(f, " [{}] {} label:{}", v.rd, v.prefix, v.label)?;
+                        }
                     }
                 }
             }
