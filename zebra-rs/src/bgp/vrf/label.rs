@@ -110,6 +110,37 @@ impl VrfLabelAllocator {
             self.free.insert(label);
         }
     }
+
+    /// Reclaim and return every fully-unused block (one whose carved
+    /// labels are all freed), so BGP can return them to the RIB label
+    /// manager when its VRF count shrinks. Always keeps at least one
+    /// block so the allocator stays usable without an immediate
+    /// re-request. Returned `(start, end)` pairs are half-open.
+    pub fn reclaim_free_blocks(&mut self) -> Vec<(u32, u32)> {
+        let mut reclaimed = Vec::new();
+        let mut i = 0;
+        while i < self.blocks.len() {
+            // Keep at least one block — don't churn down to empty.
+            if self.blocks.len() <= 1 {
+                break;
+            }
+            let (start, next, end) = {
+                let b = &self.blocks[i];
+                (b.start, b.next, b.end)
+            };
+            // Fully unused iff every carved label is freed (an
+            // untouched block has an empty carved range → true).
+            if (start..next).all(|l| self.free.contains(&l)) {
+                self.blocks.remove(i);
+                // The released labels are no longer ours.
+                self.free.retain(|&l| !(start..end).contains(&l));
+                reclaimed.push((start, end));
+            } else {
+                i += 1;
+            }
+        }
+        reclaimed
+    }
 }
 
 impl Default for VrfLabelAllocator {
@@ -213,5 +244,31 @@ mod tests {
         a.free(501);
         assert_eq!(a.alloc(), Some(100));
         assert_eq!(a.alloc(), Some(501));
+    }
+
+    #[test]
+    fn reclaim_returns_fully_free_extra_blocks() {
+        let mut a = VrfLabelAllocator::bounded(100, 102); // [100, 102)
+        a.extend(500, 502); // [500, 502)
+        let l0 = a.alloc().unwrap(); // 100 (block 0)
+        let _l1 = a.alloc().unwrap(); // 101 (block 0 now spent, in use)
+        let l2 = a.alloc().unwrap(); // 500 (block 1)
+
+        // Both blocks have in-use labels → nothing to reclaim.
+        assert!(a.reclaim_free_blocks().is_empty());
+
+        // Free block 1's only carved label → block 1 is fully free and
+        // gets reclaimed (block 0 still in use, kept).
+        a.free(l2);
+        assert_eq!(a.reclaim_free_blocks(), vec![(500, 502)]);
+        // The released labels are no longer allocatable.
+        assert_eq!(a.alloc(), None);
+
+        // Freeing block 0's labels leaves it fully free, but it's the
+        // only block left → kept (no churn), and its labels stay reusable.
+        a.free(l0);
+        a.free(101);
+        assert!(a.reclaim_free_blocks().is_empty());
+        assert_eq!(a.alloc(), Some(100));
     }
 }
