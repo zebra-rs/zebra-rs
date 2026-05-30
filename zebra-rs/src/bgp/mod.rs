@@ -37,6 +37,8 @@ pub use route::*;
 
 pub mod nht;
 
+pub mod flowspec;
+
 pub mod adj_rib;
 pub use adj_rib::*;
 

@@ -2233,12 +2233,18 @@ fn show_bgp_flowspec(
         for (nlri, ribs) in table.0.iter() {
             for rib in ribs.iter() {
                 any = true;
-                writeln!(buf, " * match:  {nlri}")?;
+                // RFC 9117 validity, computed live against the current
+                // unicast Loc-RIB (Phase 2 neither stores nor gates on
+                // it yet). `*` marks a valid flow spec.
+                let validation = super::flowspec::flowspec_validate(bgp, nlri, rib);
+                let mark = if validation.is_valid() { "*" } else { " " };
+                writeln!(buf, " {mark} match:  {nlri}")?;
                 writeln!(
                     buf,
-                    "   action: {}   from {}",
+                    "   action: {}   from {}   [{}]",
                     show_flowspec_actions(&rib.attr),
-                    addr
+                    addr,
+                    validation
                 )?;
             }
         }
