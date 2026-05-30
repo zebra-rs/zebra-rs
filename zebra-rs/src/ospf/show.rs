@@ -1404,6 +1404,39 @@ fn show_router_info_detail(
                 };
                 writeln!(out, "    SID Label = {}", sid_val)?;
             }
+            RouterInfoTlv::Fad(fad) => {
+                writeln!(out, "  Flexible Algorithm Definition TLV:")?;
+                writeln!(out, "    Flex-Algorithm = {}", fad.flex_algorithm)?;
+                let metric = match fad.metric_type {
+                    0 => "IGP",
+                    1 => "Min Unidirectional Link Delay",
+                    2 => "TE Default",
+                    _ => "Unknown",
+                };
+                writeln!(out, "    Metric-Type = {} ({})", fad.metric_type, metric)?;
+                writeln!(out, "    Calc-Type = {}", fad.calc_type)?;
+                writeln!(out, "    Priority = {}", fad.priority)?;
+                for sub in &fad.subs {
+                    match sub {
+                        OspfFadSubTlv::ExcludeAg(g) => {
+                            writeln!(out, "    Exclude Admin Group = {:08x?}", g.words)?;
+                        }
+                        OspfFadSubTlv::IncludeAnyAg(g) => {
+                            writeln!(out, "    Include-Any Admin Group = {:08x?}", g.words)?;
+                        }
+                        OspfFadSubTlv::IncludeAllAg(g) => {
+                            writeln!(out, "    Include-All Admin Group = {:08x?}", g.words)?;
+                        }
+                        OspfFadSubTlv::Flags(fl) => {
+                            writeln!(out, "    Flags: M-flag = {}", fl.m_flag)?;
+                        }
+                        OspfFadSubTlv::ExcludeSrlg(s) => {
+                            writeln!(out, "    Exclude SRLG = {:?}", s.srlgs)?;
+                        }
+                        OspfFadSubTlv::Unknown(_) => {}
+                    }
+                }
+            }
             RouterInfoTlv::Unknown(_) => {}
         }
     }
