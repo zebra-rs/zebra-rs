@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::{BufMut, BytesMut};
 use ipnet::Ipv4Net;
@@ -105,12 +105,36 @@ impl fmt::Display for Vpnv4Nlri {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Vpnv4Nexthop {
     pub rd: RouteDistinguisher,
-    pub nhop: Ipv4Addr,
+    /// VPNv4 next-hop address. Normally IPv4 (RFC 4364), but RFC 8950 /
+    /// RFC 9252 allow a VPN-IPv4 NLRI to be advertised with an IPv6
+    /// next-hop (e.g. L3VPN over an SRv6 underlay), so this holds either.
+    pub nhop: IpAddr,
 }
 
 impl fmt::Display for Vpnv4Nexthop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}]:{}", self.rd, self.nhop)
+    }
+}
+
+/// Emit a VPNv4 MP_REACH next-hop field: the 1-octet length, the
+/// 8-octet (always-zero) RD, then the next-hop address. RFC 4364 uses
+/// an IPv4 next-hop (length 12); RFC 8950 / RFC 9252 allow an IPv6
+/// next-hop (length 24) when a VPN-IPv4 NLRI rides, e.g., an SRv6
+/// underlay.
+fn emit_vpnv4_nexthop(buf: &mut BytesMut, nhop: &IpAddr) {
+    let rd = [0u8; 8];
+    match nhop {
+        IpAddr::V4(a) => {
+            buf.put_u8(12); // RD(8) + IPv4(4)
+            buf.put(&rd[..]);
+            buf.put(&a.octets()[..]);
+        }
+        IpAddr::V6(a) => {
+            buf.put_u8(24); // RD(8) + IPv6(16)
+            buf.put(&rd[..]);
+            buf.put(&a.octets()[..]);
+        }
     }
 }
 
@@ -139,12 +163,9 @@ impl AttrEmitter for Vpnv4Reach {
         buf.put_u16(u16::from(Afi::Ip));
         buf.put_u8(u8::from(Safi::MplsVpn));
         // Nexthop
-        buf.put_u8(12); // Nexthop length.  RD(8)+IPv4 Nexthop(4);
-        // Nexthop RD.
-        let rd = [0u8; 8];
-        buf.put(&rd[..]);
-        // Nexthop.
-        buf.put(&self.nhop.nhop.octets()[..]);
+        // Nexthop: length + zero RD + address. Adapts to v4 (len 12)
+        // or v6 (len 24, RFC 8950 / RFC 9252).
+        emit_vpnv4_nexthop(buf, &self.nhop.nhop);
         // SNPA
         buf.put_u8(0);
         // Prefix.
@@ -205,12 +226,9 @@ impl Vpnv4Reach {
         buf.put_u16(u16::from(Afi::Ip));
         buf.put_u8(u8::from(Safi::MplsVpn));
         // Nexthop
-        buf.put_u8(12); // Nexthop length.  RD(8)+IPv4 Nexthop(4);
-        // Nexthop RD.
-        let rd = [0u8; 8];
-        buf.put(&rd[..]);
-        // Nexthop.
-        buf.put(&self.nhop.nhop.octets()[..]);
+        // Nexthop: length + zero RD + address. Adapts to v4 (len 12)
+        // or v6 (len 24, RFC 8950 / RFC 9252).
+        emit_vpnv4_nexthop(buf, &self.nhop.nhop);
         // SNPA
         buf.put_u8(0);
 
@@ -325,5 +343,90 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(advertised);
         assert!(set.remove(&remove_key), "default-label key matches");
+    }
+
+    #[test]
+    fn nexthop_emits_ipv4_with_length_12() {
+        let mut buf = BytesMut::new();
+        emit_vpnv4_nexthop(&mut buf, &IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        // length(1) + RD(8) + IPv4(4)
+        assert_eq!(buf.len(), 13);
+        assert_eq!(buf[0], 12);
+    }
+
+    #[test]
+    fn nexthop_emits_ipv6_with_length_24() {
+        let addr: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut buf = BytesMut::new();
+        emit_vpnv4_nexthop(&mut buf, &IpAddr::V6(addr));
+        // length(1) + RD(8) + IPv6(16)
+        assert_eq!(buf.len(), 25);
+        assert_eq!(buf[0], 24);
+        assert_eq!(&buf[9..25], &addr.octets()[..]);
+    }
+
+    #[test]
+    fn vpnv4_reach_round_trips_ipv6_nexthop() {
+        // RFC 8950 / RFC 9252: a VPN-IPv4 NLRI advertised with an IPv6
+        // next-hop (length 24). Emit the MP_REACH body then parse it
+        // back and confirm the IPv6 next-hop survives.
+        let addr: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let reach = Vpnv4Reach {
+            snpa: 0,
+            nhop: Vpnv4Nexthop {
+                rd: RouteDistinguisher::default(),
+                nhop: IpAddr::V6(addr),
+            },
+            updates: vec![Vpnv4Nlri {
+                label: Label::new(80, 0, true),
+                rd: RouteDistinguisher::default(),
+                nlri: Ipv4Nlri {
+                    id: 0,
+                    prefix: "192.168.5.0/24".parse().unwrap(),
+                },
+            }],
+        };
+        let mut buf = BytesMut::new();
+        reach.emit(&mut buf);
+        // `parse_nlri_opt` returns the input positioned at the NLRI
+        // section (the `many0` remainder is discarded), so the parsed
+        // `updates` carry the routes; the returned `rest` is not empty.
+        let (_, parsed) = crate::MpReachAttr::parse_nlri_opt(&buf, None).expect("parse");
+        match parsed {
+            crate::MpReachAttr::Vpnv4(r) => {
+                assert_eq!(r.nhop.nhop, IpAddr::V6(addr));
+                assert_eq!(r.updates.len(), 1);
+                assert_eq!(r.updates[0].nlri.prefix, "192.168.5.0/24".parse().unwrap());
+            }
+            _ => panic!("expected Vpnv4 reach"),
+        }
+    }
+
+    #[test]
+    fn vpnv4_reach_round_trips_ipv4_nexthop() {
+        // The classic RFC 4364 shape (length 12) still round-trips.
+        let addr = Ipv4Addr::new(10, 0, 0, 1);
+        let reach = Vpnv4Reach {
+            snpa: 0,
+            nhop: Vpnv4Nexthop {
+                rd: RouteDistinguisher::default(),
+                nhop: IpAddr::V4(addr),
+            },
+            updates: vec![Vpnv4Nlri {
+                label: Label::new(80, 0, true),
+                rd: RouteDistinguisher::default(),
+                nlri: Ipv4Nlri {
+                    id: 0,
+                    prefix: "192.168.5.0/24".parse().unwrap(),
+                },
+            }],
+        };
+        let mut buf = BytesMut::new();
+        reach.emit(&mut buf);
+        let (_, parsed) = crate::MpReachAttr::parse_nlri_opt(&buf, None).expect("parse");
+        match parsed {
+            crate::MpReachAttr::Vpnv4(r) => assert_eq!(r.nhop.nhop, IpAddr::V4(addr)),
+            _ => panic!("expected Vpnv4 reach"),
+        }
     }
 }
