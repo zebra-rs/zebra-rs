@@ -934,6 +934,12 @@ pub struct LocalRib {
 
     pub v6: LocalRibTable<Ipv6Net>,
 
+    /// IPv4 / IPv6 Labeled-Unicast (SAFI 4) Loc-RIB. Same prefix key as
+    /// unicast; each `BgpRib` carries the per-prefix label.
+    pub v4lu: LocalRibTable<Ipv4Net>,
+
+    pub v6lu: LocalRibTable<Ipv6Net>,
+
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
 
     pub v6vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv6Net>>,
@@ -995,6 +1001,32 @@ impl LocalRib {
 
     pub fn select_best_path_v6(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
         self.v6.select_best_path(prefix)
+    }
+
+    // IPv4 / IPv6 Labeled-Unicast (SAFI 4) accessors. Same Loc-RIB
+    // engine as unicast; the per-prefix label travels on each `BgpRib`.
+    pub fn update_v4lu(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.v4lu.update(prefix, rib)
+    }
+
+    pub fn remove_v4lu(&mut self, prefix: Ipv4Net, id: u32, ident: usize) -> Vec<BgpRib> {
+        self.v4lu.remove(prefix, id, ident)
+    }
+
+    pub fn select_best_path_v4lu(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
+        self.v4lu.select_best_path(prefix)
+    }
+
+    pub fn update_v6lu(&mut self, prefix: Ipv6Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
+        self.v6lu.update(prefix, rib)
+    }
+
+    pub fn remove_v6lu(&mut self, prefix: Ipv6Net, id: u32, ident: usize) -> Vec<BgpRib> {
+        self.v6lu.remove(prefix, id, ident)
+    }
+
+    pub fn select_best_path_v6lu(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
+        self.v6lu.select_best_path(prefix)
     }
 
     // VPNv6 accessors — per-RD `v6vpn` tables, mirroring the v4vpn
@@ -2775,6 +2807,183 @@ pub fn route_ipv6_withdraw(
     }
 }
 
+/// Ingest a received IPv4 Labeled-Unicast (SAFI 4) route into the
+/// `v4lu` Loc-RIB. Control-plane only: the per-prefix label is stored on
+/// the `BgpRib`, the MP_REACH next-hop is stamped into the attr so
+/// best-path / show read it, and best-path runs. NHT gating, FIB
+/// install (label-push) and peer re-advertisement land in later phases,
+/// so this mirrors the v6-unicast ingest minus those steps.
+pub fn route_labelv4_update(
+    ident: usize,
+    lu: &Labelv4Nlri,
+    nhop: IpAddr,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        // RFC 4271 / 4456 loop detection — identical to the unicast path.
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    // Stamp the MP_REACH next-hop so best-path / show read the LU
+    // next-hop rather than the (often absent) NEXT_HOP attribute.
+    let mut attr = attr.clone();
+    attr.nexthop = Some(match nhop {
+        IpAddr::V4(v4) => BgpNexthop::Ipv4(v4),
+        IpAddr::V6(v6) => BgpNexthop::Ipv6(v6),
+    });
+
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        lu.nlri.id,
+        0,
+        &attr,
+        Some(lu.label),
+        None,
+        stale,
+    );
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_v4lu(lu.nlri.prefix, rib.clone());
+    }
+
+    rib.attr = bgp.attr_store.intern(attr);
+    let _ = bgp.local_rib.update_v4lu(lu.nlri.prefix, rib);
+}
+
+/// Ingest a received IPv6 Labeled-Unicast (SAFI 4) route — including
+/// 6PE — into the `v6lu` Loc-RIB. See [`route_labelv4_update`].
+pub fn route_labelv6_update(
+    ident: usize,
+    lu: &Labelv6Nlri,
+    nhop: IpAddr,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let mut attr = attr.clone();
+    attr.nexthop = Some(match nhop {
+        IpAddr::V4(v4) => BgpNexthop::Ipv4(v4),
+        IpAddr::V6(v6) => BgpNexthop::Ipv6(v6),
+    });
+
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        lu.nlri.id,
+        0,
+        &attr,
+        Some(lu.label),
+        None,
+        stale,
+    );
+
+    {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.add_v6lu(lu.nlri.prefix, rib.clone());
+    }
+
+    rib.attr = bgp.attr_store.intern(attr);
+    let _ = bgp.local_rib.update_v6lu(lu.nlri.prefix, rib);
+}
+
+/// Withdraw a received IPv4 Labeled-Unicast route (MP_UNREACH or
+/// session teardown). Identity is (prefix, path-id); the on-wire label
+/// is not part of it. Removes from Adj-RIB-In and the `v4lu` Loc-RIB and
+/// recomputes best-path so `show` stays consistent.
+pub fn route_labelv4_withdraw(
+    ident: usize,
+    nlri: &Ipv4Nlri,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    rib_in: bool,
+) {
+    if rib_in {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_v4lu(nlri.prefix, nlri.id);
+    }
+    let _ = bgp.local_rib.remove_v4lu(nlri.prefix, nlri.id, ident);
+    let _ = bgp.local_rib.select_best_path_v4lu(nlri.prefix);
+}
+
+/// Withdraw a received IPv6 Labeled-Unicast route. See
+/// [`route_labelv4_withdraw`].
+pub fn route_labelv6_withdraw(
+    ident: usize,
+    nlri: &Ipv6Nlri,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    rib_in: bool,
+) {
+    if rib_in {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        peer.adj_in.remove_v6lu(nlri.prefix, nlri.id);
+    }
+    let _ = bgp.local_rib.remove_v6lu(nlri.prefix, nlri.id, ident);
+    let _ = bgp.local_rib.select_best_path_v6lu(nlri.prefix);
+}
+
 pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
@@ -3449,6 +3658,28 @@ pub fn route_from_peer(
                     route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
                 }
             }
+            MpReachAttr::Labelv4 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                // IPv4 Labeled-Unicast (SAFI 4): store each route in the
+                // v4lu Loc-RIB with its per-prefix label. The MP_REACH
+                // next-hop is authoritative.
+                for update in updates.iter() {
+                    route_labelv4_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
+                }
+            }
+            MpReachAttr::Labelv6 {
+                snpa: _,
+                nhop,
+                updates,
+            } => {
+                // IPv6 Labeled-Unicast (SAFI 4), including 6PE.
+                for update in updates.iter() {
+                    route_labelv6_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
+                }
+            }
             _ => {
                 //
             }
@@ -3526,6 +3757,28 @@ pub fn route_from_peer(
                 // An empty `withdraws` is End-of-RIB. Graceful-restart
                 // stale handling for flow specs is deferred (no Loc-RIB
                 // yet), so there is nothing to flush.
+            }
+            MpUnreachAttr::Labelv4(withdrawals) => {
+                for withdraw in withdrawals.iter() {
+                    route_labelv4_withdraw(peer_id, &withdraw.nlri, bgp, peers, true);
+                }
+            }
+            MpUnreachAttr::Labelv4Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsLabel);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
+            MpUnreachAttr::Labelv6(withdrawals) => {
+                for withdraw in withdrawals.iter() {
+                    route_labelv6_withdraw(peer_id, &withdraw.nlri, bgp, peers, true);
+                }
+            }
+            MpUnreachAttr::Labelv6Eor => {
+                let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsLabel);
+                let _ = bgp
+                    .tx
+                    .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
             }
             _ => {
                 //
@@ -3768,6 +4021,47 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.cache_evpn.clear();
     peer.cache_evpn_rev.clear();
     peer.cache_evpn_timer = None;
+
+    // IPv4 / IPv6 Labeled-Unicast (SAFI 4). No LLGR handling yet —
+    // withdraw every labeled route the peer gave us and clear the
+    // Adj-RIB tables, mirroring the unicast block above.
+    let withdrawn_v4lu = {
+        let mut withdrawn: Vec<Ipv4Nlri> = vec![];
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        for (prefix, ribs) in peer.adj_in.v4lu.0.iter() {
+            for rib in ribs.iter() {
+                withdrawn.push(Ipv4Nlri {
+                    id: rib.remote_id,
+                    prefix: *prefix,
+                });
+            }
+        }
+        withdrawn
+    };
+    for withdraw in withdrawn_v4lu.iter() {
+        route_labelv4_withdraw(peer_id, withdraw, bgp, peers, true);
+    }
+    let withdrawn_v6lu = {
+        let mut withdrawn: Vec<Ipv6Nlri> = vec![];
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        for (prefix, ribs) in peer.adj_in.v6lu.0.iter() {
+            for rib in ribs.iter() {
+                withdrawn.push(Ipv6Nlri {
+                    id: rib.remote_id,
+                    prefix: *prefix,
+                });
+            }
+        }
+        withdrawn
+    };
+    for withdraw in withdrawn_v6lu.iter() {
+        route_labelv6_withdraw(peer_id, withdraw, bgp, peers, true);
+    }
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_in.v4lu.0.clear();
+    peer.adj_in.v6lu.0.clear();
+    peer.adj_out.v4lu.0.clear();
+    peer.adj_out.v6lu.0.clear();
 
     peer.cap_map = CapAfiMap::new();
     peer.cap_recv = BgpCap::default();

@@ -198,6 +198,10 @@ pub struct AdjRib<D: RibDirection> {
     pub v4: AdjRibTable<D>,
     // IPv6 unicast
     pub v6: AdjRibTable<D, Ipv6Net>,
+    // IPv4 Labeled-Unicast (SAFI 4)
+    pub v4lu: AdjRibTable<D>,
+    // IPv6 Labeled-Unicast (SAFI 4)
+    pub v6lu: AdjRibTable<D, Ipv6Net>,
     // IPv4 VPN
     pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
     // IPv6 VPN
@@ -215,6 +219,8 @@ impl<D: RibDirection> AdjRib<D> {
         Self {
             v4: AdjRibTable::new(),
             v6: AdjRibTable::new(),
+            v4lu: AdjRibTable::new(),
+            v6lu: AdjRibTable::new(),
             v4vpn: BTreeMap::new(),
             v6vpn: BTreeMap::new(),
             evpn: BTreeMap::new(),
@@ -266,6 +272,24 @@ impl AdjRib<In> {
 
     pub fn remove_v6(&mut self, prefix: Ipv6Net, id: u32) -> Option<BgpRib> {
         self.v6.remove(prefix, id)
+    }
+
+    // IPv4 / IPv6 Labeled-Unicast (SAFI 4) add/remove.
+
+    pub fn add_v4lu(&mut self, prefix: Ipv4Net, route: BgpRib) -> Option<BgpRib> {
+        self.v4lu.add(prefix, route)
+    }
+
+    pub fn remove_v4lu(&mut self, prefix: Ipv4Net, id: u32) -> Option<BgpRib> {
+        self.v4lu.remove(prefix, id)
+    }
+
+    pub fn add_v6lu(&mut self, prefix: Ipv6Net, route: BgpRib) -> Option<BgpRib> {
+        self.v6lu.add(prefix, route)
+    }
+
+    pub fn remove_v6lu(&mut self, prefix: Ipv6Net, id: u32) -> Option<BgpRib> {
+        self.v6lu.remove(prefix, id)
     }
 
     pub fn add_v6vpn(
@@ -326,6 +350,8 @@ impl AdjRib<In> {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
             (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
+            (Afi::Ip, Safi::MplsLabel) => self.v4lu.0.len(),
+            (Afi::Ip6, Safi::MplsLabel) => self.v6lu.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
@@ -367,6 +393,8 @@ impl AdjRib<Out> {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
             (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
+            (Afi::Ip, Safi::MplsLabel) => self.v4lu.0.len(),
+            (Afi::Ip6, Safi::MplsLabel) => self.v6lu.0.len(),
             (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
