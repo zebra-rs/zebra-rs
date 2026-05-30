@@ -3236,6 +3236,78 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     route_evpn_export_selected(&rd, &prefix, &selected, removed.first(), bgp);
 }
 
+/// Store one received Flow Specification NLRI in the peer's Adj-RIB-In.
+///
+/// Phase 1 (receive/reflect) is control-plane only: the flow spec is
+/// kept in Adj-RIB-In so it can be shown, but it is not validated
+/// (RFC 9117 — Phase 2), not selected into a Loc-RIB or re-advertised
+/// (Phase 3), and not installed (Phase 4). Loop detection mirrors
+/// `route_evpn_update` so a route carrying our own AS / ORIGINATOR_ID /
+/// CLUSTER_LIST is dropped silently.
+pub fn route_flowspec_update(
+    ident: usize,
+    nlri: &FlowspecNlri,
+    afi: Afi,
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    let id = nlri.id;
+
+    let (peer_ident, peer_router_id, typ) = {
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+
+        if let Some(ref aspath) = attr.aspath {
+            for segment in &aspath.segs {
+                if segment.asn.contains(&peer.local_as) {
+                    return;
+                }
+            }
+        }
+        if let Some(ref originator_id) = attr.originator_id
+            && originator_id.id == *bgp.router_id
+        {
+            return;
+        }
+        if let Some(ref cluster_list) = attr.cluster_list
+            && cluster_list.list.contains(bgp.router_id)
+        {
+            return;
+        }
+
+        let typ = if peer.is_ibgp() {
+            BgpRibType::IBGP
+        } else {
+            BgpRibType::EBGP
+        };
+
+        (peer.ident, peer.remote_id, typ)
+    };
+
+    let mut rib = BgpRib::new(
+        peer_ident,
+        peer_router_id,
+        typ,
+        id,
+        0,    // weight
+        attr, // interned just below
+        None, // label
+        None, // nexthop — flow specs carry actions, not a next-hop
+        stale,
+    );
+    rib.attr = bgp.attr_store.intern(attr.clone());
+
+    let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+    peer.adj_in.add_flowspec(afi, nlri.clone(), rib);
+}
+
+/// Withdraw one Flow Specification NLRI from the peer's Adj-RIB-In.
+pub fn route_flowspec_withdraw(ident: usize, nlri: &FlowspecNlri, afi: Afi, peers: &mut PeerMap) {
+    let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+    peer.adj_in.remove_flowspec(afi, nlri, nlri.id);
+}
+
 pub fn route_from_peer(
     peer_id: usize,
     packet: UpdatePacket,
@@ -3372,6 +3444,11 @@ pub fn route_from_peer(
                     );
                 }
             }
+            MpReachAttr::Flowspec { afi, updates } => {
+                for nlri in updates.iter() {
+                    route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
+                }
+            }
             _ => {
                 //
             }
@@ -3441,6 +3518,14 @@ pub fn route_from_peer(
                 let _ = bgp
                     .tx
                     .send(Message::Event(peer_id, Event::StaleTimerExipires(afi_safi)));
+            }
+            MpUnreachAttr::Flowspec { afi, withdraws } => {
+                for nlri in withdraws.iter() {
+                    route_flowspec_withdraw(peer_id, nlri, afi, peers);
+                }
+                // An empty `withdraws` is End-of-RIB. Graceful-restart
+                // stale handling for flow specs is deferred (no Loc-RIB
+                // yet), so there is nothing to flush.
             }
             _ => {
                 //

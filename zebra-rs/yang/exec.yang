@@ -208,6 +208,14 @@ module exec {
           ext:help "BGP EVPN RIB";
           type empty;
         }
+        container flowspec {
+          ext:help "BGP IPv4 Flow Specification RIB";
+          presence "BGP IPv4 Flowspec RIB";
+          leaf ipv6 {
+            ext:help "BGP IPv6 Flow Specification RIB";
+            type empty;
+          }
+        }
         leaf summary {
           ext:help "BGP summary information";
           type empty;
