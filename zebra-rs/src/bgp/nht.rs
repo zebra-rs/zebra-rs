@@ -15,7 +15,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
-use bgp_packet::{BgpAttr, BgpNexthop, RouteDistinguisher};
+use bgp_packet::{BgpAttr, BgpNexthop, EvpnPrefix, RouteDistinguisher};
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::rib::nht::{NexthopResolution, ResolvedNexthop};
@@ -28,6 +28,11 @@ pub enum NhtDep {
     V6(Ipv6Net),
     V4vpn(RouteDistinguisher, Ipv4Net),
     V6vpn(RouteDistinguisher, Ipv6Net),
+    /// EVPN Type-5 (IP Prefix) route in `local_rib.evpn`. Like the
+    /// VPN deps, the PE next-hop is tracked so the VRF import re-runs
+    /// when the underlay resolves or reroutes. The `EvpnPrefix` is the
+    /// RD-stripped key (its `IpPrefix` variant carries the v4/v6 net).
+    Evpn(RouteDistinguisher, EvpnPrefix),
 }
 
 /// How a tracked next-hop's resolution changed, returned by

@@ -1759,6 +1759,37 @@ impl Bgp {
                     );
                 }
             }
+            NhtDep::Evpn(rd, prefix) => {
+                // EVPN Type-5: the imported IP prefix's underlay
+                // rerouted; re-dispatch the VRF import with the fresh
+                // transport. Reuses the VPNv4/v6 dispatch.
+                let selected = self.local_rib.select_best_path_evpn(&rd, &prefix);
+                if let Some(winner) = selected.last()
+                    && let bgp_packet::EvpnPrefix::IpPrefix { prefix: net, .. } = &prefix
+                {
+                    let label = winner.label.map(|l| l.label).unwrap_or(0);
+                    match net {
+                        ipnet::IpNet::V4(p) => super::vrf::dispatch_import_v4(
+                            &dispatcher,
+                            rd,
+                            *p,
+                            &winner.attr,
+                            label,
+                            transport,
+                            None,
+                        ),
+                        ipnet::IpNet::V6(p) => super::vrf::dispatch_import_v6(
+                            &dispatcher,
+                            rd,
+                            *p,
+                            &winner.attr,
+                            label,
+                            transport,
+                            None,
+                        ),
+                    }
+                }
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
@@ -1798,6 +1829,10 @@ impl Bgp {
                     .set_nexthop_reachable(*p, nh, reachable);
                 self.local_rib.select_best_path_vpn_v6(rd, *p)
             }
+            // EVPN Type-5 best-path isn't gated on next-hop reachability
+            // (the VRF FIB install is gated by transport availability in
+            // the dispatch below), so just re-select.
+            NhtDep::Evpn(rd, prefix) => self.local_rib.select_best_path_evpn(rd, prefix),
         };
 
         let mut top = super::peer::BgpTop {
@@ -1906,6 +1941,74 @@ impl Bgp {
                     .and_then(|t| t.candidate_attr(*p))
                 {
                     super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
+                }
+            }
+            NhtDep::Evpn(rd, prefix) => {
+                // EVPN Type-5 analog: advertise the re-selected best-path
+                // to peers, then (re-)dispatch the VRF import with the
+                // resolved transport, or withdraw if the PE went away.
+                if !selected.is_empty() {
+                    super::route::route_advertise_evpn_to_peers(
+                        *rd,
+                        prefix.clone(),
+                        &selected,
+                        &mut top,
+                        &mut self.peers,
+                    );
+                }
+                let dispatcher = super::vrf::VrfImportDispatcher {
+                    rib_known_vrfs: &self.rib_known_vrfs,
+                    vrf_registry: &self.vrf_registry,
+                };
+                if let bgp_packet::EvpnPrefix::IpPrefix { prefix: net, .. } = prefix
+                    && let Some(winner) = selected.last()
+                {
+                    let label = winner.label.map(|l| l.label).unwrap_or(0);
+                    let transport = self.nexthop_cache.transport_for(nh);
+                    match net {
+                        ipnet::IpNet::V4(p) => {
+                            if reachable {
+                                super::vrf::dispatch_import_v4(
+                                    &dispatcher,
+                                    *rd,
+                                    *p,
+                                    &winner.attr,
+                                    label,
+                                    transport,
+                                    None,
+                                );
+                            } else {
+                                super::vrf::dispatch_withdraw_import_v4(
+                                    &dispatcher,
+                                    *rd,
+                                    *p,
+                                    &winner.attr,
+                                    None,
+                                );
+                            }
+                        }
+                        ipnet::IpNet::V6(p) => {
+                            if reachable {
+                                super::vrf::dispatch_import_v6(
+                                    &dispatcher,
+                                    *rd,
+                                    *p,
+                                    &winner.attr,
+                                    label,
+                                    transport,
+                                    None,
+                                );
+                            } else {
+                                super::vrf::dispatch_withdraw_import_v6(
+                                    &dispatcher,
+                                    *rd,
+                                    *p,
+                                    &winner.attr,
+                                    None,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -2989,9 +2989,19 @@ fn route_evpn_export_selected(
                     );
                 }
             }
-            EvpnPrefix::IpPrefix { .. } => {
-                // Type-5 withdrawal drives a VRF route un-import, not an
-                // FDB/MDB delete. Wired in a later phase.
+            EvpnPrefix::IpPrefix { prefix, .. } => {
+                // Type-5 withdrawal un-imports the IP prefix from matching
+                // VRFs, reusing the VPNv4/v6 withdraw dispatch.
+                if let Some(dispatcher) = bgp.vrf_import {
+                    match prefix {
+                        IpNet::V4(p) => super::vrf::dispatch_withdraw_import_v4(
+                            dispatcher, *rd, *p, &wd.attr, None,
+                        ),
+                        IpNet::V6(p) => super::vrf::dispatch_withdraw_import_v6(
+                            dispatcher, *rd, *p, &wd.attr, None,
+                        ),
+                    }
+                }
             }
         }
         return;
@@ -3053,11 +3063,24 @@ fn route_evpn_export_selected(
                 );
             }
         }
-        EvpnPrefix::IpPrefix { .. } => {
-            // Type-5 (IP Prefix) drives a VRF route import, not an FDB/MDB
-            // install. The import + dataplane path is wired in a later
-            // phase; until then a received Type-5 best-path is held in the
-            // Loc-RIB without a dataplane action.
+        EvpnPrefix::IpPrefix { prefix, .. } => {
+            // A received Type-5 best-path imports into matching VRFs
+            // exactly like a VPNv4/v6 route — reuse the same dispatch +
+            // transport + FIB machinery. Our own originated Type-5
+            // (typ Originated) is left to the VRF Export local-leak path.
+            if best.typ != BgpRibType::Originated
+                && let Some(dispatcher) = bgp.vrf_import
+            {
+                let (label, transport) = vpn_import_transport(bgp, best);
+                match prefix {
+                    IpNet::V4(p) => super::vrf::dispatch_import_v4(
+                        dispatcher, *rd, *p, &best.attr, label, transport, None,
+                    ),
+                    IpNet::V6(p) => super::vrf::dispatch_import_v6(
+                        dispatcher, *rd, *p, &best.attr, label, transport, None,
+                    ),
+                }
+            }
         }
     }
 }
@@ -3135,6 +3158,19 @@ pub fn route_evpn_update(
     if let EvpnRoute::Mac(m) = route {
         rib.esi = Some(m.esi);
     }
+    // Type-5 (IP Prefix) carries an MPLS service label in its NLRI;
+    // preserve it on the BgpRib so the VRF import (which reuses the
+    // VPNv4/v6 path) can build the label-push FIB entry. SRv6 Type-5
+    // carries label 0 + the SID in the Prefix-SID attribute.
+    if let EvpnRoute::Prefix(p) = route
+        && p.label != 0
+    {
+        rib.label = Some(bgp_packet::Label {
+            label: p.label,
+            exp: 0,
+            bos: true,
+        });
+    }
 
     // Apply input policy *after* the route is registered in
     // Adj-RIB-In (raw, pre-policy view) but *before* it enters
@@ -3151,6 +3187,15 @@ pub fn route_evpn_update(
     };
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
+
+    // Type-5: register the PE next-hop with NHT so the underlay
+    // resolves (transport is empty at receive — resolution is async)
+    // and a later reroute re-triggers the VRF import. Type-2/3 are
+    // VXLAN (VTEP next-hop, no transport) and are not tracked.
+    if let EvpnRoute::Prefix(_) = route {
+        let dep = super::nht::NhtDep::Evpn(rd, prefix.clone());
+        nht_track_received(bgp, &mut rib, dep);
+    }
 
     let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
 
