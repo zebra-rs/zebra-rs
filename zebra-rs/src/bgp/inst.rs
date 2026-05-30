@@ -1322,11 +1322,10 @@ impl Bgp {
     /// Re-evaluate one dependent prefix after its next-hop's
     /// reachability flipped: refresh the candidates' gate flag, re-run
     /// best-path, then re-advertise (and, for unicast, reconcile the
-    /// FIB). For VPNv4 deps this also (re-)dispatches the per-VRF import
-    /// with the resolved transport — register-then-gate means an
+    /// FIB). For VPNv4/v6 deps this also (re-)dispatches the per-VRF
+    /// import with the resolved transport — register-then-gate means an
     /// imported route only becomes best-path here, so this is where the
-    /// VRF dataplane install is triggered. (VPNv6 re-dispatch lands with
-    /// the VPNv6 install in a follow-up.)
+    /// VRF dataplane install is triggered.
     fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
         use super::nht::NhtDep;
         // Refresh gate flags + re-select (mutates `local_rib`).
@@ -1435,6 +1434,33 @@ impl Bgp {
                     &mut top,
                     &mut self.peers,
                 );
+                // VPNv6 counterpart of the V4vpn arm: (re-)dispatch the
+                // VRF import with the resolved transport once the PE
+                // next-hop resolves, or withdraw on PE failure.
+                let dispatcher = super::vrf::VrfImportDispatcher {
+                    rib_known_vrfs: &self.rib_known_vrfs,
+                    vrf_registry: &self.vrf_registry,
+                };
+                if reachable && let Some(winner) = selected.first() {
+                    let label = winner.label.map(|l| l.label).unwrap_or(0);
+                    let transport = self.nexthop_cache.transport_for(nh);
+                    super::vrf::dispatch_import_v6(
+                        &dispatcher,
+                        *rd,
+                        *p,
+                        &winner.attr,
+                        label,
+                        transport,
+                        None,
+                    );
+                } else if let Some(attr) = self
+                    .local_rib
+                    .v6vpn
+                    .get(rd)
+                    .and_then(|t| t.candidate_attr(*p))
+                {
+                    super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
+                }
             }
         }
     }
@@ -1932,6 +1958,8 @@ impl Bgp {
                         prefix,
                         &winner.attr,
                         0,
+                        // Local VRF-to-VRF leak: no SR-MPLS transport.
+                        &[],
                         Some(vrf.as_str()),
                     );
                 }
@@ -1991,6 +2019,7 @@ impl Bgp {
                             prefix,
                             &winner.attr,
                             0,
+                            &[],
                             Some(vrf.as_str()),
                         );
                     } else if let Some(gone) = removed.first() {

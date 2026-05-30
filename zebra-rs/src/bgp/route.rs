@@ -2230,6 +2230,7 @@ pub fn route_ipv6_update(
     ident: usize,
     nlri: &Ipv6Nlri,
     rd: Option<RouteDistinguisher>,
+    label: Option<Label>,
     attr: &BgpAttr,
     nexthop: Option<VpnNexthop>,
     bgp: &mut BgpTop,
@@ -2273,7 +2274,7 @@ pub fn route_ipv6_update(
         nlri.id,
         0,
         attr,
-        None,    // no label here (the VPNv6 label rides on the NLRI)
+        label,   // VPNv6 service label (None for plain v6 unicast)
         nexthop, // VpnNexthop::V6 for VPNv6 rows; None for unicast
         stale,
     );
@@ -2335,12 +2336,14 @@ pub fn route_ipv6_update(
             // on the remote ingress path.
             if let Some(dispatcher) = bgp.vrf_import {
                 if let Some(winner) = selected.first() {
+                    let (label, transport) = vpn_import_transport(bgp, winner);
                     super::vrf::dispatch_import_v6(
                         dispatcher,
                         rd,
                         nlri.prefix,
                         &winner.attr,
-                        0,
+                        label,
+                        transport,
                         None,
                     );
                 } else {
@@ -2391,12 +2394,14 @@ pub fn route_ipv6_withdraw(
             // the removed row's RTs.
             if let Some(dispatcher) = bgp.vrf_import {
                 if let Some(winner) = selected.first() {
+                    let (label, transport) = vpn_import_transport(bgp, winner);
                     super::vrf::dispatch_import_v6(
                         dispatcher,
                         rd,
                         nlri.prefix,
                         &winner.attr,
-                        0,
+                        label,
+                        transport,
                         None,
                     );
                 } else if let Some(gone) = removed.first() {
@@ -2944,7 +2949,9 @@ pub fn route_from_peer(
                     let mut attr_v6 = bgp_attr.clone();
                     attr_v6.nexthop = Some(BgpNexthop::Ipv6(nh6));
                     for update in updates.iter() {
-                        route_ipv6_update(peer_id, update, None, &attr_v6, None, bgp, peers, false);
+                        route_ipv6_update(
+                            peer_id, update, None, None, &attr_v6, None, bgp, peers, false,
+                        );
                     }
                 } else {
                     tracing::warn!(
@@ -2962,6 +2969,7 @@ pub fn route_from_peer(
                         peer_id,
                         &update.nlri,
                         Some(update.rd),
+                        Some(update.label),
                         bgp_attr,
                         Some(VpnNexthop::V6(nlri.nhop.clone())),
                         bgp,

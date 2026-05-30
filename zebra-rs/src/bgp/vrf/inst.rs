@@ -314,6 +314,7 @@ pub fn dispatch_import_v6(
     prefix: ipnet::Ipv6Net,
     attr: &bgp_packet::BgpAttr,
     label: u32,
+    transport: &[crate::rib::nht::ResolvedNexthop],
     skip_vrf: Option<&str>,
 ) {
     let matches =
@@ -327,6 +328,7 @@ pub fn dispatch_import_v6(
             prefix,
             attr: attr.clone(),
             label,
+            transport: transport.to_vec(),
         });
     }
 }
@@ -715,6 +717,7 @@ impl BgpVrf {
         prefix: ipnet::Ipv6Net,
         mut attr: bgp_packet::BgpAttr,
         label: u32,
+        transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
         attr.nexthop = None;
         let interned = self.attr_store.intern(attr);
@@ -779,6 +782,37 @@ impl BgpVrf {
             winners,
             "bgp vrf: ImportV6 written to LocRIB and advertised to CE peers",
         );
+
+        // VPN dataplane install — VPNv6 counterpart of
+        // `handle_import_v4`. Install when the imported route is the VRF
+        // best-path and we have a real VRF table + resolved transport;
+        // otherwise withdraw any stale FIB entry.
+        if self.ctx.vrf_id() != 0 {
+            let imported_won = selected
+                .first()
+                .is_some_and(|w| matches!(w.typ, super::super::route::BgpRibType::Originated));
+            let entry = if imported_won {
+                build_vpn_fib_entry(label, transport)
+            } else {
+                None
+            };
+            match entry {
+                Some(rib) => {
+                    let _ = self
+                        .ctx
+                        .rib
+                        .send(crate::rib::Message::Ipv6Add { prefix, rib });
+                }
+                None => {
+                    let mut stub = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+                    stub.valid = false;
+                    let _ = self
+                        .ctx
+                        .rib
+                        .send(crate::rib::Message::Ipv6Del { prefix, rib: stub });
+                }
+            }
+        }
     }
 
     /// VPNv6 counterpart of [`Self::handle_withdraw_import`].
@@ -821,6 +855,16 @@ impl BgpVrf {
             winners,
             "bgp vrf: WithdrawImportV6 removed from LocRIB and withdrawn from CE peers",
         );
+
+        // Remove the VRF FIB entry — symmetric with `handle_import_v6`.
+        if self.ctx.vrf_id() != 0 {
+            let mut stub = crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp);
+            stub.valid = false;
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::Ipv6Del { prefix, rib: stub });
+        }
     }
 
     /// Per-task handling of cross-task messages that aren't
@@ -856,8 +900,9 @@ impl BgpVrf {
                 prefix,
                 attr,
                 label,
+                transport,
             } => {
-                self.handle_import_v6(rd, prefix, attr, label);
+                self.handle_import_v6(rd, prefix, attr, label, &transport);
             }
             BgpVrfMsg::WithdrawImportV6 { rd, prefix } => {
                 self.handle_withdraw_import_v6(rd, prefix);
@@ -1070,6 +1115,29 @@ mod tests {
                 assert_eq!(multi.nexthops[1].mpls_label, vec![16801, 24001]);
             }
             other => panic!("expected Multi nexthop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vpn_fib_entry_v6_egress() {
+        use crate::rib::nht::ResolvedNexthop;
+
+        // VPNv6: the remote PE (and thus the resolved transport egress)
+        // is an IPv6 address; the {transport,service} label stack is
+        // built the same way over the v6 next-hop.
+        let transport = vec![ResolvedNexthop {
+            addr: "2001:db8::2".parse().unwrap(),
+            ifindex: 7,
+            labels: vec![16900],
+        }];
+        let entry = build_vpn_fib_entry(24002, &transport).expect("installable");
+        match entry.nexthop {
+            crate::rib::Nexthop::Uni(uni) => {
+                assert_eq!(uni.addr, "2001:db8::2".parse::<std::net::IpAddr>().unwrap());
+                assert_eq!(uni.ifindex(), Some(7));
+                assert_eq!(uni.mpls_label, vec![16900, 24002]);
+            }
+            other => panic!("expected Uni nexthop, got {other:?}"),
         }
     }
 }
