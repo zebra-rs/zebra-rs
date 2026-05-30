@@ -20,9 +20,9 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::{
-    BgpAttr, BindingSid, Community, CommunityValue, ExtCommunity, ExtCommunitySubType,
-    ExtCommunityValue, Origin, Segment, SegmentList, SrPolicyNlri, SrPolicyTlvs, Srv6BindingSid,
-    TunnelEncap,
+    BgpAttr, BindingSid, ClusterList, Community, CommunityValue, ExtCommunity, ExtCommunitySubType,
+    ExtCommunityValue, Origin, OriginatorId, Segment, SegmentList, SrPolicyNlri, SrPolicyTlvs,
+    Srv6BindingSid, TunnelEncap,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -751,6 +751,63 @@ pub fn config_srp_segment_srv6_sid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
+// =======================================================================
+// Route-reflector pass-through: reflect received SR Policies (SAFI 73).
+// =======================================================================
+
+/// The attribute to use when reflecting a received SR Policy update to
+/// one destination peer, or `None` if it must not be reflected to that
+/// peer.
+///
+/// - RFC 9830 §4.1: a policy carrying NO_ADVERTISE is never propagated.
+/// - RFC 4456: an iBGP-learned policy is reflected to an iBGP peer only
+///   if that peer is a route-reflector client.
+/// - On an iBGP→iBGP reflection the ORIGINATOR_ID is stamped (with the
+///   original advertiser's router-id if absent) and the local router-id
+///   is prepended to the CLUSTER_LIST.
+pub fn reflect_attr(
+    attr: &BgpAttr,
+    source_ibgp: bool,
+    source_router_id: Ipv4Addr,
+    dest_ibgp: bool,
+    dest_is_client: bool,
+    our_router_id: Ipv4Addr,
+) -> Option<BgpAttr> {
+    if attr
+        .com
+        .as_ref()
+        .is_some_and(|c| c.contains(&CommunityValue::NO_ADVERTISE.value()))
+    {
+        return None;
+    }
+    if source_ibgp && dest_ibgp && !dest_is_client {
+        return None;
+    }
+    let mut out = attr.clone();
+    if source_ibgp && dest_ibgp {
+        if out.originator_id.is_none() {
+            out.originator_id = Some(OriginatorId::new(source_router_id));
+        }
+        match out.cluster_list {
+            Some(ref mut cl) => cl.list.insert(0, our_router_id),
+            None => {
+                let mut cl = ClusterList::new();
+                cl.list.push(our_router_id);
+                out.cluster_list = Some(cl);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Whether a received SR Policy withdrawal should be reflected to a
+/// destination peer (RFC 4456 client rule; the NO_ADVERTISE check is
+/// moot for a withdraw — reflecting a never-advertised withdraw is a
+/// harmless no-op on the peer).
+pub fn reflect_withdraw_to(source_ibgp: bool, dest_ibgp: bool, dest_is_client: bool) -> bool {
+    !(source_ibgp && dest_ibgp && !dest_is_client)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1231,5 +1288,66 @@ mod tests {
             ..Default::default()
         };
         assert!(policy.advert(rid).is_none());
+    }
+
+    fn v4(s: &str) -> Ipv4Addr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn reflect_attr_suppresses_no_advertise() {
+        let attr = BgpAttr {
+            com: Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+            ..Default::default()
+        };
+        // NO_ADVERTISE → never reflected, regardless of peer roles.
+        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
+        assert!(reflect_attr(&attr, false, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
+    }
+
+    #[test]
+    fn reflect_attr_ibgp_requires_client() {
+        let attr = BgpAttr::default();
+        // iBGP source → iBGP non-client dest: suppressed.
+        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, false, v4("1.1.1.1")).is_none());
+        // iBGP source → iBGP client dest: reflected, with RR attrs stamped.
+        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        assert_eq!(out.originator_id.map(|o| o.id), Some(v4("2.2.2.2")));
+        assert_eq!(out.cluster_list.map(|c| c.list), Some(vec![v4("1.1.1.1")]));
+    }
+
+    #[test]
+    fn reflect_attr_preserves_existing_originator_and_prepends_cluster() {
+        let attr = BgpAttr {
+            originator_id: Some(OriginatorId::new(v4("9.9.9.9"))),
+            cluster_list: Some(ClusterList {
+                list: vec![v4("3.3.3.3")],
+            }),
+            ..Default::default()
+        };
+        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        // ORIGINATOR_ID preserved (not overwritten); our id prepended.
+        assert_eq!(out.originator_id.map(|o| o.id), Some(v4("9.9.9.9")));
+        assert_eq!(
+            out.cluster_list.map(|c| c.list),
+            Some(vec![v4("1.1.1.1"), v4("3.3.3.3")])
+        );
+    }
+
+    #[test]
+    fn reflect_attr_ebgp_source_no_rr_attrs() {
+        let attr = BgpAttr::default();
+        // eBGP source → iBGP dest: reflected without ORIGINATOR_ID /
+        // CLUSTER_LIST (it's a fresh iBGP advertisement).
+        let out = reflect_attr(&attr, false, v4("2.2.2.2"), true, false, v4("1.1.1.1")).unwrap();
+        assert!(out.originator_id.is_none());
+        assert!(out.cluster_list.is_none());
+    }
+
+    #[test]
+    fn reflect_withdraw_to_follows_client_rule() {
+        assert!(!reflect_withdraw_to(true, true, false)); // iBGP→iBGP non-client: no
+        assert!(reflect_withdraw_to(true, true, true)); // iBGP→iBGP client: yes
+        assert!(reflect_withdraw_to(false, true, false)); // eBGP→iBGP: yes
     }
 }
