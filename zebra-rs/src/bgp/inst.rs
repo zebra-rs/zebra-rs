@@ -405,6 +405,16 @@ pub struct Bgp {
     /// initial request and any on-demand extension so a burst of
     /// label-less VRFs asks the RIB label manager for only one block.
     vrf_label_request_pending: bool,
+    /// Configured global SRv6 locator name (`router bgp global srv6
+    /// locator <name>`). When set, BGP watches this locator on the
+    /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
+    /// from it for `encapsulation srv6` VRFs. `None` until configured.
+    pub srv6_locator_name: Option<String>,
+    /// SRv6 locator updates from the RIB segment-routing manager,
+    /// established once via `Message::SrSubscribe` in [`Self::new`].
+    /// Drained in the event loop; resolution is currently logged and
+    /// the resolved `Locator` + SID allocation land in a follow-up.
+    pub srv6_locator_rx: UnboundedReceiver<crate::rib::RibSrRx>,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -535,6 +545,11 @@ impl Bgp {
         if let Some(ref tx) = nd_client_tx {
             let _ = tx.send(crate::nd::inst::NdClientReq::SetNotifier { tx: nd_event_tx });
         }
+        // SRv6 locator subscription. Register the SR return channel
+        // once up front (mirrors IS-IS); the per-locator interest is
+        // expressed later via `SrLocatorWatch` when the operator sets
+        // `router bgp global srv6 locator <name>`.
+        let (srv6_sr_tx, srv6_locator_rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
@@ -573,6 +588,8 @@ impl Bgp {
             rib_subscriber,
             vrf_label_alloc: None,
             vrf_label_request_pending: false,
+            srv6_locator_name: None,
+            srv6_locator_rx,
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -594,6 +611,13 @@ impl Bgp {
         };
         bgp.callback_build();
         bgp.show_build();
+        // One-time SR subscription so subsequent `SrLocatorWatch`
+        // requests get a return channel; the RIB replies on
+        // `srv6_locator_rx`.
+        let _ = bgp.ctx.rib.send(crate::rib::Message::SrSubscribe {
+            proto: "bgp".into(),
+            tx: srv6_sr_tx,
+        });
         bgp
     }
 
@@ -627,6 +651,57 @@ impl Bgp {
         let resolved = self.hostname();
         for (_, peer) in self.peers.iter_mut() {
             peer.local_hostname = resolved.clone();
+        }
+    }
+
+    /// Update the configured global SRv6 locator name and (un)watch it
+    /// on the RIB. Mirrors IS-IS `reconcile_locator_watch`: unwatch the
+    /// previous name, watch the new one. The resolved [`Locator`]
+    /// arrives asynchronously on [`Self::srv6_locator_rx`].
+    pub fn set_srv6_locator(&mut self, name: Option<String>) {
+        if self.srv6_locator_name == name {
+            return;
+        }
+        if let Some(prev) = self.srv6_locator_name.take() {
+            let _ = self.ctx.rib.send(crate::rib::Message::SrLocatorUnwatch {
+                proto: "bgp".into(),
+                name: prev,
+            });
+        }
+        if let Some(next) = name {
+            let _ = self.ctx.rib.send(crate::rib::Message::SrLocatorWatch {
+                proto: "bgp".into(),
+                name: next.clone(),
+            });
+            self.srv6_locator_name = Some(next);
+        }
+    }
+
+    /// Handle an SRv6 locator update from the RIB segment-routing
+    /// manager. v1 logs the resolution so operators can confirm the
+    /// configured `srv6 locator` bound to a real prefix; storing the
+    /// resolved [`Locator`] and allocating per-VRF End.DT46 service
+    /// SIDs lands in a follow-up.
+    fn process_sr_rx(&mut self, msg: crate::rib::RibSrRx) {
+        match msg {
+            crate::rib::RibSrRx::Locator { name, locator } => {
+                // Ignore stale updates for a locator we no longer watch.
+                if self.srv6_locator_name.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                match locator.as_ref().and_then(|l| l.prefix) {
+                    Some(prefix) => {
+                        tracing::info!(locator = %name, %prefix, "bgp: SRv6 locator resolved");
+                    }
+                    None => {
+                        tracing::info!(
+                            locator = %name,
+                            "bgp: SRv6 locator unresolved / withdrawn",
+                        );
+                    }
+                }
+            }
+            crate::rib::RibSrRx::Block { .. } => {}
         }
     }
 
@@ -1840,6 +1915,10 @@ impl Bgp {
                     // VRF→global fan-in: peer register / accept
                     // dispatch and Export → VPNv4/v6.
                     self.process_vrf_global_msg(msg);
+                }
+                Some(msg) = self.srv6_locator_rx.recv() => {
+                    // SRv6 locator resolution from the RIB SR manager.
+                    self.process_sr_rx(msg);
                 }
             }
         }

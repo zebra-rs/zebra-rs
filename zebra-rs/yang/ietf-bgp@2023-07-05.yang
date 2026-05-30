@@ -319,6 +319,22 @@ module ietf-bgp {
              hostname is used; when neither is available the
              capability is not sent.";
         }
+        container srv6 {
+          description
+            "SRv6 parameters for BGP services over an SRv6 underlay
+             (RFC 9252).";
+          leaf locator {
+            type string;
+            description
+              "Name of the SRv6 locator this BGP speaker draws per-VRF
+               End.DT46 service SIDs from for L3VPN over SRv6. Held as
+               a plain string (staging-friendly, like the IS-IS
+               `locator` reference) and resolved against the locators
+               the RIB segment-routing manager publishes; until it
+               resolves, `encapsulation srv6` VRFs run without a
+               service SID.";
+          }
+        }
         container distance {
           description
             "Administrative distances (or preferences) assigned to

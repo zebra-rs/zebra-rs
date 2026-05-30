@@ -57,6 +57,28 @@ impl BgpVrfLabelMode {
     }
 }
 
+/// VPN data-plane encapsulation for a VRF — mirrors `encapsulation`
+/// in zebra-bgp-vrf.yang. Default `Mpls` (RFC 4364 service label).
+/// `Srv6` (RFC 9252) binds a per-VRF End.DT46 service SID from the
+/// global `srv6 locator` instead of an MPLS label, and the PE
+/// programs a seg6local decap rather than an AF_MPLS ILM.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BgpVrfEncapsulation {
+    #[default]
+    Mpls,
+    Srv6,
+}
+
+impl BgpVrfEncapsulation {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "mpls" => Some(Self::Mpls),
+            "srv6" => Some(Self::Srv6),
+            _ => None,
+        }
+    }
+}
+
 /// Per-peer attribute set for a CE peer configured under
 /// `router bgp vrf X neighbor <addr>`. Mirrors `bgp-vrf-neighbor` in
 /// zebra-bgp-vrf.yang.
@@ -105,6 +127,7 @@ pub struct BgpVrfConfig {
     pub rd: Option<RouteDistinguisher>,
     pub router_id: Option<Ipv4Addr>,
     pub label_mode: BgpVrfLabelMode,
+    pub encapsulation: BgpVrfEncapsulation,
     pub neighbors: BTreeMap<IpAddr, BgpVrfNeighborConfig>,
     pub ipv4_unicast: Option<BgpVrfAfConfig<Ipv4Net>>,
     pub ipv6_unicast: Option<BgpVrfAfConfig<Ipv6Net>>,
@@ -169,6 +192,21 @@ pub fn config_vrf_label_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
             cfg.label_mode = BgpVrfLabelMode::parse(&raw)?;
         }
         ConfigOp::Delete => cfg.label_mode = BgpVrfLabelMode::default(),
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> encapsulation {mpls|srv6}`.
+pub fn config_vrf_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => {
+            let raw = args.string()?;
+            cfg.encapsulation = BgpVrfEncapsulation::parse(&raw)?;
+        }
+        ConfigOp::Delete => cfg.encapsulation = BgpVrfEncapsulation::default(),
         _ => {}
     }
     Some(())
@@ -363,6 +401,29 @@ mod tests {
             Some(BgpVrfLabelMode::Nexthop)
         );
         assert_eq!(BgpVrfLabelMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn encapsulation_parse_accepts_yang_enums() {
+        assert_eq!(
+            BgpVrfEncapsulation::parse("mpls"),
+            Some(BgpVrfEncapsulation::Mpls)
+        );
+        assert_eq!(
+            BgpVrfEncapsulation::parse("srv6"),
+            Some(BgpVrfEncapsulation::Srv6)
+        );
+        assert_eq!(BgpVrfEncapsulation::parse("bogus"), None);
+    }
+
+    #[test]
+    fn vrf_config_default_encapsulation_is_mpls() {
+        // YANG default is `mpls` — a VRF with no `encapsulation` leaf
+        // keeps the RFC 4364 MPLS service-label data path.
+        assert_eq!(
+            BgpVrfConfig::default().encapsulation,
+            BgpVrfEncapsulation::Mpls
+        );
     }
 
     #[test]

@@ -271,6 +271,28 @@ module zebra-bgp-vrf {
           "Label allocation strategy for VPN routes originated from
            this VRF. Consulted by the label allocator in step 19.";
       }
+      leaf encapsulation {
+        type enumeration {
+          enum mpls {
+            description
+              "MPLS encapsulation (default, RFC 4364). VPN routes
+               carry an MPLS service label and a PE pops it into the
+               VRF master device.";
+          }
+          enum srv6 {
+            description
+              "SRv6 encapsulation (RFC 9252). The VRF binds a single
+               End.DT46 service SID carved from the global `srv6
+               locator`, advertised in the BGP Prefix-SID attribute;
+               the PE decapsulates into the VRF table via seg6local.
+               Requires a resolved global `srv6 locator`.";
+          }
+        }
+        default "mpls";
+        description
+          "VPN data-plane encapsulation for routes originated from /
+           imported into this VRF.";
+      }
       uses bgp-vrf-neighbor;
       uses bgp-vrf-afi-safi;
     }
