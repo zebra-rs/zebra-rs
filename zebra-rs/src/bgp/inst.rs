@@ -2148,6 +2148,11 @@ impl Bgp {
                     .get(&vrf)
                     .map(|k| k.export_rts_v4.clone())
                     .unwrap_or_default();
+                let advertise_type5 = self
+                    .vrfs
+                    .get(&vrf)
+                    .map(|c| c.evpn_advertise_v4)
+                    .unwrap_or(false);
 
                 // SRv6 L3VPN: for an `encapsulation srv6` VRF, attach
                 // the SRv6 L3 Service TLV (End.DT46 SID) and advertise
@@ -2164,6 +2169,10 @@ impl Bgp {
                 // the global instance interns it.
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
                 let interned = self.attr_store.intern(tagged);
+                // Capture the export-RT-tagged attribute (incl. any SRv6
+                // Prefix-SID) for a parallel EVPN Type-5 origination,
+                // before `interned` is moved into the VPNv4 BgpRib below.
+                let evpn_attr = advertise_type5.then(|| (*interned).clone());
 
                 // VPNv4 NLRI carries a single MPLS label per route.
                 // VRF tasks without an allocator pass `0`, which we
@@ -2280,6 +2289,20 @@ impl Bgp {
                     winners = selected_len,
                     "bgp: export written to LocalRib.v4vpn and advertised to PE peers",
                 );
+
+                // EVPN Type-5: additionally advertise this VRF prefix as
+                // an IP Prefix route reusing the same RD, export RTs,
+                // service label and (SRv6) Prefix-SID. Peer-gated by the
+                // L2VPN/EVPN AFI/SAFI, so it composes with the VPNv4 above.
+                if let Some(attr) = evpn_attr {
+                    self.evpn_originate_type5(
+                        rd,
+                        ipnet::IpNet::V4(prefix),
+                        attr,
+                        label,
+                        srv6_nexthop,
+                    );
+                }
             }
             super::vrf::BgpGlobalMsg::WithdrawExport { vrf, prefix } => {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
@@ -2368,6 +2391,16 @@ impl Bgp {
                     winners = selected.len(),
                     "bgp: export withdrawn from LocalRib.v4vpn and PE peers",
                 );
+
+                // Mirror the EVPN Type-5 withdrawal.
+                let advertise_type5 = self
+                    .vrfs
+                    .get(&vrf)
+                    .map(|c| c.evpn_advertise_v4)
+                    .unwrap_or(false);
+                if advertise_type5 {
+                    self.evpn_withdraw_type5(rd, ipnet::IpNet::V4(prefix));
+                }
             }
             super::vrf::BgpGlobalMsg::ExportV6 {
                 vrf,
@@ -2388,6 +2421,11 @@ impl Bgp {
                     .get(&vrf)
                     .map(|k| k.export_rts_v6.clone())
                     .unwrap_or_default();
+                let advertise_type5 = self
+                    .vrfs
+                    .get(&vrf)
+                    .map(|c| c.evpn_advertise_v6)
+                    .unwrap_or(false);
 
                 // SRv6 L3VPN (VPNv6 over an SRv6 underlay): attach the
                 // End.DT46 SID + advertise the locator next-hop; the
@@ -2397,6 +2435,7 @@ impl Bgp {
 
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
                 let interned = self.attr_store.intern(tagged);
+                let evpn_attr = advertise_type5.then(|| (*interned).clone());
 
                 let label_obj = if label != 0 && srv6_nexthop.is_none() {
                     Some(bgp_packet::Label {
@@ -2494,6 +2533,17 @@ impl Bgp {
                     winners,
                     "bgp: v6 export written to LocalRib.v6vpn and advertised to PE peers",
                 );
+
+                // EVPN Type-5 (IPv6 prefix) — composes with VPNv6 above.
+                if let Some(attr) = evpn_attr {
+                    self.evpn_originate_type5(
+                        rd,
+                        ipnet::IpNet::V6(prefix),
+                        attr,
+                        label,
+                        srv6_nexthop,
+                    );
+                }
             }
             super::vrf::BgpGlobalMsg::WithdrawExportV6 { vrf, prefix } => {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
@@ -2563,6 +2613,16 @@ impl Bgp {
                     winners = selected.len(),
                     "bgp: v6 export withdrawn from LocalRib.v6vpn and PE peers",
                 );
+
+                // Mirror the EVPN Type-5 (IPv6) withdrawal.
+                let advertise_type5 = self
+                    .vrfs
+                    .get(&vrf)
+                    .map(|c| c.evpn_advertise_v6)
+                    .unwrap_or(false);
+                if advertise_type5 {
+                    self.evpn_withdraw_type5(rd, ipnet::IpNet::V6(prefix));
+                }
             }
             super::vrf::BgpGlobalMsg::RegisterPeer { vrf, addr } => {
                 peer_index_register(&mut self.peer_index, vrf, addr);
