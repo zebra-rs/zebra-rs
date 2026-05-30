@@ -120,10 +120,50 @@ impl MpReachAttr {
             false
         };
         if header.afi == Afi::Ip && header.safi == Safi::MplsVpn {
-            let (input, rd) = RouteDistinguisher::parse_be(input)?;
-            let (input, nhop) = be_u32(input)?;
-            let nhop: Ipv4Addr = Ipv4Addr::from(nhop);
-            let nhop = Vpnv4Nexthop { rd, nhop };
+            // VPNv4 next-hop (RFC 4364 §3.2): an 8-octet RD (always
+            // zero on the wire) followed by the next-hop address.
+            // Normally IPv4 (length 12), but RFC 8950 / RFC 9252 allow
+            // an IPv6 next-hop (length 24, or 48 for global ||
+            // link-local) when VPN-IPv4 NLRI rides an SRv6 underlay;
+            // surface the global half.
+            let (input, nhop) = match header.nhop_len {
+                12 => {
+                    let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, addr) = be_u32(input)?;
+                    (
+                        input,
+                        Vpnv4Nexthop {
+                            rd,
+                            nhop: IpAddr::V4(Ipv4Addr::from(addr)),
+                        },
+                    )
+                }
+                24 => {
+                    let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, addr) = be_u128(input)?;
+                    (
+                        input,
+                        Vpnv4Nexthop {
+                            rd,
+                            nhop: IpAddr::V6(Ipv6Addr::from(addr)),
+                        },
+                    )
+                }
+                48 => {
+                    let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, global) = be_u128(input)?;
+                    let (input, _ll_rd) = RouteDistinguisher::parse_be(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (
+                        input,
+                        Vpnv4Nexthop {
+                            rd,
+                            nhop: IpAddr::V6(Ipv6Addr::from(global)),
+                        },
+                    )
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
             let (input, snpa) = be_u8(input)?;
             let (_, updates) =
                 many0_complete(|i| Vpnv4Nlri::parse_nlri(i, add_path)).parse(input)?;

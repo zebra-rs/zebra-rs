@@ -1893,7 +1893,7 @@ impl Bgp {
 
                 let nexthop = bgp_packet::Vpnv4Nexthop {
                     rd,
-                    nhop: self.router_id,
+                    nhop: std::net::IpAddr::V4(self.router_id),
                 };
 
                 let rib = super::route::BgpRib {

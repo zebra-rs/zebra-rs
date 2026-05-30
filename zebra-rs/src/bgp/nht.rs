@@ -148,7 +148,7 @@ pub fn bgp_nexthop_ip(attr: &BgpAttr) -> Option<IpAddr> {
     match attr.nexthop.as_ref()? {
         BgpNexthop::Ipv4(a) => Some(IpAddr::V4(*a)),
         BgpNexthop::Ipv6(a) => Some(IpAddr::V6(*a)),
-        BgpNexthop::Vpnv4(v) => Some(IpAddr::V4(v.nhop)),
+        BgpNexthop::Vpnv4(v) => Some(v.nhop),
         BgpNexthop::Vpnv6(v) => Some(IpAddr::V6(v.nhop)),
         BgpNexthop::Evpn(ip) => Some(*ip),
     }

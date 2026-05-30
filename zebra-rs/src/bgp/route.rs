@@ -3669,7 +3669,7 @@ pub fn route_update_ipv4(
         attrs.nexthop = match rib.nexthop {
             Some(VpnNexthop::V4(ref v4nh)) => Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
                 rd: v4nh.rd,
-                nhop: nexthop,
+                nhop: std::net::IpAddr::V4(nexthop),
             })),
             // A V6 VPN next-hop never reaches the v4 advertise path
             // (v6vpn rows advertise via route_update_ipv6); plain
