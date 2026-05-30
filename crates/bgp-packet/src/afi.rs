@@ -38,6 +38,10 @@ pub enum Safi {
     Flowspec = 133,
     #[strum(serialize = "MUP")]
     Mup = 85,
+    /// SR Policy / SR-TE Policy SAFI (RFC 9830). Used with AFI 1
+    /// (IPv4 endpoint) or AFI 2 (IPv6 endpoint).
+    #[strum(serialize = "SR Policy")]
+    SrTePolicy = 73,
     #[strum(to_string = "Unknown({0})")]
     Unknown(u8),
 }
@@ -149,6 +153,7 @@ impl From<Safi> for u8 {
             Rtc => 132,
             Flowspec => 133,
             Mup => 85,
+            SrTePolicy => 73,
             Unknown(v) => v,
         }
     }
@@ -163,6 +168,7 @@ impl From<u8> for Safi {
             4 => MplsLabel,
             7 => Encap,
             70 => Evpn,
+            73 => SrTePolicy,
             85 => Mup,
             128 => MplsVpn,
             132 => Rtc,
@@ -203,6 +209,7 @@ mod tests {
             Safi::Encap,
             Safi::Evpn,
             Safi::Mup,
+            Safi::SrTePolicy,
             Safi::MplsVpn,
             Safi::Rtc,
             Safi::Flowspec,
