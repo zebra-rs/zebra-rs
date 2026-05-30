@@ -181,6 +181,12 @@ impl Ospf {
         self.show_add("/show/ip/ospf/spf", show_ospf_spf);
         self.show_add("/show/ip/ospf/flex-algo", show_ospf_flex_algo);
         self.show_add("/show/ip/ospf/graph", show_ospf_graph);
+        self.show_add("/show/ip/ospf/ti-lfa", show_ospf_tilfa);
+        self.show_add("/show/ip/ospf/repair-list", show_ospf_repair_list);
+        self.show_add(
+            "/show/ip/ospf/repair-list/detail",
+            show_ospf_repair_list_detail,
+        );
         self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
         self.show_add("/show/ip/ospf/graceful-restart", show_ospf_graceful_restart);
         self.show_add("/show/ip/ospf/checkpoint", show_ospf_checkpoint);
@@ -1952,6 +1958,294 @@ fn show_ospf_graph(
         }
         Ok(buf)
     }
+}
+
+// ---------------------------------------------------------------------
+// TI-LFA (RFC 9490) show commands: `show ip ospf ti-lfa` (graph-level
+// per-destination repair lists) and `show ip ospf repair-list` (the
+// repair backups actually stamped onto the installed RIB).
+// ---------------------------------------------------------------------
+
+fn label_value_str(label: &crate::rib::Label) -> String {
+    match label {
+        crate::rib::Label::Implicit(l) => format!("{l} (implicit-null)"),
+        crate::rib::Label::Explicit(l) => format!("{l}"),
+    }
+}
+
+fn ospf_vertex_name(graph: &spf::Graph, id: usize) -> String {
+    graph
+        .get(&id)
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| format!("v{id}"))
+}
+
+fn format_ospf_sr_segment(graph: &spf::Graph, seg: &spf::SrSegment) -> String {
+    match seg {
+        spf::SrSegment::NodeSid(v) => {
+            format!("Node-SID {} (vertex {})", ospf_vertex_name(graph, *v), v)
+        }
+        // OSPF has no LAN pseudonode in the graph, so `via` is always None.
+        spf::SrSegment::AdjSid(from, to, _via) => format!(
+            "Adj-SID {} -> {} (vertex {} -> {})",
+            ospf_vertex_name(graph, *from),
+            ospf_vertex_name(graph, *to),
+            from,
+            to,
+        ),
+    }
+}
+
+#[derive(Serialize)]
+struct RepairSegmentJson {
+    kind: &'static str,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct RepairRowJson {
+    prefix: String,
+    primary_nexthop: String,
+    primary_ifindex: u32,
+    primary_metric: u32,
+    repair_nexthop: String,
+    repair_ifindex: u32,
+    repair_metric: u32,
+    segments: Vec<RepairSegmentJson>,
+}
+
+#[derive(Serialize)]
+struct RepairListJson {
+    routes: Vec<RepairRowJson>,
+}
+
+/// Walk the installed v4 RIB and collect every prefix whose primary
+/// nexthop carries a stamped TI-LFA repair backup. One row per
+/// (prefix, backed-up nexthop).
+fn collect_ospf_repair_rows(ospf: &Ospf) -> Vec<RepairRowJson> {
+    let mut rows = Vec::new();
+    for (prefix, route) in ospf.rib.iter() {
+        for (addr, nhop) in route.nhops.iter() {
+            let Some(backup) = nhop.backup.as_ref() else {
+                continue;
+            };
+            let segments = backup
+                .labels
+                .iter()
+                .map(|label| RepairSegmentJson {
+                    kind: "sr-mpls",
+                    value: label_value_str(label),
+                })
+                .collect();
+            rows.push(RepairRowJson {
+                prefix: prefix.to_string(),
+                primary_nexthop: addr.to_string(),
+                primary_ifindex: nhop.ifindex,
+                primary_metric: route.metric,
+                repair_nexthop: backup.addr.to_string(),
+                repair_ifindex: backup.ifindex,
+                repair_metric: route
+                    .metric
+                    .saturating_add(super::inst::BACKUP_METRIC_OFFSET),
+                segments,
+            });
+        }
+    }
+    rows
+}
+
+/// `show ip ospf repair-list` — the TI-LFA repair backups installed on
+/// the RIB, one line per protected prefix with its primary and repair
+/// next-hops and the SR-MPLS repair label stack.
+fn show_ospf_repair_list(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let rows = collect_ospf_repair_rows(ospf);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListJson { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        writeln!(buf, "(no TI-LFA repair-list entries)")?;
+        return Ok(buf);
+    }
+    writeln!(
+        buf,
+        "{:<22} {:<18} {:<18} Segments",
+        "Prefix", "Primary via", "Repair via",
+    )?;
+    for row in &rows {
+        let segs: Vec<String> = row.segments.iter().map(|s| s.value.clone()).collect();
+        writeln!(
+            buf,
+            "{:<22} {:<18} {:<18} [{}]",
+            row.prefix,
+            row.primary_nexthop,
+            row.repair_nexthop,
+            segs.join(", "),
+        )?;
+    }
+    Ok(buf)
+}
+
+/// `show ip ospf repair-list detail` — same rows as `repair-list`, but
+/// expanded with per-segment label breakdown and the egress ifindex /
+/// metric of each leg.
+fn show_ospf_repair_list_detail(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let rows = collect_ospf_repair_rows(ospf);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListJson { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        writeln!(buf, "(no TI-LFA repair-list entries)")?;
+        return Ok(buf);
+    }
+    for row in &rows {
+        writeln!(buf, "{}", row.prefix)?;
+        writeln!(
+            buf,
+            "  Primary: via {} (ifindex {}), metric {}",
+            row.primary_nexthop, row.primary_ifindex, row.primary_metric,
+        )?;
+        writeln!(
+            buf,
+            "  Repair:  via {} (ifindex {}), metric {}",
+            row.repair_nexthop, row.repair_ifindex, row.repair_metric,
+        )?;
+        if row.segments.is_empty() {
+            writeln!(buf, "    (trivial repair, no SR segments)")?;
+        } else {
+            for seg in &row.segments {
+                writeln!(buf, "    {} {}", seg.kind, seg.value)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct TilfaSegmentJson {
+    kind: &'static str,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct TilfaRepairJson {
+    first_hop: String,
+    first_hop_vertex: usize,
+    first_hop_link_id: u32,
+    segments: Vec<TilfaSegmentJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaDestJson {
+    destination: String,
+    destination_vertex: usize,
+    repairs: Vec<TilfaRepairJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaJson {
+    destinations: Vec<TilfaDestJson>,
+}
+
+/// `show ip ospf ti-lfa` — the graph-level per-destination repair
+/// paths from the most recent SPF (before RIB stamping), each as a
+/// first-hop plus the SR segment list. Useful for confirming the
+/// algorithm produced a repair even when label resolution later
+/// dropped it (e.g. a peer not advertising the needed Prefix-SID).
+fn show_ospf_tilfa(
+    ospf: &Ospf,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let graph = ospf.graph.as_ref();
+    let tilfa = ospf.tilfa_result.as_ref();
+
+    if json {
+        let destinations = match (graph, tilfa) {
+            (Some(g), Some(t)) => t
+                .iter()
+                .map(|(dest, repairs)| TilfaDestJson {
+                    destination: ospf_vertex_name(g, *dest),
+                    destination_vertex: *dest,
+                    repairs: repairs
+                        .iter()
+                        .map(|rp| TilfaRepairJson {
+                            first_hop: ospf_vertex_name(g, rp.first_hop),
+                            first_hop_vertex: rp.first_hop,
+                            first_hop_link_id: rp.first_hop_link_id,
+                            segments: rp
+                                .segs
+                                .iter()
+                                .map(|seg| TilfaSegmentJson {
+                                    kind: match seg {
+                                        spf::SrSegment::NodeSid(_) => "node-sid",
+                                        spf::SrSegment::AdjSid(..) => "adj-sid",
+                                    },
+                                    description: format_ospf_sr_segment(g, seg),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        return Ok(serde_json::to_string_pretty(&TilfaJson { destinations })
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let mut buf = String::new();
+    let (Some(graph), Some(tilfa)) = (graph, tilfa) else {
+        writeln!(buf, "(no TI-LFA repair paths computed)")?;
+        return Ok(buf);
+    };
+    if tilfa.is_empty() {
+        writeln!(buf, "(no TI-LFA repair paths computed)")?;
+        return Ok(buf);
+    }
+    writeln!(buf, "OSPF TI-LFA repair paths:")?;
+    for (dest, repairs) in tilfa.iter() {
+        writeln!(
+            buf,
+            "  Destination {} (vertex {})",
+            ospf_vertex_name(graph, *dest),
+            dest,
+        )?;
+        for (i, rp) in repairs.iter().enumerate() {
+            writeln!(
+                buf,
+                "    [{}] first-hop {} (vertex {}, link_id {})",
+                i,
+                ospf_vertex_name(graph, rp.first_hop),
+                rp.first_hop,
+                rp.first_hop_link_id,
+            )?;
+            if rp.segs.is_empty() {
+                writeln!(buf, "        segments: (none — direct repair)")?;
+            } else {
+                writeln!(buf, "        segments:")?;
+                for seg in &rp.segs {
+                    writeln!(buf, "          {}", format_ospf_sr_segment(graph, seg))?;
+                }
+            }
+        }
+    }
+    Ok(buf)
 }
 
 /// `show ip ospf graceful-restart` (RFC 3623 helper status).
