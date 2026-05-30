@@ -83,9 +83,19 @@ pub struct SrPolicy {
     /// (the active path's End.B6.Encaps install). Tracked so a change of
     /// active path tears the old one down.
     installed: Option<Srv6Bsid>,
+    /// SR-MPLS Binding SID *label* currently programmed in the LFIB (the
+    /// active path's ILM). `None` when no MPLS install is live. Unlike
+    /// the SRv6 install (immediate), the MPLS ILM is gated on the
+    /// endpoint resolving via NHT, so this is set by `mpls_reconcile`.
+    installed_mpls: Option<u32>,
 }
 
 impl SrPolicy {
+    /// The active candidate path, if one is selected.
+    pub fn active_cp(&self) -> Option<&CandidatePath> {
+        self.active.as_ref().and_then(|k| self.candidates.get(k))
+    }
+
     /// Diff the active path's desired SRv6 Binding-SID install against
     /// what is currently programmed, update the record, and return the
     /// FIB delta the caller applies via the RIB.
@@ -122,12 +132,60 @@ pub struct Srv6Bsid {
     pub segments: Vec<Ipv6Addr>,
 }
 
-/// The FIB change produced by an insert/withdraw: remove an old Binding
-/// SID and/or install a new one. Both `None` means no dataplane change.
+/// The FIB change produced by an insert/withdraw. The SRv6 Binding SID
+/// install is immediate (`remove`/`install`); the SR-MPLS ILM is gated on
+/// NHT, so insert/withdraw only report `mpls_remove` — the LFIB label to
+/// tear down when a withdraw drops a whole policy (the live install/update
+/// is driven by `mpls_reconcile`). All `None` means no dataplane change.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SrPolicyFibDelta {
     pub remove: Option<Ipv6Addr>,
     pub install: Option<Srv6Bsid>,
+    pub mpls_remove: Option<u32>,
+}
+
+/// An SR-MPLS Binding SID install: the incoming BSID label and the
+/// segment list (Type-A labels, top of stack first) the ILM pushes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MplsBsid {
+    pub bsid: u32,
+    pub segments: Vec<u32>,
+}
+
+/// The SR-MPLS Binding-SID install an active candidate path realizes, or
+/// `None` if it isn't an installable SR-MPLS policy (not valid, no MPLS
+/// Binding SID, or its first segment list isn't an all-Type-A list).
+fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
+    if !cp.valid {
+        return None;
+    }
+    let bsid = match &cp.binding_sid {
+        Some(BindingSid::MplsLabel(label)) => *label,
+        _ => return None,
+    };
+    let first = cp.segment_lists.first()?;
+    let segments: Vec<u32> = first
+        .segments
+        .iter()
+        .filter_map(|seg| match seg {
+            Segment::TypeA { label, .. } => Some(*label),
+            _ => None,
+        })
+        .collect();
+    // Only an all-SR-MPLS (Type A) list maps to an ILM label push.
+    if segments.is_empty() || segments.len() != first.segments.len() {
+        return None;
+    }
+    Some(MplsBsid { bsid, segments })
+}
+
+/// The LFIB change `mpls_reconcile` wants applied: remove an old BSID
+/// label and/or install a new one. The install is realized by the caller
+/// toward the endpoint's NHT-resolved next-hop.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MplsIlmAction {
+    pub remove: Option<u32>,
+    pub install: Option<MplsBsid>,
 }
 
 /// The SRv6 Binding-SID install an active candidate path realizes, or
@@ -201,14 +259,62 @@ impl SrPolicyDb {
             .retain(|k, cp| !(k.discriminator == discriminator && cp.peer == peer));
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
+            let mpls_remove = policy.installed_mpls.take();
             self.policies.remove(&key);
             SrPolicyFibDelta {
                 remove,
                 install: None,
+                mpls_remove,
             }
         } else {
             policy.active = select_active(&policy.candidates, prev.as_ref());
             policy.reconcile_fib()
+        }
+    }
+
+    /// Whether the policy's active path is an installable SR-MPLS policy
+    /// (so its endpoint should be NHT-tracked for the ILM install).
+    pub fn wants_mpls(&self, color: u32, endpoint: IpAddr) -> bool {
+        self.policies
+            .get(&SrPolicyKey { color, endpoint })
+            .and_then(|p| p.active_cp())
+            .and_then(mpls_bsid)
+            .is_some()
+    }
+
+    /// Reconcile the SR-MPLS Binding-SID ILM for a *live* policy against
+    /// its active path and the endpoint's reachability, updating the
+    /// recorded install. Returns the LFIB action for the caller to apply
+    /// (it owns the resolved next-hop). A no-op (and no install) when the
+    /// policy is absent — a removed policy's teardown rides
+    /// `SrPolicyFibDelta::mpls_remove` instead. `reachable` is whether the
+    /// endpoint resolved via NHT.
+    pub fn mpls_reconcile(
+        &mut self,
+        color: u32,
+        endpoint: IpAddr,
+        reachable: bool,
+    ) -> MplsIlmAction {
+        let key = SrPolicyKey { color, endpoint };
+        let Some(policy) = self.policies.get_mut(&key) else {
+            return MplsIlmAction::default();
+        };
+        let desired = policy.active_cp().and_then(mpls_bsid);
+        match desired {
+            Some(bsid) if reachable => {
+                // Replace whenever reachable (the resolved next-hop or the
+                // label stack may have changed); drop a stale label first.
+                let remove = policy.installed_mpls.filter(|old| *old != bsid.bsid);
+                policy.installed_mpls = Some(bsid.bsid);
+                MplsIlmAction {
+                    remove,
+                    install: Some(bsid),
+                }
+            }
+            _ => MplsIlmAction {
+                remove: policy.installed_mpls.take(),
+                install: None,
+            },
         }
     }
 }
@@ -573,5 +679,79 @@ mod tests {
             }],
         }];
         assert_eq!(db.insert(key, c), SrPolicyFibDelta::default());
+    }
+
+    /// A valid SR-MPLS candidate path: an MPLS Binding SID label plus a
+    /// one-hop Type-A label stack.
+    fn mpls_cp(disc: u32, pref: u32, peer: usize, bsid: u32, label: u32) -> CandidatePath {
+        let mut c = cp(20, "10.0.0.1", disc, pref, true);
+        c.peer = peer;
+        c.binding_sid = Some(BindingSid::MplsLabel(bsid));
+        c.segment_lists = vec![SegmentList {
+            weight: None,
+            segments: vec![Segment::TypeA { flags: 0, label }],
+        }];
+        c
+    }
+
+    #[test]
+    fn mpls_reconcile_gates_install_on_reachability() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: ep,
+        };
+        db.insert(key, mpls_cp(1, 100, 1, 1000, 16001));
+
+        // Endpoint unresolved → no install yet.
+        assert_eq!(db.mpls_reconcile(100, ep, false), MplsIlmAction::default());
+        // Endpoint resolves → install the BSID ILM.
+        let action = db.mpls_reconcile(100, ep, true);
+        assert_eq!(action.remove, None);
+        assert_eq!(
+            action.install,
+            Some(MplsBsid {
+                bsid: 1000,
+                segments: vec![16001],
+            })
+        );
+        // Endpoint goes unreachable → tear the ILM down.
+        let action = db.mpls_reconcile(100, ep, false);
+        assert_eq!(action.remove, Some(1000));
+        assert_eq!(action.install, None);
+    }
+
+    #[test]
+    fn mpls_reconcile_swaps_label_when_active_path_changes() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: ep,
+        };
+        db.insert(key.clone(), mpls_cp(1, 100, 1, 1000, 16001));
+        assert_eq!(db.mpls_reconcile(100, ep, true).install.unwrap().bsid, 1000);
+        // A higher-preference path with a different BSID label wins.
+        db.insert(key, mpls_cp(2, 200, 2, 2000, 16002));
+        let action = db.mpls_reconcile(100, ep, true);
+        assert_eq!(action.remove, Some(1000));
+        assert_eq!(action.install.unwrap().bsid, 2000);
+    }
+
+    #[test]
+    fn withdrawing_mpls_policy_reports_label_to_remove() {
+        let mut db = SrPolicyDb::default();
+        let ep = endpoint("10.0.0.9");
+        let key = SrPolicyKey {
+            color: 9,
+            endpoint: ep,
+        };
+        db.insert(key, mpls_cp(1, 100, 1, 1000, 16001));
+        // Install it (records installed_mpls).
+        assert!(db.mpls_reconcile(9, ep, true).install.is_some());
+        // Withdrawing the last path reports the LFIB label to tear down.
+        let delta = db.withdraw(9, ep, 1, 1);
+        assert_eq!(delta.mpls_remove, Some(1000));
     }
 }

@@ -40,6 +40,14 @@ pub enum NhtDep {
     /// when the underlay resolves or reroutes. The `EvpnPrefix` is the
     /// RD-stripped key (its `IpPrefix` variant carries the v4/v6 net).
     Evpn(RouteDistinguisher, EvpnPrefix),
+    /// SR Policy (SAFI 73) in `local_rib.sr_policy`. The policy endpoint
+    /// is tracked so the SR-MPLS Binding-SID ILM (re)installs toward the
+    /// resolved next-hop, or is torn down, when the endpoint's
+    /// reachability or transport changes. Keyed by `<color, endpoint>`.
+    SrPolicy {
+        color: u32,
+        endpoint: IpAddr,
+    },
 }
 
 /// How a tracked next-hop's resolution changed, returned by

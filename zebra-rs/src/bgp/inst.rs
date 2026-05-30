@@ -1824,6 +1824,17 @@ impl Bgp {
                     &selected,
                 );
             }
+            // SR Policy: the endpoint's transport rerouted; re-install
+            // the Binding-SID ILM toward the fresh next-hop.
+            NhtDep::SrPolicy { color, endpoint } => {
+                super::route::sr_policy_reconcile_mpls(
+                    &self.ctx.rib,
+                    &self.nexthop_cache,
+                    &mut self.local_rib.sr_policy,
+                    color,
+                    endpoint,
+                );
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
@@ -1875,6 +1886,9 @@ impl Bgp {
             // (the VRF FIB install is gated by transport availability in
             // the dispatch below), so just re-select.
             NhtDep::Evpn(rd, prefix) => self.local_rib.select_best_path_evpn(rd, prefix),
+            // SR Policy has no BGP best-path / advertise step; its ILM is
+            // reconciled in the dispatch below, not via `selected`.
+            NhtDep::SrPolicy { .. } => Vec::new(),
         };
 
         let mut top = super::peer::BgpTop {
@@ -2085,6 +2099,17 @@ impl Bgp {
                         }
                     }
                 }
+            }
+            // SR Policy reachability flip: (re)install or tear down the
+            // Binding-SID ILM via the endpoint's NHT resolution.
+            NhtDep::SrPolicy { color, endpoint } => {
+                super::route::sr_policy_reconcile_mpls(
+                    top.rib_client,
+                    &self.nexthop_cache,
+                    &mut top.local_rib.sr_policy,
+                    *color,
+                    *endpoint,
+                );
             }
         }
     }
