@@ -116,6 +116,41 @@ pub struct IsisTlvExtIsReachEntry {
 }
 
 impl IsisTlvExtIsReachEntry {
+    /// Local IPv4 interface address (sub-TLV 6), if present. Exposed so
+    /// consumers outside this crate (e.g. the BGP-LS producer) can read link
+    /// addresses without naming the module-private `IsisSubTlv` enum, which is
+    /// ambiguous at the crate root (both `neigh` and `prefix` define one).
+    pub fn ipv4_if_addr(&self) -> Option<std::net::Ipv4Addr> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::Ipv4IfAddr(a) => Some(a.addr),
+            _ => None,
+        })
+    }
+
+    /// Remote IPv4 neighbor address (sub-TLV 8), if present.
+    pub fn ipv4_neigh_addr(&self) -> Option<std::net::Ipv4Addr> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::Ipv4NeighAddr(a) => Some(a.addr),
+            _ => None,
+        })
+    }
+
+    /// Local IPv6 interface address (sub-TLV 12), if present.
+    pub fn ipv6_if_addr(&self) -> Option<std::net::Ipv6Addr> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::Ipv6IfAddr(a) => Some(a.addr),
+            _ => None,
+        })
+    }
+
+    /// Remote IPv6 neighbor address (sub-TLV 13), if present.
+    pub fn ipv6_neigh_addr(&self) -> Option<std::net::Ipv6Addr> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::Ipv6NeighAddr(a) => Some(a.addr),
+            _ => None,
+        })
+    }
+
     fn len(&self) -> u8 {
         11 + self.sub_len() // 11 is TLV length without sub TLVs.
     }
