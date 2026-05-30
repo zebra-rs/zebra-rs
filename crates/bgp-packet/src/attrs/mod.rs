@@ -108,3 +108,6 @@ pub use nlri_labeled_unicast::*;
 
 pub mod nlri_srpolicy;
 pub use nlri_srpolicy::*;
+
+pub mod srpolicy;
+pub use srpolicy::*;
