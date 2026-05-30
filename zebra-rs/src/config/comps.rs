@@ -202,6 +202,10 @@ pub fn comps_add_all(
     s: &State,
     list_presence: bool,
 ) {
+    // Leaves/keys tagged `ext:no-sort` keep their YANG enum declaration
+    // order instead of being alphabetized below (e.g. the BGP afi-safi
+    // family list).
+    let mut no_sort = false;
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched => {
             for entry in entry.dir.borrow().iter() {
@@ -220,6 +224,7 @@ pub fn comps_add_all(
                 for subent in entry.dir.borrow().iter() {
                     if &subent.name == key {
                         comps_as_leaf(comps, subent);
+                        no_sort |= subent.extension.contains_key("ext:no-sort");
                         if let Some(dynamic) = subent.extension.get("ext:dynamic")
                             && let Some(candidates) = s.dynamic.get(dynamic)
                         {
@@ -242,6 +247,7 @@ pub fn comps_add_all(
         }
         _ => {
             comps_as_leaf(comps, entry);
+            no_sort |= entry.extension.contains_key("ext:no-sort");
             if let Some(dynamic) = entry.extension.get("ext:dynamic")
                 && let Some(candidates) = s.dynamic.get(dynamic)
             {
@@ -251,9 +257,69 @@ pub fn comps_add_all(
             }
         }
     }
-    comps.sort_by(|a, b| a.name.cmp(&b.name));
+    if !no_sort {
+        comps.sort_by(|a, b| a.name.cmp(&b.name));
+    }
 
     if ymatch_complete(ymatch, list_presence, s.delete) {
         comps_add_cr(comps);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libyang::EnumNode;
+
+    /// Build an `afi-safi`-style list entry: a list keyed on `name`
+    /// whose `name` leaf is an enumeration declared in a deliberately
+    /// non-alphabetical order. `tag_no_sort` controls whether the leaf
+    /// carries the `ext:no-sort` marker.
+    fn afi_safi_list(tag_no_sort: bool) -> Rc<Entry> {
+        let mut name_leaf = Entry::new_leaf("name".to_string());
+        let mut tn = TypeNode::new("enumeration".to_string(), YangType::Enumeration);
+        tn.enum_stmt = ["ipv4", "ipv6", "vpnv4", "vpnv6", "rtcv4", "rtcv6"]
+            .iter()
+            .map(|n| EnumNode::new((*n).to_string()))
+            .collect();
+        name_leaf.type_node = Some(tn);
+        if tag_no_sort {
+            name_leaf
+                .extension
+                .insert("ext:no-sort".to_string(), "true".to_string());
+        }
+
+        let list = Rc::new(Entry::new_list(
+            "afi-safi".to_string(),
+            vec!["name".to_string()],
+        ));
+        list.dir.borrow_mut().push(Rc::new(name_leaf));
+        list
+    }
+
+    fn key_completions(entry: &Rc<Entry>) -> Vec<String> {
+        let s = State::new();
+        let mut comps = Vec::new();
+        comps_add_all(&mut comps, YangMatch::Key, entry, &s, false);
+        comps.into_iter().map(|c| c.name).collect()
+    }
+
+    /// `ext:no-sort` keeps the enum key completions in their YANG
+    /// declaration order (the BGP afi-safi family ordering).
+    #[test]
+    fn enum_key_no_sort_preserves_declaration_order() {
+        assert_eq!(
+            key_completions(&afi_safi_list(true)),
+            vec!["ipv4", "ipv6", "vpnv4", "vpnv6", "rtcv4", "rtcv6"],
+        );
+    }
+
+    /// Without the marker the same enum is alphabetized, as before.
+    #[test]
+    fn enum_key_without_marker_is_alphabetized() {
+        assert_eq!(
+            key_completions(&afi_safi_list(false)),
+            vec!["ipv4", "ipv6", "rtcv4", "rtcv6", "vpnv4", "vpnv6"],
+        );
     }
 }
