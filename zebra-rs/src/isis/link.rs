@@ -401,13 +401,10 @@ pub struct DisStatistics {
     pub last_change: Option<std::time::SystemTime>,
     pub uptime: Option<std::time::SystemTime>,
     pub history: Vec<DisChange>,
-    pub dampening_until: Option<std::time::SystemTime>,
 }
 
 impl DisStatistics {
     const MAX_HISTORY: usize = 50;
-    const FLAP_THRESHOLD: u32 = 5;
-    const DAMPENING_PERIOD_SECS: u64 = 30;
 
     pub fn record_change(
         &mut self,
@@ -441,24 +438,6 @@ impl DisStatistics {
         self.history.push(change);
         if self.history.len() > Self::MAX_HISTORY {
             self.history.remove(0);
-        }
-
-        // Check for flapping and apply dampening
-        if self.flap_count >= Self::FLAP_THRESHOLD {
-            self.dampening_until =
-                Some(now + std::time::Duration::from_secs(Self::DAMPENING_PERIOD_SECS));
-            // isis_warn!(
-            //     "DIS flapping detected, applying dampening for {} seconds",
-            //     Self::DAMPENING_PERIOD_SECS
-            // );
-        }
-    }
-
-    pub fn is_dampened(&self) -> bool {
-        if let Some(until) = self.dampening_until {
-            std::time::SystemTime::now() < until
-        } else {
-            false
         }
     }
 }
@@ -1684,7 +1663,6 @@ pub fn show_dis_statistics(
         current_status: String,
         current_dis: String,
         flap_count: u32,
-        is_dampened: bool,
         uptime: Option<String>,
         last_change: Option<String>,
         history_count: usize,
@@ -1715,7 +1693,6 @@ pub fn show_dis_statistics(
                             current_status: format!("{:?}", link.state.dis_status.get(&level)),
                             current_dis,
                             flap_count: dis_stats.flap_count,
-                            is_dampened: dis_stats.is_dampened(),
                             uptime: dis_stats.uptime.map(format_time_ago),
                             last_change: dis_stats.last_change.map(format_time_ago),
                             history_count: dis_stats.history.len(),
@@ -1729,8 +1706,16 @@ pub fn show_dis_statistics(
 
     let mut buf = String::new();
     writeln!(buf, "DIS Statistics:").unwrap();
-    writeln!(buf, "Interface        Level  Status      DIS              Flaps  Dampened  Uptime     Last Change").unwrap();
-    writeln!(buf, "---------------- ------ ----------- ---------------- ------ --------- ---------- -----------").unwrap();
+    writeln!(
+        buf,
+        "Interface        Level  Status      DIS              Flaps  Uptime     Last Change"
+    )
+    .unwrap();
+    writeln!(
+        buf,
+        "---------------- ------ ----------- ---------------- ------ ---------- -----------"
+    )
+    .unwrap();
 
     for (_, link) in isis.links.iter() {
         if link.config.enabled() {
@@ -1768,13 +1753,12 @@ pub fn show_dis_statistics(
 
                     writeln!(
                         buf,
-                        "{:<16} {:<6} {:<11} {:<16} {:<6} {:<9} {:<10} {}",
+                        "{:<16} {:<6} {:<11} {:<16} {:<6} {:<10} {}",
                         link.state.name,
                         level.digit(),
                         status,
                         current_dis,
                         dis_stats.flap_count,
-                        if dis_stats.is_dampened() { "Yes" } else { "No" },
                         uptime,
                         last_change
                     )
