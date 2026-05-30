@@ -1700,6 +1700,34 @@ fn show_ospf_flex_algo(
             Some(None) => writeln!(buf, "  SPF: no source vertex in per-algo topology")?,
             None => writeln!(buf, "  SPF: not yet computed")?,
         }
+
+        // Per-algo RIB: prefixes forwardable under this algo (those
+        // carrying a per-algo Prefix-SID), with the resolved MPLS label
+        // and the per-algo nexthops.
+        if let Some(rib) = ospf.rib_flex_algo.get(algo) {
+            if rib.iter().next().is_none() {
+                writeln!(buf, "  Routes: none (no per-algo Prefix-SIDs reachable)")?;
+            } else {
+                writeln!(buf, "  Routes:")?;
+                for (prefix, route) in rib.iter() {
+                    let label = route
+                        .sid
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let nh = route
+                        .nhops
+                        .keys()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    writeln!(
+                        buf,
+                        "    {prefix}  metric {}  label {label}  via {nh}",
+                        route.metric
+                    )?;
+                }
+            }
+        }
         writeln!(buf)?;
     }
     Ok(buf)
