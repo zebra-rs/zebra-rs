@@ -1,10 +1,31 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use packet_utils::Algo;
 
 use crate::config::{Args, ConfigOp};
 
 use super::entry::FlexAlgoEntry;
+
+/// Algorithms this router advertises in the SR-Algorithm advertisement
+/// (IS-IS sub-TLV 19, RFC 8667 §3.2; OSPF RI TLV 8, RFC 8665 §3.1).
+/// `Algo::Spf` (algo 0) is always present; every flex-algo entry in
+/// `fa.config` is added as `Algo::FlexAlgo(N)` in sorted order.
+///
+/// Required by RFC 9350 §5.2 / §6: a router that originates a FAD or
+/// participates in a flex-algo MUST list that algo here. The
+/// configuration model treats *any* entry in `flex_algo.config` as
+/// participation — `advertise_definition` controls FAD origination,
+/// not participation. `Algo` is `packet_utils::Algo`, shared by the
+/// IS-IS and OSPF packet crates, so this helper serves both.
+pub fn sr_algorithms(fa: &FlexAlgoConfig) -> Vec<Algo> {
+    let mut algos = Vec::with_capacity(1 + fa.config.len());
+    algos.push(Algo::Spf);
+    for &n in fa.config.keys() {
+        algos.push(Algo::FlexAlgo(n));
+    }
+    algos
+}
 
 /// Staged Flexible Algorithm Definitions (RFC 9350) for one IGP
 /// instance, keyed by algorithm id (128..=255). Protocol-neutral: the
@@ -382,5 +403,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("128..=255"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn sr_algorithms_lists_spf_plus_every_configured_algo() {
+        let mut fa = FlexAlgoConfig::new(P);
+        // No flex-algos yet — should yield exactly Algo::Spf.
+        assert_eq!(sr_algorithms(&fa), vec![Algo::Spf]);
+
+        // Add two flex-algos via any leaf write (participation is
+        // implied by the entry existing, not by advertise_definition).
+        for algo in ["129", "128"] {
+            fa.exec(format!("{P}/priority"), args(&[algo, "200"]), ConfigOp::Set)
+                .unwrap();
+            fa.commit();
+        }
+        // BTreeMap iterates sorted, so flex-algos appear in 128, 129
+        // order after Spf.
+        assert_eq!(
+            sr_algorithms(&fa),
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(129)]
+        );
     }
 }

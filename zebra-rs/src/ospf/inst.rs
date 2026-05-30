@@ -843,7 +843,8 @@ impl Ospf<Ospfv2> {
 
         if self.segment_routing == SegmentRoutingMode::Mpls {
             let gr_capable = self.restarting.is_some();
-            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id, gr_capable);
+            let algos = crate::flex_algo::sr_algorithms(&self.flex_algo);
+            let mut lsa = super::srmpls::router_info_lsa_build(self.router_id, gr_capable, algos);
 
             // Preserve sequence number if re-originating.
             if let Some(area) = self.areas.get(AREA0)
