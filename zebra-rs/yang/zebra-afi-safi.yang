@@ -19,10 +19,11 @@ module zebra-afi-safi {
      Two flavors are provided as groupings supplying the `name` key of
      an `afi-safi` list:
 
-       * `afi-safi`         — the full BGP set (ipv4, ipv6, vpnv4,
-                              vpnv6, evpn, rtcv4, rtcv6, ipv4-flowspec,
-                              ipv6-flowspec). Used by `router bgp`
-                              (global + per-neighbor afi-safi).
+       * `afi-safi`         — the full BGP set (ipv4, ipv6, label-v4,
+                              label-v6, vpnv4, vpnv6, evpn, rtcv4, rtcv6,
+                              ipv4-flowspec, ipv6-flowspec). Used by
+                              `router bgp` (global + per-neighbor
+                              afi-safi).
        * `afi-safi-unicast` — the unicast subset (ipv4, ipv6). Used by
                               `router isis` and the per-VRF BGP afi-safi
                               (which carries the same family names).
@@ -42,6 +43,15 @@ module zebra-afi-safi {
         }
         enum ipv6 {
           description "IPv6 unicast (AFI 2, SAFI 1).";
+        }
+        enum label-v4 {
+          description
+            "IPv4 Labeled Unicast (AFI 1, SAFI 4); RFC 3107 / RFC 8277.";
+        }
+        enum label-v6 {
+          description
+            "IPv6 Labeled Unicast (AFI 2, SAFI 4); RFC 3107 / RFC 8277,
+             incl. 6PE (RFC 4798).";
         }
         enum vpnv4 {
           description "MPLS-labeled VPN-IPv4 (AFI 1, SAFI 128).";
