@@ -1104,10 +1104,12 @@ pub async fn ipv4_nexthop_sync(
             if ifindex == 0 {
                 uni.ifindex_resolved = None;
                 uni.set_valid(false);
-                if uni.is_installed() {
-                    uni.set_installed(false);
-                    // XXX fib.nexthop_del(&Group::Uni(uni.clone())).await;
-                }
+                // Keep `installed`: the kernel nexthop object still
+                // exists. `nexthop_orphan_gc` removes it *after*
+                // `ipv4_route_sync` has withdrawn the routes that
+                // referenced it — deleting a still-referenced nexthop
+                // would cascade-remove those routes out from under the
+                // route sync.
             } else {
                 uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
@@ -2066,9 +2068,9 @@ pub async fn ipv6_nexthop_sync(
             if ifindex == 0 {
                 uni.ifindex_resolved = None;
                 uni.set_valid(false);
-                if uni.is_installed() {
-                    uni.set_installed(false);
-                }
+                // Keep `installed`; `nexthop_orphan_gc` removes the
+                // kernel object after `ipv6_route_sync` (see the v4
+                // path for the ordering rationale).
             } else {
                 uni.ifindex_resolved = Some(ifindex);
                 uni.set_valid(true);
@@ -2081,6 +2083,25 @@ pub async fn ipv6_nexthop_sync(
     }
     if DEBUG_V6 {
         println!("[ipv6_nexthop_sync] done");
+    }
+}
+
+/// Remove kernel nexthop objects for recursive `Uni` groups that went
+/// unresolvable (`!valid` but still `installed`). MUST run after the
+/// IPv4 **and** IPv6 route syncs have withdrawn every route that
+/// referenced them: a nexthop object can't be deleted while a route
+/// still points at it without the kernel cascade-removing that route.
+/// Address-family-agnostic — the kernel object is keyed by `gid`, so a
+/// single pass over `nmap.groups` covers both families.
+pub async fn nexthop_orphan_gc(nmap: &mut NexthopMap, fib: &FibHandle) {
+    for nhop in nmap.groups.iter_mut().flatten() {
+        if let Group::Uni(uni) = nhop
+            && !uni.is_valid()
+            && uni.is_installed()
+        {
+            fib.nexthop_del(&Group::Uni(uni.clone())).await;
+            uni.set_installed(false);
+        }
     }
 }
 

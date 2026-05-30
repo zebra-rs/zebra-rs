@@ -17,6 +17,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
 use crate::rib::route::{
     AddrRecoveryState, ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync,
+    nexthop_orphan_gc,
 };
 use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -1860,6 +1861,12 @@ impl Rib {
                 self.rib_sync_timer = None;
                 self.ipv4_route_resolve().await;
                 self.ipv6_route_resolve().await;
+                // After both families' routes have been (re)selected and
+                // any now-invalid ones withdrawn, drop the kernel
+                // nexthop objects for recursive groups that went
+                // unresolvable — safe to delete only now that nothing
+                // references them.
+                nexthop_orphan_gc(&mut self.nmap, &self.fib_handle).await;
             }
             Message::Subscribe {
                 proto_id,
