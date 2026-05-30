@@ -14,6 +14,14 @@ use std::net::Ipv6Addr;
 pub const BGP_SID_FIRST: u16 = 0x0040;
 pub const BGP_SID_LAST: u16 = 0xDFFF;
 
+// Compile-time invariant: the BGP service-SID band must stay below the
+// IS-IS ELIB range (and above function 0, the node SID) so a shared
+// locator can never collide a BGP End.DT46 function with an IS-IS
+// End.X function. A runtime `assert!` over consts would just be
+// `clippy::assertions_on_constants`, so guard it at compile time.
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(BGP_SID_FIRST > 0 && BGP_SID_LAST < crate::isis::srv6::ELIB_FIRST);
+
 /// First-fit allocator over the BGP service-SID function band. Stable
 /// across individual allocs / frees (a freed function is reused,
 /// keeping `show` output steady) but reset wholesale when the
@@ -110,13 +118,5 @@ mod tests {
         let _ = pool.allocate();
         pool.reset();
         assert_eq!(pool.allocate(), Some(BGP_SID_FIRST));
-    }
-
-    #[test]
-    fn band_sits_below_the_isis_elib_range() {
-        // The whole BGP band must stay under ELIB_FIRST (0xE000) so a
-        // shared locator can't collide BGP DT46 with IS-IS End.X.
-        assert!(BGP_SID_LAST < crate::isis::srv6::ELIB_FIRST);
-        assert!(BGP_SID_FIRST > 0); // never the node SID (function 0)
     }
 }
