@@ -1542,6 +1542,36 @@ fn show_ext_link_detail(
                     )?;
                     writeln!(out, "      Address: {}", addr)?;
                 }
+                ExtLinkSubTlv::Asla(asla) => {
+                    writeln!(out, "    Application-Specific Link Attributes Sub-TLV:")?;
+                    writeln!(
+                        out,
+                        "      SABM: {:02x?}{}",
+                        asla.sabm,
+                        if asla.is_flex_algo() {
+                            " (Flex-Algo)"
+                        } else {
+                            ""
+                        }
+                    )?;
+                    if !asla.udabm.is_empty() {
+                        writeln!(out, "      UDABM: {:02x?}", asla.udabm)?;
+                    }
+                    for sub in &asla.subs {
+                        match sub {
+                            OspfAslaSubSubTlv::ExtAdminGroup(g) => {
+                                writeln!(out, "      Extended Admin Group = {:08x?}", g.words)?;
+                            }
+                            OspfAslaSubSubTlv::Unknown(u) => {
+                                writeln!(
+                                    out,
+                                    "      Unknown Sub-sub-TLV: type={} len={}",
+                                    u.typ, u.len
+                                )?;
+                            }
+                        }
+                    }
+                }
                 ExtLinkSubTlv::Unknown(u) => {
                     writeln!(out, "    Unknown Sub-TLV: type={} len={}", u.typ, u.len)?;
                 }
