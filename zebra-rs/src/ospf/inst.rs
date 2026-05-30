@@ -5577,20 +5577,37 @@ impl Ospf<Ospfv3> {
         {
             let metric = link.output_cost as u16;
             let my_iid = link.interface_id;
+            // Per-link Flex-Algo affinity (RFC 9492 ASLA). Rides the
+            // Router-Link TLV alongside any Adj-SID; a link with
+            // affinity but no Adj-SID still originates the TLV (so the
+            // admin-group is visible to flex-algo SPF), as long as the
+            // adjacency itself is Full — mirrors v2's broadened
+            // Ext-Link origination gate.
+            let asla =
+                super::flex_algo::build_link_asla_v3(&link.config.affinity, &self.affinity_map);
             match link.network_type {
                 OspfNetworkType::PointToPoint => {
-                    if let Some(adjacency_sid) = link.config.adjacency_sid
-                        && let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full)
-                    {
-                        Some((
-                            link.area,
-                            Ospfv3RouterLinkType::PointToPoint,
-                            metric,
-                            my_iid,
-                            nbr.interface_id,
-                            nbr.ident.router_id,
-                            vec![super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid)],
-                        ))
+                    if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
+                        let mut subs = Vec::new();
+                        if let Some(adjacency_sid) = link.config.adjacency_sid {
+                            subs.push(super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid));
+                        }
+                        if let Some(a) = asla.clone() {
+                            subs.push(a);
+                        }
+                        if subs.is_empty() {
+                            None
+                        } else {
+                            Some((
+                                link.area,
+                                Ospfv3RouterLinkType::PointToPoint,
+                                metric,
+                                my_iid,
+                                nbr.interface_id,
+                                nbr.ident.router_id,
+                                subs,
+                            ))
+                        }
                     } else {
                         None
                     }
@@ -5625,7 +5642,7 @@ impl Ospf<Ospfv3> {
                         // used to index `link.nbrs`), not the v6
                         // interface address — RFC 5340 keys v3
                         // neighbor state machines by router-id.
-                        let subs: Vec<_> = link
+                        let mut subs: Vec<_> = link
                             .nbrs
                             .values()
                             .filter(|n| n.state == NfsmState::Full)
@@ -5638,6 +5655,9 @@ impl Ospf<Ospfv3> {
                                 ))
                             })
                             .collect();
+                        if let Some(a) = asla.clone() {
+                            subs.push(a);
+                        }
                         if subs.is_empty() {
                             None
                         } else {

@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ospf_packet::{
-    ExtLinkSubTlv, OSPF_SABM_FLEX_ALGO, OspfAslaSubSubTlv, OspfAslaSubTlv, OspfFadExcludeSrlg,
-    OspfFadFlags, OspfFadSubTlv, Ospfv3FadExcludeSrlg, Ospfv3FadFlags, Ospfv3FadSubTlv,
-    Ospfv3FadTlv, RouterInfoTlvFad,
+    ExtLinkSubTlv, OSPF_SABM_FLEX_ALGO, OSPFV3_SABM_FLEX_ALGO, OspfAslaSubSubTlv, OspfAslaSubTlv,
+    OspfFadExcludeSrlg, OspfFadFlags, OspfFadSubTlv, Ospfv3AslaSubSubTlv, Ospfv3AslaSubTlv,
+    Ospfv3FadExcludeSrlg, Ospfv3FadFlags, Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3SubTlv,
+    RouterInfoTlvFad,
 };
 
 use crate::flex_algo::{
@@ -183,6 +184,23 @@ pub fn build_link_asla(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<
     }))
 }
 
+/// OSPFv3 sibling of `build_link_asla`: build the per-link ASLA sub-TLV
+/// (RFC 9492) that rides as an `Ospfv3SubTlv::Asla` on the E-Router-LSA
+/// Router-Link TLV. Same SABM X-bit framing and empty-bitmap guard as
+/// the v2 builder; only the wire type differs (OSPFv3 sub-TLV 11 with
+/// the Extended Admin Group sub-sub-TLV 21).
+pub fn build_link_asla_v3(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<Ospfv3SubTlv> {
+    let group = local_link_affinity(affinity, am);
+    if group.words.is_empty() {
+        return None;
+    }
+    Some(Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+        sabm: vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
+        udabm: Vec::new(),
+        subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(group)],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +333,37 @@ mod tests {
         assert_eq!(a.sabm.len(), 4, "OSPF SABM must be 0/4/8 octets");
         let g = a.ext_admin_group().expect("admin group");
         assert!(g.get(0) && g.get(200) && !g.get(1));
+    }
+
+    #[test]
+    fn build_link_asla_v3_emits_flex_algo_admin_group() {
+        use ospf_packet::Ospfv3SubTlv;
+
+        let mut am = AffinityMap::new();
+        for (name, bit) in [("blue", "0"), ("red", "200")] {
+            am.exec(
+                "/affinity-map/affinity/bit-position".into(),
+                args(&[name, bit]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            am.commit();
+        }
+        let asla = build_link_asla_v3(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let Ospfv3SubTlv::Asla(a) = &asla else {
+            panic!("expected Asla, got {asla:?}");
+        };
+        assert!(a.is_flex_algo(), "SABM X-bit must be set");
+        assert_eq!(a.sabm.len(), 4, "OSPFv3 SABM must be 0/4/8 octets");
+        let g = a.ext_admin_group().expect("admin group");
+        assert!(g.get(0) && g.get(200) && !g.get(1));
+    }
+
+    #[test]
+    fn build_link_asla_v3_none_when_no_affinity_resolves() {
+        let am = AffinityMap::new();
+        assert!(build_link_asla_v3(&BTreeSet::new(), &am).is_none());
+        assert!(build_link_asla_v3(&affinity_set(&["ghost"]), &am).is_none());
     }
 
     #[test]
