@@ -49,7 +49,7 @@ use crate::parser::GraceLsa;
 
 use super::parser::{AdjSidFlags, PrefixSidFlags};
 use super::{DbDescFlags, OspfType};
-use packet_utils::{Algo, SidLabelTlv};
+use packet_utils::{Algo, ExtAdminGroup, SidLabelTlv};
 
 /// OSPFv3 protocol version (header octet 0).
 pub const OSPFV3_VERSION: u8 = 3;
@@ -1610,6 +1610,24 @@ pub const OSPFV3_SUB_TLV_PREFIX_SID: u16 = 4;
 pub const OSPFV3_SUB_TLV_ADJ_SID: u16 = 6;
 /// LAN-Adj-SID Sub-TLV (RFC 8666 §6.2) carried inside a Router-Link TLV.
 pub const OSPFV3_SUB_TLV_LAN_ADJ_SID: u16 = 7;
+/// Application-Specific Link Attributes (ASLA) Sub-TLV (RFC 9492)
+/// carried inside a Router-Link TLV. For Flex-Algorithm it holds the
+/// per-link Extended Admin Group with the SABM X-bit set.
+pub const OSPFV3_SUB_TLV_ASLA: u16 = 11;
+
+/// Flexible Algorithm Definition (FAD) TLV (RFC 9350) — top-level TLV
+/// inside the SR-info E-Router-LSA, alongside the SR-Algorithm TLV.
+/// Type 16 matches the OSPFv2 RI FAD TLV.
+pub const OSPFV3_EXT_TLV_FAD: u16 = 16;
+
+/// SABM first-octet bit for the Flexible Algorithm application
+/// (RFC 9350 §12, bit 3). Same value as OSPFv2 / IS-IS.
+pub const OSPFV3_SABM_FLEX_ALGO: u8 = 0x10;
+
+/// Extended Administrative Group sub-sub-TLV (RFC 9492) inside an
+/// OSPFv3 ASLA — the per-link affinity bitmap. OSPFv3 uses 21 (OSPFv2
+/// uses 20).
+const OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP: u16 = 21;
 
 /// Prefix-SID Sub-TLV (RFC 8666 §5).
 ///
@@ -1806,6 +1824,7 @@ pub enum Ospfv3SubTlv {
     PrefixSid(Ospfv3PrefixSidSubTlv),
     AdjSid(Ospfv3AdjSidSubTlv),
     LanAdjSid(Ospfv3LanAdjSidSubTlv),
+    Asla(Ospfv3AslaSubTlv),
     Unknown { typ: u16, value: Vec<u8> },
 }
 
@@ -1815,6 +1834,7 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::PrefixSid(s) => s.value_len() as usize,
             Ospfv3SubTlv::AdjSid(s) => s.value_len() as usize,
             Ospfv3SubTlv::LanAdjSid(s) => s.value_len() as usize,
+            Ospfv3SubTlv::Asla(s) => s.value_len(),
             Ospfv3SubTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
@@ -1825,6 +1845,7 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::PrefixSid(s) => (OSPFV3_SUB_TLV_PREFIX_SID, s.value_len()),
             Ospfv3SubTlv::AdjSid(s) => (OSPFV3_SUB_TLV_ADJ_SID, s.value_len()),
             Ospfv3SubTlv::LanAdjSid(s) => (OSPFV3_SUB_TLV_LAN_ADJ_SID, s.value_len()),
+            Ospfv3SubTlv::Asla(s) => (OSPFV3_SUB_TLV_ASLA, s.value_len() as u16),
             Ospfv3SubTlv::Unknown { typ, value } => (*typ, value.len() as u16),
         };
         buf.put_u16(typ);
@@ -1833,6 +1854,7 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::PrefixSid(s) => s.emit(buf),
             Ospfv3SubTlv::AdjSid(s) => s.emit(buf),
             Ospfv3SubTlv::LanAdjSid(s) => s.emit(buf),
+            Ospfv3SubTlv::Asla(s) => s.emit(buf),
             Ospfv3SubTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         let value_len = value_len as usize;
@@ -1859,6 +1881,10 @@ impl Ospfv3SubTlv {
             OSPFV3_SUB_TLV_LAN_ADJ_SID => {
                 let (_, s) = Ospfv3LanAdjSidSubTlv::parse_be(value)?;
                 Ospfv3SubTlv::LanAdjSid(s)
+            }
+            OSPFV3_SUB_TLV_ASLA => {
+                let (_, s) = Ospfv3AslaSubTlv::parse_be(value)?;
+                Ospfv3SubTlv::Asla(s)
             }
             _ => Ospfv3SubTlv::Unknown {
                 typ,
@@ -2182,6 +2208,322 @@ impl Ospfv3SrLocalBlockTlv {
     }
 }
 
+// ── RFC 9350 OSPFv3 Flexible Algorithm codec ──────────────────────
+//
+// Mirrors the OSPFv2 FAD/ASLA codec (parser.rs). The FAD sub-TLV codes
+// (1..=5) and the SABM X-bit (0x10) are shared across IS-IS / OSPFv2 /
+// OSPFv3; OSPFv3 uses its own codepoints for the enclosing TLVs (ASLA
+// sub-TLV 11, Extended Admin Group sub-sub-TLV 21, FAD TLV 16). Framing
+// is the same 2-byte type + 2-byte length + 32-bit-aligned value as
+// every other v3 TLV.
+
+/// FAD Flags sub-TLV (RFC 9350 §7.4). M-flag (Prefix Metric) is the MSB
+/// of byte 0; trailing bytes round-trip flags defined later.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Ospfv3FadFlags {
+    pub m_flag: bool,
+    pub trailing: Vec<u8>,
+}
+
+/// FAD Exclude SRLG sub-TLV (RFC 9350 §7.5): a list of 32-bit SRLGs.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Ospfv3FadExcludeSrlg {
+    pub srlgs: Vec<u32>,
+}
+
+/// One nested sub-TLV under the OSPFv3 FAD TLV.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ospfv3FadSubTlv {
+    ExcludeAg(ExtAdminGroup),
+    IncludeAnyAg(ExtAdminGroup),
+    IncludeAllAg(ExtAdminGroup),
+    Flags(Ospfv3FadFlags),
+    ExcludeSrlg(Ospfv3FadExcludeSrlg),
+    Unknown { typ: u16, value: Vec<u8> },
+}
+
+impl Ospfv3FadSubTlv {
+    fn value_len(&self) -> usize {
+        match self {
+            Ospfv3FadSubTlv::ExcludeAg(g)
+            | Ospfv3FadSubTlv::IncludeAnyAg(g)
+            | Ospfv3FadSubTlv::IncludeAllAg(g) => g.byte_len(),
+            Ospfv3FadSubTlv::Flags(f) => 1 + f.trailing.len(),
+            Ospfv3FadSubTlv::ExcludeSrlg(s) => s.srlgs.len() * 4,
+            Ospfv3FadSubTlv::Unknown { value, .. } => value.len(),
+        }
+    }
+
+    fn wire_len(&self) -> usize {
+        4 + ((self.value_len() + 3) & !3)
+    }
+
+    fn typ(&self) -> u16 {
+        match self {
+            Ospfv3FadSubTlv::ExcludeAg(_) => 1,
+            Ospfv3FadSubTlv::IncludeAnyAg(_) => 2,
+            Ospfv3FadSubTlv::IncludeAllAg(_) => 3,
+            Ospfv3FadSubTlv::Flags(_) => 4,
+            Ospfv3FadSubTlv::ExcludeSrlg(_) => 5,
+            Ospfv3FadSubTlv::Unknown { typ, .. } => *typ,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let value_len = self.value_len();
+        buf.put_u16(self.typ());
+        buf.put_u16(value_len as u16);
+        match self {
+            Ospfv3FadSubTlv::ExcludeAg(g)
+            | Ospfv3FadSubTlv::IncludeAnyAg(g)
+            | Ospfv3FadSubTlv::IncludeAllAg(g) => g.emit(buf),
+            Ospfv3FadSubTlv::Flags(f) => {
+                buf.put_u8(if f.m_flag { 0x80 } else { 0 });
+                buf.put_slice(&f.trailing);
+            }
+            Ospfv3FadSubTlv::ExcludeSrlg(s) => {
+                for v in &s.srlgs {
+                    buf.put_u32(*v);
+                }
+            }
+            Ospfv3FadSubTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
+        let pad = ((value_len + 3) & !3) - value_len;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_one(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        let parsed = match typ {
+            1 => {
+                let (_, g) = ExtAdminGroup::parse_be(value)?;
+                Ospfv3FadSubTlv::ExcludeAg(g)
+            }
+            2 => {
+                let (_, g) = ExtAdminGroup::parse_be(value)?;
+                Ospfv3FadSubTlv::IncludeAnyAg(g)
+            }
+            3 => {
+                let (_, g) = ExtAdminGroup::parse_be(value)?;
+                Ospfv3FadSubTlv::IncludeAllAg(g)
+            }
+            4 => {
+                let m_flag = value.first().is_some_and(|b| b & 0x80 != 0);
+                let trailing = value.get(1..).unwrap_or(&[]).to_vec();
+                Ospfv3FadSubTlv::Flags(Ospfv3FadFlags { m_flag, trailing })
+            }
+            5 => {
+                let mut srlgs = Vec::new();
+                let mut rest = value;
+                while rest.len() >= 4 {
+                    let (r, v) = be_u32(rest)?;
+                    srlgs.push(v);
+                    rest = r;
+                }
+                Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg { srlgs })
+            }
+            _ => Ospfv3FadSubTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            },
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
+    }
+}
+
+/// RFC 9350 §7.1 OSPFv3 Flexible Algorithm Definition TLV (a top-level
+/// E-Router-LSA TLV, type 16): fixed Flex-Algorithm / Metric-Type /
+/// Calc-Type / Priority header plus nested constraint sub-TLVs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3FadTlv {
+    pub flex_algorithm: u8,
+    pub metric_type: u8,
+    pub calc_type: u8,
+    pub priority: u8,
+    pub subs: Vec<Ospfv3FadSubTlv>,
+}
+
+impl Ospfv3FadTlv {
+    fn value_len(&self) -> usize {
+        4 + self.subs.iter().map(|s| s.wire_len()).sum::<usize>()
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flex_algorithm);
+        buf.put_u8(self.metric_type);
+        buf.put_u8(self.calc_type);
+        buf.put_u8(self.priority);
+        for s in &self.subs {
+            s.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flex_algorithm) = be_u8(input)?;
+        let (input, metric_type) = be_u8(input)?;
+        let (input, calc_type) = be_u8(input)?;
+        let (input, priority) = be_u8(input)?;
+        let mut subs = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (r, s) = Ospfv3FadSubTlv::parse_one(rest)?;
+            subs.push(s);
+            rest = r;
+        }
+        Ok((
+            rest,
+            Self {
+                flex_algorithm,
+                metric_type,
+                calc_type,
+                priority,
+                subs,
+            },
+        ))
+    }
+}
+
+/// A link-attribute sub-sub-TLV carried inside an OSPFv3 ASLA sub-TLV.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ospfv3AslaSubSubTlv {
+    /// Extended Administrative Group (RFC 7308), type 21 — the per-link
+    /// affinity bitmap tested by Flex-Algorithm SPF.
+    ExtAdminGroup(ExtAdminGroup),
+    Unknown {
+        typ: u16,
+        value: Vec<u8>,
+    },
+}
+
+impl Ospfv3AslaSubSubTlv {
+    fn value_len(&self) -> usize {
+        match self {
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => g.byte_len(),
+            Ospfv3AslaSubSubTlv::Unknown { value, .. } => value.len(),
+        }
+    }
+
+    fn wire_len(&self) -> usize {
+        4 + ((self.value_len() + 3) & !3)
+    }
+
+    fn typ(&self) -> u16 {
+        match self {
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(_) => OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP,
+            Ospfv3AslaSubSubTlv::Unknown { typ, .. } => *typ,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let value_len = self.value_len();
+        buf.put_u16(self.typ());
+        buf.put_u16(value_len as u16);
+        match self {
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => g.emit(buf),
+            Ospfv3AslaSubSubTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
+        let pad = ((value_len + 3) & !3) - value_len;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_one(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        let parsed = if typ == OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP {
+            let (_, g) = ExtAdminGroup::parse_be(value)?;
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(g)
+        } else {
+            Ospfv3AslaSubSubTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            }
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
+    }
+}
+
+/// RFC 9492 OSPFv3 Application-Specific Link Attributes (ASLA) Sub-TLV
+/// (Router-Link sub-TLV type 11). SABM / UDABM application bitmasks
+/// (0/4/8 octets each) plus link-attribute sub-sub-TLVs. For
+/// Flex-Algorithm the SABM carries the X-bit (`OSPFV3_SABM_FLEX_ALGO`)
+/// and the attribute is the Extended Admin Group sub-sub-TLV.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Ospfv3AslaSubTlv {
+    pub sabm: Vec<u8>,
+    pub udabm: Vec<u8>,
+    pub subs: Vec<Ospfv3AslaSubSubTlv>,
+}
+
+impl Ospfv3AslaSubTlv {
+    fn value_len(&self) -> usize {
+        let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        4 + self.sabm.len() + self.udabm.len() + subs
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.sabm.len() as u8);
+        buf.put_u8(self.udabm.len() as u8);
+        buf.put_u16(0); // reserved
+        buf.put_slice(&self.sabm);
+        buf.put_slice(&self.udabm);
+        for s in &self.subs {
+            s.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, sabm_len) = be_u8(input)?;
+        let (input, udabm_len) = be_u8(input)?;
+        let (input, _reserved) = be_u16(input)?;
+        let (input, sabm) = take(sabm_len as usize)(input)?;
+        let (input, udabm) = take(udabm_len as usize)(input)?;
+        let mut subs = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            let (r, s) = Ospfv3AslaSubSubTlv::parse_one(rest)?;
+            subs.push(s);
+            rest = r;
+        }
+        Ok((
+            rest,
+            Self {
+                sabm: sabm.to_vec(),
+                udabm: udabm.to_vec(),
+                subs,
+            },
+        ))
+    }
+
+    /// True iff the SABM marks this advertisement for Flex-Algorithm
+    /// (RFC 9350 §12 X-bit, first octet).
+    pub fn is_flex_algo(&self) -> bool {
+        self.sabm
+            .first()
+            .is_some_and(|b| b & OSPFV3_SABM_FLEX_ALGO != 0)
+    }
+
+    /// First Extended Admin Group carried in this ASLA, if any.
+    pub fn ext_admin_group(&self) -> Option<&ExtAdminGroup> {
+        self.subs.iter().find_map(|s| match s {
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => Some(g),
+            Ospfv3AslaSubSubTlv::Unknown { .. } => None,
+        })
+    }
+}
+
 /// One top-level TLV inside an Extended LSA body (RFC 8362 §3).
 ///
 /// Typed variants surface the structured shape; everything else
@@ -2194,6 +2536,7 @@ pub enum Ospfv3ExtTlv {
     SrAlgorithm(Ospfv3SrAlgorithmTlv),
     SidLabelRange(Ospfv3SidLabelRangeTlv),
     SrLocalBlock(Ospfv3SrLocalBlockTlv),
+    Fad(Ospfv3FadTlv),
     Unknown { typ: u16, value: Vec<u8> },
 }
 
@@ -2208,6 +2551,7 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SrAlgorithm(t) => t.value_len(),
             Ospfv3ExtTlv::SidLabelRange(t) => t.value_len(),
             Ospfv3ExtTlv::SrLocalBlock(t) => t.value_len(),
+            Ospfv3ExtTlv::Fad(t) => t.value_len(),
             Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
@@ -2220,6 +2564,7 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SrAlgorithm(t) => (OSPFV3_EXT_TLV_SR_ALGORITHM, t.value_len()),
             Ospfv3ExtTlv::SidLabelRange(t) => (OSPFV3_EXT_TLV_SID_LABEL_RANGE, t.value_len()),
             Ospfv3ExtTlv::SrLocalBlock(t) => (OSPFV3_EXT_TLV_LOCAL_BLOCK, t.value_len()),
+            Ospfv3ExtTlv::Fad(t) => (OSPFV3_EXT_TLV_FAD, t.value_len()),
             Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.len()),
         };
         buf.put_u16(typ);
@@ -2230,6 +2575,7 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SrAlgorithm(t) => t.emit(buf),
             Ospfv3ExtTlv::SidLabelRange(t) => t.emit(buf),
             Ospfv3ExtTlv::SrLocalBlock(t) => t.emit(buf),
+            Ospfv3ExtTlv::Fad(t) => t.emit(buf),
             Ospfv3ExtTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         // Pad to 4-byte alignment.
@@ -2264,6 +2610,10 @@ impl Ospfv3ExtTlv {
             OSPFV3_EXT_TLV_LOCAL_BLOCK => {
                 let (_, t) = Ospfv3SrLocalBlockTlv::parse_be(value)?;
                 Ospfv3ExtTlv::SrLocalBlock(t)
+            }
+            OSPFV3_EXT_TLV_FAD => {
+                let (_, t) = Ospfv3FadTlv::parse_be(value)?;
+                Ospfv3ExtTlv::Fad(t)
             }
             _ => Ospfv3ExtTlv::Unknown {
                 typ,
@@ -4253,5 +4603,117 @@ mod tests {
         assert_eq!(parsed_body.tlvs[1], sid_range_index);
         assert_eq!(parsed_body.tlvs[2], sid_range_label);
         assert_eq!(parsed_body.tlvs[3], local_block);
+    }
+
+    fn admin_group(bits: &[u16]) -> ExtAdminGroup {
+        let mut g = ExtAdminGroup::default();
+        for b in bits {
+            g.set(*b);
+        }
+        g
+    }
+
+    /// RFC 9350 §7.1 OSPFv3 FAD TLV (type 16) round-trips through the
+    /// E-Router-LSA codec with every constraint sub-TLV present.
+    #[test]
+    fn ospfv3_fad_tlv_round_trips_in_e_router_lsa() {
+        let fad = Ospfv3FadTlv {
+            flex_algorithm: 128,
+            metric_type: 1, // Min Unidirectional Link Delay
+            calc_type: 0,
+            priority: 200,
+            subs: vec![
+                Ospfv3FadSubTlv::ExcludeAg(admin_group(&[4])),
+                Ospfv3FadSubTlv::IncludeAnyAg(admin_group(&[0, 33])),
+                Ospfv3FadSubTlv::IncludeAllAg(admin_group(&[200])),
+                Ospfv3FadSubTlv::Flags(Ospfv3FadFlags {
+                    m_flag: true,
+                    trailing: Vec::new(),
+                }),
+                Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg {
+                    srlgs: vec![100, 4_000_000_000],
+                }),
+            ],
+        };
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![Ospfv3ExtTlv::Fad(fad.clone())],
+        };
+
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::ERouter(body).emit(&mut buf);
+        assert_eq!(buf.len() % 4, 0, "E-Router body must be 4-byte aligned");
+
+        let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_E_ROUTER_LSA_TYPE).unwrap();
+        assert!(rest.is_empty(), "trailing bytes after E-Router body");
+        let Ospfv3LsBody::ERouter(parsed_body) = parsed else {
+            panic!("expected ERouter variant");
+        };
+        assert_eq!(parsed_body.tlvs.len(), 1);
+        match &parsed_body.tlvs[0] {
+            Ospfv3ExtTlv::Fad(p) => assert_eq!(p, &fad),
+            other => panic!("expected Fad TLV, got {other:?}"),
+        }
+    }
+
+    /// RFC 9492 OSPFv3 ASLA sub-TLV (Router-Link sub-TLV 11) carrying a
+    /// Flex-Algo Extended Admin Group round-trips through the
+    /// E-Router-LSA codec, and the Flex-Algo helpers read it back.
+    #[test]
+    fn ospfv3_asla_ext_admin_group_round_trips_in_e_router_lsa() {
+        let asla = Ospfv3AslaSubTlv {
+            // SABM length must be 0/4/8 — Flex-Algo X-bit in octet 0.
+            sabm: vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(admin_group(&[
+                0, 4, 200,
+            ]))],
+        };
+        let link = Ospfv3RouterLsaLink::new(
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            42,
+            7,
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv {
+                link,
+                subs: vec![Ospfv3SubTlv::Asla(asla.clone())],
+            })],
+        };
+
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::ERouter(body).emit(&mut buf);
+        assert_eq!(buf.len() % 4, 0, "E-Router body must be 4-byte aligned");
+
+        let (rest, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_E_ROUTER_LSA_TYPE).unwrap();
+        assert!(rest.is_empty(), "trailing bytes after E-Router body");
+        let Ospfv3LsBody::ERouter(parsed_body) = parsed else {
+            panic!("expected ERouter variant");
+        };
+        assert_eq!(parsed_body.tlvs.len(), 1);
+        let Ospfv3ExtTlv::RouterLink(rl) = &parsed_body.tlvs[0] else {
+            panic!("expected RouterLink top-level TLV");
+        };
+        assert_eq!(rl.subs.len(), 1);
+        match &rl.subs[0] {
+            Ospfv3SubTlv::Asla(a) => {
+                assert_eq!(a, &asla);
+                assert!(a.is_flex_algo());
+                assert_eq!(a.ext_admin_group(), Some(&admin_group(&[0, 4, 200])));
+            }
+            other => panic!("expected Asla, got {other:?}"),
+        }
+    }
+
+    /// SABM without the X-bit is not treated as a Flex-Algo advert.
+    #[test]
+    fn ospfv3_asla_without_x_bit_is_not_flex_algo() {
+        let asla = Ospfv3AslaSubTlv {
+            sabm: vec![0x80, 0, 0, 0], // R-bit (RSVP-TE) only.
+            udabm: Vec::new(),
+            subs: Vec::new(),
+        };
+        assert!(!asla.is_flex_algo());
     }
 }
