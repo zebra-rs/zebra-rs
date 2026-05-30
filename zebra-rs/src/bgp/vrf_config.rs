@@ -286,8 +286,8 @@ pub fn config_vrf_neighbor_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> afi-safi ipv4-unicast` — presence container.
-pub fn config_vrf_afi_ipv4_unicast(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> afi-safi ipv4` — presence container.
+pub fn config_vrf_afi_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
     match op {
@@ -300,7 +300,7 @@ pub fn config_vrf_afi_ipv4_unicast(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> afi-safi ipv4-unicast network <PREFIX>`.
+/// `set router bgp vrf <NAME> afi-safi ipv4 network <PREFIX>`.
 pub fn config_vrf_afi_ipv4_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
@@ -318,8 +318,8 @@ pub fn config_vrf_afi_ipv4_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> afi-safi ipv6-unicast` — presence container.
-pub fn config_vrf_afi_ipv6_unicast(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp vrf <NAME> afi-safi ipv6` — presence container.
+pub fn config_vrf_afi_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);
     match op {
@@ -332,7 +332,7 @@ pub fn config_vrf_afi_ipv6_unicast(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
     Some(())
 }
 
-/// `set router bgp vrf <NAME> afi-safi ipv6-unicast network <PREFIX>`.
+/// `set router bgp vrf <NAME> afi-safi ipv6 network <PREFIX>`.
 pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let cfg = vrf_entry(bgp, name);

@@ -1603,19 +1603,19 @@ impl Bgp {
             super::vrf_config::config_vrf_neighbor_enabled,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/ipv4-unicast",
-            super::vrf_config::config_vrf_afi_ipv4_unicast,
+            "/router/bgp/vrf/afi-safi/ipv4",
+            super::vrf_config::config_vrf_afi_ipv4,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/ipv4-unicast/network",
+            "/router/bgp/vrf/afi-safi/ipv4/network",
             super::vrf_config::config_vrf_afi_ipv4_network,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/ipv6-unicast",
-            super::vrf_config::config_vrf_afi_ipv6_unicast,
+            "/router/bgp/vrf/afi-safi/ipv6",
+            super::vrf_config::config_vrf_afi_ipv6,
         );
         self.callback_add(
-            "/router/bgp/vrf/afi-safi/ipv6-unicast/network",
+            "/router/bgp/vrf/afi-safi/ipv6/network",
             super::vrf_config::config_vrf_afi_ipv6_network,
         );
 

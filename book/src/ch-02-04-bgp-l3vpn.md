@@ -41,7 +41,7 @@ router bgp {
     neighbor 10.100.0.2 {
       remote-as 65001;
     }
-    afi-safi ipv4-unicast {
+    afi-safi ipv4 {
       network 192.168.5.0/24;
     }
   }
@@ -56,7 +56,7 @@ router bgp {
 | `router bgp vrf <name> rd <RD>` | Route Distinguisher for this VRF's VPN NLRI |
 | `router bgp vrf <name> label-mode per-vrf` | One MPLS label per VRF (the default) |
 | `router bgp vrf <name> neighbor <addr> remote-as <asn>` | A CE peer in the VRF |
-| `router bgp vrf <name> afi-safi ipv4-unicast network <prefix>` | Originate a local route into the VRF |
+| `router bgp vrf <name> afi-safi ipv4 network <prefix>` | Originate a local route into the VRF |
 
 `label-mode` defaults to `per-vrf`: a single label is bound to the
 whole VRF, and the egress lookup that follows the label pop happens in
