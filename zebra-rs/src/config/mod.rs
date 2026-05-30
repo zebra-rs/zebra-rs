@@ -2,6 +2,7 @@ mod vty {
     tonic::include_proto!("vty");
 }
 pub use vty::ApplyCode;
+pub use vty::CommandPath;
 pub use vty::ExecCode;
 
 mod manager;
@@ -26,6 +27,7 @@ pub use comps::Completion;
 
 mod paths;
 pub use paths::path_from_command;
+pub use paths::vrf_redirect_split;
 
 mod api;
 pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Message, ShowChannel};

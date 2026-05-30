@@ -143,6 +143,17 @@ impl RibSubscriber {
         let _ = self.rib_tx.send(crate::rib::Message::SidDel { addr });
     }
 
+    /// Send a `ProtoCleanup` for `proto` to RIB. Used at per-VRF IS-IS
+    /// despawn to drop the child's client-registry / SR / redistribute
+    /// rows; the VRF's FIB routes are reclaimed separately by RIB's
+    /// `VrfDel` handling. Rides the legacy `rib_tx` like the other
+    /// registration-time messages.
+    pub fn send_proto_cleanup(&self, proto: &str) {
+        let _ = self.rib_tx.send(crate::rib::Message::ProtoCleanup {
+            proto: proto.to_string(),
+        });
+    }
+
     /// Request a dynamic MPLS label block of `size` labels for `proto`
     /// from the RIB label manager. The RIB replies asynchronously with
     /// a `RibRx::LabelBlock` on `proto`'s subscriber channel.

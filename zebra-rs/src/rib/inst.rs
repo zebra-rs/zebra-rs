@@ -1185,7 +1185,14 @@ impl Rib {
             "bgp" => RibType::Bgp,
             "isis" => RibType::Isis,
             "ospf" => RibType::Ospf,
-            _ => return,
+            // Protocols with no main-table rtype (e.g. a per-VRF
+            // instance like `"isis:vrf:<name>"`, whose routes live in
+            // `vrf_tables` and are reclaimed by `VrfDel`) still need
+            // their client-registry / SR / redistribute rows dropped.
+            _ => {
+                self.proto_unregister(&proto);
+                return;
+            }
         };
 
         let v4_prefixes: Vec<Ipv4Net> = self

@@ -64,3 +64,5 @@ pub mod flex_algo;
 pub mod auth;
 
 pub mod checkpoint;
+
+pub mod vrf;
