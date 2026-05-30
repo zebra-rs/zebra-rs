@@ -6176,6 +6176,162 @@ impl Bgp {
         }
     }
 
+    /// Redistribute an IPv4 route into the label-v4 (SAFI 4) Loc-RIB.
+    /// The label-v4 sibling of [`Bgp::route_redist_inject`]: same
+    /// `redist_remote_id` discriminator and MED-from-metric, but
+    /// originates into `v4lu` with implicit-null (we are the egress FEC)
+    /// and advertises via the labelv4 path. No FIB install (control-plane
+    /// only; the per-prefix local label + ILM is Phase 5).
+    pub fn route_redist_inject_labelv4(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: Ipv4Net,
+        metric: u32,
+    ) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let mut attr = BgpAttr::new();
+        attr.med = Some(bgp_packet::Med::new(metric));
+        let mut rib = BgpRib::new(
+            ident,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            remote_id,
+            32768,
+            &attr,
+            Some(Label::new(3, 0, true)),
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) = self.local_rib.update_v4lu(prefix, rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    pub fn route_redist_withdraw_labelv4(&mut self, rtype: crate::rib::RibType, prefix: Ipv4Net) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let removed = self.local_rib.remove_v4lu(prefix, remote_id, ident);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path_v4lu(prefix);
+        if !selected.is_empty() || !removed.is_empty() {
+            route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Redistribute an IPv6 route into the label-v6 (SAFI 4) Loc-RIB.
+    /// The v6 counterpart of [`Bgp::route_redist_inject_labelv4`].
+    pub fn route_redist_inject_labelv6(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: Ipv6Net,
+        metric: u32,
+    ) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let mut attr = BgpAttr::new();
+        attr.med = Some(bgp_packet::Med::new(metric));
+        let mut rib = BgpRib::new(
+            ident,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            remote_id,
+            32768,
+            &attr,
+            Some(Label::new(3, 0, true)),
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) = self.local_rib.update_v6lu(prefix, rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    pub fn route_redist_withdraw_labelv6(&mut self, rtype: crate::rib::RibType, prefix: Ipv6Net) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let removed = self.local_rib.remove_v6lu(prefix, remote_id, ident);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path_v6lu(prefix);
+        if !selected.is_empty() || !removed.is_empty() {
+            route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
     /// Originate an EVPN Type-2 (MAC/IP Advertisement) route from a
     /// kernel-learned bridge FDB entry.
     ///

@@ -674,7 +674,10 @@ fn redist_afi_valid(afi_safi: &bgp_packet::AfiSafi) -> bool {
     use bgp_packet::{Afi, Safi};
     matches!(
         (afi_safi.afi, afi_safi.safi),
-        (Afi::Ip, Safi::Unicast) | (Afi::Ip6, Safi::Unicast)
+        (Afi::Ip, Safi::Unicast)
+            | (Afi::Ip6, Safi::Unicast)
+            | (Afi::Ip, Safi::MplsLabel)
+            | (Afi::Ip6, Safi::MplsLabel)
     )
 }
 
