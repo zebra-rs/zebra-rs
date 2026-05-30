@@ -385,6 +385,89 @@ fn select_fib_entry_label(
     build_vpn_fib_entry(service_label, transport)
 }
 
+/// Program the BGP-LU transit swap ILM for `best` (a SAFI-4 best-path
+/// winner). When `best` is a *received* route we allocated a local label
+/// for, install `local → swap to [transport…, received]` toward the
+/// resolved egress so traffic a peer sends us (with our advertised local
+/// label) is forwarded down the LSP. Self-originated winners (we are the
+/// egress) carry no local label. An unresolved next-hop removes the ILM.
+/// AFI-agnostic — the ILM is keyed by the local MPLS label, not the IP
+/// prefix.
+fn reconcile_swap_ilm(
+    rib_client: &crate::rib::client::RibClient,
+    cache: Option<&super::nht::NexthopCache>,
+    best: Option<&BgpRib>,
+) {
+    let Some(best) = best else { return };
+    let Some(local) = best.local_label else {
+        return;
+    };
+    if best.typ == BgpRibType::Originated {
+        return;
+    }
+    let transport = match (cache, super::nht::bgp_nexthop_ip(&best.attr)) {
+        (Some(c), Some(nh)) => c.transport_for(nh),
+        _ => &[][..],
+    };
+    if transport.is_empty() {
+        ilm_swap_remove(rib_client, local);
+        return;
+    }
+    let service_label = best.label.map(|l| l.label).unwrap_or(0);
+    ilm_swap_install(rib_client, local, service_label, transport);
+}
+
+/// Send `Message::IlmAdd` for a swap entry at `local_label`. The outgoing
+/// label stack `[transport labels…, service_label]` rides `mpls_label`
+/// (the ILM swap field, distinct from `mpls` used by IP-route installs);
+/// the egress address/ifindex mirror [`build_vpn_fib_entry`].
+fn ilm_swap_install(
+    rib_client: &crate::rib::client::RibClient,
+    local_label: u32,
+    service_label: u32,
+    transport: &[rib::nht::ResolvedNexthop],
+) {
+    let mk_uni = |egress: &rib::nht::ResolvedNexthop| {
+        let mut uni = rib::NexthopUni::new(egress.addr, 0, Vec::new());
+        let mut labels = egress.labels.clone();
+        if service_label != 0 {
+            labels.push(service_label);
+        }
+        uni.mpls_label = labels;
+        if egress.ifindex != 0 {
+            uni.ifindex_origin = Some(egress.ifindex);
+        }
+        uni.valid = true;
+        uni
+    };
+    let nexthop = if transport.len() == 1 {
+        rib::Nexthop::Uni(mk_uni(&transport[0]))
+    } else {
+        let mut multi = rib::NexthopMulti::default();
+        for egress in transport {
+            multi.nexthops.push(mk_uni(egress));
+        }
+        rib::Nexthop::Multi(multi)
+    };
+    let mut ilm = rib::inst::IlmEntry::new(rib::RibType::Bgp);
+    ilm.ilm_type = rib::inst::IlmType::Swap;
+    ilm.nexthop = nexthop;
+    let _ = rib_client.send(rib::Message::IlmAdd {
+        label: local_label,
+        ilm,
+    });
+}
+
+/// Tear down the swap ILM at `local_label` (route withdrawn / next-hop
+/// unresolved). The RIB ignores a Del for a label it never installed.
+fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_label: u32) {
+    let ilm = rib::inst::IlmEntry::new(rib::RibType::Bgp);
+    let _ = rib_client.send(rib::Message::IlmDel {
+        label: local_label,
+        ilm,
+    });
+}
+
 /// Install / reconcile the kernel FIB for an IPv4 Labeled-Unicast prefix
 /// (ingress LSR: push the label toward the BGP next-hop). Takes the RIB
 /// client + NHT cache directly (not a `BgpTop`) so it is callable both
@@ -411,6 +494,7 @@ pub(super) fn fib_install_labelv4(
             let _ = rib_client.send(rib::Message::Ipv4Del { prefix, rib: stub });
         }
     }
+    reconcile_swap_ilm(rib_client, cache, selected.first());
 }
 
 /// IPv6 counterpart of [`fib_install_labelv4`] (incl. 6PE — the resolved
@@ -437,6 +521,7 @@ pub(super) fn fib_install_labelv6(
             let _ = rib_client.send(rib::Message::Ipv6Del { prefix, rib: stub });
         }
     }
+    reconcile_swap_ilm(rib_client, cache, selected.first());
 }
 
 /// Walk the route's Color extcomms in order, look each up in
@@ -509,6 +594,12 @@ pub struct BgpRib {
     pub best_reason: Reason,
     // Label.
     pub label: Option<Label>,
+    /// BGP-LU local label we allocated for this prefix (SAFI 4 only).
+    /// When set and the route is re-advertised with next-hop-self, this
+    /// label is sent in the NLRI (instead of `label`, the received one)
+    /// and an ILM swaps it to `label` toward the resolved transport.
+    /// `None` for unicast/VPN/EVPN rows and for next-hop-unchanged.
+    pub local_label: Option<u32>,
     // VPN next-hop (v4vpn / v6vpn rows); `None` for unicast rows.
     pub nexthop: Option<VpnNexthop>,
     /// Next-Hop Tracking gate: `false` when this path's BGP next-hop is
@@ -588,6 +679,7 @@ impl BgpRib {
             best_path: false,
             best_reason: Reason::NotSelected,
             label,
+            local_label: None,
             nexthop,
             nexthop_reachable: true,
             egress_ifindex_v6: None,
@@ -2980,6 +3072,14 @@ pub fn route_labelv4_update(
     // reachability and resolve its transport for the FIB label-push.
     let dep = super::nht::NhtDep::V4lu(lu.nlri.prefix);
     nht_track_received(bgp, &mut rib, dep.clone());
+    // Allocate a per-prefix local label so re-advertising with
+    // next-hop-self forwards via a swap ILM (Phase 5b). `None` when no
+    // dynamic block is granted yet — advertise the received label until
+    // then.
+    rib.local_label = bgp
+        .lu_labels
+        .as_mut()
+        .and_then(|ll| ll.label_v4(lu.nlri.prefix));
     let (replaced, selected, _next_id) = bgp.local_rib.update_v4lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.local_rib.candidate_nexthops_v4lu(lu.nlri.prefix);
@@ -3064,6 +3164,10 @@ pub fn route_labelv6_update(
     rib.attr = bgp.attr_store.intern(attr);
     let dep = super::nht::NhtDep::V6lu(lu.nlri.prefix);
     nht_track_received(bgp, &mut rib, dep.clone());
+    rib.local_label = bgp
+        .lu_labels
+        .as_mut()
+        .and_then(|ll| ll.label_v6(lu.nlri.prefix));
     let (replaced, selected, _next_id) = bgp.local_rib.update_v6lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.local_rib.candidate_nexthops_v6lu(lu.nlri.prefix);
@@ -3106,6 +3210,17 @@ pub fn route_labelv4_withdraw(
         );
     }
     let selected = bgp.local_rib.select_best_path_v4lu(nlri.prefix);
+    // Prefix fully gone: release its local label and tear down the swap
+    // ILM. (A surviving winner keeps the same per-prefix label, whose ILM
+    // `fib_install_labelv4` reconciles below.)
+    if selected.is_empty()
+        && let Some(local) = bgp
+            .lu_labels
+            .as_mut()
+            .and_then(|ll| ll.free_v4(nlri.prefix))
+    {
+        ilm_swap_remove(bgp.rib_client, local);
+    }
     fib_install_labelv4(
         bgp.rib_client,
         bgp.nexthop_cache.as_deref(),
@@ -3141,6 +3256,14 @@ pub fn route_labelv6_withdraw(
         );
     }
     let selected = bgp.local_rib.select_best_path_v6lu(nlri.prefix);
+    if selected.is_empty()
+        && let Some(local) = bgp
+            .lu_labels
+            .as_mut()
+            .and_then(|ll| ll.free_v6(nlri.prefix))
+    {
+        ilm_swap_remove(bgp.rib_client, local);
+    }
     fib_install_labelv6(
         bgp.rib_client,
         bgp.nexthop_cache.as_deref(),
@@ -4804,7 +4927,16 @@ fn route_update_labelv4(
     }
 
     attrs.nexthop = None;
-    let label = rib.label.unwrap_or(Label::new(3, 0, true));
+    // Next-hop-self makes us the forwarding hop: advertise our per-prefix
+    // local label (swap-programmed via an ILM) so a peer's labeled
+    // traffic reaches us with a label we can swap to the received one.
+    // No local label (self-originated egress, or no dynamic block yet) →
+    // implicit-null / received-label fallback. Next-hop-unchanged passes
+    // the received label through untouched.
+    let label = match (needs_self, rib.local_label) {
+        (true, Some(l)) => Label::new(l, 0, true),
+        _ => rib.label.unwrap_or(Label::new(3, 0, true)),
+    };
     Some((nlri, attrs, nhop, label))
 }
 
@@ -4872,7 +5004,16 @@ fn route_update_labelv6(
     }
 
     attrs.nexthop = None;
-    let label = rib.label.unwrap_or(Label::new(3, 0, true));
+    // Next-hop-self makes us the forwarding hop: advertise our per-prefix
+    // local label (swap-programmed via an ILM) so a peer's labeled
+    // traffic reaches us with a label we can swap to the received one.
+    // No local label (self-originated egress, or no dynamic block yet) →
+    // implicit-null / received-label fallback. Next-hop-unchanged passes
+    // the received label through untouched.
+    let label = match (needs_self, rib.local_label) {
+        (true, Some(l)) => Label::new(l, 0, true),
+        _ => rib.label.unwrap_or(Label::new(3, 0, true)),
+    };
     Some((nlri, attrs, nhop, label))
 }
 
@@ -5997,6 +6138,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -6039,6 +6181,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -6097,6 +6240,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -6131,6 +6275,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path_v4lu(prefix);
@@ -6184,6 +6329,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         fib_install_labelv6(
@@ -6216,6 +6362,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path_v6lu(prefix);
@@ -6301,6 +6448,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -6341,6 +6489,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path(prefix);
@@ -6405,6 +6554,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -6440,6 +6590,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path_v4lu(prefix);
@@ -6497,6 +6648,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         fib_install_labelv6(
@@ -6530,6 +6682,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         let selected = bgp_ref.local_rib.select_best_path_v6lu(prefix);
@@ -6664,6 +6817,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         if !selected.is_empty() {
@@ -6780,6 +6934,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         if !selected.is_empty() {
@@ -6883,6 +7038,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
+            lu_labels: None,
         };
 
         if !selected.is_empty() {

@@ -1484,6 +1484,7 @@ fn write_ilm_entry(
             table_id,
             vrf_ifindex: _,
         } => format!("VPN Decap (tbl {:<3})", table_id),
+        super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::None => {
             // Try to find a matching route for this nexthop
             if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
@@ -1538,6 +1539,7 @@ fn ilm_to_json(
             table_id,
             vrf_ifindex: _,
         } => format!("VPN Decap (tbl {})", table_id),
+        super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::None => {
             if let Some((prefix, _)) = find_route_for_nexthop(rib, uni) {
                 prefix.to_string()

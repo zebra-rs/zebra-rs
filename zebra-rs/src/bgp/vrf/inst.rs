@@ -434,6 +434,7 @@ impl BgpVrf {
                     nexthop_cache: None,
                     vrf_transport_v4: Some(&self.transport_v4),
                     vrf_transport_v6: Some(&self.transport_v6),
+                    lu_labels: None,
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
@@ -520,6 +521,7 @@ impl BgpVrf {
             best_path: false,
             best_reason: super::super::route::Reason::Default,
             label: label_obj,
+            local_label: None,
             // v4-unicast rows in LocRIB don't read the
             // Vpnv4-shaped `nexthop` slot; FIB install pulls
             // from `attr.nexthop` set above.
@@ -560,6 +562,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
+            lu_labels: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -619,6 +622,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
+            lu_labels: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -686,6 +690,7 @@ impl BgpVrf {
             best_path: false,
             best_reason: super::super::route::Reason::Default,
             label: label_obj,
+            local_label: None,
             nexthop: None,
             nexthop_reachable: true,
             egress_ifindex_v6: None,
@@ -718,6 +723,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
+            lu_labels: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,
@@ -767,6 +773,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
+            lu_labels: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,

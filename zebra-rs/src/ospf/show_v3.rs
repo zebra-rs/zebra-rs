@@ -1037,6 +1037,7 @@ fn fmt_ilm_type(t: &crate::rib::inst::IlmType) -> String {
         crate::rib::inst::IlmType::DecapVrf { table_id, .. } => {
             format!("Pop DecapVrf (table {})", table_id)
         }
+        crate::rib::inst::IlmType::Swap => "Swap LU".to_string(),
     }
 }
 
