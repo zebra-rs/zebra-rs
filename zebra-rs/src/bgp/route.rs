@@ -3669,7 +3669,16 @@ pub fn route_update_ipv4(
         attrs.nexthop = match rib.nexthop {
             Some(VpnNexthop::V4(ref v4nh)) => Some(BgpNexthop::Vpnv4(Vpnv4Nexthop {
                 rd: v4nh.rd,
-                nhop: std::net::IpAddr::V4(nexthop),
+                // SRv6 L3VPN (RFC 9252): a VPNv4 route advertised with an
+                // SRv6 L3 Service SID carries the PE's locator (an IPv6
+                // address stored on the row) as its next-hop — keep it
+                // rather than next-hop-self. MPLS-mode rows next-hop-self
+                // with the local IPv4.
+                nhop: if attrs.srv6_l3_sid().is_some() {
+                    v4nh.nhop
+                } else {
+                    std::net::IpAddr::V4(nexthop)
+                },
             })),
             // A V6 VPN next-hop never reaches the v4 advertise path
             // (v6vpn rows advertise via route_update_ipv6); plain
@@ -3775,7 +3784,14 @@ pub fn route_update_ipv6(
         attrs.nexthop = match rib.nexthop {
             Some(VpnNexthop::V6(ref v6nh)) => Some(BgpNexthop::Vpnv6(Vpnv6Nexthop {
                 rd: v6nh.rd,
-                nhop: local_v6,
+                // SRv6 L3VPN: a VPNv6 route with an SRv6 L3 Service SID
+                // advertises the PE's locator (stored on the row) as the
+                // next-hop; MPLS-mode rows next-hop-self with local_v6.
+                nhop: if attrs.srv6_l3_sid().is_some() {
+                    v6nh.nhop
+                } else {
+                    local_v6
+                },
             })),
             _ => Some(BgpNexthop::Ipv6(local_v6)),
         };
