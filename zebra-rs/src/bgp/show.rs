@@ -2092,6 +2092,144 @@ fn show_bgp_evpn(
     Ok(buf)
 }
 
+/// Render the Flow Specification traffic-filtering actions carried in a
+/// path's extended communities into a compact, comma-joined string.
+/// Non-action extended communities are ignored; `-` is returned when
+/// the path carries no flow-spec action.
+fn show_flowspec_actions(attr: &BgpAttr) -> String {
+    let Some(ecom) = &attr.ecom else {
+        return String::from("-");
+    };
+    let mut parts = Vec::new();
+    for v in ecom.0.iter() {
+        let Some(action) = v.as_flowspec_action() else {
+            continue;
+        };
+        parts.push(match action {
+            FlowspecAction::TrafficRateBytes { rate, .. } => {
+                if rate == 0.0 {
+                    "discard".to_string()
+                } else {
+                    format!("rate-bytes:{rate}")
+                }
+            }
+            FlowspecAction::TrafficRatePackets { rate, .. } => format!("rate-pkts:{rate}"),
+            FlowspecAction::TrafficAction { terminal, sample } => {
+                format!("traffic-action(terminal={terminal},sample={sample})")
+            }
+            FlowspecAction::RedirectAs2 { asn, value } => format!("redirect:{asn}:{value}"),
+            FlowspecAction::RedirectIpv4 { addr, value } => format!("redirect:{addr}:{value}"),
+            FlowspecAction::RedirectAs4 { asn, value } => format!("redirect:{asn}:{value}"),
+            FlowspecAction::TrafficMarking { dscp } => format!("mark-dscp:{dscp}"),
+        });
+    }
+    if parts.is_empty() {
+        String::from("-")
+    } else {
+        parts.join(",")
+    }
+}
+
+/// `show ip bgp flowspec [ipv6]` — list the Flow Specification rules in
+/// Adj-RIB-In across all peers for the given AFI, each with its decoded
+/// traffic-filtering actions and the advertising neighbor. Phase 1 is
+/// receive-only: there is no Loc-RIB / best-path for flow specs yet, so
+/// this is the raw received view.
+fn show_bgp_flowspec(
+    bgp: &Bgp,
+    afi: Afi,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        return Ok(String::from("[]"));
+    }
+
+    let family = if afi == Afi::Ip6 { "IPv6" } else { "IPv4" };
+    let mut buf = String::new();
+    writeln!(buf, "{family} Flow Specification (Adj-RIB-In, received):")?;
+
+    let mut any = false;
+    for (addr, peer) in bgp.peers.iter() {
+        let table = if afi == Afi::Ip6 {
+            &peer.adj_in.flowspec_v6
+        } else {
+            &peer.adj_in.flowspec_v4
+        };
+        // BTreeMap iteration yields the flow specs in RFC 8955 §5.1
+        // precedence order (most-specific first).
+        for (nlri, ribs) in table.0.iter() {
+            for rib in ribs.iter() {
+                any = true;
+                writeln!(buf, " * match:  {nlri}")?;
+                writeln!(
+                    buf,
+                    "   action: {}   from {}",
+                    show_flowspec_actions(&rib.attr),
+                    addr
+                )?;
+            }
+        }
+    }
+    if !any {
+        writeln!(buf, "  (no flow specifications received)")?;
+    }
+    Ok(buf)
+}
+
+fn show_bgp_flowspec_v4(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_flowspec(bgp, Afi::Ip, json)
+}
+
+fn show_bgp_flowspec_v6(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_flowspec(bgp, Afi::Ip6, json)
+}
+
+#[cfg(test)]
+mod flowspec_show_tests {
+    use super::*;
+
+    #[test]
+    fn actions_render_discard_and_marking() {
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity(vec![
+                FlowspecAction::TrafficRateBytes { asn: 0, rate: 0.0 }.into(),
+                FlowspecAction::TrafficMarking { dscp: 46 }.into(),
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(show_flowspec_actions(&attr), "discard,mark-dscp:46");
+    }
+
+    #[test]
+    fn actions_empty_renders_dash() {
+        let attr = BgpAttr::default();
+        assert_eq!(show_flowspec_actions(&attr), "-");
+    }
+
+    #[test]
+    fn actions_ignore_non_flowspec_ecom() {
+        // A Route-Target (0x00/0x02) is not a flow-spec action and must
+        // not appear in the rendered action list.
+        let attr = BgpAttr {
+            ecom: Some(ExtCommunity(vec![ExtCommunityValue {
+                high_type: 0x00,
+                low_type: 0x02,
+                val: [0, 100, 0, 0, 0, 200],
+            }])),
+            ..Default::default()
+        };
+        assert_eq!(show_flowspec_actions(&attr), "-");
+    }
+}
+
 #[cfg(test)]
 mod evpn_show_tests {
     use super::*;
@@ -2641,6 +2779,8 @@ impl Bgp {
         );
         self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
         self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);
+        self.show_add("/show/ip/bgp/flowspec", show_bgp_flowspec_v4);
+        self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
         // self.show_add("/show/community-list", show_community_list);
         self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
         self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
