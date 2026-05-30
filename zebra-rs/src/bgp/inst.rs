@@ -1790,6 +1790,27 @@ impl Bgp {
                     }
                 }
             }
+            // Labeled-Unicast: the next-hop's transport rerouted but it's
+            // still reachable; re-install the FIB label-push entry with
+            // the fresh transport. No re-advertise (best-path unchanged).
+            NhtDep::V4lu(p) => {
+                let selected = self.local_rib.select_best_path_v4lu(p);
+                super::route::fib_install_labelv4(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    p,
+                    &selected,
+                );
+            }
+            NhtDep::V6lu(p) => {
+                let selected = self.local_rib.select_best_path_v6lu(p);
+                super::route::fib_install_labelv6(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    p,
+                    &selected,
+                );
+            }
             NhtDep::V4(_) | NhtDep::V6(_) => {}
         }
     }
@@ -1812,6 +1833,14 @@ impl Bgp {
             NhtDep::V6(p) => {
                 self.local_rib.v6.set_nexthop_reachable(*p, nh, reachable);
                 self.local_rib.v6.select_best_path(*p)
+            }
+            NhtDep::V4lu(p) => {
+                self.local_rib.v4lu.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v4lu.select_best_path(*p)
+            }
+            NhtDep::V6lu(p) => {
+                self.local_rib.v6lu.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v6lu.select_best_path(*p)
             }
             NhtDep::V4vpn(rd, p) => {
                 self.local_rib
@@ -1866,6 +1895,38 @@ impl Bgp {
             NhtDep::V6(p) => {
                 super::route::fib_install_v6(&top, *p, &selected);
                 super::route::route_advertise_to_peers_v6(*p, &selected, &mut top, &mut self.peers);
+            }
+            // Labeled-Unicast reachability flip: re-install the FIB
+            // label-push entry (or withdraw) and re-advertise. The cache
+            // is passed directly (not via `top`, whose `nexthop_cache` is
+            // `None`) — `top`'s borrows don't include it.
+            NhtDep::V4lu(p) => {
+                super::route::fib_install_labelv4(
+                    top.rib_client,
+                    Some(&self.nexthop_cache),
+                    *p,
+                    &selected,
+                );
+                super::route::route_advertise_to_peers_labelv4(
+                    *p,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
+            }
+            NhtDep::V6lu(p) => {
+                super::route::fib_install_labelv6(
+                    top.rib_client,
+                    Some(&self.nexthop_cache),
+                    *p,
+                    &selected,
+                );
+                super::route::route_advertise_to_peers_labelv6(
+                    *p,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
             }
             NhtDep::V4vpn(rd, p) => {
                 super::route::route_advertise_to_peers(
