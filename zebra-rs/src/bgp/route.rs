@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bgp_packet::*;
 use bytes::BytesMut;
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::{Prefix, PrefixMap};
 
 use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
@@ -5396,6 +5396,99 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// Originate (or refresh) an EVPN Type-5 (IP Prefix) route for a
+    /// VRF route the global Export handler is re-emitting. The L3VPN
+    /// service rides exactly as it does for VPNv4/VPNv6: an MPLS
+    /// service `label` carried on the `BgpRib` (MPLS mode), or the
+    /// SRv6 L3 Service TLV already attached to `attr` by
+    /// `srv6_export_nexthop` (SRv6 mode, `label` 0). The route is
+    /// inserted into `local_rib.evpn` and advertised to peers that
+    /// negotiated the (L2vpn, Evpn) AFI/SAFI — so this composes with,
+    /// rather than replaces, the VPNv4/VPNv6 advertisement of the same
+    /// prefix.
+    ///
+    /// `attr` is the already export-RT-tagged attribute the Export
+    /// handler interned for VPNv4/VPNv6; we set the EVPN next-hop
+    /// (the PE router-id for MPLS, the locator for SRv6) and re-use it.
+    pub fn evpn_originate_type5(
+        &mut self,
+        rd: RouteDistinguisher,
+        net: IpNet,
+        mut attr: BgpAttr,
+        label: u32,
+        srv6_nexthop: Option<std::net::Ipv6Addr>,
+    ) {
+        let prefix = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: net,
+        };
+        let nexthop = match srv6_nexthop {
+            Some(v6) => IpAddr::V6(v6),
+            None => IpAddr::V4(self.router_id),
+        };
+        attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
+        // MPLS: the service label rides on the BgpRib (mirrored by the
+        // Type-5 NLRI emit in `route_update_evpn`). SRv6: label 0, the
+        // SID is in `attr.prefix_sid`.
+        let label_obj = if label != 0 && srv6_nexthop.is_none() {
+            Some(bgp_packet::Label {
+                label,
+                exp: 0,
+                bos: true,
+            })
+        } else {
+            None
+        };
+        let mut rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            label_obj,
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) =
+            self.local_rib.update_evpn(rd, prefix.clone(), rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+        };
+
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Inverse of `evpn_originate_type5`: withdraw the EVPN Type-5
+    /// advertisement for `(rd, net)` from `local_rib.evpn` and every
+    /// EVPN peer. Called from the VRF withdraw-export handlers.
+    pub fn evpn_withdraw_type5(&mut self, rd: RouteDistinguisher, net: IpNet) {
+        let prefix = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: net,
+        };
+        let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+        let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
     /// Originate a Type-3 (Inclusive Multicast Ethernet Tag) route
     /// for one local VTEP×VNI pair (RFC 7432 §4.3, §11.3 + RFC 8365
     /// §5.1.3). One IMET per VNI tells remote PEs "send your BUM
@@ -7350,5 +7443,47 @@ mod tests {
     fn fib_entry_v6_skipped_when_nexthop_missing() {
         let rib = bgp_rib_with_nexthop(None, super::BgpRibType::EBGP);
         assert!(super::make_bgp_rib_entry_v6(&rib).is_none());
+    }
+
+    /// The advertise/withdraw reconstruction maps an `EvpnPrefix::IpPrefix`
+    /// key back to a Type-5 wire route: same RD/eth-tag/prefix, a
+    /// family-matched unspecified gateway, label 0 (withdraw semantics),
+    /// and a zero ESI.
+    #[test]
+    fn evpn_route_from_prefix_type5_v4() {
+        use bgp_packet::{EvpnPrefix, EvpnRoute, RouteDistinguisher};
+        let rd = RouteDistinguisher::from_str("65000:100").unwrap();
+        let prefix = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: "10.1.2.0/24".parse().unwrap(),
+        };
+        match super::evpn_route_from_prefix(&rd, &prefix, 0) {
+            EvpnRoute::Prefix(p) => {
+                assert_eq!(p.rd, rd);
+                assert_eq!(p.ether_tag, 0);
+                assert_eq!(p.prefix.to_string(), "10.1.2.0/24");
+                assert_eq!(p.gw, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                assert_eq!(p.label, 0);
+                assert_eq!(p.esi, [0u8; 10]);
+            }
+            _ => panic!("expected Type-5 Prefix route"),
+        }
+    }
+
+    #[test]
+    fn evpn_route_from_prefix_type5_v6() {
+        use bgp_packet::{EvpnPrefix, EvpnRoute, RouteDistinguisher};
+        let rd = RouteDistinguisher::from_str("65000:200").unwrap();
+        let prefix = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: "2001:db8::/32".parse().unwrap(),
+        };
+        match super::evpn_route_from_prefix(&rd, &prefix, 0) {
+            EvpnRoute::Prefix(p) => {
+                assert_eq!(p.prefix.to_string(), "2001:db8::/32");
+                assert_eq!(p.gw, IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+            }
+            _ => panic!("expected Type-5 Prefix route"),
+        }
     }
 }
