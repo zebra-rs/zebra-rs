@@ -130,6 +130,8 @@ impl Args {
             "vpnv4" => Some(AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
             "vpnv6" => Some(AfiSafi::new(Afi::Ip6, Safi::MplsVpn)),
             "evpn" => Some(AfiSafi::new(Afi::L2vpn, Safi::Evpn)),
+            "rtcv4" => Some(AfiSafi::new(Afi::Ip, Safi::Rtc)),
+            "rtcv6" => Some(AfiSafi::new(Afi::Ip6, Safi::Rtc)),
             _ => None,
         }
     }

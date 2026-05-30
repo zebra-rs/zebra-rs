@@ -82,6 +82,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.16/28
         out: 198.18.37.16/28
@@ -93,7 +95,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.30
       afi-safi:
       - name: vpnv4
@@ -104,6 +105,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.16/28
         out: 198.18.37.16/28
@@ -115,7 +118,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.81
       afi-safi:
       - name: vpnv4
@@ -126,6 +128,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -137,7 +141,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.82
       afi-safi:
       - name: vpnv4
@@ -148,6 +151,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -159,7 +164,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.83
       afi-safi:
       - name: vpnv4
@@ -170,6 +174,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -181,7 +187,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.88
       afi-safi:
       - name: vpnv4
@@ -192,6 +197,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -203,7 +210,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.89
       afi-safi:
       - name: vpnv4
@@ -214,6 +220,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -225,7 +233,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.90
       afi-safi:
       - name: vpnv4
@@ -236,6 +243,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -247,7 +256,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.91
       afi-safi:
       - name: vpnv4
@@ -258,6 +266,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -269,7 +279,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.92
       afi-safi:
       - name: vpnv4
@@ -280,6 +289,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -291,7 +302,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.93
       afi-safi:
       - name: vpnv4
@@ -302,6 +312,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -313,7 +325,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.37.94
       afi-safi:
       - name: vpnv4
@@ -324,6 +335,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.37.80/28
         out: 198.18.37.80/28
@@ -335,7 +348,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.97
       afi-safi:
       - name: vpnv4
@@ -346,6 +358,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.96/28
         out: 198.18.39.96/28
@@ -357,7 +371,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.110
       afi-safi:
       - name: vpnv4
@@ -368,6 +381,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.96/28
         out: 198.18.39.96/28
@@ -379,7 +394,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.129
       afi-safi:
       - name: vpnv4
@@ -390,6 +404,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -401,7 +417,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.130
       afi-safi:
       - name: vpnv4
@@ -412,6 +427,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -423,7 +440,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.131
       afi-safi:
       - name: vpnv4
@@ -434,6 +450,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -445,7 +463,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.136
       afi-safi:
       - name: vpnv4
@@ -456,6 +473,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -467,7 +486,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.137
       afi-safi:
       - name: vpnv4
@@ -478,6 +496,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -489,7 +509,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.138
       afi-safi:
       - name: vpnv4
@@ -500,6 +519,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -511,7 +532,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.139
       afi-safi:
       - name: vpnv4
@@ -522,6 +542,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -533,7 +555,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.140
       afi-safi:
       - name: vpnv4
@@ -544,6 +565,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -555,7 +578,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.141
       afi-safi:
       - name: vpnv4
@@ -566,6 +588,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -577,7 +601,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.142
       afi-safi:
       - name: vpnv4
@@ -588,6 +611,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.128/28
         out: 198.18.39.128/28
@@ -599,7 +624,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.145
       afi-safi:
       - name: vpnv4
@@ -610,6 +634,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.144/28
         out: 198.18.39.144/28
@@ -621,7 +647,6 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true
     - remote-address: 198.18.39.158
       afi-safi:
       - name: vpnv4
@@ -632,6 +657,8 @@ router:
         long-lived-graceful-restart:
           enabled: true
           restart-time: 172800
+      - name: rtcv4
+        enabled: true
       policy:
         in: 198.18.39.144/28
         out: 198.18.39.144/28
@@ -643,4 +670,3 @@ router:
       route-reflector:
         client: true
         cluster-id: 198.18.39.94
-      rtc: true

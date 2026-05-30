@@ -20,8 +20,9 @@ module zebra-afi-safi {
      an `afi-safi` list:
 
        * `afi-safi`         — the full BGP set (ipv4, ipv6, vpnv4,
-                              vpnv6, evpn). Used by `router bgp`
-                              (global + per-neighbor afi-safi).
+                              vpnv6, evpn, rtcv4, rtcv6). Used by
+                              `router bgp` (global + per-neighbor
+                              afi-safi).
        * `afi-safi-unicast` — the unicast subset (ipv4, ipv6). Used by
                               `router isis` and the per-VRF BGP afi-safi
                               (which carries the same family names).
@@ -50,6 +51,14 @@ module zebra-afi-safi {
         }
         enum evpn {
           description "BGP EVPN (AFI 25, SAFI 70).";
+        }
+        enum rtcv4 {
+          description
+            "IPv4 Route Target Constraint (AFI 1, SAFI 132).";
+        }
+        enum rtcv6 {
+          description
+            "IPv6 Route Target Constraint (AFI 2, SAFI 132).";
         }
       }
       description
