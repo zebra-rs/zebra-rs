@@ -190,8 +190,8 @@ Follow the **EVPN exact-match pattern**, *not* `LocalRibTable<P>`
 - Best-path: no MED / AS-path install semantics — selection is "valid?" +
   precedence (from `Ord`). Keep simple (first valid wins).
 - `cap.rs:30` `CapAfiMap::new()` gains `(Ip,133)` and `(Ip6,133)`;
-  `config/configs.rs:125` `Args::afi_safi()` gains `ipv4-flowspec` /
-  `ipv6-flowspec`; `show.rs:76` label map gets the strings.
+  `config/configs.rs:125` `Args::afi_safi()` gains `flowspec-ipv4` /
+  `flowspec-ipv6`; `show.rs:76` label map gets the strings.
 
 ### RIB message channel — Phase 4
 
@@ -212,13 +212,13 @@ conventions (kebab-case module, presence containers, augment into
 `config/manager.rs:1183`).
 
 **(a) Family activation** — extend `zebra-afi-safi.yang` `afi-safi` grouping
-enum with `ipv4-flowspec`, `ipv6-flowspec`; add matching arms to
+enum with `flowspec-ipv4`, `flowspec-ipv6`; add matching arms to
 `Args::afi_safi()` (`config/configs.rs:125`). Neighbor activation then works
 unchanged via the existing per-neighbor `afi-safi/<name>/enabled` path:
 
 ```
-set router bgp 65000 neighbor 10.0.0.1 afi-safi ipv4-flowspec enabled true
-set router bgp 65000 neighbor 2001:db8::1 afi-safi ipv6-flowspec enabled true
+set router bgp 65000 neighbor 10.0.0.1 afi-safi flowspec-ipv4 enabled true
+set router bgp 65000 neighbor 2001:db8::1 afi-safi flowspec-ipv6 enabled true
 ```
 
 **(b) Per-neighbor validation knob** — augment the neighbor afi-safi:
