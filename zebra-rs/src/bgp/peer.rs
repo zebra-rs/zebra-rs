@@ -662,6 +662,13 @@ pub struct BgpTop<'a> {
     /// `BgpVrfMsg::ImportV4`. `None` inside per-VRF tasks (they
     /// never receive VPNv4 NLRI directly).
     pub vrf_import: Option<&'a super::vrf::VrfImportDispatcher<'a>>,
+    /// Next-Hop Tracking cache. `Some(...)` only in the global `Bgp`
+    /// task (it owns the `rib_rx` stream that delivers
+    /// `RibRx::NexthopUpdate`); the received-route path registers
+    /// next-hops here and gates best-path on their resolution. `None`
+    /// in per-VRF tasks and the local-origination/advertise BgpTops
+    /// (no gating there).
+    pub nexthop_cache: Option<&'a mut super::nht::NexthopCache>,
     /// Colour-aware nexthop resolver inputs. Optional because
     /// per-VRF BGP runtimes don't carry them today — Color →
     /// Flex-Algo binding is a default-VRF concept; per-VRF support
@@ -1640,6 +1647,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             color_policy: Some(&bgp.color_policy),
             flex_algo_routes: Some(&bgp.flex_algo_routes),
             vrf_import: None,
+            nexthop_cache: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -1673,6 +1681,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         color_policy: Some(&bgp.color_policy),
         flex_algo_routes: Some(&bgp.flex_algo_routes),
         vrf_import: None,
+        nexthop_cache: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

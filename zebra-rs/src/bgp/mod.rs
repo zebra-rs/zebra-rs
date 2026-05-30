@@ -35,6 +35,8 @@ pub use policy::*;
 pub mod route;
 pub use route::*;
 
+pub mod nht;
+
 pub mod adj_rib;
 pub use adj_rib::*;
 

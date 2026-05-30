@@ -291,6 +291,9 @@ pub struct Bgp {
     /// table or a future VRF instance.
     pub ctx: ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
+    /// Next-Hop Tracking cache (global instance only). Populated by the
+    /// received-route path and updated by `RibRx::NexthopUpdate`.
+    pub nexthop_cache: super::nht::NexthopCache,
     pub callbacks: HashMap<String, Callback>,
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
@@ -531,6 +534,7 @@ impl Bgp {
             local_rib: LocalRib::default(),
             ctx,
             rib_rx,
+            nexthop_cache: super::nht::NexthopCache::default(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -744,6 +748,7 @@ impl Bgp {
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_import: Some(&import_dispatcher),
+                    nexthop_cache: Some(&mut self.nexthop_cache),
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -1290,8 +1295,107 @@ impl Bgp {
                     self.flex_algo_routes.remove(&algo);
                 }
             }
+            RibRx::NexthopUpdate { nh, resolution } => {
+                self.nht_handle_update(nh, resolution.reachable);
+            }
             _ => {
                 //
+            }
+        }
+    }
+
+    /// Apply a NHT resolution change: update the cached reachability and
+    /// re-evaluate every dependent prefix.
+    fn nht_handle_update(&mut self, nh: std::net::IpAddr, reachable: bool) {
+        let deps = self.nexthop_cache.update(nh, reachable);
+        for dep in deps {
+            self.nht_reeval_dep(nh, reachable, dep);
+        }
+    }
+
+    /// Re-evaluate one dependent prefix after its next-hop's
+    /// reachability flipped: refresh the candidates' gate flag, re-run
+    /// best-path, then re-advertise (and, for unicast, reconcile the
+    /// FIB). The per-VRF leak re-dispatch on a reachability change is a
+    /// follow-up; this handles the global advertise/FIB effect.
+    fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
+        use super::nht::NhtDep;
+        // Refresh gate flags + re-select (mutates `local_rib`).
+        let selected = match &dep {
+            NhtDep::V4(p) => {
+                self.local_rib.v4.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v4.select_best_path(*p)
+            }
+            NhtDep::V6(p) => {
+                self.local_rib.v6.set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.v6.select_best_path(*p)
+            }
+            NhtDep::V4vpn(rd, p) => {
+                self.local_rib
+                    .v4vpn
+                    .entry(*rd)
+                    .or_default()
+                    .set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.select_best_path_vpn(rd, *p)
+            }
+            NhtDep::V6vpn(rd, p) => {
+                self.local_rib
+                    .v6vpn
+                    .entry(*rd)
+                    .or_default()
+                    .set_nexthop_reachable(*p, nh, reachable);
+                self.local_rib.select_best_path_vpn_v6(rd, *p)
+            }
+        };
+
+        let mut top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: None,
+        };
+        match &dep {
+            NhtDep::V4(p) => {
+                super::route::fib_install_v4(&top, *p, &selected);
+                super::route::route_advertise_to_peers(
+                    None,
+                    *p,
+                    &selected,
+                    0,
+                    &mut top,
+                    &mut self.peers,
+                );
+            }
+            NhtDep::V6(p) => {
+                super::route::fib_install_v6(&top, *p, &selected);
+                super::route::route_advertise_to_peers_v6(*p, &selected, &mut top, &mut self.peers);
+            }
+            NhtDep::V4vpn(rd, p) => {
+                super::route::route_advertise_to_peers(
+                    Some(*rd),
+                    *p,
+                    &selected,
+                    0,
+                    &mut top,
+                    &mut self.peers,
+                );
+            }
+            NhtDep::V6vpn(rd, p) => {
+                super::route::route_advertise_to_peers_vpnv6(
+                    *rd,
+                    *p,
+                    &selected,
+                    &mut top,
+                    &mut self.peers,
+                );
             }
         }
     }
@@ -1547,6 +1651,7 @@ impl Bgp {
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
                     nexthop: Some(super::route::VpnNexthop::V4(nexthop)),
+                    nexthop_reachable: true,
                     egress_ifindex_v6: None,
                     stale: false,
                     esi: None,
@@ -1598,6 +1703,7 @@ impl Bgp {
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
                     vrf_import: None,
+                    nexthop_cache: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1683,6 +1789,7 @@ impl Bgp {
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
                     vrf_import: None,
+                    nexthop_cache: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -1755,6 +1862,7 @@ impl Bgp {
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
                     nexthop: Some(super::route::VpnNexthop::V6(nexthop)),
+                    nexthop_reachable: true,
                     egress_ifindex_v6: None,
                     stale: false,
                     esi: None,
@@ -1796,6 +1904,7 @@ impl Bgp {
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
                     vrf_import: None,
+                    nexthop_cache: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
@@ -1863,6 +1972,7 @@ impl Bgp {
                     flex_algo_routes: Some(&self.flex_algo_routes),
                     vrf_export: None,
                     vrf_import: None,
+                    nexthop_cache: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
