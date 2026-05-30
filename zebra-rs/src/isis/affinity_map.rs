@@ -64,6 +64,14 @@ impl AffinityMap {
     }
 }
 
+/// Lets the protocol-neutral FAD constraint engine in
+/// `crate::flex_algo` resolve affinity names against this IS-IS table.
+impl crate::flex_algo::AffinityBits for AffinityMap {
+    fn affinity_bit(&self, name: &str) -> Option<u16> {
+        self.bit(name)
+    }
+}
+
 #[derive(Default)]
 struct ConfigBuilder {
     path: String,
