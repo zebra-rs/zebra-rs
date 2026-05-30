@@ -916,8 +916,17 @@ impl Bgp {
                 // can pick it back up. Reclaim before the handle
                 // drops — handle drop aborts the task but doesn't
                 // know about the allocator.
-                if let Some(alloc) = self.vrf_label_alloc.as_mut() {
+                let released: Vec<(u32, u32)> = if let Some(alloc) = self.vrf_label_alloc.as_mut() {
                     alloc.free(handle.label);
+                    // A shrinking VRF count can free a whole block;
+                    // return it to the RIB label manager.
+                    alloc.reclaim_free_blocks()
+                } else {
+                    Vec::new()
+                };
+                for (start, end) in released {
+                    self.rib_subscriber
+                        .send_label_block_release("bgp", start, end - start);
                 }
                 // Drop every `peer_index` entry that pointed at
                 // this VRF — defensive cleanup against the VRF

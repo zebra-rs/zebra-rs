@@ -137,6 +137,17 @@ impl RibSubscriber {
             size,
         });
     }
+
+    /// Return a previously-granted label block `[start, start+size)` to
+    /// the RIB label manager — used when a protocol's label usage
+    /// shrinks enough to free a whole block.
+    pub fn send_label_block_release(&self, proto: &str, start: u32, size: u32) {
+        let _ = self.rib_tx.send(crate::rib::Message::LabelBlockRelease {
+            proto: proto.to_string(),
+            start,
+            size,
+        });
+    }
 }
 
 pub struct ConfigManager {

@@ -146,12 +146,9 @@ pub enum Message {
         size: u32,
     },
     /// Return a previously-reserved label block `[start, start+size)` to
-    /// the pool. `proto_cleanup` is the backstop for a proto that exits
-    /// without releasing.
-    //
-    // `allow(dead_code)`: the live release path is `proto_cleanup`; an
-    // explicit per-block release while running is a follow-up.
-    #[allow(dead_code)]
+    /// the pool — produced by a protocol whose label usage shrank enough
+    /// to free a whole block. `proto_cleanup` is the backstop for a
+    /// proto that exits without releasing.
     LabelBlockRelease {
         proto: String,
         start: u32,
