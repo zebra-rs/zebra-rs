@@ -120,68 +120,12 @@ module openconfig-isis-types {
       "Base identify type for multi-topology";
   }
 
-  identity SAFI_TYPE {
-    description
-      "Base identify type for SAFI";
-  }
-
-  identity AFI_TYPE {
-    description
-      "Base identify type for AFI";
-  }
-
-  identity AFI_SAFI_TYPE {
-    description
-      "Base identify type for AFI/SAFI";
-  }
-
-  identity IPV4_UNICAST {
-    base AFI_SAFI_TYPE;
-    description
-      "Base identify type for IPv4 Unicast address family";
-  }
-
-  identity IPV6_MULTICAST {
-    base AFI_SAFI_TYPE;
-    description
-      "Base identify type for IPv6 multicast address family";
-  }
-
-  identity IPV4_MULTICAST {
-    base AFI_SAFI_TYPE;
-    description
-      "Base identify type for IPv4 multicast address family";
-  }
-
-  identity IPV6_UNICAST {
-    base AFI_SAFI_TYPE;
-    description
-      "Base identify type for IPv6 unicast address family";
-  }
-
-  identity UNICAST {
-    base SAFI_TYPE;
-    description
-      "Base identify type for IPv4 Unicast address family";
-  }
-
-  identity MULTICAST {
-    base SAFI_TYPE;
-    description
-      "Base identify type for IPv6 multicast address family";
-  }
-
-  identity IPV4 {
-    base AFI_TYPE;
-    description
-      "Base identify type for IPv4 address family";
-  }
-
-  identity IPV6 {
-    base AFI_TYPE;
-    description
-      "Base identify type for IPv6 address family";
-  }
+  // The OpenConfig AFI_SAFI_TYPE / AFI_TYPE / SAFI_TYPE identities and
+  // their derivations (IPV4_UNICAST, IPV6_UNICAST, ...) were removed:
+  // zebra-rs defines its own afi-safi families in zebra-afi-safi.yang,
+  // and these identities were unused outside this module. The IS-IS
+  // NET (`net`), multi-topology (`MT_TYPE`) and auth (`AUTH_MODE`)
+  // types in this module are still in use and stay.
 
   identity AUTH_MODE {
     description

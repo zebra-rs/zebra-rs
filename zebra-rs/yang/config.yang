@@ -71,6 +71,9 @@ module config {
   import openconfig-isis-types {
     prefix isis;
   }
+  import zebra-afi-safi {
+    prefix zas;
+  }
 
   import config-static {
     prefix static;
@@ -982,12 +985,7 @@ module config {
           // 237 depending on MT). Prefix family must match the
           // afi-safi name; the callback rejects mismatches.
           key "name";
-          leaf name {
-            type enumeration {
-              enum ipv4;
-              enum ipv6;
-            }
-          }
+          uses zas:afi-safi-unicast;
           list network {
             key "prefix";
             leaf prefix {

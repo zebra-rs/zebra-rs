@@ -1,0 +1,77 @@
+module zebra-afi-safi {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-afi-safi";
+  prefix "zas";
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "zebra-rs's own address-family / sub-address-family definition,
+     replacing the borrowed OpenConfig (AFI_SAFI_TYPE) and IANA
+     (iana-bgp-types:afi-safi-type) afi-safi identities for the
+     operator-facing config tree.
+
+     Two flavors are provided as groupings supplying the `name` key of
+     an `afi-safi` list:
+
+       * `afi-safi`         — the full BGP set (ipv4, ipv6, vpnv4,
+                              vpnv6, evpn). Used by `router bgp`
+                              (global + per-neighbor afi-safi).
+       * `afi-safi-unicast` — the unicast subset (ipv4, ipv6). Used by
+                              `router isis` and the per-VRF BGP afi-safi
+                              (which carries the same family names).
+
+     The family names match the strings the Rust config layer parses
+     (`Args::afi_safi`), so re-pointing a list's `name` leaf at one of
+     these groupings is name-preserving and needs no runtime change.";
+
+  grouping afi-safi {
+    description
+      "The `name` key for a BGP `afi-safi` list — the full set of
+       families zebra-rs's BGP supports.";
+    leaf name {
+      type enumeration {
+        enum ipv4 {
+          description "IPv4 unicast (AFI 1, SAFI 1).";
+        }
+        enum ipv6 {
+          description "IPv6 unicast (AFI 2, SAFI 1).";
+        }
+        enum vpnv4 {
+          description "MPLS-labeled VPN-IPv4 (AFI 1, SAFI 128).";
+        }
+        enum vpnv6 {
+          description "MPLS-labeled VPN-IPv6 (AFI 2, SAFI 128).";
+        }
+        enum evpn {
+          description "BGP EVPN (AFI 25, SAFI 70).";
+        }
+      }
+      description
+        "Address family / sub-address family this list entry configures.";
+    }
+  }
+
+  grouping afi-safi-unicast {
+    description
+      "The `name` key for a unicast-only `afi-safi` list — used by
+       IS-IS and the per-VRF BGP afi-safi.";
+    leaf name {
+      type enumeration {
+        enum ipv4 {
+          description "IPv4 unicast.";
+        }
+        enum ipv6 {
+          description "IPv6 unicast.";
+        }
+      }
+      description
+        "Address family this list entry configures.";
+    }
+  }
+}
