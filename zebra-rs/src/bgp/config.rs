@@ -1303,7 +1303,16 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         peer.config.transport.update_source = None;
     }
 
-    Some(())
+    // IOS-XR semantics: an async BFD session inherits the neighbor's
+    // update-source as its local address (see `bfd_apply`, which reads
+    // `transport.update_source`). Reconcile here so changing or clearing
+    // update-source on a peer that already has BFD enabled rebuilds the
+    // session with the new local address instead of leaving it stale at
+    // the wildcard (0.0.0.0 / ::) until the next `/bfd/*` leaf change.
+    // Order-independent, mirroring the `/bfd/*` callbacks; a no-op when
+    // BFD isn't enabled, since `bfd_apply` diffs against the recorded
+    // session key.
+    bfd_apply(bgp, peer_addr)
 }
 
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -2092,6 +2101,102 @@ mod bfd_wiring_tests {
                 assert!(!key.multihop, "eBGP without override is single-hop");
                 assert_eq!(params.dst_port, BFD_SINGLE_HOP_PORT);
                 assert_eq!(params.min_ttl, 255);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// IOS-XR semantics: an async BFD session inherits the neighbor's
+    /// `update-source` as its local address — order-independently, so
+    /// setting update-source AFTER `bfd enable` rebuilds the session
+    /// with the new local instead of leaving it stale at the wildcard.
+    /// Regression: the update-source callback now re-runs `bfd_apply`.
+    #[tokio::test]
+    async fn bfd_inherits_update_source_after_enable() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+
+        // Enable BFD first → subscribe with the wildcard local.
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        let first_key = match bfd_rx.try_recv().expect("initial subscribe") {
+            ClientReq::Subscribe { key, .. } => {
+                assert_eq!(
+                    key.local,
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    "no update-source ⇒ wildcard local",
+                );
+                key
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+
+        // Set update-source AFTER bfd is already enabled.
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "10.0.0.100"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        // The stale wildcard-local session is dropped …
+        match bfd_rx.try_recv().expect("unsubscribe stale key") {
+            ClientReq::Unsubscribe { key, .. } => {
+                assert_eq!(key, first_key, "old wildcard-local session removed");
+            }
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        // … and re-created with the update-source as the local address.
+        match bfd_rx.try_recv().expect("resubscribe with update-source") {
+            ClientReq::Subscribe { key, .. } => {
+                assert_eq!(
+                    key.local,
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+                    "BFD local inherits update-source",
+                );
+                assert_eq!(key.remote, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// Clearing update-source on a BFD-enabled peer reverts the local
+    /// address to the wildcard (the kernel then picks the source).
+    #[tokio::test]
+    async fn bfd_update_source_cleared_reverts_to_wildcard() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        let _ = bfd_rx.try_recv().expect("initial wildcard subscribe");
+
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "10.0.0.100"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let _ = bfd_rx.try_recv().expect("unsubscribe wildcard");
+        let _ = bfd_rx.try_recv().expect("subscribe 10.0.0.100");
+
+        // Delete update-source → session rebuilt with the wildcard local.
+        config_transport_local_address(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "10.0.0.100"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        match bfd_rx.try_recv().expect("unsubscribe 10.0.0.100") {
+            ClientReq::Unsubscribe { key, .. } => {
+                assert_eq!(key.local, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)));
+            }
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        match bfd_rx.try_recv().expect("resubscribe wildcard") {
+            ClientReq::Subscribe { key, .. } => {
+                assert_eq!(
+                    key.local,
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    "cleared update-source ⇒ wildcard local again",
+                );
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }
