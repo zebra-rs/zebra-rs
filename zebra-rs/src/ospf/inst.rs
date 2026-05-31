@@ -85,8 +85,14 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// (128..=255 from `flex_algo.config`). `None` for an algo whose
     /// per-algo graph had no source this cycle. Recomputed each SPF
     /// run alongside `spf_result`; read by `show ip ospf flex-algo`.
-    /// Per-algo RIB / MPLS-ILM install is a follow-up.
     pub spf_flex_algo: BTreeMap<u8, Option<BTreeMap<usize, Path>>>,
+    /// Per-Flexible-Algorithm IPv4 RIB, keyed by algo id. Each prefix
+    /// carries the per-algo SPF nexthops + the prefix's per-algo
+    /// Prefix-SID (RFC 9350 §7). Held in-memory only — the per-algo
+    /// Prefix-SID *labels* install into the kernel MPLS ILM (a
+    /// follow-up), but per-algo IPv4 does not reach the FIB (the global
+    /// table has no algorithm dimension), mirroring IS-IS.
+    pub rib_flex_algo: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     /// MPLS LFIB shadow. Keyed by absolute incoming label, value
     /// carries the swap/pop action + the nexthops where the kernel
@@ -518,6 +524,7 @@ impl Ospf<Ospfv2> {
             spf_result: None,
             graph: None,
             spf_flex_algo: BTreeMap::new(),
+            rib_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -3644,6 +3651,7 @@ impl Ospf<Ospfv3> {
             spf_result: None,
             graph: None,
             spf_flex_algo: BTreeMap::new(),
+            rib_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -7195,6 +7203,87 @@ fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, S
     }
 }
 
+/// Build the per-Flexible-Algorithm IPv4 RIB for `algo` from its SPF
+/// result. Unlike `build_rib_from_spf`, this is driven by the per-algo
+/// Prefix-SIDs: for SR-MPLS Flex-Algo only prefixes that carry a
+/// per-algo Prefix-SID are forwardable (a label is needed at every
+/// hop), so each entry is one peer Extended-Prefix LSA's algo-`algo`
+/// Prefix-SID, reached over the per-algo SPF path to its originator.
+///
+/// Mirrors the IS-IS `build_rib_from_flex_algo`: per-algo IPv4 is held
+/// in-memory only; the resolved `sid` label is what installs into the
+/// kernel MPLS ILM (follow-up). Self-originated per-algo SIDs (local
+/// Node-SID pop) are skipped here, matching `add_prefix_sids`.
+fn build_rib_from_flex_algo(
+    top: &Ospf,
+    area_id: Ipv4Addr,
+    algo: u8,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv4Net, SpfRoute> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
+    let Some(area) = top.areas.get(area_id) else {
+        return rib;
+    };
+
+    for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let OspfLsp::OpaqueAreaExtPrefix(ref ep) = lsa.data.lsp else {
+            continue;
+        };
+        let adv_router = lsa.data.h.adv_router;
+        if adv_router == top.router_id {
+            continue;
+        }
+        let Some(label_config) = area.lsdb.label_map.get(&adv_router) else {
+            continue;
+        };
+        // The per-algo path to the prefix's originator. If the origin
+        // is unreachable under this algo's FAD-filtered topology, the
+        // prefix isn't forwardable under the algo — skip it.
+        let Some(origin_node) = top.lsp_map.lookup(adv_router) else {
+            continue;
+        };
+        let Some(path) = spf_result.get(&origin_node) else {
+            continue;
+        };
+        let nhops = build_spf_nexthops(top, origin_node, path);
+        if nhops.is_empty() {
+            continue;
+        }
+
+        for tlv in &ep.tlvs {
+            for sub in &tlv.subs {
+                let ExtPrefixSubTlv::PrefixSid(ps) = sub else {
+                    continue;
+                };
+                if ps.algo != Algo::FlexAlgo(algo) {
+                    continue;
+                }
+                let (value, sid_label) = match ps.sid {
+                    SidLabelTlv::Label(v) => (SidLabelValue::Label(v), Some(v)),
+                    SidLabelTlv::Index(v) => (
+                        SidLabelValue::Index(v),
+                        label_config.global.start.checked_add(v),
+                    ),
+                };
+                let route = SpfRoute {
+                    metric: path.cost,
+                    nhops: nhops.clone(),
+                    sid: sid_label,
+                    prefix_sid: Some((value, label_config.clone())),
+                };
+                rib_insert(&mut rib, tlv.prefix, route);
+                break;
+            }
+        }
+    }
+    rib
+}
+
 /// Walk Type 5 (AS-External) LSAs in the AS-scoped LSDB and install
 /// external routes per RFC 2328 §16.4.
 ///
@@ -8228,10 +8317,23 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
 
-    // Per-algo SPF trees, for `show ip ospf flex-algo`. Per-algo RIB /
-    // MPLS-ILM install is a follow-up. Like `spf_result`, this is a
-    // single (last-computed-area) snapshot — fine for the common
-    // single-area flex-algo deployment.
+    // Build the per-algo RIBs from the per-algo SPF results (top is
+    // borrowed immutably here, so collect into a local map first, then
+    // swap the instance fields). Like `spf_result`, these are a single
+    // (last-computed-area) snapshot — fine for the common single-area
+    // flex-algo deployment.
+    let mut rib_flex_algo = BTreeMap::new();
+    for o in &flex_algos {
+        let algo_rib = match &o.spf_result {
+            Some(spf_res) => build_rib_from_flex_algo(top, area_id, o.algo, spf_res),
+            None => PrefixMap::new(),
+        };
+        rib_flex_algo.insert(o.algo, algo_rib);
+    }
+    top.rib_flex_algo = rib_flex_algo;
+
+    // Per-algo SPF trees, for `show ip ospf flex-algo`. Per-algo
+    // Prefix-SID MPLS-ILM install is a follow-up.
     top.spf_flex_algo = flex_algos
         .into_iter()
         .map(|o| (o.algo, o.spf_result))
