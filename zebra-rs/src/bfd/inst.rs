@@ -135,13 +135,17 @@ pub enum Message {
     /// A parsed control packet arrived. The received IP TTL is carried
     /// up so [`Bfd::on_recv`] can enforce the per-session TTL floor
     /// (GTSM=255 for single-hop, the configured minimum for multihop)
-    /// after the packet is demuxed to a session.
+    /// after the packet is demuxed to a session. `multihop` records
+    /// which transport the packet arrived on (single-hop port 3784 vs
+    /// multihop port 4784) so the demux can refuse to drive a session
+    /// of the opposite hop type.
     Recv {
         packet: bfd_packet::ControlPacket,
         src: SocketAddr,
         dst: Option<IpAddr>,
         ifindex: u32,
         ttl: u8,
+        multihop: bool,
     },
     /// Periodic transmission timer fired for `key`.
     TxTick { key: SessionKey },
@@ -188,7 +192,10 @@ impl Bfd {
         let read_sock = sock.clone();
         let read_tx = main_tx.clone();
         tokio::spawn(async move {
-            read_packet(read_sock, read_tx).await;
+            // Primary socket: single-hop port (3784) in production; an
+            // ephemeral port in tests, which only carry single-hop
+            // sessions. Either way these are single-hop reads.
+            read_packet(read_sock, read_tx, false).await;
         });
 
         let write_sock = sock.clone();
@@ -214,7 +221,7 @@ impl Bfd {
                     let mh_sock = Arc::new(mh_sock);
                     let mh_tx = main_tx.clone();
                     tokio::spawn(async move {
-                        read_packet(mh_sock, mh_tx).await;
+                        read_packet(mh_sock, mh_tx, true).await;
                     });
                 }
                 Err(e) => tracing::warn!(
@@ -242,7 +249,7 @@ impl Bfd {
                     let read_sock = sock6.clone();
                     let read_tx = main_tx.clone();
                     tokio::spawn(async move {
-                        read_packet_v6(read_sock, read_tx).await;
+                        read_packet_v6(read_sock, read_tx, false).await;
                     });
                     tokio::spawn(async move {
                         write_packet_v6(sock6, write_rx_v6).await;
@@ -263,7 +270,7 @@ impl Bfd {
                     let mh6 = Arc::new(mh6);
                     let mh_tx = main_tx.clone();
                     tokio::spawn(async move {
-                        read_packet_v6(mh6, mh_tx).await;
+                        read_packet_v6(mh6, mh_tx, true).await;
                     });
                 }
                 Err(e) => tracing::warn!(
@@ -432,8 +439,8 @@ impl Bfd {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => match msg {
-                    Message::Recv { packet, src, dst, ifindex, ttl } =>
-                        self.on_recv(packet, src, dst, ifindex, ttl),
+                    Message::Recv { packet, src, dst, ifindex, ttl, multihop } =>
+                        self.on_recv(packet, src, dst, ifindex, ttl, multihop),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                 },
@@ -457,22 +464,48 @@ impl Bfd {
         dst: Option<IpAddr>,
         ifindex: u32,
         ttl: u8,
+        multihop: bool,
     ) {
         let lookup = if packet.your_disc != 0 {
             self.sessions.get_by_disc(packet.your_disc).map(|s| s.key)
         } else {
-            self.bootstrap_lookup(src, ifindex)
+            self.bootstrap_lookup(src, ifindex, multihop)
         };
         let Some(key) = lookup else {
             tracing::debug!(
                 ?src,
                 ?dst,
                 ifindex,
+                multihop,
                 your_disc = format_args!("{:#010x}", packet.your_disc),
                 "bfd: no session matches received packet",
             );
             return;
         };
+
+        // Hop-type segregation. RFC 5881 (single-hop) and RFC 5883
+        // (multihop) use distinct UDP ports precisely so the two never
+        // mix; a packet that arrived on the single-hop port must not
+        // drive a multihop session and vice versa. The bootstrap path
+        // already filtered on this, but the discriminator path resolves
+        // purely on the (random) Your Discriminator, so re-check here.
+        // Without it a peer's failing single-hop session (which keeps
+        // emitting Down packets with `your_disc == 0`) can be matched to
+        // our multihop session and knock it down.
+        if key.multihop != multihop {
+            if let Some(session) = self.sessions.get_by_key_mut(&key) {
+                session.stats.rx_invalid_count += 1;
+            }
+            tracing::debug!(
+                ?src,
+                ?dst,
+                ifindex,
+                arrived_multihop = multihop,
+                session_multihop = key.multihop,
+                "bfd: hop-type mismatch, dropping packet",
+            );
+            return;
+        }
 
         // Enforce the TTL floor now that the packet is matched to a
         // session whose hop mode we know. Single-hop sessions carry
@@ -523,6 +556,23 @@ impl Bfd {
             });
         }
 
+        // RFC 5880 §6.8.6: a received Poll (P) MUST be answered with a
+        // Final (F) "as soon as practicable", independent of the
+        // transmit timer. Without it a peer that changes its timers via
+        // a Poll Sequence — e.g. FRR leaving its ≥1s slow-TX state
+        // (§6.8.3) and speeding up to its configured rate when the
+        // session comes Up — never completes the sequence, so it holds
+        // the slow rate while we have already shortened our Detection
+        // Time to the advertised fast rate, and we time out
+        // (ControlDetectionTimeExpired). A packet with both P and F set
+        // is malformed, so only answer a pure Poll.
+        if packet.poll
+            && !packet.final_bit
+            && let Some(session) = self.sessions.get_by_key(&key)
+        {
+            self.send_control(session, true);
+        }
+
         if let Some(change) = change {
             self.notify_state_change(key, change);
         }
@@ -533,11 +583,16 @@ impl Bfd {
     /// Linear scan — fine for the small session counts a single
     /// process maintains; an explicit (local, remote, ifindex) index
     /// can be added later if it shows up in profiles.
-    fn bootstrap_lookup(&self, src: SocketAddr, ifindex: u32) -> Option<SessionKey> {
+    fn bootstrap_lookup(
+        &self,
+        src: SocketAddr,
+        ifindex: u32,
+        multihop: bool,
+    ) -> Option<SessionKey> {
         let src_ip = src.ip();
         self.sessions.iter().find_map(|(_, s)| {
             let ifindex_match = s.key.ifindex == 0 || s.key.ifindex == ifindex;
-            if s.key.remote == src_ip && ifindex_match {
+            if s.key.remote == src_ip && s.key.multihop == multihop && ifindex_match {
                 Some(s.key)
             } else {
                 None
@@ -546,13 +601,22 @@ impl Bfd {
     }
 
     fn on_tx_tick(&self, key: SessionKey) {
-        let Some(session) = self.sessions.get_by_key(&key) else {
-            return;
-        };
+        if let Some(session) = self.sessions.get_by_key(&key) {
+            self.send_control(session, false);
+        }
+    }
+
+    /// Transmit one control packet reflecting `session`'s current
+    /// state. `final_bit` sets the Final (F) flag — used only when
+    /// answering a peer's Poll (P) per RFC 5880 §6.8.6; the periodic
+    /// [`Self::on_tx_tick`] path passes `false`.
+    fn send_control(&self, session: &Session, final_bit: bool) {
         let dst = SocketAddr::new(session.key.remote, session.dst_port);
         let ifindex = (session.key.ifindex != 0).then_some(session.key.ifindex);
+        let mut packet = session.build_packet();
+        packet.final_bit = final_bit;
         let req = WriteRequest {
-            packet: session.build_packet(),
+            packet,
             dst,
             ifindex,
         };
@@ -659,7 +723,7 @@ mod tests {
             ..bfd_packet::ControlPacket::default()
         };
         let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 49152));
-        bfd.on_recv(packet, src, None, 0, 254); // single-hop requires 255
+        bfd.on_recv(packet, src, None, 0, 254, false); // single-hop requires 255
 
         let session = bfd.sessions.get_by_key(&key).unwrap();
         assert_eq!(session.stats.rx_invalid_count, 1);
@@ -690,12 +754,102 @@ mod tests {
             ..bfd_packet::ControlPacket::default()
         };
         let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 49152));
-        bfd.on_recv(packet, src, None, 0, 254); // == floor ⇒ accepted
+        bfd.on_recv(packet, src, None, 0, 254, true); // == floor ⇒ accepted
 
         let session = bfd.sessions.get_by_key(&key).unwrap();
         assert_eq!(session.stats.rx_count, 1, "ttl at floor is accepted");
         assert_eq!(session.stats.rx_invalid_count, 0);
         assert_eq!(session.remote_disc, 0x3333_4444);
+    }
+
+    /// Regression: a single-hop control packet must never be demuxed
+    /// onto a multihop session. A peer running a failing single-hop
+    /// session to us keeps emitting Down packets with `your_disc == 0`;
+    /// before the hop-type filter those matched our multihop session by
+    /// (remote, ifindex) alone and knocked it Down. With the filter the
+    /// stray packet finds no single-hop session and is dropped.
+    #[tokio::test]
+    async fn single_hop_packet_does_not_disturb_multihop_session() {
+        let mut bfd = fresh_bfd();
+        let mut key = loopback_key(20);
+        key.multihop = true;
+        let params = SessionParams {
+            min_ttl: 254,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("bgp".into(), key, params, tx);
+        let disc = bfd.sessions.get_by_key(&key).unwrap().local_disc;
+
+        const FRR_MH_DISC: u32 = 0xaaaa_0001;
+        const FRR_SH_DISC: u32 = 0xbbbb_0002;
+        let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 20), 49152));
+
+        // Bring the multihop session Up via two multihop packets.
+        let down = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Down,
+            my_disc: FRR_MH_DISC,
+            your_disc: 0,
+            ..bfd_packet::ControlPacket::default()
+        };
+        bfd.on_recv(down, src, None, 0, 254, true);
+        let up = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Up,
+            my_disc: FRR_MH_DISC,
+            your_disc: disc,
+            ..bfd_packet::ControlPacket::default()
+        };
+        bfd.on_recv(up, src, None, 0, 254, true);
+
+        let session = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(
+            session.local_state,
+            bfd_packet::State::Up,
+            "session came up"
+        );
+        assert_eq!(session.remote_disc, FRR_MH_DISC);
+        assert_eq!(session.stats.rx_count, 2);
+
+        // Stray single-hop Down (your_disc == 0, single-hop transport):
+        // no single-hop session exists → dropped, multihop untouched.
+        let stray = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Down,
+            my_disc: FRR_SH_DISC,
+            your_disc: 0,
+            ..bfd_packet::ControlPacket::default()
+        };
+        bfd.on_recv(stray, src, None, 0, 255, false);
+
+        let session = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(
+            session.local_state,
+            bfd_packet::State::Up,
+            "stray single-hop packet must not knock the multihop session down",
+        );
+        assert_eq!(
+            session.remote_disc, FRR_MH_DISC,
+            "remote discriminator must not be corrupted by the stray packet",
+        );
+        assert_eq!(session.stats.rx_count, 2, "stray packet not processed");
+
+        // Defence in depth: a single-hop packet echoing our discriminator
+        // (discriminator demux path) is rejected by the hop-type guard.
+        let stray_disc = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Down,
+            my_disc: FRR_SH_DISC,
+            your_disc: disc,
+            ..bfd_packet::ControlPacket::default()
+        };
+        bfd.on_recv(stray_disc, src, None, 0, 255, false);
+
+        let session = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(session.local_state, bfd_packet::State::Up);
+        assert_eq!(session.remote_disc, FRR_MH_DISC);
+        assert_eq!(session.stats.rx_count, 2, "guarded packet not processed");
+        assert_eq!(
+            session.stats.rx_invalid_count, 1,
+            "hop-type mismatch on the discriminator path is counted invalid",
+        );
     }
 
     /// Two clients on the same key share one session; neither
@@ -817,5 +971,55 @@ mod tests {
             key,
         });
         assert!(bfd.sessions.get_by_key(&key).is_none());
+    }
+
+    /// A received Poll (P) is answered with a Final (F) on the wire
+    /// (RFC 5880 §6.8.6). Without this a peer's timer-change Poll
+    /// Sequence never completes, which manifested as a BGP/FRR BFD flap
+    /// (ControlDetectionTimeExpired) once intervals dropped to 300 ms.
+    /// Multi-threaded runtime so the spawned write task can run while
+    /// the test blocks on the peer socket's `recv`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poll_is_answered_with_final() {
+        let peer = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind peer");
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let peer_port = peer.local_addr().unwrap().port();
+
+        let mut bfd = fresh_bfd();
+        let key = SessionKey {
+            local: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            remote: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ifindex: 0,
+            multihop: false,
+        };
+        let params = SessionParams {
+            dst_port: peer_port,
+            min_ttl: 255,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("test".into(), key, params, tx);
+        let disc = bfd.sessions.get_by_key(&key).unwrap().local_disc;
+
+        // A pure Poll (P=1, F=0) from the peer.
+        let mut pkt = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Down,
+            detect_mult: 3,
+            my_disc: 0x5151_5151,
+            your_disc: disc,
+            ..bfd_packet::ControlPacket::default()
+        };
+        pkt.poll = true;
+        let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, peer_port));
+        bfd.on_recv(pkt, src, None, 0, 255, false);
+
+        // The write task must emit a Final (F=1, P=0) response.
+        let mut buf = [0u8; 1500];
+        let n = peer.recv(&mut buf).expect("final response received");
+        let resp = bfd_packet::ControlPacket::parse(&buf[..n]).expect("parse final");
+        assert!(resp.final_bit, "response carries Final");
+        assert!(!resp.poll, "response clears Poll");
+        assert_eq!(resp.your_disc, 0x5151_5151, "echoes the peer discriminator");
     }
 }

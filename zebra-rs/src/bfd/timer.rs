@@ -99,11 +99,26 @@ pub async fn session_timer(
                     detection_time_us,
                     detect_mult: mult,
                 }) => {
-                    tx_us = tx_interval_us;
-                    detect_us = detection_time_us;
                     detect_mult = mult.max(1);
-                    next_tx = arm_tx(tx_us, detect_mult);
+                    detect_us = detection_time_us;
+                    // Every valid Rx funnels an Update here to reset the
+                    // detection timer (RFC 5880 §6.8.4) — so re-arm the
+                    // detection deadline unconditionally.
                     detect_at = arm_detect(detect_us);
+                    // The TX timer, however, free-runs at the negotiated
+                    // interval (RFC 5880 §6.8.7) and must be reset ONLY
+                    // when that interval actually changes. Re-arming it on
+                    // every Rx starves transmission: when the peer sends
+                    // at ~our TX interval, each received packet postpones
+                    // our next TxTick before it can fire, so we transmit
+                    // far too rarely and the peer hits its detection
+                    // timeout (ControlDetectionTimeExpired). The
+                    // comparison also covers the suspend/resume edges
+                    // (0 ⇄ non-zero), since `arm_tx(0)` yields `None`.
+                    if tx_interval_us != tx_us {
+                        tx_us = tx_interval_us;
+                        next_tx = arm_tx(tx_us, detect_mult);
+                    }
                 }
                 Some(TimerCmd::ResetDetect) => {
                     detect_at = arm_detect(detect_us);
@@ -186,5 +201,65 @@ mod tests {
     fn zero_detect_disables_arm() {
         assert!(arm_detect(0).is_none());
         assert!(arm_detect(150_000).is_some());
+    }
+
+    /// Regression: a steady stream of received packets (each funnelling
+    /// a `TimerCmd::Update` with the *same* negotiated intervals to reset
+    /// the detection timer) must NOT keep re-arming — and thereby starve
+    /// — the transmit timer. The peer sends at ~our TX interval, so if
+    /// each Rx postponed our next TxTick we would transmit far too rarely
+    /// and the peer would hit its detection timeout
+    /// (ControlDetectionTimeExpired) — the BGP/FRR BFD flap.
+    ///
+    /// Drives the real `session_timer` task with short wall-clock
+    /// intervals (TX 15 ms): an Update arrives every 10 ms — shorter than
+    /// the 11.25–15 ms jittered TX window — so before the fix the TX
+    /// timer was reset before it could ever fire and zero TxTicks were
+    /// emitted. With the free-running TX timer we expect a tick roughly
+    /// every ~13 ms, i.e. many over the run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tx_not_starved_by_received_updates() {
+        use super::super::session::SessionKey;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let key = SessionKey {
+            local: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            remote: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            ifindex: 0,
+            multihop: false,
+        };
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let initial = InitialParams {
+            tx_interval_us: 15_000,
+            detection_time_us: 45_000,
+            detect_mult: 3,
+        };
+        let task = tokio::spawn(session_timer(key, initial, cmd_rx, event_tx));
+
+        let mut tx_ticks = 0u32;
+        for _ in 0..30 {
+            // Simulate a received packet: reset detection via Update with
+            // unchanged intervals.
+            cmd_tx
+                .send(TimerCmd::Update {
+                    tx_interval_us: 15_000,
+                    detection_time_us: 45_000,
+                    detect_mult: 3,
+                })
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            while let Ok(msg) = event_rx.try_recv() {
+                if matches!(msg, Message::TxTick { .. }) {
+                    tx_ticks += 1;
+                }
+            }
+        }
+
+        assert!(
+            tx_ticks >= 5,
+            "TX starved by received Updates: only {tx_ticks} TxTicks over ~300ms",
+        );
+        task.abort();
     }
 }
