@@ -5482,7 +5482,7 @@ impl Ospf<Ospfv3> {
         let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
-            && let Some(prefix_sid) = link.config.prefix_sid
+            && (link.config.prefix_sid.is_some() || !link.config.flex_algo_prefix_sids.is_empty())
             && let Some(addr) = link
                 .addr
                 .iter()
@@ -5497,16 +5497,23 @@ impl Ospf<Ospfv3> {
             } else {
                 link.output_cost as u16
             };
-            Some((link.area, prefix_sid, host, metric))
+            Some((
+                link.area,
+                link.config.prefix_sid,
+                link.config.flex_algo_prefix_sids.clone(),
+                host,
+                metric,
+            ))
         } else {
             None
         };
 
-        if let Some((area_id, prefix_sid, host, metric)) = build_inputs {
+        if let Some((area_id, prefix_sid, flex_algo_sids, host, metric)) = build_inputs {
             let mut lsa = super::srmpls::ext_intra_area_prefix_v3_lsa_build(
                 self.router_id,
                 host,
-                &prefix_sid,
+                prefix_sid.as_ref(),
+                &flex_algo_sids,
                 link_state_id,
                 metric,
             );

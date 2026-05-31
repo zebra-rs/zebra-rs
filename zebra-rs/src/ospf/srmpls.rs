@@ -363,24 +363,11 @@ pub fn build_v3_lan_adj_sub(neighbor_router_id: Ipv4Addr, label: u32) -> Ospfv3S
     })
 }
 
-/// Build an OSPFv3 E-Intra-Area-Prefix-LSA (RFC 8362 §3.7) carrying
-/// one Intra-Area-Prefix TLV whose sub-TLV is a Prefix-SID (RFC 8666
-/// §5) for the given IPv6 prefix.
-///
-/// `link_state_id` is the LSA's per-router ID -- mirrors the v2
-/// opaque-id convention of deriving from the interface ifindex so a
-/// per-link LSA gets a stable key across re-originations.
-///
-/// Flag semantics mirror the v2 path: Index-form SID carries the NP
-/// (No-PHP) flag so the upstream does not pop; Absolute-Label SID
-/// carries V (Value) + L (Local) per RFC 8666 §5.
-pub fn ext_intra_area_prefix_v3_lsa_build(
-    router_id: Ipv4Addr,
-    prefix: Ipv6Net,
-    prefix_sid: &PrefixSid,
-    link_state_id: u32,
-    metric: u16,
-) -> Ospfv3Lsa {
+/// Build one OSPFv3 Prefix-SID sub-TLV (RFC 8666 §5) for `algo`. Flag
+/// semantics mirror the v2 path: Index-form SID carries the NP (No-PHP)
+/// flag so the upstream does not pop; Absolute-Label SID carries V
+/// (Value) + L (Local).
+fn ext_prefix_sid_sub_v3(algo: Algo, prefix_sid: &PrefixSid) -> Ospfv3SubTlv {
     let (sid, flags) = match prefix_sid {
         PrefixSid::Index(idx) => (
             SidLabelTlv::Index(*idx),
@@ -391,12 +378,33 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
             PrefixSidFlags::new().with_v_flag(true).with_l_flag(true),
         ),
     };
+    Ospfv3SubTlv::PrefixSid(Ospfv3PrefixSidSubTlv { flags, algo, sid })
+}
 
-    let prefix_sid_sub = Ospfv3SubTlv::PrefixSid(Ospfv3PrefixSidSubTlv {
-        flags,
-        algo: Algo::Spf,
-        sid,
-    });
+/// Build an OSPFv3 E-Intra-Area-Prefix-LSA (RFC 8362 §3.7) carrying
+/// one Intra-Area-Prefix TLV for the given IPv6 prefix, with the algo-0
+/// Prefix-SID (if configured) plus a per-Flexible-Algorithm Prefix-SID
+/// sub-TLV for every entry in `flex_algo_sids` (RFC 9350 §7,
+/// Algorithm = FlexAlgo(N)). OSPFv3 analog of `ext_prefix_lsa_build`.
+///
+/// `link_state_id` is the LSA's per-router ID -- mirrors the v2
+/// opaque-id convention of deriving from the interface ifindex so a
+/// per-link LSA gets a stable key across re-originations.
+pub fn ext_intra_area_prefix_v3_lsa_build(
+    router_id: Ipv4Addr,
+    prefix: Ipv6Net,
+    prefix_sid: Option<&PrefixSid>,
+    flex_algo_sids: &BTreeMap<u8, PrefixSid>,
+    link_state_id: u32,
+    metric: u16,
+) -> Ospfv3Lsa {
+    let mut subs = Vec::new();
+    if let Some(ps) = prefix_sid {
+        subs.push(ext_prefix_sid_sub_v3(Algo::Spf, ps));
+    }
+    for (algo, sid) in flex_algo_sids {
+        subs.push(ext_prefix_sid_sub_v3(Algo::FlexAlgo(*algo), sid));
+    }
 
     // Encode the prefix bytes padded to a 4-byte boundary per
     // RFC 5340 §A.4.1.1, matching the existing v3 codec convention.
@@ -419,7 +427,7 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
         referenced_link_state_id: 0,
         referenced_advertising_router: router_id,
         address_prefix,
-        subs: vec![prefix_sid_sub],
+        subs,
     });
 
     let body = Ospfv3ELsaBody {
@@ -646,5 +654,76 @@ mod tests {
             })
             .collect();
         assert_eq!(fads, vec![fad]);
+    }
+
+    /// The OSPFv3 E-Intra-Area-Prefix-LSA carries the algo-0 Prefix-SID
+    /// plus one per-Flex-Algorithm Prefix-SID sub-TLV (RFC 9350 §7).
+    #[test]
+    fn ext_intra_area_prefix_v3_lsa_emits_per_algo_prefix_sids() {
+        use super::PrefixSid;
+        let prefix = "2001:db8::1/128".parse::<Ipv6Net>().unwrap();
+        let mut flex = BTreeMap::new();
+        flex.insert(128u8, PrefixSid::Index(1128));
+        flex.insert(200u8, PrefixSid::Absolute(16200));
+
+        let lsa = ext_intra_area_prefix_v3_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            prefix,
+            Some(&PrefixSid::Index(100)),
+            &flex,
+            7,
+            10,
+        );
+        let Ospfv3LsBody::EIntraAreaPrefix(body) = &lsa.body else {
+            panic!("expected EIntraAreaPrefix body");
+        };
+        let Ospfv3ExtTlv::IntraAreaPrefix(tlv) = &body.tlvs[0] else {
+            panic!("expected IntraAreaPrefix TLV");
+        };
+        let algos: Vec<Algo> = tlv
+            .subs
+            .iter()
+            .filter_map(|s| match s {
+                Ospfv3SubTlv::PrefixSid(p) => Some(p.algo),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            algos,
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)]
+        );
+    }
+
+    /// With no algo-0 Prefix-SID, only the flex-algo SID is emitted.
+    #[test]
+    fn ext_intra_area_prefix_v3_lsa_flex_algo_only() {
+        use super::PrefixSid;
+        let prefix = "2001:db8::1/128".parse::<Ipv6Net>().unwrap();
+        let mut flex = BTreeMap::new();
+        flex.insert(128u8, PrefixSid::Index(1128));
+
+        let lsa = ext_intra_area_prefix_v3_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            prefix,
+            None,
+            &flex,
+            7,
+            10,
+        );
+        let Ospfv3LsBody::EIntraAreaPrefix(body) = &lsa.body else {
+            panic!("expected EIntraAreaPrefix body");
+        };
+        let Ospfv3ExtTlv::IntraAreaPrefix(tlv) = &body.tlvs[0] else {
+            panic!("expected IntraAreaPrefix TLV");
+        };
+        let algos: Vec<Algo> = tlv
+            .subs
+            .iter()
+            .filter_map(|s| match s {
+                Ospfv3SubTlv::PrefixSid(p) => Some(p.algo),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(algos, vec![Algo::FlexAlgo(128)]);
     }
 }
