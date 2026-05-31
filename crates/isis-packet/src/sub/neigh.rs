@@ -151,6 +151,23 @@ impl IsisTlvExtIsReachEntry {
         })
     }
 
+    /// Administrative group / link-color bitmask (sub-TLV 3), if present.
+    /// IS-IS carries it as a single 32-bit mask; the first word is returned.
+    pub fn admin_group(&self) -> Option<u32> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::AdminGrp(a) => a.groups.first().copied(),
+            _ => None,
+        })
+    }
+
+    /// TE default metric (sub-TLV 18, RFC 5305), if present. A 24-bit value.
+    pub fn te_metric(&self) -> Option<u32> {
+        self.subs.iter().find_map(|s| match s {
+            IsisSubTlv::TeMetric(t) => Some(t.metric),
+            _ => None,
+        })
+    }
+
     fn len(&self) -> u8 {
         11 + self.sub_len() // 11 is TLV length without sub TLVs.
     }

@@ -4436,16 +4436,21 @@ pub fn route_bgpls_withdraw(ident: usize, nlri: &BgpLsNlri, bgp: &mut BgpTop, pe
 /// Unlike `route_bgpls_update` (the receive path, which looks up a real
 /// peer), this has no neighbor — it builds an `Originated` `BgpRib` keyed by
 /// `ORIGINATED_PEER` and inserts straight into the Loc-RIB, mirroring
-/// `evpn_originate_macip`. The attributes are empty for now (NLRI-only
-/// producer); BGP-LS Attribute (type 29) enrichment is a later phase.
-/// Re-advertisement to peers is likewise deferred — this records topology so
-/// `show bgp link-state` reflects it.
+/// `evpn_originate_macip`. `ls_attr` is the producer-built BGP-LS Attribute
+/// (path attribute type 29 — link/prefix metrics, admin-group, …); it is
+/// stored on the route so `show bgp link-state` can render it and a future
+/// advertise phase can re-emit it. An empty `ls_attr` leaves `bgp_ls` unset.
+/// Re-advertisement to peers is deferred.
 pub fn route_bgpls_originate(
     nlri: BgpLsNlri,
+    ls_attr: BgpLsAttr,
     local_rib: &mut LocalRib,
     attr_store: &mut super::store::BgpAttrStore,
 ) {
-    let attr = BgpAttr::new();
+    let mut attr = BgpAttr::new();
+    if !ls_attr.is_empty() {
+        attr.bgp_ls = Some(ls_attr);
+    }
     let mut rib = BgpRib::new(
         ORIGINATED_PEER,
         Ipv4Addr::UNSPECIFIED,

@@ -2430,8 +2430,44 @@ fn show_bgp_link_state(
             .map(|p| p.address.to_string())
             .unwrap_or_else(|| rib.router_id.to_string());
         writeln!(buf, " {nlri}   from {from}")?;
+        if let Some(attr) = &rib.attr.bgp_ls {
+            let summary = show_bgp_ls_attr(attr);
+            if !summary.is_empty() {
+                writeln!(buf, "     attr: {summary}")?;
+            }
+        }
     }
     Ok(buf)
+}
+
+/// Compact one-line summary of the high-value BGP-LS Attribute TLVs (RFC
+/// 9552 §4) the IS-IS producer emits: IGP metric (1095, 3-octet), prefix
+/// metric (1155, 4-octet), admin-group (1088, 4-octet hex), TE default
+/// metric (1092, 4-octet). Unknown/other TLVs are summarized by count so
+/// the line stays readable.
+fn show_bgp_ls_attr(attr: &BgpLsAttr) -> String {
+    fn be(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64)
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = attr.get(BGPLS_ATTR_IGP_METRIC) {
+        parts.push(format!("igp-metric {}", be(v)));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_PREFIX_METRIC) {
+        parts.push(format!("prefix-metric {}", be(v)));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_TE_DEFAULT_METRIC) {
+        parts.push(format!("te-metric {}", be(v)));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_ADMIN_GROUP) {
+        parts.push(format!("admin-group 0x{:08x}", be(v) as u32));
+    }
+    let known = parts.len();
+    let extra = attr.tlvs.len().saturating_sub(known);
+    if extra > 0 {
+        parts.push(format!("+{extra} more"));
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]

@@ -67,7 +67,7 @@ pub enum Message {
     /// against its own last-advertised set and sends only deltas, so this
     /// carries exactly the change for one trigger.
     BgpLs {
-        add: Vec<bgp_packet::BgpLsNlri>,
+        add: Vec<(bgp_packet::BgpLsNlri, bgp_packet::BgpLsAttr)>,
         withdraw: Vec<bgp_packet::BgpLsNlri>,
     },
 }
@@ -1078,9 +1078,10 @@ impl Bgp {
                 for nlri in &withdraw {
                     super::route::route_bgpls_withdraw_originated(nlri, &mut self.local_rib);
                 }
-                for nlri in add {
+                for (nlri, ls_attr) in add {
                     super::route::route_bgpls_originate(
                         nlri,
+                        ls_attr,
                         &mut self.local_rib,
                         &mut self.attr_store,
                     );
