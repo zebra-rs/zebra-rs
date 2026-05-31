@@ -589,6 +589,18 @@ module exec {
         leaf spf {
           type empty;
         }
+        leaf ti-lfa {
+          ext:help "OSPFv3 TI-LFA per-destination repair paths (graph-level view)";
+          type empty;
+        }
+        container repair-list {
+          ext:help "OSPFv3 TI-LFA repair-list";
+          presence "OSPFv3 repair-list";
+          leaf detail {
+            ext:help "OSPFv3 repair-list detail (per-segment label breakdown)";
+            type empty;
+          }
+        }
         leaf flex-algo {
           ext:help "OSPFv3 Flexible Algorithm (RFC 9350) state";
           type empty;

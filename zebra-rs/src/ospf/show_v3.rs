@@ -44,6 +44,9 @@ impl Ospf<Ospfv3> {
             ("/route", show_ospfv3_route),
             ("/spf", show_ospfv3_spf),
             ("/graph", show_ospfv3_graph),
+            ("/ti-lfa", show_ospfv3_tilfa),
+            ("/repair-list", show_ospfv3_repair_list),
+            ("/repair-list/detail", show_ospfv3_repair_list_detail),
             ("/segment-routing", show_ospfv3_segment_routing),
             ("/flex-algo", show_ospfv3_flex_algo),
         ];
@@ -84,6 +87,278 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => "Intra-Area-Prefix-LSA",
         _ => "Unknown",
     }
+}
+
+// ---- TI-LFA (RFC 9490) ------------------------------------------
+// `show ipv6 ospf ti-lfa` (graph-level per-destination repair lists)
+// and `show ipv6 ospf repair-list` (repair backups installed on the
+// v6 RIB). v3 siblings of the v2 handlers in `show.rs`.
+
+fn label_value_str_v3(label: &crate::rib::Label) -> String {
+    match label {
+        crate::rib::Label::Implicit(l) => format!("{l} (implicit-null)"),
+        crate::rib::Label::Explicit(l) => format!("{l}"),
+    }
+}
+
+fn vertex_name_v3(graph: &crate::spf::Graph, id: usize) -> String {
+    graph
+        .get(&id)
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| format!("v{id}"))
+}
+
+fn format_sr_segment_v3(graph: &crate::spf::Graph, seg: &crate::spf::SrSegment) -> String {
+    match seg {
+        crate::spf::SrSegment::NodeSid(v) => {
+            format!("Node-SID {} (vertex {})", vertex_name_v3(graph, *v), v)
+        }
+        crate::spf::SrSegment::AdjSid(from, to, _via) => format!(
+            "Adj-SID {} -> {} (vertex {} -> {})",
+            vertex_name_v3(graph, *from),
+            vertex_name_v3(graph, *to),
+            from,
+            to,
+        ),
+    }
+}
+
+#[derive(Serialize)]
+struct RepairSegmentV3Json {
+    kind: &'static str,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct RepairRowV3Json {
+    prefix: String,
+    primary_nexthop: String,
+    primary_ifindex: u32,
+    primary_metric: u32,
+    repair_nexthop: String,
+    repair_ifindex: u32,
+    repair_metric: u32,
+    segments: Vec<RepairSegmentV3Json>,
+}
+
+#[derive(Serialize)]
+struct RepairListV3Json {
+    routes: Vec<RepairRowV3Json>,
+}
+
+fn collect_ospfv3_repair_rows(top: &Ospf<Ospfv3>) -> Vec<RepairRowV3Json> {
+    let mut rows = Vec::new();
+    for (prefix, route) in top.rib6.iter() {
+        for (addr, nhop) in route.nhops.iter() {
+            let Some(backup) = nhop.backup.as_ref() else {
+                continue;
+            };
+            let segments = backup
+                .labels
+                .iter()
+                .map(|label| RepairSegmentV3Json {
+                    kind: "sr-mpls",
+                    value: label_value_str_v3(label),
+                })
+                .collect();
+            rows.push(RepairRowV3Json {
+                prefix: prefix.to_string(),
+                primary_nexthop: addr.to_string(),
+                primary_ifindex: nhop.ifindex,
+                primary_metric: route.metric,
+                repair_nexthop: backup.addr.to_string(),
+                repair_ifindex: backup.ifindex,
+                repair_metric: route
+                    .metric
+                    .saturating_add(super::inst::BACKUP_METRIC_OFFSET),
+                segments,
+            });
+        }
+    }
+    rows
+}
+
+fn show_ospfv3_repair_list(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    let rows = collect_ospfv3_repair_rows(top);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListV3Json { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        writeln!(buf, "(no TI-LFA repair-list entries)")?;
+        return Ok(buf);
+    }
+    writeln!(
+        buf,
+        "{:<30} {:<26} {:<26} Segments",
+        "Prefix", "Primary via", "Repair via",
+    )?;
+    for row in &rows {
+        let segs: Vec<String> = row.segments.iter().map(|s| s.value.clone()).collect();
+        writeln!(
+            buf,
+            "{:<30} {:<26} {:<26} [{}]",
+            row.prefix,
+            row.primary_nexthop,
+            row.repair_nexthop,
+            segs.join(", "),
+        )?;
+    }
+    Ok(buf)
+}
+
+fn show_ospfv3_repair_list_detail(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    let rows = collect_ospfv3_repair_rows(top);
+    if json {
+        return Ok(
+            serde_json::to_string_pretty(&RepairListV3Json { routes: rows })
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")),
+        );
+    }
+    let mut buf = String::new();
+    if rows.is_empty() {
+        writeln!(buf, "(no TI-LFA repair-list entries)")?;
+        return Ok(buf);
+    }
+    for row in &rows {
+        writeln!(buf, "{}", row.prefix)?;
+        writeln!(
+            buf,
+            "  Primary: via {} (ifindex {}), metric {}",
+            row.primary_nexthop, row.primary_ifindex, row.primary_metric,
+        )?;
+        writeln!(
+            buf,
+            "  Repair:  via {} (ifindex {}), metric {}",
+            row.repair_nexthop, row.repair_ifindex, row.repair_metric,
+        )?;
+        if row.segments.is_empty() {
+            writeln!(buf, "    (trivial repair, no SR segments)")?;
+        } else {
+            for seg in &row.segments {
+                writeln!(buf, "    {} {}", seg.kind, seg.value)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct TilfaV3SegmentJson {
+    kind: &'static str,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct TilfaV3RepairJson {
+    first_hop: String,
+    first_hop_vertex: usize,
+    first_hop_link_id: u32,
+    segments: Vec<TilfaV3SegmentJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaV3DestJson {
+    destination: String,
+    destination_vertex: usize,
+    repairs: Vec<TilfaV3RepairJson>,
+}
+
+#[derive(Serialize)]
+struct TilfaV3Json {
+    destinations: Vec<TilfaV3DestJson>,
+}
+
+fn show_ospfv3_tilfa(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    let graph = top.graph.as_ref();
+    let tilfa = top.tilfa_result.as_ref();
+
+    if json {
+        let destinations = match (graph, tilfa) {
+            (Some(g), Some(t)) => t
+                .iter()
+                .map(|(dest, repairs)| TilfaV3DestJson {
+                    destination: vertex_name_v3(g, *dest),
+                    destination_vertex: *dest,
+                    repairs: repairs
+                        .iter()
+                        .map(|rp| TilfaV3RepairJson {
+                            first_hop: vertex_name_v3(g, rp.first_hop),
+                            first_hop_vertex: rp.first_hop,
+                            first_hop_link_id: rp.first_hop_link_id,
+                            segments: rp
+                                .segs
+                                .iter()
+                                .map(|seg| TilfaV3SegmentJson {
+                                    kind: match seg {
+                                        crate::spf::SrSegment::NodeSid(_) => "node-sid",
+                                        crate::spf::SrSegment::AdjSid(..) => "adj-sid",
+                                    },
+                                    description: format_sr_segment_v3(g, seg),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        return Ok(serde_json::to_string_pretty(&TilfaV3Json { destinations })
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let mut buf = String::new();
+    let (Some(graph), Some(tilfa)) = (graph, tilfa) else {
+        writeln!(buf, "(no TI-LFA repair paths computed)")?;
+        return Ok(buf);
+    };
+    if tilfa.is_empty() {
+        writeln!(buf, "(no TI-LFA repair paths computed)")?;
+        return Ok(buf);
+    }
+    writeln!(buf, "OSPFv3 TI-LFA repair paths:")?;
+    for (dest, repairs) in tilfa.iter() {
+        writeln!(
+            buf,
+            "  Destination {} (vertex {})",
+            vertex_name_v3(graph, *dest),
+            dest,
+        )?;
+        for (i, rp) in repairs.iter().enumerate() {
+            writeln!(
+                buf,
+                "    [{}] first-hop {} (vertex {}, link_id {})",
+                i,
+                vertex_name_v3(graph, rp.first_hop),
+                rp.first_hop,
+                rp.first_hop_link_id,
+            )?;
+            if rp.segs.is_empty() {
+                writeln!(buf, "        segments: (none — direct repair)")?;
+            } else {
+                writeln!(buf, "        segments:")?;
+                for seg in &rp.segs {
+                    writeln!(buf, "          {}", format_sr_segment_v3(graph, seg))?;
+                }
+            }
+        }
+    }
+    Ok(buf)
 }
 
 // ---- show ipv6 ospf (instance summary) --------------------------

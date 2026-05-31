@@ -38,7 +38,10 @@ use super::lsdb::{LsdbEvent, OspfLsaKey, seq_max, v2_lsa_key_unpack};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
-use super::tilfa::{RepairPathMpls, build_repair_path_mpls, tilfa_repair_path};
+use super::tilfa::{
+    RepairPathMpls, RepairPathMplsV3, build_repair_path_mpls, build_repair_path_mpls_v3,
+    tilfa_repair_path,
+};
 use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv3};
 use super::{
@@ -6965,6 +6968,16 @@ pub struct SpfRouteV3 {
     /// path can surface the on-the-wire SID encoding alongside the
     /// resolved label. Mirror of v2's `SpfRoute::prefix_sid`.
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// SPF vertex id this route was built from (advertising router, or
+    /// ABR/ASBR for inter-area / NSSA). Set at build time; joined with
+    /// the per-destination repair in the TI-LFA second pass. `None`
+    /// for per-Flex-Algo entries (no v3 per-algo TI-LFA). Mirror of
+    /// v2's `SpfRoute::dest_vertex`.
+    pub dest_vertex: Option<usize>,
+    /// `fast-reroute backup-as-primary` at build time, carried so it
+    /// joins the `table_diff` equality that gates RIB updates. Mirror
+    /// of v2's `SpfRoute::backup_as_primary`.
+    pub backup_as_primary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6978,6 +6991,12 @@ pub struct SpfNexthopV3 {
     /// the SPF builder, which then triggers the standard swap
     /// (push the incoming label as the outgoing label).
     pub adjacency: bool,
+    /// TI-LFA post-convergence repair for this primary nexthop, set
+    /// only on the single primary nexthop of a RIB route by the v3
+    /// TI-LFA second pass; `None` otherwise (ILM/adjacency nexthops,
+    /// ECMP, TI-LFA off, or unresolved). v3 sibling of
+    /// `SpfNexthop::backup`.
+    pub backup: Option<RepairPathMplsV3>,
 }
 
 /// v3 sibling of `SpfIlm`. Same role -- one entry in the SR-MPLS
@@ -7573,6 +7592,7 @@ fn build_rib6_from_flex_algo(
                     SpfNexthopV3 {
                         ifindex,
                         adjacency: false,
+                        backup: None,
                     },
                 )
             })
@@ -7609,6 +7629,9 @@ fn build_rib6_from_flex_algo(
                     nhops: nhops.clone(),
                     sid: sid_label,
                     prefix_sid: Some((value, label_config.clone())),
+                    // Per-Flex-Algo routes have no TI-LFA today.
+                    dest_vertex: None,
+                    backup_as_primary: false,
                 };
                 rib6_insert(&mut rib, prefix, route);
                 break;
@@ -7841,82 +7864,101 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
         }
     }
 
-    for (adv_router, originated, lsa_data) in &router_lsas {
-        let node_id = top.lsp_map.get(*adv_router);
+    // Map each neighbor router-id we hold a local adjacency to -> the
+    // ifindex of its interface, so edges from our own Router-LSA carry
+    // a usable `link_id` for TI-LFA's repair first-hop (mirrors the v2
+    // graph builder). v3 keys `link.nbrs` by router-id and learns the
+    // ifindex from the adjacency.
+    let mut nbr_to_ifindex: std::collections::HashMap<Ipv4Addr, u32> =
+        std::collections::HashMap::new();
+    for link in top.links.values() {
+        for nbr in link.nbrs.values() {
+            nbr_to_ifindex.insert(nbr.ident.router_id, nbr.ifindex);
+        }
+    }
 
+    // Pass 1: create every vertex and resolve the source. All vertices
+    // must exist before pass 2 wires edges onto both endpoints.
+    for (adv_router, originated, _lsa_data) in &router_lsas {
+        let node_id = top.lsp_map.get(*adv_router);
         if *originated {
             source_node = Some(node_id);
         }
-
-        let mut vertex = spf::Vertex {
+        let vertex = spf::Vertex {
             id: node_id,
             name: adv_router.to_string(),
             sys_id: adv_router.to_string(),
             ..Default::default()
         };
+        graph.insert(node_id, vertex);
+    }
 
-        if let Ospfv3LsBody::Router(ref router_body) = lsa_data.body {
-            for link in &router_body.links {
-                use ospf_packet::Ospfv3RouterLinkType;
-                match link.link_type {
-                    Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
-                        // Bidirectional check: peer's Router-LSA
-                        // must exist (non-MaxAge) AND carry a
-                        // matching link back to us.
-                        let Some(peer_lsa) = router_lsa_by_id.get(&link.neighbor_router_id) else {
-                            continue;
-                        };
-                        let has_backlink = peer_lsa.links.iter().any(|l| {
-                            matches!(
-                                l.link_type,
-                                Ospfv3RouterLinkType::PointToPoint
-                                    | Ospfv3RouterLinkType::VirtualLink
-                            ) && l.neighbor_router_id == *adv_router
-                        });
-                        if !has_backlink {
-                            continue;
-                        }
-                        let to_id = top.lsp_map.get(link.neighbor_router_id);
-                        vertex.olinks.push(spf::Link {
-                            from: node_id,
-                            to: to_id,
-                            cost: link.metric as u32,
-                            link_id: 0,
-                        });
+    // Pass 2: wire edges onto the originator's `olinks` (forward SPF,
+    // unchanged) and the target's `ilinks` (reverse SPF for TI-LFA's
+    // Q-space — new, previously unpopulated).
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = top.lsp_map.get(*adv_router);
+        let Ospfv3LsBody::Router(ref router_body) = lsa_data.body else {
+            continue;
+        };
+        for link in &router_body.links {
+            use ospf_packet::Ospfv3RouterLinkType;
+            match link.link_type {
+                Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
+                    // Bidirectional check: peer's Router-LSA must exist
+                    // (non-MaxAge) AND carry a matching link back to us.
+                    let Some(peer_lsa) = router_lsa_by_id.get(&link.neighbor_router_id) else {
+                        continue;
+                    };
+                    let has_backlink = peer_lsa.links.iter().any(|l| {
+                        matches!(
+                            l.link_type,
+                            Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink
+                        ) && l.neighbor_router_id == *adv_router
+                    });
+                    if !has_backlink {
+                        continue;
                     }
-                    Ospfv3RouterLinkType::Transit => {
-                        // Bidirectional check: Network-LSA must list
-                        // us in attached_routers. Key is the DR's
-                        // (interface_id, router_id) from the
-                        // Router-LSA link's
-                        // (neighbor_interface_id, neighbor_router_id).
-                        let net_key = (link.neighbor_interface_id, link.neighbor_router_id);
-                        let Some(attached) = network_lsas.get(&net_key) else {
+                    let to_id = top.lsp_map.get(link.neighbor_router_id);
+                    let link_id = if *originated {
+                        nbr_to_ifindex
+                            .get(&link.neighbor_router_id)
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    push_edge(&mut graph, node_id, to_id, link.metric as u32, link_id);
+                }
+                Ospfv3RouterLinkType::Transit => {
+                    // Bidirectional check: Network-LSA must list us in
+                    // attached_routers. Key is the DR's
+                    // (interface_id, router_id) from the Router-LSA
+                    // link's (neighbor_interface_id, neighbor_router_id).
+                    let net_key = (link.neighbor_interface_id, link.neighbor_router_id);
+                    let Some(attached) = network_lsas.get(&net_key) else {
+                        continue;
+                    };
+                    if !attached.iter().any(|r| r == adv_router) {
+                        continue;
+                    }
+                    // Edges to every other attached router (excluding
+                    // self) at the link's metric.
+                    for peer in attached {
+                        if peer == adv_router {
                             continue;
+                        }
+                        let to_id = top.lsp_map.get(*peer);
+                        let link_id = if *originated {
+                            nbr_to_ifindex.get(peer).copied().unwrap_or(0)
+                        } else {
+                            0
                         };
-                        if !attached.iter().any(|r| r == adv_router) {
-                            continue;
-                        }
-                        // Add edges to every other attached router
-                        // (excluding self) at the link's metric.
-                        for peer in attached {
-                            if peer == adv_router {
-                                continue;
-                            }
-                            let to_id = top.lsp_map.get(*peer);
-                            vertex.olinks.push(spf::Link {
-                                from: node_id,
-                                to: to_id,
-                                cost: link.metric as u32,
-                                link_id: 0,
-                            });
-                        }
+                        push_edge(&mut graph, node_id, to_id, link.metric as u32, link_id);
                     }
                 }
             }
         }
-
-        graph.insert(node_id, vertex);
     }
 
     (graph, source_node)
@@ -8177,10 +8219,7 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
         area_id,
         graph,
         source,
-        // OSPFv3 TI-LFA is a follow-up: the v3 SPF graph (`graph_v3`)
-        // does not yet carry reverse edges (ilinks) for Q-space, so
-        // keep the repair computation off for v3 instances.
-        ti_lfa_enabled: false,
+        ti_lfa_enabled: top.ti_lfa_enabled,
         flex_algos,
     })
 }
@@ -8195,9 +8234,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
         graph,
         source,
         spf_result,
-        // OSPFv3 TI-LFA is a follow-up; v3 SPF input keeps it disabled
-        // so this is always empty. Ignore it here.
-        tilfa_result: _,
+        tilfa_result,
         duration,
         last,
         flex_algos,
@@ -8221,10 +8258,11 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     }
     top.rib6_flex_algo = rib6_flex_algo;
 
-    apply_routing_updates_v3(top, area_id, source, &spf_result);
+    apply_routing_updates_v3(top, area_id, source, &spf_result, &tilfa_result);
 
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
+    top.tilfa_result = Some(tilfa_result);
 
     // Per-algo SPF trees, for `show ipv6 ospf flex-algo`.
     top.spf_flex_algo = flex_algos
@@ -8264,6 +8302,7 @@ fn build_rib6_from_spf(
     area_id: Ipv4Addr,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
     use ospf_packet::{OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3LsBody};
@@ -8307,6 +8346,7 @@ fn build_rib6_from_spf(
                         SpfNexthopV3 {
                             ifindex,
                             adjacency: false,
+                            backup: None,
                         },
                     )
                 })
@@ -8349,6 +8389,7 @@ fn build_rib6_from_spf(
                     SpfNexthopV3 {
                         ifindex: link.index,
                         adjacency: false,
+                        backup: None,
                     },
                 );
                 (
@@ -8378,6 +8419,7 @@ fn build_rib6_from_spf(
                     SpfNexthopV3 {
                         ifindex: link.index,
                         adjacency: false,
+                        backup: None,
                     },
                 );
                 (prefix.metric as u32, nhops_map)
@@ -8388,6 +8430,8 @@ fn build_rib6_from_spf(
                 nhops: nhops_map,
                 sid: None,
                 prefix_sid: None,
+                dest_vertex: Some(ref_vertex),
+                backup_as_primary: top.fast_reroute_backup_as_primary,
             };
             // Equal-cost: take the lowest-metric. If equal, merge
             // nexthop sets so we end up with ECMP at the same
@@ -8417,6 +8461,31 @@ fn build_rib6_from_spf(
         && area.area_type.is_nssa()
     {
         add_nssa_routes_v3(top, area_id, spf_result, &mut rib);
+    }
+
+    // TI-LFA second pass: stamp the post-convergence repair backup onto
+    // single-primary routes (ECMP skipped — surviving legs already
+    // protect). v3 sibling of the v2 second pass in `build_rib_from_spf`;
+    // resolving a repair list to SR-MPLS labels needs the LSDB, so it
+    // runs here on the main task rather than on the SPF worker.
+    if let Some(area) = top.areas.get(area_id) {
+        for (_, route) in rib.iter_mut() {
+            if route.nhops.len() != 1 {
+                continue;
+            }
+            let Some(dest) = route.dest_vertex else {
+                continue;
+            };
+            let Some(repair) = tilfa_result.get(&dest).and_then(|paths| paths.first()) else {
+                continue;
+            };
+            let Some(backup) = build_repair_path_mpls_v3(top, area, repair) else {
+                continue;
+            };
+            if let Some(nhop) = route.nhops.values_mut().next() {
+                nhop.backup = Some(backup);
+            }
+        }
     }
 
     rib
@@ -8514,6 +8583,7 @@ fn add_nssa_routes_v3(
                     SpfNexthopV3 {
                         ifindex,
                         adjacency: false,
+                        backup: None,
                     },
                 )
             })
@@ -8524,6 +8594,9 @@ fn add_nssa_routes_v3(
             nhops: nhops_map,
             sid: None,
             prefix_sid: None,
+            // Protect the path to the NSSA originator (ASBR).
+            dest_vertex: Some(originator_vertex),
+            backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         // Equal-cost merge — same shape as the intra-area insert
         // above in `build_rib6_from_spf`.
@@ -8544,51 +8617,67 @@ fn add_nssa_routes_v3(
     }
 }
 
-/// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. The
-/// nexthop becomes `Nexthop::Uni` for single-hop routes,
-/// `Nexthop::Multi` for ECMP.
-fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
-    // SR-MPLS egress imposition: if the prefix has a resolved
-    // Prefix-SID label, push it onto every nexthop as an Explicit
-    // swap label. v2's `nhop_to_nexthop_uni` additionally tags
-    // adjacency-directly-attached nexthops as `Label::Implicit`
-    // (PHP), keyed off `SpfNexthop::adjacency`. `SpfNexthopV3`
-    // doesn't carry that flag yet, so we always push Explicit --
-    // functionally correct (swap to same label) just with no PHP
-    // optimization. Adding the adjacency flag to the v3 SPF
-    // nexthop builder is a follow-up.
+/// One v3 primary nexthop as a `NexthopUni` at `metric`, with the
+/// prefix-SID label (if any) pushed as an Explicit swap. `SpfNexthopV3`
+/// doesn't carry the adjacency/PHP flag in its label form yet, so we
+/// always push Explicit — functionally correct (swap to same label),
+/// just no PHP optimization. v3 sibling of `nhop_to_nexthop_uni`.
+fn nhop_v3_to_nexthop_uni(
+    addr: &std::net::Ipv6Addr,
+    route: &SpfRouteV3,
+    nhop: &SpfNexthopV3,
+    metric: u32,
+) -> rib::NexthopUni {
     let labels: Vec<rib::Label> = match route.sid {
         Some(sid) => vec![rib::Label::Explicit(sid)],
         None => vec![],
     };
-    let nexthop = if route.nhops.len() == 1 {
-        let (addr, nhop) = route.nhops.iter().next().unwrap();
-        let mut uni =
-            rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, labels.clone());
-        uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
-        rib::Nexthop::Uni(uni)
+    let mut uni = rib::NexthopUni::new(std::net::IpAddr::V6(*addr), metric, labels);
+    uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
+    uni
+}
+
+/// A v3 TI-LFA repair as a backup `NexthopUni`: the repair's v6
+/// link-local, the resolved SR-MPLS label stack, and the egress
+/// ifindex, at `metric`. v3 sibling of `backup_to_nexthop_uni`.
+fn backup_v3_to_nexthop_uni(backup: &RepairPathMplsV3, metric: u32) -> rib::NexthopUni {
+    let mut uni = rib::NexthopUni::new(
+        std::net::IpAddr::V6(backup.addr),
+        metric,
+        backup.labels.clone(),
+    );
+    uni.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+    uni
+}
+
+/// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. Flattens the
+/// primaries and (when present) their TI-LFA repair backups into one
+/// Vec at distinct metrics; `build_rib_nexthop` groups by metric and
+/// dispatches Uni / Multi / List. Mirrors v2's `make_rib_entry`.
+fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
+    let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
+    let (primary_metric, backup_metric) = if route.backup_as_primary {
+        (offset_metric, route.metric)
     } else {
-        let nexthops: Vec<rib::NexthopUni> = route
-            .nhops
-            .iter()
-            .map(|(addr, nhop)| {
-                let mut uni =
-                    rib::NexthopUni::new(std::net::IpAddr::V6(*addr), route.metric, labels.clone());
-                uni.ifindex_origin = (nhop.ifindex != 0).then_some(nhop.ifindex);
-                uni
-            })
-            .collect();
-        rib::Nexthop::Multi(rib::NexthopMulti {
-            metric: route.metric,
-            nexthops,
-            ..Default::default()
-        })
+        (route.metric, offset_metric)
     };
+    let nhops: Vec<rib::NexthopUni> = route
+        .nhops
+        .iter()
+        .flat_map(|(addr, nhop)| {
+            let primary = nhop_v3_to_nexthop_uni(addr, route, nhop, primary_metric);
+            let backup = nhop
+                .backup
+                .as_ref()
+                .map(|b| backup_v3_to_nexthop_uni(b, backup_metric));
+            std::iter::once(primary).chain(backup)
+        })
+        .collect();
 
     let mut rib_entry = rib::entry::RibEntry::new(RibType::Ospf);
     rib_entry.distance = 110;
     rib_entry.metric = route.metric;
-    rib_entry.nexthop = nexthop;
+    rib_entry.nexthop = build_rib_nexthop(nhops);
     rib_entry
 }
 
@@ -8699,8 +8788,9 @@ fn apply_routing_updates_v3(
     area_id: Ipv4Addr,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
+    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
 ) {
-    let mut new_rib = build_rib6_from_spf(top, area_id, source, spf_result);
+    let mut new_rib = build_rib6_from_spf(top, area_id, source, spf_result, tilfa_result);
     // Attach SR Prefix-SIDs to matching routes so `make_rib6_entry`
     // pushes the label onto each nexthop (egress imposition).
     add_prefix_sids_v3(top, area_id, &mut new_rib);
@@ -9509,6 +9599,7 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                         SpfNexthopV3 {
                             ifindex: link.index,
                             adjacency: true,
+                            backup: None,
                         },
                     );
                     ilm.insert(
@@ -9586,6 +9677,7 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
             SpfNexthopV3 {
                 ifindex,
                 adjacency: true,
+                backup: None,
             },
         );
         ilm.insert(
