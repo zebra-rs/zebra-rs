@@ -1,0 +1,16 @@
+[package]
+name = "stamp-packet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Codec for STAMP (RFC 8762) test packets with RFC 8972/9503 extensions"
+
+[dependencies]
+bytes = "1.9"
+
+[dev-dependencies]
+hex-literal = "1.0"
+
+[lints]
+workspace = true
