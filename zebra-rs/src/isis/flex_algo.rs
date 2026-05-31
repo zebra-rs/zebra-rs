@@ -64,6 +64,27 @@ pub fn parse_asla_flex_algo_bitmap(asla: &IsisSubAsla) -> Option<ExtAdminGroup> 
     None
 }
 
+/// Extract the minimum unidirectional link delay (microseconds) from a
+/// peer-advertised ASLA sub-TLV iff the SABM marks it for the
+/// Flex-Algorithm application (X-bit). The value is the Min field of the
+/// nested Min/Max Link Delay sub-TLV (RFC 8570 §4.2) — the RFC 9350 §6
+/// metric-type 1 (min-unidir-link-delay) input. Returns `None` when the
+/// X-bit is clear or no Min/Max Link Delay sub-TLV is nested. Mirrors
+/// `parse_asla_flex_algo_bitmap` so SPF reads the same Min a sender
+/// packs via `build_link_asla`.
+pub fn parse_asla_min_delay(asla: &IsisSubAsla) -> Option<u32> {
+    let first = asla.sabm.first()?;
+    if first & SABM_FLEX_ALGO == 0 {
+        return None;
+    }
+    for sub in &asla.subs {
+        if let NeighSubTlv::MinMaxLinkDelay(d) = sub {
+            return Some(d.min_delay);
+        }
+    }
+    None
+}
+
 /// SABM byte (RFC 9479 §4.2) with the Flex-Algorithm (X-bit) set.
 /// Bit layout in the first SABM byte, MSB-first: R(7) S(6) F(5) X(4)
 /// reserved(3..0). Used as the Selective Application-specific
@@ -469,6 +490,66 @@ mod tests {
         };
         let bitmap = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
         assert_eq!(bitmap.words, vec![0x11, 0x80000000]);
+    }
+
+    #[test]
+    fn parse_asla_min_delay_returns_min_when_x_bit_set() {
+        use isis_packet::IsisSubMinMaxLinkDelay;
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![SABM_FLEX_ALGO],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay: 900,
+                max_delay: 1_200,
+            })],
+        };
+        assert_eq!(parse_asla_min_delay(&asla), Some(900));
+    }
+
+    #[test]
+    fn parse_asla_min_delay_returns_none_without_x_bit() {
+        use isis_packet::IsisSubMinMaxLinkDelay;
+        // SABM = [0x80] sets R-bit (RSVP-TE) but not X-bit.
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![0x80],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay: 900,
+                max_delay: 1_200,
+            })],
+        };
+        assert!(parse_asla_min_delay(&asla).is_none());
+    }
+
+    #[test]
+    fn parse_asla_min_delay_returns_none_without_min_max_sub() {
+        // X-bit set but only an AdminGrp nested — no Min/Max delay.
+        let asla = IsisSubAsla {
+            l_flag: false,
+            sabm: vec![SABM_FLEX_ALGO],
+            udabm: vec![],
+            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp { groups: vec![0x1] })],
+        };
+        assert!(parse_asla_min_delay(&asla).is_none());
+    }
+
+    #[test]
+    fn parse_asla_min_delay_round_trips_through_build_link_asla() {
+        use isis_packet::IsisSubMinMaxLinkDelay;
+        // Producer nests Min/Max in the flex-algo ASLA; the consumer
+        // recovers the Min bit-for-bit.
+        let am = AffinityMap::new();
+        let extra = vec![NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+            anomalous: false,
+            min_delay: 1_500,
+            max_delay: 2_000,
+        })];
+        let asla = build_link_asla(&BTreeSet::new(), &am, extra).expect("ASLA");
+        assert_eq!(parse_asla_min_delay(&asla), Some(1_500));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use isis_packet::{
 use crate::spf;
 
 use super::config::MtId;
-use super::flex_algo::{FlexAlgoEntry, link_passes_fad, local_link_affinity};
+use super::flex_algo::{FadMetricType, FlexAlgoEntry, link_passes_fad, local_link_affinity};
 use super::inst::IsisTop;
 use super::level::Level;
 
@@ -498,9 +498,12 @@ fn process_neighbor_link_mt2(
 ///     cached. `entry.srlg_exclude` is read but produces no effect; a
 ///     `tracing::warn` would be reasonable but is left to the
 ///     scheduler layer.
-///   - **Metric type:** IGP only. `entry.metric_type ==
-///     MinUnidirLinkDelay` or `TeDefault` falls back to IGP with no
-///     warning (TODO when those metric caches arrive).
+///   - **Metric type (§5.1):** `MinUnidirLinkDelay` (metric-type 1)
+///     routes on per-link Min delay — local links from
+///     `LinkConfig::te_metric.min_delay`, peer links from the Min/Max
+///     Link Delay sub-TLV in the link's flex-algo ASLA. A link that
+///     advertises no delay is pruned (RFC 9350 §15). IGP (and the
+///     not-yet-supported TeDefault) use the reach entry's IGP metric.
 pub fn graph_flex_algo(
     top: &mut IsisTop,
     level: Level,
@@ -606,6 +609,34 @@ pub fn graph_flex_algo(
                     continue;
                 }
 
+                // Edge cost per the FAD metric-type (RFC 9350 §5.1).
+                // metric-type 1 routes on the link's Min delay: local
+                // links from current config, peer links from the
+                // flex-algo ASLA's Min/Max Link Delay sub-TLV. A link
+                // that advertises no delay is pruned (RFC 9350 §15).
+                // Everything else uses the reach entry's IGP metric.
+                let cost = if entry.metric_type == Some(FadMetricType::MinUnidirLinkDelay) {
+                    let delay = if source_sys_id == self_sys_id {
+                        local_adj_to_ifindex
+                            .get(&entry_reach.neighbor_id)
+                            .and_then(|ifx| top.links.get(ifx))
+                            .and_then(|link| link.config.te_metric.min_delay)
+                    } else {
+                        entry_reach.subs.iter().find_map(|sub| match sub {
+                            neigh::IsisSubTlv::Asla(asla) => {
+                                super::flex_algo::parse_asla_min_delay(asla)
+                            }
+                            _ => None,
+                        })
+                    };
+                    match delay {
+                        Some(d) => d,
+                        None => continue,
+                    }
+                } else {
+                    entry_reach.metric
+                };
+
                 let to_id = top
                     .lsp_map
                     .get_mut(&level)
@@ -620,7 +651,7 @@ pub fn graph_flex_algo(
                     0
                 };
 
-                let link = spf::Link::with_id(node_id, to_id, entry_reach.metric, link_id);
+                let link = spf::Link::with_id(node_id, to_id, cost, link_id);
                 if let Some(from) = graph.get_mut(&node_id) {
                     from.olinks.push(link.clone());
                 }
