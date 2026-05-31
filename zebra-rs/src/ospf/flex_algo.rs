@@ -5,9 +5,12 @@
 //! Extended-Link Opaque LSAs. Parallel to `isis::flex_algo`'s
 //! isis-packet builders.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use ospf_packet::{OspfFadExcludeSrlg, OspfFadFlags, OspfFadSubTlv, RouterInfoTlvFad};
+use ospf_packet::{
+    ExtLinkSubTlv, OSPF_SABM_FLEX_ALGO, OspfAslaSubSubTlv, OspfAslaSubTlv, OspfFadExcludeSrlg,
+    OspfFadFlags, OspfFadSubTlv, RouterInfoTlvFad,
+};
 
 use crate::flex_algo::{
     AffinityMap, FadMetricType, FlexAlgoConfig, SrlgGroup, local_link_affinity,
@@ -87,6 +90,27 @@ pub fn build_fad(
         });
     }
     out
+}
+
+/// Build the per-link ASLA sub-TLV (RFC 9492) carrying this link's
+/// affinity (Extended Admin Group, RFC 7308) for the Flexible
+/// Algorithm application. Returns `None` when no affinity name resolves
+/// to a bit — a zero-length admin group would be a meaningless wire
+/// artifact, so the link simply advertises no ASLA.
+///
+/// The SABM is a single 4-octet word with only the Flex-Algorithm
+/// X-bit set (`OSPF_SABM_FLEX_ALGO`, RFC 9350 §12); OSPF requires the
+/// mask length to be 0/4/8 octets (RFC 9492 §2). UDABM is empty.
+pub fn build_link_asla(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<ExtLinkSubTlv> {
+    let group = local_link_affinity(affinity, am);
+    if group.words.is_empty() {
+        return None;
+    }
+    Some(ExtLinkSubTlv::Asla(OspfAslaSubTlv {
+        sabm: vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0],
+        udabm: Vec::new(),
+        subs: vec![OspfAslaSubSubTlv::ExtAdminGroup(group)],
+    }))
 }
 
 #[cfg(test)]
@@ -195,5 +219,40 @@ mod tests {
         let fads = build_fad(&fa, &am, &BTreeMap::new());
         assert_eq!(fads.len(), 1);
         assert!(fads[0].subs.is_empty(), "got subs: {:?}", fads[0].subs);
+    }
+
+    fn affinity_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn build_link_asla_emits_flex_algo_admin_group() {
+        let mut am = AffinityMap::new();
+        for (name, bit) in [("blue", "0"), ("red", "200")] {
+            am.exec(
+                "/affinity-map/affinity/bit-position".into(),
+                args(&[name, bit]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            am.commit();
+        }
+        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let ExtLinkSubTlv::Asla(a) = &asla else {
+            panic!("expected Asla, got {asla:?}");
+        };
+        assert!(a.is_flex_algo(), "SABM X-bit must be set");
+        assert_eq!(a.sabm.len(), 4, "OSPF SABM must be 0/4/8 octets");
+        let g = a.ext_admin_group().expect("admin group");
+        assert!(g.get(0) && g.get(200) && !g.get(1));
+    }
+
+    #[test]
+    fn build_link_asla_none_when_no_affinity_resolves() {
+        let am = AffinityMap::new();
+        // No names → None.
+        assert!(build_link_asla(&BTreeSet::new(), &am).is_none());
+        // Referenced name not in the map → None (empty bitmap).
+        assert!(build_link_asla(&affinity_set(&["ghost"]), &am).is_none());
     }
 }
