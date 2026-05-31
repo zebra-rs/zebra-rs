@@ -1,29 +1,27 @@
 //! Central dynamic MPLS label-block manager.
 //!
-//! Owns the dynamic label pool — the band above the SR-MPLS ranges
-//! (SRGB default 16000..23999, SRLB 15000..15099, configured in
-//! [`crate::rib::segment_routing::block`]) — and hands out reserved
-//! blocks to protocols that need dynamically-allocated labels (BGP
-//! L3VPN per-VRF labels today; LDP and others later). A block is
-//! reserved until released; a released block is reused for a later
-//! request of the same size before the high-water mark advances.
-//! Per-protocol bookkeeping lets `proto_cleanup` reclaim every block a
+//! Owns the dynamic label pool — counting up from the first usable MPLS
+//! label (16; 0..=15 are IANA-reserved) — and hands out reserved blocks
+//! to protocols that need dynamically-allocated labels (BGP L3VPN
+//! per-VRF labels today; LDP and others later). A block is reserved
+//! until released; a released block is reused for a later request of the
+//! same size before the high-water mark advances. Per-protocol
+//! bookkeeping lets `proto_cleanup` reclaim every block a
 //! disabled/crashed protocol held.
 //!
-//! Keeping BGP/LDP dynamic labels in a band clear of the SR ranges
-//! avoids cross-protocol label collisions in the kernel MPLS table —
-//! something the previous per-VRF allocator (which counted up from 16)
-//! could violate at scale.
+//! Operators must keep any configured SR-MPLS blocks (SRGB/SRLB) clear
+//! of the dynamic pool to avoid cross-protocol label collisions in the
+//! kernel MPLS table.
 
 use std::collections::BTreeMap;
 
 use crate::spf::label_block::LabelBlock;
 
-/// First label of the dynamic pool. Chosen well above the SR-MPLS
-/// default ranges so dynamic (BGP/LDP) labels never collide with
-/// prefix-/adjacency-SIDs. Operators configuring custom SR blocks must
-/// keep them below this floor.
-pub const DYNAMIC_START: u32 = 100_000;
+/// First label of the dynamic pool — the start of the reserved MPLS
+/// label space (labels 0..=15 are reserved by IANA). Operators must keep
+/// any configured SR-MPLS blocks clear of the dynamic pool to avoid
+/// cross-protocol label collisions in the kernel MPLS table.
+pub const DYNAMIC_START: u32 = 16;
 
 /// One past the last usable 20-bit MPLS label (labels are 20 bits, so
 /// `0..=0x000F_FFFF`; this exclusive end is `0x000F_FFFF + 1`).
@@ -117,7 +115,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allocs_carve_from_the_dynamic_pool_above_sr() {
+    fn allocs_carve_from_the_dynamic_pool() {
         let mut m = LabelManager::new();
         let a = m.alloc("bgp", 1024).unwrap();
         assert_eq!(a.start, DYNAMIC_START);
@@ -125,8 +123,6 @@ mod tests {
         // Second block starts where the first ended — no overlap.
         let b = m.alloc("bgp", 16).unwrap();
         assert_eq!(b.start, DYNAMIC_START + 1024);
-        // Whole pool sits clear of the SR default ceiling (SRGB 23999).
-        assert!(a.start > 23999);
     }
 
     #[test]
