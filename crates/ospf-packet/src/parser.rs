@@ -8,7 +8,7 @@ use internet_checksum::Checksum;
 use ipnet::Ipv4Net;
 use nom::bytes::complete::take;
 use nom::error::{ErrorKind, make_error};
-use nom::number::complete::{be_u8, be_u24, be_u32};
+use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
 use packet_utils::{Algo, ExtAdminGroup, SidLabelTlv};
@@ -1909,6 +1909,7 @@ impl ExtLinkSubTlv {
             // Both Remote-Interface-Address variants carry a single
             // IPv4 address in the value.
             ExtLinkSubTlv::RemoteItfAddr(_) | ExtLinkSubTlv::RemoteItfAddrCisco(_) => 4,
+            ExtLinkSubTlv::Asla(a) => a.value_len(),
             ExtLinkSubTlv::Unknown(u) => u.len,
         }
     }
@@ -1918,6 +1919,7 @@ impl ExtLinkSubTlv {
             ExtLinkSubTlv::AdjSid(_) => (2u16, self.value_len()),
             ExtLinkSubTlv::LanAdjSid(_) => (3u16, self.value_len()),
             ExtLinkSubTlv::RemoteItfAddr(_) => (5u16, self.value_len()),
+            ExtLinkSubTlv::Asla(_) => (10u16, self.value_len()),
             ExtLinkSubTlv::RemoteItfAddrCisco(_) => (32768u16, self.value_len()),
             ExtLinkSubTlv::Unknown(u) => (u.typ, u.len),
         };
@@ -1929,6 +1931,7 @@ impl ExtLinkSubTlv {
             ExtLinkSubTlv::RemoteItfAddr(addr) | ExtLinkSubTlv::RemoteItfAddrCisco(addr) => {
                 buf.put(&addr.octets()[..]);
             }
+            ExtLinkSubTlv::Asla(a) => a.emit_value(buf),
             ExtLinkSubTlv::Unknown(u) => buf.put(&u.values[..]),
         }
         // Pad to 4-byte alignment.
@@ -2067,6 +2070,8 @@ pub enum ExtLinkSubTlvType {
     AdjSid = 2,
     LanAdjSid = 3,
     RemoteItfAddr = 5,
+    // RFC 9492 Application-Specific Link Attributes sub-TLV.
+    Asla = 10,
     RemoteItfAddrCisco = 32768,
     Unknown(u16),
 }
@@ -2077,6 +2082,7 @@ impl From<u16> for ExtLinkSubTlvType {
             2 => ExtLinkSubTlvType::AdjSid,
             3 => ExtLinkSubTlvType::LanAdjSid,
             5 => ExtLinkSubTlvType::RemoteItfAddr,
+            10 => ExtLinkSubTlvType::Asla,
             32768 => ExtLinkSubTlvType::RemoteItfAddrCisco,
             x => ExtLinkSubTlvType::Unknown(x),
         }
@@ -2092,6 +2098,10 @@ pub enum ExtLinkSubTlv {
     /// the peer's IPv4 address on the link, used by SR-TE head-ends to
     /// disambiguate parallel links when steering through an Adj-SID.
     RemoteItfAddr(Ipv4Addr),
+    /// Application-Specific Link Attributes (RFC 9492, sub-TLV type
+    /// 10). For Flex-Algorithm this carries the per-link Extended
+    /// Administrative Group with the SABM X-bit set (RFC 9350 §12).
+    Asla(OspfAslaSubTlv),
     /// Cisco-experimental predecessor of the RFC 8379 sub-TLV (type
     /// 32768). Same semantics, different code point. Round-tripped so a
     /// re-emit preserves the wire-level type the peer originally sent.
@@ -2119,6 +2129,10 @@ impl ExtLinkSubTlv {
                 let (_, addr) = Ipv4Addr::parse_be(sub_data)?;
                 ExtLinkSubTlv::RemoteItfAddr(addr)
             }
+            ExtLinkSubTlvType::Asla => {
+                let (_, asla) = OspfAslaSubTlv::parse_be(sub_data)?;
+                ExtLinkSubTlv::Asla(asla)
+            }
             ExtLinkSubTlvType::RemoteItfAddrCisco => {
                 let (_, addr) = Ipv4Addr::parse_be(sub_data)?;
                 ExtLinkSubTlv::RemoteItfAddrCisco(addr)
@@ -2135,6 +2149,155 @@ impl ExtLinkSubTlv {
         let (input, _) = take(padded - len)(input)?;
 
         Ok((input, val))
+    }
+}
+
+/// SABM first-octet bit for the Flexible Algorithm application
+/// (RFC 9350 §12, bit 3 MSB-first). Identical value to the IS-IS
+/// X-bit so the two protocols agree on the encoding.
+pub const OSPF_SABM_FLEX_ALGO: u8 = 0x10;
+
+/// RFC 9492 §2 OSPFv2 Application-Specific Link Attributes (ASLA)
+/// Sub-TLV (Extended Link Sub-TLV type 10).
+///
+/// ```text
+///   0                   1                   2                   3
+///   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  |  SABM Length  | UDABM Length  |            Reserved           |
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  //              SABM / UDABM (0, 4, or 8 octets each)          //
+///  //              Link Attribute Sub-sub-TLVs                    //
+/// ```
+///
+/// Scopes a set of link attributes to one or more applications. For
+/// Flex-Algorithm the SABM carries the X-bit (`OSPF_SABM_FLEX_ALGO`)
+/// and the only attribute we originate is the Extended Administrative
+/// Group sub-sub-TLV (type 20). Unlike IS-IS, OSPF requires the SABM /
+/// UDABM lengths to be 0, 4, or 8 octets (RFC 9492 §2).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct OspfAslaSubTlv {
+    pub sabm: Vec<u8>,
+    pub udabm: Vec<u8>,
+    pub subs: Vec<OspfAslaSubSubTlv>,
+}
+
+/// A link-attribute sub-sub-TLV carried inside an ASLA sub-TLV
+/// (OSPFv2 Extended Link Sub-TLV registry).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OspfAslaSubSubTlv {
+    /// Extended Administrative Group (RFC 7308), type 20 — the per-link
+    /// affinity bitmap tested by Flex-Algorithm SPF.
+    ExtAdminGroup(ExtAdminGroup),
+    Unknown(RouterInfoTlvUnknown),
+}
+
+impl OspfAslaSubSubTlv {
+    fn parse_sub(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, data) = packet_utils::safe_split_at(input, len)?;
+        let val = match tl.typ {
+            20 => {
+                let (_, g) = ExtAdminGroup::parse_be(data)?;
+                OspfAslaSubSubTlv::ExtAdminGroup(g)
+            }
+            _ => OspfAslaSubSubTlv::Unknown(RouterInfoTlvUnknown {
+                typ: tl.typ,
+                len: tl.len,
+                values: data.to_vec(),
+            }),
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, val))
+    }
+
+    fn value_len(&self) -> u16 {
+        match self {
+            OspfAslaSubSubTlv::ExtAdminGroup(g) => g.byte_len() as u16,
+            OspfAslaSubSubTlv::Unknown(u) => u.len,
+        }
+    }
+
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn tlv_type(&self) -> u16 {
+        match self {
+            OspfAslaSubSubTlv::ExtAdminGroup(_) => 20,
+            OspfAslaSubSubTlv::Unknown(u) => u.typ,
+        }
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let len = self.value_len();
+        buf.put_u16(self.tlv_type());
+        buf.put_u16(len);
+        match self {
+            OspfAslaSubSubTlv::ExtAdminGroup(g) => g.emit(buf),
+            OspfAslaSubSubTlv::Unknown(u) => buf.put(&u.values[..]),
+        }
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+impl OspfAslaSubTlv {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, sabm_len) = be_u8(input)?;
+        let (input, udabm_len) = be_u8(input)?;
+        let (input, _reserved) = be_u16(input)?;
+        let (input, sabm) = packet_utils::safe_split_at(input, sabm_len as usize)?;
+        let (input, udabm) = packet_utils::safe_split_at(input, udabm_len as usize)?;
+        let (input, subs) = many0_complete(OspfAslaSubSubTlv::parse_sub).parse(input)?;
+        Ok((
+            input,
+            Self {
+                sabm: sabm.to_vec(),
+                udabm: udabm.to_vec(),
+                subs,
+            },
+        ))
+    }
+
+    /// Value length (excludes the 4-byte sub-TLV header): the 4-byte
+    /// fixed header plus the masks plus every sub-sub-TLV. Masks are
+    /// 0/4/8 octets so the total is 4-byte aligned.
+    fn value_len(&self) -> u16 {
+        let subs: u16 = self.subs.iter().map(|s| s.wire_len()).sum();
+        4 + self.sabm.len() as u16 + self.udabm.len() as u16 + subs
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.sabm.len() as u8);
+        buf.put_u8(self.udabm.len() as u8);
+        buf.put_u16(0); // reserved
+        buf.put_slice(&self.sabm);
+        buf.put_slice(&self.udabm);
+        for s in &self.subs {
+            s.emit(buf);
+        }
+    }
+
+    /// True iff the SABM marks this advertisement for the Flexible
+    /// Algorithm application (RFC 9350 §12 X-bit, first octet).
+    pub fn is_flex_algo(&self) -> bool {
+        self.sabm
+            .first()
+            .is_some_and(|b| b & OSPF_SABM_FLEX_ALGO != 0)
+    }
+
+    /// First Extended Admin Group carried in this ASLA, if any.
+    pub fn ext_admin_group(&self) -> Option<&ExtAdminGroup> {
+        self.subs.iter().find_map(|s| match s {
+            OspfAslaSubSubTlv::ExtAdminGroup(g) => Some(g),
+            OspfAslaSubSubTlv::Unknown(_) => None,
+        })
     }
 }
 
@@ -2639,6 +2802,53 @@ mod tests {
             RouterInfoTlv::Fad(parsed) => assert_eq!(parsed, &fad),
             other => panic!("expected Fad TLV, got {other:?}"),
         }
+    }
+
+    /// RFC 9492 ASLA sub-TLV carrying a Flex-Algo Extended Admin Group
+    /// round-trips through the Extended Link LSA codec.
+    #[test]
+    fn asla_ext_admin_group_round_trips_in_ext_link_lsa() {
+        let asla = OspfAslaSubTlv {
+            // OSPF SABM length must be 0/4/8 — Flex-Algo X-bit in octet 0.
+            sabm: vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0],
+            udabm: Vec::new(),
+            subs: vec![OspfAslaSubSubTlv::ExtAdminGroup(admin_group(&[0, 4, 200]))],
+        };
+        let lsa = ExtLinkLsa {
+            tlvs: vec![ExtLinkTlv {
+                link_type: 1,
+                link_id: Ipv4Addr::new(10, 0, 0, 2),
+                link_data: Ipv4Addr::new(10, 0, 0, 1),
+                subs: vec![ExtLinkSubTlv::Asla(asla.clone())],
+            }],
+        };
+
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        assert_eq!(buf.len() % 4, 0);
+
+        let (rest, parsed) = ExtLinkLsa::parse_be(&buf).expect("parse");
+        assert!(rest.is_empty(), "trailing: {rest:?}");
+        assert_eq!(parsed.tlvs.len(), 1);
+        match &parsed.tlvs[0].subs[0] {
+            ExtLinkSubTlv::Asla(a) => {
+                assert_eq!(a, &asla);
+                assert!(a.is_flex_algo());
+                assert_eq!(a.ext_admin_group(), Some(&admin_group(&[0, 4, 200])));
+            }
+            other => panic!("expected Asla, got {other:?}"),
+        }
+    }
+
+    /// SABM without the X-bit is not treated as a Flex-Algo advert.
+    #[test]
+    fn asla_without_x_bit_is_not_flex_algo() {
+        let asla = OspfAslaSubTlv {
+            sabm: vec![0x80, 0, 0, 0], // R-bit (RSVP-TE) only.
+            udabm: Vec::new(),
+            subs: Vec::new(),
+        };
+        assert!(!asla.is_flex_algo());
     }
 
     /// A FAD carrying an algorithm we don't recognise as a sub-TLV must
