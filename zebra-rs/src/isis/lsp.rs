@@ -817,6 +817,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         {
             is_reach.subs.push(neigh::IsisSubTlv::Asla(asla));
         }
+        // Per-link RFC 8570 TE metrics (unidirectional / min-max delay,
+        // delay variation, link loss). Statically configured today; a
+        // TWAMP/STAMP measurement task will feed these dynamically in a
+        // later phase.
+        is_reach.subs.extend(link.config.te_metric.sub_tlvs());
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
             for (_key, value) in nbr.addr4.iter() {
@@ -1003,6 +1008,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             {
                 entry.subs.push(neigh::IsisSubTlv::Asla(asla));
             }
+            // Same RFC 8570 TE metrics as the legacy TLV 22 entry above
+            // — link delay/loss are MT-agnostic physical properties.
+            entry.subs.extend(link.config.te_metric.sub_tlvs());
             for (_, nbr) in link.state.nbrs.get(&level).iter() {
                 if let Some((_, sid_addr)) = nbr.endx_sid {
                     if nbr.network_type.is_p2p() {

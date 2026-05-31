@@ -325,6 +325,26 @@ impl Isis {
         self.callback_add("/router/isis/interface/srlg", link::config_srlg);
         self.callback_add("/router/isis/interface/affinity", link::config_affinity);
         self.callback_add(
+            "/router/isis/interface/te-metric/unidirectional-delay",
+            link::config_te_unidirectional_delay,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/min-delay",
+            link::config_te_min_delay,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/max-delay",
+            link::config_te_max_delay,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/delay-variation",
+            link::config_te_delay_variation,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/loss",
+            link::config_te_loss,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

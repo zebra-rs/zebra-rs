@@ -5,6 +5,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::*;
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
@@ -272,6 +273,14 @@ pub struct LinkConfig {
     /// `srlg_groups`.
     pub affinity: BTreeSet<String>,
 
+    /// Statically configured RFC 8570 TE link metrics (unidirectional
+    /// delay, min/max delay, delay variation, link loss) for this link,
+    /// from /router/isis/interface/<name>/te-metric. Emitted as
+    /// sub-TLVs on the link's Extended IS Reachability entry. A future
+    /// performance-measurement (TWAMP/STAMP) task will populate the
+    /// same fields dynamically.
+    pub te_metric: LinkTeMetric,
+
     /// Per-Flex-Algorithm Prefix-SID for this link's IPv4 address(es).
     /// Populated from
     /// /router/isis/interface/<name>/ipv4/flex-algo-prefix-sid[algo=N].
@@ -296,6 +305,58 @@ pub struct LinkConfig {
 pub struct LinkBfdConfig {
     pub enable: bool,
     pub profile: Option<String>,
+}
+
+/// IS-IS-side mirror of the YANG `te-metric { ... }` container — the
+/// per-interface RFC 8570 traffic-engineering link metrics. Each field
+/// is `None` until configured (or, in a later phase, measured). Delay
+/// values are in microseconds; `loss` is the 24-bit value encoded per
+/// RFC 8570 §4.4 (units of 0.000003 %).
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct LinkTeMetric {
+    pub unidirectional_delay: Option<u32>,
+    pub min_delay: Option<u32>,
+    pub max_delay: Option<u32>,
+    pub delay_variation: Option<u32>,
+    pub loss: Option<u32>,
+}
+
+impl LinkTeMetric {
+    /// RFC 8570 sub-TLVs for this link's Extended IS Reachability entry
+    /// (TLV 22, and MT IS Reach TLV 222 when multi-topology is on), in
+    /// ascending sub-TLV-code order (33, 34, 35, 36). Statically
+    /// configured values carry a clear Anomalous flag — the dynamic
+    /// measurement task will raise it on threshold crossing in a later
+    /// phase. Min/Max delay (sub-TLV 34) is emitted only when both
+    /// bounds are configured.
+    pub fn sub_tlvs(&self) -> Vec<NeighSubTlv> {
+        let mut subs = Vec::new();
+        if let Some(delay) = self.unidirectional_delay {
+            subs.push(NeighSubTlv::UniLinkDelay(IsisSubUniLinkDelay {
+                anomalous: false,
+                delay,
+            }));
+        }
+        if let (Some(min_delay), Some(max_delay)) = (self.min_delay, self.max_delay) {
+            subs.push(NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay,
+                max_delay,
+            }));
+        }
+        if let Some(variation) = self.delay_variation {
+            subs.push(NeighSubTlv::DelayVariation(IsisSubDelayVariation {
+                variation,
+            }));
+        }
+        if let Some(loss) = self.loss {
+            subs.push(NeighSubTlv::LinkLoss(IsisSubLinkLoss {
+                anomalous: false,
+                loss,
+            }));
+        }
+        subs
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
@@ -967,6 +1028,48 @@ pub fn config_affinity(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
         link.config.affinity.remove(&name);
     }
     Some(())
+}
+
+// Per-link RFC 8570 TE metrics, from
+// /router/isis/interface/<ifname>/te-metric/<leaf>. libyang passes the
+// interface key then the leaf value; the value is present on delete too,
+// so the field is cleared based on `op`. Each setter re-originates both
+// levels (the level guard inside `process_lsp_originate` drops the wrong
+// level on single-level instances) so the sub-TLV change reaches peers
+// without waiting for the refresh timer.
+fn config_te_metric(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+    set: impl FnOnce(&mut LinkTeMetric, Option<u32>),
+) -> Option<()> {
+    let ifname = args.string()?;
+    let value = args.u32()?;
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    set(&mut link.config.te_metric, op.is_set().then_some(value));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
+    Some(())
+}
+
+pub fn config_te_unidirectional_delay(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_metric(isis, args, op, |t, v| t.unidirectional_delay = v)
+}
+
+pub fn config_te_min_delay(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_metric(isis, args, op, |t, v| t.min_delay = v)
+}
+
+pub fn config_te_max_delay(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_metric(isis, args, op, |t, v| t.max_delay = v)
+}
+
+pub fn config_te_delay_variation(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_metric(isis, args, op, |t, v| t.delay_variation = v)
+}
+
+pub fn config_te_loss(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_metric(isis, args, op, |t, v| t.loss = v)
 }
 
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1952,5 +2055,78 @@ mod bfd_config_tests {
                 profile: Some("FAST".to_string()),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod te_metric_tests {
+    use super::*;
+
+    /// All five metrics configured → four RFC 8570 sub-TLVs emitted in
+    /// ascending code order (33, 34, 35, 36), Anomalous clear on
+    /// statically configured values.
+    #[test]
+    fn sub_tlvs_emits_all_in_code_order() {
+        let te = LinkTeMetric {
+            unidirectional_delay: Some(1000),
+            min_delay: Some(900),
+            max_delay: Some(1200),
+            delay_variation: Some(50),
+            loss: Some(333),
+        };
+        let subs = te.sub_tlvs();
+        assert_eq!(subs.len(), 4);
+        assert!(matches!(
+            subs[0],
+            NeighSubTlv::UniLinkDelay(IsisSubUniLinkDelay {
+                anomalous: false,
+                delay: 1000,
+            })
+        ));
+        assert!(matches!(
+            subs[1],
+            NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay: 900,
+                max_delay: 1200,
+            })
+        ));
+        assert!(matches!(
+            subs[2],
+            NeighSubTlv::DelayVariation(IsisSubDelayVariation { variation: 50 })
+        ));
+        assert!(matches!(
+            subs[3],
+            NeighSubTlv::LinkLoss(IsisSubLinkLoss {
+                anomalous: false,
+                loss: 333,
+            })
+        ));
+    }
+
+    /// Min/Max delay (sub-TLV 34) needs both bounds — a lone min-delay
+    /// emits nothing, both together emit one sub-TLV.
+    #[test]
+    fn min_max_requires_both_bounds() {
+        let only_min = LinkTeMetric {
+            min_delay: Some(900),
+            ..Default::default()
+        };
+        assert!(only_min.sub_tlvs().is_empty());
+
+        let both = LinkTeMetric {
+            min_delay: Some(900),
+            max_delay: Some(1200),
+            ..Default::default()
+        };
+        assert_eq!(both.sub_tlvs().len(), 1);
+    }
+
+    /// No TE metric configured → no sub-TLVs, and the default lives on
+    /// LinkConfig.
+    #[test]
+    fn default_is_empty() {
+        assert!(LinkTeMetric::default().sub_tlvs().is_empty());
+        assert_eq!(LinkConfig::default().te_metric, LinkTeMetric::default());
     }
 }
