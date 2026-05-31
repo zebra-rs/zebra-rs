@@ -4,6 +4,7 @@ use bgp_packet::*;
 
 use crate::bfd::inst::ClientReq;
 use crate::bfd::session::{SessionKey, SessionParams};
+use crate::bfd::socket::{BFD_MULTI_HOP_PORT, BFD_MULTIHOP_DEFAULT_MIN_TTL, BFD_SINGLE_HOP_PORT};
 use crate::bgp::InOut;
 use crate::config::{Args, ConfigOp};
 use crate::policy;
@@ -452,60 +453,133 @@ fn config_flowspec_validation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
 }
 
 /// `set router bgp neighbor X bfd enable true|false` — flips the
-/// BFD attachment for this neighbor. Stores the bit on
-/// `peer.config.bfd.enable` and wires the same flip into a
-/// `ClientReq::Subscribe` / `Unsubscribe` against the BFD instance
-/// when `bgp.bfd_client_tx` is populated.
-fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = args.addr()?;
-    let enable = args.boolean()?;
-    let new_enable = op.is_set() && enable;
-    // Stash data we need from the peer, then drop the borrow so we
-    // can touch other Bgp fields without fighting the borrow checker.
-    let local = {
-        let peer = bgp.peers.get_mut(&addr)?;
-        peer.config.bfd.enable = new_enable;
-        peer.config
+/// Reconcile this neighbor's live BFD subscription with its current
+/// `peer.config.bfd` state. Idempotent and order-independent: every
+/// `/bfd/*` callback funnels through here, so whichever leaf lands last
+/// in a commit leaves the correct session subscribed regardless of the
+/// order `enable` / `multihop` / `minimum-ttl` arrive.
+///
+/// The desired key is recomputed from scratch (local source, hop mode,
+/// remote). It's compared against `peer.bfd_session_key` — the key we
+/// actually subscribed last time — so a changed key (hop-mode flip,
+/// update-source change) unsubscribes the stale session before
+/// subscribing the new one. No leak, no duplicate.
+///
+/// `minimum-ttl` is not part of the key; changing it on an already-up
+/// session needs a bounce (BFD applies params only at session
+/// creation), consistent with how intervals / profile behave.
+fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
+    let (enable, desired_key, params) = {
+        let peer = bgp.peers.get(&addr)?;
+        let enable = peer.config.bfd.enable;
+        let local = peer
+            .config
             .transport
             .update_source
-            .unwrap_or_else(|| unspecified_for(&addr))
+            .unwrap_or_else(|| unspecified_for(&addr));
+        let multihop = peer.bfd_multihop();
+        let min_ttl = if multihop {
+            peer.config
+                .bfd
+                .minimum_ttl
+                .unwrap_or(BFD_MULTIHOP_DEFAULT_MIN_TTL)
+        } else {
+            255 // GTSM (RFC 5881 §5): single-hop accepts only TTL 255.
+        };
+        let key = SessionKey {
+            local,
+            remote: addr,
+            ifindex: 0,
+            multihop,
+        };
+        let params = SessionParams {
+            dst_port: if multihop {
+                BFD_MULTI_HOP_PORT
+            } else {
+                BFD_SINGLE_HOP_PORT
+            },
+            min_ttl,
+            // Intervals / detect-mult still come from the defaults; the
+            // peer's `bfd profile` is stored but not yet resolved (a
+            // separate follow-up needing cross-task BfdConfig access).
+            ..SessionParams::default()
+        };
+        (enable, key, params)
     };
+
+    let current = bgp.peers.get(&addr).and_then(|p| p.bfd_session_key);
+    let want = enable.then_some(desired_key);
+    if want == current {
+        return Some(()); // Already in the desired state — no churn.
+    }
+
     let Some(client_tx) = bgp.bfd_client_tx.as_ref() else {
-        if new_enable {
+        if enable {
             tracing::debug!(
                 peer = %addr,
-                "bgp: bfd enable=true but bfd_client_tx is None (BFD not yet spawned)",
+                "bgp: bfd enabled but bfd_client_tx is None (BFD not yet spawned)",
             );
         }
         return Some(());
     };
-    let key = SessionKey {
-        local,
-        remote: addr,
-        ifindex: 0,
-        multihop: false,
-    };
-    let req = if new_enable {
-        // Uses SessionParams::default() for every neighbor — the
-        // peer's `bfd profile` reference is stored but not yet read.
-        // Profile resolution against `/bfd/profile/<name>` is a
-        // follow-up that needs cross-task config access (BGP would
-        // need a snapshot of BFD's BfdConfig, or BFD has to resolve
-        // profiles internally on Subscribe).
-        ClientReq::Subscribe {
+
+    // Drop a stale subscription (key changed, or BFD turned off) before
+    // adding the new one.
+    if let Some(old) = current {
+        let _ = client_tx.send(ClientReq::Unsubscribe {
             client: "bgp".to_string(),
-            key,
-            params: SessionParams::default(),
+            key: old,
+        });
+    }
+    if enable {
+        let _ = client_tx.send(ClientReq::Subscribe {
+            client: "bgp".to_string(),
+            key: desired_key,
+            params,
             notifier: bgp.bfd_event_tx.clone(),
-        }
-    } else {
-        ClientReq::Unsubscribe {
-            client: "bgp".to_string(),
-            key,
-        }
-    };
-    let _ = client_tx.send(req);
+        });
+    }
+
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        peer.bfd_session_key = want;
+    }
     Some(())
+}
+
+/// BFD attachment for this neighbor. Stores the bit on
+/// `peer.config.bfd.enable`, then reconciles the live subscription.
+fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let enable = args.boolean()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.enable = op.is_set() && enable;
+    }
+    bfd_apply(bgp, addr)
+}
+
+/// `set router bgp neighbor X bfd multihop <bool>` — explicit hop-mode
+/// override. Cleared (back to `is_ibgp()`-inference) on delete.
+fn config_peer_bfd_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let multihop = args.boolean()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.multihop = op.is_set().then_some(multihop);
+    }
+    bfd_apply(bgp, addr)
+}
+
+/// `set router bgp neighbor X bfd minimum-ttl <1-254>` — multihop
+/// received-TTL floor (RFC 5883). Ignored for single-hop sessions.
+fn config_peer_bfd_min_ttl(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let ttl = args.u8()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.minimum_ttl = op.is_set().then_some(ttl);
+    }
+    bfd_apply(bgp, addr)
 }
 
 /// Pick an unspecified local address whose family matches `remote`.
@@ -1741,6 +1815,8 @@ impl Bgp {
         // unsubscribe path to the BFD client API.
         self.callback_peer("/bfd/enable", config_peer_bfd_enable);
         self.callback_peer("/bfd/profile", config_peer_bfd_profile);
+        self.callback_peer("/bfd/multihop", config_peer_bfd_multihop);
+        self.callback_peer("/bfd/minimum-ttl", config_peer_bfd_min_ttl);
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
         self.callback_peer(
             "/tcp-ao/include-tcp-options",
@@ -1968,8 +2044,8 @@ mod bfd_wiring_tests {
         (bgp, bfd_client_rx)
     }
 
-    /// `bfd enable true` on a known neighbor sends a
-    /// `ClientReq::Subscribe` carrying the matching SessionKey.
+    /// `bfd enable true` on a known iBGP neighbor (the default peer
+    /// type) auto-infers multihop and subscribes on the 4784 port.
     #[tokio::test]
     async fn enable_sends_subscribe() {
         let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
@@ -1980,15 +2056,76 @@ mod bfd_wiring_tests {
 
         let req = bfd_rx.try_recv().expect("BGP must send a ClientReq");
         match req {
-            ClientReq::Subscribe { client, key, .. } => {
+            ClientReq::Subscribe {
+                client,
+                key,
+                params,
+                ..
+            } => {
                 assert_eq!(client, "bgp");
                 assert_eq!(
                     key.remote,
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                     "remote address mirrors the configured neighbor",
                 );
-                assert!(!key.multihop, "single-hop only");
+                assert!(key.multihop, "iBGP default infers multihop (FRR-style)");
+                assert_eq!(params.dst_port, BFD_MULTI_HOP_PORT);
+                assert_eq!(params.min_ttl, BFD_MULTIHOP_DEFAULT_MIN_TTL);
                 assert_eq!(key.ifindex, 0);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// An eBGP neighbor with no override defaults to single-hop
+    /// (port 3784, GTSM TTL floor of 255).
+    #[tokio::test]
+    async fn enable_ebgp_is_single_hop() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        bgp.peers.get_mut(&addr).unwrap().peer_type = PeerType::EBGP;
+
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        match bfd_rx.try_recv().expect("subscribe") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert!(!key.multihop, "eBGP without override is single-hop");
+                assert_eq!(params.dst_port, BFD_SINGLE_HOP_PORT);
+                assert_eq!(params.min_ttl, 255);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// `bfd multihop true` forces multihop even on an eBGP neighbor,
+    /// regardless of the order the leaves arrive within the commit
+    /// (enable lands first, then the override) — the stale single-hop
+    /// session is unsubscribed and replaced.
+    #[tokio::test]
+    async fn multihop_override_replaces_single_hop() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.6"]), ConfigOp::Set).unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+        bgp.peers.get_mut(&addr).unwrap().peer_type = PeerType::EBGP;
+
+        // enable first → transient single-hop subscribe.
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.6", "true"]), ConfigOp::Set).unwrap();
+        match bfd_rx.try_recv().expect("initial subscribe") {
+            ClientReq::Subscribe { key, .. } => assert!(!key.multihop),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+
+        // override arrives → unsubscribe single-hop, subscribe multihop.
+        config_peer_bfd_multihop(&mut bgp, arg_words(&["10.0.0.6", "true"]), ConfigOp::Set)
+            .unwrap();
+        match bfd_rx.try_recv().expect("unsubscribe stale key") {
+            ClientReq::Unsubscribe { key, .. } => assert!(!key.multihop),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        match bfd_rx.try_recv().expect("resubscribe multihop") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert!(key.multihop);
+                assert_eq!(params.dst_port, BFD_MULTI_HOP_PORT);
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }

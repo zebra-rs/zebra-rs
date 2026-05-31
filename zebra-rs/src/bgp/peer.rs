@@ -20,6 +20,7 @@ use caps::CapAs4;
 use caps::CapRefresh;
 use caps::CapabilityPacket;
 
+use crate::bfd::session::SessionKey;
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::{AdjRib, In, Out};
@@ -188,14 +189,24 @@ pub struct PeerTransportConfig {
 }
 
 /// Per-neighbor BFD attachment recorded from
-/// `set router bgp neighbor <addr> bfd { enable | profile }`
-/// (zebra-bgp-bfd.yang). The configuration is stored here; `enable`
-/// flips translate into subscribe / unsubscribe calls on the BFD
-/// instance via `bfd::inst::Bfd::client_req_tx`.
+/// `set router bgp neighbor <addr> bfd { enable | multihop |
+/// minimum-ttl | profile }` (zebra-bgp-bfd.yang). The configuration is
+/// stored here; `enable` flips translate into subscribe / unsubscribe
+/// calls on the BFD instance via `bfd::inst::Bfd::client_req_tx`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PeerBfdConfig {
     pub enable: bool,
     pub profile: Option<String>,
+    /// Hop-mode override. `None` (the default) means "infer": the
+    /// session is multihop iff the BGP session is iBGP, mirroring FRR's
+    /// `PEER_IS_MULTIHOP`. `Some(true)`/`Some(false)` force it — used
+    /// for eBGP-over-loopback until a dedicated `ebgp-multihop` knob
+    /// exists. See [`Peer::bfd_multihop`].
+    pub multihop: Option<bool>,
+    /// Multihop minimum received TTL (RFC 5883). `None` falls back to
+    /// [`crate::bfd::socket::BFD_MULTIHOP_DEFAULT_MIN_TTL`]. Ignored for
+    /// single-hop sessions (GTSM requires 255 unconditionally).
+    pub minimum_ttl: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -463,6 +474,15 @@ pub struct Peer {
     /// `start_adv_timer_evpn`) so the timer-arming path doesn't need
     /// to reach back into the global `Bgp`.
     pub adv_interval: timer::AdvInterval,
+
+    /// The BFD [`SessionKey`] this peer currently has a live
+    /// subscription for, or `None` if BFD is off. Runtime bookkeeping
+    /// (not config): lets the reconcile path in `config::config_peer_bfd_*`
+    /// unsubscribe the *old* key before subscribing a new one when the
+    /// key changes (hop-mode flip, update-source change), so config
+    /// callbacks that arrive in any order within a commit never leak or
+    /// duplicate a session.
+    pub bfd_session_key: Option<SessionKey>,
 }
 
 impl Peer {
@@ -530,6 +550,7 @@ impl Peer {
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
+            bfd_session_key: None,
         };
         peer.config
             .mp
@@ -576,6 +597,15 @@ impl Peer {
 
     pub fn is_ibgp(&self) -> bool {
         self.peer_type.is_ibgp()
+    }
+
+    /// Effective BFD hop mode for this neighbour: the explicit
+    /// `bfd multihop` override if set, else inferred from the BGP
+    /// session type (iBGP ⇒ multihop), mirroring FRR's
+    /// `PEER_IS_MULTIHOP`. eBGP-over-loopback uses the explicit
+    /// override until a dedicated `ebgp-multihop` knob exists.
+    pub fn bfd_multihop(&self) -> bool {
+        self.config.bfd.multihop.unwrap_or_else(|| self.is_ibgp())
     }
 
     pub fn is_reflector_client(&self) -> bool {
@@ -1897,20 +1927,24 @@ mod bfd_config_tests {
         assert_eq!(pc.bfd, bfd);
     }
 
-    /// Round-trip: setting enable + profile mirrors the CLI flow
-    /// (`bfd enable true; bfd profile FAST`) producing the recorded
-    /// state the BFD subscribe path reads.
+    /// Round-trip: setting enable + profile + multihop mirrors the CLI
+    /// flow (`bfd enable true; bfd profile FAST; bfd multihop true`)
+    /// producing the recorded state the BFD subscribe path reads.
     #[test]
     fn enable_and_profile_round_trip() {
         let mut pc = PeerConfig::default();
         pc.bfd.enable = true;
         pc.bfd.profile = Some("FAST".to_string());
+        pc.bfd.multihop = Some(true);
+        pc.bfd.minimum_ttl = Some(250);
 
         assert_eq!(
             pc.bfd,
             PeerBfdConfig {
                 enable: true,
                 profile: Some("FAST".to_string()),
+                multihop: Some(true),
+                minimum_ttl: Some(250),
             },
         );
     }

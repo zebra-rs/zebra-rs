@@ -36,6 +36,8 @@ module zebra-bgp-bfd {
            bfd {
              enable true;
              profile FAST;
+             multihop true;     // eBGP-over-loopback; iBGP infers this
+             minimum-ttl 250;
            }
          }
        }
@@ -47,6 +49,17 @@ module zebra-bgp-bfd {
      neighbor to BFD via the channel exposed by
      `bfd::inst::Bfd::client_req_tx`; a transition to Down then
      terminates the BGP session.";
+
+  revision 2026-05-31 {
+    description
+      "Add `multihop` hop-mode override and multihop `minimum-ttl`.
+       Default hop mode is inferred from the BGP session (iBGP ⇒
+       multihop), matching FRR; the override covers eBGP-over-loopback
+       until a dedicated `ebgp-multihop` knob exists.";
+    reference
+      "RFC 5883 (Multihop BFD). FRR `bfd` peer `multihop` / `minimum-ttl`.
+       Cisco IOS-XR `bfd multihop ttl-drop-threshold`.";
+  }
 
   revision 2026-05-19 {
     description "Initial revision (PR 5b — storage only).";
@@ -84,6 +97,32 @@ module zebra-bgp-bfd {
            to this neighbor's BFD session. Leafref validation will
            be added once libyang exposes cross-tree leafref
            resolution.";
+      }
+
+      leaf multihop {
+        ext:help "Force BFD hop mode for this neighbor";
+        type boolean;
+        description
+          "Explicit hop-mode override. When unset (the default), the
+           session is multihop iff the BGP session is iBGP, mirroring
+           FRR's `PEER_IS_MULTIHOP`. Set `true` for eBGP-over-loopback
+           (which neither vendor auto-detects without `ebgp-multihop`)
+           or `false` to force single-hop. Multihop uses UDP/4784 and a
+           relaxed TTL floor; single-hop uses UDP/3784 with GTSM
+           (TTL=255).";
+      }
+
+      leaf minimum-ttl {
+        ext:help "Multihop: lowest accepted received TTL";
+        type uint8 {
+          range "1..254";
+        }
+        default 254;
+        description
+          "Multihop only: minimum TTL accepted on incoming control
+           packets (RFC 5883). Ignored on single-hop sessions where
+           GTSM requires TTL=255 unconditionally. Equivalent to FRR's
+           `minimum-ttl` and IOS-XR's `bfd multihop ttl-drop-threshold`.";
       }
     }
   }

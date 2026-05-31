@@ -9,8 +9,19 @@ use crate::context::ProtoContext;
 /// IANA-assigned UDP port for BFD single-hop control packets (RFC 5881 §4).
 pub const BFD_SINGLE_HOP_PORT: u16 = 3784;
 
+/// IANA-assigned UDP port for BFD multihop control packets (RFC 5883 §5).
+pub const BFD_MULTI_HOP_PORT: u16 = 4784;
+
+/// Default minimum accepted received TTL for a multihop session
+/// (RFC 5883). Single-hop sessions ignore this and require TTL=255
+/// unconditionally (GTSM, RFC 5881 §5). Matches FRR's `minimum-ttl`
+/// default and the equivalent IOS-XR `bfd multihop ttl-drop-threshold`.
+pub const BFD_MULTIHOP_DEFAULT_MIN_TTL: u8 = 254;
+
 /// Build an IPv4 UDP socket suitable for sending and receiving BFD
-/// single-hop control packets.
+/// control packets. Used for both the single-hop listener (3784) and
+/// the multihop listener (4784); the per-session TTL policy is enforced
+/// after demux, not on this socket.
 ///
 /// The socket is configured to:
 ///   * send with IP TTL = 255 (RFC 5881 §5, GTSM on egress);
