@@ -62,6 +62,7 @@ impl Ospf {
             config_ospf_interface_network_type,
         );
         self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
+        self.ospf_add("/area/interface/affinity", config_ospf_interface_affinity);
         self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
@@ -541,6 +542,26 @@ fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, op: ConfigOp)
         .tx
         .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
 
+    Some(())
+}
+
+// `/router/ospf/area/interface/affinity` — one call per affinity name
+// on the leaf-list. Each name references a global `/affinity-map`
+// entry; the bit positions are resolved at LSA-build time, so we only
+// stage the names here (matching the per-interface IS-IS handler).
+// Extended-Link ASLA origination from these names lands with flex-algo
+// origination (RFC 9350 §6.3); for now this is pure config staging.
+fn config_ospf_interface_affinity(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let affinity = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    if op.is_set() {
+        link.config.affinity.insert(affinity);
+    } else {
+        link.config.affinity.remove(&affinity);
+    }
     Some(())
 }
 

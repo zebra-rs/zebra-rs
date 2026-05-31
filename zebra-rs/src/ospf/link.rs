@@ -1,7 +1,10 @@
 use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{collections::BTreeMap, net::Ipv4Addr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::Ipv4Addr,
+};
 
 use bitfield_struct::bitfield;
 use netlink_packet_route::link::LinkFlags;
@@ -99,6 +102,12 @@ pub struct LinkConfig {
     /// (`KeyChain::active_send_key(now)`) and receive-side
     /// validation (`KeyChain::lookup_recv_key(key_id, now)`).
     pub key_chain: Option<String>,
+    /// Names of `/affinity-map` entries this link carries. Resolved to
+    /// an Extended Admin Group bitmap (RFC 7308) and advertised in the
+    /// link's ASLA sub-TLV (RFC 9492) by flex-algo origination, and
+    /// tested against each FAD's include/exclude constraints at
+    /// per-algo SPF time. Mirrors `isis::LinkConfig::affinity`.
+    pub affinity: BTreeSet<String>,
 }
 
 /// OSPFv2 per-interface authentication mode.

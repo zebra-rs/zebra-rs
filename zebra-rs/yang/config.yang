@@ -521,6 +521,13 @@ module config {
                 type uint32;
               }
             }
+            leaf-list affinity {
+              // Names of /affinity-map entries this link carries.
+              // Advertised as an Extended Admin Group bitmap inside the
+              // ASLA sub-TLV (RFC 9492) and tested against each FAD's
+              // include/exclude constraints at flex-algo SPF time.
+              type string;
+            }
           }
         }
         container segment-routing {
