@@ -45,6 +45,7 @@ impl Ospf<Ospfv3> {
             ("/spf", show_ospfv3_spf),
             ("/graph", show_ospfv3_graph),
             ("/segment-routing", show_ospfv3_segment_routing),
+            ("/flex-algo", show_ospfv3_flex_algo),
         ];
         for (path, cb) in entries {
             self.show_cb.insert(format!("{}{}", prefix, path), *cb);
@@ -894,6 +895,83 @@ fn show_ospfv3_spf(top: &Ospf<Ospfv3>, _args: Args, json: bool) -> Result<String
         )?;
     }
     render_or(json, &entries, text)
+}
+
+/// `show ipv6 ospf flex-algo` — for each configured Flexible Algorithm
+/// (RFC 9350): its local definition plus the FAD-filtered per-algo SPF
+/// tree (the routers reachable under that algorithm's constraints).
+/// v3 sibling of v2's `show_ospf_flex_algo`. Per-algo v6 routes land
+/// with the v6 RIB slice.
+fn show_ospfv3_flex_algo(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    _json: bool,
+) -> Result<String, std::fmt::Error> {
+    use crate::flex_algo::FadMetricType;
+
+    let mut buf = String::new();
+    if top.flex_algo.config.is_empty() {
+        writeln!(buf, "No Flexible Algorithms configured")?;
+        return Ok(buf);
+    }
+
+    let names =
+        |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(" ");
+
+    for (algo, entry) in &top.flex_algo.config {
+        writeln!(buf, "Flex-Algorithm {algo}")?;
+        let metric = match entry.metric_type.unwrap_or(FadMetricType::Igp) {
+            FadMetricType::Igp => "igp",
+            FadMetricType::MinUnidirLinkDelay => "min-unidir-link-delay",
+            FadMetricType::TeDefault => "te-default",
+        };
+        writeln!(buf, "  Metric-Type: {metric}")?;
+        writeln!(buf, "  Priority: {}", entry.priority.unwrap_or(128))?;
+        writeln!(
+            buf,
+            "  Advertise-Definition: {}",
+            entry.advertise_definition.unwrap_or(false)
+        )?;
+        if !entry.include_any.is_empty() {
+            writeln!(buf, "  Affinity Include-Any: {}", names(&entry.include_any))?;
+        }
+        if !entry.include_all.is_empty() {
+            writeln!(buf, "  Affinity Include-All: {}", names(&entry.include_all))?;
+        }
+        if !entry.exclude_any.is_empty() {
+            writeln!(buf, "  Affinity Exclude-Any: {}", names(&entry.exclude_any))?;
+        }
+        if !entry.srlg_exclude.is_empty() {
+            writeln!(buf, "  SRLG Exclude: {}", names(&entry.srlg_exclude))?;
+        }
+
+        match top.spf_flex_algo.get(algo) {
+            Some(Some(spf_res)) => {
+                writeln!(buf, "  SPF: {} reachable node(s)", spf_res.len())?;
+                for (id, path) in spf_res {
+                    let router_id = top
+                        .lsp_map
+                        .resolve(*id)
+                        .map_or_else(|| String::from("?"), |r| r.to_string());
+                    let vias: Vec<String> = path
+                        .first_hop_links
+                        .iter()
+                        .filter_map(|(vid, _)| top.lsp_map.resolve(*vid).map(|r| r.to_string()))
+                        .collect();
+                    let via = if vias.is_empty() {
+                        "(self)".to_string()
+                    } else {
+                        vias.join(", ")
+                    };
+                    writeln!(buf, "    {router_id} cost {} via {via}", path.cost)?;
+                }
+            }
+            Some(None) => writeln!(buf, "  SPF: no source vertex in per-algo topology")?,
+            None => writeln!(buf, "  SPF: not yet computed")?,
+        }
+        writeln!(buf)?;
+    }
+    Ok(buf)
 }
 
 // ---- show ipv6 ospf graph ---------------------------------------
