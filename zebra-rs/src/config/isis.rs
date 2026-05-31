@@ -5,12 +5,12 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_isis(config: &ConfigManager) {
-    // Capture BFD's client handle so per-interface `bfd { enable }`
-    // can later submit Subscribe / Unsubscribe. `commit_config`
-    // guarantees BFD is already spawned when this commit will also
-    // set `bfd { … }`, even if `router isis` came first in the diff
-    // (the IS-IS arm there pre-spawns BFD on the will-set flag).
-    // Callers that bypass `commit_config` may still see `None`.
+    // Capture BFD's client handle so per-interface `isis bfd` can later
+    // submit Subscribe / Unsubscribe. `commit_config` spawns BFD
+    // eagerly before IS-IS, so the handle is always live here —
+    // independent of commit order and of whether a top-level
+    // `bfd { … }` block exists. Callers that bypass `commit_config`
+    // may still see `None`.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     // BGP-LS producer (RFC 9552): the IS-IS task pushes Link-State routes
     // to BGP over this sender. Captured by value — `None` if `router bgp`

@@ -7,11 +7,11 @@ pub fn spawn_bgp(config: &ConfigManager) {
     // Capture BFD / ND client handles so per-neighbor `bfd { enable }`
     // and IPv6 unnumbered RA hand-off can submit requests later. Both
     // are guaranteed to be populated when BGP is spawned via
-    // `commit_config`: the BGP arm there pre-spawns ND eagerly, and
-    // pre-spawns BFD when the same commit will set `bfd { … }`.
-    // Code paths that bypass `commit_config` and call `spawn_bgp`
-    // directly may still see `None` here; the captured-by-value
-    // contract has not changed.
+    // `commit_config`: the BGP arm there spawns ND *and* BFD eagerly,
+    // before `spawn_bgp`, so neither depends on commit order or on a
+    // top-level `bfd { … }` block. Code paths that bypass
+    // `commit_config` and call `spawn_bgp` directly may still see
+    // `None` here; the captured-by-value contract is unchanged.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let nd_client_tx = config.nd_client_tx.borrow().clone();
     let (rib_client, rib_rx) = config.subscribe_to_rib("bgp");

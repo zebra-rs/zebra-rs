@@ -451,26 +451,6 @@ impl ConfigManager {
                 nd = true;
             }
         }
-        // Pre-scan the diff so we know whether this commit will
-        // introduce a `bfd { … }` block *before* we process lines in
-        // order. Needed because BGP / IS-IS capture `bfd_client_tx`
-        // by value at spawn time; if the operator wrote `router bgp`
-        // (or `router isis`) above `bfd` in the same commit, the
-        // naive line-order spawn would hand them a `None` BFD handle.
-        let mut will_set_bfd = false;
-        for line in diff.lines() {
-            let Some(first_char) = line.chars().next() else {
-                continue;
-            };
-            if first_char != '+' {
-                continue;
-            }
-            let line = remove_first_char(line);
-            if line.starts_with("bfd") {
-                will_set_bfd = true;
-                break;
-            }
-        }
         // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
         // channel: `spawn_isis` captures `bgp_tx` by value, so if this
         // commit will set `router bgp` we must spawn BGP before IS-IS even
@@ -519,11 +499,14 @@ impl ConfigManager {
             }
             if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
                 isis = true;
-                // Spawn BFD first if this commit will set BFD too —
-                // `spawn_isis` captures `bfd_client_tx` by value, so
-                // IS-IS gets no handle if `bfd { … }` lands later in
-                // the same commit.
-                if !bfd && will_set_bfd {
+                // Bring BFD up before IS-IS unconditionally: `spawn_isis`
+                // captures `bfd_client_tx` by value, so IS-IS would get a
+                // stale `None` handle if BFD spawned later (a different
+                // commit, or below `router isis` in this one). Spawning it
+                // eagerly here means `isis bfd` works regardless of order
+                // and without a top-level `bfd { … }` block. Idempotent —
+                // the `bfd` flag is seeded from already-running protocols.
+                if !bfd {
                     bfd = true;
                     spawn_bfd(self);
                 }
@@ -536,10 +519,6 @@ impl ConfigManager {
                         nd = true;
                         spawn_nd(self);
                     }
-                    if !bfd && will_set_bfd {
-                        bfd = true;
-                        spawn_bfd(self);
-                    }
                     spawn_bgp(self);
                 }
                 spawn_isis(self);
@@ -547,14 +526,16 @@ impl ConfigManager {
             if !bgp && op == ConfigOp::Set && line.starts_with("router bgp") {
                 bgp = true;
                 // `spawn_bgp` captures `bfd_client_tx` *and*
-                // `nd_client_tx` by value. ND is always eager (BGP
-                // unnumbered may want it regardless of explicit RA
-                // config). BFD only if this commit will set it.
+                // `nd_client_tx` by value, so both must be live first.
+                // ND is eager (BGP unnumbered may want it regardless of
+                // explicit RA config); BFD is now eager too so a later
+                // `neighbor X bfd` works without a top-level `bfd { … }`
+                // block and regardless of commit order.
                 if !nd {
                     nd = true;
                     spawn_nd(self);
                 }
-                if !bfd && will_set_bfd {
+                if !bfd {
                     bfd = true;
                     spawn_bfd(self);
                 }
@@ -636,8 +617,14 @@ impl ConfigManager {
         }
         // BFD's top-level keyword is `bfd` (FRR-style), not
         // `router <proto>`, so it can't use `proto_in_candidate`.
+        // BFD is now spawned eagerly for BGP / IS-IS, so it must outlive
+        // a removed `bfd { … }` block as long as a consumer remains —
+        // otherwise the consumer's captured handle would dangle. Tear it
+        // down only when neither a `bfd` block nor any consumer is left.
         if self.protocol_tasks.borrow().contains_key("bfd")
             && !candidate.lines().any(|l| l.starts_with("bfd"))
+            && !proto_in_candidate("bgp")
+            && !proto_in_candidate("isis")
         {
             despawn_bfd(self);
         }
