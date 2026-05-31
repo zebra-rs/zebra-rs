@@ -133,6 +133,11 @@ impl Ospf {
             config_ospf_interface_adjacency_sid_absolute,
         );
         self.ospf_add("/segment-routing/mpls", config_ospf_sr_mpls);
+        self.ospf_add("/fast-reroute/ti-lfa", config_ospf_ti_lfa);
+        self.ospf_add(
+            "/fast-reroute/backup-as-primary",
+            config_ospf_fast_reroute_backup_as_primary,
+        );
         self.ospf_add(
             "/graceful-restart/helper-enabled",
             config_ospf_gr_helper_enabled,
@@ -985,6 +990,46 @@ fn config_ospf_interface_adjacency_sid_absolute(
 
     ospf.ext_link_lsa_originate(ifindex);
 
+    Some(())
+}
+
+/// `/router/ospf/fast-reroute/ti-lfa`. Gates the per-destination
+/// TI-LFA repair computation (RFC 9490). On a state change, kick an
+/// SPF recompute for every attached area so the RIB picks up repair
+/// paths (on enable) or drops them (on disable). No LSA re-origination
+/// is needed: the repair is a local install-side decision and changes
+/// nothing this router advertises.
+fn config_ospf_ti_lfa(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    let prev = ospf.ti_lfa_enabled;
+    ospf.ti_lfa_enabled = op.is_set();
+    if ospf.ti_lfa_enabled == prev {
+        return Some(());
+    }
+    let area_ids: Vec<Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospf/fast-reroute/backup-as-primary`. Inverts the
+/// primary/backup metric ordering at install time. Re-run SPF so the
+/// RIB rebuilds with the swapped offset; like the ti-lfa toggle this
+/// is install-side only and needs no LSA re-origination.
+fn config_ospf_fast_reroute_backup_as_primary(
+    ospf: &mut Ospf,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let prev = ospf.fast_reroute_backup_as_primary;
+    ospf.fast_reroute_backup_as_primary = op.is_set();
+    if ospf.fast_reroute_backup_as_primary == prev {
+        return Some(());
+    }
+    let area_ids: Vec<Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
     Some(())
 }
 
