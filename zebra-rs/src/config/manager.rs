@@ -487,6 +487,13 @@ impl ConfigManager {
             // and spawn an OSPFv2 instance for a v3 config block.
             if !ospfv3 && op == ConfigOp::Set && line.starts_with("router ospfv3") {
                 ospfv3 = true;
+                // OSPF captures `bfd_client_tx` by value at spawn, so
+                // bring BFD up first (see the IS-IS arm below for the
+                // full rationale).
+                if !bfd {
+                    bfd = true;
+                    spawn_bfd(self);
+                }
                 spawn_ospfv3(self);
             }
             if !ospf
@@ -495,6 +502,10 @@ impl ConfigManager {
                 && !line.starts_with("router ospfv3")
             {
                 ospf = true;
+                if !bfd {
+                    bfd = true;
+                    spawn_bfd(self);
+                }
                 spawn_ospf(self);
             }
             if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
@@ -625,6 +636,9 @@ impl ConfigManager {
             && !candidate.lines().any(|l| l.starts_with("bfd"))
             && !proto_in_candidate("bgp")
             && !proto_in_candidate("isis")
+            // `proto_in_candidate("ospf")` prefix-matches `router ospfv3`
+            // too, so this one check covers both OSPF versions.
+            && !proto_in_candidate("ospf")
         {
             despawn_bfd(self);
         }

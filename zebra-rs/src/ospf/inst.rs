@@ -256,6 +256,17 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// only): VRF name → (table_id, ifindex). A child spawns once both
     /// config intent (`vrf_log`) and kernel info exist.
     pub rib_known_vrfs: BTreeMap<String, (u32, u32)>,
+
+    /// BFD client handle, captured at spawn (BFD is eager-spawned
+    /// before OSPF). `None` only if BFD failed to start. Used to
+    /// Subscribe / Unsubscribe per-neighbor single-hop sessions; see
+    /// [`Ospf::bfd_reconcile_nbr`].
+    pub bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+    /// Notifier the BFD instance fans state-change events back on.
+    /// Cloned into every Subscribe; the matching receiver is drained by
+    /// the event loop into [`Ospf::process_bfd_event`].
+    pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
+    pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -339,6 +350,153 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Reconcile one neighbor's BFD subscription against the interface
+    /// config and the neighbor's current NFSM state. Idempotent and
+    /// order-independent: the desired key is compared to the tracked
+    /// `nbr.bfd_session_key`, unsubscribing a stale key before
+    /// subscribing the new one (so a hop-mode/address change or a
+    /// `min-neighbor-state` flip never leaks or duplicates a session).
+    /// OSPF sessions are single-hop (directly connected neighbors); the
+    /// `profile` is stored but not yet applied (the session uses
+    /// `SessionParams::default()`, matching BGP / IS-IS).
+    fn bfd_reconcile_nbr(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
+        let desired = {
+            let Some(link) = self.links.get(&ifindex) else {
+                return;
+            };
+            let bfd = &link.config.bfd;
+            let Some(nbr) = link.nbrs.get(&nbr_addr) else {
+                return;
+            };
+            let up = bfd.enable && nbr.state >= bfd.min_neighbor_state.as_nfsm();
+            if up {
+                V::bfd_addrs(&link.addr, nbr).map(|(local, remote)| {
+                    crate::bfd::session::SessionKey {
+                        local,
+                        remote,
+                        ifindex,
+                        multihop: false,
+                    }
+                })
+            } else {
+                None
+            }
+        };
+
+        let current = self
+            .links
+            .get(&ifindex)
+            .and_then(|l| l.nbrs.get(&nbr_addr))
+            .and_then(|n| n.bfd_session_key);
+        if desired == current {
+            return;
+        }
+
+        // Apply the delta against the BFD instance (eager-spawned, so
+        // the handle is normally live). If it's absent, leave the
+        // tracked key untouched so a later reconcile retries.
+        let Some(client_tx) = self.bfd_client_tx.as_ref() else {
+            return;
+        };
+        if let Some(old) = current {
+            let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: V::PROTO.to_string(),
+                key: old,
+            });
+        }
+        if let Some(key) = desired {
+            let _ = client_tx.send(crate::bfd::inst::ClientReq::Subscribe {
+                client: V::PROTO.to_string(),
+                key,
+                params: crate::bfd::session::SessionParams::default(),
+                notifier: self.bfd_event_tx.clone(),
+            });
+        }
+        if let Some(nbr) = self
+            .links
+            .get_mut(&ifindex)
+            .and_then(|l| l.nbrs.get_mut(&nbr_addr))
+        {
+            nbr.bfd_session_key = desired;
+        }
+    }
+
+    /// Re-evaluate every neighbor on `ifindex` — used by the `bfd`
+    /// interface config callbacks, which can flip the subscribe state
+    /// of already-formed neighbors.
+    pub(crate) fn bfd_reconcile_link(&mut self, ifindex: u32) {
+        let nbrs: Vec<Ipv4Addr> = match self.links.get(&ifindex) {
+            Some(link) => link.nbrs.keys().copied().collect(),
+            None => return,
+        };
+        for nbr_addr in nbrs {
+            self.bfd_reconcile_nbr(ifindex, nbr_addr);
+        }
+    }
+
+    /// React to a BFD session state change. On Down, tear the matching
+    /// OSPF adjacency down via the same dead-timer (`InactivityTimer`)
+    /// path the hold-timer uses (RFC 5882 §5), and drop the
+    /// subscription. The synthetic `from == to` mirror (sent on
+    /// subscribe) and non-Down transitions are ignored.
+    pub(crate) fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
+        let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
+        tracing::info!(
+            ?key,
+            from = %change.from,
+            to = %change.to,
+            diag = %change.diag,
+            "{}: bfd session state change",
+            V::PROTO,
+        );
+        if change.from == change.to || change.to != bfd_packet::State::Down {
+            return;
+        }
+
+        let ifindex = key.ifindex;
+        let Some(nbr_addr) = self.links.get(&ifindex).and_then(|link| {
+            link.nbrs
+                .iter()
+                .find(|(_, n)| n.bfd_session_key == Some(key))
+                .map(|(addr, _)| *addr)
+        }) else {
+            tracing::debug!(
+                ?key,
+                "{}: bfd-down for unknown neighbor; ignoring",
+                V::PROTO
+            );
+            return;
+        };
+        tracing::warn!(
+            ?key,
+            ifindex,
+            diag = %change.diag,
+            "{}: tearing down adjacency on bfd-down (RFC 5882 §5)",
+            V::PROTO,
+        );
+
+        // Drop the subscription (clear tracked key + unsubscribe), then
+        // drive the neighbor down via the dead-timer event.
+        if let Some(client_tx) = self.bfd_client_tx.as_ref() {
+            let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: V::PROTO.to_string(),
+                key,
+            });
+        }
+        if let Some(nbr) = self
+            .links
+            .get_mut(&ifindex)
+            .and_then(|l| l.nbrs.get_mut(&nbr_addr))
+        {
+            nbr.bfd_session_key = None;
+        }
+        let _ = self.tx.send(Message::Nfsm(
+            ifindex,
+            nbr_addr,
+            super::nfsm::NfsmEvent::InactivityTimer,
+        ));
+    }
+
     /// Record a rewritten per-VRF config line (default instance only).
     /// Appends to the VRF's replay log and, if its child is already
     /// running, forwards the line live to the child's config inbox.
@@ -644,8 +802,10 @@ impl Ospf<Ospfv2> {
         proto_label: String,
         rib_subscriber: RibSubscriber,
         config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
+        bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
+        let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
@@ -707,6 +867,9 @@ impl Ospf<Ospfv2> {
             vrf_log: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            bfd_client_tx,
+            bfd_event_tx,
+            bfd_event_rx,
         };
         ospf.callback_build();
         ospf.show_build();
@@ -3526,6 +3689,10 @@ impl Ospf<Ospfv2> {
 
                 if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
                     self.process_neighbor_state_change(index, src, old_state, new_state);
+                    // Re-evaluate the BFD session against the configured
+                    // threshold (the reconcile reads the now-current
+                    // neighbor state, so it covers both 2-Way and Full).
+                    self.bfd_reconcile_nbr(index, src);
                 }
             }
             Message::HelloTimer(index) => {
@@ -3723,6 +3890,9 @@ impl Ospf<Ospfv2> {
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg);
                 }
+                Some(event) = self.bfd_event_rx.recv() => {
+                    self.process_bfd_event(event);
+                }
             }
         }
     }
@@ -3792,8 +3962,10 @@ impl Ospf<Ospfv3> {
         proto_label: String,
         rib_subscriber: RibSubscriber,
         config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
+        bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
+        let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
@@ -3878,6 +4050,9 @@ impl Ospf<Ospfv3> {
             vrf_log: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            bfd_client_tx,
+            bfd_event_tx,
+            bfd_event_rx,
         };
         ospf.callback_build();
         ospf.show_build();
@@ -5297,6 +5472,10 @@ impl Ospf<Ospfv3> {
 
                 if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
                     self.process_neighbor_state_change(index, src, old_state, new_state);
+                    // Re-evaluate the BFD session against the configured
+                    // threshold (the reconcile reads the now-current
+                    // neighbor state, so it covers both 2-Way and Full).
+                    self.bfd_reconcile_nbr(index, src);
                 }
             }
             Message::SpfSchedule(area_id) => {
@@ -6534,6 +6713,9 @@ impl Ospf<Ospfv3> {
                 }
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg);
+                }
+                Some(event) = self.bfd_event_rx.recv() => {
+                    self.process_bfd_event(event);
                 }
             }
         }

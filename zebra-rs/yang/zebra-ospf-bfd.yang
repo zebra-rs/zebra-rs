@@ -1,0 +1,135 @@
+module zebra-ospf-bfd {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospf-bfd";
+  prefix "zob";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-interface BFD attachment for OSPFv2 and OSPFv3. Adds
+     a flat `bfd` container under each OSPF interface:
+
+       router ospf {
+         area 0 {
+           interface eth0 {
+             bfd {
+               enable true;
+               min-neighbor-state two-way;
+             }
+           }
+         }
+       }
+
+     When `enable` is true the OSPF instance attaches a single-hop BFD
+     session to each neighbor on the interface once it reaches the
+     configured `min-neighbor-state`; a session going Down tears the
+     adjacency down (RFC 5882 §5). OSPF neighbors are directly
+     connected, so the session is always single-hop (UDP/3784, GTSM
+     TTL=255) — there is no multihop knob.
+
+     OSPFv3 BFD runs over IPv6 link-local; the config is accepted for
+     v3 but inert until IPv6 support lands in the BFD module.";
+
+  revision 2026-05-31 {
+    description "Initial revision — per-interface BFD for OSPFv2/v3.";
+    reference
+      "RFC 5880, RFC 5881 (single-hop), RFC 5882 (failure response).
+       FRR `ip ospf bfd`; Cisco IOS-XR `bfd fast-detect` under ospf.";
+  }
+
+  grouping ospf-interface-bfd-extension {
+    description
+      "FRR-style flat `bfd { ... }` block on an OSPF interface.";
+
+    container bfd {
+      ext:help "BFD attachment for this OSPF interface";
+      description
+        "When `enable` is true, OSPF attaches a single-hop BFD session
+         to each neighbor on this interface. A session going Down
+         tears the adjacency down.";
+
+      leaf enable {
+        ext:help "Activate BFD on this interface";
+        type boolean;
+        default false;
+        description
+          "Activates BFD for neighbors on this interface. Disabling
+           (or removing the `bfd` block) detaches the sessions.";
+      }
+
+      leaf profile {
+        ext:help "Named /bfd/profile to apply (stored; not yet applied)";
+        type string;
+        description
+          "Name of a `/bfd/profile` entry whose parameters apply to
+           this interface's BFD sessions. Stored but not yet resolved
+           into session parameters — a shared follow-up across BGP /
+           IS-IS / OSPF; sessions currently use the BFD defaults.";
+      }
+
+      leaf min-neighbor-state {
+        ext:help "Neighbor state at which BFD starts (two-way|full)";
+        type enumeration {
+          enum two-way {
+            description
+              "Start/stop the session at the 2-Way neighbor state
+               (default, FRR-style). Also protects DR-Other pairs on
+               a broadcast LAN.";
+          }
+          enum full {
+            description
+              "Start/stop the session at the Full neighbor state
+               (Cisco/IOS-XR-style). Tracks only DR/BDR adjacencies
+               on a broadcast LAN.";
+          }
+        }
+        default two-way;
+        description
+          "OSPF neighbor state at which the BFD session is started and
+           torn down. Identical on point-to-point links, where the
+           neighbor goes straight to Full.";
+      }
+    }
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description "Attach the bfd block to OSPFv2 interfaces (set).";
+    uses ospf-interface-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospf/config:area/config:interface" {
+    description "Attach the bfd block to OSPFv2 interfaces (delete).";
+    uses ospf-interface-bfd-extension;
+  }
+
+  augment "/configure:set/config:router"
+        + "/config:ospfv3/config:area/config:interface" {
+    description "Attach the bfd block to OSPFv3 interfaces (set).";
+    uses ospf-interface-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/config:ospfv3/config:area/config:interface" {
+    description "Attach the bfd block to OSPFv3 interfaces (delete).";
+    uses ospf-interface-bfd-extension;
+  }
+}

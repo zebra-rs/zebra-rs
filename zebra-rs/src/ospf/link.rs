@@ -20,7 +20,7 @@ use crate::rib::Link;
 
 use super::addr::OspfAddr;
 use super::version::{OspfVersion, Ospfv2};
-use super::{Identity, IfsmState, Message, Neighbor};
+use super::{Identity, IfsmState, Message, Neighbor, NfsmState};
 use crate::context::Timer;
 
 pub const OSPF_DEFAULT_PRIORITY: u8 = 64;
@@ -122,6 +122,8 @@ pub struct LinkConfig {
     /// `isis::LinkConfig::te_metric`; a future TWAMP/STAMP task will
     /// populate these dynamically.
     pub te_metric: LinkTeMetric,
+    /// Per-interface BFD attachment (zebra-ospf-bfd.yang).
+    pub bfd: OspfLinkBfdConfig,
 }
 
 /// Per-interface RFC 7471 TE link metrics. All delay values are in
@@ -176,6 +178,41 @@ impl LinkTeMetric {
         }
         subs
     }
+}
+
+/// Neighbor-state threshold at which a BFD session is started and torn
+/// down for this interface. `TwoWay` (default, FRR-style) also protects
+/// DR-Other pairs on a broadcast LAN; `Full` (Cisco/IOS-XR-style)
+/// tracks only DR/BDR adjacencies. Identical on point-to-point links,
+/// where the neighbor goes straight to Full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NbrStateThreshold {
+    #[default]
+    TwoWay,
+    Full,
+}
+
+impl NbrStateThreshold {
+    /// The NFSM state the neighbor must reach (or fall below) for the
+    /// BFD session to be installed (or removed).
+    pub fn as_nfsm(self) -> NfsmState {
+        match self {
+            Self::TwoWay => NfsmState::TwoWay,
+            Self::Full => NfsmState::Full,
+        }
+    }
+}
+
+/// Per-interface BFD attachment recorded from
+/// `router ospf{,v3} area <a> interface <if> bfd { enable | profile |
+/// min-neighbor-state }` (zebra-ospf-bfd.yang). Shared by v2 and v3.
+/// `enable` / `min-neighbor-state` flips drive Subscribe / Unsubscribe
+/// against the BFD instance via `Ospf::bfd_reconcile_link`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OspfLinkBfdConfig {
+    pub enable: bool,
+    pub profile: Option<String>,
+    pub min_neighbor_state: NbrStateThreshold,
 }
 
 /// OSPFv2 per-interface authentication mode.
