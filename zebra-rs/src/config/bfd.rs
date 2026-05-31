@@ -17,6 +17,7 @@ pub fn spawn_bfd(config: &ConfigManager) {
     match inst::Bfd::new(ProtoContext::default_table_no_rib()) {
         Ok(bfd) => {
             config.subscribe("bfd", bfd.cm.tx.clone());
+            config.subscribe_show("bfd", bfd.show.tx.clone());
             // Publish the inbound client-request handle on the
             // ConfigManager so protocol modules (BGP / OSPF / IS-IS /
             // static) can pick it up at *their* spawn time and later
