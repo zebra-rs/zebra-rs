@@ -329,6 +329,10 @@ module exec {
         leaf spf {
           type empty;
         }
+        leaf flex-algo {
+          ext:help "OSPF Flexible Algorithm (RFC 9350) state";
+          type empty;
+        }
         leaf segment-routing {
           type empty;
         }

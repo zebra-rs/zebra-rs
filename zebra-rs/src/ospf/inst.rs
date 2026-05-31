@@ -81,6 +81,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub lsp_map: LspMap,
     pub spf_result: Option<BTreeMap<usize, Path>>,
     pub graph: Option<spf::Graph>,
+    /// Per-Flexible-Algorithm SPF trees (RFC 9350), keyed by algo id
+    /// (128..=255 from `flex_algo.config`). `None` for an algo whose
+    /// per-algo graph had no source this cycle. Recomputed each SPF
+    /// run alongside `spf_result`; read by `show ip ospf flex-algo`.
+    /// Per-algo RIB / MPLS-ILM install is a follow-up.
+    pub spf_flex_algo: BTreeMap<u8, Option<BTreeMap<usize, Path>>>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     /// MPLS LFIB shadow. Keyed by absolute incoming label, value
     /// carries the swap/pop action + the nexthops where the kernel
@@ -511,6 +517,7 @@ impl Ospf<Ospfv2> {
             lsp_map: LspMap::default(),
             spf_result: None,
             graph: None,
+            spf_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -3629,6 +3636,7 @@ impl Ospf<Ospfv3> {
             lsp_map: LspMap::default(),
             spf_result: None,
             graph: None,
+            spf_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -6536,6 +6544,202 @@ fn graph(top: &mut Ospf, area_id: Ipv4Addr) -> (spf::Graph, Option<usize>) {
     (graph, source_node)
 }
 
+/// Routers in `area` that participate in Flex-Algorithm `algo` — i.e.
+/// list it in the SR-Algorithm TLV of their Router Information Opaque
+/// LSA (RFC 9350 §5.2 / §6). Walks the area LSDB on demand (same shape
+/// as `add_prefix_sids`); no separate ingested map is maintained.
+fn flex_algo_participants(area: &OspfArea, algo: u8) -> BTreeSet<Ipv4Addr> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    let mut set = BTreeSet::new();
+    for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.data.lsp else {
+            continue;
+        };
+        let participates = ri.tlvs.iter().any(
+            |tlv| matches!(tlv, RouterInfoTlv::Algo(a) if a.algos.contains(&Algo::FlexAlgo(algo))),
+        );
+        if participates {
+            set.insert(lsa.data.h.adv_router);
+        }
+    }
+    set
+}
+
+/// Per-link affinity (Extended Admin Group) advertised in this area's
+/// Extended-Link Opaque LSAs via the flex-algo ASLA sub-TLV, keyed by
+/// `(adv_router, link_id, link_data)` so a Router-LSA link can be
+/// joined to its affinity during graph build. (In IS-IS the affinity
+/// rides on the reach TLV inline; OSPF carries it in a separate LSA,
+/// hence this join table.)
+fn flex_algo_link_affinity(
+    area: &OspfArea,
+) -> BTreeMap<(Ipv4Addr, Ipv4Addr, Ipv4Addr), ExtAdminGroup> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    let mut map = BTreeMap::new();
+    for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let OspfLsp::OpaqueAreaExtLink(ref el) = lsa.data.lsp else {
+            continue;
+        };
+        let adv_router = lsa.data.h.adv_router;
+        for tlv in &el.tlvs {
+            for sub in &tlv.subs {
+                if let ExtLinkSubTlv::Asla(asla) = sub
+                    && asla.is_flex_algo()
+                    && let Some(group) = asla.ext_admin_group()
+                {
+                    map.insert((adv_router, tlv.link_id, tlv.link_data), group.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Build the per-algo SPF graph for `area_id`. Mirrors `graph()` but
+/// (a) includes only routers participating in `algo` (plus self), and
+/// (b) admits each Router-LSA link only if it passes the FAD
+/// constraints in `entry` (RFC 9350 §6), the link's affinity coming
+/// from the Extended-Link ASLA join table.
+///
+/// Local FAD config (`entry`) drives the constraints — no multi-router
+/// FAD election yet (matches IS-IS). Metric is IGP only; SRLG-exclude
+/// is not enforced; both are deferred exactly as on the IS-IS side.
+fn graph_flex_algo(
+    top: &mut Ospf,
+    area_id: Ipv4Addr,
+    algo: u8,
+    entry: &crate::flex_algo::FlexAlgoEntry,
+) -> (spf::Graph, Option<usize>) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    let mut graph = spf::Graph::new();
+    let mut source_node = None;
+
+    let Some(area) = top.areas.get(area_id) else {
+        return (graph, source_node);
+    };
+
+    let participants = flex_algo_participants(area, algo);
+    let link_affinity = flex_algo_link_affinity(area);
+
+    // Router-LSAs of participating routers (self always kept — it is
+    // the SPF source).
+    let mut router_lsas = Vec::new();
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if !lsa.originated && !participants.contains(&adv_router) {
+            continue;
+        }
+        router_lsas.push((adv_router, lsa.originated, lsa.data.clone()));
+    }
+
+    let mut router_lsa_by_id: HashMap<Ipv4Addr, &RouterLsa> = HashMap::new();
+    for (adv_router, _, lsa_data) in &router_lsas {
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            router_lsa_by_id.insert(*adv_router, router_lsa);
+        }
+    }
+
+    let mut network_lsas: HashMap<Ipv4Addr, Vec<Ipv4Addr>> = HashMap::new();
+    for ((ls_id, _adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if let OspfLsp::Network(ref net_lsa) = lsa.data.lsp {
+            network_lsas.insert(ls_id, net_lsa.attached_routers.clone());
+        }
+    }
+
+    for (adv_router, originated, lsa_data) in &router_lsas {
+        let node_id = top.lsp_map.get(*adv_router);
+        if *originated {
+            source_node = Some(node_id);
+        }
+        let mut vertex = spf::Vertex {
+            id: node_id,
+            name: adv_router.to_string(),
+            sys_id: adv_router.to_string(),
+            ..Default::default()
+        };
+
+        if let OspfLsp::Router(ref router_lsa) = lsa_data.lsp {
+            for link in &router_lsa.links {
+                // FAD admissibility for the owning router's link. A
+                // link with no advertised ASLA resolves to `None` =
+                // empty bitmap (rejected by include-any, passed by
+                // exclude-only), per RFC 9350 §6.
+                let affinity = link_affinity.get(&(*adv_router, link.link_id, link.link_data));
+                if !crate::flex_algo::link_passes_fad(affinity, entry, &top.affinity_map) {
+                    continue;
+                }
+                match link.link_type {
+                    OspfLinkType::P2p | OspfLinkType::VirtualLink => {
+                        if !participants.contains(&link.link_id) {
+                            continue;
+                        }
+                        let Some(peer_lsa) = router_lsa_by_id.get(&link.link_id) else {
+                            continue;
+                        };
+                        let has_backlink = peer_lsa.links.iter().any(|l| {
+                            matches!(l.link_type, OspfLinkType::P2p | OspfLinkType::VirtualLink)
+                                && l.link_id == *adv_router
+                        });
+                        if !has_backlink {
+                            continue;
+                        }
+                        let to_id = top.lsp_map.get(link.link_id);
+                        vertex.olinks.push(spf::Link {
+                            from: node_id,
+                            to: to_id,
+                            cost: link.tos_0_metric as u32,
+                            link_id: 0,
+                        });
+                    }
+                    OspfLinkType::Transit => {
+                        let Some(attached) = network_lsas.get(&link.link_id) else {
+                            continue;
+                        };
+                        if !attached.contains(adv_router) {
+                            continue;
+                        }
+                        for attached_router in attached {
+                            if *attached_router == *adv_router {
+                                continue;
+                            }
+                            if !participants.contains(attached_router) {
+                                continue;
+                            }
+                            if !router_lsa_by_id.contains_key(attached_router) {
+                                continue;
+                            }
+                            let to_id = top.lsp_map.get(*attached_router);
+                            vertex.olinks.push(spf::Link {
+                                from: node_id,
+                                to: to_id,
+                                cost: link.tos_0_metric as u32,
+                                link_id: 0,
+                            });
+                        }
+                    }
+                    OspfLinkType::Stub => {}
+                }
+            }
+        }
+
+        graph.insert(node_id, vertex);
+    }
+
+    (graph, source_node)
+}
+
 #[derive(Debug, PartialEq)]
 pub struct SpfRoute {
     pub metric: u32,
@@ -7310,6 +7514,8 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
         area_id,
         graph,
         source,
+        // OSPFv3 flex-algo is a later phase; no per-algo graphs yet.
+        flex_algos: Vec::new(),
     })
 }
 
@@ -7325,6 +7531,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
         spf_result,
         duration,
         last,
+        flex_algos: _,
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
@@ -7889,6 +8096,15 @@ struct SpfInput {
     area_id: Ipv4Addr,
     graph: spf::Graph,
     source: usize,
+    /// One per configured Flex-Algorithm: its FAD-filtered graph and
+    /// source vertex (None if the algo's graph had no source).
+    flex_algos: Vec<FlexAlgoSpfInput>,
+}
+
+struct FlexAlgoSpfInput {
+    algo: u8,
+    graph: spf::Graph,
+    source: Option<usize>,
 }
 
 /// Result of a single v2 SPF run, ready to be applied back to
@@ -7901,17 +8117,47 @@ pub struct SpfOutput {
     spf_result: BTreeMap<usize, spf::Path>,
     duration: Duration,
     last: Instant,
+    flex_algos: Vec<FlexAlgoSpfOutput>,
+}
+
+struct FlexAlgoSpfOutput {
+    algo: u8,
+    spf_result: Option<BTreeMap<usize, spf::Path>>,
 }
 
 /// Build the SPF graph for `area_id` and resolve the local vertex.
 /// Returns `None` if the area has no source node (router-LSA for
-/// self not yet originated), matching the previous early-return.
+/// self not yet originated), matching the previous early-return. Also
+/// builds the per-Flex-Algorithm graphs for every configured algo.
 fn build_spf_input(top: &mut Ospf, area_id: Ipv4Addr) -> Option<SpfInput> {
     let (graph, source_node) = graph(top, area_id);
-    source_node.map(|source| SpfInput {
+    let source = source_node?;
+
+    // Snapshot the configured algos so the per-algo graph build can
+    // take `&mut top` without holding a borrow on `top.flex_algo`.
+    let algos: Vec<(u8, crate::flex_algo::FlexAlgoEntry)> = top
+        .flex_algo
+        .config
+        .iter()
+        .map(|(algo, entry)| (*algo, entry.clone()))
+        .collect();
+    let flex_algos = algos
+        .iter()
+        .map(|(algo, entry)| {
+            let (graph, source) = graph_flex_algo(top, area_id, *algo, entry);
+            FlexAlgoSpfInput {
+                algo: *algo,
+                graph,
+                source,
+            }
+        })
+        .collect();
+
+    Some(SpfInput {
         area_id,
         graph,
         source,
+        flex_algos,
     })
 }
 
@@ -7922,9 +8168,23 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         area_id,
         graph,
         source,
+        flex_algos,
     } = input;
     let start = Instant::now();
     let spf_result = spf::spf(&graph, source, &spf::SpfOpt::default());
+    let flex_algos = flex_algos
+        .into_iter()
+        .map(
+            |FlexAlgoSpfInput {
+                 algo,
+                 graph,
+                 source,
+             }| FlexAlgoSpfOutput {
+                algo,
+                spf_result: source.map(|src| spf::spf(&graph, src, &spf::SpfOpt::default())),
+            },
+        )
+        .collect();
     let last = Instant::now();
     let duration = last.duration_since(start);
     SpfOutput {
@@ -7934,6 +8194,7 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         spf_result,
         duration,
         last,
+        flex_algos,
     }
 }
 
@@ -7949,6 +8210,7 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
         spf_result,
         duration,
         last,
+        flex_algos,
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
@@ -7958,6 +8220,15 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     // Store the SPF result and graph in OSPF instance.
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
+
+    // Per-algo SPF trees, for `show ip ospf flex-algo`. Per-algo RIB /
+    // MPLS-ILM install is a follow-up. Like `spf_result`, this is a
+    // single (last-computed-area) snapshot — fine for the common
+    // single-area flex-algo deployment.
+    top.spf_flex_algo = flex_algos
+        .into_iter()
+        .map(|o| (o.algo, o.spf_result))
+        .collect();
 
     apply_routing_updates(top, rib);
 }
