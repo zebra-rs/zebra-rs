@@ -937,6 +937,8 @@ impl ConfigManager {
                                 "OSPF"
                             } else if is_bgp(&paths) {
                                 "BGP"
+                            } else if is_bfd(&paths) {
+                                "BFD"
                             } else if is_policy(&paths) {
                                 "Policy"
                             } else {
@@ -1079,6 +1081,10 @@ fn is_isis(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "isis")
 }
 
+fn is_bfd(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "bfd")
+}
+
 fn is_policy(paths: &[CommandPath]) -> bool {
     paths
         .iter()
@@ -1098,6 +1104,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "ospf"
     } else if is_isis(paths) {
         "isis"
+    } else if is_bfd(paths) {
+        "bfd"
     } else if is_policy(paths) {
         "policy"
     } else {

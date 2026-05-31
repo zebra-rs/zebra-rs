@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::{ConfigChannel, ConfigRequest, path_from_command};
+use crate::config::{
+    Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
+};
 use crate::context::{ProtoContext, Task};
 
 use super::config::{BfdConfig, Callback};
@@ -20,6 +22,11 @@ use super::timer::{InitialParams, TimerCmd, session_timer};
 /// when one process registers more than one logical client per
 /// session (rare).
 pub type ClientId = String;
+
+/// `show <path>` dispatch handler. Mirrors [`crate::ospf::ShowCallback`]
+/// and [`crate::isis`]'s equivalent: given the BFD instance, the parsed
+/// trailing [`Args`], and the JSON flag, render the response text.
+pub type ShowCallback = fn(&Bfd, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// Top-level BFD instance. Owns the IPv4 single-hop UDP socket, the
 /// session table, the committed YANG config mirror, a per-session
@@ -45,6 +52,12 @@ pub struct Bfd {
     /// Config-manager subscription endpoints (the receive half drains
     /// in the event loop).
     pub cm: ConfigChannel,
+    /// `show bfd ...` subscription endpoints. The receive half drains
+    /// in the event loop and dispatches through [`Self::show_cb`].
+    pub show: ShowChannel,
+    /// Show callback table — path → handler — populated by
+    /// [`Bfd::show_build`] and consulted by [`Self::process_show_msg`].
+    pub show_cb: HashMap<String, ShowCallback>,
     /// Inbound client request channel — protocol modules send
     /// `ClientReq::Subscribe` / `Unsubscribe` here to attach to BFD
     /// sessions. Clones of the sender half are distributed via
@@ -180,6 +193,8 @@ impl Bfd {
             config: BfdConfig::default(),
             callbacks: HashMap::new(),
             cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
             client_req: ClientReqChannel::new(),
             subscribers: HashMap::new(),
             main_tx,
@@ -187,6 +202,7 @@ impl Bfd {
             timer_handles: HashMap::new(),
         };
         bfd.callback_build();
+        bfd.show_build();
         Ok(bfd)
     }
 
@@ -312,6 +328,19 @@ impl Bfd {
         self.sessions.remove(key)
     }
 
+    /// Look up the show handler for `msg.paths` and invoke it. Mirrors
+    /// [`crate::ospf`]/[`crate::isis`]'s `process_show_msg`.
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
+            let _ = msg.resp.send(output).await;
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         loop {
             tokio::select! {
@@ -323,6 +352,9 @@ impl Bfd {
                 },
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
+                }
+                Some(msg) = self.show.rx.recv() => {
+                    self.process_show_msg(msg).await;
                 }
                 Some(req) = self.client_req.rx.recv() => {
                     self.process_client_req(req);

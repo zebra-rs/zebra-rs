@@ -142,6 +142,23 @@ module exec {
         }
       }
     }
+    container bfd {
+      ext:help "BFD (Bidirectional Forwarding Detection) information";
+      presence "Show BFD session summary";
+      list peer {
+        ext:help "BFD peer (session) detail";
+        ext:presence "Show every peer in detail, or one peer when an address follows";
+        key address;
+        leaf address {
+          ext:help "Peer IP address (IPv4 or IPv6)";
+          type inet:ip-address;
+        }
+      }
+      leaf counters {
+        ext:help "Per-session control-packet counters";
+        type empty;
+      }
+    }
     container bgp {
       ext:help "BGP information";
       list update-group {
