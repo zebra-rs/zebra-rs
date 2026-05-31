@@ -20,6 +20,10 @@ module zebra-bgp-vrf {
     prefix configure;
   }
 
+  import extension {
+    prefix ext;
+  }
+
   organization
     "zebra-rs";
 
@@ -223,6 +227,7 @@ module zebra-bgp-vrf {
          config is parsed — same staging pattern as IS-IS uses for
          `block` and `locator`.";
       leaf name {
+        ext:dynamic "rib:vrf";
         type string;
         description
           "Name of the VRF this BGP block applies to.";
