@@ -613,12 +613,21 @@ impl Bfd {
     fn send_control(&self, session: &Session, final_bit: bool) {
         let dst = SocketAddr::new(session.key.remote, session.dst_port);
         let ifindex = (session.key.ifindex != 0).then_some(session.key.ifindex);
+        // Stamp the configured local address as the packet source (e.g.
+        // a BGP neighbor's update-source). The wildcard means "no
+        // preference" — let the kernel choose the source per the route.
+        let src = match session.key.local {
+            IpAddr::V4(a) if a.is_unspecified() => None,
+            IpAddr::V6(a) if a.is_unspecified() => None,
+            addr => Some(addr),
+        };
         let mut packet = session.build_packet();
         packet.final_bit = final_bit;
         let req = WriteRequest {
             packet,
             dst,
             ifindex,
+            src,
         };
         // Route to the egress loop matching the destination family.
         match session.key.remote {
