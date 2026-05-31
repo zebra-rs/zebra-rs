@@ -186,6 +186,13 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     /// packets must carry a seq ≥ this value; smaller values are
     /// dropped as replays. Reset to 0 when the neighbor is created.
     pub auth_md5_last_seq: u32,
+    /// The BFD [`SessionKey`](crate::bfd::session::SessionKey) this
+    /// neighbor currently has a live subscription for, or `None`.
+    /// Runtime bookkeeping (not config): lets `Ospf::bfd_reconcile_nbr`
+    /// unsubscribe the prior key before subscribing a new one when it
+    /// changes, and avoids duplicate subscribes. Mirrors the BGP
+    /// `peer.bfd_session_key` reconcile pattern.
+    pub bfd_session_key: Option<crate::bfd::session::SessionKey>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -277,6 +284,7 @@ where
             interface_id: 0,
             gr_helper: None,
             auth_md5_last_seq: 0,
+            bfd_session_key: None,
         };
         nbr.ident.prefix = prefix;
         nbr

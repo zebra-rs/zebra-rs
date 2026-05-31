@@ -5,7 +5,7 @@ use super::Ospf;
 use super::OspfLink;
 use super::area::{AreaTypeKind, ExternalMetricType, NssaTranslatorRole, RedistEntry};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
-use super::link::{OspfAuthMode, OspfNetworkType};
+use super::link::{NbrStateThreshold, OspfAuthMode, OspfNetworkType};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::version::{OspfVersion, Ospfv2};
 
@@ -57,6 +57,18 @@ impl Ospf {
             config_ospf_area_redist_connected_metric_type,
         );
         self.ospf_add("/area/interface/enable", config_ospf_interface_enable);
+        self.ospf_add(
+            "/area/interface/bfd/enable",
+            config_ospf_interface_bfd_enable,
+        );
+        self.ospf_add(
+            "/area/interface/bfd/profile",
+            config_ospf_interface_bfd_profile,
+        );
+        self.ospf_add(
+            "/area/interface/bfd/min-neighbor-state",
+            config_ospf_interface_bfd_min_neighbor_state,
+        );
         self.ospf_add(
             "/area/interface/network-type",
             config_ospf_interface_network_type,
@@ -671,6 +683,76 @@ fn config_ospf_interface_hello_interval(
         link.timer.hello = Some(ospf_hello_timer(link));
     }
 
+    Some(())
+}
+
+/// `interface <if> bfd enable <bool>` — attach/detach BFD on this
+/// OSPF interface. Generic over `V` (shared by v2 and v3); reconciles
+/// every neighbor on the link so already-formed adjacencies pick up
+/// the change.
+pub(super) fn config_ospf_interface_bfd_enable<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let enable = args.boolean()?;
+
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        link.config.bfd.enable = op.is_set() && enable;
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
+    Some(())
+}
+
+/// `interface <if> bfd profile <name>` — stored verbatim; profile
+/// resolution into session parameters is a shared follow-up (BGP /
+/// IS-IS defer it too), so no reconcile is needed.
+pub(super) fn config_ospf_interface_bfd_profile<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let profile = args.string()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// `interface <if> bfd min-neighbor-state <two-way|full>` — the NFSM
+/// state at which the session is started/torn down. Default `two-way`
+/// (FRR-style). Reconciles existing neighbors so a live flip takes
+/// effect immediately.
+pub(super) fn config_ospf_interface_bfd_min_neighbor_state<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let value = args.string()?;
+
+    let threshold = if op.is_set() {
+        match value.as_str() {
+            "full" => NbrStateThreshold::Full,
+            _ => NbrStateThreshold::TwoWay,
+        }
+    } else {
+        NbrStateThreshold::default()
+    };
+
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        link.config.bfd.min_neighbor_state = threshold;
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
     Some(())
 }
 

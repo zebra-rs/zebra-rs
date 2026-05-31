@@ -232,6 +232,19 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     where
         Self: Sized;
 
+    /// Build the (local, remote) IP addresses for a single-hop BFD
+    /// session to `nbr` on this interface, or `None` if one can't be
+    /// formed. v2: the interface's primary IPv4 and the neighbor's
+    /// source IPv4. v3: the IPv6 link-local pair — deferred to the
+    /// IPv6-BFD phase, so it returns `None` for now (config is
+    /// accepted but inert).
+    fn bfd_addrs(
+        addrs: &[crate::ospf::addr::OspfAddr<Self>],
+        nbr: &crate::ospf::Neighbor<Self>,
+    ) -> Option<(std::net::IpAddr, std::net::IpAddr)>
+    where
+        Self: Sized;
+
     // ---- IFSM trait accessors ----------------------------------
     //
     // The IFSM is shared verbatim across v2 and v3 (RFC 5340 §4.2.1),
@@ -419,6 +432,15 @@ impl OspfVersion for Ospfv2 {
         ident.prefix.addr()
     }
 
+    fn bfd_addrs(
+        addrs: &[crate::ospf::addr::OspfAddr<Ospfv2>],
+        nbr: &crate::ospf::Neighbor<Ospfv2>,
+    ) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
+        let local = addrs.first()?.prefix.addr();
+        let remote = nbr.ident.prefix.addr();
+        Some((std::net::IpAddr::V4(local), std::net::IpAddr::V4(remote)))
+    }
+
     fn is_declared_dr(ident: &crate::ospf::Identity<Ospfv2>) -> bool {
         ident.prefix.addr() == ident.d_router
     }
@@ -548,6 +570,16 @@ impl OspfVersion for Ospfv3 {
         ident.router_id
     }
 
+    fn bfd_addrs(
+        _addrs: &[crate::ospf::addr::OspfAddr<Ospfv3>],
+        _nbr: &crate::ospf::Neighbor<Ospfv3>,
+    ) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
+        // OSPFv3 BFD runs over IPv6 link-local, which needs IPv6
+        // support in the BFD module first (a later phase). Inert until
+        // then: config is accepted but no session is created.
+        None
+    }
+
     fn is_declared_dr(ident: &crate::ospf::Identity<Ospfv3>) -> bool {
         ident.d_router == ident.router_id
     }
@@ -589,5 +621,78 @@ impl OspfVersion for Ospfv3 {
         nbr: &mut crate::ospf::Neighbor<Ospfv3>,
     ) {
         crate::ospf::nfsm::ospfv3_populate_initial_db_summary(oi, nbr);
+    }
+}
+
+#[cfg(test)]
+mod bfd_tests {
+    use super::{OspfVersion, Ospfv2};
+    use crate::ospf::addr::OspfAddr;
+    use crate::ospf::link::NbrStateThreshold;
+    use crate::ospf::neigh::Neighbor;
+    use crate::ospf::nfsm::NfsmState;
+    use ipnet::Ipv4Net;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::str::FromStr;
+    use tokio::sync::mpsc;
+
+    fn v2_neighbor(remote: &str) -> Neighbor<Ospfv2> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        Neighbor::<Ospfv2>::new(
+            tx,
+            3,
+            Ipv4Net::from_str(remote).unwrap(),
+            &Ipv4Addr::new(2, 2, 2, 2),
+            40,
+            ptx,
+        )
+    }
+
+    /// v2 pairs the interface's primary IPv4 (local) with the
+    /// neighbor's source IPv4 (remote) for a single-hop session.
+    #[test]
+    fn bfd_addrs_v2_pairs_local_and_remote() {
+        let nbr = v2_neighbor("10.0.0.2/24");
+        let local = OspfAddr::<Ospfv2> {
+            prefix: Ipv4Net::from_str("10.0.0.1/24").unwrap(),
+        };
+        assert_eq!(
+            Ospfv2::bfd_addrs(&[local], &nbr),
+            Some((
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            )),
+        );
+    }
+
+    /// No local address on the interface ⇒ no session can be formed.
+    #[test]
+    fn bfd_addrs_v2_none_without_local() {
+        let nbr = v2_neighbor("10.0.0.2/24");
+        assert_eq!(Ospfv2::bfd_addrs(&[], &nbr), None);
+    }
+
+    /// `two-way` (default) covers 2-Way and Full but not Init/Down —
+    /// the FRR-style threshold that protects DR-Other pairs.
+    #[test]
+    fn two_way_threshold_semantics() {
+        assert_eq!(NbrStateThreshold::default(), NbrStateThreshold::TwoWay);
+        let t = NbrStateThreshold::TwoWay.as_nfsm();
+        assert_eq!(t, NfsmState::TwoWay);
+        assert!(NfsmState::TwoWay >= t);
+        assert!(NfsmState::Full >= t);
+        assert!(NfsmState::Init < t);
+        assert!(NfsmState::Down < t);
+    }
+
+    /// `full` (Cisco-style) excludes 2-Way; only Full qualifies.
+    #[test]
+    fn full_threshold_semantics() {
+        let t = NbrStateThreshold::Full.as_nfsm();
+        assert_eq!(t, NfsmState::Full);
+        assert!(NfsmState::Full >= t);
+        assert!(NfsmState::Loading < t);
+        assert!(NfsmState::TwoWay < t);
     }
 }

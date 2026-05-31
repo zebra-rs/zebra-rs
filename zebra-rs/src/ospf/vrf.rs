@@ -117,6 +117,9 @@ pub fn spawn_ospf_vrf_v2(
         proto.clone(),
         rib_subscriber.clone(),
         config_tx.clone(),
+        // Per-VRF OSPF BFD is deferred (the BFD instance is default-table
+        // only); `None` makes per-interface `bfd` inert in a VRF for now.
+        None,
     );
     let cm_tx = ospf.cm.tx.clone();
     let show_tx = ospf.show.tx.clone();
@@ -144,6 +147,8 @@ pub fn spawn_ospf_vrf_v3(
         proto.clone(),
         rib_subscriber.clone(),
         config_tx.clone(),
+        // Per-VRF OSPFv3 BFD deferred (see `spawn_ospf_vrf_v2`).
+        None,
     );
     let cm_tx = ospf.cm.tx.clone();
     let show_tx = ospf.show.tx.clone();

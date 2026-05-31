@@ -11,6 +11,9 @@ pub fn spawn_ospf(config: &ConfigManager) {
     // get `"ospf:vrf:<name>"`. `rib_subscriber` + `config.tx` let the
     // default task mint per-VRF RIB subscriptions and (de)register
     // `show ip ospf vrf <name>`.
+    // BFD is eager-spawned before OSPF in `commit_config`, so this
+    // handle is live; threaded in so per-interface `bfd` can subscribe.
+    let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let ospf = inst::Ospf::<crate::ospf::Ospfv2>::new(
         ctx,
         rib_rx,
@@ -18,6 +21,7 @@ pub fn spawn_ospf(config: &ConfigManager) {
         "ospf".to_string(),
         config.rib_subscriber(),
         config.tx.clone(),
+        bfd_client_tx,
     );
     config.subscribe("ospf", ospf.cm.tx.clone());
     config.subscribe_show("ospf", ospf.show.tx.clone());
@@ -47,6 +51,7 @@ pub fn spawn_ospfv3(config: &ConfigManager) {
     let ctx = ProtoContext::default_table(rib_client);
     // `"ospfv3"` default label; per-VRF children get
     // `"ospfv3:vrf:<name>"`. See `spawn_ospf` for the rationale.
+    let bfd_client_tx = config.bfd_client_tx.borrow().clone();
     let ospf = inst::Ospf::<crate::ospf::Ospfv3>::new(
         ctx,
         rib_rx,
@@ -54,6 +59,7 @@ pub fn spawn_ospfv3(config: &ConfigManager) {
         "ospfv3".to_string(),
         config.rib_subscriber(),
         config.tx.clone(),
+        bfd_client_tx,
     );
     config.subscribe("ospfv3", ospf.cm.tx.clone());
     config.subscribe_show("ospfv3", ospf.show.tx.clone());
