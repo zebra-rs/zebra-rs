@@ -786,6 +786,54 @@ module config {
             }
           }
         }
+
+        list vrf {
+          // Per-VRF OSPFv2 instance. The default `router ospf` task
+          // forwards each `vrf <name> ...` line (with the `vrf <name>`
+          // prefix stripped) to a full per-VRF OSPFv2 instance whose
+          // computed routes install into the VRF's routing table. The
+          // `vrf` key is a plain string (staging-friendly, like
+          // `router static`'s per-VRF list) so the VRF need not yet
+          // exist at the top-level `vrf` list when parsed. Minimal
+          // subset (router-id / area / interface enable) for now;
+          // later work widens it toward parity with the default
+          // instance.
+          key "name";
+          leaf name {
+            type string;
+          }
+          leaf router-id {
+            type inet:ipv4-address;
+          }
+          list area {
+            key "area-id";
+            leaf area-id {
+              type union {
+                type uint32;
+                type inet:ipv4-address;
+              }
+            }
+            list interface {
+              key "if-name";
+              leaf if-name {
+                ext:dynamic "rib:interface";
+                type string;
+              }
+              leaf enable {
+                type boolean;
+              }
+              leaf network-type {
+                type enumeration {
+                  enum broadcast;
+                  enum point-to-point;
+                }
+              }
+              leaf priority {
+                type uint8;
+              }
+            }
+          }
+        }
       }
       container ospfv3 {
         // OSPFv3 (RFC 5340). Shape mirrors `container ospf` so a
@@ -1059,6 +1107,45 @@ module config {
             // the TI-LFA repair so the repair installs first. Protection
             // testing knob; see `router ospf` for the full rationale.
             presence "Install TI-LFA backup as the primary nexthop";
+          }
+        }
+
+        list vrf {
+          // Per-VRF OSPFv3 instance. See `container ospf`'s `vrf`
+          // list for the forwarding model. Minimal subset (area /
+          // interface enable); `router-id` is omitted because the v3
+          // instance has no router-id config handler today.
+          key "name";
+          leaf name {
+            type string;
+          }
+          list area {
+            key "area-id";
+            leaf area-id {
+              type union {
+                type uint32;
+                type inet:ipv4-address;
+              }
+            }
+            list interface {
+              key "if-name";
+              leaf if-name {
+                ext:dynamic "rib:interface";
+                type string;
+              }
+              leaf enable {
+                type boolean;
+              }
+              leaf network-type {
+                type enumeration {
+                  enum broadcast;
+                  enum point-to-point;
+                }
+              }
+              leaf priority {
+                type uint8;
+              }
+            }
           }
         }
       }

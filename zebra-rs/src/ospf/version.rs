@@ -109,6 +109,28 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// `{FLEX_ALGO_PREFIX}/...`.
     const FLEX_ALGO_PREFIX: &'static str;
 
+    /// Proto label base for this version — `"ospf"` (v2) or
+    /// `"ospfv3"` (v3). Used as the default instance's RIB / policy
+    /// registration name and as the prefix for per-VRF labels
+    /// (`"<PROTO>:vrf:<name>"`), which also doubles as the manager
+    /// show-channel key.
+    const PROTO: &'static str;
+
+    /// Spawn a per-VRF instance of this version and return its handle.
+    /// Dispatches the version-specific `Ospf::<Self>::new` + serve
+    /// (the generic per-VRF code can't name the concrete constructor);
+    /// the shared spawn steps — RIB subscription bound to `table_id`,
+    /// `ProtoContext::for_vrf`, show-channel registration, and config
+    /// replay — live in `crate::ospf::vrf`.
+    fn spawn_vrf(
+        name: &str,
+        table_id: u32,
+        rib_subscriber: &crate::config::RibSubscriber,
+        config_tx: &tokio::sync::mpsc::Sender<crate::config::Message>,
+        policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+        buffered: &[(Vec<crate::config::CommandPath>, crate::config::ConfigOp)],
+    ) -> crate::ospf::vrf::OspfVrfHandle;
+
     /// AllSPFRouters multicast group: 224.0.0.5 (v2) or ff02::5 (v3).
     const ALL_SPF_ROUTERS: Self::Addr;
 
@@ -333,6 +355,26 @@ impl OspfVersion for Ospfv2 {
     type LsRequest = OspfLsRequest;
     type LsRequestEntry = OspfLsRequestEntry;
     const FLEX_ALGO_PREFIX: &'static str = "/router/ospf/flex-algo";
+    const PROTO: &'static str = "ospf";
+
+    fn spawn_vrf(
+        name: &str,
+        table_id: u32,
+        rib_subscriber: &crate::config::RibSubscriber,
+        config_tx: &tokio::sync::mpsc::Sender<crate::config::Message>,
+        policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+        buffered: &[(Vec<crate::config::CommandPath>, crate::config::ConfigOp)],
+    ) -> crate::ospf::vrf::OspfVrfHandle {
+        crate::ospf::vrf::spawn_ospf_vrf_v2(
+            name,
+            table_id,
+            rib_subscriber,
+            config_tx,
+            policy_tx,
+            buffered,
+        )
+    }
+
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
 
@@ -441,6 +483,26 @@ impl OspfVersion for Ospfv3 {
     type LsRequest = Ospfv3LsRequest;
     type LsRequestEntry = Ospfv3LsRequestEntry;
     const FLEX_ALGO_PREFIX: &'static str = "/router/ospfv3/flex-algo";
+    const PROTO: &'static str = "ospfv3";
+
+    fn spawn_vrf(
+        name: &str,
+        table_id: u32,
+        rib_subscriber: &crate::config::RibSubscriber,
+        config_tx: &tokio::sync::mpsc::Sender<crate::config::Message>,
+        policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+        buffered: &[(Vec<crate::config::CommandPath>, crate::config::ConfigOp)],
+    ) -> crate::ospf::vrf::OspfVrfHandle {
+        crate::ospf::vrf::spawn_ospf_vrf_v3(
+            name,
+            table_id,
+            rib_subscriber,
+            config_tx,
+            policy_tx,
+            buffered,
+        )
+    }
+
     /// AllSPFRouters in v3 (RFC 5340 §A.1): `ff02::5`.
     const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
     /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.

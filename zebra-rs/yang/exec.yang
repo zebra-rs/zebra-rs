@@ -356,6 +356,45 @@ module exec {
           ext:help "OSPF graceful-restart checkpoint (on-disk state)";
           type empty;
         }
+        list vrf {
+          // Per-VRF OSPFv2 show. `show ip ospf vrf <name> <cmd>` is
+          // redirected by the config manager (it strips the
+          // `vrf <name>` selector via `vrf_redirect_split`) into the
+          // per-VRF task's show channel registered as
+          // `"ospf:vrf:<name>"`. The stripped command renders via the
+          // child's existing handlers; a bare `... vrf <name>` maps to
+          // the summary (`show ip ospf`).
+          ext:help "Per-VRF OSPFv2 instance";
+          ext:presence "Show this VRF's OSPFv2 summary";
+          key name;
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          leaf interface {
+            ext:help "OSPF interfaces in this VRF";
+            type empty;
+          }
+          container neighbor {
+            ext:help "OSPF neighbors in this VRF";
+            presence "OSPF neighbor";
+            leaf detail {
+              type empty;
+            }
+          }
+          container database {
+            ext:help "OSPF database in this VRF";
+            presence "OSPF database";
+            leaf detail {
+              type empty;
+            }
+          }
+          leaf route {
+            ext:help "OSPF routes in this VRF";
+            type empty;
+          }
+        }
       }
     }
 
@@ -607,6 +646,43 @@ module exec {
         }
         leaf segment-routing {
           type empty;
+        }
+        list vrf {
+          // Per-VRF OSPFv3 show. `show ipv6 ospf vrf <name> <cmd>` is
+          // redirected by the config manager into the per-VRF task's
+          // show channel registered as `"ospfv3:vrf:<name>"`; the
+          // stripped command renders via the child's handlers (a bare
+          // `... vrf <name>` maps to the summary).
+          ext:help "Per-VRF OSPFv3 instance";
+          ext:presence "Show this VRF's OSPFv3 summary";
+          key name;
+          leaf name {
+            ext:help "VRF name";
+            ext:dynamic "rib:vrf";
+            type string;
+          }
+          leaf interface {
+            ext:help "OSPFv3 interfaces in this VRF";
+            type empty;
+          }
+          container neighbor {
+            ext:help "OSPFv3 neighbors in this VRF";
+            presence "OSPFv3 neighbor";
+            leaf detail {
+              type empty;
+            }
+          }
+          container database {
+            ext:help "OSPFv3 database in this VRF";
+            presence "OSPFv3 database";
+            leaf detail {
+              type empty;
+            }
+          }
+          leaf route {
+            ext:help "OSPFv3 routes in this VRF";
+            type empty;
+          }
         }
       }
     }

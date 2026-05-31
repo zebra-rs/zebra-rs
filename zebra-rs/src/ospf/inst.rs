@@ -26,7 +26,10 @@ use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, LinkFlagsExt, Nexthop, NexthopMulti, NexthopUni, RibType};
 use crate::spf::label_block::LabelConfig;
 use crate::{
-    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
+    config::{
+        Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
+        path_from_command, vrf_redirect_split,
+    },
     context::Task,
 };
 
@@ -225,6 +228,34 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// sender; the v3 event loop `take()`s this receiver at startup.
     /// `None` on v2.
     pub v3_recv_rx: Option<UnboundedReceiver<super::network_v6::Ospfv3Recv>>,
+
+    /// Protocol identity for name-keyed RIB / policy registrations.
+    /// `V::PROTO` (`"ospf"` / `"ospfv3"`) for the default instance,
+    /// `"<proto>:vrf:<name>"` for a per-VRF instance — so the two
+    /// don't clobber each other's rows in the name-keyed policy /
+    /// redistribute / SR registries. Route-install attribution is by
+    /// the numeric `ProtoId` in `ctx.rib`, so it is unaffected.
+    pub proto_label: String,
+    /// Send-capable RIB-subscription factory. The default instance
+    /// uses it to mint a per-VRF `RibClient` bound to the VRF's kernel
+    /// `table_id` when spawning a child; cloned into each child too.
+    pub rib_subscriber: RibSubscriber,
+    /// Sender into the config manager, for (de)registering a child's
+    /// `show ... vrf <name>` channel via `SubscribeShowVrf` /
+    /// `UnsubscribeShowVrf`. Bounded — send with `try_send`.
+    pub config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
+    /// Per-VRF buffered config (default instance only). Each
+    /// `router ospf{,v3} vrf <name> ...` line, rewritten to strip the
+    /// `vrf <name>` prefix, is appended in commit order; replayed into
+    /// a child at spawn and kept so a `VrfDel`→`VrfAdd` flap respawns
+    /// from intent. Empty for child instances.
+    pub vrf_log: BTreeMap<String, Vec<(Vec<CommandPath>, ConfigOp)>>,
+    /// Running per-VRF child tasks (default instance only), by name.
+    pub vrf_registry: BTreeMap<String, super::vrf::OspfVrfHandle>,
+    /// Kernel VRF master info from `RibRx::VrfAdd` (default instance
+    /// only): VRF name → (table_id, ifindex). A child spawns once both
+    /// config intent (`vrf_log`) and kernel info exist.
+    pub rib_known_vrfs: BTreeMap<String, (u32, u32)>,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -308,6 +339,95 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Record a rewritten per-VRF config line (default instance only).
+    /// Appends to the VRF's replay log and, if its child is already
+    /// running, forwards the line live to the child's config inbox.
+    pub(crate) fn vrf_config_record(
+        &mut self,
+        name: String,
+        rewritten: Vec<CommandPath>,
+        op: ConfigOp,
+    ) {
+        if let Some(handle) = self.vrf_registry.get(&name) {
+            let _ = handle.cm_tx.send(ConfigRequest::new(rewritten.clone(), op));
+        }
+        self.vrf_log.entry(name).or_default().push((rewritten, op));
+    }
+
+    /// `CommitEnd` fan-out for the default instance: tear down per-VRF
+    /// children whose `router ospf{,v3} vrf <name>` block was fully
+    /// deleted this commit, then forward `CommitEnd` to every surviving
+    /// live child so it runs its own commit-time reconcile.
+    pub(crate) fn vrf_commit_end(&mut self) {
+        let emptied: Vec<String> = self
+            .vrf_log
+            .iter()
+            .filter(|(_, log)| !super::vrf::vrf_log_active(log))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in emptied {
+            self.vrf_log.remove(&name);
+            // Kernel info (`rib_known_vrfs`) is owned by VrfAdd/VrfDel,
+            // not by config — leave it so a re-added block respawns if
+            // the kernel VRF still exists.
+            if self.vrf_registry.remove(&name).is_some() {
+                super::vrf::despawn_ospf_vrf(
+                    V::PROTO,
+                    &name,
+                    &self.config_tx,
+                    &self.rib_subscriber,
+                );
+            }
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .cm_tx
+                .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+        }
+    }
+
+    /// Kernel VRF master appeared (or was replayed at subscribe time).
+    /// Record its `table_id`/`ifindex`, and spawn the per-VRF OSPF
+    /// child of this version if config intent exists and it isn't
+    /// already running. Default instance only.
+    pub(crate) fn vrf_add(&mut self, name: String, table_id: u32, ifindex: u32) {
+        self.rib_known_vrfs
+            .insert(name.clone(), (table_id, ifindex));
+        if self.vrf_registry.contains_key(&name) {
+            return;
+        }
+        let has_intent = self
+            .vrf_log
+            .get(&name)
+            .is_some_and(|log| super::vrf::vrf_log_active(log));
+        if !has_intent {
+            return;
+        }
+        // Clone the replay log so the spawn borrow doesn't overlap the
+        // `vrf_registry` insert below.
+        let log = self.vrf_log.get(&name).cloned().unwrap_or_default();
+        let handle = V::spawn_vrf(
+            &name,
+            table_id,
+            &self.rib_subscriber,
+            &self.config_tx,
+            &self.policy_tx,
+            &log,
+        );
+        self.vrf_registry.insert(name, handle);
+    }
+
+    /// Kernel VRF master removed. Despawn the child but KEEP its config
+    /// log so a later `VrfAdd` (master re-created) respawns from intent.
+    /// RIB reclaims the VRF's FIB table on its side. Default instance
+    /// only.
+    pub(crate) fn vrf_del(&mut self, name: String) {
+        self.rib_known_vrfs.remove(&name);
+        if self.vrf_registry.remove(&name).is_some() {
+            super::vrf::despawn_ospf_vrf(V::PROTO, &name, &self.config_tx, &self.rib_subscriber);
+        }
+    }
+
     /// Stage a flex-algo (`{V::FLEX_ALGO_PREFIX}/...`), `/affinity-map`
     /// or `/srlg/group` config leaf into its builder. The caller gates
     /// on the path prefix and returns early after this; the staged
@@ -521,12 +641,15 @@ impl Ospf<Ospfv2> {
         ctx: crate::context::ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         policy_tx: UnboundedSender<crate::policy::Message>,
+        proto_label: String,
+        rib_subscriber: RibSubscriber,
+        config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
-            proto: "ospf".into(),
+            proto: proto_label.clone(),
             tx: policy_chan.tx.clone(),
         });
 
@@ -578,14 +701,25 @@ impl Ospf<Ospfv2> {
             sock,
             v3_send_tx: None,
             v3_recv_rx: None,
+            proto_label,
+            rib_subscriber,
+            config_tx,
+            vrf_log: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
         };
         ospf.callback_build();
         ospf.show_build();
 
         // If a fresh graceful-restart checkpoint is on disk, replay
         // the saved state into this instance + enter restarting mode
-        // so we don't cold-start over a planned restart.
-        ospf.gr_restart_load_checkpoint();
+        // so we don't cold-start over a planned restart. Only the
+        // default instance loads it — the on-disk path is keyed by a
+        // fixed proto name (`ospf.cbor`), so a per-VRF child must not
+        // restore the default instance's state.
+        if ospf.proto_label == "ospf" {
+            ospf.gr_restart_load_checkpoint();
+        }
 
         let tx = ospf.tx.clone();
         let sock = ospf.sock.clone();
@@ -600,15 +734,26 @@ impl Ospf<Ospfv2> {
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-
-        // Apply the flex-algo / affinity-map / SRLG staging at the end
-        // of a commit cycle (mirrors IS-IS). Nothing else handles
-        // CommitEnd on the v2 instance today.
+        // CommitEnd: fan out to per-VRF children (run their reconcile)
+        // and prune any whose `router ospf vrf <name>` block was fully
+        // deleted, then apply this instance's own flex-algo / affinity
+        // / SRLG staging (mirrors IS-IS).
         if msg.op == ConfigOp::CommitEnd {
+            self.vrf_commit_end();
             self.commit_flex_algo_tables();
             return;
         }
+
+        // `/router/ospf/vrf/<name>/...` belongs to a per-VRF child, not
+        // the default instance. Strip the `vrf <name>` selector and
+        // buffer + forward the rewritten line; never dispatch it through
+        // the default instance's own callback table.
+        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+            self.vrf_config_record(name, rewritten, msg.op);
+            return;
+        }
+
+        let (path, args) = path_from_command(&msg.paths);
 
         // Clear ops bypass the YANG callback table — they map
         // straight to runtime side-effects (kick SPF, drop a peer,
@@ -3521,6 +3666,15 @@ impl Ospf<Ospfv2> {
             RibRx::RouteDel { rtype, routes, .. } => {
                 self.route_redist_del(rtype, routes);
             }
+            // VRF master lifecycle (default instance only): spawn /
+            // despawn the per-VRF OSPFv2 child once config intent +
+            // kernel table_id both exist.
+            RibRx::VrfAdd {
+                name,
+                table_id,
+                ifindex,
+            } => self.vrf_add(name, table_id, ifindex),
+            RibRx::VrfDel { name } => self.vrf_del(name),
             _ => {
                 //
             }
@@ -3629,12 +3783,15 @@ impl Ospf<Ospfv3> {
         ctx: crate::context::ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         policy_tx: UnboundedSender<crate::policy::Message>,
+        proto_label: String,
+        rib_subscriber: RibSubscriber,
+        config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
-            proto: "ospfv3".into(),
+            proto: proto_label.clone(),
             tx: policy_chan.tx.clone(),
         });
 
@@ -3709,9 +3866,18 @@ impl Ospf<Ospfv3> {
             sock,
             v3_send_tx: Some(v3_send_tx),
             v3_recv_rx: Some(v3_recv_rx),
+            proto_label,
+            rib_subscriber,
+            config_tx,
+            vrf_log: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
         };
         ospf.callback_build();
         ospf.show_build();
+        // v3 has no on-disk GR checkpoint load today, so nothing to
+        // gate here (a per-VRF child would otherwise need the same
+        // default-instance guard the v2 path uses).
         ospf
     }
 
@@ -3720,15 +3886,25 @@ impl Ospf<Ospfv3> {
     /// `/router/ospfv3/area/interface/enable` is registered (#791-stub
     /// path); more leaves land alongside the YANG schema expansion.
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-
-        // Apply the flex-algo / affinity-map / SRLG staging at the end
-        // of a commit cycle (mirrors the v2 sibling). Nothing else
-        // handles CommitEnd on the v3 instance today.
+        // CommitEnd: fan out to per-VRF children and prune deleted
+        // ones, then apply this instance's own staging (mirrors the v2
+        // sibling).
         if msg.op == ConfigOp::CommitEnd {
+            self.vrf_commit_end();
             self.commit_flex_algo_tables();
             return;
         }
+
+        // `/router/ospfv3/vrf/<name>/...` belongs to a per-VRF child.
+        // Strip the `vrf <name>` selector and buffer + forward the
+        // rewritten line; never dispatch it through the default
+        // instance's own callback table.
+        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+            self.vrf_config_record(name, rewritten, msg.op);
+            return;
+        }
+
+        let (path, args) = path_from_command(&msg.paths);
 
         // Clear ops bypass the YANG callback table; see the v2
         // sibling. Path-filter so the v3 instance ignores the v2
@@ -3785,6 +3961,15 @@ impl Ospf<Ospfv3> {
             RibRx::LinkDel(ifindex) => self.link_del(ifindex),
             RibRx::AddrAdd(addr) => self.addr_add(addr),
             RibRx::AddrDel(addr) => self.addr_del(addr),
+            // VRF master lifecycle (default instance only): spawn /
+            // despawn the per-VRF OSPFv3 child once config intent +
+            // kernel table_id both exist.
+            RibRx::VrfAdd {
+                name,
+                table_id,
+                ifindex,
+            } => self.vrf_add(name, table_id, ifindex),
+            RibRx::VrfDel { name } => self.vrf_del(name),
             _ => {}
         }
     }
