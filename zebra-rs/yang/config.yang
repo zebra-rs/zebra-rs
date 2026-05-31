@@ -1823,6 +1823,65 @@ module config {
             }
           }
 
+          container te-metric {
+            ext:help "Static TE link metrics (RFC 8570) for this interface";
+            description
+              "Per-interface traffic-engineering link metrics advertised
+               as RFC 8570 sub-TLVs on this link's Extended IS
+               Reachability entry (TLV 22, and the MT IS Reach TLV 222
+               when multi-topology is enabled). Statically configured
+               here; a future performance-measurement (TWAMP/STAMP) task
+               will populate the same fields dynamically. All delay
+               values are in microseconds.";
+
+            leaf unidirectional-delay {
+              type uint32 {
+                range "0..16777215";
+              }
+              units "microseconds";
+              description
+                "Average unidirectional link delay (RFC 8570 §4.1,
+                 sub-TLV 33).";
+            }
+            leaf min-delay {
+              type uint32 {
+                range "0..16777215";
+              }
+              units "microseconds";
+              description
+                "Minimum unidirectional link delay (RFC 8570 §4.2,
+                 sub-TLV 34). Advertised with max-delay; the Min/Max
+                 sub-TLV is emitted only when both are set.";
+            }
+            leaf max-delay {
+              type uint32 {
+                range "0..16777215";
+              }
+              units "microseconds";
+              description
+                "Maximum unidirectional link delay (RFC 8570 §4.2,
+                 sub-TLV 34).";
+            }
+            leaf delay-variation {
+              type uint32 {
+                range "0..16777215";
+              }
+              units "microseconds";
+              description
+                "Unidirectional delay variation / jitter (RFC 8570
+                 §4.3, sub-TLV 35).";
+            }
+            leaf loss {
+              type uint32 {
+                range "0..16777214";
+              }
+              description
+                "Unidirectional link loss (RFC 8570 §4.4, sub-TLV 36),
+                 encoded in units of 0.000003 %; the maximum 16777214
+                 (0xFFFFFE) is ~50.33 %.";
+            }
+          }
+
           leaf-list affinity {
             // Names of /router/isis/affinity-map entries this link
             // belongs to. The union of their bit-positions forms the
