@@ -145,7 +145,7 @@ module exec {
     container bfd {
       ext:help "BFD (Bidirectional Forwarding Detection) information";
       presence "Show BFD session summary";
-      list peer {
+      list peers {
         ext:help "BFD peer (session) detail";
         ext:presence "Show every peer in detail, or one peer when an address follows";
         key address;
