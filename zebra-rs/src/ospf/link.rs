@@ -8,6 +8,10 @@ use std::{
 
 use bitfield_struct::bitfield;
 use netlink_packet_route::link::LinkFlags;
+use ospf_packet::{
+    OspfAslaSubSubTlv, OspfSubDelayVariation, OspfSubLinkLoss, OspfSubMinMaxLinkDelay,
+    OspfSubUniLinkDelay,
+};
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
@@ -113,6 +117,65 @@ pub struct LinkConfig {
     /// tested against each FAD's include/exclude constraints at
     /// per-algo SPF time. Mirrors `isis::LinkConfig::affinity`.
     pub affinity: BTreeSet<String>,
+    /// Static RFC 7471 TE link metrics (delay/jitter/loss) advertised in
+    /// this link's ASLA sub-TLV on the Extended-Link Opaque LSA. Mirrors
+    /// `isis::LinkConfig::te_metric`; a future TWAMP/STAMP task will
+    /// populate these dynamically.
+    pub te_metric: LinkTeMetric,
+}
+
+/// Per-interface RFC 7471 TE link metrics. All delay values are in
+/// microseconds; `loss` is the raw 24-bit RFC 7471 encoding (units of
+/// 0.000003 %). `None` means "not configured / not measured" — the
+/// corresponding sub-TLV is simply not advertised.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct LinkTeMetric {
+    pub unidirectional_delay: Option<u32>,
+    pub min_delay: Option<u32>,
+    pub max_delay: Option<u32>,
+    pub delay_variation: Option<u32>,
+    pub loss: Option<u32>,
+}
+
+impl LinkTeMetric {
+    /// Build the RFC 7471 link-attribute sub-sub-TLVs for the configured
+    /// metrics, in ascending code-point order (27/28/29/30). These ride
+    /// inside the link's ASLA sub-TLV (RFC 9492) — see
+    /// `flex_algo::build_link_asla`. The anomalous flag is always clear
+    /// for statically-configured values; the dynamic measurement task
+    /// will set it on threshold crossings.
+    ///
+    /// The Min/Max sub-TLV (28) is emitted only when *both* bounds are
+    /// configured — a half-populated bound would be a meaningless wire
+    /// artifact.
+    pub fn asla_sub_subs(&self) -> Vec<OspfAslaSubSubTlv> {
+        let mut subs = Vec::new();
+        if let Some(delay) = self.unidirectional_delay {
+            subs.push(OspfAslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+                anomalous: false,
+                delay,
+            }));
+        }
+        if let (Some(min_delay), Some(max_delay)) = (self.min_delay, self.max_delay) {
+            subs.push(OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay,
+                max_delay,
+            }));
+        }
+        if let Some(variation) = self.delay_variation {
+            subs.push(OspfAslaSubSubTlv::DelayVariation(OspfSubDelayVariation {
+                variation,
+            }));
+        }
+        if let Some(loss) = self.loss {
+            subs.push(OspfAslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
+                anomalous: false,
+                loss,
+            }));
+        }
+        subs
+    }
 }
 
 /// OSPFv2 per-interface authentication mode.
@@ -513,4 +576,60 @@ pub struct OspfLinkFlags {
     pub resvd1: bool,
     #[bits(6)]
     pub resvd2: usize,
+}
+
+#[cfg(test)]
+mod te_metric_tests {
+    use super::*;
+
+    #[test]
+    fn asla_sub_subs_emits_all_in_code_order() {
+        let m = LinkTeMetric {
+            unidirectional_delay: Some(1_000),
+            min_delay: Some(900),
+            max_delay: Some(1_200),
+            delay_variation: Some(50),
+            loss: Some(10),
+        };
+        let subs = m.asla_sub_subs();
+        assert_eq!(subs.len(), 4);
+        assert!(matches!(subs[0], OspfAslaSubSubTlv::UniLinkDelay(_)));
+        assert!(matches!(subs[1], OspfAslaSubSubTlv::MinMaxLinkDelay(_)));
+        assert!(matches!(subs[2], OspfAslaSubSubTlv::DelayVariation(_)));
+        assert!(matches!(subs[3], OspfAslaSubSubTlv::LinkLoss(_)));
+    }
+
+    #[test]
+    fn min_max_requires_both_bounds() {
+        // Only min set → no Min/Max sub-TLV.
+        let m = LinkTeMetric {
+            min_delay: Some(900),
+            ..Default::default()
+        };
+        assert!(m.asla_sub_subs().is_empty());
+
+        // Only max set → no Min/Max sub-TLV.
+        let m = LinkTeMetric {
+            max_delay: Some(1_200),
+            ..Default::default()
+        };
+        assert!(m.asla_sub_subs().is_empty());
+
+        // Both set → exactly one Min/Max sub-TLV.
+        let m = LinkTeMetric {
+            min_delay: Some(900),
+            max_delay: Some(1_200),
+            ..Default::default()
+        };
+        let subs = m.asla_sub_subs();
+        assert!(matches!(
+            subs.as_slice(),
+            [OspfAslaSubSubTlv::MinMaxLinkDelay(_)]
+        ));
+    }
+
+    #[test]
+    fn default_is_empty() {
+        assert!(LinkTeMetric::default().asla_sub_subs().is_empty());
+    }
 }

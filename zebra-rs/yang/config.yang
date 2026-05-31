@@ -545,6 +545,67 @@ module config {
               // include/exclude constraints at flex-algo SPF time.
               type string;
             }
+            container te-metric {
+              ext:help "Static TE link metrics (RFC 7471) for this interface";
+              description
+                "Per-interface traffic-engineering link metrics advertised
+                 as RFC 7471 link-attribute sub-TLVs carried in this link's
+                 ASLA sub-TLV (RFC 9492) on the Extended-Link Opaque LSA —
+                 the same place flex-algo affinity is advertised, and what
+                 Flex-Algorithm metric-type 1 consumes. Origination is
+                 gated on Segment Routing over MPLS being enabled (the
+                 Extended-Link LSA is only originated then). Statically
+                 configured here; a future performance-measurement
+                 (TWAMP/STAMP) task will populate the same fields
+                 dynamically. All delay values are in microseconds.";
+
+              leaf unidirectional-delay {
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Average unidirectional link delay (RFC 7471 §4.1,
+                   sub-TLV 27).";
+              }
+              leaf min-delay {
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Minimum unidirectional link delay (RFC 7471 §4.2,
+                   sub-TLV 28). Advertised with max-delay; the Min/Max
+                   sub-TLV is emitted only when both are set.";
+              }
+              leaf max-delay {
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Maximum unidirectional link delay (RFC 7471 §4.2,
+                   sub-TLV 28).";
+              }
+              leaf delay-variation {
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Unidirectional delay variation / jitter (RFC 7471
+                   §4.3, sub-TLV 29).";
+              }
+              leaf loss {
+                type uint32 {
+                  range "0..16777214";
+                }
+                description
+                  "Unidirectional link loss (RFC 7471 §4.4, sub-TLV 30),
+                   encoded in units of 0.000003 %; the maximum 16777214
+                   (0xFFFFFE) is ~50.33 %.";
+              }
+            }
           }
         }
         container segment-routing {

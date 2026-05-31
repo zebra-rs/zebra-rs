@@ -64,6 +64,26 @@ impl Ospf {
         self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
         self.ospf_add("/area/interface/affinity", config_ospf_interface_affinity);
         self.ospf_add(
+            "/area/interface/te-metric/unidirectional-delay",
+            config_ospf_interface_te_unidirectional_delay,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/min-delay",
+            config_ospf_interface_te_min_delay,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/max-delay",
+            config_ospf_interface_te_max_delay,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/delay-variation",
+            config_ospf_interface_te_delay_variation,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/loss",
+            config_ospf_interface_te_loss,
+        );
+        self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
         );
@@ -576,6 +596,59 @@ fn config_ospf_interface_affinity(ospf: &mut Ospf, mut args: Args, op: ConfigOp)
         link.config.affinity.remove(&affinity);
     }
     Some(())
+}
+
+// `/router/ospf/area/interface/te-metric/*` — static RFC 7471 TE link
+// metrics. Each leaf shares this helper: parse the area-id / interface
+// name / u32 value, set or clear one `LinkTeMetric` field, then
+// re-originate the Extended-Link Opaque LSA so the metric rides in the
+// link's ASLA sub-TLV. Origination only happens when SR-MPLS is enabled
+// (see `ext_link_lsa_originate`).
+fn config_ospf_interface_te_metric(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+    set: impl Fn(&mut super::link::LinkTeMetric, Option<u32>),
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let value = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    set(&mut link.config.te_metric, op.is_set().then_some(value));
+    let ifindex = link.index;
+
+    ospf.ext_link_lsa_originate(ifindex);
+
+    Some(())
+}
+
+fn config_ospf_interface_te_unidirectional_delay(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_metric(ospf, args, op, |m, v| m.unidirectional_delay = v)
+}
+
+fn config_ospf_interface_te_min_delay(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+    config_ospf_interface_te_metric(ospf, args, op, |m, v| m.min_delay = v)
+}
+
+fn config_ospf_interface_te_max_delay(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+    config_ospf_interface_te_metric(ospf, args, op, |m, v| m.max_delay = v)
+}
+
+fn config_ospf_interface_te_delay_variation(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_metric(ospf, args, op, |m, v| m.delay_variation = v)
+}
+
+fn config_ospf_interface_te_loss(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
+    config_ospf_interface_te_metric(ospf, args, op, |m, v| m.loss = v)
 }
 
 fn config_ospf_interface_hello_interval(

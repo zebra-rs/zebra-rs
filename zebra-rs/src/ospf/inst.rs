@@ -1117,10 +1117,16 @@ impl Ospf<Ospfv2> {
         {
             let our_addr = addr.prefix.addr();
             // Per-link ASLA carrying this link's flex-algo affinity
-            // (RFC 9492 / RFC 9350 §6.3), independent of Adj-SID: a link
-            // with affinity but no Adj-SID still originates an
-            // Extended-Link LSA so peers can run the FAD constraints.
-            let asla = super::flex_algo::build_link_asla(&link.config.affinity, &self.affinity_map);
+            // (RFC 9492 / RFC 9350 §6.3) and any static RFC 7471 TE
+            // metrics, independent of Adj-SID: a link with affinity or
+            // TE metrics but no Adj-SID still originates an Extended-Link
+            // LSA so peers can run the FAD constraints / read the
+            // metrics.
+            let asla = super::flex_algo::build_link_asla(
+                &link.config.affinity,
+                &self.affinity_map,
+                link.config.te_metric.asla_sub_subs(),
+            );
             match link.network_type {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {

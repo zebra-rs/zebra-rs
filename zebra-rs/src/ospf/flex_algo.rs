@@ -164,23 +164,34 @@ pub fn build_fad_v3(
 }
 
 /// Build the per-link ASLA sub-TLV (RFC 9492) carrying this link's
-/// affinity (Extended Admin Group, RFC 7308) for the Flexible
-/// Algorithm application. Returns `None` when no affinity name resolves
-/// to a bit — a zero-length admin group would be a meaningless wire
-/// artifact, so the link simply advertises no ASLA.
+/// affinity (Extended Admin Group, RFC 7308) and any RFC 7471 TE
+/// metrics (`extra` — delay/jitter/loss link-attribute sub-sub-TLVs)
+/// for the Flexible Algorithm application. Returns `None` only when the
+/// ASLA would carry nothing: no affinity name resolves to a bit *and*
+/// `extra` is empty — an attribute-less ASLA would be a meaningless wire
+/// artifact.
 ///
 /// The SABM is a single 4-octet word with only the Flex-Algorithm
 /// X-bit set (`OSPF_SABM_FLEX_ALGO`, RFC 9350 §12); OSPF requires the
 /// mask length to be 0/4/8 octets (RFC 9492 §2). UDABM is empty.
-pub fn build_link_asla(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<ExtLinkSubTlv> {
+pub fn build_link_asla(
+    affinity: &BTreeSet<String>,
+    am: &AffinityMap,
+    extra: Vec<OspfAslaSubSubTlv>,
+) -> Option<ExtLinkSubTlv> {
     let group = local_link_affinity(affinity, am);
-    if group.words.is_empty() {
+    let mut subs = Vec::new();
+    if !group.words.is_empty() {
+        subs.push(OspfAslaSubSubTlv::ExtAdminGroup(group));
+    }
+    subs.extend(extra);
+    if subs.is_empty() {
         return None;
     }
     Some(ExtLinkSubTlv::Asla(OspfAslaSubTlv {
         sabm: vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0],
         udabm: Vec::new(),
-        subs: vec![OspfAslaSubSubTlv::ExtAdminGroup(group)],
+        subs,
     }))
 }
 
@@ -325,7 +336,7 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am, Vec::new()).expect("ASLA");
         let ExtLinkSubTlv::Asla(a) = &asla else {
             panic!("expected Asla, got {asla:?}");
         };
@@ -369,10 +380,37 @@ mod tests {
     #[test]
     fn build_link_asla_none_when_no_affinity_resolves() {
         let am = AffinityMap::new();
-        // No names → None.
-        assert!(build_link_asla(&BTreeSet::new(), &am).is_none());
-        // Referenced name not in the map → None (empty bitmap).
-        assert!(build_link_asla(&affinity_set(&["ghost"]), &am).is_none());
+        // No names, no extra subs → None.
+        assert!(build_link_asla(&BTreeSet::new(), &am, Vec::new()).is_none());
+        // Referenced name not in the map and no extra subs → None
+        // (empty bitmap).
+        assert!(build_link_asla(&affinity_set(&["ghost"]), &am, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn build_link_asla_emits_te_metrics_without_affinity() {
+        use ospf_packet::{OspfAslaSubSubTlv, OspfSubUniLinkDelay};
+
+        let am = AffinityMap::new();
+        // No affinity at all, but a TE-metric sub-sub-TLV present: the
+        // link must still advertise an ASLA so the metric reaches peers.
+        let extra = vec![OspfAslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+            anomalous: false,
+            delay: 1_000,
+        })];
+        let asla = build_link_asla(&BTreeSet::new(), &am, extra).expect("ASLA");
+        let ExtLinkSubTlv::Asla(a) = &asla else {
+            panic!("expected Asla, got {asla:?}");
+        };
+        assert!(a.is_flex_algo(), "SABM X-bit must be set");
+        assert!(
+            a.ext_admin_group().is_none(),
+            "no affinity → no admin group"
+        );
+        assert!(matches!(
+            a.subs.as_slice(),
+            [OspfAslaSubSubTlv::UniLinkDelay(_)]
+        ));
     }
 
     #[test]
