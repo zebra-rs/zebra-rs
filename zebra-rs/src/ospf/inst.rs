@@ -93,6 +93,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// follow-up), but per-algo IPv4 does not reach the FIB (the global
     /// table has no algorithm dimension), mirroring IS-IS.
     pub rib_flex_algo: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
+    /// Per-Flexible-Algorithm IPv6 RIB (OSPFv3), keyed by algo id. v6
+    /// sibling of `rib_flex_algo`: each prefix carries the per-algo SPF
+    /// nexthops + the prefix's per-algo Prefix-SID. In-memory only — the
+    /// per-algo Prefix-SID labels install into `ilm6` (a follow-up), but
+    /// per-algo IPv6 does not reach the FIB.
+    pub rib6_flex_algo: BTreeMap<u8, PrefixMap<ipnet::Ipv6Net, SpfRouteV3>>,
     pub rib: PrefixMap<Ipv4Net, SpfRoute>,
     /// MPLS LFIB shadow. Keyed by absolute incoming label, value
     /// carries the swap/pop action + the nexthops where the kernel
@@ -525,6 +531,7 @@ impl Ospf<Ospfv2> {
             graph: None,
             spf_flex_algo: BTreeMap::new(),
             rib_flex_algo: BTreeMap::new(),
+            rib6_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -3652,6 +3659,7 @@ impl Ospf<Ospfv3> {
             graph: None,
             spf_flex_algo: BTreeMap::new(),
             rib_flex_algo: BTreeMap::new(),
+            rib6_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
@@ -7337,6 +7345,128 @@ fn build_rib_from_flex_algo(
     rib
 }
 
+/// v6 sibling of `rib_insert`: keep the lowest-metric route for a
+/// prefix, merging nexthops on an exact metric tie (ECMP).
+fn rib6_insert(
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+    prefix: ipnet::Ipv6Net,
+    route: SpfRouteV3,
+) {
+    if let Some(curr) = rib.get_mut(&prefix) {
+        if curr.metric > route.metric {
+            *curr = route;
+        } else if curr.metric == route.metric {
+            for (addr, nhop) in route.nhops {
+                curr.nhops.insert(addr, nhop);
+            }
+        }
+    } else {
+        rib.insert(prefix, route);
+    }
+}
+
+/// OSPFv3 sibling of `build_rib_from_flex_algo`: build the per-algo
+/// IPv6 RIB from peer E-Intra-Area-Prefix-LSAs carrying a per-algo
+/// Prefix-SID (RFC 9350 §7). For each such prefix whose originator is
+/// reachable under `algo`'s FAD-filtered SPF (`spf_result`), resolve
+/// the Prefix-SID label against the advertiser's SRGB
+/// (`Lsdb::label_map`) and record the per-algo nexthops. Self prefixes
+/// are skipped (pushing a label onto our own /128 is nonsensical),
+/// matching `build_rib_from_flex_algo`.
+fn build_rib6_from_flex_algo(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    algo: u8,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
+    use ospf_packet::{
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv,
+    };
+
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    let mut rib = PrefixMap::<ipnet::Ipv6Net, SpfRouteV3>::new();
+    let Some(area) = top.areas.get(area_id) else {
+        return rib;
+    };
+
+    for ((_ls_id, adv_router), lsa) in area
+        .lsdb
+        .iter_by_raw_type(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE)
+    {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if adv_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::EIntraAreaPrefix(ref body) = lsa.data.body else {
+            continue;
+        };
+        let Some(label_config) = area.lsdb.label_map.get(&adv_router) else {
+            continue;
+        };
+        // Per-algo path to the prefix's originator. Unreachable under
+        // this algo's FAD-filtered topology ⇒ not forwardable ⇒ skip.
+        let Some(origin_node) = top.lsp_map.lookup(adv_router) else {
+            continue;
+        };
+        let Some(path) = spf_result.get(&origin_node) else {
+            continue;
+        };
+        let nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = collect_v3_nexthops(top, path)
+            .into_iter()
+            .map(|(addr, ifindex)| {
+                (
+                    addr,
+                    SpfNexthopV3 {
+                        ifindex,
+                        adjacency: false,
+                    },
+                )
+            })
+            .collect();
+        if nhops.is_empty() {
+            continue;
+        }
+
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::IntraAreaPrefix(prefix_tlv) = tlv else {
+                continue;
+            };
+            let Some(prefix) =
+                ospfv3_prefix_to_ipv6net(prefix_tlv.prefix_length, &prefix_tlv.address_prefix)
+            else {
+                continue;
+            };
+            for sub in &prefix_tlv.subs {
+                let Ospfv3SubTlv::PrefixSid(ps) = sub else {
+                    continue;
+                };
+                if ps.algo != Algo::FlexAlgo(algo) {
+                    continue;
+                }
+                let (value, sid_label) = match ps.sid {
+                    SidLabelTlv::Label(v) => (SidLabelValue::Label(v), Some(v)),
+                    SidLabelTlv::Index(v) => (
+                        SidLabelValue::Index(v),
+                        label_config.global.start.checked_add(v),
+                    ),
+                };
+                let route = SpfRouteV3 {
+                    metric: path.cost,
+                    nhops: nhops.clone(),
+                    sid: sid_label,
+                    prefix_sid: Some((value, label_config.clone())),
+                };
+                rib6_insert(&mut rib, prefix, route);
+                break;
+            }
+        }
+    }
+    rib
+}
+
 /// Walk Type 5 (AS-External) LSAs in the AS-scoped LSDB and install
 /// external routes per RFC 2328 §16.4.
 ///
@@ -7916,8 +8046,23 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
 
-    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`. Per-algo v6
-    // RIB + Prefix-SID ILM install are the next v3 slices.
+    // Per-algo IPv6 RIBs from the per-algo SPF results (top borrowed
+    // immutably, so collect locally then swap the field). Single
+    // (last-computed-area) snapshot, like `spf_result` — fine for the
+    // common single-area flex-algo deployment. Mirror of v2's
+    // apply_spf_result.
+    let mut rib6_flex_algo = BTreeMap::new();
+    for o in &flex_algos {
+        let algo_rib = match &o.spf_result {
+            Some(spf_res) => build_rib6_from_flex_algo(top, area_id, o.algo, spf_res),
+            None => PrefixMap::new(),
+        };
+        rib6_flex_algo.insert(o.algo, algo_rib);
+    }
+    top.rib6_flex_algo = rib6_flex_algo;
+
+    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`. Per-algo
+    // Prefix-SID ILM install (ilm6) is the next v3 slice.
     top.spf_flex_algo = flex_algos
         .into_iter()
         .map(|o| (o.algo, o.spf_result))
