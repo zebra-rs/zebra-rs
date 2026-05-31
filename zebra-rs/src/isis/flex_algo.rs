@@ -87,26 +87,41 @@ fn link_admin_group_words(affinity: &BTreeSet<String>, am: &AffinityMap) -> Vec<
 }
 
 /// Build a per-link ASLA sub-TLV (RFC 9479) carrying the link's
-/// affinity (Extended Admin Group, RFC 7308) for the Flex-Algorithm
-/// application. Returns `None` when no affinity bits resolved — a
-/// zero-byte AdminGrp inside an ASLA would be a meaningless wire
-/// artifact.
+/// affinity (Extended Admin Group, RFC 7308) and any RFC 8570 TE
+/// metrics (`extra` — delay/jitter/loss sub-TLVs) scoped to the
+/// Flex-Algorithm application. Returns `None` only when the ASLA would
+/// carry nothing: no affinity bit resolved *and* `extra` is empty.
+///
+/// The TE metrics are *also* advertised inline in TLV 22 for general
+/// RFC 8570 visibility; this copy is the application-specific one
+/// Flex-Algorithm consumes (RFC 9350 §6.3 — link attributes used by a
+/// Flex-Algorithm must be advertised via ASLA with the Flex-Algorithm
+/// application bit set).
 ///
 /// SABM is set to a single byte with only the X-bit (Flex-Algorithm,
 /// 0x10) — these link attributes apply to flex-algo SPF only. The
 /// L-flag stays cleared (modern non-legacy interpretation per
 /// RFC 9479 §4.2). UDABM is left empty: every receiver that
 /// understands ASLA understands Flex-Algorithm.
-pub fn build_link_asla(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<IsisSubAsla> {
+pub fn build_link_asla(
+    affinity: &BTreeSet<String>,
+    am: &AffinityMap,
+    extra: Vec<NeighSubTlv>,
+) -> Option<IsisSubAsla> {
     let words = link_admin_group_words(affinity, am);
-    if words.is_empty() {
+    let mut subs = Vec::new();
+    if !words.is_empty() {
+        subs.push(NeighSubTlv::AdminGrp(IsisSubAdminGrp { groups: words }));
+    }
+    subs.extend(extra);
+    if subs.is_empty() {
         return None;
     }
     Some(IsisSubAsla {
         l_flag: false,
         sabm: vec![SABM_FLEX_ALGO],
         udabm: Vec::new(),
-        subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp { groups: words })],
+        subs,
     })
 }
 
@@ -470,7 +485,7 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am, Vec::new()).expect("ASLA");
         let parsed = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
         // bit 0 in word 0, bit (200 - 6*32 = 8) in word 6.
         assert_eq!(parsed.words.len(), 7);
@@ -482,14 +497,14 @@ mod tests {
     #[test]
     fn build_link_asla_returns_none_for_empty_affinity() {
         let am = AffinityMap::new();
-        assert!(build_link_asla(&BTreeSet::new(), &am).is_none());
+        assert!(build_link_asla(&BTreeSet::new(), &am, Vec::new()).is_none());
     }
 
     #[test]
     fn build_link_asla_returns_none_when_all_names_unresolved() {
         let am = AffinityMap::new();
         // `blue` is referenced but the affinity-map is empty.
-        assert!(build_link_asla(&affinity_set(&["blue"]), &am).is_none());
+        assert!(build_link_asla(&affinity_set(&["blue"]), &am, Vec::new()).is_none());
     }
 
     #[test]
@@ -504,7 +519,7 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla(&affinity_set(&["blue", "low-lat", "red"]), &am)
+        let asla = build_link_asla(&affinity_set(&["blue", "low-lat", "red"]), &am, Vec::new())
             .expect("ASLA expected");
         // L-flag clear, SABM = [0x10] (X-bit only), UDABM empty.
         assert!(!asla.l_flag);
@@ -540,7 +555,7 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla(&affinity_set(&["a", "b", "c"]), &am).expect("ASLA");
+        let asla = build_link_asla(&affinity_set(&["a", "b", "c"]), &am, Vec::new()).expect("ASLA");
         match &asla.subs[0] {
             NeighSubTlv::AdminGrp(ag) => {
                 // bit 200 lives in word 6 (200/32=6), so we need
@@ -549,6 +564,60 @@ mod tests {
             }
             _ => panic!("expected AdminGrp"),
         }
+    }
+
+    #[test]
+    fn build_link_asla_nests_te_metrics_without_affinity() {
+        use isis_packet::{IsisSubMinMaxLinkDelay, IsisSubUniLinkDelay};
+
+        // No affinity, but delay sub-TLVs present → the ASLA is still
+        // emitted, carrying only the TE metrics (no AdminGrp).
+        let am = AffinityMap::new();
+        let extra = vec![
+            NeighSubTlv::UniLinkDelay(IsisSubUniLinkDelay {
+                anomalous: false,
+                delay: 1_000,
+            }),
+            NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay: 900,
+                max_delay: 1_200,
+            }),
+        ];
+        let asla = build_link_asla(&BTreeSet::new(), &am, extra).expect("ASLA");
+        assert_eq!(asla.sabm, vec![SABM_FLEX_ALGO]);
+        assert!(
+            !asla
+                .subs
+                .iter()
+                .any(|s| matches!(s, NeighSubTlv::AdminGrp(_))),
+            "no affinity → no AdminGrp"
+        );
+        assert!(matches!(asla.subs[0], NeighSubTlv::UniLinkDelay(_)));
+        assert!(matches!(asla.subs[1], NeighSubTlv::MinMaxLinkDelay(_)));
+    }
+
+    #[test]
+    fn build_link_asla_combines_affinity_and_te_metrics() {
+        use isis_packet::IsisSubMinMaxLinkDelay;
+
+        let mut am = AffinityMap::new();
+        am.exec(
+            "/affinity-map/affinity/bit-position".into(),
+            args(&["blue", "0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        am.commit();
+        let extra = vec![NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+            anomalous: false,
+            min_delay: 900,
+            max_delay: 1_200,
+        })];
+        let asla = build_link_asla(&affinity_set(&["blue"]), &am, extra).expect("ASLA");
+        // AdminGrp first (affinity), then the delay sub-TLV.
+        assert!(matches!(asla.subs[0], NeighSubTlv::AdminGrp(_)));
+        assert!(matches!(asla.subs[1], NeighSubTlv::MinMaxLinkDelay(_)));
     }
 
     #[test]
