@@ -26,7 +26,12 @@ pub(super) const SRLB_RANGE: u32 = 1000;
 /// restarting-router capability (RFC 3623 / RFC 7770 §2.1 bit 5).
 /// Set to `true` while `Ospf::restarting.is_some()` so helpers
 /// see us as a planned-restart originator; clear otherwise.
-pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool, algos: Vec<Algo>) -> OspfLsa {
+pub fn router_info_lsa_build(
+    router_id: Ipv4Addr,
+    gr_capable: bool,
+    algos: Vec<Algo>,
+    fads: Vec<RouterInfoTlvFad>,
+) -> OspfLsa {
     let mut tlvs = Vec::new();
 
     // Router Capabilities TLV (type 1, RFC 7770 §2.1):
@@ -57,6 +62,12 @@ pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool, algos: Vec<A
         range: SRLB_RANGE,
         sid_label: SidLabelTlv::Label(SRLB_START),
     }));
+
+    // Flexible Algorithm Definition TLVs (type 16, RFC 9350 §6.1): one
+    // per algo this router originates a FAD for (advertise-definition).
+    for fad in fads {
+        tlvs.push(RouterInfoTlv::Fad(fad));
+    }
 
     let ri_lsa = RouterInfoLsa { tlvs };
 
@@ -427,7 +438,7 @@ mod tests {
     /// and GR-helper (bit 4) set; GR-capable (bit 5) clear.
     #[test]
     fn router_info_lsa_steady_state_caps() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), false, vec![Algo::Spf]);
+        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), false, vec![Algo::Spf], vec![]);
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must be set");
         assert!(cap.gr_helper(), "GR helper bit must be set");
@@ -443,7 +454,7 @@ mod tests {
     /// to helpers.
     #[test]
     fn router_info_lsa_restarting_sets_gr_capable() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true, vec![Algo::Spf]);
+        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true, vec![Algo::Spf], vec![]);
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must remain set");
         assert!(cap.gr_helper(), "GR helper bit must remain set");
@@ -461,6 +472,7 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 1),
             false,
             vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)],
+            vec![],
         );
         let OspfLsp::OpaqueAreaRouterInfo(ri) = &lsa.lsp else {
             panic!("expected RouterInfo opaque LSA");
@@ -477,5 +489,35 @@ mod tests {
             algos,
             vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)]
         );
+    }
+
+    /// FAD TLVs passed to the builder ride in the RI LSA (RFC 9350 §6.1).
+    #[test]
+    fn router_info_lsa_carries_fad_tlvs() {
+        let fad = RouterInfoTlvFad {
+            flex_algorithm: 128,
+            metric_type: 0,
+            calc_type: 0,
+            priority: 128,
+            subs: Vec::new(),
+        };
+        let lsa = router_info_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            false,
+            vec![Algo::Spf, Algo::FlexAlgo(128)],
+            vec![fad.clone()],
+        );
+        let OspfLsp::OpaqueAreaRouterInfo(ri) = &lsa.lsp else {
+            panic!("expected RouterInfo opaque LSA");
+        };
+        let fads: Vec<_> = ri
+            .tlvs
+            .iter()
+            .filter_map(|tlv| match tlv {
+                RouterInfoTlv::Fad(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fads, vec![fad]);
     }
 }
