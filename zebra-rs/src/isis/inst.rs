@@ -21,7 +21,10 @@ use crate::rib::api::RibRx;
 use crate::rib::{self, MacAddr};
 use crate::spf;
 use crate::{
-    config::{Args, ConfigChannel, ConfigOp, ConfigRequest, path_from_command},
+    config::{
+        Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
+        path_from_command, vrf_redirect_split,
+    },
     context::ProtoContext,
 };
 
@@ -429,6 +432,34 @@ pub struct Isis {
     /// updates `key_chains` and re-originates LSPs at the affected
     /// level for area/domain-password scope changes.
     pub policy_rx: UnboundedReceiver<crate::policy::PolicyRx>,
+
+    /// Protocol identity used for name-keyed RIB / policy / SR
+    /// registrations. `"isis"` for the default instance,
+    /// `"isis:vrf:<name>"` for a per-VRF instance — so the two never
+    /// clobber each other's rows in the (name-keyed) policy / SR /
+    /// redistribute registries. Route-install attribution is by the
+    /// numeric `ProtoId` carried in `ctx.rib`, so it is unaffected.
+    pub proto_label: String,
+    /// Send-capable RIB-subscription factory. The default instance
+    /// uses it to mint a per-VRF `RibClient` bound to the VRF's kernel
+    /// `table_id` when spawning a child; cloned into each child too.
+    pub rib_subscriber: RibSubscriber,
+    /// Sender into the config manager, for (de)registering a child's
+    /// `show isis vrf <name>` channel via `SubscribeShowVrf` /
+    /// `UnsubscribeShowVrf`. Bounded — send with `try_send`.
+    pub config_tx: mpsc::Sender<crate::config::Message>,
+    /// Per-VRF buffered config (parent only). Each `router isis vrf
+    /// <name> ...` line, rewritten to strip the `vrf <name>` prefix,
+    /// is appended in commit order; replayed into a child at spawn
+    /// time and kept so a `VrfDel`→`VrfAdd` flap respawns from intent.
+    /// Empty for child instances.
+    pub vrf_log: BTreeMap<String, Vec<(Vec<CommandPath>, ConfigOp)>>,
+    /// Running per-VRF child tasks (parent only), keyed by VRF name.
+    pub vrf_registry: BTreeMap<String, super::vrf::IsisVrfHandle>,
+    /// Kernel VRF master info from `RibRx::VrfAdd` (parent only):
+    /// VRF name → (table_id, ifindex). A child spawns once both
+    /// config intent (`vrf_log`) and kernel info exist.
+    pub rib_known_vrfs: BTreeMap<String, (u32, u32)>,
 }
 
 pub struct IsisTop<'a> {
@@ -552,16 +583,20 @@ pub struct IsisTop<'a> {
 }
 
 impl Isis {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         bgp_tx: Option<mpsc::Sender<crate::bgp::inst::Message>>,
         policy_tx: UnboundedSender<crate::policy::Message>,
+        proto_label: String,
+        rib_subscriber: RibSubscriber,
+        config_tx: mpsc::Sender<crate::config::Message>,
     ) -> Self {
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
-            proto: "isis".into(),
+            proto: proto_label.clone(),
             tx: policy_chan.tx.clone(),
         });
         // SR config subscription channel. One-time registration with the
@@ -570,7 +605,7 @@ impl Isis {
         // typed handle just like every other protocol-to-RIB send.
         let (sr_tx, sr_rx) = mpsc::unbounded_channel::<RibSrRx>();
         let _ = ctx.rib.send(rib::Message::SrSubscribe {
-            proto: "isis".into(),
+            proto: proto_label.clone(),
             tx: sr_tx,
         });
 
@@ -664,14 +699,24 @@ impl Isis {
                 key_chains: BTreeMap::new(),
                 policy_tx,
                 policy_rx: policy_chan.rx,
+                proto_label,
+                rib_subscriber,
+                config_tx,
+                vrf_log: BTreeMap::new(),
+                vrf_registry: BTreeMap::new(),
+                rib_known_vrfs: BTreeMap::new(),
             };
         isis.callback_build();
         isis.show_build();
         // Restart-aware boot. No-op when no checkpoint on disk
         // (cold-start). When present + fresh, restores self-LSPs +
         // sets restarting state so the first IIH on every link
-        // goes out with RR=1.
-        isis.gr_restart_load_checkpoint();
+        // goes out with RR=1. Only the default instance loads the
+        // checkpoint — the on-disk path is fixed (`isis.cbor`), so a
+        // per-VRF child must not restore the default instance's LSPs.
+        if isis.proto_label == "isis" {
+            isis.gr_restart_load_checkpoint();
+        }
         isis
     }
 
@@ -682,12 +727,28 @@ impl Isis {
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         // CommitEnd is the only signal IS-IS reacts to outside the
         // YANG callback table — fold the staged SRLG cache into the
-        // applied snapshot and re-originate if it moved.
+        // applied snapshot and re-originate if it moved. The default
+        // instance also fans CommitEnd out to its per-VRF children and
+        // prunes any whose `router isis vrf <name>` block was deleted.
         if msg.op == ConfigOp::CommitEnd {
+            self.vrf_commit_end();
             self.commit_srlg();
             return;
         }
         if msg.op == ConfigOp::CommitStart {
+            return;
+        }
+
+        // `/router/isis/vrf/<name>/...` belongs to a per-VRF instance,
+        // not the default one. Strip the `vrf <name>` selector and
+        // buffer the rewritten line (replayed into the child at spawn;
+        // kept for VrfDel→VrfAdd respawn); forward it live if the child
+        // is already running. The default instance never runs these
+        // through its own callback table. Only the default instance
+        // owns children — a child's paths never carry a `vrf` segment,
+        // so this is a no-op there.
+        if let Some((name, rewritten)) = vrf_redirect_split(&msg.paths) {
+            self.vrf_config_record(name, rewritten, msg.op);
             return;
         }
 
@@ -739,6 +800,43 @@ impl Isis {
 
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        }
+    }
+
+    /// Record a rewritten per-VRF config line (parent only). Appends to
+    /// the VRF's replay log and, if its child is already running,
+    /// forwards the line live to the child's config inbox.
+    fn vrf_config_record(&mut self, name: String, rewritten: Vec<CommandPath>, op: ConfigOp) {
+        if let Some(handle) = self.vrf_registry.get(&name) {
+            let _ = handle.cm_tx.send(ConfigRequest::new(rewritten.clone(), op));
+        }
+        self.vrf_log.entry(name).or_default().push((rewritten, op));
+    }
+
+    /// CommitEnd fan-out for the default instance: tear down per-VRF
+    /// children whose `router isis vrf <name>` block was fully deleted
+    /// this commit, then forward `CommitEnd` to every surviving live
+    /// child so it runs its own commit-time reconcile.
+    fn vrf_commit_end(&mut self) {
+        let emptied: Vec<String> = self
+            .vrf_log
+            .iter()
+            .filter(|(_, log)| !super::vrf::vrf_log_active(log))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in emptied {
+            self.vrf_log.remove(&name);
+            // Kernel info (`rib_known_vrfs`) is owned by VrfAdd/VrfDel,
+            // not by config — leave it so a re-added block respawns if
+            // the kernel VRF still exists.
+            if self.vrf_registry.remove(&name).is_some() {
+                super::vrf::despawn_isis_vrf(&name, &self.config_tx, &self.rib_subscriber);
+            }
+        }
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .cm_tx
+                .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
         }
     }
 
@@ -1248,9 +1346,66 @@ impl Isis {
             RibRx::RouteDel { rtype, routes, .. } => {
                 self.route_redist_del(rtype, routes);
             }
+            // VRF master lifecycle (default instance only — a per-VRF
+            // child's subscription is bound to its own table and never
+            // owns sub-VRFs). The kernel `table_id` lets us bind a
+            // child's RibClient so its SPF routes install into the VRF
+            // table; the spawn waits until config intent exists too.
+            RibRx::VrfAdd {
+                name,
+                table_id,
+                ifindex,
+            } => {
+                self.vrf_add(name, table_id, ifindex);
+            }
+            RibRx::VrfDel { name } => {
+                self.vrf_del(name);
+            }
             _ => {
                 //
             }
+        }
+    }
+
+    /// Kernel VRF master appeared (or was replayed at subscribe time).
+    /// Record its `table_id`/`ifindex`, and spawn the per-VRF IS-IS
+    /// child if config intent for this VRF exists and it isn't already
+    /// running. Default instance only.
+    fn vrf_add(&mut self, name: String, table_id: u32, ifindex: u32) {
+        self.rib_known_vrfs
+            .insert(name.clone(), (table_id, ifindex));
+        if self.vrf_registry.contains_key(&name) {
+            return;
+        }
+        let has_intent = self
+            .vrf_log
+            .get(&name)
+            .is_some_and(|log| super::vrf::vrf_log_active(log));
+        if !has_intent {
+            return;
+        }
+        // Clone the replay log so the spawn borrow doesn't overlap the
+        // `vrf_registry` insert below.
+        let log = self.vrf_log.get(&name).cloned().unwrap_or_default();
+        let handle = super::vrf::spawn_isis_vrf(
+            &name,
+            table_id,
+            &self.rib_subscriber,
+            &self.config_tx,
+            &self.policy_tx,
+            &log,
+        );
+        self.vrf_registry.insert(name, handle);
+    }
+
+    /// Kernel VRF master removed. Despawn the child but KEEP its config
+    /// log so a later `VrfAdd` (master re-created) respawns from intent.
+    /// RIB reclaims the VRF's FIB table on its side. Default instance
+    /// only.
+    fn vrf_del(&mut self, name: String) {
+        self.rib_known_vrfs.remove(&name);
+        if self.vrf_registry.remove(&name).is_some() {
+            super::vrf::despawn_isis_vrf(&name, &self.config_tx, &self.rib_subscriber);
         }
     }
 
@@ -2520,6 +2675,27 @@ mod bfd_wiring_tests {
         (ProtoContext::default_table(client), rib_rx)
     }
 
+    /// Parked `RibSubscriber` for `Isis::new` tests. Its receivers are
+    /// leaked so sends never trip a `SendError`.
+    fn test_rib_subscriber() -> crate::config::RibSubscriber {
+        let (rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, rib_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(rib_rx));
+        Box::leak(Box::new(rib_inbound_rx));
+        crate::config::RibSubscriber::for_test(
+            rib_tx,
+            rib_inbound_tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        )
+    }
+
+    /// Parked config-manager sender for `Isis::new` tests.
+    fn test_config_tx() -> mpsc::Sender<crate::config::Message> {
+        let (tx, rx) = mpsc::channel(16);
+        Box::leak(Box::new(rx));
+        tx
+    }
+
     fn fresh_isis_with_bfd() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
         let (ctx, rib_rx) = test_ctx();
         let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
@@ -2527,7 +2703,16 @@ mod bfd_wiring_tests {
         // Park the policy_rx so the Subscribe send in `new` doesn't
         // drop and panic on its own send.
         Box::leak(Box::new(policy_rx));
-        let isis = Isis::new(ctx, rib_rx, Some(bfd_client_tx), None, policy_tx);
+        let isis = Isis::new(
+            ctx,
+            rib_rx,
+            Some(bfd_client_tx),
+            None,
+            policy_tx,
+            "isis".to_string(),
+            test_rib_subscriber(),
+            test_config_tx(),
+        );
         (isis, bfd_client_rx)
     }
 
@@ -2573,7 +2758,16 @@ mod bfd_wiring_tests {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, policy_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(policy_rx));
-        let isis = Isis::new(ctx, rib_rx, None, None, policy_tx);
+        let isis = Isis::new(
+            ctx,
+            rib_rx,
+            None,
+            None,
+            policy_tx,
+            "isis".to_string(),
+            test_rib_subscriber(),
+            test_config_tx(),
+        );
         let key = loopback_key();
         isis.process_bfd_subscribe(key);
         isis.process_bfd_unsubscribe(key);

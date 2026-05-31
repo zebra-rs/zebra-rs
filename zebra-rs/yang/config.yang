@@ -1806,6 +1806,57 @@ module config {
             }
           }
         }
+
+        list vrf {
+          // Per-VRF IS-IS instance. Mirrors the (default) top-level
+          // IS-IS config tree for each named VRF: the default
+          // `router isis` task forwards every `vrf <name> ...` line —
+          // with the `vrf <name>` prefix stripped — to a full per-VRF
+          // IS-IS instance whose computed routes install into the
+          // VRF's routing table. The `vrf` key is a plain string
+          // (staging-friendly, like `router static`'s per-VRF list)
+          // so the VRF need not yet exist at the top-level `vrf` list
+          // when this config is parsed. Only a minimal subset (net /
+          // is-type / interface enable) is exposed today; later work
+          // widens it toward full parity with the default instance.
+          key "name";
+          leaf name {
+            type string;
+          }
+          leaf net {
+            // First entry in "router isis vrf X" node (mirrors the
+            // top-level `net` sort) so forwarded config arrives
+            // system-id-first.
+            ext:sort "1";
+            type isis:net;
+          }
+          leaf is-type {
+            type enumeration {
+              enum level-1;
+              enum level-1-2;
+              enum level-2-only;
+            }
+          }
+          list interface {
+            // Last item, mirroring the top-level interface sort.
+            ext:sort "-10";
+            key "if-name";
+            leaf if-name {
+              ext:dynamic "rib:interface";
+              type string;
+            }
+            container ipv4 {
+              leaf enable {
+                type boolean;
+              }
+            }
+            container ipv6 {
+              leaf enable {
+                type boolean;
+              }
+            }
+          }
+        }
       }
       container static {
         ext:help "Static route configuration";

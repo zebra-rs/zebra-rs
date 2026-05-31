@@ -481,6 +481,47 @@ module exec {
           }
         }
       }
+
+      list vrf {
+        // Per-VRF IS-IS instance show. `show isis vrf <name> <cmd>` is
+        // redirected by the config manager (it strips the `vrf <name>`
+        // selector via `vrf_redirect_split`) into the per-VRF task's
+        // show channel registered as `"isis:vrf:<name>"`. The stripped
+        // command (`show isis <cmd>`) is rendered by the child's
+        // existing show handlers, so this list mirrors a subset of the
+        // top-level leaves above.
+        ext:help "Per-VRF IS-IS instance";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        leaf summary {
+          ext:help "IS-IS summary for this VRF";
+          type empty;
+        }
+        leaf neighbor {
+          ext:help "IS-IS neighbors in this VRF";
+          type empty;
+        }
+        leaf database {
+          ext:help "IS-IS database for this VRF";
+          type empty;
+        }
+        leaf route {
+          ext:help "IS-IS routes in this VRF";
+          type empty;
+        }
+        leaf interface {
+          ext:help "IS-IS interfaces in this VRF";
+          type empty;
+        }
+        leaf topology {
+          ext:help "IS-IS SPF tree for this VRF";
+          type empty;
+        }
+      }
     }
     container ipv6 {
       ext:help "Show IPv6 commands";
