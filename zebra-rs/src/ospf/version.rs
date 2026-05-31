@@ -571,13 +571,22 @@ impl OspfVersion for Ospfv3 {
     }
 
     fn bfd_addrs(
-        _addrs: &[crate::ospf::addr::OspfAddr<Ospfv3>],
-        _nbr: &crate::ospf::Neighbor<Ospfv3>,
+        addrs: &[crate::ospf::addr::OspfAddr<Ospfv3>],
+        nbr: &crate::ospf::Neighbor<Ospfv3>,
     ) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
-        // OSPFv3 BFD runs over IPv6 link-local, which needs IPv6
-        // support in the BFD module first (a later phase). Inert until
-        // then: config is accepted but no session is created.
-        None
+        // OSPFv3 sources control packets from the interface link-local
+        // (RFC 5340 §A.1) and stores each neighbor's link-local source
+        // as a /128 in `ident.prefix`. BFD mirrors that — both
+        // endpoints are link-local, demuxed per-ifindex (the
+        // `SessionKey.ifindex` is set by the reconcile, and v6 egress
+        // is pinned to it via `IPV6_PKTINFO`). Mirrors
+        // `packet_v3::link_local_src`.
+        let local = addrs.iter().find_map(|a| {
+            let addr = a.prefix.addr();
+            addr.is_unicast_link_local().then_some(addr)
+        })?;
+        let remote = nbr.ident.prefix.addr();
+        Some((std::net::IpAddr::V6(local), std::net::IpAddr::V6(remote)))
     }
 
     fn is_declared_dr(ident: &crate::ospf::Identity<Ospfv3>) -> bool {
@@ -626,13 +635,13 @@ impl OspfVersion for Ospfv3 {
 
 #[cfg(test)]
 mod bfd_tests {
-    use super::{OspfVersion, Ospfv2};
+    use super::{OspfVersion, Ospfv2, Ospfv3};
     use crate::ospf::addr::OspfAddr;
     use crate::ospf::link::NbrStateThreshold;
     use crate::ospf::neigh::Neighbor;
     use crate::ospf::nfsm::NfsmState;
-    use ipnet::Ipv4Net;
-    use std::net::{IpAddr, Ipv4Addr};
+    use ipnet::{Ipv4Net, Ipv6Net};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
     use tokio::sync::mpsc;
 
@@ -664,6 +673,50 @@ mod bfd_tests {
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             )),
         );
+    }
+
+    fn v3_neighbor(remote_link_local: &str) -> Neighbor<Ospfv3> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        Neighbor::<Ospfv3>::new(
+            tx,
+            5,
+            Ipv6Net::from_str(remote_link_local).unwrap(),
+            &Ipv4Addr::new(3, 3, 3, 3),
+            40,
+            ptx,
+        )
+    }
+
+    /// v3 pairs the interface's link-local with the neighbor's
+    /// link-local (its /128 in `ident.prefix`), skipping any global
+    /// address on the interface.
+    #[test]
+    fn bfd_addrs_v3_pairs_link_locals() {
+        let nbr = v3_neighbor("fe80::2/128");
+        let global = OspfAddr::<Ospfv3> {
+            prefix: Ipv6Net::from_str("2001:db8::1/64").unwrap(),
+        };
+        let link_local = OspfAddr::<Ospfv3> {
+            prefix: Ipv6Net::from_str("fe80::1/64").unwrap(),
+        };
+        assert_eq!(
+            Ospfv3::bfd_addrs(&[global, link_local], &nbr),
+            Some((
+                IpAddr::V6(Ipv6Addr::from_str("fe80::1").unwrap()),
+                IpAddr::V6(Ipv6Addr::from_str("fe80::2").unwrap()),
+            )),
+        );
+    }
+
+    /// No link-local on the interface (only a global) ⇒ no session.
+    #[test]
+    fn bfd_addrs_v3_none_without_link_local() {
+        let nbr = v3_neighbor("fe80::2/128");
+        let global = OspfAddr::<Ospfv3> {
+            prefix: Ipv6Net::from_str("2001:db8::1/64").unwrap(),
+        };
+        assert_eq!(Ospfv3::bfd_addrs(&[global], &nbr), None);
     }
 
     /// No local address on the interface ⇒ no session can be formed.
