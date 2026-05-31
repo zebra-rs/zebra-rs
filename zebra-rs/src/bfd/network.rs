@@ -23,6 +23,13 @@ pub struct WriteRequest {
     /// Optional egress ifindex (sent via `IP_PKTINFO` / `IPV6_PKTINFO`).
     /// `None` lets the kernel route normally.
     pub ifindex: Option<u32>,
+    /// Optional source address to stamp on the outgoing datagram (via
+    /// `IP_PKTINFO.ipi_spec_dst` / `IPV6_PKTINFO.ipi6_addr`). `None`
+    /// lets the kernel pick the source per the route. Set from the
+    /// session's configured local address (e.g. a BGP neighbor's
+    /// `update-source`) so control packets leave with that address
+    /// instead of the wildcard. Must match `dst`'s family.
+    pub src: Option<IpAddr>,
 }
 
 /// Async receive loop. Pulls one BFD control packet at a time off
@@ -118,9 +125,19 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         let iov = [IoSlice::new(&buf)];
         let sockaddr: SockaddrIn = dst.into();
 
-        let pktinfo = req.ifindex.map(|ifindex| libc::in_pktinfo {
-            ipi_ifindex: ifindex as i32,
-            ipi_spec_dst: libc::in_addr { s_addr: 0 },
+        // `ipi_spec_dst` sets the source address on the outgoing
+        // datagram (the field name is misleading; for egress it is the
+        // *source*). `s_addr` is network byte order, and `octets()` is
+        // already network order, so `from_ne_bytes` lands the bytes
+        // verbatim. A cmsg is emitted when either an egress ifindex or a
+        // source address is requested.
+        let spec_dst = match req.src {
+            Some(IpAddr::V4(a)) => u32::from_ne_bytes(a.octets()),
+            _ => 0,
+        };
+        let pktinfo = (req.ifindex.is_some() || spec_dst != 0).then(|| libc::in_pktinfo {
+            ipi_ifindex: req.ifindex.unwrap_or(0) as i32,
+            ipi_spec_dst: libc::in_addr { s_addr: spec_dst },
             ipi_addr: libc::in_addr { s_addr: 0 },
         });
         let cmsg_storage;
@@ -238,9 +255,20 @@ pub async fn write_packet_v6(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiv
         let iov = [IoSlice::new(&buf)];
         let sockaddr: SockaddrIn6 = dst.into();
 
-        let pktinfo = req.ifindex.map(|ifindex| libc::in6_pktinfo {
-            ipi6_addr: libc::in6_addr { s6_addr: [0u8; 16] },
-            ipi6_ifindex: ifindex,
+        // `ipi6_addr` sets the source address on the outgoing datagram;
+        // `s6_addr` and `octets()` are both network-order [u8; 16]. A
+        // cmsg is emitted when either an egress ifindex or a source
+        // address is requested (ifindex is still mandatory for
+        // link-local destinations).
+        let src6 = match req.src {
+            Some(IpAddr::V6(a)) => Some(a.octets()),
+            _ => None,
+        };
+        let pktinfo = (req.ifindex.is_some() || src6.is_some()).then(|| libc::in6_pktinfo {
+            ipi6_addr: libc::in6_addr {
+                s6_addr: src6.unwrap_or([0u8; 16]),
+            },
+            ipi6_ifindex: req.ifindex.unwrap_or(0),
         });
         let cmsg_storage;
         let cmsgs: &[socket::ControlMessage<'_>] = if let Some(ref pi) = pktinfo {
@@ -449,5 +477,51 @@ mod tests {
         assert!(timed.is_err(), "malformed packet must be dropped");
 
         read_handle.abort();
+    }
+
+    /// `WriteRequest.src` stamps the datagram's source address via
+    /// `IP_PKTINFO`. Regression for BFD control packets leaving with the
+    /// kernel-chosen source instead of the session's configured local
+    /// address (e.g. a BGP neighbor's update-source). The sender socket
+    /// is bound to `0.0.0.0` so the per-packet source override applies;
+    /// we send to `127.0.0.1` with `src = 127.0.0.2` and confirm the
+    /// receiver sees `127.0.0.2` (which the kernel would never pick on
+    /// its own for a loopback route). Multi-threaded runtime so the
+    /// spawned write task runs while the test blocks on `recv_from`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_stamps_source_address() {
+        let recv = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind receiver");
+        recv.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let recv_port = recv.local_addr().unwrap().port();
+
+        let ctx = ProtoContext::default_table_no_rib();
+        let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let write_handle = tokio::spawn(async move { write_packet(sock, rx).await });
+
+        let packet = ControlPacket {
+            state: State::Down,
+            my_disc: 0x0BFD_0001,
+            ..ControlPacket::default()
+        };
+        tx.send(WriteRequest {
+            packet,
+            dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, recv_port)),
+            ifindex: None,
+            src: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+        })
+        .unwrap();
+
+        let mut buf = [0u8; 1500];
+        let (_n, from) = recv.recv_from(&mut buf).expect("packet received");
+        assert_eq!(
+            from.ip(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+            "source address must be stamped from WriteRequest.src",
+        );
+
+        write_handle.abort();
     }
 }
