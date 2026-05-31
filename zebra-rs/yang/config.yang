@@ -801,6 +801,7 @@ module config {
           // per-VRF surface widens.
           key "name";
           leaf name {
+            ext:dynamic "rib:vrf";
             type string;
           }
           leaf router-id {
@@ -1154,6 +1155,7 @@ module config {
           // today (so a forwarded line would be a no-op).
           key "name";
           leaf name {
+            ext:dynamic "rib:vrf";
             type string;
           }
           list area {
@@ -1979,6 +1981,7 @@ module config {
           // widens toward full parity with the default instance.
           key "name";
           leaf name {
+            ext:dynamic "rib:vrf";
             type string;
           }
           leaf net {
