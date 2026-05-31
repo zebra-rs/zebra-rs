@@ -2189,6 +2189,19 @@ pub enum OspfAslaSubSubTlv {
     /// Extended Administrative Group (RFC 7308), type 20 — the per-link
     /// affinity bitmap tested by Flex-Algorithm SPF.
     ExtAdminGroup(ExtAdminGroup),
+    /// Unidirectional Link Delay (RFC 7471 §4.1), type 27. Average
+    /// one-way delay; Flex-Algorithm metric-type 1 reads min-delay from
+    /// `MinMaxLinkDelay`, this carries the smoothed average.
+    UniLinkDelay(OspfSubUniLinkDelay),
+    /// Min/Max Unidirectional Link Delay (RFC 7471 §4.2), type 28. The
+    /// `Min` bound is the RFC 9350 metric-type 1 (min-unidir-link-delay)
+    /// input.
+    MinMaxLinkDelay(OspfSubMinMaxLinkDelay),
+    /// Unidirectional Delay Variation (RFC 7471 §4.3), type 29 (jitter).
+    DelayVariation(OspfSubDelayVariation),
+    /// Unidirectional Link Loss (RFC 7471 §4.4), type 30, in units of
+    /// 0.000003 %.
+    LinkLoss(OspfSubLinkLoss),
     Unknown(RouterInfoTlvUnknown),
 }
 
@@ -2201,6 +2214,22 @@ impl OspfAslaSubSubTlv {
             20 => {
                 let (_, g) = ExtAdminGroup::parse_be(data)?;
                 OspfAslaSubSubTlv::ExtAdminGroup(g)
+            }
+            27 => {
+                let (_, v) = OspfSubUniLinkDelay::parse_be(data)?;
+                OspfAslaSubSubTlv::UniLinkDelay(v)
+            }
+            28 => {
+                let (_, v) = OspfSubMinMaxLinkDelay::parse_be(data)?;
+                OspfAslaSubSubTlv::MinMaxLinkDelay(v)
+            }
+            29 => {
+                let (_, v) = OspfSubDelayVariation::parse_be(data)?;
+                OspfAslaSubSubTlv::DelayVariation(v)
+            }
+            30 => {
+                let (_, v) = OspfSubLinkLoss::parse_be(data)?;
+                OspfAslaSubSubTlv::LinkLoss(v)
             }
             _ => OspfAslaSubSubTlv::Unknown(RouterInfoTlvUnknown {
                 typ: tl.typ,
@@ -2216,6 +2245,12 @@ impl OspfAslaSubSubTlv {
     fn value_len(&self) -> u16 {
         match self {
             OspfAslaSubSubTlv::ExtAdminGroup(g) => g.byte_len() as u16,
+            // RFC 7471 delay/loss sub-TLVs are fixed-width: Min/Max is 8
+            // octets, the other three 4.
+            OspfAslaSubSubTlv::MinMaxLinkDelay(_) => 8,
+            OspfAslaSubSubTlv::UniLinkDelay(_)
+            | OspfAslaSubSubTlv::DelayVariation(_)
+            | OspfAslaSubSubTlv::LinkLoss(_) => 4,
             OspfAslaSubSubTlv::Unknown(u) => u.len,
         }
     }
@@ -2228,6 +2263,10 @@ impl OspfAslaSubSubTlv {
     fn tlv_type(&self) -> u16 {
         match self {
             OspfAslaSubSubTlv::ExtAdminGroup(_) => 20,
+            OspfAslaSubSubTlv::UniLinkDelay(_) => 27,
+            OspfAslaSubSubTlv::MinMaxLinkDelay(_) => 28,
+            OspfAslaSubSubTlv::DelayVariation(_) => 29,
+            OspfAslaSubSubTlv::LinkLoss(_) => 30,
             OspfAslaSubSubTlv::Unknown(u) => u.typ,
         }
     }
@@ -2238,6 +2277,10 @@ impl OspfAslaSubSubTlv {
         buf.put_u16(len);
         match self {
             OspfAslaSubSubTlv::ExtAdminGroup(g) => g.emit(buf),
+            OspfAslaSubSubTlv::UniLinkDelay(v) => v.emit_value(buf),
+            OspfAslaSubSubTlv::MinMaxLinkDelay(v) => v.emit_value(buf),
+            OspfAslaSubSubTlv::DelayVariation(v) => v.emit_value(buf),
+            OspfAslaSubSubTlv::LinkLoss(v) => v.emit_value(buf),
             OspfAslaSubSubTlv::Unknown(u) => buf.put(&u.values[..]),
         }
         let pad = ((len as usize + 3) & !3) - len as usize;
@@ -2296,8 +2339,125 @@ impl OspfAslaSubTlv {
     pub fn ext_admin_group(&self) -> Option<&ExtAdminGroup> {
         self.subs.iter().find_map(|s| match s {
             OspfAslaSubSubTlv::ExtAdminGroup(g) => Some(g),
-            OspfAslaSubSubTlv::Unknown(_) => None,
+            _ => None,
         })
+    }
+}
+
+// RFC 7471 OSPFv2 TE-metric link-attribute sub-TLVs. These ride as
+// link-attribute sub-sub-TLVs inside the RFC 9492 ASLA sub-TLV (so the
+// metrics are application-scoped — e.g. Flex-Algorithm). The wire shapes
+// are deliberately identical to the IS-IS RFC 8570 sub-TLVs 33-36; only
+// the OSPF code points (27-30) differ.
+
+/// RFC 7471 §4.1 Unidirectional Link Delay (type 27). 4-octet value:
+/// byte 0 bit 7 is the `A` (anomalous) flag, bits 6..0 reserved, bytes
+/// 1..3 the 24-bit average one-way delay in microseconds.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OspfSubUniLinkDelay {
+    pub anomalous: bool,
+    pub delay: u32,
+}
+
+impl OspfSubUniLinkDelay {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                anomalous: (raw & 0x8000_0000) != 0,
+                delay: raw & 0x00FF_FFFF,
+            },
+        ))
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        buf.put_u32(a | (self.delay & 0x00FF_FFFF));
+    }
+}
+
+/// RFC 7471 §4.2 Min/Max Unidirectional Link Delay (type 28). 8-octet
+/// value: byte 0 bit 7 is the shared `A` flag, bytes 1..3 the 24-bit
+/// Min delay, byte 4 reserved, bytes 5..7 the 24-bit Max delay (both
+/// microseconds). The Min bound is the RFC 9350 metric-type 1 input.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OspfSubMinMaxLinkDelay {
+    pub anomalous: bool,
+    pub min_delay: u32,
+    pub max_delay: u32,
+}
+
+impl OspfSubMinMaxLinkDelay {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, w0) = be_u32(input)?;
+        let (input, w1) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                anomalous: (w0 & 0x8000_0000) != 0,
+                min_delay: w0 & 0x00FF_FFFF,
+                max_delay: w1 & 0x00FF_FFFF,
+            },
+        ))
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        buf.put_u32(a | (self.min_delay & 0x00FF_FFFF));
+        buf.put_u32(self.max_delay & 0x00FF_FFFF);
+    }
+}
+
+/// RFC 7471 §4.3 Unidirectional Delay Variation (type 29). 4-octet
+/// value: byte 0 reserved, bytes 1..3 the 24-bit delay variation
+/// (jitter) in microseconds. No `A` flag (RFC 7471 §4.3).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OspfSubDelayVariation {
+    pub variation: u32,
+}
+
+impl OspfSubDelayVariation {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                variation: raw & 0x00FF_FFFF,
+            },
+        ))
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u32(self.variation & 0x00FF_FFFF);
+    }
+}
+
+/// RFC 7471 §4.4 Unidirectional Link Loss (type 30). 4-octet value:
+/// byte 0 bit 7 is the `A` flag, bits 6..0 reserved, bytes 1..3 the
+/// 24-bit loss in units of 0.000003 % (ceiling 0xFFFFFE ≈ 50.33 %;
+/// 0xFFFFFF means the value is unavailable).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OspfSubLinkLoss {
+    pub anomalous: bool,
+    pub loss: u32,
+}
+
+impl OspfSubLinkLoss {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, raw) = be_u32(input)?;
+        Ok((
+            input,
+            Self {
+                anomalous: (raw & 0x8000_0000) != 0,
+                loss: raw & 0x00FF_FFFF,
+            },
+        ))
+    }
+
+    fn emit_value(&self, buf: &mut BytesMut) {
+        let a = if self.anomalous { 0x8000_0000 } else { 0 };
+        buf.put_u32(a | (self.loss & 0x00FF_FFFF));
     }
 }
 
@@ -2838,6 +2998,82 @@ mod tests {
             }
             other => panic!("expected Asla, got {other:?}"),
         }
+    }
+
+    /// RFC 7471 delay/loss link-attribute sub-sub-TLVs round-trip
+    /// through the ASLA → Extended Link LSA codec, including the
+    /// anomalous flag, the 24-bit field masking and the 8-octet Min/Max
+    /// layout.
+    #[test]
+    fn asla_te_metrics_round_trip_in_ext_link_lsa() {
+        let asla = OspfAslaSubTlv {
+            sabm: vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0],
+            udabm: Vec::new(),
+            subs: vec![
+                OspfAslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+                    anomalous: true,
+                    delay: 1_000,
+                }),
+                OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 900,
+                    max_delay: 1_200,
+                }),
+                OspfAslaSubSubTlv::DelayVariation(OspfSubDelayVariation { variation: 50 }),
+                OspfAslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
+                    anomalous: true,
+                    loss: 0x00FF_FFFE,
+                }),
+            ],
+        };
+        let lsa = ExtLinkLsa {
+            tlvs: vec![ExtLinkTlv {
+                link_type: 1,
+                link_id: Ipv4Addr::new(10, 0, 0, 2),
+                link_data: Ipv4Addr::new(10, 0, 0, 1),
+                subs: vec![ExtLinkSubTlv::Asla(asla.clone())],
+            }],
+        };
+
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        assert_eq!(buf.len() % 4, 0);
+
+        let (rest, parsed) = ExtLinkLsa::parse_be(&buf).expect("parse");
+        assert!(rest.is_empty(), "trailing: {rest:?}");
+        match &parsed.tlvs[0].subs[0] {
+            ExtLinkSubTlv::Asla(a) => assert_eq!(a, &asla),
+            other => panic!("expected Asla, got {other:?}"),
+        }
+    }
+
+    /// The 24-bit delay/loss fields and the anomalous flag must survive
+    /// values that exercise the full mask without bleeding into the
+    /// reserved bits.
+    #[test]
+    fn asla_te_metric_field_masking() {
+        // Delay value with bits set above the 24-bit field — the codec
+        // must mask them off on emit so only 24 bits go on the wire.
+        let v = OspfSubUniLinkDelay {
+            anomalous: false,
+            delay: 0x00FF_FFFF,
+        };
+        let mut buf = BytesMut::new();
+        v.emit_value(&mut buf);
+        assert_eq!(&buf[..], &[0x00, 0xFF, 0xFF, 0xFF]);
+
+        let (_, back) = OspfSubUniLinkDelay::parse_be(&buf).expect("parse");
+        assert_eq!(back, v);
+
+        // Anomalous flag occupies bit 7 of octet 0, distinct from the
+        // delay field.
+        let v = OspfSubLinkLoss {
+            anomalous: true,
+            loss: 1,
+        };
+        let mut buf = BytesMut::new();
+        v.emit_value(&mut buf);
+        assert_eq!(&buf[..], &[0x80, 0x00, 0x00, 0x01]);
     }
 
     /// SABM without the X-bit is not treated as a Flex-Algo advert.
