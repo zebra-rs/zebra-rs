@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
 use tokio::io::unix::AsyncFd;
@@ -12,9 +12,9 @@ use crate::context::{ProtoContext, Task};
 
 use super::config::{BfdConfig, Callback};
 use super::fsm::Event;
-use super::network::{WriteRequest, read_packet, write_packet};
+use super::network::{WriteRequest, read_packet, read_packet_v6, write_packet, write_packet_v6};
 use super::session::{Session, SessionKey, SessionParams, SessionTable, StateChange};
-use super::socket::{BFD_MULTI_HOP_PORT, BFD_SINGLE_HOP_PORT, bfd_socket_ipv4};
+use super::socket::{BFD_MULTI_HOP_PORT, BFD_SINGLE_HOP_PORT, bfd_socket_ipv4, bfd_socket_ipv6};
 use super::timer::{InitialParams, TimerCmd, session_timer};
 
 /// Identifier for a BFD subscriber. Conventionally the proto name
@@ -71,6 +71,11 @@ pub struct Bfd {
     subscribers: HashMap<SessionKey, BTreeMap<ClientId, UnboundedSender<BfdEvent>>>,
     main_tx: UnboundedSender<Message>,
     write_tx: UnboundedSender<WriteRequest>,
+    /// Egress channel for IPv6 sessions, drained by `write_packet_v6`
+    /// on the v6 socket. `on_tx_tick` routes by the session's remote
+    /// address family. Sends are dropped if the v6 listener never came
+    /// up (the receiver is gone) — v6 simply doesn't work in that case.
+    write_tx_v6: UnboundedSender<WriteRequest>,
     timer_handles: HashMap<SessionKey, TimerHandle>,
 }
 
@@ -133,7 +138,7 @@ pub enum Message {
     /// after the packet is demuxed to a session.
     Recv {
         packet: bfd_packet::ControlPacket,
-        src: SocketAddrV4,
+        src: SocketAddr,
         dst: Option<IpAddr>,
         ifindex: u32,
         ttl: u8,
@@ -178,6 +183,7 @@ impl Bfd {
 
         let (main_tx, rx) = mpsc::unbounded_channel::<Message>();
         let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteRequest>();
+        let (write_tx_v6, write_rx_v6) = mpsc::unbounded_channel::<WriteRequest>();
 
         let read_sock = sock.clone();
         let read_tx = main_tx.clone();
@@ -218,6 +224,54 @@ impl Bfd {
             }
         }
 
+        // IPv6 listeners (RFC 5881/5883 reuse the same ports on the v6
+        // transport; `IPV6_V6ONLY` keeps them off the v4 sockets). The
+        // 3784 socket is shared TX+RX (drains `write_rx_v6`); 4784 is
+        // RX-only. Non-fatal: v4 keeps working if v6 is unavailable.
+        // Gated on the well-known bind so ephemeral-port test instances
+        // don't open them.
+        if bind.port() == BFD_SINGLE_HOP_PORT {
+            match bfd_socket_ipv6(
+                &ctx,
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, BFD_SINGLE_HOP_PORT, 0, 0),
+            )
+            .and_then(AsyncFd::new)
+            {
+                Ok(sock6) => {
+                    let sock6 = Arc::new(sock6);
+                    let read_sock = sock6.clone();
+                    let read_tx = main_tx.clone();
+                    tokio::spawn(async move {
+                        read_packet_v6(read_sock, read_tx).await;
+                    });
+                    tokio::spawn(async move {
+                        write_packet_v6(sock6, write_rx_v6).await;
+                    });
+                }
+                Err(e) => tracing::warn!(
+                    "bfd: IPv6 single-hop listener on {BFD_SINGLE_HOP_PORT} unavailable, \
+                     IPv4 only: {e}"
+                ),
+            }
+            match bfd_socket_ipv6(
+                &ctx,
+                SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, BFD_MULTI_HOP_PORT, 0, 0),
+            )
+            .and_then(AsyncFd::new)
+            {
+                Ok(mh6) => {
+                    let mh6 = Arc::new(mh6);
+                    let mh_tx = main_tx.clone();
+                    tokio::spawn(async move {
+                        read_packet_v6(mh6, mh_tx).await;
+                    });
+                }
+                Err(e) => tracing::warn!(
+                    "bfd: IPv6 multihop listener on {BFD_MULTI_HOP_PORT} unavailable: {e}"
+                ),
+            }
+        }
+
         let mut bfd = Self {
             rx,
             sessions: SessionTable::new(),
@@ -231,6 +285,7 @@ impl Bfd {
             subscribers: HashMap::new(),
             main_tx,
             write_tx,
+            write_tx_v6,
             timer_handles: HashMap::new(),
         };
         bfd.callback_build();
@@ -398,7 +453,7 @@ impl Bfd {
     fn on_recv(
         &mut self,
         packet: bfd_packet::ControlPacket,
-        src: SocketAddrV4,
+        src: SocketAddr,
         dst: Option<IpAddr>,
         ifindex: u32,
         ttl: u8,
@@ -478,8 +533,8 @@ impl Bfd {
     /// Linear scan — fine for the small session counts a single
     /// process maintains; an explicit (local, remote, ifindex) index
     /// can be added later if it shows up in profiles.
-    fn bootstrap_lookup(&self, src: SocketAddrV4, ifindex: u32) -> Option<SessionKey> {
-        let src_ip = IpAddr::V4(*src.ip());
+    fn bootstrap_lookup(&self, src: SocketAddr, ifindex: u32) -> Option<SessionKey> {
+        let src_ip = src.ip();
         self.sessions.iter().find_map(|(_, s)| {
             let ifindex_match = s.key.ifindex == 0 || s.key.ifindex == ifindex;
             if s.key.remote == src_ip && ifindex_match {
@@ -494,17 +549,22 @@ impl Bfd {
         let Some(session) = self.sessions.get_by_key(&key) else {
             return;
         };
-        let IpAddr::V4(remote) = session.key.remote else {
-            // IPv6 not yet supported.
-            return;
-        };
-        let dst = SocketAddrV4::new(remote, session.dst_port);
+        let dst = SocketAddr::new(session.key.remote, session.dst_port);
         let ifindex = (session.key.ifindex != 0).then_some(session.key.ifindex);
-        let _ = self.write_tx.send(WriteRequest {
+        let req = WriteRequest {
             packet: session.build_packet(),
             dst,
             ifindex,
-        });
+        };
+        // Route to the egress loop matching the destination family.
+        match session.key.remote {
+            IpAddr::V4(_) => {
+                let _ = self.write_tx.send(req);
+            }
+            IpAddr::V6(_) => {
+                let _ = self.write_tx_v6.send(req);
+            }
+        }
     }
 
     fn on_detect_expired(&mut self, key: SessionKey) {
@@ -598,7 +658,7 @@ mod tests {
             your_disc: disc,
             ..bfd_packet::ControlPacket::default()
         };
-        let src = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 49152);
+        let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 49152));
         bfd.on_recv(packet, src, None, 0, 254); // single-hop requires 255
 
         let session = bfd.sessions.get_by_key(&key).unwrap();
@@ -629,7 +689,7 @@ mod tests {
             your_disc: disc,
             ..bfd_packet::ControlPacket::default()
         };
-        let src = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 49152);
+        let src = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 49152));
         bfd.on_recv(packet, src, None, 0, 254); // == floor ⇒ accepted
 
         let session = bfd.sessions.get_by_key(&key).unwrap();

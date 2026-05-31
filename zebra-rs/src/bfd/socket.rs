@@ -1,4 +1,4 @@
-use std::net::SocketAddrV4;
+use std::net::{SocketAddrV4, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::os::raw::c_int;
 
@@ -72,6 +72,64 @@ fn set_ipv4_pktinfo(socket: &Socket) -> std::io::Result<()> {
             socket.as_raw_fd(),
             libc::IPPROTO_IP,
             libc::IP_PKTINFO,
+            &on as *const _ as *const libc::c_void,
+            std::mem::size_of::<c_int>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Build an IPv6 UDP socket for BFD control packets. RFC 5881 §4 /
+/// RFC 5883 §5 use the same well-known ports on the v6 transport, so
+/// this is bound with `IPV6_V6ONLY` to avoid shadowing the v4 socket
+/// on the same port. Mirrors [`bfd_socket_ipv4`]:
+///   * send with Hop Limit = 255 (GTSM on egress);
+///   * report the received Hop Limit via `IPV6_RECVHOPLIMIT` so the
+///     receive path can enforce GTSM after demux;
+///   * report destination + ingress ifindex via `IPV6_RECVPKTINFO`
+///     so link-local sessions (which overlap across interfaces) can be
+///     demultiplexed by `(remote, ifindex)`.
+pub fn bfd_socket_ipv6(ctx: &ProtoContext, bind: SocketAddrV6) -> std::io::Result<Socket> {
+    let socket = ctx.udp_socket_unbound(Domain::IPV6)?;
+
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_only_v6(true)?;
+    socket.set_unicast_hops_v6(255)?; // GTSM: every outgoing packet leaves with Hop Limit=255
+    set_ipv6_recvhoplimit(&socket)?;
+    set_ipv6_recvpktinfo(&socket)?;
+
+    socket.bind(&bind.into())?;
+    Ok(socket)
+}
+
+fn set_ipv6_recvhoplimit(socket: &Socket) -> std::io::Result<()> {
+    let on: c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVHOPLIMIT,
+            &on as *const _ as *const libc::c_void,
+            std::mem::size_of::<c_int>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn set_ipv6_recvpktinfo(socket: &Socket) -> std::io::Result<()> {
+    let on: c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_RECVPKTINFO,
             &on as *const _ as *const libc::c_void,
             std::mem::size_of::<c_int>() as libc::socklen_t,
         )
