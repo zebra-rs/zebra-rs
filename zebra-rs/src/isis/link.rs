@@ -264,7 +264,7 @@ pub struct LinkConfig {
 
     /// Affinity (admin-group) names this link belongs to, from
     /// /router/isis/interface/<name>/affinity. Each name references a
-    /// /router/isis/affinity-map/affinity entry; the bit positions are
+    /// /affinity-map/affinity entry; the bit positions are
     /// resolved to a 256-bit Extended Admin Group bitmap (RFC 7308) at
     /// LSP-build time, advertised inside the ASLA sub-TLV (RFC 9479)
     /// whenever at least one flex-algo references the attribute.
