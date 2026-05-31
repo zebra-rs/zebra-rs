@@ -8,7 +8,7 @@
 //!
 //! Three commands are exposed:
 //!   * `show bfd`              — one-line-per-session summary table.
-//!   * `show bfd peer [<addr>]`— FRR-style detailed block(s), all peers
+//!   * `show bfd peers [<addr>]`— FRR-style detailed block(s), all peers
 //!     or one when an address follows.
 //!   * `show bfd counters`     — per-session control-packet counters.
 //!
@@ -33,7 +33,7 @@ impl Bfd {
 
     pub fn show_build(&mut self) {
         self.show_add("/show/bfd", show_bfd);
-        self.show_add("/show/bfd/peer", show_bfd_peer);
+        self.show_add("/show/bfd/peers", show_bfd_peers);
         self.show_add("/show/bfd/counters", show_bfd_counters);
     }
 }
@@ -167,7 +167,7 @@ fn show_bfd(bfd: &Bfd, _args: Args, json: bool) -> Result<String, fmt::Error> {
 }
 
 // -----------------------------------------------------------------------
-// show bfd peer [<addr>]  (detail, FRR-style)
+// show bfd peers [<addr>]  (detail, FRR-style)
 // -----------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -329,7 +329,7 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
     Ok(())
 }
 
-fn show_bfd_peer(bfd: &Bfd, mut args: Args, json: bool) -> Result<String, fmt::Error> {
+fn show_bfd_peers(bfd: &Bfd, mut args: Args, json: bool) -> Result<String, fmt::Error> {
     // Optional trailing peer address narrows the output to one session.
     let filter = args.addr();
 
@@ -489,8 +489,8 @@ mod tests {
                 .unwrap()
                 .contains("No BFD sessions")
         );
-        // `show bfd peer` always prints the header, then a no-sessions line.
-        let peer = show_bfd_peer(&bfd, no_args(), false).unwrap();
+        // `show bfd peers` always prints the header, then a no-sessions line.
+        let peer = show_bfd_peers(&bfd, no_args(), false).unwrap();
         assert!(peer.contains("BFD Peers:"));
         assert!(peer.contains("No BFD sessions"));
     }
@@ -516,7 +516,7 @@ mod tests {
         bfd.add_session(k, SessionParams::default());
         bring_up(&mut bfd, &k);
 
-        let out = show_bfd_peer(&bfd, no_args(), false).unwrap();
+        let out = show_bfd_peers(&bfd, no_args(), false).unwrap();
         assert!(out.contains("BFD Peers:"));
         assert!(out.contains("peer 10.0.0.2 (single-hop)"));
         assert!(out.contains("Status: up"));
@@ -536,7 +536,7 @@ mod tests {
         bfd.add_session(key(2), SessionParams::default());
         bfd.add_session(key(3), SessionParams::default());
 
-        let out = show_bfd_peer(&bfd, addr_args("10.0.0.2"), false).unwrap();
+        let out = show_bfd_peers(&bfd, addr_args("10.0.0.2"), false).unwrap();
         assert!(out.contains("peer 10.0.0.2"));
         assert!(!out.contains("peer 10.0.0.3"));
     }
@@ -546,7 +546,7 @@ mod tests {
         let mut bfd = fresh_bfd();
         bfd.add_session(key(2), SessionParams::default());
 
-        let out = show_bfd_peer(&bfd, addr_args("10.0.0.9"), false).unwrap();
+        let out = show_bfd_peers(&bfd, addr_args("10.0.0.9"), false).unwrap();
         assert!(out.contains("No BFD session for peer 10.0.0.9"));
     }
 
