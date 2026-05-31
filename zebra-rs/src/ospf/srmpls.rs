@@ -26,7 +26,7 @@ pub(super) const SRLB_RANGE: u32 = 1000;
 /// restarting-router capability (RFC 3623 / RFC 7770 §2.1 bit 5).
 /// Set to `true` while `Ospf::restarting.is_some()` so helpers
 /// see us as a planned-restart originator; clear otherwise.
-pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool) -> OspfLsa {
+pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool, algos: Vec<Algo>) -> OspfLsa {
     let mut tlvs = Vec::new();
 
     // Router Capabilities TLV (type 1, RFC 7770 §2.1):
@@ -41,10 +41,10 @@ pub fn router_info_lsa_build(router_id: Ipv4Addr, gr_capable: bool) -> OspfLsa {
         .with_gr_capable(gr_capable);
     tlvs.push(RouterInfoTlv::RouterInfo(RouterInfoTlvCap { caps }));
 
-    // SR Algorithm TLV (type 8): SPF (algorithm 0).
-    tlvs.push(RouterInfoTlv::Algo(RouterInfoTlvAlgo {
-        algos: vec![Algo::Spf],
-    }));
+    // SR Algorithm TLV (type 8, RFC 8665 §3.1): SPF (algorithm 0) plus
+    // every configured Flexible Algorithm (RFC 9350 §6). The caller
+    // passes `flex_algo::sr_algorithms(&ospf.flex_algo)`.
+    tlvs.push(RouterInfoTlv::Algo(RouterInfoTlvAlgo { algos }));
 
     // SID/Label Range TLV (type 9): Global block.
     tlvs.push(RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
@@ -427,7 +427,7 @@ mod tests {
     /// and GR-helper (bit 4) set; GR-capable (bit 5) clear.
     #[test]
     fn router_info_lsa_steady_state_caps() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), false);
+        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), false, vec![Algo::Spf]);
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must be set");
         assert!(cap.gr_helper(), "GR helper bit must be set");
@@ -443,13 +443,39 @@ mod tests {
     /// to helpers.
     #[test]
     fn router_info_lsa_restarting_sets_gr_capable() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true);
+        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true, vec![Algo::Spf]);
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must remain set");
         assert!(cap.gr_helper(), "GR helper bit must remain set");
         assert!(
             cap.gr_capable(),
             "GR restarter bit must be set while restarting"
+        );
+    }
+
+    /// The SR-Algorithm TLV (type 8) carries the configured Flexible
+    /// Algorithms after SPF (RFC 9350 §6).
+    #[test]
+    fn router_info_lsa_advertises_configured_flex_algos() {
+        let lsa = router_info_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            false,
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)],
+        );
+        let OspfLsp::OpaqueAreaRouterInfo(ri) = &lsa.lsp else {
+            panic!("expected RouterInfo opaque LSA");
+        };
+        let algos = ri
+            .tlvs
+            .iter()
+            .find_map(|tlv| match tlv {
+                RouterInfoTlv::Algo(a) => Some(a.algos.clone()),
+                _ => None,
+            })
+            .expect("SR-Algorithm TLV present");
+        assert_eq!(
+            algos,
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)]
         );
     }
 }

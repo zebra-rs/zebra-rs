@@ -15,7 +15,7 @@ pub mod entry;
 pub mod srlg;
 
 pub use affinity_map::AffinityMap;
-pub use config::FlexAlgoConfig;
+pub use config::{FlexAlgoConfig, sr_algorithms};
 pub use constraint::{AffinityBits, link_passes_fad, local_link_affinity};
 pub use entry::{FadMetricType, FlexAlgoEntry};
 pub use srlg::{SrlgGroup, SrlgGroupBuilder};
