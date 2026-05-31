@@ -794,10 +794,11 @@ module config {
           // computed routes install into the VRF's routing table. The
           // `vrf` key is a plain string (staging-friendly, like
           // `router static`'s per-VRF list) so the VRF need not yet
-          // exist at the top-level `vrf` list when parsed. Minimal
-          // subset (router-id / area / interface enable) for now;
-          // later work widens it toward parity with the default
-          // instance.
+          // exist at the top-level `vrf` list when parsed. The exposed
+          // subset tracks the default instance's per-interface knobs
+          // (enable / network-type / priority / timers) plus per-area
+          // NSSA `redistribute connected`; more leaves land as the
+          // per-VRF surface widens.
           key "name";
           leaf name {
             type string;
@@ -811,6 +812,28 @@ module config {
               type union {
                 type uint32;
                 type inet:ipv4-address;
+              }
+            }
+            // Per-NSSA-area redistribute into Type-7 (mirrors the
+            // default instance). Forwarded paths
+            // `/router/ospf/area/redistribute/connected[/metric|
+            // /metric-type]` match the existing v2 callbacks.
+            container redistribute {
+              container connected {
+                presence "Redistribute connected routes into Type-7";
+                leaf metric {
+                  type uint32 {
+                    range "0..16777214";
+                  }
+                  default 20;
+                }
+                leaf metric-type {
+                  type enumeration {
+                    enum type-1;
+                    enum type-2;
+                  }
+                  default type-2;
+                }
               }
             }
             list interface {
@@ -830,6 +853,18 @@ module config {
               }
               leaf priority {
                 type uint8;
+              }
+              leaf hello-interval {
+                type uint16;
+              }
+              leaf dead-interval {
+                type uint32;
+              }
+              leaf retransmit-interval {
+                type uint16;
+              }
+              leaf mtu-ignore {
+                type boolean;
               }
             }
           }
@@ -1112,9 +1147,11 @@ module config {
 
         list vrf {
           // Per-VRF OSPFv3 instance. See `container ospf`'s `vrf`
-          // list for the forwarding model. Minimal subset (area /
-          // interface enable); `router-id` is omitted because the v3
-          // instance has no router-id config handler today.
+          // list for the forwarding model. Exposes the per-interface
+          // knobs the v3 instance handles (enable / network-type /
+          // priority / timers). `router-id` and `redistribute` are
+          // omitted — the v3 instance has no config handler for them
+          // today (so a forwarded line would be a no-op).
           key "name";
           leaf name {
             type string;
@@ -1144,6 +1181,18 @@ module config {
               }
               leaf priority {
                 type uint8;
+              }
+              leaf hello-interval {
+                type uint16;
+              }
+              leaf dead-interval {
+                type uint32;
+              }
+              leaf retransmit-interval {
+                type uint16;
+              }
+              leaf mtu-ignore {
+                type boolean;
               }
             }
           }
@@ -1508,7 +1557,10 @@ module config {
         }
 
         container timers {
-          leaf hold_time {
+          // `hold-time` (hyphen) matches the callback registered at
+          // `/router/isis/timers/hold-time`; the previous `hold_time`
+          // spelling never dispatched (dead leaf).
+          leaf hold-time {
             type uint16;
           }
           leaf lsp-refresh-interval {
@@ -1921,9 +1973,10 @@ module config {
           // VRF's routing table. The `vrf` key is a plain string
           // (staging-friendly, like `router static`'s per-VRF list)
           // so the VRF need not yet exist at the top-level `vrf` list
-          // when this config is parsed. Only a minimal subset (net /
-          // is-type / interface enable) is exposed today; later work
-          // widens it toward full parity with the default instance.
+          // when this config is parsed. Exposed subset: net / is-type,
+          // the instance + per-interface timers, and afi-safi network
+          // / redistribution; more leaves land as the per-VRF surface
+          // widens toward full parity with the default instance.
           key "name";
           leaf name {
             type string;
@@ -1942,6 +1995,100 @@ module config {
               enum level-2-only;
             }
           }
+          container timers {
+            // `hold-time` (hyphen) matches the callback path
+            // `/router/isis/timers/hold-time`. (The top-level leaf is
+            // also `hold-time`.)
+            leaf hold-time {
+              type uint16;
+            }
+            leaf lsp-refresh-interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+            }
+            leaf min-lsp-arrival-time {
+              type uint32 {
+                range "1..600000";
+              }
+              units "milliseconds";
+            }
+          }
+          container spf-interval {
+            leaf initial-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+            leaf secondary-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+            leaf maximum-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+          }
+          container lsp-gen-interval {
+            leaf initial-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+            leaf secondary-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+            leaf maximum-wait {
+              type uint32 {
+                range "1..120000";
+              }
+              units "milliseconds";
+            }
+          }
+          list afi-safi {
+            // Per-AFI self-originated networks + redistribution
+            // (mirrors the default instance, reusing the same
+            // groupings). Forwarded `/router/isis/afi-safi/...` paths
+            // match the existing v2 callbacks.
+            key "name";
+            uses zas:afi-safi-unicast;
+            list network {
+              key "prefix";
+              leaf prefix {
+                type inet:ip-prefix;
+              }
+            }
+            container redistribute {
+              presence "Enable route redistribution into IS-IS for this AFI";
+              container connected {
+                presence "Redistribute connected routes";
+                uses isis-redist-common;
+              }
+              container static {
+                presence "Redistribute static routes";
+                uses isis-redist-common;
+              }
+              container bgp {
+                presence "Redistribute BGP routes";
+                uses isis-redist-common;
+              }
+              container ospf {
+                presence "Redistribute OSPF routes";
+                uses isis-redist-common;
+                uses isis-redist-ospf-match;
+              }
+            }
+          }
           list interface {
             // Last item, mirroring the top-level interface sort.
             ext:sort "-10";
@@ -1949,6 +2096,56 @@ module config {
             leaf if-name {
               ext:dynamic "rib:interface";
               type string;
+            }
+            leaf circuit-type {
+              type enumeration {
+                enum level-1;
+                enum level-1-2;
+                enum level-2-only;
+              }
+            }
+            leaf network-type {
+              type enumeration {
+                enum lan;
+                enum point-to-point;
+              }
+            }
+            leaf priority {
+              type uint8;
+            }
+            container hello {
+              leaf padding {
+                type enumeration {
+                  enum always;
+                  enum disable;
+                }
+              }
+              leaf interval {
+                type uint16 {
+                  range "1..65535";
+                }
+                units "seconds";
+              }
+              leaf multiplier {
+                type uint16 {
+                  range "2..1000";
+                }
+              }
+            }
+            leaf csnp-interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+            }
+            leaf psnp-interval {
+              type uint16 {
+                range "1..65535";
+              }
+              units "seconds";
+            }
+            leaf metric {
+              type uint32;
             }
             container ipv4 {
               leaf enable {
