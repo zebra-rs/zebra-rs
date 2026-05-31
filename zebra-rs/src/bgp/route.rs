@@ -4429,6 +4429,46 @@ pub fn route_bgpls_withdraw(ident: usize, nlri: &BgpLsNlri, bgp: &mut BgpTop, pe
     let _ = bgp.local_rib.select_best_path_bgpls(nlri);
 }
 
+/// Originate one locally-produced BGP Link-State NLRI (RFC 9552) into the
+/// `bgp_ls` Loc-RIB as a self-originated route. Used by the IS-IS producer
+/// bridge: IS-IS translates its LSDB to `BgpLsNlri`s and pushes them here.
+///
+/// Unlike `route_bgpls_update` (the receive path, which looks up a real
+/// peer), this has no neighbor — it builds an `Originated` `BgpRib` keyed by
+/// `ORIGINATED_PEER` and inserts straight into the Loc-RIB, mirroring
+/// `evpn_originate_macip`. The attributes are empty for now (NLRI-only
+/// producer); BGP-LS Attribute (type 29) enrichment is a later phase.
+/// Re-advertisement to peers is likewise deferred — this records topology so
+/// `show bgp link-state` reflects it.
+pub fn route_bgpls_originate(
+    nlri: BgpLsNlri,
+    local_rib: &mut LocalRib,
+    attr_store: &mut super::store::BgpAttrStore,
+) {
+    let attr = BgpAttr::new();
+    let mut rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,     // remote_id — BGP-LS has no AddPath
+        32768, // weight — default for locally-originated
+        &attr,
+        None, // label
+        None, // nexthop
+        false,
+    );
+    rib.attr = attr_store.intern(attr);
+    let _ = local_rib.update_bgpls(nlri, rib);
+}
+
+/// Withdraw a previously-originated BGP-LS NLRI from the `bgp_ls` Loc-RIB
+/// (the IS-IS producer no longer advertises it). Removes the
+/// `ORIGINATED_PEER` candidate and re-runs best-path selection.
+pub fn route_bgpls_withdraw_originated(nlri: &BgpLsNlri, local_rib: &mut LocalRib) {
+    local_rib.remove_bgpls(nlri, 0, ORIGINATED_PEER);
+    let _ = local_rib.select_best_path_bgpls(nlri);
+}
+
 /// Realize an SR Policy active-path change in the dataplane: remove the
 /// previous SRv6 Binding SID and/or install the new one as an
 /// End.B6.Encaps local SID (RFC 8986 §4.14) pushing the policy's

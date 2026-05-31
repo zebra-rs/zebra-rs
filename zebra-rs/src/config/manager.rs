@@ -215,6 +215,13 @@ pub struct ConfigManager {
     /// kernel rejecting a socket option, …); consumers silently skip
     /// in that case.
     pub nd_client_tx: RefCell<Option<UnboundedSender<crate::nd::inst::NdClientReq>>>,
+    /// BGP task inbox sender, captured at `spawn_bgp` time so the IS-IS
+    /// task can push BGP Link-State (RFC 9552) producer routes to BGP.
+    /// Populated by [`super::bgp::spawn_bgp`]; `None` while no BGP task
+    /// exists. `spawn_isis` captures it by value, so `commit_config`
+    /// pre-spawns BGP before IS-IS when both appear in one commit (same
+    /// by-value contract as `bfd_client_tx`).
+    pub bgp_tx: RefCell<Option<mpsc::Sender<crate::bgp::inst::Message>>>,
     pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
     /// Runtime-mutable YANG-defined service-accounts (D25). Updated by
     /// `commit_config` when `vty service-account uid N` changes; read by
@@ -245,6 +252,7 @@ impl ConfigManager {
             cm_clients: RefCell::new(HashMap::new()),
             show_clients: RefCell::new(HashMap::new()),
             show_vrf_clients: RefCell::new(HashMap::new()),
+            bgp_tx: RefCell::new(None),
             rib_tx,
             rib_inbound_tx,
             next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -452,6 +460,24 @@ impl ConfigManager {
                 break;
             }
         }
+        // Same by-value capture problem for the IS-IS→BGP BGP-LS producer
+        // channel: `spawn_isis` captures `bgp_tx` by value, so if this
+        // commit will set `router bgp` we must spawn BGP before IS-IS even
+        // if `router isis` appears first in the diff.
+        let mut will_set_bgp = false;
+        for line in diff.lines() {
+            let Some(first_char) = line.chars().next() else {
+                continue;
+            };
+            if first_char != '+' {
+                continue;
+            }
+            let line = remove_first_char(line);
+            if line.starts_with("router bgp") {
+                will_set_bgp = true;
+                break;
+            }
+        }
 
         for line in diff.lines() {
             let first_char = line.chars().next().unwrap();
@@ -489,6 +515,21 @@ impl ConfigManager {
                 if !bfd && will_set_bfd {
                     bfd = true;
                     spawn_bfd(self);
+                }
+                // Pre-spawn BGP if this commit will set it, so IS-IS
+                // captures a live `bgp_tx` for the BGP-LS producer (the
+                // sender is captured by value at `spawn_isis` time).
+                if !bgp && will_set_bgp {
+                    bgp = true;
+                    if !nd {
+                        nd = true;
+                        spawn_nd(self);
+                    }
+                    if !bfd && will_set_bfd {
+                        bfd = true;
+                        spawn_bfd(self);
+                    }
+                    spawn_bgp(self);
                 }
                 spawn_isis(self);
             }

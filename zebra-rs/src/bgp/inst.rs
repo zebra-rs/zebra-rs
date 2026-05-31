@@ -61,6 +61,15 @@ pub enum Message {
     /// bucket, and ship to each member with split-horizon pruning.
     FlushUpdateGroupIpv4(super::update_group::UpdateGroupId),
     FlushUpdateGroupIpv6(super::update_group::UpdateGroupId),
+    /// BGP Link-State (RFC 9552) objects produced by the local IS-IS task
+    /// and pushed over the IS-IS→BGP channel. `add` are originated into the
+    /// `bgp_ls` Loc-RIB; `withdraw` are removed. The IS-IS producer diffs
+    /// against its own last-advertised set and sends only deltas, so this
+    /// carries exactly the change for one trigger.
+    BgpLs {
+        add: Vec<bgp_packet::BgpLsNlri>,
+        withdraw: Vec<bgp_packet::BgpLsNlri>,
+    },
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -1060,6 +1069,22 @@ impl Bgp {
                     &mut self.peers,
                     &group_id,
                 );
+            }
+            Message::BgpLs { add, withdraw } => {
+                // Locally-produced BGP-LS (IS-IS producer, RFC 9552). Store
+                // into / remove from the `bgp_ls` Loc-RIB as Originated.
+                // Re-advertisement to peers is a later phase; this records
+                // the topology so `show bgp link-state` reflects it.
+                for nlri in &withdraw {
+                    super::route::route_bgpls_withdraw_originated(nlri, &mut self.local_rib);
+                }
+                for nlri in add {
+                    super::route::route_bgpls_originate(
+                        nlri,
+                        &mut self.local_rib,
+                        &mut self.attr_store,
+                    );
+                }
             }
         }
     }

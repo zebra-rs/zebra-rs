@@ -25,6 +25,11 @@ pub fn spawn_bgp(config: &ConfigManager) {
         nd_client_tx,
         config.tx.clone(),
     );
+    // Hand the IS-IS task a sender into BGP so the BGP-LS producer
+    // (RFC 9552) can push Link-State add/withdraw. `spawn_isis` captures
+    // this by value, so `commit_config` pre-spawns BGP before IS-IS when
+    // both land in one commit (mirrors the `bfd_client_tx` contract).
+    *config.bgp_tx.borrow_mut() = Some(bgp.tx.clone());
     config.subscribe("bgp", bgp.cm.tx.clone());
     config.subscribe_show("bgp", bgp.show.tx.clone());
     let task = inst::serve(bgp);
