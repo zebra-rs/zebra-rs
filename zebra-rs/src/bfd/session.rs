@@ -51,13 +51,18 @@ pub struct SessionParams {
 
 impl Default for SessionParams {
     fn default() -> Self {
-        // Conservative defaults aligned with RFC 5880 §6.8.1
-        // (1-second intervals, ×3 detection — sub-second
-        // configurations are negotiated explicitly).
+        // Match the FRR-aligned profile constants in [`super::config`]
+        // (300 ms intervals, ×3 ⇒ 900 ms detection). A session created
+        // without a resolved `bfd profile` must not negotiate slower
+        // than the configured default would: at 1 s our `required-min-rx`
+        // dragged FRR's transmit up to 1 s and the detection time to 3 s
+        // on both ends. Sub-second rates comply with RFC 5880 §6.8.1.
+        // `min_ttl` is the single-hop GTSM floor (RFC 5881 §5); multihop
+        // callers override it to `BFD_MULTIHOP_DEFAULT_MIN_TTL`.
         Self {
-            desired_min_tx_us: 1_000_000,
-            required_min_rx_us: 1_000_000,
-            detect_mult: 3,
+            desired_min_tx_us: super::config::DEFAULT_TRANSMIT_INTERVAL_MS * 1_000,
+            required_min_rx_us: super::config::DEFAULT_RECEIVE_INTERVAL_MS * 1_000,
+            detect_mult: super::config::DEFAULT_DETECT_MULT,
             dst_port: super::socket::BFD_SINGLE_HOP_PORT,
             min_ttl: 255,
         }
