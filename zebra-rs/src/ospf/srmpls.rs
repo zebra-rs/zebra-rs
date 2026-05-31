@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -82,13 +83,9 @@ pub fn router_info_lsa_build(
     lsa
 }
 
-/// Build an Extended Prefix Opaque LSA for a prefix with Prefix SID.
-pub fn ext_prefix_lsa_build(
-    router_id: Ipv4Addr,
-    prefix: Ipv4Net,
-    prefix_sid: &PrefixSid,
-    opaque_id: u32,
-) -> OspfLsa {
+/// Build one Prefix-SID sub-TLV (RFC 8665 §5 / RFC 9350 §7) for the
+/// given algorithm from a configured Prefix-SID.
+fn ext_prefix_sid_sub(algo: Algo, prefix_sid: &PrefixSid) -> ExtPrefixSubTlv {
     let (sid, flags) = match prefix_sid {
         PrefixSid::Index(idx) => (
             SidLabelTlv::Index(*idx),
@@ -99,20 +96,39 @@ pub fn ext_prefix_lsa_build(
             PrefixSidFlags::new().with_v_flag(true).with_l_flag(true),
         ),
     };
-
-    let sid_sub = ExtPrefixSidSubTlv {
+    ExtPrefixSubTlv::PrefixSid(ExtPrefixSidSubTlv {
         flags,
         mt_id: 0,
-        algo: Algo::Spf,
+        algo,
         sid,
-    };
+    })
+}
+
+/// Build an Extended Prefix Opaque LSA for a prefix, carrying the
+/// algo-0 Prefix-SID (if configured) plus a per-Flex-Algorithm
+/// Prefix-SID sub-TLV for every entry in `flex_algo_sids` (RFC 9350
+/// §7, Algorithm = FlexAlgo(N)).
+pub fn ext_prefix_lsa_build(
+    router_id: Ipv4Addr,
+    prefix: Ipv4Net,
+    prefix_sid: Option<&PrefixSid>,
+    flex_algo_sids: &BTreeMap<u8, PrefixSid>,
+    opaque_id: u32,
+) -> OspfLsa {
+    let mut subs = Vec::new();
+    if let Some(ps) = prefix_sid {
+        subs.push(ext_prefix_sid_sub(Algo::Spf, ps));
+    }
+    for (algo, sid) in flex_algo_sids {
+        subs.push(ext_prefix_sid_sub(Algo::FlexAlgo(*algo), sid));
+    }
 
     let tlv = ExtPrefixTlv {
         route_type: 1, // Intra-area.
         prefix,
         af: 0, // IPv4 unicast.
         flags: 0,
-        subs: vec![ExtPrefixSubTlv::PrefixSid(sid_sub)],
+        subs,
     };
 
     let ep_lsa = ExtPrefixLsa { tlvs: vec![tlv] };
@@ -519,5 +535,63 @@ mod tests {
             })
             .collect();
         assert_eq!(fads, vec![fad]);
+    }
+
+    /// The Extended-Prefix LSA carries the algo-0 Prefix-SID plus one
+    /// per-Flex-Algorithm Prefix-SID sub-TLV (RFC 9350 §7).
+    #[test]
+    fn ext_prefix_lsa_emits_per_algo_prefix_sids() {
+        use super::PrefixSid;
+        let prefix = "10.0.0.1/32".parse::<Ipv4Net>().unwrap();
+        let mut flex = BTreeMap::new();
+        flex.insert(128u8, PrefixSid::Index(1128));
+        flex.insert(200u8, PrefixSid::Absolute(20200));
+
+        let lsa = ext_prefix_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            prefix,
+            Some(&PrefixSid::Index(16)),
+            &flex,
+            0,
+        );
+        let OspfLsp::OpaqueAreaExtPrefix(ep) = &lsa.lsp else {
+            panic!("expected Extended-Prefix opaque LSA");
+        };
+        let algos: Vec<Algo> = ep.tlvs[0]
+            .subs
+            .iter()
+            .filter_map(|s| match s {
+                ExtPrefixSubTlv::PrefixSid(p) => Some(p.algo),
+                _ => None,
+            })
+            .collect();
+        // algo-0 (Spf) first, then the flex-algos in sorted order.
+        assert_eq!(
+            algos,
+            vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)]
+        );
+    }
+
+    /// With no algo-0 Prefix-SID, only the flex-algo sub-TLVs appear.
+    #[test]
+    fn ext_prefix_lsa_flex_algo_only() {
+        use super::PrefixSid;
+        let prefix = "10.0.0.1/32".parse::<Ipv4Net>().unwrap();
+        let mut flex = BTreeMap::new();
+        flex.insert(128u8, PrefixSid::Index(1128));
+
+        let lsa = ext_prefix_lsa_build(Ipv4Addr::new(10, 0, 0, 1), prefix, None, &flex, 0);
+        let OspfLsp::OpaqueAreaExtPrefix(ep) = &lsa.lsp else {
+            panic!("expected Extended-Prefix opaque LSA");
+        };
+        let algos: Vec<Algo> = ep.tlvs[0]
+            .subs
+            .iter()
+            .filter_map(|s| match s {
+                ExtPrefixSubTlv::PrefixSid(p) => Some(p.algo),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(algos, vec![Algo::FlexAlgo(128)]);
     }
 }

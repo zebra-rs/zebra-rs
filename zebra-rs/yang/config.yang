@@ -508,6 +508,23 @@ module config {
                 type uint32;
               }
             }
+            list flex-algo-prefix-sid {
+              // Per-Flexible-Algorithm Prefix-SID for this interface's
+              // prefix (RFC 9350 §7). Emitted as an extra Prefix-SID
+              // sub-TLV (Algorithm = the keyed algo) in the
+              // Extended-Prefix Opaque LSA, alongside the algo-0
+              // `prefix-sid` above.
+              key "algo";
+              leaf algo {
+                type uint8 { range "128..255"; }
+              }
+              leaf index {
+                type uint32;
+              }
+              leaf absolute {
+                type uint32;
+              }
+            }
             container adjacency-sid {
               // Per-link Adjacency-SID (RFC 8665 §6). Originated in
               // the Extended-Link Opaque LSA (type 10 / opaque-type 8)
