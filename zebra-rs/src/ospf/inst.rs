@@ -9088,6 +9088,17 @@ fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // computed RIB, then diff against the previous snapshot so the
     // RIB subsystem sees only the IlmAdd / IlmDel deltas.
     let mut ilm = build_ilm_from_rib(&rib);
+    // Per-Flexible-Algorithm Prefix-SID labels (RFC 9350 §7). The
+    // label space is shared with algo-0 (Prefix-SIDs are globally
+    // unique), so the per-algo entries coexist in the single ILM map
+    // and install into the kernel MPLS LFIB alongside algo-0 via the
+    // same diff below. Per-algo IPv4 stays in-memory; only the labels
+    // forward, mirroring IS-IS.
+    for algo_rib in top.rib_flex_algo.values() {
+        for (label, spf_ilm) in build_ilm_from_rib(algo_rib) {
+            ilm.insert(label, spf_ilm);
+        }
+    }
     add_self_prefix_sids_to_ilm(top, &mut ilm);
     add_self_adj_sids_to_ilm(top, &mut ilm);
     let ilm_diff = spf::table_diff(
