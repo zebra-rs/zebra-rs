@@ -162,6 +162,17 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// consumed by `nssa_redist_connected_resync` when origination
     /// state needs to be rebuilt (config change, area-type flip).
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
+    /// Staged Flexible Algorithm definitions for this instance
+    /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
+    /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
+    /// committed entries lands in a later phase.
+    pub flex_algo: crate::flex_algo::FlexAlgoConfig,
+    /// This instance's copy of the global `/affinity-map` table,
+    /// resolving affinity names to RFC 7308 admin-group bit positions.
+    /// Fed by the config broadcast; shared by all IGPs.
+    pub affinity_map: crate::flex_algo::AffinityMap,
+    /// This instance's staging of the global `/srlg` table.
+    pub srlg_config: crate::flex_algo::SrlgGroupBuilder,
     /// v3-only outbound packet channel. `Ospf<Ospfv3>::new` spawns
     /// `network_v6::write_packet_v6` consuming the matching receiver;
     /// producers of v3 outgoing packets clone this sender to push
@@ -255,6 +266,30 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Stage a flex-algo (`{V::FLEX_ALGO_PREFIX}/...`), `/affinity-map`
+    /// or `/srlg/group` config leaf into its builder. The caller gates
+    /// on the path prefix and returns early after this; the staged
+    /// values apply at `CommitEnd` via `commit_flex_algo_tables`.
+    fn flex_algo_table_exec(&mut self, path: String, args: Args, op: ConfigOp) {
+        if path.starts_with(V::FLEX_ALGO_PREFIX) {
+            let _ = self.flex_algo.exec(path, args, op);
+        } else if path.starts_with("/affinity-map") {
+            let _ = self.affinity_map.exec(path, args, op);
+        } else if path.starts_with("/srlg/group") {
+            let _ = self.srlg_config.exec(path, args, op);
+        }
+    }
+
+    /// Apply the staged flex-algo / affinity-map / SRLG tables at the
+    /// end of a commit cycle. Origination from the committed config
+    /// (FAD / SR-Algorithm / per-link ASLA) lands in a later phase, so
+    /// there are no LSA side effects here yet.
+    fn commit_flex_algo_tables(&mut self) {
+        self.flex_algo.commit();
+        self.affinity_map.commit();
+        let _ = self.srlg_config.commit();
+    }
+
     pub fn ospf_interface<'a>(
         &'a mut self,
         ifindex: u32,
@@ -486,6 +521,9 @@ impl Ospf<Ospfv2> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
+            affinity_map: crate::flex_algo::AffinityMap::new(),
+            srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
             sock,
             v3_send_tx: None,
             v3_recv_rx: None,
@@ -513,6 +551,14 @@ impl Ospf<Ospfv2> {
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         let (path, args) = path_from_command(&msg.paths);
 
+        // Apply the flex-algo / affinity-map / SRLG staging at the end
+        // of a commit cycle (mirrors IS-IS). Nothing else handles
+        // CommitEnd on the v2 instance today.
+        if msg.op == ConfigOp::CommitEnd {
+            self.commit_flex_algo_tables();
+            return;
+        }
+
         // Clear ops bypass the YANG callback table — they map
         // straight to runtime side-effects (kick SPF, drop a peer,
         // ...) the way `clear ip bgp` works in BGP. Other op-codes
@@ -534,6 +580,18 @@ impl Ospf<Ospfv2> {
             } else if path == "/clear/ospf/graceful-restart/commit" {
                 let _ = self.gr_restart_commit();
             }
+            return;
+        }
+
+        // Flex-algo definitions (`/router/ospf/flex-algo`) and the
+        // global `/affinity-map` / `/srlg` tables stage into their
+        // builders here and apply at CommitEnd; the registry callbacks
+        // below don't cover them.
+        if path.starts_with(Ospfv2::FLEX_ALGO_PREFIX)
+            || path.starts_with("/affinity-map")
+            || path.starts_with("/srlg/group")
+        {
+            self.flex_algo_table_exec(path, args, msg.op);
             return;
         }
 
@@ -3564,6 +3622,9 @@ impl Ospf<Ospfv3> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
+            affinity_map: crate::flex_algo::AffinityMap::new(),
+            srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
             sock,
             v3_send_tx: Some(v3_send_tx),
             v3_recv_rx: Some(v3_recv_rx),

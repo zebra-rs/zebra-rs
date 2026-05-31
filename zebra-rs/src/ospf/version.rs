@@ -103,6 +103,12 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// (RFC 2328 §A and RFC 5340 §2.3).
     const IP_PROTO: u8 = 89;
 
+    /// Config subtree carrying this version's Flexible Algorithm
+    /// definitions: `/router/ospf/flex-algo` (v2) or
+    /// `/router/ospfv3/flex-algo` (v3). Per-leaf paths are
+    /// `{FLEX_ALGO_PREFIX}/...`.
+    const FLEX_ALGO_PREFIX: &'static str;
+
     /// AllSPFRouters multicast group: 224.0.0.5 (v2) or ff02::5 (v3).
     const ALL_SPF_ROUTERS: Self::Addr;
 
@@ -326,6 +332,7 @@ impl OspfVersion for Ospfv2 {
     type Options = OspfOptions;
     type LsRequest = OspfLsRequest;
     type LsRequestEntry = OspfLsRequestEntry;
+    const FLEX_ALGO_PREFIX: &'static str = "/router/ospf/flex-algo";
     const ALL_SPF_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 5);
     const ALL_DROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 6);
 
@@ -433,6 +440,7 @@ impl OspfVersion for Ospfv3 {
     type Options = Ospfv3Options;
     type LsRequest = Ospfv3LsRequest;
     type LsRequestEntry = Ospfv3LsRequestEntry;
+    const FLEX_ALGO_PREFIX: &'static str = "/router/ospfv3/flex-algo";
     /// AllSPFRouters in v3 (RFC 5340 §A.1): `ff02::5`.
     const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
     /// AllDRouters in v3 (RFC 5340 §A.1): `ff02::6`.
