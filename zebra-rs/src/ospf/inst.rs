@@ -6951,15 +6951,53 @@ fn flex_algo_link_affinity(
     map
 }
 
+/// Per-link minimum unidirectional delay (microseconds) advertised in
+/// this area's Extended-Link Opaque LSAs via the flex-algo ASLA Min/Max
+/// Link Delay sub-TLV (RFC 7471 §4.2), keyed the same way as
+/// `flex_algo_link_affinity`. Used as the SPF edge cost when a
+/// Flex-Algorithm selects metric-type 1 (min-unidir-link-delay, RFC
+/// 9350 §6).
+fn flex_algo_link_delay(area: &OspfArea) -> BTreeMap<(Ipv4Addr, Ipv4Addr, Ipv4Addr), u32> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    let mut map = BTreeMap::new();
+    for (_, lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let OspfLsp::OpaqueAreaExtLink(ref el) = lsa.data.lsp else {
+            continue;
+        };
+        let adv_router = lsa.data.h.adv_router;
+        for tlv in &el.tlvs {
+            for sub in &tlv.subs {
+                if let ExtLinkSubTlv::Asla(asla) = sub
+                    && asla.is_flex_algo()
+                    && let Some(delay) = asla.min_unidir_delay()
+                {
+                    map.insert((adv_router, tlv.link_id, tlv.link_data), delay);
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Build the per-algo SPF graph for `area_id`. Mirrors `graph()` but
 /// (a) includes only routers participating in `algo` (plus self), and
 /// (b) admits each Router-LSA link only if it passes the FAD
 /// constraints in `entry` (RFC 9350 §6), the link's affinity coming
 /// from the Extended-Link ASLA join table.
 ///
-/// Local FAD config (`entry`) drives the constraints — no multi-router
-/// FAD election yet (matches IS-IS). Metric is IGP only; SRLG-exclude
-/// is not enforced; both are deferred exactly as on the IS-IS side.
+/// Edge cost follows the FAD metric-type (RFC 9350 §5.1): metric-type 1
+/// (min-unidir-link-delay) uses the per-link Min delay from the
+/// Extended-Link ASLA, and a link with no delay advertised is pruned
+/// (RFC 9350 §15 — a link missing the selected metric MUST NOT be used).
+/// All other metric-types (IGP, and the not-yet-supported TE-default)
+/// fall back to the IGP `tos_0_metric`.
+///
+/// Local FAD config (`entry`) drives the constraints and metric-type —
+/// no multi-router FAD election yet (matches IS-IS). SRLG-exclude is not
+/// enforced; deferred exactly as on the IS-IS side.
 fn graph_flex_algo(
     top: &mut Ospf,
     area_id: Ipv4Addr,
@@ -6977,6 +7015,16 @@ fn graph_flex_algo(
 
     let participants = flex_algo_participants(area, algo);
     let link_affinity = flex_algo_link_affinity(area);
+
+    // RFC 9350 §5.1 metric-type 1 routes on per-link delay instead of
+    // the IGP cost. Build the delay join table only for that metric-type
+    // — the IGP path never consults it.
+    let use_delay = entry.metric_type == Some(crate::flex_algo::FadMetricType::MinUnidirLinkDelay);
+    let link_delay = if use_delay {
+        flex_algo_link_delay(area)
+    } else {
+        BTreeMap::new()
+    };
 
     // Router-LSAs of participating routers (self always kept — it is
     // the SPF source).
@@ -7030,6 +7078,17 @@ fn graph_flex_algo(
                 if !crate::flex_algo::link_passes_fad(affinity, entry, &top.affinity_map) {
                     continue;
                 }
+                // Edge cost per the FAD metric-type. With a delay metric,
+                // a link advertising no Min delay is pruned (RFC 9350
+                // §15); otherwise the IGP cost is used.
+                let cost = if use_delay {
+                    match link_delay.get(&(*adv_router, link.link_id, link.link_data)) {
+                        Some(&d) => d,
+                        None => continue,
+                    }
+                } else {
+                    link.tos_0_metric as u32
+                };
                 match link.link_type {
                     OspfLinkType::P2p | OspfLinkType::VirtualLink => {
                         if !participants.contains(&link.link_id) {
@@ -7049,7 +7108,7 @@ fn graph_flex_algo(
                         vertex.olinks.push(spf::Link {
                             from: node_id,
                             to: to_id,
-                            cost: link.tos_0_metric as u32,
+                            cost,
                             link_id: 0,
                         });
                     }
@@ -7074,7 +7133,7 @@ fn graph_flex_algo(
                             vertex.olinks.push(spf::Link {
                                 from: node_id,
                                 to: to_id,
-                                cost: link.tos_0_metric as u32,
+                                cost,
                                 link_id: 0,
                             });
                         }

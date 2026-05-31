@@ -2342,6 +2342,16 @@ impl OspfAslaSubTlv {
             _ => None,
         })
     }
+
+    /// Minimum unidirectional link delay (microseconds) from the Min/Max
+    /// Link Delay sub-sub-TLV (RFC 7471 §4.2), if present. This is the
+    /// RFC 9350 §6 metric-type 1 (min-unidir-link-delay) input.
+    pub fn min_unidir_delay(&self) -> Option<u32> {
+        self.subs.iter().find_map(|s| match s {
+            OspfAslaSubSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
+            _ => None,
+        })
+    }
 }
 
 // RFC 7471 OSPFv2 TE-metric link-attribute sub-TLVs. These ride as
@@ -2995,6 +3005,8 @@ mod tests {
                 assert_eq!(a, &asla);
                 assert!(a.is_flex_algo());
                 assert_eq!(a.ext_admin_group(), Some(&admin_group(&[0, 4, 200])));
+                // No Min/Max delay sub-TLV here → no delay metric.
+                assert_eq!(a.min_unidir_delay(), None);
             }
             other => panic!("expected Asla, got {other:?}"),
         }
@@ -3042,7 +3054,12 @@ mod tests {
         let (rest, parsed) = ExtLinkLsa::parse_be(&buf).expect("parse");
         assert!(rest.is_empty(), "trailing: {rest:?}");
         match &parsed.tlvs[0].subs[0] {
-            ExtLinkSubTlv::Asla(a) => assert_eq!(a, &asla),
+            ExtLinkSubTlv::Asla(a) => {
+                assert_eq!(a, &asla);
+                // The RFC 9350 metric-type 1 accessor returns the Min
+                // delay from the Min/Max sub-TLV.
+                assert_eq!(a.min_unidir_delay(), Some(900));
+            }
             other => panic!("expected Asla, got {other:?}"),
         }
     }
