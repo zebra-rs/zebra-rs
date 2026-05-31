@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ospf_packet::{
     ExtLinkSubTlv, OSPF_SABM_FLEX_ALGO, OspfAslaSubSubTlv, OspfAslaSubTlv, OspfFadExcludeSrlg,
-    OspfFadFlags, OspfFadSubTlv, RouterInfoTlvFad,
+    OspfFadFlags, OspfFadSubTlv, Ospfv3FadExcludeSrlg, Ospfv3FadFlags, Ospfv3FadSubTlv,
+    Ospfv3FadTlv, RouterInfoTlvFad,
 };
 
 use crate::flex_algo::{
@@ -82,6 +83,75 @@ pub fn build_fad(
         }
 
         out.push(RouterInfoTlvFad {
+            flex_algorithm: algo,
+            metric_type,
+            calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
+            priority,
+            subs,
+        });
+    }
+    out
+}
+
+/// OSPFv3 sibling of `build_fad`: build the FAD TLVs (RFC 9350 §7.1)
+/// this router originates inside its E-Router-LSA. Identical constraint
+/// logic to the v2 builder — the only difference is the ospf-packet v3
+/// wire types (`Ospfv3FadTlv` etc., which use the OSPFv3 codepoints).
+pub fn build_fad_v3(
+    fa: &FlexAlgoConfig,
+    am: &AffinityMap,
+    srlg_groups: &BTreeMap<String, SrlgGroup>,
+) -> Vec<Ospfv3FadTlv> {
+    let mut out = Vec::new();
+    for (&algo, entry) in &fa.config {
+        if entry.advertise_definition != Some(true) {
+            continue;
+        }
+        let metric_type = entry.metric_type.unwrap_or(FadMetricType::Igp).wire();
+        let priority = entry.priority.unwrap_or(128);
+
+        let mut subs = Vec::new();
+
+        if !entry.exclude_any.is_empty() {
+            let group = local_link_affinity(&entry.exclude_any, am);
+            if !group.words.is_empty() {
+                subs.push(Ospfv3FadSubTlv::ExcludeAg(group));
+            }
+        }
+        if !entry.include_any.is_empty() {
+            let group = local_link_affinity(&entry.include_any, am);
+            if !group.words.is_empty() {
+                subs.push(Ospfv3FadSubTlv::IncludeAnyAg(group));
+            }
+        }
+        if !entry.include_all.is_empty() {
+            let group = local_link_affinity(&entry.include_all, am);
+            if !group.words.is_empty() {
+                subs.push(Ospfv3FadSubTlv::IncludeAllAg(group));
+            }
+        }
+        if entry.prefix_metric == Some(true) {
+            subs.push(Ospfv3FadSubTlv::Flags(Ospfv3FadFlags {
+                m_flag: true,
+                trailing: Vec::new(),
+            }));
+        }
+        if !entry.srlg_exclude.is_empty() {
+            let mut ids: Vec<u32> = entry
+                .srlg_exclude
+                .iter()
+                .filter_map(|n| srlg_groups.get(n).map(|g| g.value))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            if !ids.is_empty() {
+                subs.push(Ospfv3FadSubTlv::ExcludeSrlg(Ospfv3FadExcludeSrlg {
+                    srlgs: ids,
+                }));
+            }
+        }
+
+        out.push(Ospfv3FadTlv {
             flex_algorithm: algo,
             metric_type,
             calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
@@ -254,5 +324,98 @@ mod tests {
         assert!(build_link_asla(&BTreeSet::new(), &am).is_none());
         // Referenced name not in the map → None (empty bitmap).
         assert!(build_link_asla(&affinity_set(&["ghost"]), &am).is_none());
+    }
+
+    #[test]
+    fn build_fad_v3_skips_entries_without_advertise_flag() {
+        let mut fa = FlexAlgoConfig::new("/router/ospfv3/flex-algo");
+        // Algo 128 — no advertise-definition, skipped.
+        fa.exec(
+            "/router/ospfv3/flex-algo/priority".into(),
+            args(&["128", "200"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        // Algo 129 — advertise-definition set, emitted.
+        fa.exec(
+            "/router/ospfv3/flex-algo/advertise-definition".into(),
+            args(&["129", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+
+        let fads = build_fad_v3(&fa, &AffinityMap::new(), &BTreeMap::new());
+        assert_eq!(fads.len(), 1);
+        assert_eq!(fads[0].flex_algorithm, 129);
+        assert_eq!(fads[0].metric_type, FadMetricType::Igp.wire());
+        assert_eq!(fads[0].priority, 128);
+        assert!(fads[0].subs.is_empty());
+    }
+
+    #[test]
+    fn build_fad_v3_emits_exclude_ag_srlg_and_flags() {
+        use ospf_packet::Ospfv3FadSubTlv;
+
+        let mut fa = FlexAlgoConfig::new("/router/ospfv3/flex-algo");
+        for (leaf, vals) in [
+            ("/advertise-definition", &["128", "true"][..]),
+            ("/metric-type", &["128", "min-unidir-link-delay"][..]),
+            ("/affinity/exclude-any", &["128", "blue"][..]),
+            ("/srlg-exclude", &["128", "risk-a"][..]),
+            ("/prefix-metric", &["128", "true"][..]),
+        ] {
+            fa.exec(
+                format!("/router/ospfv3/flex-algo{leaf}"),
+                args(vals),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
+        fa.commit();
+
+        let mut am = AffinityMap::new();
+        am.exec(
+            "/affinity-map/affinity/bit-position".into(),
+            args(&["blue", "4"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        am.commit();
+
+        let mut srlg = BTreeMap::new();
+        srlg.insert(
+            "risk-a".to_string(),
+            SrlgGroup {
+                name: "risk-a".into(),
+                value: 100,
+            },
+        );
+
+        let fads = build_fad_v3(&fa, &am, &srlg);
+        assert_eq!(fads.len(), 1);
+        let fad = &fads[0];
+        assert_eq!(fad.flex_algorithm, 128);
+        assert_eq!(fad.metric_type, FadMetricType::MinUnidirLinkDelay.wire());
+
+        let (mut excl, mut flags, mut srlgs) = (false, false, false);
+        for sub in &fad.subs {
+            match sub {
+                Ospfv3FadSubTlv::ExcludeAg(g) => {
+                    excl = true;
+                    assert!(g.get(4));
+                }
+                Ospfv3FadSubTlv::Flags(f) => {
+                    flags = true;
+                    assert!(f.m_flag);
+                }
+                Ospfv3FadSubTlv::ExcludeSrlg(s) => {
+                    srlgs = true;
+                    assert_eq!(s.srlgs, vec![100]);
+                }
+                other => panic!("unexpected sub: {other:?}"),
+            }
+        }
+        assert!(excl && flags && srlgs);
     }
 }

@@ -5721,7 +5721,13 @@ impl Ospf<Ospfv3> {
         let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
 
         if self.segment_routing == SegmentRoutingMode::Mpls && self.areas.get(area_id).is_some() {
-            let mut lsa = super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id);
+            let algos = crate::flex_algo::sr_algorithms(&self.flex_algo);
+            let fads = super::flex_algo::build_fad_v3(
+                &self.flex_algo,
+                &self.affinity_map,
+                &self.srlg_groups,
+            );
+            let mut lsa = super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id, algos, fads);
 
             if let Some(area) = self.areas.get(area_id)
                 && let Some(prev_seq) = area
