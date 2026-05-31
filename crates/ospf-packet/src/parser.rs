@@ -11,7 +11,7 @@ use nom::error::{ErrorKind, make_error};
 use nom::number::complete::{be_u8, be_u24, be_u32};
 use nom::{Err, IResult, Needed};
 use nom_derive::*;
-use packet_utils::{Algo, SidLabelTlv};
+use packet_utils::{Algo, ExtAdminGroup, SidLabelTlv};
 
 use super::util::{Emit, ParseBe};
 use super::{OspfLsType, OspfType, many0_complete};
@@ -1036,6 +1036,8 @@ pub enum RouterInfoTlvType {
     Algo = 8,
     SidLabelRange = 9,
     LocalBlock = 14,
+    // RFC 9350 §6.1 Flexible Algorithm Definition TLV.
+    Fad = 16,
     Unknown(u16),
 }
 
@@ -1047,6 +1049,7 @@ impl From<u16> for RouterInfoTlvType {
             8 => Algo,
             9 => SidLabelRange,
             14 => LocalBlock,
+            16 => Fad,
             x => Unknown(x),
         }
     }
@@ -1055,7 +1058,7 @@ impl From<u16> for RouterInfoTlvType {
 impl RouterInfoTlvType {
     pub fn is_known(&self) -> bool {
         use RouterInfoTlvType::*;
-        matches!(self, Algo)
+        matches!(self, Algo | Fad)
     }
 }
 
@@ -1070,6 +1073,8 @@ pub enum RouterInfoTlv {
     SidLabelRnage(RouterInfoTlvSidLabelRange),
     #[nom(Selector = "RouterInfoTlvType::LocalBlock")]
     LocalBlock(RouterInfoTlvLocalBlock),
+    #[nom(Selector = "RouterInfoTlvType::Fad")]
+    Fad(RouterInfoTlvFad),
     #[nom(Selector = "_")]
     Unknown(RouterInfoTlvUnknown),
 }
@@ -1249,6 +1254,7 @@ impl RouterInfoTlv {
             RouterInfoTlv::Algo(a) => a.algos.len() as u16,
             RouterInfoTlv::SidLabelRnage(r) => 4 + ospf_sid_label_len(&r.sid_label),
             RouterInfoTlv::LocalBlock(r) => 4 + ospf_sid_label_len(&r.sid_label),
+            RouterInfoTlv::Fad(f) => f.value_len(),
             RouterInfoTlv::Unknown(u) => u.len,
         }
     }
@@ -1259,6 +1265,7 @@ impl RouterInfoTlv {
             RouterInfoTlv::Algo(_) => 8,
             RouterInfoTlv::SidLabelRnage(_) => 9,
             RouterInfoTlv::LocalBlock(_) => 14,
+            RouterInfoTlv::Fad(_) => 16,
             RouterInfoTlv::Unknown(u) => u.typ,
         }
     }
@@ -1287,6 +1294,9 @@ impl RouterInfoTlv {
                 buf.put_u8(0); // reserved
                 emit_ospf_sid_label(buf, &r.sid_label);
             }
+            RouterInfoTlv::Fad(f) => {
+                f.emit_value(buf);
+            }
             RouterInfoTlv::Unknown(u) => {
                 buf.put(&u.values[..]);
             }
@@ -1295,6 +1305,236 @@ impl RouterInfoTlv {
         let pad = ((len as usize + 3) & !3) - len as usize;
         for _ in 0..pad {
             buf.put_u8(0);
+        }
+    }
+}
+
+// ── RFC 9350 §6 OSPF Flexible Algorithm Definition (FAD) ──────────
+//
+// OSPF carries the FAD as a top-level TLV (type 16) of the Router
+// Information Opaque LSA. The fixed header (Flex-Algorithm /
+// Metric-Type / Calc-Type / Priority) and the nested constraint
+// sub-TLVs share their semantics — and the FAD sub-TLV type codes
+// (1..=5, the shared "IGP Flexible Algorithm Definition Sub-TLVs"
+// IANA registry) — with the IS-IS encoding in isis-packet. Only the
+// framing differs: OSPF uses a 2-byte type + 2-byte length sub-TLV
+// header, 32-bit aligned, vs the IS-IS 1+1 code/length.
+
+// RFC 9350 §6 FAD Sub-TLV type codes.
+#[repr(u16)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum OspfFadSubTlvType {
+    #[default]
+    ExcludeAg = 1,
+    IncludeAnyAg = 2,
+    IncludeAllAg = 3,
+    Flags = 4,
+    ExcludeSrlg = 5,
+    Unknown(u16),
+}
+
+impl From<u16> for OspfFadSubTlvType {
+    fn from(typ: u16) -> Self {
+        use OspfFadSubTlvType::*;
+        match typ {
+            1 => ExcludeAg,
+            2 => IncludeAnyAg,
+            3 => IncludeAllAg,
+            4 => Flags,
+            5 => ExcludeSrlg,
+            x => Unknown(x),
+        }
+    }
+}
+
+/// FAD Flags sub-TLV (RFC 9350 §6.4). Only the M-flag (Prefix Metric,
+/// MSB of byte 0) is defined; trailing bytes are preserved so flags
+/// added after this codec round-trip cleanly.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct OspfFadFlags {
+    pub m_flag: bool,
+    pub trailing: Vec<u8>,
+}
+
+/// FAD Exclude SRLG sub-TLV (RFC 9350 §6.5): an ordered list of 32-bit
+/// SRLG identifiers; any link whose advertised SRLG set intersects
+/// this list is excluded from the algorithm's SPF.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct OspfFadExcludeSrlg {
+    pub srlgs: Vec<u32>,
+}
+
+/// One nested sub-TLV under the OSPF FAD TLV.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OspfFadSubTlv {
+    ExcludeAg(ExtAdminGroup),
+    IncludeAnyAg(ExtAdminGroup),
+    IncludeAllAg(ExtAdminGroup),
+    Flags(OspfFadFlags),
+    ExcludeSrlg(OspfFadExcludeSrlg),
+    Unknown(RouterInfoTlvUnknown),
+}
+
+impl OspfFadSubTlv {
+    pub fn parse_sub(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, tl) = TlvTypeLen::parse_be(input)?;
+        let len = tl.len as usize;
+        let (input, sub_data) = packet_utils::safe_split_at(input, len)?;
+        let typ: OspfFadSubTlvType = tl.typ.into();
+
+        let val = match typ {
+            OspfFadSubTlvType::ExcludeAg => {
+                let (_, g) = ExtAdminGroup::parse_be(sub_data)?;
+                OspfFadSubTlv::ExcludeAg(g)
+            }
+            OspfFadSubTlvType::IncludeAnyAg => {
+                let (_, g) = ExtAdminGroup::parse_be(sub_data)?;
+                OspfFadSubTlv::IncludeAnyAg(g)
+            }
+            OspfFadSubTlvType::IncludeAllAg => {
+                let (_, g) = ExtAdminGroup::parse_be(sub_data)?;
+                OspfFadSubTlv::IncludeAllAg(g)
+            }
+            OspfFadSubTlvType::Flags => {
+                // M-flag = MSB of byte 0; keep any trailing bytes.
+                let m_flag = sub_data.first().is_some_and(|b| b & 0x80 != 0);
+                let trailing = sub_data.get(1..).unwrap_or(&[]).to_vec();
+                OspfFadSubTlv::Flags(OspfFadFlags { m_flag, trailing })
+            }
+            OspfFadSubTlvType::ExcludeSrlg => {
+                let (_, srlgs) = many0_complete(be_u32).parse(sub_data)?;
+                OspfFadSubTlv::ExcludeSrlg(OspfFadExcludeSrlg { srlgs })
+            }
+            OspfFadSubTlvType::Unknown(_) => OspfFadSubTlv::Unknown(RouterInfoTlvUnknown {
+                typ: tl.typ,
+                len: tl.len,
+                values: sub_data.to_vec(),
+            }),
+        };
+
+        // Skip padding to 4-byte alignment.
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+
+        Ok((input, val))
+    }
+
+    /// Sub-TLV value length (excludes the 4-byte sub-TLV header).
+    fn value_len(&self) -> u16 {
+        match self {
+            OspfFadSubTlv::ExcludeAg(g)
+            | OspfFadSubTlv::IncludeAnyAg(g)
+            | OspfFadSubTlv::IncludeAllAg(g) => g.byte_len() as u16,
+            OspfFadSubTlv::Flags(f) => 1 + f.trailing.len() as u16,
+            OspfFadSubTlv::ExcludeSrlg(s) => (s.srlgs.len() * 4) as u16,
+            OspfFadSubTlv::Unknown(u) => u.len,
+        }
+    }
+
+    fn tlv_type(&self) -> u16 {
+        match self {
+            OspfFadSubTlv::ExcludeAg(_) => 1,
+            OspfFadSubTlv::IncludeAnyAg(_) => 2,
+            OspfFadSubTlv::IncludeAllAg(_) => 3,
+            OspfFadSubTlv::Flags(_) => 4,
+            OspfFadSubTlv::ExcludeSrlg(_) => 5,
+            OspfFadSubTlv::Unknown(u) => u.typ,
+        }
+    }
+
+    /// Total wire length: 4-byte header + value, padded to 4-byte align.
+    fn wire_len(&self) -> u16 {
+        let len = self.value_len();
+        4 + ((len + 3) & !3)
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let len = self.value_len();
+        buf.put_u16(self.tlv_type());
+        buf.put_u16(len);
+        match self {
+            OspfFadSubTlv::ExcludeAg(g)
+            | OspfFadSubTlv::IncludeAnyAg(g)
+            | OspfFadSubTlv::IncludeAllAg(g) => g.emit(buf),
+            OspfFadSubTlv::Flags(f) => {
+                buf.put_u8(if f.m_flag { 0x80 } else { 0x00 });
+                buf.put_slice(&f.trailing);
+            }
+            OspfFadSubTlv::ExcludeSrlg(s) => {
+                for v in &s.srlgs {
+                    buf.put_u32(*v);
+                }
+            }
+            OspfFadSubTlv::Unknown(u) => buf.put(&u.values[..]),
+        }
+        // Pad to 4-byte alignment.
+        let pad = ((len as usize + 3) & !3) - len as usize;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+}
+
+/// RFC 9350 §6.1 OSPF Flexible Algorithm Definition TLV
+/// (Router Information Opaque LSA, TLV type 16).
+///
+/// ```text
+///   0                   1                   2                   3
+///   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  |  Flex-Algo    |  Metric-Type  |  Calc-Type    |   Priority    |
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  //                       Sub-TLVs                              //
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouterInfoTlvFad {
+    /// Algorithm identifier, 128..=255 per RFC 9350 §4.
+    pub flex_algorithm: u8,
+    /// Metric-Type (0=IGP, 1=Min Unidir Link Delay, 2=TE Default).
+    pub metric_type: u8,
+    /// Calc-Type. Only 0 (SPF) is currently defined.
+    pub calc_type: u8,
+    /// Tie-breaker priority when multiple routers originate a FAD for
+    /// the same Flex-Algorithm; higher wins (RFC 9350 §5.2 / §6.5).
+    pub priority: u8,
+    /// Nested FAD constraint sub-TLVs.
+    pub subs: Vec<OspfFadSubTlv>,
+}
+
+impl RouterInfoTlvFad {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flex_algorithm) = be_u8(input)?;
+        let (input, metric_type) = be_u8(input)?;
+        let (input, calc_type) = be_u8(input)?;
+        let (input, priority) = be_u8(input)?;
+        let (input, subs) = many0_complete(OspfFadSubTlv::parse_sub).parse(input)?;
+        Ok((
+            input,
+            Self {
+                flex_algorithm,
+                metric_type,
+                calc_type,
+                priority,
+                subs,
+            },
+        ))
+    }
+
+    /// FAD TLV value length (excludes the 4-byte RI TLV header): the
+    /// 4-byte fixed header plus every nested sub-TLV.
+    pub fn value_len(&self) -> u16 {
+        4 + self.subs.iter().map(|s| s.wire_len()).sum::<u16>()
+    }
+
+    /// Emit only the FAD value (the RI TLV type/length header and any
+    /// outer padding are written by `RouterInfoTlv::emit`).
+    pub fn emit_value(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flex_algorithm);
+        buf.put_u8(self.metric_type);
+        buf.put_u8(self.calc_type);
+        buf.put_u8(self.priority);
+        for s in &self.subs {
+            s.emit(buf);
         }
     }
 }
@@ -2351,5 +2591,81 @@ mod tests {
         let bogus = (buf.len() + 1) as u16;
         BigEndian::write_u16(&mut buf[2..4], bogus);
         assert!(parse(&buf).is_err());
+    }
+
+    fn admin_group(bits: &[u16]) -> ExtAdminGroup {
+        let mut g = ExtAdminGroup::default();
+        for b in bits {
+            g.set(*b);
+        }
+        g
+    }
+
+    /// RFC 9350 §6.1 FAD TLV round-trips through the RI LSA codec with
+    /// every constraint sub-TLV present.
+    #[test]
+    fn fad_tlv_round_trips_in_router_info_lsa() {
+        let fad = RouterInfoTlvFad {
+            flex_algorithm: 128,
+            metric_type: 1, // Min Unidirectional Link Delay
+            calc_type: 0,
+            priority: 200,
+            subs: vec![
+                OspfFadSubTlv::ExcludeAg(admin_group(&[4])),
+                OspfFadSubTlv::IncludeAnyAg(admin_group(&[0, 33])),
+                OspfFadSubTlv::IncludeAllAg(admin_group(&[200])),
+                OspfFadSubTlv::Flags(OspfFadFlags {
+                    m_flag: true,
+                    trailing: Vec::new(),
+                }),
+                OspfFadSubTlv::ExcludeSrlg(OspfFadExcludeSrlg {
+                    srlgs: vec![100, 4_000_000_000],
+                }),
+            ],
+        };
+        let lsa = RouterInfoLsa {
+            tlvs: vec![RouterInfoTlv::Fad(fad.clone())],
+        };
+
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        // FAD value_len must be 4-byte aligned, so no outer RI padding.
+        assert_eq!(buf.len() % 4, 0);
+
+        let (rest, tlvs) = RouterInfoTlv::parse_tlvs(&buf).expect("parse");
+        assert!(rest.is_empty(), "trailing bytes: {rest:?}");
+        assert_eq!(tlvs.len(), 1);
+        match &tlvs[0] {
+            RouterInfoTlv::Fad(parsed) => assert_eq!(parsed, &fad),
+            other => panic!("expected Fad TLV, got {other:?}"),
+        }
+    }
+
+    /// A FAD carrying an algorithm we don't recognise as a sub-TLV must
+    /// still round-trip via the `Unknown` arm without dropping bytes.
+    #[test]
+    fn fad_preserves_unknown_sub_tlv() {
+        let fad = RouterInfoTlvFad {
+            flex_algorithm: 130,
+            metric_type: 0,
+            calc_type: 0,
+            priority: 128,
+            subs: vec![OspfFadSubTlv::Unknown(RouterInfoTlvUnknown {
+                typ: 250,
+                len: 4,
+                values: vec![0xde, 0xad, 0xbe, 0xef],
+            })],
+        };
+        let lsa = RouterInfoLsa {
+            tlvs: vec![RouterInfoTlv::Fad(fad.clone())],
+        };
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        let (rest, tlvs) = RouterInfoTlv::parse_tlvs(&buf).expect("parse");
+        assert!(rest.is_empty());
+        match &tlvs[0] {
+            RouterInfoTlv::Fad(parsed) => assert_eq!(parsed, &fad),
+            other => panic!("expected Fad TLV, got {other:?}"),
+        }
     }
 }
