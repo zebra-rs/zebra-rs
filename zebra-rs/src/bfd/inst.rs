@@ -14,7 +14,7 @@ use super::config::{BfdConfig, Callback};
 use super::fsm::Event;
 use super::network::{WriteRequest, read_packet, write_packet};
 use super::session::{Session, SessionKey, SessionParams, SessionTable, StateChange};
-use super::socket::{BFD_SINGLE_HOP_PORT, bfd_socket_ipv4};
+use super::socket::{BFD_MULTI_HOP_PORT, BFD_SINGLE_HOP_PORT, bfd_socket_ipv4};
 use super::timer::{InitialParams, TimerCmd, session_timer};
 
 /// Identifier for a BFD subscriber. Conventionally the proto name
@@ -127,12 +127,16 @@ struct TimerHandle {
 
 #[derive(Debug)]
 pub enum Message {
-    /// A parsed, GTSM-validated control packet arrived.
+    /// A parsed control packet arrived. The received IP TTL is carried
+    /// up so [`Bfd::on_recv`] can enforce the per-session TTL floor
+    /// (GTSM=255 for single-hop, the configured minimum for multihop)
+    /// after the packet is demuxed to a session.
     Recv {
         packet: bfd_packet::ControlPacket,
         src: SocketAddrV4,
         dst: Option<IpAddr>,
         ifindex: u32,
+        ttl: u8,
     },
     /// Periodic transmission timer fired for `key`.
     TxTick { key: SessionKey },
@@ -185,6 +189,34 @@ impl Bfd {
         tokio::spawn(async move {
             write_packet(write_sock, write_rx).await;
         });
+
+        // Production instances also listen on the multihop port (4784,
+        // RFC 5883) so iBGP / eBGP-multihop neighbours can be tracked.
+        // Egress reuses the primary socket — `on_tx_tick` picks the
+        // destination port per session — so only a second *receive*
+        // socket is needed. Gated on the well-known bind so the
+        // ephemeral-port test instances don't fight over 4784. A bind
+        // failure here is non-fatal: single-hop still works.
+        if bind.port() == BFD_SINGLE_HOP_PORT {
+            match bfd_socket_ipv4(
+                &ctx,
+                SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, BFD_MULTI_HOP_PORT),
+            )
+            .and_then(AsyncFd::new)
+            {
+                Ok(mh_sock) => {
+                    let mh_sock = Arc::new(mh_sock);
+                    let mh_tx = main_tx.clone();
+                    tokio::spawn(async move {
+                        read_packet(mh_sock, mh_tx).await;
+                    });
+                }
+                Err(e) => tracing::warn!(
+                    "bfd: multihop listener on {BFD_MULTI_HOP_PORT} unavailable, \
+                     single-hop only: {e}"
+                ),
+            }
+        }
 
         let mut bfd = Self {
             rx,
@@ -345,8 +377,8 @@ impl Bfd {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => match msg {
-                    Message::Recv { packet, src, dst, ifindex } =>
-                        self.on_recv(packet, src, dst, ifindex),
+                    Message::Recv { packet, src, dst, ifindex, ttl } =>
+                        self.on_recv(packet, src, dst, ifindex, ttl),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                 },
@@ -369,6 +401,7 @@ impl Bfd {
         src: SocketAddrV4,
         dst: Option<IpAddr>,
         ifindex: u32,
+        ttl: u8,
     ) {
         let lookup = if packet.your_disc != 0 {
             self.sessions.get_by_disc(packet.your_disc).map(|s| s.key)
@@ -385,6 +418,30 @@ impl Bfd {
             );
             return;
         };
+
+        // Enforce the TTL floor now that the packet is matched to a
+        // session whose hop mode we know. Single-hop sessions carry
+        // `min_ttl = 255` (RFC 5881 §5 GTSM), multihop the configured
+        // minimum (RFC 5883). A `u8` TTL can't exceed 255, so a single
+        // `<` comparison covers both: single-hop accepts only 255.
+        {
+            let session = self
+                .sessions
+                .get_by_key_mut(&key)
+                .expect("just looked up by key");
+            if ttl < session.min_ttl {
+                session.stats.rx_invalid_count += 1;
+                tracing::debug!(
+                    ?src,
+                    ?dst,
+                    ttl,
+                    min_ttl = session.min_ttl,
+                    multihop = session.key.multihop,
+                    "bfd: received TTL below floor, dropping packet",
+                );
+                return;
+            }
+        }
 
         let (change, new_tx_us, new_detect_us, new_detect_mult) = {
             let session = self
@@ -522,6 +579,63 @@ mod tests {
         let BfdEvent::StateChange { change, .. } = event;
         assert_eq!(change.from, bfd_packet::State::Down);
         assert_eq!(change.to, bfd_packet::State::Down);
+    }
+
+    /// A control packet whose received TTL is below a single-hop
+    /// session's floor (255, GTSM) is rejected in `on_recv`: the
+    /// invalid counter ticks and `handle_packet` never runs.
+    #[tokio::test]
+    async fn on_recv_drops_below_single_hop_floor() {
+        let mut bfd = fresh_bfd();
+        let key = loopback_key(8); // multihop: false ⇒ min_ttl 255
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("test".into(), key, SessionParams::default(), tx);
+        let disc = bfd.sessions.get_by_key(&key).unwrap().local_disc;
+
+        let packet = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Up,
+            my_disc: 0x1111_2222,
+            your_disc: disc,
+            ..bfd_packet::ControlPacket::default()
+        };
+        let src = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 49152);
+        bfd.on_recv(packet, src, None, 0, 254); // single-hop requires 255
+
+        let session = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(session.stats.rx_invalid_count, 1);
+        assert_eq!(session.stats.rx_count, 0, "rejected before handle_packet");
+        assert_eq!(session.remote_disc, 0, "no peer discriminator learned");
+    }
+
+    /// A multihop session accepts a packet whose TTL equals its
+    /// relaxed floor — `handle_packet` runs and the peer discriminator
+    /// is learned.
+    #[tokio::test]
+    async fn on_recv_multihop_accepts_relaxed_ttl() {
+        let mut bfd = fresh_bfd();
+        let mut key = loopback_key(9);
+        key.multihop = true;
+        let params = SessionParams {
+            min_ttl: 254,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("test".into(), key, params, tx);
+        let disc = bfd.sessions.get_by_key(&key).unwrap().local_disc;
+
+        let packet = bfd_packet::ControlPacket {
+            state: bfd_packet::State::Down,
+            my_disc: 0x3333_4444,
+            your_disc: disc,
+            ..bfd_packet::ControlPacket::default()
+        };
+        let src = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 9), 49152);
+        bfd.on_recv(packet, src, None, 0, 254); // == floor ⇒ accepted
+
+        let session = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(session.stats.rx_count, 1, "ttl at floor is accepted");
+        assert_eq!(session.stats.rx_invalid_count, 0);
+        assert_eq!(session.remote_disc, 0x3333_4444);
     }
 
     /// Two clients on the same key share one session; neither

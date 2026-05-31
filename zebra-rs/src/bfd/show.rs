@@ -176,6 +176,10 @@ struct BfdPeerDetailJson {
     local: String,
     interface: String,
     multihop: bool,
+    /// Minimum accepted received TTL — only meaningful (and serialized)
+    /// for multihop sessions; single-hop is GTSM (255) by definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_ttl: Option<u8>,
     local_discr: u32,
     remote_discr: u32,
     local_state: String,
@@ -208,6 +212,7 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         local: key.local.to_string(),
         interface: iface_str(key),
         multihop: key.multihop,
+        minimum_ttl: key.multihop.then_some(s.min_ttl),
         local_discr: s.local_disc,
         remote_discr: s.remote_disc,
         local_state: s.local_state.to_string(),
@@ -249,6 +254,9 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
     writeln!(buf, "        Remote ID: {}", s.remote_disc)?;
     writeln!(buf, "        Local address: {}", key.local)?;
     writeln!(buf, "        Interface: {}", iface_str(key))?;
+    if key.multihop {
+        writeln!(buf, "        Minimum TTL: {}", s.min_ttl)?;
+    }
     writeln!(
         buf,
         "        Status: {}",

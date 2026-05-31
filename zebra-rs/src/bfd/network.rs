@@ -12,9 +12,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::inst::Message;
 
-/// GTSM expected TTL for single-hop BFD (RFC 5881 §5).
-const GTSM_TTL: u8 = 255;
-
 /// Egress request consumed by [`write_packet`]. The event loop pushes
 /// these whenever a [`super::timer::TimerEvent::TxTick`] fires (or in
 /// future PRs, when a poll-sequence packet must be sent off-schedule).
@@ -29,9 +26,11 @@ pub struct WriteRequest {
 
 /// Async receive loop. Pulls one BFD control packet at a time off
 /// `sock`, runs structural validation via
-/// [`bfd_packet::ControlPacket::parse`], drops packets that fail GTSM
-/// (TTL < 255) with a debug log, and forwards survivors to the event
-/// loop via `tx`.
+/// [`bfd_packet::ControlPacket::parse`], and forwards survivors to the
+/// event loop via `tx`. The received IP TTL is carried up in
+/// [`Message::Recv`]; the TTL floor (GTSM=255 single-hop, configured
+/// minimum multihop) is enforced after session demux in
+/// [`super::inst::Bfd::on_recv`], because the hop mode isn't known here.
 pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
     let mut buf = [0u8; 1500];
     let mut iov = [IoSliceMut::new(&mut buf)];
@@ -66,20 +65,6 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                     }
                 }
 
-                if ttl != GTSM_TTL {
-                    // RFC 5881 §5: single-hop control packets MUST arrive
-                    // with TTL=255. Misconfigured peer; debug-log only
-                    // so a chatty bad neighbour can't flood the logs.
-                    tracing::debug!(
-                        ?src,
-                        ?dst,
-                        ttl,
-                        ifindex,
-                        "bfd: GTSM violation, dropping packet",
-                    );
-                    return Ok(());
-                }
-
                 let Some(payload) = msg.iovs().next() else {
                     return Err(ErrorKind::UnexpectedEof.into());
                 };
@@ -92,11 +77,15 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                     }
                 };
 
+                // The per-session TTL floor (GTSM for single-hop, the
+                // configured minimum for multihop) is checked after demux
+                // in `on_recv`; we can't know the hop mode at this point.
                 let _ = tx.send(Message::Recv {
                     packet,
                     src,
                     dst: dst.map(IpAddr::V4),
                     ifindex,
+                    ttl,
                 });
                 Ok(())
             })
@@ -212,10 +201,12 @@ mod tests {
         read_handle.abort();
     }
 
-    /// Packets with TTL < 255 are dropped per the GTSM rule in
-    /// RFC 5881 §5. No event reaches the channel.
+    /// The TTL floor is no longer enforced in `read_packet` — it's
+    /// deferred to `on_recv`, which knows the matched session's hop
+    /// mode. So a TTL=1 packet is *forwarded*, carrying its received
+    /// TTL up for the demux layer to accept or drop.
     #[tokio::test]
-    async fn gtsm_drops_low_ttl() {
+    async fn low_ttl_forwarded_for_demux_check() {
         let (sock, port) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let read_handle = tokio::spawn(async move { read_packet(sock, tx).await });
@@ -229,12 +220,14 @@ mod tests {
         packet.emit(&mut wire);
         send_raw(&wire, port, 1);
 
-        let timed = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-        assert!(
-            timed.is_err(),
-            "GTSM should have dropped the TTL=1 packet, got: {:?}",
-            timed.ok()
-        );
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("channel closed");
+        let Message::Recv { ttl, .. } = got else {
+            panic!("expected Recv, got {got:?}");
+        };
+        assert_eq!(ttl, 1, "received TTL is carried up, not dropped here");
 
         read_handle.abort();
     }

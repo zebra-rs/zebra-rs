@@ -36,13 +36,17 @@ pub struct SessionKey {
 /// `bfd.DetectMult`. `dst_port` is the UDP destination used when
 /// transmitting — production callers pass
 /// [`super::socket::BFD_SINGLE_HOP_PORT`] (3784) for single-hop and
-/// 4784 for multihop (RFC 5883); tests pass the peer's ephemeral port.
+/// [`super::socket::BFD_MULTI_HOP_PORT`] (4784) for multihop (RFC 5883);
+/// tests pass the peer's ephemeral port. `min_ttl` is the lowest
+/// accepted received TTL: 255 for single-hop (GTSM, RFC 5881 §5),
+/// or the configured multihop floor (RFC 5883).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionParams {
     pub desired_min_tx_us: u32,
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
     pub dst_port: u16,
+    pub min_ttl: u8,
 }
 
 impl Default for SessionParams {
@@ -55,6 +59,7 @@ impl Default for SessionParams {
             required_min_rx_us: 1_000_000,
             detect_mult: 3,
             dst_port: super::socket::BFD_SINGLE_HOP_PORT,
+            min_ttl: 255,
         }
     }
 }
@@ -94,6 +99,12 @@ pub struct Session {
 
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
+
+    /// Lowest accepted received TTL. 255 for single-hop (GTSM); the
+    /// configured floor for multihop (RFC 5883). Enforced in
+    /// [`super::inst::Bfd::on_recv`] after the packet is demuxed to
+    /// this session, since the hop mode isn't known at socket-read time.
+    pub min_ttl: u8,
 
     /// Reported by the peer in the most recent control packet.
     pub remote_min_tx_us: u32,
@@ -135,6 +146,7 @@ impl Session {
             required_min_rx_us: params.required_min_rx_us,
             detect_mult: params.detect_mult,
             dst_port: params.dst_port,
+            min_ttl: params.min_ttl,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
