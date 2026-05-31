@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
 use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::{
     Algo, ExtAdminGroup, FadSubTlv, IsisSubAdminGrp, IsisSubAsla, IsisSubFadExcludeAg,
@@ -14,64 +13,14 @@ use super::Isis;
 use super::affinity_map::AffinityMap;
 use super::srlg::SrlgGroup;
 
-// The protocol-neutral flex-algo data model + FAD constraint engine
-// now live in `crate::flex_algo`; re-export so existing IS-IS call
-// sites (`super::flex_algo::…` in graph.rs / rib.rs) keep resolving.
-pub use crate::flex_algo::{FadMetricType, FlexAlgoEntry, link_passes_fad, local_link_affinity};
-
-pub struct FlexAlgoConfig {
-    pub config: BTreeMap<u8, FlexAlgoEntry>,
-    pub cache: BTreeMap<u8, FlexAlgoEntry>,
-    builder: ConfigBuilder,
-}
-
-impl Default for FlexAlgoConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FlexAlgoConfig {
-    pub fn new() -> Self {
-        Self {
-            config: BTreeMap::new(),
-            cache: BTreeMap::new(),
-            builder: config_builder(),
-        }
-    }
-
-    /// Stage one leaf update into the pending cache. Mirrors
-    /// `StaticConfig::exec` in rib/static/config.rs — pure staging,
-    /// no side effects until `commit` is called.
-    pub fn exec(&mut self, path: String, mut args: Args, op: ConfigOp) -> Result<()> {
-        const CONFIG_ERR: &str = "missing flex-algo config handler";
-        const ALGO_ERR: &str = "missing flex-algo algorithm arg";
-
-        let func = self.builder.map.get(&(path, op)).context(CONFIG_ERR)?;
-        let algo = args.u8().context(ALGO_ERR)?;
-        if !(128..=255).contains(&algo) {
-            bail!("flex-algo identifier must be 128..=255 (got {algo})");
-        }
-        func(&mut self.config, &mut self.cache, algo, &mut args)
-    }
-
-    /// Drain the pending cache into the committed map. Apply / drop
-    /// semantics match `StaticConfig::commit`. SPF gating and
-    /// per-algo RIB install will be wired in follow-up PRs; LSP
-    /// re-origination is triggered by the per-leaf shim callbacks
-    /// (so a single config change that hits multiple leaves
-    /// originates the LSP once per leaf — acceptable churn given the
-    /// LSP-gen throttle).
-    pub fn commit(&mut self) {
-        while let Some((algo, entry)) = self.cache.pop_first() {
-            if entry.delete {
-                self.config.remove(&algo);
-            } else {
-                self.config.insert(algo, entry);
-            }
-        }
-    }
-}
+// The protocol-neutral flex-algo data model, FAD constraint engine and
+// config-staging engine now live in `crate::flex_algo`; re-export so
+// existing IS-IS call sites (`super::flex_algo::…` in graph.rs / rib.rs
+// / inst.rs) keep resolving. Only the isis-packet wire builders and the
+// IS-IS callback shims below stay here.
+pub use crate::flex_algo::{
+    FadMetricType, FlexAlgoConfig, FlexAlgoEntry, link_passes_fad, local_link_affinity,
+};
 
 /// Extract per-algorithm Prefix-SIDs from a peer-advertised Ext IP-
 /// Reach entry. Yields one (algo, sid) pair for each Prefix-SID
@@ -282,232 +231,6 @@ pub fn build_fad_subs(
     out
 }
 
-#[derive(Default)]
-struct ConfigBuilder {
-    path: String,
-    pub map: BTreeMap<(String, ConfigOp), Handler>,
-}
-
-type Handler = fn(
-    config: &mut BTreeMap<u8, FlexAlgoEntry>,
-    cache: &mut BTreeMap<u8, FlexAlgoEntry>,
-    algo: u8,
-    args: &mut Args,
-) -> Result<()>;
-
-impl ConfigBuilder {
-    pub fn path(mut self, path: &str) -> Self {
-        self.path = path.to_string();
-        self
-    }
-
-    pub fn set(mut self, func: Handler) -> Self {
-        self.map.insert((self.path.clone(), ConfigOp::Set), func);
-        self
-    }
-
-    pub fn del(mut self, func: Handler) -> Self {
-        self.map.insert((self.path.clone(), ConfigOp::Delete), func);
-        self
-    }
-}
-
-fn config_get(config: &BTreeMap<u8, FlexAlgoEntry>, algo: u8) -> FlexAlgoEntry {
-    config.get(&algo).cloned().unwrap_or_default()
-}
-
-fn config_lookup(config: &BTreeMap<u8, FlexAlgoEntry>, algo: u8) -> Option<FlexAlgoEntry> {
-    config.get(&algo).cloned()
-}
-
-fn cache_get<'a>(
-    config: &BTreeMap<u8, FlexAlgoEntry>,
-    cache: &'a mut BTreeMap<u8, FlexAlgoEntry>,
-    algo: u8,
-) -> Option<&'a mut FlexAlgoEntry> {
-    if cache.get(&algo).is_none() {
-        cache.insert(algo, config_get(config, algo));
-    }
-    cache.get_mut(&algo)
-}
-
-fn cache_lookup<'a>(
-    config: &BTreeMap<u8, FlexAlgoEntry>,
-    cache: &'a mut BTreeMap<u8, FlexAlgoEntry>,
-    algo: u8,
-) -> Option<&'a mut FlexAlgoEntry> {
-    if cache.get(&algo).is_none() {
-        cache.insert(algo, config_lookup(config, algo)?);
-    }
-    let entry = cache.get_mut(&algo)?;
-    if entry.delete { None } else { Some(entry) }
-}
-
-fn config_builder() -> ConfigBuilder {
-    const CONFIG_ERR: &str = "flex-algo entry parse error";
-    const BOOL_ERR: &str = "flex-algo boolean arg parse error";
-    const U8_ERR: &str = "flex-algo u8 arg parse error";
-    const ENUM_ERR: &str = "flex-algo enum arg parse error";
-    const NAME_ERR: &str = "flex-algo name arg parse error";
-
-    ConfigBuilder::default()
-        .path("/router/isis/flex-algo")
-        .set(|config, cache, algo, _args| {
-            let _ = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            if let Some(e) = cache.get_mut(&algo) {
-                e.delete = true;
-            } else {
-                let mut e = config_lookup(config, algo).context(CONFIG_ERR)?;
-                e.delete = true;
-                cache.insert(algo, e);
-            }
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/advertise-definition")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.advertise_definition = Some(args.boolean().context(BOOL_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.advertise_definition = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/metric-type")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.metric_type = Some(args.string().context(ENUM_ERR)?.parse()?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.metric_type = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/priority")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.priority = Some(args.u8().context(U8_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.priority = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/prefix-metric")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.prefix_metric = Some(args.boolean().context(BOOL_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.prefix_metric = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/dataplane/sr-mpls")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_sr_mpls = Some(args.boolean().context(BOOL_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_sr_mpls = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/dataplane/srv6")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_srv6 = Some(args.boolean().context(BOOL_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_srv6 = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/dataplane/ip")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_ip = Some(args.boolean().context(BOOL_ERR)?);
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.dataplane_ip = None;
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/affinity/include-any")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_any.insert(name);
-            Ok(())
-        })
-        .del(|config, cache, algo, args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_any.remove(&name);
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/affinity/include-all")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_all.insert(name);
-            Ok(())
-        })
-        .del(|config, cache, algo, args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_all.remove(&name);
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/affinity/exclude-any")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.exclude_any.insert(name);
-            Ok(())
-        })
-        .del(|config, cache, algo, args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.exclude_any.remove(&name);
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/srlg-exclude")
-        .set(|config, cache, algo, args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.srlg_exclude.insert(name);
-            Ok(())
-        })
-        .del(|config, cache, algo, args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.srlg_exclude.remove(&name);
-            Ok(())
-        })
-        .path("/router/isis/flex-algo/fast-reroute/ti-lfa")
-        .set(|config, cache, algo, _args| {
-            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            e.ti_lfa = true;
-            Ok(())
-        })
-        .del(|config, cache, algo, _args| {
-            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            e.ti_lfa = false;
-            Ok(())
-        })
-}
-
 // ── Wiring into the existing IS-IS callback dispatcher ────────────
 //
 // The IS-IS instance dispatches per-leaf via `Isis::callbacks`, with
@@ -597,82 +320,6 @@ mod tests {
 
     fn args(items: &[&str]) -> Args {
         Args(items.iter().map(|s| s.to_string()).collect::<VecDeque<_>>())
-    }
-
-    #[test]
-    fn set_advertise_definition_then_commit_persists() {
-        let mut fa = FlexAlgoConfig::new();
-        fa.exec(
-            "/router/isis/flex-algo/advertise-definition".into(),
-            args(&["128", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        fa.commit();
-        let e = fa.config.get(&128).unwrap();
-        assert_eq!(e.advertise_definition, Some(true));
-    }
-
-    #[test]
-    fn set_metric_type_then_priority_share_entry() {
-        let mut fa = FlexAlgoConfig::new();
-        fa.exec(
-            "/router/isis/flex-algo/metric-type".into(),
-            args(&["128", "min-unidir-link-delay"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        fa.commit();
-        fa.exec(
-            "/router/isis/flex-algo/priority".into(),
-            args(&["128", "200"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        fa.commit();
-        let e = fa.config.get(&128).unwrap();
-        assert_eq!(e.metric_type, Some(FadMetricType::MinUnidirLinkDelay));
-        assert_eq!(e.priority, Some(200));
-    }
-
-    #[test]
-    fn affinity_exclude_any_is_a_set() {
-        let mut fa = FlexAlgoConfig::new();
-        for color in ["blue", "red", "blue"] {
-            fa.exec(
-                "/router/isis/flex-algo/affinity/exclude-any".into(),
-                args(&["129", color]),
-                ConfigOp::Set,
-            )
-            .unwrap();
-            fa.commit();
-        }
-        let e = fa.config.get(&129).unwrap();
-        assert_eq!(e.exclude_any.len(), 2);
-        assert!(e.exclude_any.contains("blue"));
-        assert!(e.exclude_any.contains("red"));
-    }
-
-    #[test]
-    fn delete_entry_removes_it() {
-        let mut fa = FlexAlgoConfig::new();
-        fa.exec(
-            "/router/isis/flex-algo/priority".into(),
-            args(&["128", "100"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        fa.commit();
-        assert!(fa.config.contains_key(&128));
-
-        fa.exec(
-            "/router/isis/flex-algo".into(),
-            args(&["128"]),
-            ConfigOp::Delete,
-        )
-        .unwrap();
-        fa.commit();
-        assert!(!fa.config.contains_key(&128));
     }
 
     #[test]
@@ -924,7 +571,7 @@ mod tests {
 
     #[test]
     fn sr_algorithms_lists_spf_plus_every_configured_algo() {
-        let mut fa = FlexAlgoConfig::new();
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
         // No flex-algos yet — should yield exactly Algo::Spf.
         assert_eq!(sr_algorithms(&fa), vec![Algo::Spf]);
 
@@ -950,7 +597,7 @@ mod tests {
 
     #[test]
     fn build_fad_subs_skips_entries_without_advertise_flag() {
-        let mut fa = FlexAlgoConfig::new();
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
         // Algo 128 — advertise-definition NOT set, so should be skipped.
         fa.exec(
             "/router/isis/flex-algo/priority".into(),
@@ -981,7 +628,7 @@ mod tests {
 
     #[test]
     fn build_fad_subs_emits_exclude_ag_and_srlg() {
-        let mut fa = FlexAlgoConfig::new();
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
         for (path, args_) in [
             (
                 "/router/isis/flex-algo/advertise-definition",
@@ -1047,7 +694,7 @@ mod tests {
 
     #[test]
     fn build_fad_subs_drops_unresolved_affinity_names() {
-        let mut fa = FlexAlgoConfig::new();
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
         fa.exec(
             "/router/isis/flex-algo/advertise-definition".into(),
             args(&["128", "true"]),
@@ -1069,19 +716,5 @@ mod tests {
         // No ExcludeAg sub-TLV emitted because the bitmap would be
         // empty — a 0-byte sub-TLV is meaningless on the wire.
         assert!(subs[0].subs.is_empty(), "got subs: {:?}", subs[0].subs);
-    }
-
-    #[test]
-    fn algo_outside_user_range_rejected() {
-        let mut fa = FlexAlgoConfig::new();
-        let err = fa
-            .exec(
-                "/router/isis/flex-algo/priority".into(),
-                args(&["127", "100"]),
-                ConfigOp::Set,
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("128..=255"), "unexpected err: {err}");
     }
 }

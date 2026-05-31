@@ -9,11 +9,13 @@
 //! module; only the pure data model and constraint logic live here.
 
 pub mod affinity_map;
+pub mod config;
 pub mod constraint;
 pub mod entry;
 pub mod srlg;
 
 pub use affinity_map::AffinityMap;
+pub use config::FlexAlgoConfig;
 pub use constraint::{AffinityBits, link_passes_fad, local_link_affinity};
 pub use entry::{FadMetricType, FlexAlgoEntry};
 pub use srlg::{SrlgGroup, SrlgGroupBuilder};
