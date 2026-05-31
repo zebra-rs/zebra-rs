@@ -26,6 +26,10 @@
 - [OSPFv2](ch-08-00-ospf.md)
   - [Configuration](ch-08-01-ospf-configuration.md)
 
+## Performance Measurement
+
+- [Link Delay Measurement (TWAMP Light / STAMP)](ch-09-00-twamp-stamp.md)
+
 ## SRv6
 
 - [SRv6](ch-04-00-srv6.md)
