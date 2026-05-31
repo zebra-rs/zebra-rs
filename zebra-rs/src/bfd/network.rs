@@ -32,7 +32,12 @@ pub struct WriteRequest {
 /// [`Message::Recv`]; the TTL floor (GTSM=255 single-hop, configured
 /// minimum multihop) is enforced after session demux in
 /// [`super::inst::Bfd::on_recv`], because the hop mode isn't known here.
-pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
+///
+/// `multihop` records which transport this reader serves — `false` for
+/// the single-hop port (3784) and `true` for the multihop port (4784) —
+/// and is stamped into every [`Message::Recv`] so the demux can refuse
+/// to drive a session of the wrong hop type.
+pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>, multihop: bool) {
     let mut buf = [0u8; 1500];
     let mut iov = [IoSliceMut::new(&mut buf)];
     let mut cmsgspace = nix::cmsg_space!(libc::in_pktinfo, libc::c_int);
@@ -87,6 +92,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                     dst: dst.map(IpAddr::V4),
                     ifindex,
                     ttl,
+                    multihop,
                 });
                 Ok(())
             })
@@ -145,8 +151,14 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
 /// (via `IPV6_RECVHOPLIMIT`) and ingress ifindex (via
 /// `IPV6_RECVPKTINFO`) and forwards survivors as [`Message::Recv`] with
 /// a v6 `src`. The Hop-Limit floor is enforced after demux in
-/// [`super::inst::Bfd::on_recv`], same as v4.
-pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
+/// [`super::inst::Bfd::on_recv`], same as v4. `multihop` records which
+/// transport this reader serves and is stamped into [`Message::Recv`]
+/// for hop-type-aware demux (see [`read_packet`]).
+pub async fn read_packet_v6(
+    sock: Arc<AsyncFd<Socket>>,
+    tx: UnboundedSender<Message>,
+    multihop: bool,
+) {
     let mut buf = [0u8; 1500];
     let mut iov = [IoSliceMut::new(&mut buf)];
     let mut cmsgspace = nix::cmsg_space!(libc::in6_pktinfo, libc::c_int);
@@ -203,6 +215,7 @@ pub async fn read_packet_v6(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                     dst: dst.map(IpAddr::V6),
                     ifindex,
                     ttl: hop_limit,
+                    multihop,
                 });
                 Ok(())
             })
@@ -318,7 +331,7 @@ mod tests {
     async fn loopback_recv_one_packet() {
         let (sock, port) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let read_handle = tokio::spawn(async move { read_packet(sock, tx).await });
+        let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
         let packet = ControlPacket {
             state: State::Down,
@@ -353,7 +366,7 @@ mod tests {
     async fn low_ttl_forwarded_for_demux_check() {
         let (sock, port) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let read_handle = tokio::spawn(async move { read_packet(sock, tx).await });
+        let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
         let packet = ControlPacket {
             state: State::Down,
@@ -384,7 +397,7 @@ mod tests {
     async fn loopback_recv_one_packet_v6() {
         let (sock, port) = loopback_recv_socket_v6();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let read_handle = tokio::spawn(async move { read_packet_v6(sock, tx).await });
+        let read_handle = tokio::spawn(async move { read_packet_v6(sock, tx, false).await });
 
         let packet = ControlPacket {
             state: State::Down,
@@ -421,7 +434,7 @@ mod tests {
     async fn parse_error_dropped() {
         let (sock, port) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let read_handle = tokio::spawn(async move { read_packet(sock, tx).await });
+        let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
         // A 24-byte buffer with version=1 but zero My Discriminator —
         // ControlPacket::parse rejects it (ZeroMyDisc).
