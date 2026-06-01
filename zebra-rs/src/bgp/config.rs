@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use bgp_packet::*;
 
 use crate::bfd::inst::ClientReq;
-use crate::bfd::session::{SessionKey, SessionParams};
+use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
 use crate::bfd::socket::{BFD_MULTI_HOP_PORT, BFD_MULTIHOP_DEFAULT_MIN_TTL, BFD_SINGLE_HOP_PORT};
 use crate::bgp::InOut;
 use crate::config::{Args, ConfigOp};
@@ -471,7 +471,11 @@ fn config_flowspec_validation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
 fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     let (enable, desired_key, params) = {
         let peer = bgp.peers.get(&addr)?;
-        let enable = peer.config.bfd.enable;
+        // Effective enable + Echo = the per-neighbor `bfd {}` merged over the
+        // instance-level `router bgp { bfd {} }` default (blanket enable +
+        // per-neighbor override). Hop-mode / min-ttl stay per-neighbor.
+        let eff = peer.config.bfd.resolve(&bgp.bfd);
+        let enable = eff.enable;
         let local = peer
             .config
             .transport
@@ -492,6 +496,17 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
             ifindex: 0,
             multihop,
         };
+        // Echo is single-hop only (RFC 5883 multihop has no Echo), so it's
+        // requested only for non-multihop neighbors; the BFD instance gates it
+        // further to IPv4 with a live reflector.
+        let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
+            Some(mode) if !multihop => (
+                mode,
+                eff.echo_receive_ms.saturating_mul(1000),
+                eff.echo_transmit_ms.saturating_mul(1000),
+            ),
+            _ => (crate::bfd::session::EchoMode::Off, 0, 0),
+        };
         let params = SessionParams {
             dst_port: if multihop {
                 BFD_MULTI_HOP_PORT
@@ -499,9 +514,12 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
                 BFD_SINGLE_HOP_PORT
             },
             min_ttl,
-            // Intervals / detect-mult still come from the defaults; the
-            // peer's `bfd profile` is stored but not yet resolved (a
-            // separate follow-up needing cross-task BfdConfig access).
+            echo_mode,
+            required_min_echo_rx_us: echo_rx_us,
+            echo_transmit_us: echo_tx_us,
+            // Detect-mult still comes from the defaults; the peer's `bfd
+            // profile` is stored but not yet resolved (a separate follow-up
+            // needing cross-task BfdConfig access).
             ..SessionParams::default()
         };
         (enable, key, params)
@@ -553,7 +571,9 @@ fn config_peer_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     let enable = args.boolean()?;
     {
         let peer = bgp.peers.get_mut(&addr)?;
-        peer.config.bfd.enable = op.is_set() && enable;
+        // `None` ⇒ inherit `router bgp { bfd { enable } }`; `Some(false)` opts
+        // this neighbor out of a blanket instance enable.
+        peer.config.bfd.enable = op.is_set().then_some(enable);
     }
     bfd_apply(bgp, addr)
 }
@@ -580,6 +600,107 @@ fn config_peer_bfd_min_ttl(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         peer.config.bfd.minimum_ttl = op.is_set().then_some(ttl);
     }
     bfd_apply(bgp, addr)
+}
+
+/// Parse the `{transmit|receive|both}` echo-mode enum (set) → `Some(mode)`, or
+/// `None` on delete. `None`/parse-failure on a malformed value.
+fn parse_bfd_echo_mode(value: &str, op: ConfigOp) -> Option<Option<EchoMode>> {
+    if !op.is_set() {
+        return Some(None);
+    }
+    match value {
+        "transmit" => Some(Some(EchoMode::Transmit)),
+        "receive" => Some(Some(EchoMode::Receive)),
+        "both" => Some(Some(EchoMode::Both)),
+        _ => None,
+    }
+}
+
+/// `set router bgp neighbor X bfd echo-mode <transmit|receive|both>` —
+/// per-neighbor Echo role. Single-hop only (inert on multihop sessions).
+fn config_peer_bfd_echo_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let value = args.string()?;
+    let mode = parse_bfd_echo_mode(&value, op)?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.echo_mode = mode;
+    }
+    bfd_apply(bgp, addr)
+}
+
+/// `set router bgp neighbor X bfd echo-transmit-interval <ms>`.
+fn config_peer_bfd_echo_tx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let interval = args.u32()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    }
+    bfd_apply(bgp, addr)
+}
+
+/// `set router bgp neighbor X bfd echo-receive-interval <ms>`.
+fn config_peer_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let interval = args.u32()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    }
+    bfd_apply(bgp, addr)
+}
+
+/// Re-reconcile BFD for every neighbor — used by the instance-level
+/// `router bgp { bfd {} }` callbacks, whose defaults (notably a blanket
+/// `enable`) affect neighbors that set nothing of their own. `bfd_apply` is a
+/// per-neighbor reconcile that diffs against the recorded session key, so this
+/// is just a fan-out.
+fn bfd_reconcile_all(bgp: &mut Bgp) {
+    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
+    for addr in addrs {
+        bfd_apply(bgp, addr);
+    }
+}
+
+// ---- instance-level `router bgp { bfd { ... } }` defaults -------------------
+
+/// `router bgp bfd enable <bool>` — blanket-enable BFD on every neighbor
+/// (a per-neighbor `bfd { enable false }` opts one out).
+fn config_bgp_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let enable = args.boolean()?;
+    bgp.bfd.enable = op.is_set().then_some(enable);
+    bfd_reconcile_all(bgp);
+    Some(())
+}
+
+/// `router bgp bfd profile <name>` — instance-default profile (stored only).
+fn config_bgp_bfd_profile(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let profile = args.string()?;
+    bgp.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// `router bgp bfd echo-mode <transmit|receive|both>` — instance default.
+fn config_bgp_bfd_echo_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = args.string()?;
+    bgp.bfd.echo_mode = parse_bfd_echo_mode(&value, op)?;
+    bfd_reconcile_all(bgp);
+    Some(())
+}
+
+/// `router bgp bfd echo-transmit-interval <ms>` — instance default.
+fn config_bgp_bfd_echo_tx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let interval = args.u32()?;
+    bgp.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `router bgp bfd echo-receive-interval <ms>` — instance default.
+fn config_bgp_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let interval = args.u32()?;
+    bgp.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    Some(())
 }
 
 /// Pick an unspecified local address whose family matches `remote`.
@@ -1826,6 +1947,21 @@ impl Bgp {
         self.callback_peer("/bfd/profile", config_peer_bfd_profile);
         self.callback_peer("/bfd/multihop", config_peer_bfd_multihop);
         self.callback_peer("/bfd/minimum-ttl", config_peer_bfd_min_ttl);
+        self.callback_peer("/bfd/echo-mode", config_peer_bfd_echo_mode);
+        self.callback_peer("/bfd/echo-transmit-interval", config_peer_bfd_echo_tx);
+        self.callback_peer("/bfd/echo-receive-interval", config_peer_bfd_echo_rx);
+        // Instance-level `router bgp { bfd { ... } }` defaults.
+        self.callback_add("/router/bgp/bfd/enable", config_bgp_bfd_enable);
+        self.callback_add("/router/bgp/bfd/profile", config_bgp_bfd_profile);
+        self.callback_add("/router/bgp/bfd/echo-mode", config_bgp_bfd_echo_mode);
+        self.callback_add(
+            "/router/bgp/bfd/echo-transmit-interval",
+            config_bgp_bfd_echo_tx,
+        );
+        self.callback_add(
+            "/router/bgp/bfd/echo-receive-interval",
+            config_bgp_bfd_echo_rx,
+        );
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
         self.callback_peer(
             "/tcp-ao/include-tcp-options",
@@ -2281,7 +2417,7 @@ mod bfd_wiring_tests {
             .peers
             .get(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)))
             .unwrap();
-        assert!(peer.config.bfd.enable, "config bit still flips");
+        assert_eq!(peer.config.bfd.enable, Some(true), "config bit still flips");
     }
 
     // -----------------------------------------------------------------

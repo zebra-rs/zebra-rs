@@ -215,10 +215,12 @@ all sessions on that link, and stopped when the last one goes away. It needs
 raw socket); the packaged install grants these. A node with no Echo configured
 runs no helper and advertises `Required Min Echo RX Interval = 0`.
 
-Echo is enabled per attachment — on OSPF and IS-IS interfaces, where `echo-mode`
-selects the role (`transmit` / `receive` / `both`) and
-`echo-transmit-interval` / `echo-receive-interval` set the rates; see
-[OSPF BFD](ch-08-02-ospf-bfd.md#echo) and [IS-IS BFD](ch-07-03-isis-bfd.md#echo).
+Echo is enabled per attachment — on OSPF and IS-IS interfaces, and on
+single-hop eBGP neighbours, where `echo-mode` selects the role
+(`transmit` / `receive` / `both`) and `echo-transmit-interval` /
+`echo-receive-interval` set the rates; see
+[OSPF BFD](ch-08-02-ospf-bfd.md#echo), [IS-IS BFD](ch-07-03-isis-bfd.md#echo),
+and [BGP BFD](ch-02-08-bgp-bfd.md#echo).
 `show bfd peers` reports the negotiated `Echo receive interval` /
 `Echo transmission interval`.
 
@@ -243,8 +245,10 @@ native timers would allow.
   originating our own, offloaded to the `xdp-bfd-echo` XDP/eBPF helper
   (see [Echo function](#echo-function) below), with per-role
   (`transmit` / `receive` / `both`) config and an instance-level
-  `router ospf { bfd {} }` default inherited and overridden per interface.
+  `router <proto> { bfd {} }` default inherited and overridden per
+  interface / neighbour. Echo is configurable on OSPF, IS-IS, and
+  single-hop eBGP (BGP echo is inert on multihop sessions — RFC 5883 has
+  no Echo).
 - **Not yet:** configurable control-packet timers (the intervals are
-  fixed at the defaults); Echo on BGP (OSPF + IS-IS today; BGP echo is
-  single-hop-only so it awaits a decision); BFD
-  for **static routes**; per-VRF OSPF BFD.
+  fixed at the defaults); BFD for **static routes**; per-VRF OSPF BFD;
+  BFD `profile` resolution (stored, not yet applied).

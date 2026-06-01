@@ -1,5 +1,5 @@
 use super::BgpAttrStore;
-use super::peer::{BgpTop, Event, fsm};
+use super::peer::{BgpTop, Event, PeerBfdConfig, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use crate::bgp::debug::BgpDebugFlags;
@@ -320,6 +320,10 @@ pub struct Bgp {
     /// emitted. See `Bgp::hostname()` for the resolution order.
     pub hostname: Option<String>,
     pub peers: PeerMap,
+    /// Instance-level BFD defaults (`router bgp { bfd {} }`), inherited by
+    /// every neighbor and overridden per neighbor (see
+    /// [`super::peer::PeerBfdConfig::resolve`]).
+    pub bfd: PeerBfdConfig,
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
@@ -614,6 +618,7 @@ impl Bgp {
             local_vxlans: BTreeMap::new(),
             hostname: None,
             peers: PeerMap::new(),
+            bfd: PeerBfdConfig::default(),
             tx,
             rx,
             local_rib: LocalRib::default(),

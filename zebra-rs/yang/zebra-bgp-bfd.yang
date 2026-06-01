@@ -27,89 +27,126 @@ module zebra-bgp-bfd {
     "https://github.com/zebra-rs";
 
   description
-    "FRR-style per-neighbor BFD attachment for BGP. Adds a flat
-     `bfd` container under each BGP neighbor:
+    "FRR-style BFD attachment for BGP. A flat `bfd` container appears
+     both at the BGP instance level (a default applied to every neighbor)
+     and under each neighbor (an override):
 
        router bgp {
+         bfd {
+           enable true;          // blanket-enable all neighbors
+           echo-mode receive;    // default Echo role
+         }
          neighbor 10.0.0.5 {
            remote-as 65501;
            bfd {
              enable true;
              profile FAST;
-             multihop true;     // eBGP-over-loopback; iBGP infers this
+             multihop true;       // eBGP-over-loopback; iBGP infers this
              minimum-ttl 250;
+             echo-mode both;      // override (single-hop neighbors only)
            }
          }
        }
 
-     PR 5b stores the per-neighbor BFD configuration on
-     `peer.config.bfd` (see `bgp::peer::PeerBfdConfig`). PR 5c wires
-     these leaves to the BFD client subscription API — when
-     `enable` flips to true, the BGP code path subscribes the
-     neighbor to BFD via the channel exposed by
-     `bfd::inst::Bfd::client_req_tx`; a transition to Down then
-     terminates the BGP session.";
+     The effective value of each `bfd` leaf is the per-neighbor setting if
+     present, else the instance default, else a hard default. `enable true`
+     at the instance level activates BFD on every neighbor (a per-neighbor
+     `enable false` opts one out). Echo is **single-hop only** (RFC 5883
+     multihop has no Echo), so `echo-mode` is inert on multihop sessions
+     (iBGP and multihop eBGP). Hop-mode (`multihop`) and `minimum-ttl` are
+     per-neighbor only.";
+
+  revision 2026-06-01 {
+    description
+      "Add instance-level `router bgp { bfd {} }` defaults with
+       per-neighbor override, and single-hop `echo-mode`
+       (transmit/receive/both) + echo-transmit/receive-interval.";
+    reference
+      "RFC 5880 §6.4 (Echo). FRR bfdd echo-mode; single-hop eBGP only.";
+  }
 
   revision 2026-05-31 {
     description
-      "Add `multihop` hop-mode override and multihop `minimum-ttl`.
-       Default hop mode is inferred from the BGP session (iBGP ⇒
-       multihop), matching FRR; the override covers eBGP-over-loopback
-       until a dedicated `ebgp-multihop` knob exists.";
+      "Add `multihop` hop-mode override and multihop `minimum-ttl`.";
     reference
-      "RFC 5883 (Multihop BFD). FRR `bfd` peer `multihop` / `minimum-ttl`.
-       Cisco IOS-XR `bfd multihop ttl-drop-threshold`.";
+      "RFC 5883 (Multihop BFD). FRR `bfd` peer `multihop` / `minimum-ttl`.";
   }
 
   revision 2026-05-19 {
     description "Initial revision (PR 5b — storage only).";
     reference
-      "FRR `neighbor X bfd` / `neighbor X bfd profile P`.
-       Cisco IOS-XR `neighbor X bfd fast-detect`.
-       RFC 5880, RFC 9314.";
+      "FRR `neighbor X bfd` / `neighbor X bfd profile P`. RFC 5880, RFC 9314.";
+  }
+
+  // Leaves shared by the instance-level and per-neighbor `bfd {}` containers.
+  // No YANG `default` (absent ⇒ inherit, then a hard default in code).
+  grouping bgp-bfd-common {
+    leaf enable {
+      ext:help "Activate BFD (omit to inherit the instance default)";
+      type boolean;
+      description
+        "Activate BFD. At the instance level, `true` blanket-enables BFD
+         on every neighbor; per neighbor it overrides that default, so
+         `false` opts a single neighbor out. Absent at both levels ⇒ off.";
+    }
+    leaf profile {
+      type string;
+      description
+        "Name of a `/bfd/profile` entry whose parameters apply to the
+         session. Stored; profile resolution is a shared follow-up.";
+    }
+    leaf echo-mode {
+      ext:help "BFD Echo role (transmit | receive | both)";
+      type enumeration {
+        enum transmit { description "Originate Echo only."; }
+        enum receive { description "Advertise + reflect only."; }
+        enum both { description "Both."; }
+      }
+      description
+        "Enable the BFD Echo function (RFC 5880 §6.4). **Single-hop only**
+         — RFC 5883 multihop has no Echo, so this is inert on multihop
+         sessions (iBGP / multihop eBGP). Single-hop IPv4 only. Overrides
+         the instance default; absent ⇒ inherit (Echo off if unset).";
+    }
+    leaf echo-transmit-interval {
+      ext:help "Echo transmit interval (ms)";
+      type uint32;
+      units "milliseconds";
+      description
+        "Rate we originate Echo at (echo-mode `transmit`/`both`). Hard
+         default 50 ms when unset at every level.";
+    }
+    leaf echo-receive-interval {
+      ext:help "Advertised Required Min Echo RX Interval (ms)";
+      type uint32;
+      units "milliseconds";
+      description
+        "Advertised Required Min Echo RX (echo-mode `receive`/`both`).
+         Hard default 50 ms when unset.";
+    }
   }
 
   grouping bgp-neighbor-bfd-extension {
     description
-      "FRR-style flat `bfd { ... }` block on a BGP neighbor.";
+      "FRR-style flat `bfd { ... }` block on a BGP neighbor — overrides the
+       instance-level `bfd {}` defaults, per leaf.";
 
     container bfd {
       ext:help "BFD attachment for this neighbor";
       description
-        "When `enable` is true, BGP attaches a BFD session to this
-         neighbor. The optional `profile` selects a named bundle of
-         session parameters defined under `/bfd/profile`; without a
-         profile, BFD's own defaults are used.";
-
-      leaf enable {
-        type boolean;
-        default false;
-        description
-          "Activates the BFD session for this neighbor. Disabling
-           (or removing the `bfd` block entirely) detaches the
-           session.";
-      }
-
-      leaf profile {
-        type string;
-        description
-          "Name of a `/bfd/profile` entry whose parameters apply
-           to this neighbor's BFD session. Leafref validation will
-           be added once libyang exposes cross-tree leafref
-           resolution.";
-      }
+        "Per-neighbor BFD. Each leaf overrides the BGP instance's `bfd {}`
+         default; an unset leaf inherits it.";
+      uses bgp-bfd-common;
 
       leaf multihop {
         ext:help "Force BFD hop mode for this neighbor";
         type boolean;
         description
-          "Explicit hop-mode override. When unset (the default), the
-           session is multihop iff the BGP session is iBGP, mirroring
-           FRR's `PEER_IS_MULTIHOP`. Set `true` for eBGP-over-loopback
-           (which neither vendor auto-detects without `ebgp-multihop`)
-           or `false` to force single-hop. Multihop uses UDP/4784 and a
-           relaxed TTL floor; single-hop uses UDP/3784 with GTSM
-           (TTL=255).";
+          "Explicit hop-mode override (per-neighbor only). When unset, the
+           session is multihop iff the BGP session is iBGP, mirroring FRR's
+           `PEER_IS_MULTIHOP`. Set `true` for eBGP-over-loopback or `false`
+           to force single-hop. Multihop uses UDP/4784 and a relaxed TTL
+           floor; single-hop uses UDP/3784 with GTSM (TTL=255).";
       }
 
       leaf minimum-ttl {
@@ -119,17 +156,41 @@ module zebra-bgp-bfd {
         }
         default 254;
         description
-          "Multihop only: minimum TTL accepted on incoming control
-           packets (RFC 5883). Ignored on single-hop sessions where
-           GTSM requires TTL=255 unconditionally. Equivalent to FRR's
-           `minimum-ttl` and IOS-XR's `bfd multihop ttl-drop-threshold`.";
+          "Multihop only (per-neighbor): minimum TTL accepted on incoming
+           control packets (RFC 5883). Ignored on single-hop sessions.";
       }
+    }
+  }
+
+  grouping bgp-router-bfd-extension {
+    description
+      "Instance-level BFD defaults for a BGP instance, inherited by every
+       neighbor and overridable per neighbor.";
+
+    container bfd {
+      ext:help "BFD defaults for this BGP instance";
+      description
+        "Defaults applied to every neighbor's BFD session. `enable true`
+         here blanket-enables BFD on all neighbors; a per-neighbor
+         `bfd { enable false }` opts one out. Every leaf is overridable per
+         neighbor. (Hop-mode / minimum-ttl are per-neighbor only.)";
+      uses bgp-bfd-common;
     }
   }
 
   /* =========================================================
    * Augments into the zebra-rs configure tree
    * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description "Instance-level BFD defaults for BGP (set).";
+    uses bgp-router-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description "Instance-level BFD defaults for BGP (delete).";
+    uses bgp-router-bfd-extension;
+  }
 
   augment "/configure:set/config:router"
         + "/bgp:bgp/bgp:neighbor" {
