@@ -137,6 +137,12 @@ pub struct Session {
     /// 0 even with `required_min_echo_rx_us` configured, so the non-zero
     /// advertisement stays an honest promise to actually loop Echo back.
     pub echo_ready: bool,
+    /// Whether we have told the helper to *originate* Echo for this session
+    /// (RFC 5880 §6.8.9: only while Up, the peer advertises a non-zero echo-rx,
+    /// and the session is single-hop IPv4). Tracked so the instance sends
+    /// `echo-add`/`echo-del` exactly on the edges; see
+    /// `Bfd::echo_originate_reconcile`.
+    pub echo_originating: bool,
 
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
@@ -196,6 +202,7 @@ impl Session {
             min_ttl: params.min_ttl,
             required_min_echo_rx_us: params.required_min_echo_rx_us,
             echo_ready: false,
+            echo_originating: false,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,

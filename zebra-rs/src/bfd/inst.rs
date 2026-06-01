@@ -155,6 +155,10 @@ pub enum Message {
     TxTick { key: SessionKey },
     /// Detection timer fired for `key`.
     DetectExpired { key: SessionKey },
+    /// The per-interface helper reported that our originated Echo for the
+    /// session with this local discriminator stopped returning (Echo detection
+    /// timeout). Drives the session Down with `EchoFunctionFailed`.
+    EchoDown { discr: u32 },
 }
 
 /// Lifecycle events emitted by the instance for clients (tests today,
@@ -294,11 +298,11 @@ impl Bfd {
             show_cb: HashMap::new(),
             client_req: ClientReqChannel::new(),
             subscribers: HashMap::new(),
-            main_tx,
+            main_tx: main_tx.clone(),
             write_tx,
             write_tx_v6,
             timer_handles: HashMap::new(),
-            reflectors: super::reflector::EchoReflectors::new(),
+            reflectors: super::reflector::EchoReflectors::new(main_tx),
         };
         bfd.callback_build();
         bfd.show_build();
@@ -448,6 +452,12 @@ impl Bfd {
             && !s.key.multihop
             && s.key.remote.is_ipv4()
         {
+            // Stop any originator first, while the helper is still alive — the
+            // release below may be the last reference and tear the child down.
+            if s.echo_originating {
+                self.reflectors
+                    .send_command(s.key.ifindex, format!("echo-del {}", s.local_disc));
+            }
             self.reflectors.release(s.key.ifindex);
         }
         removed
@@ -474,6 +484,7 @@ impl Bfd {
                         self.on_recv(packet, src, dst, ifindex, ttl, multihop),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
+                    Message::EchoDown { discr } => self.on_echo_down(discr),
                 },
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
@@ -607,6 +618,10 @@ impl Bfd {
         if let Some(change) = change {
             self.notify_state_change(key, change);
         }
+
+        // (Re)evaluate the §6.8.9 originate gate: a transition to/from Up, or a
+        // freshly-learned non-zero peer echo-rx, can start or stop our Echo.
+        self.echo_originate_reconcile(key);
     }
 
     /// Find an existing session that matches an incoming packet whose
@@ -685,6 +700,79 @@ impl Bfd {
         let change = session.handle_event(Event::DetectExpired);
         if let Some(change) = change {
             self.notify_state_change(key, change);
+        }
+    }
+
+    /// The per-interface helper reported that our originated Echo for the
+    /// session with local discriminator `discr` stopped returning (RFC 5880
+    /// §6.8.5). Drive the session Down with `EchoFunctionFailed`, then reconcile
+    /// the originator — the session is no longer Up, so we stop sending Echo.
+    fn on_echo_down(&mut self, discr: u32) {
+        let Some(key) = self.sessions.get_by_disc(discr).map(|s| s.key) else {
+            return;
+        };
+        let change = self
+            .sessions
+            .get_by_key_mut(&key)
+            .and_then(|s| s.handle_event(Event::EchoDetectExpired));
+        if let Some(change) = change {
+            self.notify_state_change(key, change);
+        }
+        self.echo_originate_reconcile(key);
+    }
+
+    /// RFC 5880 §6.8.9 — start or stop *originating* Echo for `key` based on the
+    /// session's current gate, emitting `echo-add`/`echo-del` to the
+    /// per-interface helper exactly on the edges (tracked by
+    /// [`Session::echo_originating`]).
+    ///
+    /// We originate only while the session is **Up**, the peer advertises a
+    /// non-zero Required Min Echo RX Interval (it will loop our Echo back), we
+    /// ourselves advertise a non-zero echo-rx (echo-mode is on), it is
+    /// single-hop, and both endpoints carry a concrete IPv4 address — the helper
+    /// builds a self-addressed L2 IPv4 frame and the forwarding plane hairpins
+    /// it. The transmit interval is the faster of the two echo-rx minimums but
+    /// never below the peer's floor; detection is `interval × detect_mult`.
+    fn echo_originate_reconcile(&mut self, key: SessionKey) {
+        let Some(s) = self.sessions.get_by_key(&key) else {
+            return;
+        };
+        // Echo is single-hop IPv4 only; `local` must be a concrete source the
+        // helper can stamp as src==dst on the self-addressed frame.
+        let v4 = match (s.key.local, s.key.remote) {
+            (IpAddr::V4(local), IpAddr::V4(peer)) if !s.key.multihop && !local.is_unspecified() => {
+                Some((local, peer))
+            }
+            _ => None,
+        };
+        let want = v4.is_some()
+            && s.local_state == bfd_packet::State::Up
+            && s.required_min_echo_rx_us > 0
+            && s.remote_min_echo_rx_us > 0;
+        if want == s.echo_originating {
+            return;
+        }
+        let ifindex = s.key.ifindex;
+        let discr = s.local_disc;
+        if want {
+            let (local, peer) = v4.expect("want implies a concrete IPv4 pair");
+            // §6.8.9: the interval MUST NOT be below the peer's advertised
+            // Required Min Echo RX Interval. Take the faster of the two mins.
+            let tx_us = s
+                .required_min_echo_rx_us
+                .max(s.remote_min_echo_rx_us)
+                .max(1);
+            let mult = s.detect_mult.max(1);
+            self.reflectors.send_command(
+                ifindex,
+                format!("echo-add {discr} {local} {peer} {tx_us} {mult}"),
+            );
+        } else {
+            self.reflectors
+                .send_command(ifindex, format!("echo-del {discr}"));
+        }
+        if let Some(s) = self.sessions.get_by_key_mut(&key) {
+            s.echo_originating = want;
         }
     }
 

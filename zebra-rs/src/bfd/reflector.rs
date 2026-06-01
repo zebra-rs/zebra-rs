@@ -18,8 +18,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use crate::context::Task;
+
+use super::inst::Message;
 
 /// Env override for the reflector binary path (mirrors vtypam's
 /// `ZEBRA_VTYPAM_BIN`). Falls back to the install locations.
@@ -37,6 +44,12 @@ struct Reflector {
     /// not-ready and keep advertising 0, which is honest.
     child: Option<Child>,
     ifname: String,
+    /// Queue for stdin command lines (`echo-add`/`echo-del`) to the child's IPC
+    /// task; `None` if the child didn't spawn or wasn't piped.
+    cmd_tx: Option<UnboundedSender<String>>,
+    /// IPC task: writes commands to the child's stdin and forwards its
+    /// `echo-down` events into the BFD event loop. Aborts when dropped.
+    _io: Option<Task<()>>,
 }
 
 impl Reflector {
@@ -68,20 +81,28 @@ pub struct EchoReflectors {
     by_ifindex: HashMap<u32, Reflector>,
     bin: PathBuf,
     mode: String,
-}
-
-impl Default for EchoReflectors {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Cloned into each child's IPC task to deliver `echo-down` into the BFD
+    /// event loop as [`Message::EchoDown`].
+    main_tx: UnboundedSender<Message>,
 }
 
 impl EchoReflectors {
-    pub fn new() -> Self {
+    pub fn new(main_tx: UnboundedSender<Message>) -> Self {
         Self {
             by_ifindex: HashMap::new(),
             bin: resolve_bin(),
             mode: std::env::var(MODE_ENV).unwrap_or_else(|_| "auto".to_string()),
+            main_tx,
+        }
+    }
+
+    /// Send a control line (`echo-add …` / `echo-del …`) to the helper on
+    /// `ifindex`. No-op if there's no running, piped child for it.
+    pub fn send_command(&self, ifindex: u32, line: String) {
+        if let Some(r) = self.by_ifindex.get(&ifindex)
+            && let Some(tx) = &r.cmd_tx
+        {
+            let _ = tx.send(line);
         }
     }
 
@@ -136,37 +157,111 @@ impl EchoReflectors {
                 refcount: 1,
                 child: None,
                 ifname: String::new(),
+                cmd_tx: None,
+                _io: None,
             };
         };
-        let child = match Command::new(&self.bin)
+        match Command::new(&self.bin)
             .arg("-i")
             .arg(&ifname)
             .arg("-m")
             .arg(&self.mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
         {
-            Ok(child) => {
+            Ok(mut child) => {
                 tracing::info!(
                     "bfd echo: spawned reflector on {ifname} (ifindex {ifindex}, mode {})",
                     self.mode
                 );
-                Some(child)
+                // Wire the originator IPC: a task drains command lines to the
+                // child's stdin and forwards its `echo-down` events to the loop.
+                let (cmd_tx, io) = match (child.stdin.take(), child.stdout.take()) {
+                    (Some(stdin), Some(stdout)) => {
+                        let (tx, rx) = mpsc::unbounded_channel::<String>();
+                        let task = Task::spawn(child_io(
+                            ifname.clone(),
+                            stdin,
+                            stdout,
+                            rx,
+                            self.main_tx.clone(),
+                        ));
+                        (Some(tx), Some(task))
+                    }
+                    _ => (None, None),
+                };
+                Reflector {
+                    refcount: 1,
+                    child: Some(child),
+                    ifname,
+                    cmd_tx,
+                    _io: io,
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     "bfd echo: failed to spawn {} on {ifname}: {e}",
                     self.bin.display()
                 );
-                None
+                Reflector {
+                    refcount: 1,
+                    child: None,
+                    ifname,
+                    cmd_tx: None,
+                    _io: None,
+                }
             }
-        };
-        Reflector {
-            refcount: 1,
-            child,
-            ifname,
         }
     }
+}
+
+/// Per-child IPC task: forwards `echo-down <discr>` from the helper's stdout
+/// into the event loop, and writes queued command lines to its stdin. Ends when
+/// the child's stdout closes (child gone) or the command sender is dropped
+/// (reflector released).
+async fn child_io(
+    ifname: String,
+    mut stdin: ChildStdin,
+    stdout: ChildStdout,
+    mut cmd_rx: UnboundedReceiver<String>,
+    main_tx: UnboundedSender<Message>,
+) {
+    let mut lines = BufReader::new(stdout).lines();
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(l)) => {
+                    if let Some(discr) = parse_echo_down(&l) {
+                        let _ = main_tx.send(Message::EchoDown { discr });
+                    }
+                }
+                _ => break,
+            },
+            cmd = cmd_rx.recv() => match cmd {
+                Some(c) => {
+                    if stdin.write_all(c.as_bytes()).await.is_err()
+                        || stdin.write_all(b"\n").await.is_err()
+                        || stdin.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    tracing::debug!("bfd echo: IPC task for {ifname} ended");
+}
+
+/// Parse a `echo-down <discr>` event line from the helper.
+fn parse_echo_down(line: &str) -> Option<u32> {
+    let mut it = line.split_whitespace();
+    if it.next() != Some("echo-down") {
+        return None;
+    }
+    it.next()?.parse().ok()
 }
 
 /// Resolve the reflector binary path: `$ZEBRA_BFD_REFLECTOR_BIN`, else the dev
@@ -206,7 +301,8 @@ mod tests {
 
     #[test]
     fn acquire_release_refcounts_per_ifindex() {
-        let mut r = EchoReflectors::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut r = EchoReflectors::new(tx);
         assert!(!r.by_ifindex.contains_key(&NO_SUCH_IFINDEX));
 
         r.acquire(NO_SUCH_IFINDEX);
@@ -227,7 +323,8 @@ mod tests {
 
     #[test]
     fn release_unknown_ifindex_is_noop() {
-        let mut r = EchoReflectors::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut r = EchoReflectors::new(tx);
         r.release(12345); // must not panic / underflow
         assert!(r.by_ifindex.is_empty());
     }
@@ -236,7 +333,8 @@ mod tests {
     fn bin_env_override_is_honoured() {
         // SAFETY: single-threaded test; set then read immediately.
         unsafe { std::env::set_var(BIN_ENV, "/opt/custom/bfd-echo-reflector") };
-        let r = EchoReflectors::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let r = EchoReflectors::new(tx);
         unsafe { std::env::remove_var(BIN_ENV) };
         assert_eq!(r.bin, PathBuf::from("/opt/custom/bfd-echo-reflector"));
     }
