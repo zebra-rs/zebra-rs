@@ -70,6 +70,14 @@ impl Ospf {
             config_ospf_interface_bfd_min_neighbor_state,
         );
         self.ospf_add(
+            "/area/interface/bfd/echo-mode",
+            config_ospf_interface_bfd_echo_mode,
+        );
+        self.ospf_add(
+            "/area/interface/bfd/echo-interval",
+            config_ospf_interface_bfd_echo_interval,
+        );
+        self.ospf_add(
             "/area/interface/network-type",
             config_ospf_interface_network_type,
         );
@@ -722,6 +730,48 @@ pub(super) fn config_ospf_interface_bfd_profile<V: OspfVersion>(
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
     link.config.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// `interface <if> bfd echo-mode <bool>` — advertise a non-zero Required
+/// Min Echo RX so the peer may run BFD Echo against us (single-hop, IPv4).
+/// Reconciles the link, though the value takes effect when the session is
+/// (re)established (matching how the other BFD params apply).
+pub(super) fn config_ospf_interface_bfd_echo_mode<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let echo = args.boolean()?;
+
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        link.config.bfd.echo_mode = op.is_set() && echo;
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
+    Some(())
+}
+
+/// `interface <if> bfd echo-interval <ms>` — advertised Required Min Echo
+/// RX Interval. Stored; applied when the session is (re)established.
+pub(super) fn config_ospf_interface_bfd_echo_interval<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let interval = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.bfd.echo_interval_ms = if op.is_set() {
+        interval
+    } else {
+        crate::ospf::link::DEFAULT_ECHO_INTERVAL_MS
+    };
     Some(())
 }
 

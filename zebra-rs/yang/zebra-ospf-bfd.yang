@@ -106,6 +106,30 @@ module zebra-ospf-bfd {
            torn down. Identical on point-to-point links, where the
            neighbor goes straight to Full.";
       }
+
+      leaf echo-mode {
+        ext:help "Advertise a non-zero Required Min Echo RX (BFD Echo)";
+        type boolean;
+        default false;
+        description
+          "When true, advertise a non-zero `Required Min Echo RX
+           Interval` on this interface's single-hop sessions so a peer
+           may run the BFD Echo function against us. zebra-rs honours
+           the promise with an XDP reflector that loops UDP/3785 frames
+           back (RFC 5880 §6.4 / RFC 5881 §4). Single-hop IPv4 only:
+           honoured for OSPFv2, accepted but inert for OSPFv3 (IPv6).
+           We do not transmit Echo ourselves (responder side only).";
+      }
+
+      leaf echo-interval {
+        ext:help "Advertised Required Min Echo RX Interval (ms)";
+        type uint32;
+        units "milliseconds";
+        default 50;
+        description
+          "Value advertised as `Required Min Echo RX Interval` when
+           `echo-mode` is true (FRR default 50 ms).";
+      }
     }
   }
 

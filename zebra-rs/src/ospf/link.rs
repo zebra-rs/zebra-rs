@@ -208,11 +208,33 @@ impl NbrStateThreshold {
 /// min-neighbor-state }` (zebra-ospf-bfd.yang). Shared by v2 and v3.
 /// `enable` / `min-neighbor-state` flips drive Subscribe / Unsubscribe
 /// against the BFD instance via `Ospf::bfd_reconcile_link`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// FRR default advertised Required Min Echo RX Interval (milliseconds).
+pub const DEFAULT_ECHO_INTERVAL_MS: u32 = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OspfLinkBfdConfig {
     pub enable: bool,
     pub profile: Option<String>,
     pub min_neighbor_state: NbrStateThreshold,
+    /// FRR `echo-mode`: advertise a non-zero Required Min Echo RX so a peer
+    /// may run BFD Echo against us (single-hop, IPv4 — backed by the XDP
+    /// reflector). Off by default; honoured for OSPFv2, inert for v3 (IPv6).
+    pub echo_mode: bool,
+    /// Advertised Required Min Echo RX Interval (milliseconds). Only
+    /// meaningful when `echo_mode` is set.
+    pub echo_interval_ms: u32,
+}
+
+impl Default for OspfLinkBfdConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            profile: None,
+            min_neighbor_state: NbrStateThreshold::default(),
+            echo_mode: false,
+            echo_interval_ms: DEFAULT_ECHO_INTERVAL_MS,
+        }
+    }
 }
 
 /// OSPFv2 per-interface authentication mode.

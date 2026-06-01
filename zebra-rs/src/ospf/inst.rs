@@ -360,6 +360,18 @@ impl<V: OspfVersion> Ospf<V> {
     /// `profile` is stored but not yet applied (the session uses
     /// `SessionParams::default()`, matching BGP / IS-IS).
     fn bfd_reconcile_nbr(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
+        // Configured Echo (advertised Required Min Echo RX) for this link,
+        // captured alongside the desired key. Only requested when echo-mode is
+        // on; the BFD instance further gates it to single-hop IPv4 with a live
+        // reflector, so this is inert for OSPFv3 (IPv6).
+        let echo_rx_us = self
+            .links
+            .get(&ifindex)
+            .map(|l| &l.config.bfd)
+            .filter(|bfd| bfd.echo_mode)
+            .map(|bfd| bfd.echo_interval_ms.saturating_mul(1000))
+            .unwrap_or(0);
+
         let desired = {
             let Some(link) = self.links.get(&ifindex) else {
                 return;
@@ -405,10 +417,14 @@ impl<V: OspfVersion> Ospf<V> {
             });
         }
         if let Some(key) = desired {
+            let params = crate::bfd::session::SessionParams {
+                required_min_echo_rx_us: echo_rx_us,
+                ..crate::bfd::session::SessionParams::default()
+            };
             let _ = client_tx.send(crate::bfd::inst::ClientReq::Subscribe {
                 client: V::PROTO.to_string(),
                 key,
-                params: crate::bfd::session::SessionParams::default(),
+                params,
                 notifier: self.bfd_event_tx.clone(),
             });
         }

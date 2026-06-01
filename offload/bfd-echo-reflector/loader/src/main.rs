@@ -98,8 +98,16 @@ async fn main() -> anyhow::Result<()> {
         },
     }
 
-    info!("reflecting BFD Echo (udp/3785) on {iface}; press Ctrl-C to exit");
-    signal::ctrl_c().await?;
+    info!("reflecting BFD Echo (udp/3785) on {iface}; Ctrl-C or SIGTERM to exit");
+    // Wait for SIGINT (Ctrl-C) or SIGTERM. zebra-rs's reflector supervisor
+    // stops children with SIGTERM; handling it lets the XDP program detach
+    // cleanly on the way out (the link drops when `ebpf` does) instead of
+    // being left attached by an un-caught signal.
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = signal::ctrl_c() => {}
+        _ = sigterm.recv() => {}
+    }
     info!("exiting; detaching XDP program");
     Ok(())
 }

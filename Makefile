@@ -10,6 +10,15 @@ all:
 console:
 	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
 
+# Optional: build the XDP BFD Echo reflector (offload/). Requires a nightly
+# bpfel toolchain + bpf-linker (see offload/bfd-echo-reflector/README.md), so it
+# is kept OUT of `all`/CI, which run on stable. zebra-rs spawns this binary to
+# honour a non-zero BFD `Required Min Echo RX Interval`.
+.PHONY: bfd-echo-reflector
+bfd-echo-reflector:
+	cd offload/bfd-echo-reflector && cargo build --release
+	@echo '[built offload/bfd-echo-reflector/target/release/bfd-echo-reflector]'
+
 install:
 	mkdir -p ${HOME}/.zebra/bin
 	mkdir -p ${HOME}/.zebra/yang
@@ -22,6 +31,10 @@ ifneq ("$(wildcard target/release/vtypam)","")
 endif
 ifneq ("$(wildcard vty/vty)","")
 	cp vty/vty ${HOME}/.zebra/bin
+endif
+ifneq ("$(wildcard offload/bfd-echo-reflector/target/release/bfd-echo-reflector)","")
+	cp offload/bfd-echo-reflector/target/release/bfd-echo-reflector ${HOME}/.zebra/bin
+	@echo '[bfd-echo-reflector installed — grant caps with: sudo setcap cap_net_admin,cap_bpf=ep $${HOME}/.zebra/bin/bfd-echo-reflector]'
 endif
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/zebra.conf
@@ -36,6 +49,16 @@ install-vtypam:
 	sudo setcap cap_dac_read_search,cap_audit_write=ep /usr/sbin/vtypam
 	@echo '[vtypam installed to /usr/sbin/vtypam with file caps]'
 	@echo '[Copy etc/pam.d/zebra-rs.example to /etc/pam.d/zebra-rs and adjust for your distro]'
+
+# System-wide installation of the XDP BFD Echo reflector to /usr/sbin with the
+# caps it needs to load/attach XDP (kernel 5.8+: cap_bpf, plus cap_net_admin).
+# zebra-rs spawns it from /usr/sbin/bfd-echo-reflector (override with
+# $ZEBRA_BFD_REFLECTOR_BIN). Build it first with `make bfd-echo-reflector`.
+.PHONY: install-bfd-echo-reflector
+install-bfd-echo-reflector:
+	sudo install -m 0755 -o root -g root offload/bfd-echo-reflector/target/release/bfd-echo-reflector /usr/sbin/bfd-echo-reflector
+	sudo setcap cap_net_admin,cap_bpf=ep /usr/sbin/bfd-echo-reflector
+	@echo '[bfd-echo-reflector installed to /usr/sbin with file caps]'
 
 doc:
 	rustdoc
