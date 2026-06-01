@@ -31,7 +31,10 @@ automatically with `router bgp`.
 | `enable` | boolean | `false` | Attach (or, on `false` / delete, detach) a BFD session for this neighbour. |
 | `multihop` | boolean | *inferred* | Force the hop mode. Unset ⇒ inferred (see below). |
 | `minimum-ttl` | 1–254 | 254 | Multi-hop only: lowest accepted received TTL (RFC 5883). Ignored single-hop. |
-| `profile` | string | — | Named `/bfd/profile` to apply. *Stored but not yet applied — see the overview.* |
+
+Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
+timers are not currently tunable — see
+[Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
 
 ## Single-hop vs multi-hop — inferred by default
 
@@ -65,12 +68,15 @@ router bgp {
 
 The session's local address is taken from the neighbour's
 `update-source` (falling back to an unspecified address of the right
-family); there is no separate BFD source knob.
+family); there is no separate BFD source knob. This is the address the
+BFD control packets are actually sourced from, and the one `show bfd
+peers` reports as `Local address`. Changing `update-source` on a
+BFD-enabled neighbour rebuilds the session with the new source.
 
 ## Verifying
 
 ```
-show bfd peer 10.0.0.2
+show bfd peers 10.0.0.2
 ```
 
 A multi-hop session shows `(multihop)` and its `Minimum TTL`; a

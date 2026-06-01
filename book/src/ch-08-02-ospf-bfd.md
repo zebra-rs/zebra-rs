@@ -33,7 +33,10 @@ automatically with `router ospf` / `router ospfv3`.
 |---|---|---|---|
 | `enable` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
 | `min-neighbor-state` | `two-way` \| `full` | `two-way` | Neighbour state at which the session starts / stops. |
-| `profile` | string | — | Named `/bfd/profile` to apply. *Stored but not yet applied — see the overview.* |
+
+Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
+timers are not currently tunable — see
+[Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
 
 ## The `min-neighbor-state` trigger
 
@@ -76,7 +79,7 @@ not collide.
 
 ```
 show bfd
-show bfd peer <neighbor-address>
+show bfd peers <neighbor-address>
 ```
 
 If a session stays `Down` with a remote discriminator of `0x0`, confirm
