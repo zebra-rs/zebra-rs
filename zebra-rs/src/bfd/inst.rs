@@ -5,12 +5,9 @@ use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::{
-    Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
-};
+use crate::config::{Args, ConfigChannel, DisplayRequest, ShowChannel, path_from_command};
 use crate::context::{ProtoContext, Task};
 
-use super::config::{BfdConfig, Callback};
 use super::fsm::Event;
 use super::network::{WriteRequest, read_packet, read_packet_v6, write_packet, write_packet_v6};
 use super::session::{Session, SessionKey, SessionParams, SessionTable, StateChange};
@@ -29,13 +26,12 @@ pub type ClientId = String;
 pub type ShowCallback = fn(&Bfd, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// Top-level BFD instance. Owns the IPv4 single-hop UDP socket, the
-/// session table, the committed YANG config mirror, a per-session
-/// timer handle map, and the client-subscription registry. Read and
-/// write tasks are tokio-spawned at construction and feed the event
-/// loop via `main_tx` / `write_tx`. The config-manager subscription
-/// drains through `cm.rx`, and external clients (BGP / OSPF / IS-IS
-/// / static) submit subscribe/unsubscribe requests through
-/// `client_req.rx`.
+/// session table, a per-session timer handle map, and the
+/// client-subscription registry. Read and write tasks are tokio-spawned
+/// at construction and feed the event loop via `main_tx` / `write_tx`.
+/// BFD has no config of its own; the config-manager subscription is just
+/// drained through `cm.rx`, and external clients (BGP / OSPF / IS-IS /
+/// static) submit subscribe/unsubscribe requests through `client_req.rx`.
 pub struct Bfd {
     pub rx: UnboundedReceiver<Message>,
     pub sessions: SessionTable,
@@ -43,14 +39,10 @@ pub struct Bfd {
     /// that bind to ephemeral ports — `local_addr.port()` reveals the
     /// kernel-chosen value so the peer can be told where to send.
     pub local_addr: SocketAddrV4,
-    /// In-memory mirror of `container bfd` from the committed config.
-    /// Populated by per-leaf callbacks registered in
-    /// [`Bfd::callback_build`].
-    pub config: BfdConfig,
-    /// Callback table — path → handler — used by [`Self::process_cm_msg`].
-    pub callbacks: HashMap<String, Callback>,
-    /// Config-manager subscription endpoints (the receive half drains
-    /// in the event loop).
+    /// Config-manager subscription endpoints. BFD has no config of its own,
+    /// but it registers as a config client (so the manager can tell it is
+    /// already running and avoid a double-spawn); the receive half is just
+    /// drained in the event loop.
     pub cm: ConfigChannel,
     /// `show bfd ...` subscription endpoints. The receive half drains
     /// in the event loop and dispatches through [`Self::show_cb`].
@@ -291,8 +283,6 @@ impl Bfd {
             rx,
             sessions: SessionTable::new(),
             local_addr,
-            config: BfdConfig::default(),
-            callbacks: HashMap::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -304,7 +294,6 @@ impl Bfd {
             timer_handles: HashMap::new(),
             reflectors: super::reflector::EchoReflectors::new(main_tx),
         };
-        bfd.callback_build();
         bfd.show_build();
         Ok(bfd)
     }
@@ -383,15 +372,6 @@ impl Bfd {
         if now_empty {
             self.subscribers.remove(key);
             self.remove_session(key);
-        }
-    }
-
-    /// Dispatch a single committed config request through the
-    /// per-leaf callback table.
-    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-        if let Some(f) = self.callbacks.get(&path).copied() {
-            f(self, args, msg.op);
         }
     }
 
@@ -486,9 +466,10 @@ impl Bfd {
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
                 },
-                Some(msg) = self.cm.rx.recv() => {
-                    self.process_cm_msg(msg);
-                }
+                // BFD has no config of its own — just drain the commit
+                // broadcasts so the channel doesn't back up (we register as a
+                // config client only so the manager knows BFD is running).
+                Some(_) = self.cm.rx.recv() => {}
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
