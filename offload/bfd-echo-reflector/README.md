@@ -62,7 +62,7 @@ This tree is **excluded** from the top-level zebra-rs workspace
 
 ## Prerequisites (one-time)
 
-Kernel 5.x+ with XDP (this lab is 6.8 — fine). Then:
+Kernel 5.x and upper with XDP. Then:
 
 ```sh
 # 1. nightly toolchain with rust-src (aya-build invokes `rustup run nightly … -Z build-std=core`)
