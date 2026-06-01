@@ -396,11 +396,17 @@ impl Bfd {
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
-        // Echo is single-hop only; a non-zero advertised echo-rx is a promise
-        // to loop Echo back, so bring up the per-interface XDP reflector. The
-        // advertise path stays honest by gating on `reflectors.is_ready`.
-        if params.required_min_echo_rx_us > 0 && !key.multihop {
+        // Echo is single-hop + IPv4 only (the XDP reflector loops IPv4). A
+        // non-zero advertised echo-rx is a promise to loop Echo back, so bring
+        // up the per-interface reflector and only mark the session `echo_ready`
+        // (the build_packet advertise gate) once the child is confirmed up —
+        // otherwise we keep advertising 0, which is honest.
+        if params.required_min_echo_rx_us > 0 && !key.multihop && key.remote.is_ipv4() {
             self.reflectors.acquire(key.ifindex);
+            let ready = self.reflectors.is_ready(key.ifindex);
+            if ready && let Some(s) = self.sessions.get_by_key_mut(&key) {
+                s.echo_ready = true;
+            }
         }
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -434,11 +440,13 @@ impl Bfd {
             let _ = h.cmd_tx.send(TimerCmd::Shutdown);
         }
         let removed = self.sessions.remove(key);
-        // Mirror the `add_session` acquire: drop this interface's reflector
-        // reference when an echo session goes away.
+        // Mirror the `add_session` acquire predicate exactly (the configured
+        // `required_min_echo_rx_us` is never mutated, so this stays symmetric
+        // even when the session ended up advertising 0).
         if let Some(s) = &removed
             && s.required_min_echo_rx_us > 0
             && !s.key.multihop
+            && s.key.remote.is_ipv4()
         {
             self.reflectors.release(s.key.ifindex);
         }

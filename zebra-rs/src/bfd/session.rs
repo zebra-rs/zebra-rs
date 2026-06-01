@@ -127,11 +127,16 @@ pub struct Session {
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
 
-    /// `bfd.RequiredMinEchoRxInterval` (microseconds) we advertise. Zero
-    /// means "do not send me Echo" (RFC 5880 §6.8.1). Only ever non-zero
-    /// on single-hop sessions whose interface has the Echo reflector
-    /// active; gated again on `!key.multihop` in [`Self::build_packet`].
+    /// Configured `bfd.RequiredMinEchoRxInterval` (microseconds). Zero means
+    /// "do not send me Echo" (RFC 5880 §6.8.1). Set from `SessionParams` at
+    /// creation and never mutated, so it also drives the symmetric reflector
+    /// acquire/release in the instance.
     pub required_min_echo_rx_us: u32,
+    /// Whether the per-interface XDP Echo reflector is confirmed up. The
+    /// instance sets this once the child has spawned; until then we advertise
+    /// 0 even with `required_min_echo_rx_us` configured, so the non-zero
+    /// advertisement stays an honest promise to actually loop Echo back.
+    pub echo_ready: bool,
 
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
@@ -190,6 +195,7 @@ impl Session {
             dst_port: params.dst_port,
             min_ttl: params.min_ttl,
             required_min_echo_rx_us: params.required_min_echo_rx_us,
+            echo_ready: false,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
@@ -321,14 +327,18 @@ impl Session {
             // including the §6.8.3 slow-TX clamp while not Up.
             desired_min_tx_interval: self.effective_desired_min_tx_us(),
             required_min_rx_interval: self.required_min_rx_us,
-            // Echo is single-hop only (RFC 5881 §4; RFC 5883 multihop has
-            // no Echo), so never advertise a non-zero value on a multihop
-            // session. Otherwise advertise our configured value, which is
-            // only non-zero once the reflector is looping on this iface.
-            required_min_echo_rx_interval: if self.key.multihop {
-                0
-            } else {
+            // Advertise a non-zero echo-rx only when ALL hold: Echo is
+            // single-hop (RFC 5881 §4; RFC 5883 multihop has no Echo); the
+            // session is IPv4 (our XDP reflector loops IPv4 only); and the
+            // reflector is confirmed up (`echo_ready`) so the advertisement is
+            // an honest promise to loop Echo back.
+            required_min_echo_rx_interval: if self.echo_ready
+                && !self.key.multihop
+                && self.key.remote.is_ipv4()
+            {
                 self.required_min_echo_rx_us
+            } else {
+                0
             },
             demand: self.demand,
             poll: self.poll,
@@ -760,20 +770,25 @@ mod tests {
         assert!(s.poll, "fast→slow change opens a Poll Sequence");
     }
 
-    /// A single-hop session advertises its configured Required Min Echo
-    /// RX Interval verbatim (RFC 5880 §6.8.1 / RFC 5881 §4).
+    /// A single-hop IPv4 session advertises its configured Required Min Echo
+    /// RX Interval, but only once the reflector is ready (RFC 5880 §6.8.1 /
+    /// RFC 5881 §4): before then it advertises 0 (honest — no responder yet).
     #[test]
-    fn echo_rx_advertised_for_single_hop() {
+    fn echo_rx_advertised_only_when_ready() {
         let mut t = SessionTable::new();
         let d = t.insert(
-            key(1, 2), // key() is single-hop (multihop: false)
+            key(1, 2), // key() is single-hop (multihop: false), IPv4
             SessionParams {
                 required_min_echo_rx_us: 50_000,
                 ..SessionParams::default()
             },
         );
-        let s = t.get_by_disc(d).unwrap();
+        let s = t.get_by_disc_mut(d).unwrap();
         assert!(!s.key.multihop);
+        // Reflector not up yet → advertise 0 even though it is configured.
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 0);
+        // Instance confirms the reflector → advertise the configured value.
+        s.echo_ready = true;
         assert_eq!(s.build_packet().required_min_echo_rx_interval, 50_000);
     }
 
