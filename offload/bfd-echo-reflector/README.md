@@ -133,6 +133,77 @@ it even decodes as `BFD, Echo`), and the reflector logs `BFD Echo udp/3785
 reflected (XDP_TX)`. `XDP_TX` re-transmits out the same interface, i.e. toward
 the peer end, so the sender sees the bounce.
 
+## Interoperability: FRR ↔ zebra-rs
+
+zebra-rs is responder-only, so the *originator* is a peer that runs the Echo
+function — here FRR with `echo-mode`. FRR sends Echo to UDP/3785, the zebra-rs
+XDP reflector loops it back as a forwarding hop, and FRR's Echo detection rides
+on it (BFD/OSPF stays Up; FRR then slows its control packets). zebra-rs needs no
+manual run — its BFD instance spawns the reflector once the Echo session is up.
+
+**FRR** — `192.168.10.2` (originates Echo via the `echo-on` profile):
+
+```
+!
+interface enp0s6
+ ip address 192.168.10.2/24
+ ip ospf bfd
+ ip ospf bfd profile echo-on
+!
+router ospf
+ network 192.168.10.0/24 area 0
+!
+bfd
+ profile echo-on
+  echo-mode
+ exit
+ !
+exit
+!
+```
+
+**zebra-rs** — `192.168.10.1` (reflects via XDP; `echo-mode true` advertises a
+non-zero Required Min Echo RX):
+
+```
+interface enp0s6 {
+  ipv4 {
+    address 192.168.10.1/24;
+  }
+}
+router {
+  ospf {
+    area 0 {
+      interface enp0s6 {
+        bfd {
+          echo-mode true;
+          enable true;
+        }
+        enable true;
+      }
+    }
+  }
+}
+```
+
+**Confirmation** (`tcpdump` on FRR; `00:1c:42:e8:0c:23` = FRR, `00:1c:42:45:b2:35`
+= zebra-rs):
+
+```
+$ sudo tcpdump -nei enp0s6 udp port 3785
+02:40:49.382278 00:1c:42:e8:0c:23 > 00:1c:42:45:b2:35, ethertype IPv4 (0x0800), length 66: 192.168.10.2.3785 > 192.168.10.2.3785: BFD, Echo, length: 24
+02:40:49.382520 00:1c:42:45:b2:35 > 00:1c:42:e8:0c:23, ethertype IPv4 (0x0800), length 66: 192.168.10.2.3785 > 192.168.10.2.3785: BFD, Echo, length: 24
+02:40:49.422078 00:1c:42:e8:0c:23 > 00:1c:42:45:b2:35, ethertype IPv4 (0x0800), length 66: 192.168.10.2.3785 > 192.168.10.2.3785: BFD, Echo, length: 24
+02:40:49.422285 00:1c:42:45:b2:35 > 00:1c:42:e8:0c:23, ethertype IPv4 (0x0800), length 66: 192.168.10.2.3785 > 192.168.10.2.3785: BFD, Echo, length: 24
+```
+
+Each pair is FRR's Echo out (`e8:0c:23 → 45:b2:35`) and the reflector's return
+~0.2 ms later with the MACs **swapped** (`45:b2:35 → e8:0c:23`). The
+self-addressed `192.168.10.2 → 192.168.10.2` is normal BFD Echo — the looping
+system never parses it, it just hairpins it. (Not shown: the TTL drops 255 → 254
+on the return — add `-v` to see it; FRR drops any other TTL.) On zebra-rs,
+`show bfd peers` then reports `Echo receive interval: 50ms`.
+
 ## Limitations / follow-ups
 
 - **IPv4 only** (EtherType 0x0800). IPv6 (0x86DD) is a follow-up.
