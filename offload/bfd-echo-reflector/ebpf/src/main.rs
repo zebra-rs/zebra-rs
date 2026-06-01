@@ -18,9 +18,27 @@
 //! IPv4 UDP/3785 frame is `XDP_PASS`ed, so normal traffic — including BFD
 //! *control* on UDP/3784 — is untouched.
 //!
+//! When zebra-rs also *originates* Echo on this interface, the loader fills the
+//! `OUR_LOCAL_IPS` map; an inbound Echo whose source is one of our own addresses
+//! is our frame returning (looped by the peer), so it is passed up to the
+//! sender's detector instead of being reflected.
+//!
 //! First slice: IPv4 only. IPv6 (EtherType 0x86DD) is a follow-up.
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{
+    bindings::xdp_action,
+    macros::{map, xdp},
+    maps::HashMap,
+    programs::XdpContext,
+};
+
+/// Local IPv4 addresses (big-endian numeric, as read off the wire) of sessions
+/// for which *we* originate Echo. The userspace loader fills this. An inbound
+/// Echo whose source is one of these is **our own** Echo looped back by the
+/// peer — it must NOT be re-reflected (that would loop forever); it's passed up
+/// so the sender's detector sees it. Empty in pure-responder deployments.
+#[map]
+static OUR_LOCAL_IPS: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
 
 /// Ethernet II header layout.
 const ETH_HLEN: usize = 14;
@@ -36,6 +54,7 @@ const IP_VER_IHL_OFF: usize = IP_OFF; // u8: high nibble = version, low = IHL
 const IP_TTL_OFF: usize = IP_OFF + 8; // u8 TTL
 const IP_PROTO_OFF: usize = IP_OFF + 9; // u8
 const IP_CHECK_OFF: usize = IP_OFF + 10; // u16 (big-endian) header checksum
+const IP_SRC_OFF: usize = IP_OFF + 12; // u32 (big-endian) source address
 const IPPROTO_UDP: u8 = 17;
 const IPV4_VER_IHL_NOOPTS: u8 = 0x45; // version 4, IHL 5 (20-byte header)
 
@@ -67,6 +86,24 @@ unsafe fn load_u16_be(ctx: &XdpContext, off: usize) -> Result<u16, ()> {
     let hi = unsafe { *(ptr as *const u8) } as u16;
     let lo = unsafe { *((ptr + 1) as *const u8) } as u16;
     Ok((hi << 8) | lo)
+}
+
+/// Read a big-endian `u32` at `off` bytes into the frame, with bounds check.
+/// Used for the IPv4 source address; the result matches `u32::from(Ipv4Addr)`
+/// so it keys [`OUR_LOCAL_IPS`] directly.
+#[inline(always)]
+unsafe fn load_u32_be(ctx: &XdpContext, off: usize) -> Result<u32, ()> {
+    let ptr = ctx.data() + off;
+    if ptr + 4 > ctx.data_end() {
+        return Err(());
+    }
+    unsafe {
+        let b0 = *(ptr as *const u8) as u32;
+        let b1 = *((ptr + 1) as *const u8) as u32;
+        let b2 = *((ptr + 2) as *const u8) as u32;
+        let b3 = *((ptr + 3) as *const u8) as u32;
+        Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+    }
 }
 
 /// Swap two packet bytes via volatile reads/writes. Done per byte rather than
@@ -142,6 +179,15 @@ fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     if unsafe { load_u16_be(ctx, UDP_DST_OFF)? } != BFD_ECHO_PORT {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Our own originated Echo, looped back by the peer, is self-addressed to one
+    // of our local IPs. Don't re-reflect it (that loops forever) — pass it up so
+    // the sender's detector observes the return. A peer's Echo (any other source)
+    // falls through to the reflect path below.
+    let src_ip = unsafe { load_u32_be(ctx, IP_SRC_OFF)? };
+    if unsafe { OUR_LOCAL_IPS.get(&src_ip) }.is_some() {
         return Ok(xdp_action::XDP_PASS);
     }
 
