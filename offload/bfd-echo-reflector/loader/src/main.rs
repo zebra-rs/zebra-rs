@@ -42,28 +42,12 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
-    // Embed the eBPF object built by build.rs and load it.
+    // Embed the eBPF object built by build.rs and load it. The reflector is
+    // a stateless datapath with no eBPF logging, so there is no aya-log setup.
     let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/bfd-echo-reflector"
     )))?;
-
-    // Forward `info!` messages emitted by the eBPF program. Failure here is
-    // non-fatal (e.g. if all log statements are removed from the program).
-    match aya_log::EbpfLogger::init(&mut ebpf) {
-        Err(e) => warn!("failed to initialize eBPF logger: {e}"),
-        Ok(logger) => {
-            let mut logger =
-                tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
-            tokio::task::spawn(async move {
-                loop {
-                    let mut guard = logger.readable_mut().await.unwrap();
-                    guard.get_inner_mut().flush();
-                    guard.clear_ready();
-                }
-            });
-        }
-    }
 
     let program: &mut Xdp = ebpf
         .program_mut("bfd_echo_reflect")

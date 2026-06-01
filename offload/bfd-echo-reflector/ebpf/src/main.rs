@@ -18,7 +18,6 @@
 //! First slice: IPv4 only. IPv6 (EtherType 0x86DD) is a follow-up.
 
 use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
-use aya_log_ebpf::info;
 
 /// Ethernet II header layout.
 const ETH_HLEN: usize = 14;
@@ -65,6 +64,20 @@ unsafe fn load_u16_be(ctx: &XdpContext, off: usize) -> Result<u16, ()> {
     Ok((hi << 8) | lo)
 }
 
+/// Swap two packet bytes via volatile reads/writes. Done per byte rather than
+/// as a `[u8; 6]` value-copy because the array copy can lower to a memcpy that
+/// computes a pointer difference between the two operands — which the BPF
+/// verifier rejects ("R4 pointer -= pointer prohibited"). Volatile single-byte
+/// ops can't be coalesced into that memcpy.
+#[inline(always)]
+unsafe fn swap_byte(a: *mut u8, b: *mut u8) {
+    unsafe {
+        let tmp = core::ptr::read_volatile(a);
+        core::ptr::write_volatile(a, core::ptr::read_volatile(b));
+        core::ptr::write_volatile(b, tmp);
+    }
+}
+
 #[xdp]
 pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
     match try_reflect(&ctx) {
@@ -95,19 +108,26 @@ fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
 
     // Prove the full 14-byte Ethernet header (both MACs) is in bounds, then swap
     // source/destination MAC in place and bounce the frame straight back out.
+    // Swap byte-by-byte at constant offsets (see `swap_byte`) so the copy is
+    // never lowered to a verifier-rejected memcpy.
     let start = ctx.data();
     if start + ETH_HLEN > ctx.data_end() {
         return Err(());
     }
     unsafe {
-        let dst = (start + ETH_DST_OFF) as *mut [u8; 6];
-        let src = (start + ETH_SRC_OFF) as *mut [u8; 6];
-        let tmp = *dst;
-        *dst = *src;
-        *src = tmp;
+        let dst = (start + ETH_DST_OFF) as *mut u8;
+        let src = (start + ETH_SRC_OFF) as *mut u8;
+        swap_byte(dst, src);
+        swap_byte(dst.add(1), src.add(1));
+        swap_byte(dst.add(2), src.add(2));
+        swap_byte(dst.add(3), src.add(3));
+        swap_byte(dst.add(4), src.add(4));
+        swap_byte(dst.add(5), src.add(5));
     }
 
-    info!(ctx, "BFD Echo udp/{} reflected (XDP_TX)", BFD_ECHO_PORT);
+    // No per-packet logging here: aya-log in XDP is heavyweight (and overflowed
+    // its ringbuf record), and logging every reflected frame is undesirable at
+    // line rate. Reflection is observable via tcpdump / the XDP_TX action.
     Ok(xdp_action::XDP_TX)
 }
 
