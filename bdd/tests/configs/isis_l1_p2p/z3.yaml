@@ -1,0 +1,57 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8:0:ffff::3/128
+- if-name: i2
+  ipv4:
+    address: 10.0.2.2/30
+  ipv6:
+    address: 2001:db8:2::2/64
+- if-name: i4
+  ipv4:
+    address: 10.0.3.1/30
+  ipv6:
+    address: 2001:db8:3::1/64
+- if-name: i8
+  ipv4:
+    address: 10.0.11.1/30
+  ipv6:
+    address: 2001:db8:11::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    is-type: level-1
+    hostname: z3
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i4
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i8
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 30
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
