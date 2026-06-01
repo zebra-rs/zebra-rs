@@ -29,7 +29,10 @@ automatically with `router isis`.
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
 | `enable` | boolean | `false` | Attach (or detach) BFD for adjacencies on this interface. |
-| `profile` | string | — | Named `/bfd/profile` to apply. *Stored but not yet applied — see the overview.* |
+
+Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
+timers are not currently tunable — see
+[Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
 
 A session is subscribed when the adjacency comes **Up** and
 unsubscribed when it goes down. Both IPv4 and IPv6 adjacencies are
@@ -40,7 +43,7 @@ and are demultiplexed per interface.
 
 ```
 show bfd
-show bfd peer <neighbor-address>
+show bfd peers <neighbor-address>
 ```
 
 If a session stays `Down` with a remote discriminator of `0x0`, the
