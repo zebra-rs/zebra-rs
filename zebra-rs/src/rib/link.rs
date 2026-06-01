@@ -575,16 +575,12 @@ impl Rib {
         // would land on `Link::vni` but never reach `vni_ifindex_map`,
         // and `mac_add` would silently skip every install.
         let now_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
-        if prev_vni != now_vni {
-            if let Some(prev) = prev_vni {
-                self.fib_handle.unregister_vxlan_ifindex(prev);
-                self.api_vxlan_del(prev);
-            }
-            if let Some(new) = now_vni {
-                self.fib_handle.register_vxlan_ifindex(new, ifindex);
-                if let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local) {
-                    self.api_vxlan_add(new, local);
-                }
+        if prev_vni != now_vni
+            && let Some(new) = now_vni
+        {
+            self.fib_handle.register_vxlan_ifindex(new, ifindex);
+            if let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local) {
+                self.api_vxlan_add(new, local);
             }
         }
 
@@ -621,6 +617,7 @@ impl Rib {
         // message (mirrors the registration trigger in `link_add`).
         if let Some(vni) = oslink.vni {
             self.fib_handle.unregister_vxlan_ifindex(vni);
+            self.api_vxlan_del(vni);
         }
         // Notify subscribers BEFORE removing the link entry, so the
         // VRF lookup in `api_link_del` still resolves to the right

@@ -2702,10 +2702,16 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
     if let NetlinkPayload::InnerMessage(msg) = msg.payload {
         match msg {
             RouteNetlinkMessage::NewLink(msg) => {
+                if msg.header.interface_family != AddressFamily::Unspec {
+                    return;
+                }
                 let link = link_from_msg(msg);
                 let _ = tx.send(FibMessage::NewLink(link));
             }
             RouteNetlinkMessage::DelLink(msg) => {
+                if msg.header.interface_family != AddressFamily::Unspec {
+                    return;
+                }
                 let link = link_from_msg(msg);
                 let _ = tx.send(FibMessage::DelLink(link));
             }
