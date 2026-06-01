@@ -19,11 +19,16 @@ struct Opt {
     /// Interface to attach the reflector to.
     #[clap(short, long, default_value = "eth0")]
     iface: String,
+    /// XDP attach mode: `auto` (native, fall back to SKB), `native`, or `skb`.
+    /// Use `skb` on veth / virtual NICs, where native XDP *attaches* but does
+    /// not pass frames to the program.
+    #[clap(short, long, default_value = "auto")]
+    mode: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let Opt { iface } = Opt::parse();
+    let Opt { iface, mode } = Opt::parse();
     env_logger::init();
 
     // Bump the memlock rlimit. Needed on older kernels that don't use the
@@ -66,17 +71,31 @@ async fn main() -> anyhow::Result<()> {
         .try_into()?;
     program.load()?;
 
-    // Native/driver XDP first (mode 0 = let the kernel pick native; it does NOT
-    // auto-fall back to generic). On failure, retry explicitly in SKB mode.
-    match program.attach(&iface, XdpMode::default()) {
-        Ok(_) => info!("attached BFD Echo reflector to {iface} (native/driver XDP)"),
-        Err(e) => {
-            warn!("native XDP attach on {iface} failed ({e}); retrying in SKB mode");
+    match mode.as_str() {
+        "skb" => {
             program
                 .attach(&iface, XdpMode::Skb)
                 .context("failed to attach XDP program in SKB mode")?;
             info!("attached BFD Echo reflector to {iface} (generic/SKB XDP)");
         }
+        "native" => {
+            program
+                .attach(&iface, XdpMode::Driver)
+                .context("failed to attach XDP program in native/driver mode")?;
+            info!("attached BFD Echo reflector to {iface} (native/driver XDP)");
+        }
+        // auto: native first (mode 0 = let the kernel pick native; it does NOT
+        // auto-fall back to generic), then retry explicitly in SKB mode.
+        _ => match program.attach(&iface, XdpMode::default()) {
+            Ok(_) => info!("attached BFD Echo reflector to {iface} (native/driver XDP)"),
+            Err(e) => {
+                warn!("native XDP attach on {iface} failed ({e}); retrying in SKB mode");
+                program
+                    .attach(&iface, XdpMode::Skb)
+                    .context("failed to attach XDP program in SKB mode")?;
+                info!("attached BFD Echo reflector to {iface} (generic/SKB XDP)");
+            }
+        },
     }
 
     info!("reflecting BFD Echo (udp/3785) on {iface}; press Ctrl-C to exit");

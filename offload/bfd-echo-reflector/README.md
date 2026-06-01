@@ -74,38 +74,38 @@ RUST_LOG=info cargo run --release -- --iface veth0
 sudo RUST_LOG=info ./target/release/bfd-echo-reflector -i veth0
 ```
 
-It attaches in native/driver XDP if the NIC supports it, otherwise falls back to
-generic **SKB mode** (expected on virtual NICs, e.g. Parallels on Apple Silicon).
+`--mode auto` (default) attaches native/driver XDP and falls back to generic
+**SKB mode**. On **veth and virtual NICs** native XDP *attaches* but does not
+loop frames to the program, so force generic mode with **`-m skb`** there
+(`-m native` forces driver mode). Validated in SKB mode on the
+Parallels/aarch64 lab.
 
 ## Verify end-to-end (veth pair)
 
+One command (builds first if needed):
+
 ```sh
-# 1. create a veth pair and address it
-sudo ip link add veth0 type veth peer name veth1
-sudo ip link set veth0 up && sudo ip link set veth1 up
-sudo ip addr add 10.123.0.1/24 dev veth0
-sudo ip addr add 10.123.0.2/24 dev veth1
-
-# 2. attach the reflector on veth0
-RUST_LOG=info cargo run --release -- --iface veth0    # logs "attached … (generic/SKB XDP)"
-
-# 3. watch veth1 and send a UDP/3785 frame toward veth0
-sudo tcpdump -nei veth1 udp port 3785 &
-sudo python3 - <<'PY'
-from socket import socket, AF_INET, SOCK_DGRAM
-s = socket(AF_INET, SOCK_DGRAM); s.bind(("10.123.0.2", 0))
-s.sendto(b"bfd-echo-test", ("10.123.0.1", 3785))
-PY
+sudo bash scripts/veth-test.sh
 ```
 
-**Pass criteria:** the frame sent toward `veth0:3785` reappears on `veth1` with
-the Ethernet source/destination swapped and the payload intact; non-3785 traffic
-is unaffected. The reflector also prints `BFD Echo udp/3785 reflected (XDP_TX)`
-per reflected frame (via `aya-log`).
+It creates a veth pair with the **sender end in its own network namespace**,
+attaches the reflector (`-m skb`) on the root-ns end, sends 3 UDP/3785 frames
+from the namespace, and confirms a reflected frame arrives back. Expected tail:
 
-> On a veth pair, `XDP_TX` re-transmits out the same interface, i.e. toward the
-> peer end — so the sender on `veth1` sees the bounced frame. Cleanup:
-> `sudo ip link del veth0`.
+```
+PASS: BFD Echo frame reflected via XDP_TX
+      (reflector logged 3 reflect(s); 1 inbound frame(s) on bfde1)
+```
+
+The namespace is required: if both veth ends share a namespace the kernel
+delivers `10.123.0.2 -> 10.123.0.1` locally via loopback and the frame never
+crosses the wire, so the XDP hook never fires.
+
+**Pass criteria:** the sent `udp/3785` frame reappears *inbound* on the sender's
+veth with the Ethernet source/destination swapped (`tcpdump -e` shows the swap;
+it even decodes as `BFD, Echo`), and the reflector logs `BFD Echo udp/3785
+reflected (XDP_TX)`. `XDP_TX` re-transmits out the same interface, i.e. toward
+the peer end, so the sender sees the bounce.
 
 ## Limitations / next slices
 
