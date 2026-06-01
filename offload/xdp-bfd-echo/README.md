@@ -1,4 +1,4 @@
-# bfd-echo-reflector — XDP BFD Echo reflector
+# xdp-bfd-echo — XDP BFD Echo datapath (reflector + originator)
 
 An XDP/eBPF program (with an [aya](https://aya-rs.dev/) userspace loader) that
 reflects **BFD Echo** frames (UDP **3785**, RFC 5880 §6.4 / RFC 5881 §4) in the
@@ -37,15 +37,16 @@ session and stops it (SIGTERM → clean XDP detach) on the last. zebra-rs only
 advertises a non-zero `Required Min Echo RX Interval` once the reflector is up,
 so the promise to loop Echo back stays honest.
 
-- **Binary path:** `$ZEBRA_BFD_REFLECTOR_BIN`, else `~/.zebra/bin/bfd-echo-reflector`,
-  else `/usr/sbin/bfd-echo-reflector` (the `.deb` install location).
-- **Attach mode:** `$ZEBRA_BFD_REFLECTOR_MODE` = `auto` (default) | `native` | `skb`.
-- **Capabilities:** needs `cap_net_admin,cap_bpf`; the package postinstall grants them.
+- **Binary path:** `$ZEBRA_XDP_BFD_ECHO_BIN`, else `~/.zebra/bin/xdp-bfd-echo`,
+  else `/usr/sbin/xdp-bfd-echo` (the `.deb` install location).
+- **Attach mode:** `$ZEBRA_XDP_BFD_ECHO_MODE` = `auto` (default) | `native` | `skb`.
+- **Capabilities:** needs `cap_net_admin,cap_bpf` (and `cap_net_raw` for the
+  AF_PACKET Echo originator); the package postinstall grants them.
 
 ## Layout
 
 ```
-bfd-echo-reflector/
+xdp-bfd-echo/
 ├── Cargo.toml      # workspace root (own workspace; excluded from zebra-rs)
 ├── .cargo/config.toml  # `cargo run` -> sudo (XDP attach needs CAP_NET_ADMIN)
 ├── loader/         # userspace: load + attach the XDP program (aya)
@@ -81,7 +82,7 @@ the [bpf-linker README](https://github.com/aya-rs/bpf-linker#installation).
 ## Build
 
 ```sh
-cd offload/bfd-echo-reflector
+cd offload/xdp-bfd-echo
 cargo build --release        # build.rs compiles the eBPF object via nightly+bpf-linker
 ```
 
@@ -97,7 +98,7 @@ cargo build --release        # build.rs compiles the eBPF object via nightly+bpf
 # `cargo run` is wrapped in sudo via .cargo/config.toml
 RUST_LOG=info cargo run --release -- --iface veth0
 # or run the binary directly:
-sudo RUST_LOG=info ./target/release/bfd-echo-reflector -i veth0
+sudo RUST_LOG=info ./target/release/xdp-bfd-echo -i veth0
 ```
 
 `--mode auto` (default) attaches native/driver XDP and falls back to generic

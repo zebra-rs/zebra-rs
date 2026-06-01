@@ -15,8 +15,8 @@ fi
 # zebra-rs also originates Echo, sends/receives raw frames on an AF_PACKET
 # socket — needs cap_net_raw. The deb ships it at /usr/sbin (built by the
 # packaging Makefile); the guard keeps this safe if it isn't.
-if [ -x /usr/sbin/bfd-echo-reflector ]; then
-    setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/bfd-echo-reflector
+if [ -x /usr/sbin/xdp-bfd-echo ]; then
+    setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/xdp-bfd-echo
 fi
 
 sudo systemctl daemon-reload

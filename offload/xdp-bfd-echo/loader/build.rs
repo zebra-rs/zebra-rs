@@ -1,7 +1,7 @@
 use anyhow::{Context as _, anyhow};
 use aya_build::Toolchain;
 
-/// Compile the `bfd-echo-reflector-ebpf` crate for the `bpfel-unknown-none`
+/// Compile the `xdp-bfd-echo-ebpf` crate for the `bpfel-unknown-none`
 /// target and emit the object into `OUT_DIR`, where `main.rs` embeds it via
 /// `include_bytes_aligned!`. `Toolchain::default()` resolves to `nightly`, and
 /// aya-build invokes it with `-Z build-std=core`.
@@ -12,8 +12,8 @@ fn main() -> anyhow::Result<()> {
         .context("MetadataCommand::exec")?;
     let ebpf_package = packages
         .into_iter()
-        .find(|cargo_metadata::Package { name, .. }| name.as_str() == "bfd-echo-reflector-ebpf")
-        .ok_or_else(|| anyhow!("bfd-echo-reflector-ebpf package not found"))?;
+        .find(|cargo_metadata::Package { name, .. }| name.as_str() == "xdp-bfd-echo-ebpf")
+        .ok_or_else(|| anyhow!("xdp-bfd-echo-ebpf package not found"))?;
     let cargo_metadata::Package {
         name,
         manifest_path,

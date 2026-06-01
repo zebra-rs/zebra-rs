@@ -12,7 +12,7 @@
 # the sender end, where we observe it arriving *inbound* with the MACs swapped.
 #
 # Run as root:
-#   sudo bash offload/bfd-echo-reflector/scripts/veth-test.sh
+#   sudo bash offload/xdp-bfd-echo/scripts/veth-test.sh
 set -u
 
 NS=bfdecho-ns
@@ -23,7 +23,7 @@ IP1=10.123.0.2
 PORT=3785
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$SCRIPT_DIR/../target/release/bfd-echo-reflector"
+BIN="$SCRIPT_DIR/../target/release/xdp-bfd-echo"
 REFLOG=/tmp/bfde_reflector.log
 CAPOUT=/tmp/bfde_tcpdump.out
 CAPERR=/tmp/bfde_tcpdump.err

@@ -51,11 +51,12 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
-    // Embed the eBPF object built by build.rs and load it. The reflector is
-    // a stateless datapath with no eBPF logging, so there is no aya-log setup.
+    // Embed the eBPF object built by build.rs and load it (the object's name is
+    // the eBPF crate's `[[bin]]` name, `xdp-bfd-echo`). The datapath has no eBPF
+    // logging, so there is no aya-log setup.
     let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
-        "/bfd-echo-reflector"
+        "/xdp-bfd-echo"
     )))?;
 
     let program: &mut Xdp = ebpf

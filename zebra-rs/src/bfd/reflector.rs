@@ -3,8 +3,8 @@
 //! BFD Echo (RFC 5880 §6.4 / RFC 5881 §4) is a single-hop, interface-scoped
 //! data-plane hairpin: a peer sends Echo frames to UDP/3785 and our forwarding
 //! plane loops them straight back. zebra-rs provides that loopback by running
-//! the standalone `bfd-echo-reflector` XDP loader (see
-//! `offload/bfd-echo-reflector/`) as a managed child process — one per
+//! the standalone `xdp-bfd-echo` XDP loader (see
+//! `offload/xdp-bfd-echo/`) as a managed child process — one per
 //! interface that has at least one single-hop session advertising Echo.
 //!
 //! Advertising a non-zero `Required Min Echo RX Interval` is a *promise to loop
@@ -30,10 +30,10 @@ use super::inst::Message;
 
 /// Env override for the reflector binary path (mirrors vtypam's
 /// `ZEBRA_VTYPAM_BIN`). Falls back to the install locations.
-const BIN_ENV: &str = "ZEBRA_BFD_REFLECTOR_BIN";
+const BIN_ENV: &str = "ZEBRA_XDP_BFD_ECHO_BIN";
 /// Env override for the XDP attach mode (`auto` | `native` | `skb`). Default
 /// `auto`; veth / virtual NICs need `skb` (native attaches but does not loop).
-const MODE_ENV: &str = "ZEBRA_BFD_REFLECTOR_MODE";
+const MODE_ENV: &str = "ZEBRA_XDP_BFD_ECHO_MODE";
 
 /// One supervised reflector child, keyed by ifindex in [`EchoReflectors`].
 struct Reflector {
@@ -75,7 +75,7 @@ impl Reflector {
     }
 }
 
-/// Supervises the set of `bfd-echo-reflector` child processes, one per
+/// Supervises the set of `xdp-bfd-echo` child processes, one per
 /// interface with active single-hop Echo sessions.
 pub struct EchoReflectors {
     by_ifindex: HashMap<u32, Reflector>,
@@ -264,19 +264,19 @@ fn parse_echo_down(line: &str) -> Option<u32> {
     it.next()?.parse().ok()
 }
 
-/// Resolve the reflector binary path: `$ZEBRA_BFD_REFLECTOR_BIN`, else the dev
+/// Resolve the reflector binary path: `$ZEBRA_XDP_BFD_ECHO_BIN`, else the dev
 /// install (`make install` → `~/.zebra/bin`), else the packaged location.
 fn resolve_bin() -> PathBuf {
     if let Some(p) = std::env::var_os(BIN_ENV) {
         return PathBuf::from(p);
     }
     if let Some(home) = std::env::var_os("HOME") {
-        let dev = PathBuf::from(home).join(".zebra/bin/bfd-echo-reflector");
+        let dev = PathBuf::from(home).join(".zebra/bin/xdp-bfd-echo");
         if dev.exists() {
             return dev;
         }
     }
-    PathBuf::from("/usr/sbin/bfd-echo-reflector")
+    PathBuf::from("/usr/sbin/xdp-bfd-echo")
 }
 
 /// `if_indextoname(3)` — the reflector loader attaches by interface name.
@@ -332,10 +332,10 @@ mod tests {
     #[test]
     fn bin_env_override_is_honoured() {
         // SAFETY: single-threaded test; set then read immediately.
-        unsafe { std::env::set_var(BIN_ENV, "/opt/custom/bfd-echo-reflector") };
+        unsafe { std::env::set_var(BIN_ENV, "/opt/custom/xdp-bfd-echo") };
         let (tx, _rx) = mpsc::unbounded_channel();
         let r = EchoReflectors::new(tx);
         unsafe { std::env::remove_var(BIN_ENV) };
-        assert_eq!(r.bin, PathBuf::from("/opt/custom/bfd-echo-reflector"));
+        assert_eq!(r.bin, PathBuf::from("/opt/custom/xdp-bfd-echo"));
     }
 }
