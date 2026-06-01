@@ -18,6 +18,14 @@ use bfd_packet::{ControlPacket, Diag, State};
 
 use super::fsm::{self, Event, Transition};
 
+/// RFC 5880 §6.8.3: while the session is not Up, the system MUST set
+/// `bfd.DesiredMinTxInterval` to at least one second. This caps the
+/// control-packet rate during bring-up and while a peer is dead, so a
+/// session that never establishes doesn't transmit at the (possibly
+/// sub-second) configured rate. The fast configured rate is restored
+/// once the session reaches Up.
+const SLOW_TX_MIN_US: u32 = 1_000_000;
+
 /// Tuple that uniquely identifies a BFD session at this system.
 /// Multihop sessions distinguish themselves via the `multihop` bit so
 /// (10.0.0.1, 10.0.0.2, single-hop) and (10.0.0.1, 10.0.0.2,
@@ -97,6 +105,13 @@ pub struct Session {
     pub local_diag: Diag,
     pub remote_diag: Diag,
 
+    /// We are mid-Poll-Sequence: the Poll (P) bit is set on every
+    /// outgoing control packet until the peer answers with a Final (F)
+    /// (RFC 5880 §6.8.7). Set whenever our advertised
+    /// `DesiredMinTxInterval` changes across the Up boundary (slow-TX,
+    /// §6.8.3); cleared on receipt of a Final.
+    pub poll: bool,
+
     /// Locally configured. Used to negotiate the actual interval.
     pub desired_min_tx_us: u32,
     pub required_min_rx_us: u32,
@@ -147,6 +162,7 @@ impl Session {
             remote_state: State::Down,
             local_diag: Diag::None,
             remote_diag: Diag::None,
+            poll: false,
             desired_min_tx_us: params.desired_min_tx_us,
             required_min_rx_us: params.required_min_rx_us,
             detect_mult: params.detect_mult,
@@ -180,6 +196,14 @@ impl Session {
         if new_state == from {
             return None;
         }
+        // Our effective `DesiredMinTxInterval` differs between Up and
+        // not-Up (slow-TX, RFC 5880 §6.8.3). Any transition that crosses
+        // the Up boundary changes the advertised value, so it MUST be
+        // announced with a Poll Sequence (§6.8.7): set the Poll bit until
+        // the peer answers with a Final.
+        if (from == State::Up) != (new_state == State::Up) {
+            self.poll = true;
+        }
         let now = Instant::now();
         match new_state {
             State::Up => self.last_up = Some(now),
@@ -206,13 +230,35 @@ impl Session {
         self.remote_min_rx_us = packet.required_min_rx_interval;
         self.remote_detect_mult = packet.detect_mult;
         self.remote_demand = packet.demand;
+        // A Final (F) completes a Poll Sequence we initiated (RFC 5880
+        // §6.8.7): the peer has acknowledged our changed interval, so we
+        // stop setting the Poll bit. The FSM transition may then re-set
+        // it if this same packet also crosses the Up boundary.
+        if packet.final_bit {
+            self.poll = false;
+        }
         self.handle_event(Event::Rx {
             remote_state: packet.state,
         })
     }
 
+    /// Our effective `bfd.DesiredMinTxInterval` (microseconds): the
+    /// configured value while Up, but clamped to at least one second
+    /// while not Up (slow-TX, RFC 5880 §6.8.3). This single value drives
+    /// both the rate we actually transmit at ([`Self::tx_interval_us`])
+    /// and the value we advertise on the wire ([`Self::build_packet`]),
+    /// so the two never disagree.
+    pub fn effective_desired_min_tx_us(&self) -> u32 {
+        if self.local_state == State::Up {
+            self.desired_min_tx_us
+        } else {
+            self.desired_min_tx_us.max(SLOW_TX_MIN_US)
+        }
+    }
+
     /// The actual outgoing transmission interval (microseconds) per
-    /// RFC 5880 §6.8.7: the maximum of what we'd like to send and
+    /// RFC 5880 §6.8.7: the maximum of what we'd like to send (our
+    /// *effective* desired-tx, including the §6.8.3 slow-TX clamp) and
     /// what the peer can receive. If the peer reports
     /// `Required Min RX Interval = 0` we suspend periodic transmission
     /// — represented here by returning 0.
@@ -220,7 +266,8 @@ impl Session {
         if self.remote_min_rx_us == 0 {
             return 0;
         }
-        self.desired_min_tx_us.max(self.remote_min_rx_us)
+        self.effective_desired_min_tx_us()
+            .max(self.remote_min_rx_us)
     }
 
     /// Detection time (microseconds) per RFC 5880 §6.8.4: the peer's
@@ -245,10 +292,14 @@ impl Session {
             detect_mult: self.detect_mult,
             my_disc: self.local_disc,
             your_disc: self.remote_disc,
-            desired_min_tx_interval: self.desired_min_tx_us,
+            // Advertise the *effective* desired-tx so the peer computes
+            // its detection time from the rate we actually send at,
+            // including the §6.8.3 slow-TX clamp while not Up.
+            desired_min_tx_interval: self.effective_desired_min_tx_us(),
             required_min_rx_interval: self.required_min_rx_us,
             required_min_echo_rx_interval: 0,
             demand: self.demand,
+            poll: self.poll,
             ..ControlPacket::default()
         }
     }
@@ -552,5 +603,128 @@ mod tests {
         assert!(change.is_none(), "Up/Up is not a state change");
         // …but the diagnostic is scrubbed all the same.
         assert_eq!(s.local_diag, Diag::None, "stale diag cleared while Up");
+    }
+
+    /// RFC 5880 §6.8.3 slow-TX: while the session is not Up the
+    /// effective desired-tx (and the advertised value, and the actual
+    /// send rate) is clamped to ≥1 s, even when the configured rate is
+    /// sub-second. Once Up, the fast configured rate is restored.
+    #[test]
+    fn slow_tx_clamps_desired_min_tx_while_not_up() {
+        let mut t = SessionTable::new();
+        let k = key(1, 2);
+        // Configure a fast 50 ms session; peer also offers 50 ms rx.
+        let d = t.insert(
+            k,
+            SessionParams {
+                desired_min_tx_us: 50_000,
+                required_min_rx_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        let s = t.get_by_disc_mut(d).unwrap();
+
+        // Fresh session is Down → effective tx clamped to 1 s.
+        assert_eq!(s.local_state, State::Down);
+        assert_eq!(s.effective_desired_min_tx_us(), 1_000_000);
+        assert_eq!(s.build_packet().desired_min_tx_interval, 1_000_000);
+
+        // Learn the peer (50 ms) but stay not-Up: tx_interval is still
+        // governed by the 1 s slow-TX clamp, not the 50 ms config.
+        let peer = |state| ControlPacket {
+            state,
+            my_disc: 0xfeed,
+            desired_min_tx_interval: 50_000,
+            required_min_rx_interval: 50_000,
+            ..ControlPacket::default()
+        };
+        let _ = s.handle_packet(&peer(State::Down)); // Down→Init
+        assert_eq!(s.local_state, State::Init);
+        assert_eq!(s.tx_interval_us(), 1_000_000, "slow-TX while Init");
+
+        // Init→Up: the fast configured rate kicks in.
+        let _ = s.handle_packet(&peer(State::Init));
+        assert_eq!(s.local_state, State::Up);
+        assert_eq!(s.effective_desired_min_tx_us(), 50_000);
+        assert_eq!(s.tx_interval_us(), 50_000, "fast rate once Up");
+        assert_eq!(s.build_packet().desired_min_tx_interval, 50_000);
+    }
+
+    /// A change in advertised interval across the Up boundary starts a
+    /// Poll Sequence (RFC 5880 §6.8.7): the Poll bit is set on the way
+    /// Up (slow-TX → fast) and cleared when the peer answers with a
+    /// Final.
+    #[test]
+    fn up_boundary_starts_poll_sequence_cleared_by_final() {
+        let mut t = SessionTable::new();
+        let k = key(1, 2);
+        let d = t.insert(k, SessionParams::default());
+        let s = t.get_by_disc_mut(d).unwrap();
+        assert!(!s.poll, "no poll at rest");
+
+        let peer = |state, final_bit| ControlPacket {
+            state,
+            my_disc: 1,
+            final_bit,
+            ..ControlPacket::default()
+        };
+
+        // Down→Init does not cross the Up boundary → no poll yet.
+        let _ = s.handle_packet(&peer(State::Down, false));
+        assert!(!s.poll, "Down→Init keeps interval, no poll");
+
+        // Init→Up crosses the boundary (interval changes) → poll set.
+        let _ = s.handle_packet(&peer(State::Init, false));
+        assert_eq!(s.local_state, State::Up);
+        assert!(s.poll, "Up boundary starts a Poll Sequence");
+        assert!(s.build_packet().poll, "P bit advertised on the wire");
+
+        // Peer answers with a Final → poll cleared.
+        let _ = s.handle_packet(&peer(State::Up, true));
+        assert!(!s.poll, "Final completes the Poll Sequence");
+        assert!(!s.build_packet().poll, "P bit cleared after Final");
+    }
+
+    /// Going back down also crosses the Up boundary (fast → slow-TX), so
+    /// it too opens a Poll Sequence to announce the slower interval.
+    #[test]
+    fn down_from_up_starts_poll_sequence() {
+        let mut t = SessionTable::new();
+        let k = key(1, 2);
+        let d = t.insert(k, SessionParams::default());
+        let s = t.get_by_disc_mut(d).unwrap();
+
+        // Drive Up (Down→Init→Up); Init→Up sets the bring-up poll.
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Down,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Init,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        assert_eq!(s.local_state, State::Up);
+        assert!(s.poll, "bring-up set the poll");
+
+        // A steady-state Up/Up packet carrying Final clears it (no
+        // boundary crossing, so the FSM doesn't re-set it).
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Up,
+            my_disc: 1,
+            final_bit: true,
+            ..ControlPacket::default()
+        });
+        assert!(!s.poll, "Final on a non-transition clears the poll");
+
+        // Peer signals Down → Up→Down crosses the boundary → poll set.
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Down,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        assert_eq!(s.local_state, State::Down);
+        assert!(s.poll, "fast→slow change opens a Poll Sequence");
     }
 }
