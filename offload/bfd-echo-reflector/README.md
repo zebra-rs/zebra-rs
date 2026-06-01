@@ -12,7 +12,7 @@ hairpin — no IP/UDP checksum recompute, no TTL decrement. Everything else
 This is the smallest, best-fit first piece of the broader BFD/S-BFD/STAMP XDP
 offload effort: the reflector is stateless, so it maps cleanly onto XDP. The
 originator/sender side (which needs periodic TX timers) is **not** part of this
-PoC. See `../../bfd-sbfd-stamp-xdp-offload-notes.md` and
+PoC. See `../../docs/design/bfd-sbfd-stamp-xdp-offload-notes.md` and
 `../../docs/design/bfd-echo-plan.md`.
 
 > **Status:** scaffolding + program written, **not yet compiled or run** in this
