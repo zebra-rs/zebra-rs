@@ -1,16 +1,44 @@
 # BFD Echo Function — Design & Phasing Plan
 
-Tracks a possible implementation of the BFD **Echo function** (RFC 5880
-§6.4 / §6.8.5 / §6.8.8 / §6.8.9 / §6.8.13; RFC 5881 §4 / §6) for
-zebra-rs. This document is the living plan + status: it captures the RFC
-surface, the feasibility problem (Echo is **not** an extension of our
-UDP send/recv loops), how FRR maps the hard part, the architecture
-options, a phase-by-phase slice, and the open questions — so we can
-decide scope from a written plan rather than mid-implementation.
+Tracks the BFD **Echo function** (RFC 5880 §6.4 / §6.8.5 / §6.8.8 /
+§6.8.9 / §6.8.13; RFC 5881 §4 / §6) for zebra-rs.
+
+> ## As-built (supersedes the plan below)
+>
+> Echo is **implemented**, both halves, offloaded to a per-interface
+> XDP/eBPF helper named **`xdp-bfd-echo`** (`offload/xdp-bfd-echo/`,
+> built out of the CI workspace; supervised by
+> `zebra-rs/src/bfd/reflector.rs`, ref-counted per ifindex):
+>
+> - **Responder** — the XDP program loops a peer's Echo in the data
+>   plane (TTL−−/checksum/MAC-swap/`XDP_TX`); advertised only once the
+>   helper is confirmed up.
+> - **Originator** — the helper TXes self-addressed Echo from an
+>   `AF_PACKET` socket (XDP can't originate); detection is offloaded to a
+>   per-session **`bpf_timer`** the XDP program arms on each looped
+>   return, firing `Down` + `EchoFunctionFailed` if returns stop. A
+>   userspace bootstrap timeout covers the window before the first
+>   return arms the timer.
+> - **Core model** — `bfd::session::EchoMode {Off,Transmit,Receive,Both}`
+>   (advertise ⟺ `Receive|Both`, originate ⟺ `Transmit|Both`, spawn
+>   helper ⟺ `≠ Off`). The IPC is a stdin/stdout line protocol
+>   (`echo-add`/`echo-del` → helper, `echo-down` → zebra-rs).
+> - **Config (OSPF v2+v3, done)** — `echo-mode {transmit|receive|both}`
+>   with FRR-style `echo-transmit-interval` / `echo-receive-interval`,
+>   settable at the OSPF instance level (`router ospf { bfd {} }`) as a
+>   default and overridden per interface *per leaf*
+>   (`OspfLinkBfdConfig::resolve`); instance `enable true` blanket-enables
+>   all interfaces, a per-interface `enable false` opts out. There is **no
+>   global top-level `bfd {}`** container — BFD spawns eagerly with its
+>   first consumer. IS-IS and BGP echo config is the remaining gap.
+>
+> Open lab item: verify `bpf_timer`-from-XDP loads on the target kernel.
+>
+> The original plan (options + open questions, mostly now resolved)
+> follows for historical context.
 
 Read this first if you're touching the BFD module (`zebra-rs/src/bfd/`)
-with Echo in mind. As of this writing **no Echo code exists** — and
-that is deliberate (see Status).
+with Echo in mind.
 
 ## Status (2026-06-01)
 

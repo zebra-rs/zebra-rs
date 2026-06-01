@@ -2319,15 +2319,10 @@ module config {
       }
     }
 
-    // The top-level `bfd` keyword is the FRR-style enable anchor: its
-    // presence spawns the BFD task (see `config/manager.rs`). BFD
-    // sessions are configured per-protocol (`neighbor X bfd`,
-    // `ip ospf bfd`, `isis bfd`), so this container has no leaves of
-    // its own.
-    container bfd {
-      ext:help "Bidirectional Forwarding Detection (RFC 5880)";
-      presence "Enable BFD";
-    }
+    // BFD has no top-level config: it is configured per-protocol
+    // (`neighbor X bfd`, `ip ospf bfd`, `isis bfd`) and the BFD task is
+    // spawned eagerly the first time one of those protocols comes up
+    // (see `config/manager.rs`).
 
     container segment-routing {
       ext:help "Segment Routing global configuration";

@@ -26,13 +26,21 @@ router ospf {
 }
 ```
 
-No top-level `bfd { }` block is required — the BFD subsystem starts
+There is no global top-level `bfd { }` block — the BFD subsystem starts
 automatically with `router ospf` / `router ospfv3`.
+
+The same `bfd {}` leaves can also be set once at the **instance level**
+(`router ospf { bfd {} }`) as a default for every interface; a per-interface
+`bfd {}` then overrides it *per leaf* (see
+[Instance-level defaults](#instance-level-defaults)).
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
 | `enable` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
 | `min-neighbor-state` | `two-way` \| `full` | `two-way` | Neighbour state at which the session starts / stops. |
+| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 sessions, choosing which half is active. |
+| `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
+| `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
 
 Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
 timers are not currently tunable — see
@@ -62,6 +70,69 @@ router ospf {
         enable true;
         min-neighbor-state full;   // Cisco-style; default is two-way
       }
+    }
+  }
+}
+```
+
+## Echo
+
+`echo-mode` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function) for
+this interface's sessions — single-hop IPv4 only (OSPFv2; on OSPFv3 the leaf is
+accepted but inert, since Echo has no IPv6 form here). The two halves are
+independent (RFC 5880 §6.4), backed by the per-interface `xdp-bfd-echo` helper:
+
+- **`receive`** — advertise a non-zero Required Min Echo RX and loop the peer's
+  Echo back (the *peer* gets fast detection).
+- **`transmit`** — originate our own Echo (the peer's forwarding plane loops it
+  back) and drive the session Down if it stops returning; we advertise `0`, so
+  we don't promise to loop the *peer's* Echo.
+- **`both`** — both halves.
+
+```
+router ospf {
+  area 0 {
+    interface eth0 {
+      bfd {
+        enable true;
+        echo-mode both;
+        echo-transmit-interval 50;   // ms; rate we send Echo (default 50)
+        echo-receive-interval 50;    // ms; advertised RX floor (default 50)
+      }
+    }
+  }
+}
+```
+
+A forwarding-path fault is then caught in sub-second time independent of the
+OSPF Hello/Dead timers. The helper needs `cap_net_admin,cap_bpf,cap_net_raw`
+and a kernel with XDP + `bpf_timer` support; if it can't start, the session
+stays up on control packets and advertises echo-rx `0`. `show bfd peers` shows
+the negotiated `Echo receive interval` / `Echo transmission interval`.
+
+## Instance-level defaults
+
+A `bfd {}` block directly under `router ospf` / `router ospfv3` supplies
+defaults for **every** interface in the instance. Each leaf is the same as the
+per-interface block, and the effective value for an interface is its own
+setting if present, otherwise the instance default, otherwise the hard default.
+
+`enable true` at the instance level **blanket-enables** BFD on all of the
+instance's interfaces; a per-interface `bfd { enable false }` opts one out.
+
+```
+router ospf {
+  bfd {
+    enable true;            // BFD on every interface…
+    echo-mode receive;      // …default Echo role: reflect only
+    echo-receive-interval 50;
+  }
+  area 0 {
+    interface eth0 {
+      bfd { echo-mode both; }   // eth0 also originates; inherits enable + interval
+    }
+    interface eth1 {
+      bfd { enable false; }     // opt eth1 out of the blanket enable
     }
   }
 }

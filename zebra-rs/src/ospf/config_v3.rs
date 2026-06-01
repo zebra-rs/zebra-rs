@@ -13,10 +13,13 @@ use super::area::{AreaTypeKind, NssaTranslatorRole};
 use super::config::{
     Callback, apply_link_enable_transition, area_no_summary_set, area_nssa_default_originate_set,
     area_nssa_suppress_fa_set, area_nssa_translator_role_set, area_type_set,
-    config_ospf_interface_bfd_echo_interval, config_ospf_interface_bfd_echo_mode,
-    config_ospf_interface_bfd_enable, config_ospf_interface_bfd_min_neighbor_state,
-    config_ospf_interface_bfd_profile, link_should_enable, ospf_link_get_mut_by_name,
-    parse_area_id,
+    config_ospf_bfd_echo_mode, config_ospf_bfd_echo_receive_interval,
+    config_ospf_bfd_echo_transmit_interval, config_ospf_bfd_enable,
+    config_ospf_bfd_min_neighbor_state, config_ospf_bfd_profile,
+    config_ospf_interface_bfd_echo_mode, config_ospf_interface_bfd_echo_receive_interval,
+    config_ospf_interface_bfd_echo_transmit_interval, config_ospf_interface_bfd_enable,
+    config_ospf_interface_bfd_min_neighbor_state, config_ospf_interface_bfd_profile,
+    link_should_enable, ospf_link_get_mut_by_name, parse_area_id,
 };
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::link::OspfNetworkType;
@@ -67,8 +70,28 @@ impl Ospf<Ospfv3> {
                 config_ospf_interface_bfd_echo_mode,
             ),
             (
-                "/area/interface/bfd/echo-interval",
-                config_ospf_interface_bfd_echo_interval,
+                "/area/interface/bfd/echo-transmit-interval",
+                config_ospf_interface_bfd_echo_transmit_interval,
+            ),
+            (
+                "/area/interface/bfd/echo-receive-interval",
+                config_ospf_interface_bfd_echo_receive_interval,
+            ),
+            // Instance-level `router ospfv3 { bfd { ... } }` defaults.
+            ("/bfd/enable", config_ospf_bfd_enable),
+            ("/bfd/profile", config_ospf_bfd_profile),
+            (
+                "/bfd/min-neighbor-state",
+                config_ospf_bfd_min_neighbor_state,
+            ),
+            ("/bfd/echo-mode", config_ospf_bfd_echo_mode),
+            (
+                "/bfd/echo-transmit-interval",
+                config_ospf_bfd_echo_transmit_interval,
+            ),
+            (
+                "/bfd/echo-receive-interval",
+                config_ospf_bfd_echo_receive_interval,
             ),
             (
                 "/area/interface/network-type",

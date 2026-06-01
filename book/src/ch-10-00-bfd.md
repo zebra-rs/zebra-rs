@@ -184,6 +184,43 @@ receive path is alive).
 
 Each command also accepts a trailing `json` for machine-readable output.
 
+## Echo function
+
+The BFD **Echo function** (RFC 5880 §6.4 / RFC 5881 §6) is a forwarding-plane
+liveness test: a node sends a *self-addressed* UDP/3785 packet that the peer's
+forwarding plane loops straight back, and times the round trip. Because the
+loop never enters the peer's BFD control software, it detects a forwarding
+fault even while control packets still flow — and it lets a node slow its
+control-packet rate while keeping fast detection. Echo is **single-hop IPv4
+only** (RFC 5883 multi-hop has no Echo).
+
+The two halves are independent and zebra-rs implements both, offloaded to a
+per-interface XDP/eBPF helper, **`xdp-bfd-echo`**:
+
+- **Responder** — when we advertise a non-zero `Required Min Echo RX Interval`,
+  the helper's XDP program loops a peer's Echo back in the data plane
+  (decrementing TTL so it returns at 254, the way a forwarding hop would), so
+  the *peer* gets fast detection. We only advertise non-zero once the helper is
+  confirmed running, so the promise to loop is honest.
+- **Originator** — the helper sends our Echo from a raw `AF_PACKET` socket and
+  the XDP program arms a per-session in-kernel `bpf_timer` on each return; if
+  returns stop for `interval × detect-mult`, the session goes `Down` with
+  diagnostic `Echo Function Failed` (RFC 5880 §6.8.5). We only originate while
+  the session is `Up` and the peer advertised a non-zero echo-rx (§6.8.9).
+
+The helper is reference-counted **per interface**: one `xdp-bfd-echo` process is
+spawned for each interface that has at least one Echo-enabled session, shared by
+all sessions on that link, and stopped when the last one goes away. It needs
+`cap_net_admin,cap_bpf` (load/attach XDP) and `cap_net_raw` (the originator's
+raw socket); the packaged install grants these. A node with no Echo configured
+runs no helper and advertises `Required Min Echo RX Interval = 0`.
+
+Echo is enabled per attachment — today on OSPF interfaces, where `echo-mode`
+selects the role (`transmit` / `receive` / `both`) and
+`echo-transmit-interval` / `echo-receive-interval` set the rates; see
+[OSPF BFD](ch-08-02-ospf-bfd.md#echo). `show bfd peers` reports the negotiated
+`Echo receive interval` / `Echo transmission interval`.
+
 ## What happens on failure
 
 When a session transitions to `Down`, every attached protocol is
@@ -200,10 +237,12 @@ native timers would allow.
   and OSPFv3 attachment; the three `show` commands; FRR-aligned 300 ms
   defaults; RFC 5880 §6.8.3 slow-transmit-while-not-Up with §6.8.7 Poll
   Sequences (both initiating and answering); BGP `update-source`
-  inherited as the session's local address.
-- **Not yet:** configurable timers (the intervals are fixed at the
-  defaults); the **Echo function** (RFC 5880 §6.8.9 / RFC 5881 §6) is
-  not implemented — every session advertises `Required Min Echo RX
-  Interval = 0`, telling peers it will not loop Echo packets back; BFD
-  for **static routes** is a planned future phase; per-VRF OSPF BFD is
-  not yet wired.
+  inherited as the session's local address; the **Echo function**
+  (RFC 5880 §6.4, single-hop IPv4) — both reflecting a peer's Echo and
+  originating our own, offloaded to the `xdp-bfd-echo` XDP/eBPF helper
+  (see [Echo function](#echo-function) below), with per-role
+  (`transmit` / `receive` / `both`) config and an instance-level
+  `router ospf { bfd {} }` default inherited and overridden per interface.
+- **Not yet:** configurable control-packet timers (the intervals are
+  fixed at the defaults); Echo on IS-IS and BGP (OSPF only today); BFD
+  for **static routes**; per-VRF OSPF BFD.

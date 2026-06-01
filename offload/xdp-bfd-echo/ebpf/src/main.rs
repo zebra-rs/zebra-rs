@@ -18,9 +18,67 @@
 //! IPv4 UDP/3785 frame is `XDP_PASS`ed, so normal traffic — including BFD
 //! *control* on UDP/3784 — is untouched.
 //!
+//! When zebra-rs also *originates* Echo on this interface, the loader fills the
+//! `OUR_LOCAL_IPS` map. An inbound Echo whose source is one of our own addresses
+//! is our frame returning (looped by the peer); rather than re-reflect it (which
+//! would loop forever) the program drives the **in-kernel detector**: it arms a
+//! per-session `bpf_timer` (re-armed on every return) and `XDP_DROP`s the frame.
+//! If returns stop for `echo-interval × detect-mult`, the timer callback fires
+//! in softirq and sets a `down` flag in the `ECHO_TIMERS` map; the userspace
+//! helper polls that flag and reports `echo-down` to zebra-rs. This is the Echo
+//! *sender*'s detection offload — no userspace packet RX in steady state.
+//!
 //! First slice: IPv4 only. IPv6 (EtherType 0x86DD) is a follow-up.
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{
+    bindings::{bpf_timer, xdp_action},
+    btf_maps::HashMap as BtfHashMap,
+    cty::c_void,
+    helpers::{bpf_timer_init, bpf_timer_set_callback, bpf_timer_start},
+    macros::{btf_map, map, xdp},
+    maps::HashMap,
+    programs::XdpContext,
+};
+
+/// Local IPv4 addresses (big-endian numeric, as read off the wire) of sessions
+/// for which *we* originate Echo. The userspace loader fills this. An inbound
+/// Echo whose source is one of these is **our own** Echo looped back by the
+/// peer — it must NOT be re-reflected (that would loop forever); instead it
+/// feeds the in-kernel detector ([`record_return`]) and is dropped. Empty in
+/// pure-responder deployments.
+#[map]
+static OUR_LOCAL_IPS: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
+
+/// Per-session Echo detection state, keyed by our local BFD discriminator.
+///
+/// Lives in a **BTF** map (not the legacy `#[map]` kind) because the kernel
+/// locates the embedded `struct bpf_timer` by its BTF, so the value type's
+/// layout must be described in BTF. The timer is field 0 (offset 0) — the
+/// offset the kernel records and the address [`record_return`] passes to
+/// `bpf_timer_init`. `align_of` is 8 (the `bpf_timer`'s `[u64; 2]`), within the
+/// BTF hash map's 8-byte value-alignment ceiling.
+#[repr(C)]
+pub struct EchoState {
+    /// Kernel-managed one-shot timer. Initialized lazily in-kernel on the first
+    /// observed return (userspace can't `bpf_timer_init`); userspace seeds the
+    /// rest of the value zeroed and the kernel zeroes this field on update.
+    timer: bpf_timer,
+    /// Detection time in nanoseconds (`echo-interval × detect-mult`). Set by
+    /// userspace at `echo-add`; the re-arm delay on every return.
+    detect_ns: u64,
+    /// 0 until the timer has been `bpf_timer_init`'d + callback-set in-kernel;
+    /// then 1. Read by userspace to know the kernel detector has taken over.
+    armed: u8,
+    /// Set to 1 by the timer callback when returns stopped (detection fired).
+    /// Polled and cleared by userspace, which then reports `echo-down`.
+    down: u8,
+    _pad: [u8; 6],
+}
+
+/// Detection state per originating session. 256 single-hop echo sessions on one
+/// interface is far beyond any real deployment.
+#[btf_map]
+static ECHO_TIMERS: BtfHashMap<u32, EchoState, 256> = BtfHashMap::new();
 
 /// Ethernet II header layout.
 const ETH_HLEN: usize = 14;
@@ -36,6 +94,7 @@ const IP_VER_IHL_OFF: usize = IP_OFF; // u8: high nibble = version, low = IHL
 const IP_TTL_OFF: usize = IP_OFF + 8; // u8 TTL
 const IP_PROTO_OFF: usize = IP_OFF + 9; // u8
 const IP_CHECK_OFF: usize = IP_OFF + 10; // u16 (big-endian) header checksum
+const IP_SRC_OFF: usize = IP_OFF + 12; // u32 (big-endian) source address
 const IPPROTO_UDP: u8 = 17;
 const IPV4_VER_IHL_NOOPTS: u8 = 0x45; // version 4, IHL 5 (20-byte header)
 
@@ -45,6 +104,16 @@ const UDP_DST_OFF: usize = UDP_OFF + 2; // u16 (big-endian) destination port
 
 /// BFD Echo destination port (RFC 5881 §4). BFD control is 3784; multihop 4784.
 const BFD_ECHO_PORT: u16 = 3785;
+
+/// Our Echo payload (a "local matter", RFC 5880 §5) sits right after the 8-byte
+/// UDP header: `{ magic:u32, discr:u32, seq:u32, tx_ts:u64 }`, big-endian. The
+/// magic tags it as ours; `discr` keys [`ECHO_TIMERS`]. Must match the userspace
+/// `build_echo` layout in `sender.rs`.
+const PAYLOAD_OFF: usize = UDP_OFF + 8;
+const PL_MAGIC_OFF: usize = PAYLOAD_OFF; // u32 (big-endian) "zbfd"
+const PL_DISCR_OFF: usize = PAYLOAD_OFF + 4; // u32 (big-endian) our local discriminator
+/// ASCII "zbfd" — tags our own Echo payload.
+const ECHO_MAGIC: u32 = 0x7a62_6664;
 
 /// Read a `u8` at `off` bytes into the frame, after a verifier-friendly bounds
 /// check against `data_end`.
@@ -67,6 +136,24 @@ unsafe fn load_u16_be(ctx: &XdpContext, off: usize) -> Result<u16, ()> {
     let hi = unsafe { *(ptr as *const u8) } as u16;
     let lo = unsafe { *((ptr + 1) as *const u8) } as u16;
     Ok((hi << 8) | lo)
+}
+
+/// Read a big-endian `u32` at `off` bytes into the frame, with bounds check.
+/// Used for the IPv4 source address; the result matches `u32::from(Ipv4Addr)`
+/// so it keys [`OUR_LOCAL_IPS`] directly.
+#[inline(always)]
+unsafe fn load_u32_be(ctx: &XdpContext, off: usize) -> Result<u32, ()> {
+    let ptr = ctx.data() + off;
+    if ptr + 4 > ctx.data_end() {
+        return Err(());
+    }
+    unsafe {
+        let b0 = *(ptr as *const u8) as u32;
+        let b1 = *((ptr + 1) as *const u8) as u32;
+        let b2 = *((ptr + 2) as *const u8) as u32;
+        let b3 = *((ptr + 3) as *const u8) as u32;
+        Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+    }
 }
 
 /// Swap two packet bytes via volatile reads/writes. Done per byte rather than
@@ -117,6 +204,60 @@ unsafe fn decrement_ttl(ctx: &XdpContext) -> Result<(), ()> {
     Ok(())
 }
 
+/// `bpf_timer` callback: fires `detect_ns` after the last return, i.e. when our
+/// originated Echo stopped coming back. Runs in softirq with the timed-out map
+/// element as `value`. It is one-shot (not re-armed here), so it sets the `down`
+/// flag for userspace and returns; the next return (if any) re-arms via
+/// [`record_return`]. Signature is the kernel timer-callback ABI
+/// `(map, key, value)`.
+unsafe extern "C" fn echo_timeout(_map: *mut c_void, _key: *mut c_void, value: *mut c_void) -> i32 {
+    if !value.is_null() {
+        let st = value as *mut EchoState;
+        unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!((*st).down), 1) };
+    }
+    0
+}
+
+/// Our own Echo, looped back by the peer, just arrived. Verify the payload magic,
+/// then arm (first time) or re-arm the per-session detection timer. Returning
+/// `Ok` lets the caller `XDP_DROP` the frame — in steady state the userspace
+/// sender never has to touch returns; the kernel times them.
+#[inline(always)]
+unsafe fn record_return(ctx: &XdpContext) -> Result<(), ()> {
+    if unsafe { load_u32_be(ctx, PL_MAGIC_OFF)? } != ECHO_MAGIC {
+        // Source is one of our IPs but the payload isn't ours — leave it alone.
+        return Ok(());
+    }
+    let discr = unsafe { load_u32_be(ctx, PL_DISCR_OFF)? };
+    // Userspace seeds the entry at `echo-add`; a miss means we don't track this
+    // discriminator (race or stale return) — nothing to do.
+    let Some(st) = ECHO_TIMERS.get_ptr_mut(&discr) else {
+        return Ok(());
+    };
+    unsafe {
+        let timer = core::ptr::addr_of_mut!((*st).timer);
+        if core::ptr::read_volatile(core::ptr::addr_of!((*st).armed)) == 0 {
+            // First sighting: init the timer against its own map and bind the
+            // callback. Userspace can't do this (no `bpf_timer_init` from the
+            // syscall side), so it happens here, once.
+            let map = core::ptr::from_ref(&ECHO_TIMERS)
+                .cast_mut()
+                .cast::<c_void>();
+            if bpf_timer_init(timer, map, 0) == 0 {
+                let cb: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i32 =
+                    echo_timeout;
+                bpf_timer_set_callback(timer, cb as *mut c_void);
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*st).armed), 1);
+            }
+        }
+        // Healthy return: clear any stale down flag and (re)start the one-shot.
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*st).down), 0);
+        let detect = core::ptr::read_volatile(core::ptr::addr_of!((*st).detect_ns));
+        bpf_timer_start(timer, detect, 0);
+    }
+    Ok(())
+}
+
 #[xdp]
 pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
     match try_reflect(&ctx) {
@@ -143,6 +284,16 @@ fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
 
     if unsafe { load_u16_be(ctx, UDP_DST_OFF)? } != BFD_ECHO_PORT {
         return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Our own originated Echo, looped back by the peer, is self-addressed to one
+    // of our local IPs. Don't re-reflect it (that loops forever) — feed the
+    // in-kernel detector (arm/re-arm this session's bpf_timer) and drop it. A
+    // peer's Echo (any other source) falls through to the reflect path below.
+    let src_ip = unsafe { load_u32_be(ctx, IP_SRC_OFF)? };
+    if unsafe { OUR_LOCAL_IPS.get(&src_ip) }.is_some() {
+        unsafe { record_return(ctx)? };
+        return Ok(xdp_action::XDP_DROP);
     }
 
     // Act as a forwarding hop: decrement TTL + patch the IP checksum, so the

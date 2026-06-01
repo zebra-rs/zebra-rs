@@ -5,12 +5,9 @@ use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::{
-    Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
-};
+use crate::config::{Args, ConfigChannel, DisplayRequest, ShowChannel, path_from_command};
 use crate::context::{ProtoContext, Task};
 
-use super::config::{BfdConfig, Callback};
 use super::fsm::Event;
 use super::network::{WriteRequest, read_packet, read_packet_v6, write_packet, write_packet_v6};
 use super::session::{Session, SessionKey, SessionParams, SessionTable, StateChange};
@@ -29,13 +26,12 @@ pub type ClientId = String;
 pub type ShowCallback = fn(&Bfd, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// Top-level BFD instance. Owns the IPv4 single-hop UDP socket, the
-/// session table, the committed YANG config mirror, a per-session
-/// timer handle map, and the client-subscription registry. Read and
-/// write tasks are tokio-spawned at construction and feed the event
-/// loop via `main_tx` / `write_tx`. The config-manager subscription
-/// drains through `cm.rx`, and external clients (BGP / OSPF / IS-IS
-/// / static) submit subscribe/unsubscribe requests through
-/// `client_req.rx`.
+/// session table, a per-session timer handle map, and the
+/// client-subscription registry. Read and write tasks are tokio-spawned
+/// at construction and feed the event loop via `main_tx` / `write_tx`.
+/// BFD has no config of its own; the config-manager subscription is just
+/// drained through `cm.rx`, and external clients (BGP / OSPF / IS-IS /
+/// static) submit subscribe/unsubscribe requests through `client_req.rx`.
 pub struct Bfd {
     pub rx: UnboundedReceiver<Message>,
     pub sessions: SessionTable,
@@ -43,14 +39,10 @@ pub struct Bfd {
     /// that bind to ephemeral ports — `local_addr.port()` reveals the
     /// kernel-chosen value so the peer can be told where to send.
     pub local_addr: SocketAddrV4,
-    /// In-memory mirror of `container bfd` from the committed config.
-    /// Populated by per-leaf callbacks registered in
-    /// [`Bfd::callback_build`].
-    pub config: BfdConfig,
-    /// Callback table — path → handler — used by [`Self::process_cm_msg`].
-    pub callbacks: HashMap<String, Callback>,
-    /// Config-manager subscription endpoints (the receive half drains
-    /// in the event loop).
+    /// Config-manager subscription endpoints. BFD has no config of its own,
+    /// but it registers as a config client (so the manager can tell it is
+    /// already running and avoid a double-spawn); the receive half is just
+    /// drained in the event loop.
     pub cm: ConfigChannel,
     /// `show bfd ...` subscription endpoints. The receive half drains
     /// in the event loop and dispatches through [`Self::show_cb`].
@@ -155,6 +147,10 @@ pub enum Message {
     TxTick { key: SessionKey },
     /// Detection timer fired for `key`.
     DetectExpired { key: SessionKey },
+    /// The per-interface helper reported that our originated Echo for the
+    /// session with this local discriminator stopped returning (Echo detection
+    /// timeout). Drives the session Down with `EchoFunctionFailed`.
+    EchoDown { discr: u32 },
 }
 
 /// Lifecycle events emitted by the instance for clients (tests today,
@@ -287,20 +283,17 @@ impl Bfd {
             rx,
             sessions: SessionTable::new(),
             local_addr,
-            config: BfdConfig::default(),
-            callbacks: HashMap::new(),
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
             client_req: ClientReqChannel::new(),
             subscribers: HashMap::new(),
-            main_tx,
+            main_tx: main_tx.clone(),
             write_tx,
             write_tx_v6,
             timer_handles: HashMap::new(),
-            reflectors: super::reflector::EchoReflectors::new(),
+            reflectors: super::reflector::EchoReflectors::new(main_tx),
         };
-        bfd.callback_build();
         bfd.show_build();
         Ok(bfd)
     }
@@ -382,26 +375,17 @@ impl Bfd {
         }
     }
 
-    /// Dispatch a single committed config request through the
-    /// per-leaf callback table.
-    pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
-        let (path, args) = path_from_command(&msg.paths);
-        if let Some(f) = self.callbacks.get(&path).copied() {
-            f(self, args, msg.op);
-        }
-    }
-
     /// Insert a new session and spawn its timer task. Returns the
     /// locally-assigned, non-zero, collision-free discriminator.
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
-        // Echo is single-hop + IPv4 only (the XDP reflector loops IPv4). A
-        // non-zero advertised echo-rx is a promise to loop Echo back, so bring
-        // up the per-interface reflector and only mark the session `echo_ready`
-        // (the build_packet advertise gate) once the child is confirmed up —
-        // otherwise we keep advertising 0, which is honest.
-        if params.required_min_echo_rx_us > 0 && !key.multihop && key.remote.is_ipv4() {
+        // Echo is single-hop + IPv4 only (the XDP helper handles IPv4). Any
+        // active Echo role needs the per-interface helper: `receive` reflects a
+        // peer's Echo, `transmit` sends + detects ours. Bring it up and mark the
+        // session `echo_ready` once the child is confirmed running — until then
+        // we advertise 0 (an honest promise to actually loop Echo back).
+        if !params.echo_mode.is_off() && !key.multihop && key.remote.is_ipv4() {
             self.reflectors.acquire(key.ifindex);
             let ready = self.reflectors.is_ready(key.ifindex);
             if ready && let Some(s) = self.sessions.get_by_key_mut(&key) {
@@ -441,13 +425,19 @@ impl Bfd {
         }
         let removed = self.sessions.remove(key);
         // Mirror the `add_session` acquire predicate exactly (the configured
-        // `required_min_echo_rx_us` is never mutated, so this stays symmetric
-        // even when the session ended up advertising 0).
+        // `echo_mode` is never mutated, so this stays symmetric even when the
+        // session ended up advertising 0).
         if let Some(s) = &removed
-            && s.required_min_echo_rx_us > 0
+            && !s.echo_mode.is_off()
             && !s.key.multihop
             && s.key.remote.is_ipv4()
         {
+            // Stop any originator first, while the helper is still alive — the
+            // release below may be the last reference and tear the child down.
+            if s.echo_originating {
+                self.reflectors
+                    .send_command(s.key.ifindex, format!("echo-del {}", s.local_disc));
+            }
             self.reflectors.release(s.key.ifindex);
         }
         removed
@@ -474,10 +464,12 @@ impl Bfd {
                         self.on_recv(packet, src, dst, ifindex, ttl, multihop),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
+                    Message::EchoDown { discr } => self.on_echo_down(discr),
                 },
-                Some(msg) = self.cm.rx.recv() => {
-                    self.process_cm_msg(msg);
-                }
+                // BFD has no config of its own — just drain the commit
+                // broadcasts so the channel doesn't back up (we register as a
+                // config client only so the manager knows BFD is running).
+                Some(_) = self.cm.rx.recv() => {}
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
@@ -607,6 +599,10 @@ impl Bfd {
         if let Some(change) = change {
             self.notify_state_change(key, change);
         }
+
+        // (Re)evaluate the §6.8.9 originate gate: a transition to/from Up, or a
+        // freshly-learned non-zero peer echo-rx, can start or stop our Echo.
+        self.echo_originate_reconcile(key);
     }
 
     /// Find an existing session that matches an incoming packet whose
@@ -688,6 +684,77 @@ impl Bfd {
         }
     }
 
+    /// The per-interface helper reported that our originated Echo for the
+    /// session with local discriminator `discr` stopped returning (RFC 5880
+    /// §6.8.5). Drive the session Down with `EchoFunctionFailed`, then reconcile
+    /// the originator — the session is no longer Up, so we stop sending Echo.
+    fn on_echo_down(&mut self, discr: u32) {
+        let Some(key) = self.sessions.get_by_disc(discr).map(|s| s.key) else {
+            return;
+        };
+        let change = self
+            .sessions
+            .get_by_key_mut(&key)
+            .and_then(|s| s.handle_event(Event::EchoDetectExpired));
+        if let Some(change) = change {
+            self.notify_state_change(key, change);
+        }
+        self.echo_originate_reconcile(key);
+    }
+
+    /// RFC 5880 §6.8.9 — start or stop *originating* Echo for `key` based on the
+    /// session's current gate, emitting `echo-add`/`echo-del` to the
+    /// per-interface helper exactly on the edges (tracked by
+    /// [`Session::echo_originating`]).
+    ///
+    /// We originate only while the session is **Up**, our configured Echo mode
+    /// transmits (`transmit`/`both`), the peer advertises a non-zero Required Min
+    /// Echo RX Interval (it will loop our Echo back), it is single-hop, and both
+    /// endpoints carry a concrete IPv4 address — the helper builds a
+    /// self-addressed L2 IPv4 frame and the forwarding plane hairpins it. The
+    /// transmit interval is our configured `echo-transmit-interval`, clamped up
+    /// to the peer's advertised floor; detection is `interval × detect_mult`.
+    fn echo_originate_reconcile(&mut self, key: SessionKey) {
+        let Some(s) = self.sessions.get_by_key(&key) else {
+            return;
+        };
+        // Echo is single-hop IPv4 only; `local` must be a concrete source the
+        // helper can stamp as src==dst on the self-addressed frame.
+        let v4 = match (s.key.local, s.key.remote) {
+            (IpAddr::V4(local), IpAddr::V4(peer)) if !s.key.multihop && !local.is_unspecified() => {
+                Some((local, peer))
+            }
+            _ => None,
+        };
+        let want = v4.is_some()
+            && s.local_state == bfd_packet::State::Up
+            && s.echo_mode.transmits()
+            && s.remote_min_echo_rx_us > 0;
+        if want == s.echo_originating {
+            return;
+        }
+        let ifindex = s.key.ifindex;
+        let discr = s.local_disc;
+        if want {
+            let (local, peer) = v4.expect("want implies a concrete IPv4 pair");
+            // §6.8.9: the interval MUST NOT be below the peer's advertised
+            // Required Min Echo RX Interval. Send at our configured rate, but
+            // never faster than the peer's floor.
+            let tx_us = s.echo_transmit_us.max(s.remote_min_echo_rx_us).max(1);
+            let mult = s.detect_mult.max(1);
+            self.reflectors.send_command(
+                ifindex,
+                format!("echo-add {discr} {local} {peer} {tx_us} {mult}"),
+            );
+        } else {
+            self.reflectors
+                .send_command(ifindex, format!("echo-del {discr}"));
+        }
+        if let Some(s) = self.sessions.get_by_key_mut(&key) {
+            s.echo_originating = want;
+        }
+    }
+
     fn notify_state_change(&self, key: SessionKey, change: StateChange) {
         tracing::info!(
             ?key,
@@ -715,6 +782,7 @@ pub fn serve(mut bfd: Bfd) -> Task<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::session::EchoMode;
     use super::*;
 
     fn fresh_bfd() -> Bfd {
@@ -762,6 +830,7 @@ mod tests {
         let mut key = loopback_key(20);
         key.ifindex = 0xFFFF_FFF0; // no such interface
         let params = SessionParams {
+            echo_mode: EchoMode::Both,
             required_min_echo_rx_us: 50_000,
             ..SessionParams::default()
         };
@@ -783,6 +852,7 @@ mod tests {
         key.ifindex = 0xFFFF_FFF1;
         key.multihop = true;
         let params = SessionParams {
+            echo_mode: EchoMode::Both,
             required_min_echo_rx_us: 50_000,
             ..SessionParams::default()
         };

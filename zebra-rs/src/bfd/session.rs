@@ -38,6 +38,46 @@ pub struct SessionKey {
     pub multihop: bool,
 }
 
+/// Which halves of the BFD Echo function (RFC 5880 §6.4) are enabled on a
+/// session — the two roles are independent (cf. FRR's `echo-mode` plus
+/// `echo-receive-interval`):
+///
+/// - **receive** (responder): advertise a non-zero `Required Min Echo RX
+///   Interval` and loop a peer's Echo back via the XDP reflector, so the *peer*
+///   can run Echo detection against us.
+/// - **transmit** (originator): periodically send our own Echo and drive the
+///   session Down if it stops returning (RFC 5880 §6.8.5).
+///
+/// Echo is single-hop IPv4 only either way; the BFD instance further gates on
+/// that and on the reflector being live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EchoMode {
+    /// No Echo (advertise 0, don't originate). Conformant default.
+    #[default]
+    Off,
+    /// Originate Echo only; do **not** advertise a non-zero echo-rx.
+    Transmit,
+    /// Advertise + reflect only; do **not** originate.
+    Receive,
+    /// Both originate and advertise + reflect.
+    Both,
+}
+
+impl EchoMode {
+    /// We originate Echo (`transmit` / `both`).
+    pub fn transmits(self) -> bool {
+        matches!(self, EchoMode::Transmit | EchoMode::Both)
+    }
+    /// We advertise a non-zero echo-rx and reflect (`receive` / `both`).
+    pub fn advertises(self) -> bool {
+        matches!(self, EchoMode::Receive | EchoMode::Both)
+    }
+    /// Echo entirely off — no helper needed.
+    pub fn is_off(self) -> bool {
+        matches!(self, EchoMode::Off)
+    }
+}
+
 /// Per-session timer / detection parameters as locally configured
 /// (i.e. before any peer negotiation). RFC 5880 §6.8.1 calls these
 /// `bfd.DesiredMinTxInterval`, `bfd.RequiredMinRxInterval`, and
@@ -55,13 +95,17 @@ pub struct SessionParams {
     pub detect_mult: u8,
     pub dst_port: u16,
     pub min_ttl: u8,
-    /// `bfd.RequiredMinEchoRxInterval` (microseconds) to advertise.
-    /// Zero (the default) means "I will not loop Echo back" (RFC 5880
-    /// §6.8.1) — the conformant state until a responder exists. A
-    /// non-zero value is only set by a client that has the XDP Echo
-    /// reflector active on the session's interface, and is advertised
-    /// only on single-hop sessions ([`Session::build_packet`]).
+    /// Which Echo roles are enabled (off / transmit / receive / both).
+    pub echo_mode: EchoMode,
+    /// `bfd.RequiredMinEchoRxInterval` (microseconds) to advertise when
+    /// [`EchoMode::advertises`]. Zero means "I will not loop Echo back"
+    /// (RFC 5880 §6.8.1). Advertised only on single-hop IPv4 sessions with the
+    /// reflector live ([`Session::advertised_echo_rx_us`]).
     pub required_min_echo_rx_us: u32,
+    /// Interval (microseconds) at which we originate Echo when
+    /// [`EchoMode::transmits`]. Clamped up to the peer's advertised
+    /// `Required Min Echo RX` at send time (RFC 5880 §6.8.9).
+    pub echo_transmit_us: u32,
 }
 
 impl Default for SessionParams {
@@ -81,8 +125,11 @@ impl Default for SessionParams {
             dst_port: super::socket::BFD_SINGLE_HOP_PORT,
             min_ttl: 255,
             // Echo off by default — advertising non-zero is a promise to
-            // loop Echo packets back, made only once the reflector is up.
+            // loop Echo packets back, made only once the reflector is up,
+            // and originating is opt-in per the configured mode.
+            echo_mode: EchoMode::Off,
             required_min_echo_rx_us: 0,
+            echo_transmit_us: 0,
         }
     }
 }
@@ -127,16 +174,28 @@ pub struct Session {
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
 
-    /// Configured `bfd.RequiredMinEchoRxInterval` (microseconds). Zero means
-    /// "do not send me Echo" (RFC 5880 §6.8.1). Set from `SessionParams` at
-    /// creation and never mutated, so it also drives the symmetric reflector
-    /// acquire/release in the instance.
+    /// Configured Echo roles (off / transmit / receive / both). Set from
+    /// `SessionParams` at creation and never mutated, so it drives both the
+    /// advertise/originate gates and the symmetric reflector acquire/release.
+    pub echo_mode: EchoMode,
+    /// Configured `bfd.RequiredMinEchoRxInterval` (microseconds) — the value
+    /// advertised when [`EchoMode::advertises`]. Zero means "do not send me
+    /// Echo" (RFC 5880 §6.8.1).
     pub required_min_echo_rx_us: u32,
+    /// Interval (microseconds) at which we originate Echo when
+    /// [`EchoMode::transmits`]; clamped up to the peer's advertised echo-rx.
+    pub echo_transmit_us: u32,
     /// Whether the per-interface XDP Echo reflector is confirmed up. The
     /// instance sets this once the child has spawned; until then we advertise
     /// 0 even with `required_min_echo_rx_us` configured, so the non-zero
     /// advertisement stays an honest promise to actually loop Echo back.
     pub echo_ready: bool,
+    /// Whether we have told the helper to *originate* Echo for this session
+    /// (RFC 5880 §6.8.9: only while Up, the peer advertises a non-zero echo-rx,
+    /// and the session is single-hop IPv4). Tracked so the instance sends
+    /// `echo-add`/`echo-del` exactly on the edges; see
+    /// `Bfd::echo_originate_reconcile`.
+    pub echo_originating: bool,
 
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
@@ -194,8 +253,11 @@ impl Session {
             detect_mult: params.detect_mult,
             dst_port: params.dst_port,
             min_ttl: params.min_ttl,
+            echo_mode: params.echo_mode,
             required_min_echo_rx_us: params.required_min_echo_rx_us,
+            echo_transmit_us: params.echo_transmit_us,
             echo_ready: false,
+            echo_originating: false,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
@@ -313,13 +375,19 @@ impl Session {
     }
 
     /// The `Required Min Echo RX Interval` (microseconds) we actually
-    /// advertise. Non-zero only when ALL hold: Echo is single-hop (RFC 5881
-    /// §4; RFC 5883 multihop has no Echo); the session is IPv4 (our XDP
-    /// reflector loops IPv4 only); and the reflector is confirmed up
-    /// (`echo_ready`) — so a non-zero advertisement is an honest promise to
-    /// loop Echo back. Used by both [`Self::build_packet`] and `show`.
+    /// advertise. Non-zero only when ALL hold: our Echo mode advertises
+    /// (`receive`/`both`); Echo is single-hop (RFC 5881 §4; RFC 5883 multihop
+    /// has no Echo); the session is IPv4 (our XDP reflector loops IPv4 only);
+    /// and the reflector is confirmed up (`echo_ready`) — so a non-zero
+    /// advertisement is an honest promise to loop Echo back. A `transmit`-only
+    /// session advertises 0 (we send Echo but don't ask the peer to). Used by
+    /// both [`Self::build_packet`] and `show`.
     pub fn advertised_echo_rx_us(&self) -> u32 {
-        if self.echo_ready && !self.key.multihop && self.key.remote.is_ipv4() {
+        if self.echo_mode.advertises()
+            && self.echo_ready
+            && !self.key.multihop
+            && self.key.remote.is_ipv4()
+        {
             self.required_min_echo_rx_us
         } else {
             0
@@ -781,6 +849,7 @@ mod tests {
         let d = t.insert(
             key(1, 2), // key() is single-hop (multihop: false), IPv4
             SessionParams {
+                echo_mode: EchoMode::Both,
                 required_min_echo_rx_us: 50_000,
                 ..SessionParams::default()
             },
@@ -805,12 +874,46 @@ mod tests {
         let d = t.insert(
             k,
             SessionParams {
+                echo_mode: EchoMode::Both,
                 required_min_echo_rx_us: 50_000,
                 ..SessionParams::default()
             },
         );
         let s = t.get_by_disc(d).unwrap();
         assert_eq!(s.build_packet().required_min_echo_rx_interval, 0);
+    }
+
+    /// `transmit`-only Echo originates but never advertises a non-zero
+    /// Required Min Echo RX (we send Echo without asking the peer to);
+    /// `receive`/`both` advertise once the reflector is up. Verifies the
+    /// `EchoMode` split at the advertise gate.
+    #[test]
+    fn echo_mode_gates_advertisement() {
+        let cases = [
+            (EchoMode::Off, 0),
+            (EchoMode::Transmit, 0),
+            (EchoMode::Receive, 50_000),
+            (EchoMode::Both, 50_000),
+        ];
+        for (mode, expect) in cases {
+            let mut t = SessionTable::new();
+            let d = t.insert(
+                key(1, 2), // single-hop IPv4
+                SessionParams {
+                    echo_mode: mode,
+                    required_min_echo_rx_us: 50_000,
+                    echo_transmit_us: 50_000,
+                    ..SessionParams::default()
+                },
+            );
+            let s = t.get_by_disc_mut(d).unwrap();
+            s.echo_ready = true; // reflector confirmed up
+            assert_eq!(
+                s.build_packet().required_min_echo_rx_interval,
+                expect,
+                "advertise for {mode:?}",
+            );
+        }
     }
 
     /// The peer's advertised Required Min Echo RX Interval is cached from

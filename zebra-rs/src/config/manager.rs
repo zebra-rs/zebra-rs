@@ -206,14 +206,13 @@ pub struct ConfigManager {
     pub next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
-    /// [`super::bfd::spawn_bfd`] when a `bfd { ... }` block first
-    /// appears in the candidate config; cleared by `despawn_bfd` when
-    /// the block is removed. Protocol modules (BGP / OSPF / IS-IS /
-    /// static) clone this at their own spawn time so they can later
-    /// submit `ClientReq::Subscribe` / `Unsubscribe` against the
-    /// running BFD instance. `None` indicates BFD has not (yet) been
-    /// configured — clients with a `None` handle silently skip their
-    /// BFD attach logic.
+    /// [`super::bfd::spawn_bfd`], which a consumer protocol (BGP / OSPF /
+    /// IS-IS) calls eagerly before its own spawn; cleared by `despawn_bfd`
+    /// when the last consumer is gone. Protocol modules clone this at
+    /// their own spawn time so they can later submit
+    /// `ClientReq::Subscribe` / `Unsubscribe` against the running BFD
+    /// instance. `None` indicates BFD has not (yet) been spawned — clients
+    /// with a `None` handle silently skip their BFD attach logic.
     pub bfd_client_tx: RefCell<Option<UnboundedSender<crate::bfd::inst::ClientReq>>>,
     /// Sender side of the ND client-request channel. Populated by
     /// [`super::nd::spawn_nd`] on either the first
@@ -552,10 +551,9 @@ impl ConfigManager {
                 }
                 spawn_bgp(self);
             }
-            if !bfd && op == ConfigOp::Set && line.starts_with("bfd") {
-                bfd = true;
-                spawn_bfd(self);
-            }
+            // BFD has no top-level `bfd { … }` block: it is spawned eagerly by
+            // the OSPF / IS-IS / BGP arms above (those protocols capture
+            // `bfd_client_tx` by value, so BFD must be up before them).
             // ND has no top-level `router nd` block — it's configured
             // per-interface (`interface X ipv6 router-advertisements
             // …`). Spawn on the first set line that mentions the
@@ -626,14 +624,12 @@ impl ConfigManager {
         if self.protocol_tasks.borrow().contains_key("isis") && !proto_in_candidate("isis") {
             despawn_isis(self);
         }
-        // BFD's top-level keyword is `bfd` (FRR-style), not
-        // `router <proto>`, so it can't use `proto_in_candidate`.
-        // BFD is now spawned eagerly for BGP / IS-IS, so it must outlive
-        // a removed `bfd { … }` block as long as a consumer remains —
-        // otherwise the consumer's captured handle would dangle. Tear it
-        // down only when neither a `bfd` block nor any consumer is left.
+        // BFD has no top-level block of its own; it is spawned eagerly by its
+        // consumers (BGP / IS-IS / OSPF) and must outlive any individual one as
+        // long as a consumer remains — otherwise that consumer's captured
+        // `bfd_client_tx` handle would dangle. Tear it down only when the last
+        // consumer is gone.
         if self.protocol_tasks.borrow().contains_key("bfd")
-            && !candidate.lines().any(|l| l.starts_with("bfd"))
             && !proto_in_candidate("bgp")
             && !proto_in_candidate("isis")
             // `proto_in_candidate("ospf")` prefix-matches `router ospfv3`

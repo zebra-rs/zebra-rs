@@ -19,6 +19,11 @@ pub enum Event {
     /// The session's detection timer expired without a valid packet
     /// arriving in time (RFC 5880 §6.8.4).
     DetectExpired,
+    /// The Echo detection timer expired: our originated Echo stopped
+    /// returning within `echo-interval × detect-mult` (RFC 5880 §6.8.5).
+    /// Drives Down like `DetectExpired` but records `EchoFunctionFailed`.
+    /// Reported by the per-interface helper over its IPC channel.
+    EchoDetectExpired,
     /// Administrative shutdown requested (e.g. `shutdown` under a
     /// `bfd peer` block).
     AdminDown,
@@ -57,6 +62,10 @@ pub fn transition(local: State, event: Event) -> Transition {
         Event::DetectExpired => match local {
             State::Down => stay(State::Down, None),
             _ => stay(State::Down, Some(Diag::ControlDetectionTimeExpired)),
+        },
+        Event::EchoDetectExpired => match local {
+            State::Down => stay(State::Down, None),
+            _ => stay(State::Down, Some(Diag::EchoFunctionFailed)),
         },
         Event::Rx { remote_state } => rx_transition(local, remote_state),
     }
@@ -182,6 +191,25 @@ mod tests {
         }
 
         let t = transition(AdminDown, Event::DetectExpired);
+        assert_eq!(t.new_state, AdminDown);
+        assert_eq!(t.new_diag, None);
+    }
+
+    /// RFC 5880 §6.8.5 — Echo detection expiry drives Init/Up to Down with
+    /// EchoFunctionFailed; from Down it's a no-op; AdminDown ignores it.
+    #[test]
+    fn echo_detect_expired() {
+        let t = transition(Down, Event::EchoDetectExpired);
+        assert_eq!(t.new_state, Down);
+        assert_eq!(t.new_diag, None);
+
+        for &s in &[Init, Up] {
+            let t = transition(s, Event::EchoDetectExpired);
+            assert_eq!(t.new_state, Down, "from {s:?}");
+            assert_eq!(t.new_diag, Some(Diag::EchoFunctionFailed), "from {s:?}");
+        }
+
+        let t = transition(AdminDown, Event::EchoDetectExpired);
         assert_eq!(t.new_state, AdminDown);
         assert_eq!(t.new_diag, None);
     }

@@ -10,14 +10,14 @@ all:
 console:
 	RUSTFLAGS="--cfg tokio_unstable" cargo run --bin zebra --release
 
-# Optional: build the XDP BFD Echo reflector (offload/). Requires a nightly
-# bpfel toolchain + bpf-linker (see offload/bfd-echo-reflector/README.md), so it
+# Optional: build the XDP BFD Echo helper (offload/). Requires a nightly
+# bpfel toolchain + bpf-linker (see offload/xdp-bfd-echo/README.md), so it
 # is kept OUT of `all`/CI, which run on stable. zebra-rs spawns this binary to
 # honour a non-zero BFD `Required Min Echo RX Interval`.
-.PHONY: bfd-echo-reflector
-bfd-echo-reflector:
-	cd offload/bfd-echo-reflector && cargo build --release
-	@echo '[built offload/bfd-echo-reflector/target/release/bfd-echo-reflector]'
+.PHONY: xdp-bfd-echo
+xdp-bfd-echo:
+	cd offload/xdp-bfd-echo && cargo build --release
+	@echo '[built offload/xdp-bfd-echo/target/release/xdp-bfd-echo]'
 
 install:
 	mkdir -p ${HOME}/.zebra/bin
@@ -32,9 +32,9 @@ endif
 ifneq ("$(wildcard vty/vty)","")
 	cp vty/vty ${HOME}/.zebra/bin
 endif
-ifneq ("$(wildcard offload/bfd-echo-reflector/target/release/bfd-echo-reflector)","")
-	cp offload/bfd-echo-reflector/target/release/bfd-echo-reflector ${HOME}/.zebra/bin
-	@echo '[bfd-echo-reflector installed — grant caps with: sudo setcap cap_net_admin,cap_bpf=ep $${HOME}/.zebra/bin/bfd-echo-reflector]'
+ifneq ("$(wildcard offload/xdp-bfd-echo/target/release/xdp-bfd-echo)","")
+	cp offload/xdp-bfd-echo/target/release/xdp-bfd-echo ${HOME}/.zebra/bin
+	@echo '[xdp-bfd-echo installed — grant caps with: sudo setcap cap_net_admin,cap_bpf,cap_net_raw=ep $${HOME}/.zebra/bin/xdp-bfd-echo]'
 endif
 	cp zebra/yang/* ${HOME}/.zebra/yang
 	touch ${HOME}/.zebra/zebra.conf
@@ -50,15 +50,16 @@ install-vtypam:
 	@echo '[vtypam installed to /usr/sbin/vtypam with file caps]'
 	@echo '[Copy etc/pam.d/zebra-rs.example to /etc/pam.d/zebra-rs and adjust for your distro]'
 
-# System-wide installation of the XDP BFD Echo reflector to /usr/sbin with the
-# caps it needs to load/attach XDP (kernel 5.8+: cap_bpf, plus cap_net_admin).
-# zebra-rs spawns it from /usr/sbin/bfd-echo-reflector (override with
-# $ZEBRA_BFD_REFLECTOR_BIN). Build it first with `make bfd-echo-reflector`.
-.PHONY: install-bfd-echo-reflector
-install-bfd-echo-reflector:
-	sudo install -m 0755 -o root -g root offload/bfd-echo-reflector/target/release/bfd-echo-reflector /usr/sbin/bfd-echo-reflector
-	sudo setcap cap_net_admin,cap_bpf=ep /usr/sbin/bfd-echo-reflector
-	@echo '[bfd-echo-reflector installed to /usr/sbin with file caps]'
+# System-wide installation of the BFD Echo helper to /usr/sbin with the caps it
+# needs: cap_bpf (kernel 5.8+) + cap_net_admin to load/attach XDP, and
+# cap_net_raw for the AF_PACKET Echo originator. zebra-rs spawns it from
+# /usr/sbin/xdp-bfd-echo (override with $ZEBRA_XDP_BFD_ECHO_BIN). Build
+# it first with `make xdp-bfd-echo`.
+.PHONY: install-xdp-bfd-echo
+install-xdp-bfd-echo:
+	sudo install -m 0755 -o root -g root offload/xdp-bfd-echo/target/release/xdp-bfd-echo /usr/sbin/xdp-bfd-echo
+	sudo setcap cap_net_admin,cap_bpf,cap_net_raw=ep /usr/sbin/xdp-bfd-echo
+	@echo '[xdp-bfd-echo installed to /usr/sbin with file caps]'
 
 doc:
 	rustdoc

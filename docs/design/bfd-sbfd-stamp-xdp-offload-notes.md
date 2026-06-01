@@ -53,6 +53,12 @@ BFD Echo は本質的に「ローカルが送出 → リモートのフォワー
 - 折り返してきた Echo の受信・検証（RX）→ XDP が得意（マップに last-seen / seq を持って照合）。
 - detect タイムアウト（戻ってこない → Down）→ タイマー起動が必要なので XDP 単体不可。
 
+> **実装済み（as-built）**: reflector / originator とも実装済みで、ヘルパは
+> **`xdp-bfd-echo`**（旧 `bfd-echo-reflector`）に統合。ここの予測どおり TX は
+> ユーザ空間 `AF_PACKET`、detect は XDP が戻り Echo ごとに per-session
+> `bpf_timer` を arm する方式（戻りが止まると `Down` + `EchoFunctionFailed`）。
+> `bpf_timer`-from-XDP のカーネル検証はラボ確認待ち。
+
 ### 実装メモ
 - Echo ペイロードは RFC 5880 §6.4 で **"a local matter"**（送出側裁量）。自分の discriminator + seq + 送出タイムスタンプを詰めておくと RX 側 XDP のマップ照合が安価。
 - 性能は折り返しジッタが検知タイマーの攻め具合を左右 → reflector は native モード（i40e/ice/ixgbe/mlx5 等）が望ましい。

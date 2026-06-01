@@ -1,10 +1,10 @@
-# bfd-echo-reflector — XDP BFD Echo reflector
+# xdp-bfd-echo — XDP BFD Echo datapath (reflector + originator)
 
 An XDP/eBPF program (with an [aya](https://aya-rs.dev/) userspace loader) that
 reflects **BFD Echo** frames (UDP **3785**, RFC 5880 §6.4 / RFC 5881 §4) in the
 data plane. **zebra-rs spawns and supervises it automatically** — one instance
 per interface — when the BFD Echo function is enabled on a single-hop IPv4
-session (e.g. `router ospf area 0 interface X bfd { echo-mode true; }`), so a
+session (e.g. `router ospf area 0 interface X bfd { echo-mode receive; }`), so a
 peer (FRR `echo-mode`, IOS, …) can run BFD Echo against zebra-rs. It can also be
 run standalone for testing (see [Run](#run)).
 
@@ -37,15 +37,16 @@ session and stops it (SIGTERM → clean XDP detach) on the last. zebra-rs only
 advertises a non-zero `Required Min Echo RX Interval` once the reflector is up,
 so the promise to loop Echo back stays honest.
 
-- **Binary path:** `$ZEBRA_BFD_REFLECTOR_BIN`, else `~/.zebra/bin/bfd-echo-reflector`,
-  else `/usr/sbin/bfd-echo-reflector` (the `.deb` install location).
-- **Attach mode:** `$ZEBRA_BFD_REFLECTOR_MODE` = `auto` (default) | `native` | `skb`.
-- **Capabilities:** needs `cap_net_admin,cap_bpf`; the package postinstall grants them.
+- **Binary path:** `$ZEBRA_XDP_BFD_ECHO_BIN`, else `~/.zebra/bin/xdp-bfd-echo`,
+  else `/usr/sbin/xdp-bfd-echo` (the `.deb` install location).
+- **Attach mode:** `$ZEBRA_XDP_BFD_ECHO_MODE` = `auto` (default) | `native` | `skb`.
+- **Capabilities:** needs `cap_net_admin,cap_bpf` (and `cap_net_raw` for the
+  AF_PACKET Echo originator); the package postinstall grants them.
 
 ## Layout
 
 ```
-bfd-echo-reflector/
+xdp-bfd-echo/
 ├── Cargo.toml      # workspace root (own workspace; excluded from zebra-rs)
 ├── .cargo/config.toml  # `cargo run` -> sudo (XDP attach needs CAP_NET_ADMIN)
 ├── loader/         # userspace: load + attach the XDP program (aya)
@@ -81,7 +82,7 @@ the [bpf-linker README](https://github.com/aya-rs/bpf-linker#installation).
 ## Build
 
 ```sh
-cd offload/bfd-echo-reflector
+cd offload/xdp-bfd-echo
 cargo build --release        # build.rs compiles the eBPF object via nightly+bpf-linker
 ```
 
@@ -97,7 +98,7 @@ cargo build --release        # build.rs compiles the eBPF object via nightly+bpf
 # `cargo run` is wrapped in sudo via .cargo/config.toml
 RUST_LOG=info cargo run --release -- --iface veth0
 # or run the binary directly:
-sudo RUST_LOG=info ./target/release/bfd-echo-reflector -i veth0
+sudo RUST_LOG=info ./target/release/xdp-bfd-echo -i veth0
 ```
 
 `--mode auto` (default) attaches native/driver XDP and falls back to generic
@@ -162,8 +163,9 @@ exit
 !
 ```
 
-**zebra-rs** — `192.168.10.1` (reflects via XDP; `echo-mode true` advertises a
-non-zero Required Min Echo RX):
+**zebra-rs** — `192.168.10.1` (reflects via XDP; `echo-mode receive` advertises
+a non-zero Required Min Echo RX so the FRR peer may run Echo against us; use
+`both` to also originate our own Echo toward FRR):
 
 ```
 interface enp0s6 {
@@ -176,7 +178,7 @@ router {
     area 0 {
       interface enp0s6 {
         bfd {
-          echo-mode true;
+          echo-mode receive;
           enable true;
         }
         enable true;
@@ -204,12 +206,29 @@ system never parses it, it just hairpins it. (Not shown: the TTL drops 255 → 2
 on the return — add `-v` to see it; FRR drops any other TTL.) On zebra-rs,
 `show bfd peers` then reports `Echo receive interval: 50ms`.
 
+## Originator (Echo sender)
+
+Beyond reflecting, the helper also *originates* Echo when zebra-rs asks it to
+(RFC 5880 §6.8.5/§6.8.9), driven over a stdin/stdout line protocol:
+
+- `echo-add <discr> <local-ip> <peer-ip> <tx-us> <detect-mult>` / `echo-del <discr>`
+  from zebra-rs; `echo-down <discr>` back when detection fires.
+- **Transmit** is userspace (XDP can't originate): an `AF_PACKET` socket sends a
+  self-addressed Echo (src=dst=local, udp/3785, TTL 255) every `tx-us` (75–100%
+  jittered); the peer's forwarding plane loops it back.
+- **Detection is offloaded to the kernel.** The XDP program recognizes our
+  returning Echo (source ∈ `OUR_LOCAL_IPS`), arms/re-arms a per-session
+  `bpf_timer` in the `ECHO_TIMERS` BTF map (keyed by discriminator), and drops
+  the frame. If returns stop for `tx-us × detect-mult`, the timer fires in
+  softirq and sets a `down` flag; the helper polls it and emits `echo-down`. A
+  userspace timeout covers the bootstrap window before the first return arms the
+  timer.
+
 ## Limitations / follow-ups
 
 - **IPv4 only** (EtherType 0x0800). IPv6 (0x86DD) is a follow-up.
 - Option-less IPv4 only (IHL=5); BFD Echo frames carry no IP options.
-- **Responder only** — zebra-rs reflects a peer's Echo (and honestly advertises
-  the capability), but does not yet *originate* Echo itself; the sender half
-  needs periodic TX timers + an Echo detect timer.
+- `bpf_timer` detection needs a kernel that supports it (≥ 5.15) and `CAP_BPF`;
+  the responder path has no such requirement.
 - aya deps are pulled from git to match the current build glue; pin a rev for
   reproducible builds.

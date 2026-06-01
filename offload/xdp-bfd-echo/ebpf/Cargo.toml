@@ -1,5 +1,5 @@
 [package]
-name = "bfd-echo-reflector-ebpf"
+name = "xdp-bfd-echo-ebpf"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ aya-ebpf = { workspace = true }
 which = { workspace = true }
 
 [[bin]]
-name = "bfd-echo-reflector"
+name = "xdp-bfd-echo"
 path = "src/main.rs"
 
 # No `[profile]` here: the eBPF object is built by the loader's build.rs via
