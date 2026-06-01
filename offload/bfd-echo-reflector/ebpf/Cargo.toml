@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 aya-ebpf = { workspace = true }
-aya-log-ebpf = { workspace = true }
 
 [build-dependencies]
 # Build fails fast with a clear error if bpf-linker is not on $PATH.

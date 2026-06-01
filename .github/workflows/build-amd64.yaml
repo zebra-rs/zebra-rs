@@ -15,6 +15,20 @@ jobs:
       - name: Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      # `make -C packaging` builds the XDP BFD Echo reflector (offload/), which
+      # compiles to bpfel-unknown-none and needs a nightly toolchain + rust-src
+      # and bpf-linker (which links against LLVM). Versions match the locally
+      # validated combo: bpf-linker 0.10.3 / LLVM 18.1.
+      - name: Install XDP/eBPF toolchain
+        run: |
+          rustup toolchain install nightly --component rust-src
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 18
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          cargo install bpf-linker --version 0.10.3 --locked
+
       - name: Build vty
         run: |
           sudo apt update -y

@@ -12,8 +12,8 @@ fi
 
 # The XDP BFD Echo reflector (spawned by zebra-rs to honour a non-zero
 # Required Min Echo RX Interval) loads/attaches an XDP program, which needs
-# cap_bpf (kernel 5.8+) and cap_net_admin. No-op unless the package ships it
-# (it is built by the optional `make bfd-echo-reflector` target, not `all`).
+# cap_bpf (kernel 5.8+) and cap_net_admin. The deb ships it at /usr/sbin
+# (built by the packaging Makefile); the guard keeps this safe if it isn't.
 if [ -x /usr/sbin/bfd-echo-reflector ]; then
     setcap 'cap_net_admin,cap_bpf=ep' /usr/sbin/bfd-echo-reflector
 fi

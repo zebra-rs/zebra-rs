@@ -60,6 +60,15 @@ fn ms(us: u32) -> String {
     format!("{}ms", us / 1000)
 }
 
+/// Echo interval: FRR-style `Nms`, or `disabled` when zero.
+fn echo_ms(us: u32) -> String {
+    if us == 0 {
+        "disabled".to_string()
+    } else {
+        ms(us)
+    }
+}
+
 /// Seconds elapsed since `t`, or `None` if the timestamp is unset.
 fn elapsed_secs(t: Option<Instant>) -> Option<u64> {
     t.map(|i| i.elapsed().as_secs())
@@ -195,9 +204,17 @@ struct BfdPeerDetailJson {
     transmit_interval_us: u32,
     negotiated_transmit_interval_us: u32,
     detection_time_us: u32,
+    /// `Required Min Echo RX Interval` we advertise (0 = disabled). Non-zero
+    /// only while the XDP reflector is up on a single-hop IPv4 session.
+    echo_receive_interval_us: u32,
+    /// Echo transmission interval. Always 0 — zebra-rs is responder-only
+    /// (it loops a peer's Echo back but does not originate Echo).
+    echo_transmission_interval_us: u32,
     remote_detect_multiplier: u8,
     remote_receive_interval_us: u32,
     remote_transmit_interval_us: u32,
+    /// Peer's `Required Min Echo RX Interval` (0 = it will not reflect).
+    remote_echo_receive_interval_us: u32,
     demand: bool,
     remote_demand: bool,
     rx_count: u64,
@@ -230,9 +247,12 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         transmit_interval_us: s.desired_min_tx_us,
         negotiated_transmit_interval_us: s.tx_interval_us(),
         detection_time_us: s.detection_time_us(),
+        echo_receive_interval_us: s.advertised_echo_rx_us(),
+        echo_transmission_interval_us: 0,
         remote_detect_multiplier: s.remote_detect_mult,
         remote_receive_interval_us: s.remote_min_rx_us,
         remote_transmit_interval_us: s.remote_min_tx_us,
+        remote_echo_receive_interval_us: s.remote_min_echo_rx_us,
         demand: s.demand,
         remote_demand: s.remote_demand,
         rx_count: s.stats.rx_count,
@@ -309,6 +329,13 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
         ms(detect)
     };
     writeln!(buf, "            Detection timeout: {}", detect)?;
+    writeln!(
+        buf,
+        "            Echo receive interval: {}",
+        echo_ms(s.advertised_echo_rx_us())
+    )?;
+    // Responder-only: we loop a peer's Echo back but never originate it.
+    writeln!(buf, "            Echo transmission interval: disabled")?;
 
     writeln!(buf, "        Remote timers:")?;
     writeln!(
@@ -325,6 +352,11 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
         buf,
         "            Transmission interval: {}",
         ms(s.remote_min_tx_us)
+    )?;
+    writeln!(
+        buf,
+        "            Echo receive interval: {}",
+        echo_ms(s.remote_min_echo_rx_us)
     )?;
     Ok(())
 }
@@ -528,6 +560,39 @@ mod tests {
         // detection = remote-mult * max(req-rx, remote-tx) = 3000ms.
         assert!(out.contains("Transmission interval (negotiated): 1000ms"));
         assert!(out.contains("Detection timeout: 3000ms"));
+    }
+
+    #[tokio::test]
+    async fn peer_detail_shows_echo_rows() {
+        let mut bfd = fresh_bfd();
+
+        // Default session: Echo disabled both ways (we advertise 0, peer 0).
+        bfd.add_session(key(2), SessionParams::default());
+        let out = show_bfd_peers(&bfd, addr_args("10.0.0.2"), false).unwrap();
+        assert!(out.contains("Echo receive interval: disabled"));
+        assert!(out.contains("Echo transmission interval: disabled"));
+
+        // Echo-configured single-hop IPv4 session with the reflector up: we
+        // advertise the configured value. Bogus ifindex so `add_session`
+        // resolves no name and spawns no real reflector in this unit test.
+        let mut k = key(3);
+        k.ifindex = 0xFFFF_FFF0;
+        bfd.add_session(
+            k,
+            SessionParams {
+                required_min_echo_rx_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        bfd.sessions.get_by_key_mut(&k).unwrap().echo_ready = true;
+
+        let out = show_bfd_peers(&bfd, addr_args("10.0.0.3"), false).unwrap();
+        assert!(
+            out.contains("Echo receive interval: 50ms"),
+            "advertised echo shown once reflector ready:\n{out}"
+        );
+        // Responder-only: never originate Echo.
+        assert!(out.contains("Echo transmission interval: disabled"));
     }
 
     #[tokio::test]

@@ -312,6 +312,20 @@ impl Session {
         u32::from(self.remote_detect_mult).saturating_mul(base)
     }
 
+    /// The `Required Min Echo RX Interval` (microseconds) we actually
+    /// advertise. Non-zero only when ALL hold: Echo is single-hop (RFC 5881
+    /// §4; RFC 5883 multihop has no Echo); the session is IPv4 (our XDP
+    /// reflector loops IPv4 only); and the reflector is confirmed up
+    /// (`echo_ready`) — so a non-zero advertisement is an honest promise to
+    /// loop Echo back. Used by both [`Self::build_packet`] and `show`.
+    pub fn advertised_echo_rx_us(&self) -> u32 {
+        if self.echo_ready && !self.key.multihop && self.key.remote.is_ipv4() {
+            self.required_min_echo_rx_us
+        } else {
+            0
+        }
+    }
+
     /// Build an outgoing BFD control packet that reflects the
     /// session's current state. The Length field and `auth_present`
     /// flag are populated by the encoder.
@@ -327,19 +341,7 @@ impl Session {
             // including the §6.8.3 slow-TX clamp while not Up.
             desired_min_tx_interval: self.effective_desired_min_tx_us(),
             required_min_rx_interval: self.required_min_rx_us,
-            // Advertise a non-zero echo-rx only when ALL hold: Echo is
-            // single-hop (RFC 5881 §4; RFC 5883 multihop has no Echo); the
-            // session is IPv4 (our XDP reflector loops IPv4 only); and the
-            // reflector is confirmed up (`echo_ready`) so the advertisement is
-            // an honest promise to loop Echo back.
-            required_min_echo_rx_interval: if self.echo_ready
-                && !self.key.multihop
-                && self.key.remote.is_ipv4()
-            {
-                self.required_min_echo_rx_us
-            } else {
-                0
-            },
+            required_min_echo_rx_interval: self.advertised_echo_rx_us(),
             demand: self.demand,
             poll: self.poll,
             ..ControlPacket::default()
