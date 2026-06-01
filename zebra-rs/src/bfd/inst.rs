@@ -393,9 +393,11 @@ impl Bfd {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let initial = InitialParams {
-            // No peer reply yet → start TX at our desired interval;
-            // the negotiated value lands on the first Rx.
-            tx_interval_us: params.desired_min_tx_us,
+            // A fresh session starts Down, so the §6.8.3 slow-TX clamp
+            // applies: transmit at no faster than 1 s until the session
+            // reaches Up. The negotiated rate lands on the first Rx via
+            // the Update command (`tx_interval_us`).
+            tx_interval_us: params.desired_min_tx_us.max(1_000_000),
             // No peer reply yet → detection timer is not armed.
             detection_time_us: 0,
             detect_mult: params.detect_mult,
@@ -622,7 +624,14 @@ impl Bfd {
             addr => Some(addr),
         };
         let mut packet = session.build_packet();
-        packet.final_bit = final_bit;
+        // A packet must never carry both Poll and Final (RFC 5880 §6.8.7).
+        // When this transmission is a Final answering the peer's Poll,
+        // it takes precedence: clear our own Poll bit on this packet
+        // (our Poll Sequence, if any, continues on the next periodic Tx).
+        if final_bit {
+            packet.poll = false;
+            packet.final_bit = true;
+        }
         let req = WriteRequest {
             packet,
             dst,
