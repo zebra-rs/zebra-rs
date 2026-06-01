@@ -26,8 +26,13 @@ router ospf {
 }
 ```
 
-No top-level `bfd { }` block is required — the BFD subsystem starts
+There is no global top-level `bfd { }` block — the BFD subsystem starts
 automatically with `router ospf` / `router ospfv3`.
+
+The same `bfd {}` leaves can also be set once at the **instance level**
+(`router ospf { bfd {} }`) as a default for every interface; a per-interface
+`bfd {}` then overrides it *per leaf* (see
+[Instance-level defaults](#instance-level-defaults)).
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
@@ -105,8 +110,33 @@ and a kernel with XDP + `bpf_timer` support; if it can't start, the session
 stays up on control packets and advertises echo-rx `0`. `show bfd peers` shows
 the negotiated `Echo receive interval` / `Echo transmission interval`.
 
-> A protocol-level `router ospf { bfd {} }` default block (inherited and
-> overridden per interface) is planned; today `echo-mode` is set per interface.
+## Instance-level defaults
+
+A `bfd {}` block directly under `router ospf` / `router ospfv3` supplies
+defaults for **every** interface in the instance. Each leaf is the same as the
+per-interface block, and the effective value for an interface is its own
+setting if present, otherwise the instance default, otherwise the hard default.
+
+`enable true` at the instance level **blanket-enables** BFD on all of the
+instance's interfaces; a per-interface `bfd { enable false }` opts one out.
+
+```
+router ospf {
+  bfd {
+    enable true;            // BFD on every interface…
+    echo-mode receive;      // …default Echo role: reflect only
+    echo-receive-interval 50;
+  }
+  area 0 {
+    interface eth0 {
+      bfd { echo-mode both; }   // eth0 also originates; inherits enable + interval
+    }
+    interface eth1 {
+      bfd { enable false; }     // opt eth1 out of the blanket enable
+    }
+  }
+}
+```
 
 ## OSPFv3 (IPv6)
 

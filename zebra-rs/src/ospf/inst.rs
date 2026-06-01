@@ -36,7 +36,7 @@ use crate::{
 use super::area::{OspfArea, OspfAreaMap};
 use super::config::Callback;
 use super::ifsm::{IfsmEvent, IfsmState, ospf_ifsm};
-use super::link::{OspfLink, OspfNetworkType};
+use super::link::{OspfLink, OspfLinkBfdConfig, OspfNetworkType};
 use super::lsdb::{LsdbEvent, OspfLsaKey, seq_max, v2_lsa_key_unpack};
 use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
@@ -79,6 +79,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub ctx: crate::context::ProtoContext,
     pub rib_rx: UnboundedReceiver<RibRx>,
     pub links: BTreeMap<u32, OspfLink<V>>,
+    /// Instance-level BFD defaults (`router ospf { bfd {} }`), inherited by
+    /// every interface and overridden per interface (see
+    /// [`OspfLinkBfdConfig::resolve`]).
+    pub bfd: OspfLinkBfdConfig,
     pub areas: OspfAreaMap<V>,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback<V>>,
@@ -360,37 +364,34 @@ impl<V: OspfVersion> Ospf<V> {
     /// `profile` is stored but not yet applied (the session uses
     /// `SessionParams::default()`, matching BGP / IS-IS).
     fn bfd_reconcile_nbr(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
-        // Configured Echo role + intervals for this link, captured alongside the
-        // desired key. `echo-mode` selects which half is active (`transmit` /
-        // `receive` / `both`); the two FRR-style intervals default to
-        // `DEFAULT_ECHO_INTERVAL_MS` when unset. The BFD instance further gates
-        // Echo to single-hop IPv4 with a live reflector, so this is inert for v3
-        // (IPv6). Absent `echo-mode` ⇒ Echo off.
-        let (echo_mode, echo_rx_us, echo_tx_us) = self
-            .links
-            .get(&ifindex)
-            .map(|l| &l.config.bfd)
-            .and_then(|bfd| {
-                bfd.echo_mode.map(|mode| {
-                    let dflt = crate::ospf::link::DEFAULT_ECHO_INTERVAL_MS;
-                    (
-                        mode,
-                        bfd.echo_receive_ms.unwrap_or(dflt).saturating_mul(1000),
-                        bfd.echo_transmit_ms.unwrap_or(dflt).saturating_mul(1000),
-                    )
-                })
-            })
-            .unwrap_or((crate::bfd::session::EchoMode::Off, 0, 0));
+        // Effective BFD config for this interface = the per-interface `bfd {}`
+        // merged over the instance-level `router ospf { bfd {} }` default, per
+        // leaf (so an instance `enable true` blanket-enables interfaces that
+        // didn't set their own). No link ⇒ nothing to reconcile.
+        let eff = match self.links.get(&ifindex) {
+            Some(link) => link.config.bfd.resolve(&self.bfd),
+            None => return,
+        };
+        // Echo role + intervals. `echo-mode` selects which half is active; the
+        // BFD instance further gates Echo to single-hop IPv4 with a live
+        // reflector, so this is inert for v3 (IPv6). No `echo-mode` ⇒ Echo off.
+        let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
+            Some(mode) => (
+                mode,
+                eff.echo_receive_ms.saturating_mul(1000),
+                eff.echo_transmit_ms.saturating_mul(1000),
+            ),
+            None => (crate::bfd::session::EchoMode::Off, 0, 0),
+        };
 
         let desired = {
             let Some(link) = self.links.get(&ifindex) else {
                 return;
             };
-            let bfd = &link.config.bfd;
             let Some(nbr) = link.nbrs.get(&nbr_addr) else {
                 return;
             };
-            let up = bfd.enable && nbr.state >= bfd.min_neighbor_state.as_nfsm();
+            let up = eff.enable && nbr.state >= eff.min_neighbor_state.as_nfsm();
             if up {
                 V::bfd_addrs(&link.addr, nbr).map(|(local, remote)| {
                     crate::bfd::session::SessionKey {
@@ -446,6 +447,16 @@ impl<V: OspfVersion> Ospf<V> {
             .and_then(|l| l.nbrs.get_mut(&nbr_addr))
         {
             nbr.bfd_session_key = desired;
+        }
+    }
+
+    /// Re-evaluate every neighbor on every interface — used by the
+    /// instance-level `bfd {}` config callbacks, whose defaults (e.g. a
+    /// blanket `enable`) affect interfaces that set nothing of their own.
+    pub(crate) fn bfd_reconcile_all(&mut self) {
+        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindexes {
+            self.bfd_reconcile_link(ifindex);
         }
     }
 
@@ -852,6 +863,7 @@ impl Ospf<Ospfv2> {
             rib_rx,
             ctx,
             links: BTreeMap::new(),
+            bfd: OspfLinkBfdConfig::default(),
             areas: OspfAreaMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -4035,6 +4047,7 @@ impl Ospf<Ospfv3> {
             rib_rx,
             ctx,
             links: BTreeMap::new(),
+            bfd: OspfLinkBfdConfig::default(),
             areas: OspfAreaMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),

@@ -13,6 +13,9 @@ use super::area::{AreaTypeKind, NssaTranslatorRole};
 use super::config::{
     Callback, apply_link_enable_transition, area_no_summary_set, area_nssa_default_originate_set,
     area_nssa_suppress_fa_set, area_nssa_translator_role_set, area_type_set,
+    config_ospf_bfd_echo_mode, config_ospf_bfd_echo_receive_interval,
+    config_ospf_bfd_echo_transmit_interval, config_ospf_bfd_enable,
+    config_ospf_bfd_min_neighbor_state, config_ospf_bfd_profile,
     config_ospf_interface_bfd_echo_mode, config_ospf_interface_bfd_echo_receive_interval,
     config_ospf_interface_bfd_echo_transmit_interval, config_ospf_interface_bfd_enable,
     config_ospf_interface_bfd_min_neighbor_state, config_ospf_interface_bfd_profile,
@@ -73,6 +76,22 @@ impl Ospf<Ospfv3> {
             (
                 "/area/interface/bfd/echo-receive-interval",
                 config_ospf_interface_bfd_echo_receive_interval,
+            ),
+            // Instance-level `router ospfv3 { bfd { ... } }` defaults.
+            ("/bfd/enable", config_ospf_bfd_enable),
+            ("/bfd/profile", config_ospf_bfd_profile),
+            (
+                "/bfd/min-neighbor-state",
+                config_ospf_bfd_min_neighbor_state,
+            ),
+            ("/bfd/echo-mode", config_ospf_bfd_echo_mode),
+            (
+                "/bfd/echo-transmit-interval",
+                config_ospf_bfd_echo_transmit_interval,
+            ),
+            (
+                "/bfd/echo-receive-interval",
+                config_ospf_bfd_echo_receive_interval,
             ),
             (
                 "/area/interface/network-type",

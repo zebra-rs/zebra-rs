@@ -82,6 +82,22 @@ impl Ospf {
             "/area/interface/bfd/echo-receive-interval",
             config_ospf_interface_bfd_echo_receive_interval,
         );
+        // Instance-level `router ospf { bfd { ... } }` defaults.
+        self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
+        self.ospf_add("/bfd/profile", config_ospf_bfd_profile);
+        self.ospf_add(
+            "/bfd/min-neighbor-state",
+            config_ospf_bfd_min_neighbor_state,
+        );
+        self.ospf_add("/bfd/echo-mode", config_ospf_bfd_echo_mode);
+        self.ospf_add(
+            "/bfd/echo-transmit-interval",
+            config_ospf_bfd_echo_transmit_interval,
+        );
+        self.ospf_add(
+            "/bfd/echo-receive-interval",
+            config_ospf_bfd_echo_receive_interval,
+        );
         self.ospf_add(
             "/area/interface/network-type",
             config_ospf_interface_network_type,
@@ -714,7 +730,9 @@ pub(super) fn config_ospf_interface_bfd_enable<V: OspfVersion>(
 
     let ifindex = {
         let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-        link.config.bfd.enable = op.is_set() && enable;
+        // `None` ⇒ inherit the instance-level `bfd { enable }`; `Some(false)`
+        // explicitly opts this interface out of a blanket instance enable.
+        link.config.bfd.enable = op.is_set().then_some(enable);
         link.index
     };
     ospf.bfd_reconcile_link(ifindex);
@@ -816,21 +834,110 @@ pub(super) fn config_ospf_interface_bfd_min_neighbor_state<V: OspfVersion>(
     let name = args.string()?;
     let value = args.string()?;
 
-    let threshold = if op.is_set() {
-        match value.as_str() {
-            "full" => NbrStateThreshold::Full,
-            _ => NbrStateThreshold::TwoWay,
-        }
-    } else {
-        NbrStateThreshold::default()
-    };
+    let threshold = op.is_set().then_some(match value.as_str() {
+        "full" => NbrStateThreshold::Full,
+        _ => NbrStateThreshold::TwoWay,
+    });
 
     let ifindex = {
         let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        // `None` ⇒ inherit the instance-level `bfd { min-neighbor-state }`
+        // (hard default `two-way`).
         link.config.bfd.min_neighbor_state = threshold;
         link.index
     };
     ospf.bfd_reconcile_link(ifindex);
+    Some(())
+}
+
+// ---- instance-level `router ospf{,v3} { bfd { ... } }` defaults --------------
+// Each leaf becomes the default inherited by every interface's `bfd {}` block
+// (overridable per interface via `OspfLinkBfdConfig::resolve`). Generic over
+// `V`; registered by both v2 (`config.rs`) and v3 (`config_v3.rs`).
+
+/// `router ospf bfd enable <bool>` — blanket-enable BFD on every interface in
+/// the instance (a per-interface `bfd { enable false }` opts one out).
+pub(super) fn config_ospf_bfd_enable<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let enable = args.boolean()?;
+    ospf.bfd.enable = op.is_set().then_some(enable);
+    ospf.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router ospf bfd profile <name>` — instance-default profile. Stored only
+/// (profile resolution is a shared follow-up); no reconcile.
+pub(super) fn config_ospf_bfd_profile<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let profile = args.string()?;
+    ospf.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// `router ospf bfd min-neighbor-state <two-way|full>` — instance default.
+pub(super) fn config_ospf_bfd_min_neighbor_state<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = args.string()?;
+    ospf.bfd.min_neighbor_state = op.is_set().then_some(match value.as_str() {
+        "full" => NbrStateThreshold::Full,
+        _ => NbrStateThreshold::TwoWay,
+    });
+    ospf.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router ospf bfd echo-mode <transmit|receive|both>` — instance default Echo
+/// role for every interface.
+pub(super) fn config_ospf_bfd_echo_mode<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let value = args.string()?;
+    ospf.bfd.echo_mode = if op.is_set() {
+        match value.as_str() {
+            "transmit" => Some(EchoMode::Transmit),
+            "receive" => Some(EchoMode::Receive),
+            "both" => Some(EchoMode::Both),
+            _ => return None,
+        }
+    } else {
+        None
+    };
+    ospf.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router ospf bfd echo-transmit-interval <ms>` — instance default. Takes
+/// effect when sessions are (re)established, so no reconcile.
+pub(super) fn config_ospf_bfd_echo_transmit_interval<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let interval = args.u32()?;
+    ospf.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `router ospf bfd echo-receive-interval <ms>` — instance default. Takes
+/// effect when sessions are (re)established, so no reconcile.
+pub(super) fn config_ospf_bfd_echo_receive_interval<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let interval = args.u32()?;
+    ospf.bfd.echo_receive_ms = op.is_set().then_some(interval);
     Some(())
 }
 

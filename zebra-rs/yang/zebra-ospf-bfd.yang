@@ -23,29 +23,46 @@ module zebra-ospf-bfd {
     "https://github.com/zebra-rs";
 
   description
-    "FRR-style per-interface BFD attachment for OSPFv2 and OSPFv3. Adds
-     a flat `bfd` container under each OSPF interface:
+    "FRR-style BFD attachment for OSPFv2 and OSPFv3. A flat `bfd`
+     container appears both at the OSPF instance level (a default applied
+     to every interface) and under each interface (an override):
 
        router ospf {
+         bfd {
+           enable true;          // blanket-enable all interfaces
+           echo-mode receive;    // default Echo role for the instance
+         }
          area 0 {
            interface eth0 {
              bfd {
-               enable true;
-               min-neighbor-state two-way;
+               echo-mode both;   // override just this interface
              }
            }
          }
        }
 
-     When `enable` is true the OSPF instance attaches a single-hop BFD
-     session to each neighbor on the interface once it reaches the
-     configured `min-neighbor-state`; a session going Down tears the
-     adjacency down (RFC 5882 §5). OSPF neighbors are directly
-     connected, so the session is always single-hop (UDP/3784, GTSM
-     TTL=255) — there is no multihop knob.
+     The effective value of each `bfd` leaf is the per-interface setting
+     if present, else the instance-level default, else a hard default.
+     `enable true` at the instance level activates BFD on every interface
+     in the instance; a per-interface `enable false` opts one out. When
+     enabled, OSPF attaches a single-hop BFD session to each neighbor on
+     the interface once it reaches the configured `min-neighbor-state`; a
+     session going Down tears the adjacency down (RFC 5882 §5). OSPF
+     neighbors are directly connected, so the session is always
+     single-hop (UDP/3784, GTSM TTL=255) — there is no multihop knob.
 
-     OSPFv3 BFD runs over IPv6 link-local; the config is accepted for
-     v3 but inert until IPv6 support lands in the BFD module.";
+     OSPFv3 BFD runs over IPv6 link-local; Echo (single-hop IPv4) is
+     accepted for v3 but inert.";
+
+  revision 2026-06-01 {
+    description
+      "Add instance-level `bfd {}` defaults with per-interface override;
+       split `echo-mode` into a transmit/receive/both enum and the
+       intervals into echo-transmit-interval / echo-receive-interval.";
+    reference
+      "RFC 5880 §6.4 (Echo); FRR bfdd echo-mode / echo-receive-interval /
+       echo-transmit-interval; Cisco IOS-XR hierarchical `bfd` under ospf.";
+  }
 
   revision 2026-05-31 {
     description "Initial revision — per-interface BFD for OSPFv2/v3.";
@@ -54,108 +71,151 @@ module zebra-ospf-bfd {
        FRR `ip ospf bfd`; Cisco IOS-XR `bfd fast-detect` under ospf.";
   }
 
+  // Shared BFD parameter leaves, used by both the instance-level and the
+  // per-interface `bfd {}` containers. None carry a YANG `default`: an
+  // unset leaf is absent, which the resolver reads as "inherit" (instance
+  // default, then a hard default in code) — that is how a per-interface
+  // value can override an instance default per leaf.
+  grouping ospf-bfd-params {
+    leaf enable {
+      ext:help "Activate BFD (omit to inherit the instance default)";
+      type boolean;
+      description
+        "Activate BFD. At the instance level, `true` blanket-enables BFD
+         on every interface; per interface it overrides that default, so
+         `false` opts a single interface out. Absent at both levels ⇒
+         off.";
+    }
+
+    leaf profile {
+      ext:help "Named /bfd/profile to apply (stored; not yet applied)";
+      type string;
+      description
+        "Name of a BFD profile to apply to these sessions. Stored but not
+         yet resolved into session parameters — a shared follow-up across
+         BGP / IS-IS / OSPF; sessions currently use the BFD defaults.";
+    }
+
+    leaf min-neighbor-state {
+      ext:help "Neighbor state at which BFD starts (two-way|full)";
+      type enumeration {
+        enum two-way {
+          description
+            "Start/stop the session at the 2-Way neighbor state
+             (FRR-style, the hard default). Also protects DR-Other pairs
+             on a broadcast LAN.";
+        }
+        enum full {
+          description
+            "Start/stop the session at the Full neighbor state
+             (Cisco/IOS-XR-style). Tracks only DR/BDR adjacencies on a
+             broadcast LAN.";
+        }
+      }
+      description
+        "OSPF neighbor state at which the BFD session is started and torn
+         down. Identical on point-to-point links, where the neighbor goes
+         straight to Full. Hard default `two-way` when unset.";
+    }
+
+    leaf echo-mode {
+      ext:help "BFD Echo role (transmit | receive | both)";
+      type enumeration {
+        enum transmit {
+          description
+            "Originate Echo toward the peer and drive the session Down
+             if it stops returning (RFC 5880 §6.8.5). We do NOT advertise
+             a non-zero Required Min Echo RX (we send Echo without asking
+             the peer to).";
+        }
+        enum receive {
+          description
+            "Advertise a non-zero Required Min Echo RX and loop a peer's
+             Echo back via the XDP reflector, so the peer may run Echo
+             detection against us. We do NOT originate.";
+        }
+        enum both {
+          description "Both originate and advertise + reflect.";
+        }
+      }
+      description
+        "Enable the BFD Echo function (RFC 5880 §6.4) on this interface's
+         single-hop sessions, choosing which half (or both) is active.
+         Backed by the per-interface `xdp-bfd-echo` XDP/eBPF helper.
+         Single-hop IPv4 only: honoured for OSPFv2, inert for OSPFv3
+         (IPv6). Absent ⇒ Echo off.";
+    }
+
+    leaf echo-transmit-interval {
+      ext:help "Echo transmit interval (ms) when echo-mode transmits";
+      type uint32;
+      units "milliseconds";
+      description
+        "Interval at which we originate Echo (echo-mode `transmit` /
+         `both`); clamped up to the peer's advertised Required Min Echo RX
+         at send time (RFC 5880 §6.8.9). Hard default 50 ms when unset.";
+    }
+
+    leaf echo-receive-interval {
+      ext:help "Advertised Required Min Echo RX Interval (ms)";
+      type uint32;
+      units "milliseconds";
+      description
+        "Value advertised as `Required Min Echo RX Interval` (echo-mode
+         `receive` / `both`) — the rate at which we tell the peer it may
+         loop Echo back. Hard default 50 ms when unset.";
+    }
+  }
+
   grouping ospf-interface-bfd-extension {
     description
-      "FRR-style flat `bfd { ... }` block on an OSPF interface.";
+      "FRR-style flat `bfd { ... }` block on an OSPF interface — overrides
+       the instance-level `bfd {}` defaults, per leaf.";
 
     container bfd {
       ext:help "BFD attachment for this OSPF interface";
       description
-        "When `enable` is true, OSPF attaches a single-hop BFD session
-         to each neighbor on this interface. A session going Down
+        "Per-interface BFD. Each leaf overrides the OSPF instance's
+         `bfd {}` default; an unset leaf inherits it. A session going Down
          tears the adjacency down.";
-
-      leaf enable {
-        ext:help "Activate BFD on this interface";
-        type boolean;
-        default false;
-        description
-          "Activates BFD for neighbors on this interface. Disabling
-           (or removing the `bfd` block) detaches the sessions.";
-      }
-
-      leaf profile {
-        ext:help "Named /bfd/profile to apply (stored; not yet applied)";
-        type string;
-        description
-          "Name of a `/bfd/profile` entry whose parameters apply to
-           this interface's BFD sessions. Stored but not yet resolved
-           into session parameters — a shared follow-up across BGP /
-           IS-IS / OSPF; sessions currently use the BFD defaults.";
-      }
-
-      leaf min-neighbor-state {
-        ext:help "Neighbor state at which BFD starts (two-way|full)";
-        type enumeration {
-          enum two-way {
-            description
-              "Start/stop the session at the 2-Way neighbor state
-               (default, FRR-style). Also protects DR-Other pairs on
-               a broadcast LAN.";
-          }
-          enum full {
-            description
-              "Start/stop the session at the Full neighbor state
-               (Cisco/IOS-XR-style). Tracks only DR/BDR adjacencies
-               on a broadcast LAN.";
-          }
-        }
-        default two-way;
-        description
-          "OSPF neighbor state at which the BFD session is started and
-           torn down. Identical on point-to-point links, where the
-           neighbor goes straight to Full.";
-      }
-
-      leaf echo-mode {
-        ext:help "BFD Echo role (transmit | receive | both)";
-        type enumeration {
-          enum transmit {
-            description
-              "Originate Echo toward the peer and drive the session Down
-               if it stops returning (RFC 5880 §6.8.5). We do NOT
-               advertise a non-zero Required Min Echo RX (we send Echo
-               without asking the peer to).";
-          }
-          enum receive {
-            description
-              "Advertise a non-zero Required Min Echo RX and loop a
-               peer's Echo back via the XDP reflector, so the peer may
-               run Echo detection against us. We do NOT originate.";
-          }
-          enum both {
-            description "Both originate and advertise + reflect.";
-          }
-        }
-        description
-          "Enable the BFD Echo function (RFC 5880 §6.4) on this
-           interface's single-hop sessions, choosing which half (or
-           both) is active. Backed by the per-interface `xdp-bfd-echo`
-           XDP/eBPF helper. Single-hop IPv4 only: honoured for OSPFv2,
-           inert for OSPFv3 (IPv6). Absent ⇒ Echo off.";
-      }
-
-      leaf echo-transmit-interval {
-        ext:help "Echo transmit interval (ms) when echo-mode transmits";
-        type uint32;
-        units "milliseconds";
-        description
-          "Interval at which we originate Echo (echo-mode `transmit` /
-           `both`); clamped up to the peer's advertised Required Min Echo
-           RX at send time (RFC 5880 §6.8.9). FRR default 50 ms when
-           unset.";
-      }
-
-      leaf echo-receive-interval {
-        ext:help "Advertised Required Min Echo RX Interval (ms)";
-        type uint32;
-        units "milliseconds";
-        description
-          "Value advertised as `Required Min Echo RX Interval`
-           (echo-mode `receive` / `both`) — the rate at which we tell the
-           peer it may loop Echo back. FRR default 50 ms when unset.";
-      }
+      uses ospf-bfd-params;
     }
+  }
+
+  grouping ospf-router-bfd-extension {
+    description
+      "Instance-level BFD defaults for an OSPF process, inherited by every
+       interface and overridable per interface.";
+
+    container bfd {
+      ext:help "BFD defaults for this OSPF instance";
+      description
+        "Defaults applied to every interface's BFD sessions in this OSPF
+         instance. `enable true` here activates BFD on all of the
+         instance's interfaces (blanket); a per-interface `bfd { enable
+         false }` opts one out. Every leaf is overridable per interface.";
+      uses ospf-bfd-params;
+    }
+  }
+
+  augment "/configure:set/config:router/config:ospf" {
+    description "Instance-level BFD defaults for OSPFv2 (set).";
+    uses ospf-router-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router/config:ospf" {
+    description "Instance-level BFD defaults for OSPFv2 (delete).";
+    uses ospf-router-bfd-extension;
+  }
+
+  augment "/configure:set/config:router/config:ospfv3" {
+    description "Instance-level BFD defaults for OSPFv3 (set).";
+    uses ospf-router-bfd-extension;
+  }
+
+  augment "/configure:delete/config:router/config:ospfv3" {
+    description "Instance-level BFD defaults for OSPFv3 (delete).";
+    uses ospf-router-bfd-extension;
   }
 
   augment "/configure:set/config:router"

@@ -204,30 +204,75 @@ impl NbrStateThreshold {
     }
 }
 
-/// Per-interface BFD attachment recorded from
-/// `router ospf{,v3} area <a> interface <if> bfd { enable | profile |
-/// min-neighbor-state }` (zebra-ospf-bfd.yang). Shared by v2 and v3.
-/// `enable` / `min-neighbor-state` flips drive Subscribe / Unsubscribe
-/// against the BFD instance via `Ospf::bfd_reconcile_link`.
-/// FRR default advertised Required Min Echo RX Interval (milliseconds).
+/// FRR default Echo interval (milliseconds) — the hard default for both
+/// `echo-transmit-interval` and `echo-receive-interval` when unset at every
+/// level.
 pub const DEFAULT_ECHO_INTERVAL_MS: u32 = 50;
 
+/// One `bfd { ... }` block (zebra-ospf-bfd.yang). The same struct backs both
+/// the OSPF **instance-level** default (`router ospf { bfd {} }`,
+/// `Ospf::bfd`) and the **per-interface** override
+/// (`area <a> interface <if> bfd {}`, `LinkConfig::bfd`). Every leaf is
+/// `Option` / `None`-default so the per-interface value can override the
+/// instance default *per leaf* via [`OspfLinkBfdConfig::resolve`]; an unset
+/// leaf at both levels falls back to a hard default. Shared by v2 and v3.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OspfLinkBfdConfig {
-    pub enable: bool,
+    /// Activate BFD. At instance level `Some(true)` blanket-enables every
+    /// interface; per-interface it overrides (so `Some(false)` opts out).
+    /// `None` ⇒ inherit; off if unset everywhere.
+    pub enable: Option<bool>,
     pub profile: Option<String>,
-    pub min_neighbor_state: NbrStateThreshold,
+    /// Neighbor state at which the session starts/stops. `None` ⇒ inherit
+    /// (hard default `TwoWay`).
+    pub min_neighbor_state: Option<NbrStateThreshold>,
     /// BFD Echo role for this interface's single-hop sessions
-    /// (`transmit` / `receive` / `both`); `None` ⇒ Echo off. Backed by the
-    /// per-interface `xdp-bfd-echo` helper; honoured for OSPFv2, inert for
-    /// v3 (IPv6).
+    /// (`transmit` / `receive` / `both`); `None` ⇒ inherit (Echo off if unset
+    /// everywhere). Backed by the per-interface `xdp-bfd-echo` helper;
+    /// honoured for OSPFv2, inert for v3 (IPv6).
     pub echo_mode: Option<EchoMode>,
     /// Echo transmit interval (milliseconds) — the rate we originate Echo at
-    /// (`transmit` / `both`). `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    /// (`transmit` / `both`). `None` ⇒ inherit / [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_transmit_ms: Option<u32>,
     /// Advertised Required Min Echo RX Interval (milliseconds)
-    /// (`receive` / `both`). `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    /// (`receive` / `both`). `None` ⇒ inherit / [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
+}
+
+/// The effective BFD settings for one interface after merging its
+/// per-interface `bfd {}` over the instance-level default — concrete values
+/// ready for the reconcile path. Produced by [`OspfLinkBfdConfig::resolve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedBfd {
+    pub enable: bool,
+    pub min_neighbor_state: NbrStateThreshold,
+    pub echo_mode: Option<EchoMode>,
+    pub echo_transmit_ms: u32,
+    pub echo_receive_ms: u32,
+}
+
+impl OspfLinkBfdConfig {
+    /// Resolve `self` (the per-interface block) over `default` (the
+    /// instance-level `router ospf { bfd {} }` block), per leaf: per-interface
+    /// value if set, else the instance default, else a hard default.
+    pub fn resolve(&self, default: &OspfLinkBfdConfig) -> ResolvedBfd {
+        ResolvedBfd {
+            enable: self.enable.or(default.enable).unwrap_or(false),
+            min_neighbor_state: self
+                .min_neighbor_state
+                .or(default.min_neighbor_state)
+                .unwrap_or_default(),
+            echo_mode: self.echo_mode.or(default.echo_mode),
+            echo_transmit_ms: self
+                .echo_transmit_ms
+                .or(default.echo_transmit_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            echo_receive_ms: self
+                .echo_receive_ms
+                .or(default.echo_receive_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+        }
+    }
 }
 
 /// OSPFv2 per-interface authentication mode.
@@ -628,6 +673,58 @@ pub struct OspfLinkFlags {
     pub resvd1: bool,
     #[bits(6)]
     pub resvd2: usize,
+}
+
+#[cfg(test)]
+mod bfd_resolve_tests {
+    use super::*;
+
+    /// Per-interface leaves override the instance default; unset leaves
+    /// inherit it; leaves unset at both levels fall back to the hard default.
+    #[test]
+    fn resolve_merges_per_leaf() {
+        let default = OspfLinkBfdConfig {
+            enable: Some(true), // blanket-enable
+            min_neighbor_state: Some(NbrStateThreshold::Full),
+            echo_mode: Some(EchoMode::Receive),
+            echo_transmit_ms: Some(100),
+            echo_receive_ms: None, // → hard default 50
+            ..OspfLinkBfdConfig::default()
+        };
+
+        // Interface that sets nothing → inherits everything from the default.
+        let inherit = OspfLinkBfdConfig::default().resolve(&default);
+        assert!(inherit.enable);
+        assert_eq!(inherit.min_neighbor_state, NbrStateThreshold::Full);
+        assert_eq!(inherit.echo_mode, Some(EchoMode::Receive));
+        assert_eq!(inherit.echo_transmit_ms, 100);
+        assert_eq!(inherit.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+
+        // Interface overrides: opt out of the blanket enable, change echo role.
+        let override_link = OspfLinkBfdConfig {
+            enable: Some(false),
+            echo_mode: Some(EchoMode::Both),
+            ..OspfLinkBfdConfig::default()
+        };
+        let eff = override_link.resolve(&default);
+        assert!(!eff.enable, "per-interface enable=false opts out");
+        assert_eq!(eff.echo_mode, Some(EchoMode::Both));
+        // Unset leaves still inherit the instance default.
+        assert_eq!(eff.min_neighbor_state, NbrStateThreshold::Full);
+        assert_eq!(eff.echo_transmit_ms, 100);
+    }
+
+    /// With no instance default and no per-interface override, everything is
+    /// the hard default: BFD off, two-way, no echo, 50 ms intervals.
+    #[test]
+    fn resolve_hard_defaults_when_unset() {
+        let eff = OspfLinkBfdConfig::default().resolve(&OspfLinkBfdConfig::default());
+        assert!(!eff.enable);
+        assert_eq!(eff.min_neighbor_state, NbrStateThreshold::TwoWay);
+        assert_eq!(eff.echo_mode, None);
+        assert_eq!(eff.echo_transmit_ms, DEFAULT_ECHO_INTERVAL_MS);
+        assert_eq!(eff.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+    }
 }
 
 #[cfg(test)]

@@ -240,9 +240,9 @@ native timers would allow.
   inherited as the session's local address; the **Echo function**
   (RFC 5880 §6.4, single-hop IPv4) — both reflecting a peer's Echo and
   originating our own, offloaded to the `xdp-bfd-echo` XDP/eBPF helper
-  (see [Echo function](#echo-function) below), configured per OSPF
-  interface.
+  (see [Echo function](#echo-function) below), with per-role
+  (`transmit` / `receive` / `both`) config and an instance-level
+  `router ospf { bfd {} }` default inherited and overridden per interface.
 - **Not yet:** configurable control-packet timers (the intervals are
-  fixed at the defaults); per-role Echo config (`transmit` / `receive` /
-  `both`) and a protocol-level `bfd {}` default block; Echo on IS-IS and
-  BGP; BFD for **static routes**; per-VRF OSPF BFD.
+  fixed at the defaults); Echo on IS-IS and BGP (OSPF only today); BFD
+  for **static routes**; per-VRF OSPF BFD.

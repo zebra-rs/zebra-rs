@@ -23,13 +23,14 @@ Tracks the BFD **Echo function** (RFC 5880 §6.4 / §6.8.5 / §6.8.8 /
 >   (advertise ⟺ `Receive|Both`, originate ⟺ `Transmit|Both`, spawn
 >   helper ⟺ `≠ Off`). The IPC is a stdin/stdout line protocol
 >   (`echo-add`/`echo-del` → helper, `echo-down` → zebra-rs).
-> - **Config** — per-OSPF-interface `bfd { echo-mode; echo-interval }`
->   (boolean today, mapped to `Both`). The locked target is an
->   `echo-mode {transmit|receive|both}` enum with FRR-style
->   `echo-transmit-interval` / `echo-receive-interval`, defaulted from a
->   protocol-level `router <proto> { bfd {} }` block and overridden
->   per-interface/neighbor. There is **no global top-level `bfd {}`**
->   container — BFD spawns eagerly with its first consumer.
+> - **Config (OSPF v2+v3, done)** — `echo-mode {transmit|receive|both}`
+>   with FRR-style `echo-transmit-interval` / `echo-receive-interval`,
+>   settable at the OSPF instance level (`router ospf { bfd {} }`) as a
+>   default and overridden per interface *per leaf*
+>   (`OspfLinkBfdConfig::resolve`); instance `enable true` blanket-enables
+>   all interfaces, a per-interface `enable false` opts out. There is **no
+>   global top-level `bfd {}`** container — BFD spawns eagerly with its
+>   first consumer. IS-IS and BGP echo config is the remaining gap.
 >
 > Open lab item: verify `bpf_timer`-from-XDP loads on the target kernel.
 >
