@@ -215,9 +215,11 @@ all sessions on that link, and stopped when the last one goes away. It needs
 raw socket); the packaged install grants these. A node with no Echo configured
 runs no helper and advertises `Required Min Echo RX Interval = 0`.
 
-Echo is enabled per attachment — today on OSPF interfaces (`echo-mode` /
-`echo-interval`); see [OSPF BFD](ch-08-02-ospf-bfd.md#echo). `show bfd peers`
-reports the negotiated `Echo receive interval` / `Echo transmission interval`.
+Echo is enabled per attachment — today on OSPF interfaces, where `echo-mode`
+selects the role (`transmit` / `receive` / `both`) and
+`echo-transmit-interval` / `echo-receive-interval` set the rates; see
+[OSPF BFD](ch-08-02-ospf-bfd.md#echo). `show bfd peers` reports the negotiated
+`Echo receive interval` / `Echo transmission interval`.
 
 ## What happens on failure
 

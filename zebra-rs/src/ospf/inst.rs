@@ -360,25 +360,27 @@ impl<V: OspfVersion> Ospf<V> {
     /// `profile` is stored but not yet applied (the session uses
     /// `SessionParams::default()`, matching BGP / IS-IS).
     fn bfd_reconcile_nbr(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
-        // Configured Echo for this link, captured alongside the desired key.
-        // Today's per-interface `echo-mode` is a boolean; map it to the full
-        // `both` role (advertise + originate, the prior behaviour) and use the
-        // single `echo-interval` for both the advertised RX and the TX rate.
-        // (Phase B replaces this with the `{transmit|receive|both}` enum and the
-        // separate FRR-style intervals.) The BFD instance further gates Echo to
-        // single-hop IPv4 with a live reflector, so this is inert for v3 (IPv6).
-        let (echo_mode, echo_us) = self
+        // Configured Echo role + intervals for this link, captured alongside the
+        // desired key. `echo-mode` selects which half is active (`transmit` /
+        // `receive` / `both`); the two FRR-style intervals default to
+        // `DEFAULT_ECHO_INTERVAL_MS` when unset. The BFD instance further gates
+        // Echo to single-hop IPv4 with a live reflector, so this is inert for v3
+        // (IPv6). Absent `echo-mode` ⇒ Echo off.
+        let (echo_mode, echo_rx_us, echo_tx_us) = self
             .links
             .get(&ifindex)
             .map(|l| &l.config.bfd)
-            .filter(|bfd| bfd.echo_mode)
-            .map(|bfd| {
-                (
-                    crate::bfd::session::EchoMode::Both,
-                    bfd.echo_interval_ms.saturating_mul(1000),
-                )
+            .and_then(|bfd| {
+                bfd.echo_mode.map(|mode| {
+                    let dflt = crate::ospf::link::DEFAULT_ECHO_INTERVAL_MS;
+                    (
+                        mode,
+                        bfd.echo_receive_ms.unwrap_or(dflt).saturating_mul(1000),
+                        bfd.echo_transmit_ms.unwrap_or(dflt).saturating_mul(1000),
+                    )
+                })
             })
-            .unwrap_or((crate::bfd::session::EchoMode::Off, 0));
+            .unwrap_or((crate::bfd::session::EchoMode::Off, 0, 0));
 
         let desired = {
             let Some(link) = self.links.get(&ifindex) else {
@@ -427,8 +429,8 @@ impl<V: OspfVersion> Ospf<V> {
         if let Some(key) = desired {
             let params = crate::bfd::session::SessionParams {
                 echo_mode,
-                required_min_echo_rx_us: echo_us,
-                echo_transmit_us: echo_us,
+                required_min_echo_rx_us: echo_rx_us,
+                echo_transmit_us: echo_tx_us,
                 ..crate::bfd::session::SessionParams::default()
             };
             let _ = client_tx.send(crate::bfd::inst::ClientReq::Subscribe {

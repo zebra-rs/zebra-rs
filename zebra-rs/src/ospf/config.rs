@@ -9,6 +9,7 @@ use super::link::{NbrStateThreshold, OspfAuthMode, OspfNetworkType};
 use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::version::{OspfVersion, Ospfv2};
 
+use crate::bfd::session::EchoMode;
 use crate::config::{Args, ConfigOp};
 use crate::ospf::Message;
 
@@ -74,8 +75,12 @@ impl Ospf {
             config_ospf_interface_bfd_echo_mode,
         );
         self.ospf_add(
-            "/area/interface/bfd/echo-interval",
-            config_ospf_interface_bfd_echo_interval,
+            "/area/interface/bfd/echo-transmit-interval",
+            config_ospf_interface_bfd_echo_transmit_interval,
+        );
+        self.ospf_add(
+            "/area/interface/bfd/echo-receive-interval",
+            config_ospf_interface_bfd_echo_receive_interval,
         );
         self.ospf_add(
             "/area/interface/network-type",
@@ -733,8 +738,9 @@ pub(super) fn config_ospf_interface_bfd_profile<V: OspfVersion>(
     Some(())
 }
 
-/// `interface <if> bfd echo-mode <bool>` — advertise a non-zero Required
-/// Min Echo RX so the peer may run BFD Echo against us (single-hop, IPv4).
+/// `interface <if> bfd echo-mode <transmit|receive|both>` — which BFD Echo
+/// role is active on this interface (RFC 5880 §6.4): `transmit` originates,
+/// `receive` advertises + reflects, `both` does both. Single-hop IPv4 only.
 /// Reconciles the link, though the value takes effect when the session is
 /// (re)established (matching how the other BFD params apply).
 pub(super) fn config_ospf_interface_bfd_echo_mode<V: OspfVersion>(
@@ -744,20 +750,30 @@ pub(super) fn config_ospf_interface_bfd_echo_mode<V: OspfVersion>(
 ) -> Option<()> {
     let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
-    let echo = args.boolean()?;
+    let value = args.string()?;
 
+    let mode = if op.is_set() {
+        match value.as_str() {
+            "transmit" => Some(EchoMode::Transmit),
+            "receive" => Some(EchoMode::Receive),
+            "both" => Some(EchoMode::Both),
+            _ => return None,
+        }
+    } else {
+        None
+    };
     let ifindex = {
         let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-        link.config.bfd.echo_mode = op.is_set() && echo;
+        link.config.bfd.echo_mode = mode;
         link.index
     };
     ospf.bfd_reconcile_link(ifindex);
     Some(())
 }
 
-/// `interface <if> bfd echo-interval <ms>` — advertised Required Min Echo
-/// RX Interval. Stored; applied when the session is (re)established.
-pub(super) fn config_ospf_interface_bfd_echo_interval<V: OspfVersion>(
+/// `interface <if> bfd echo-transmit-interval <ms>` — the rate we originate
+/// Echo at. Stored; applied when the session is (re)established.
+pub(super) fn config_ospf_interface_bfd_echo_transmit_interval<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
     op: ConfigOp,
@@ -767,11 +783,23 @@ pub(super) fn config_ospf_interface_bfd_echo_interval<V: OspfVersion>(
     let interval = args.u32()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.bfd.echo_interval_ms = if op.is_set() {
-        interval
-    } else {
-        crate::ospf::link::DEFAULT_ECHO_INTERVAL_MS
-    };
+    link.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `interface <if> bfd echo-receive-interval <ms>` — the advertised Required
+/// Min Echo RX Interval. Stored; applied when the session is (re)established.
+pub(super) fn config_ospf_interface_bfd_echo_receive_interval<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let interval = args.u32()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
     Some(())
 }
 

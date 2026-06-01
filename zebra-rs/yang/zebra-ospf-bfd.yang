@@ -108,27 +108,52 @@ module zebra-ospf-bfd {
       }
 
       leaf echo-mode {
-        ext:help "Advertise a non-zero Required Min Echo RX (BFD Echo)";
-        type boolean;
-        default false;
+        ext:help "BFD Echo role (transmit | receive | both)";
+        type enumeration {
+          enum transmit {
+            description
+              "Originate Echo toward the peer and drive the session Down
+               if it stops returning (RFC 5880 §6.8.5). We do NOT
+               advertise a non-zero Required Min Echo RX (we send Echo
+               without asking the peer to).";
+          }
+          enum receive {
+            description
+              "Advertise a non-zero Required Min Echo RX and loop a
+               peer's Echo back via the XDP reflector, so the peer may
+               run Echo detection against us. We do NOT originate.";
+          }
+          enum both {
+            description "Both originate and advertise + reflect.";
+          }
+        }
         description
-          "When true, advertise a non-zero `Required Min Echo RX
-           Interval` on this interface's single-hop sessions so a peer
-           may run the BFD Echo function against us. zebra-rs honours
-           the promise with an XDP reflector that loops UDP/3785 frames
-           back (RFC 5880 §6.4 / RFC 5881 §4). Single-hop IPv4 only:
-           honoured for OSPFv2, accepted but inert for OSPFv3 (IPv6).
-           We do not transmit Echo ourselves (responder side only).";
+          "Enable the BFD Echo function (RFC 5880 §6.4) on this
+           interface's single-hop sessions, choosing which half (or
+           both) is active. Backed by the per-interface `xdp-bfd-echo`
+           XDP/eBPF helper. Single-hop IPv4 only: honoured for OSPFv2,
+           inert for OSPFv3 (IPv6). Absent ⇒ Echo off.";
       }
 
-      leaf echo-interval {
+      leaf echo-transmit-interval {
+        ext:help "Echo transmit interval (ms) when echo-mode transmits";
+        type uint32;
+        units "milliseconds";
+        description
+          "Interval at which we originate Echo (echo-mode `transmit` /
+           `both`); clamped up to the peer's advertised Required Min Echo
+           RX at send time (RFC 5880 §6.8.9). FRR default 50 ms when
+           unset.";
+      }
+
+      leaf echo-receive-interval {
         ext:help "Advertised Required Min Echo RX Interval (ms)";
         type uint32;
         units "milliseconds";
-        default 50;
         description
-          "Value advertised as `Required Min Echo RX Interval` when
-           `echo-mode` is true (FRR default 50 ms).";
+          "Value advertised as `Required Min Echo RX Interval`
+           (echo-mode `receive` / `both`) — the rate at which we tell the
+           peer it may loop Echo back. FRR default 50 ms when unset.";
       }
     }
   }

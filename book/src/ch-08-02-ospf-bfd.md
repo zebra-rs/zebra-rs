@@ -33,8 +33,9 @@ automatically with `router ospf` / `router ospfv3`.
 |---|---|---|---|
 | `enable` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
 | `min-neighbor-state` | `two-way` \| `full` | `two-way` | Neighbour state at which the session starts / stops. |
-| `echo-mode` | boolean | `false` | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 sessions. |
-| `echo-interval` | uint (ms) | `50` | Echo interval when `echo-mode` is on (advertised receive floor + transmit rate). |
+| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 sessions, choosing which half is active. |
+| `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
+| `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
 
 Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
 timers are not currently tunable — see
@@ -71,12 +72,17 @@ router ospf {
 
 ## Echo
 
-`echo-mode true` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function)
-for this interface's sessions — single-hop IPv4 only (OSPFv2; on OSPFv3 the leaf
-is accepted but inert, since Echo has no IPv6 form here). zebra-rs both reflects
-a peer's Echo and originates its own, via the per-interface `xdp-bfd-echo`
-helper, so a forwarding-path fault is caught in sub-second time independent of
-the OSPF Hello/Dead timers:
+`echo-mode` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function) for
+this interface's sessions — single-hop IPv4 only (OSPFv2; on OSPFv3 the leaf is
+accepted but inert, since Echo has no IPv6 form here). The two halves are
+independent (RFC 5880 §6.4), backed by the per-interface `xdp-bfd-echo` helper:
+
+- **`receive`** — advertise a non-zero Required Min Echo RX and loop the peer's
+  Echo back (the *peer* gets fast detection).
+- **`transmit`** — originate our own Echo (the peer's forwarding plane loops it
+  back) and drive the session Down if it stops returning; we advertise `0`, so
+  we don't promise to loop the *peer's* Echo.
+- **`both`** — both halves.
 
 ```
 router ospf {
@@ -84,24 +90,23 @@ router ospf {
     interface eth0 {
       bfd {
         enable true;
-        echo-mode true;
-        echo-interval 50;   // ms; default 50
+        echo-mode both;
+        echo-transmit-interval 50;   // ms; rate we send Echo (default 50)
+        echo-receive-interval 50;    // ms; advertised RX floor (default 50)
       }
     }
   }
 }
 ```
 
-`echo-interval` sets both the advertised `Required Min Echo RX Interval` (the
-rate we tell the peer it may loop Echo back at) and the rate we transmit our own
-Echo. The helper needs `cap_net_admin,cap_bpf,cap_net_raw` and a kernel with XDP
-+ `bpf_timer` support; if it can't start, the session stays up on control
-packets and advertises echo-rx `0`. `show bfd peers` shows the negotiated
-`Echo receive interval` / `Echo transmission interval`.
+A forwarding-path fault is then caught in sub-second time independent of the
+OSPF Hello/Dead timers. The helper needs `cap_net_admin,cap_bpf,cap_net_raw`
+and a kernel with XDP + `bpf_timer` support; if it can't start, the session
+stays up on control packets and advertises echo-rx `0`. `show bfd peers` shows
+the negotiated `Echo receive interval` / `Echo transmission interval`.
 
-> Splitting Echo into independent `transmit` / `receive` / `both` roles (and a
-> protocol-level `bfd {}` default) is planned; today `echo-mode` is a single
-> on/off that enables both halves.
+> A protocol-level `router ospf { bfd {} }` default block (inherited and
+> overridden per interface) is planned; today `echo-mode` is set per interface.
 
 ## OSPFv3 (IPv6)
 

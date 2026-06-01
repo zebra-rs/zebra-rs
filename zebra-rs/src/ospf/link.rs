@@ -16,6 +16,7 @@ use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::bfd::session::EchoMode;
 use crate::rib::Link;
 
 use super::addr::OspfAddr;
@@ -211,30 +212,22 @@ impl NbrStateThreshold {
 /// FRR default advertised Required Min Echo RX Interval (milliseconds).
 pub const DEFAULT_ECHO_INTERVAL_MS: u32 = 50;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OspfLinkBfdConfig {
     pub enable: bool,
     pub profile: Option<String>,
     pub min_neighbor_state: NbrStateThreshold,
-    /// FRR `echo-mode`: advertise a non-zero Required Min Echo RX so a peer
-    /// may run BFD Echo against us (single-hop, IPv4 — backed by the XDP
-    /// reflector). Off by default; honoured for OSPFv2, inert for v3 (IPv6).
-    pub echo_mode: bool,
-    /// Advertised Required Min Echo RX Interval (milliseconds). Only
-    /// meaningful when `echo_mode` is set.
-    pub echo_interval_ms: u32,
-}
-
-impl Default for OspfLinkBfdConfig {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            profile: None,
-            min_neighbor_state: NbrStateThreshold::default(),
-            echo_mode: false,
-            echo_interval_ms: DEFAULT_ECHO_INTERVAL_MS,
-        }
-    }
+    /// BFD Echo role for this interface's single-hop sessions
+    /// (`transmit` / `receive` / `both`); `None` ⇒ Echo off. Backed by the
+    /// per-interface `xdp-bfd-echo` helper; honoured for OSPFv2, inert for
+    /// v3 (IPv6).
+    pub echo_mode: Option<EchoMode>,
+    /// Echo transmit interval (milliseconds) — the rate we originate Echo at
+    /// (`transmit` / `both`). `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_transmit_ms: Option<u32>,
+    /// Advertised Required Min Echo RX Interval (milliseconds)
+    /// (`receive` / `both`). `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_receive_ms: Option<u32>,
 }
 
 /// OSPFv2 per-interface authentication mode.

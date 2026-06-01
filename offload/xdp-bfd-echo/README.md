@@ -4,7 +4,7 @@ An XDP/eBPF program (with an [aya](https://aya-rs.dev/) userspace loader) that
 reflects **BFD Echo** frames (UDP **3785**, RFC 5880 §6.4 / RFC 5881 §4) in the
 data plane. **zebra-rs spawns and supervises it automatically** — one instance
 per interface — when the BFD Echo function is enabled on a single-hop IPv4
-session (e.g. `router ospf area 0 interface X bfd { echo-mode true; }`), so a
+session (e.g. `router ospf area 0 interface X bfd { echo-mode receive; }`), so a
 peer (FRR `echo-mode`, IOS, …) can run BFD Echo against zebra-rs. It can also be
 run standalone for testing (see [Run](#run)).
 
@@ -163,8 +163,9 @@ exit
 !
 ```
 
-**zebra-rs** — `192.168.10.1` (reflects via XDP; `echo-mode true` advertises a
-non-zero Required Min Echo RX):
+**zebra-rs** — `192.168.10.1` (reflects via XDP; `echo-mode receive` advertises
+a non-zero Required Min Echo RX so the FRR peer may run Echo against us; use
+`both` to also originate our own Echo toward FRR):
 
 ```
 interface enp0s6 {
@@ -177,7 +178,7 @@ router {
     area 0 {
       interface enp0s6 {
         bfd {
-          echo-mode true;
+          echo-mode receive;
           enable true;
         }
         enable true;
