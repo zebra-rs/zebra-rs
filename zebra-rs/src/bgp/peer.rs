@@ -20,7 +20,7 @@ use caps::CapAs4;
 use caps::CapRefresh;
 use caps::CapabilityPacket;
 
-use crate::bfd::session::SessionKey;
+use crate::bfd::session::{EchoMode, SessionKey};
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::{AdjRib, In, Out};
@@ -195,18 +195,65 @@ pub struct PeerTransportConfig {
 /// calls on the BFD instance via `bfd::inst::Bfd::client_req_tx`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PeerBfdConfig {
-    pub enable: bool,
+    /// Activate BFD. `None` ⇒ inherit the instance-level
+    /// `router bgp { bfd { enable } }`; `Some(false)` opts this neighbor out
+    /// of a blanket instance enable. Off if unset everywhere.
+    pub enable: Option<bool>,
     pub profile: Option<String>,
     /// Hop-mode override. `None` (the default) means "infer": the
     /// session is multihop iff the BGP session is iBGP, mirroring FRR's
     /// `PEER_IS_MULTIHOP`. `Some(true)`/`Some(false)` force it — used
     /// for eBGP-over-loopback until a dedicated `ebgp-multihop` knob
-    /// exists. See [`Peer::bfd_multihop`].
+    /// exists. See [`Peer::bfd_multihop`]. Per-neighbor only (not inherited).
     pub multihop: Option<bool>,
     /// Multihop minimum received TTL (RFC 5883). `None` falls back to
     /// [`crate::bfd::socket::BFD_MULTIHOP_DEFAULT_MIN_TTL`]. Ignored for
     /// single-hop sessions (GTSM requires 255 unconditionally).
     pub minimum_ttl: Option<u8>,
+    /// BFD Echo role (`transmit` / `receive` / `both`); `None` ⇒ inherit
+    /// (off if unset everywhere). **Single-hop only** — RFC 5883 multihop has
+    /// no Echo, so this is inert on multihop sessions (iBGP / multihop eBGP).
+    pub echo_mode: Option<EchoMode>,
+    /// Echo transmit interval (ms); `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_transmit_ms: Option<u32>,
+    /// Advertised Required Min Echo RX (ms); `None` ⇒
+    /// [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_receive_ms: Option<u32>,
+}
+
+/// FRR default Echo interval (ms) — the hard default for the Echo intervals
+/// when unset at every level.
+pub const DEFAULT_ECHO_INTERVAL_MS: u32 = 50;
+
+/// Effective BFD Echo settings for a neighbor after merging its per-neighbor
+/// `bfd {}` over the instance-level default. (Hop-mode / min-ttl are
+/// per-neighbor and not part of this merge.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPeerBfd {
+    pub enable: bool,
+    pub echo_mode: Option<EchoMode>,
+    pub echo_transmit_ms: u32,
+    pub echo_receive_ms: u32,
+}
+
+impl PeerBfdConfig {
+    /// Resolve `self` (per-neighbor) over `default` (instance-level
+    /// `router bgp { bfd {} }`), per leaf, for the inheritable bits
+    /// (enable + Echo). Hop-mode / min-ttl stay per-neighbor (read directly).
+    pub fn resolve(&self, default: &PeerBfdConfig) -> ResolvedPeerBfd {
+        ResolvedPeerBfd {
+            enable: self.enable.or(default.enable).unwrap_or(false),
+            echo_mode: self.echo_mode.or(default.echo_mode),
+            echo_transmit_ms: self
+                .echo_transmit_ms
+                .or(default.echo_transmit_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            echo_receive_ms: self
+                .echo_receive_ms
+                .or(default.echo_receive_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1914,12 +1961,13 @@ mod collision_tests {
 mod bfd_config_tests {
     use super::*;
 
-    /// PeerBfdConfig default mirrors the YANG defaults
-    /// (`enable=false`, no profile).
+    /// PeerBfdConfig default mirrors the YANG defaults (all unset ⇒
+    /// inherit; off if unset everywhere, no profile).
     #[test]
     fn default_bfd_is_disabled() {
         let bfd = PeerBfdConfig::default();
-        assert!(!bfd.enable);
+        assert!(bfd.enable.is_none());
+        assert!(!bfd.resolve(&PeerBfdConfig::default()).enable);
         assert!(bfd.profile.is_none());
 
         // Lives on PeerConfig with the same default.
@@ -1933,7 +1981,7 @@ mod bfd_config_tests {
     #[test]
     fn enable_and_profile_round_trip() {
         let mut pc = PeerConfig::default();
-        pc.bfd.enable = true;
+        pc.bfd.enable = Some(true);
         pc.bfd.profile = Some("FAST".to_string());
         pc.bfd.multihop = Some(true);
         pc.bfd.minimum_ttl = Some(250);
@@ -1941,11 +1989,38 @@ mod bfd_config_tests {
         assert_eq!(
             pc.bfd,
             PeerBfdConfig {
-                enable: true,
+                enable: Some(true),
                 profile: Some("FAST".to_string()),
                 multihop: Some(true),
                 minimum_ttl: Some(250),
+                ..PeerBfdConfig::default()
             },
         );
+    }
+
+    /// Per-neighbor Echo leaves override the instance default; unset inherit.
+    #[test]
+    fn bfd_resolve_merges_echo() {
+        let default = PeerBfdConfig {
+            enable: Some(true), // blanket
+            echo_mode: Some(EchoMode::Receive),
+            echo_transmit_ms: Some(100),
+            ..PeerBfdConfig::default()
+        };
+        let inherit = PeerBfdConfig::default().resolve(&default);
+        assert!(inherit.enable);
+        assert_eq!(inherit.echo_mode, Some(EchoMode::Receive));
+        assert_eq!(inherit.echo_transmit_ms, 100);
+        assert_eq!(inherit.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+
+        let over = PeerBfdConfig {
+            enable: Some(false),
+            echo_mode: Some(EchoMode::Both),
+            ..PeerBfdConfig::default()
+        };
+        let eff = over.resolve(&default);
+        assert!(!eff.enable);
+        assert_eq!(eff.echo_mode, Some(EchoMode::Both));
+        assert_eq!(eff.echo_transmit_ms, 100); // inherits
     }
 }

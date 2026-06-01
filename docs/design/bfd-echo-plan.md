@@ -23,15 +23,16 @@ Tracks the BFD **Echo function** (RFC 5880 §6.4 / §6.8.5 / §6.8.8 /
 >   (advertise ⟺ `Receive|Both`, originate ⟺ `Transmit|Both`, spawn
 >   helper ⟺ `≠ Off`). The IPC is a stdin/stdout line protocol
 >   (`echo-add`/`echo-del` → helper, `echo-down` → zebra-rs).
-> - **Config (OSPF v2+v3 and IS-IS, done)** — `echo-mode
+> - **Config (OSPF v2+v3, IS-IS, BGP — done)** — `echo-mode
 >   {transmit|receive|both}` with FRR-style `echo-transmit-interval` /
 >   `echo-receive-interval`, settable at the instance level
->   (`router ospf|isis { bfd {} }`) as a default and overridden per
->   interface *per leaf* (`{Ospf,}LinkBfdConfig::resolve`); instance
->   `enable true` blanket-enables all interfaces, a per-interface
->   `enable false` opts out. There is **no global top-level `bfd {}`**
->   container — BFD spawns eagerly with its first consumer. BGP echo
->   config is the remaining gap (single-hop eBGP only).
+>   (`router ospf|isis|bgp { bfd {} }`) as a default and overridden per
+>   interface / neighbor *per leaf*
+>   (`{Ospf,}LinkBfdConfig::resolve` / `PeerBfdConfig::resolve`); instance
+>   `enable true` blanket-enables, a per-link/neighbor `enable false` opts
+>   out. There is **no global top-level `bfd {}`** container — BFD spawns
+>   eagerly with its first consumer. BGP echo is **single-hop only**
+>   (RFC 5883 multihop has no Echo) — inert on iBGP / multihop eBGP.
 >
 > Open lab item: verify `bpf_timer`-from-XDP loads on the target kernel.
 >
