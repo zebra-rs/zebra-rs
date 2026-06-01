@@ -123,7 +123,7 @@ pub struct RouteTable {
 // Helper function to convert RibEntry to JSON format
 fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
     let protocol = format!("{:?}", e.rtype).to_lowercase();
-    let subtype = format!("{:?}", e.rsubtype).to_lowercase();
+    let subtype = e.rsubtype.name();
 
     let nexthops = match &e.nexthop {
         Nexthop::Link(ifindex) => {
@@ -249,7 +249,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
 // Helper function to convert IPv6 RibEntry to JSON format
 fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry {
     let protocol = format!("{:?}", e.rtype).to_lowercase();
-    let subtype = format!("{:?}", e.rsubtype).to_lowercase();
+    let subtype = e.rsubtype.name();
 
     let nexthops = match &e.nexthop {
         Nexthop::Link(ifindex) => {
@@ -2172,5 +2172,15 @@ mod tests {
         // omits the `type ...` trailer.
         assert_eq!(subtype_long_name(&RibSubType::Default), None);
         assert_eq!(subtype_long_name(&RibSubType::Other(99)), None);
+    }
+
+    #[test]
+    fn json_subtype_name_drops_isis_prefix() {
+        use super::super::types::RibSubType;
+        // IS-IS levels render bare in the JSON `subtype` field.
+        assert_eq!(RibSubType::IsisLevel1.name(), "level1");
+        assert_eq!(RibSubType::IsisLevel2.name(), "level2");
+        // Other variants keep their lowercased debug name.
+        assert_eq!(RibSubType::Default.name(), "default");
     }
 }

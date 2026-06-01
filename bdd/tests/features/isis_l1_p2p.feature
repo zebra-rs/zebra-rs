@@ -131,6 +131,17 @@ Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
     And I wait 20 seconds
     Then ping from "z2" to "10.0.0.6" should succeed
 
+  Scenario: IS-IS stamps the level into the central RIB
+    Given the test topology exists
+    # The IS-IS task tags each route it installs with the level it was
+    # computed at; the RIB renders that subtype as the "L1" code column
+    # in `show ip route` / `show ipv6 route` (and "level1" in the JSON
+    # subtype field). In this Level-1-only topology every IS-IS route is
+    # Level-1, so the tag must appear in both address families.
+    Then show command "show ip route" in namespace "z1" should contain "L1"
+    And show command "show ipv6 route" in namespace "z1" should contain "L1"
+    And show command "show ip route" in namespace "z10" should contain "L1"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

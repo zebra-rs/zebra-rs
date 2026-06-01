@@ -12,7 +12,7 @@ use super::level::Levels;
 use super::throttle::Throttle;
 use crate::context::Timer;
 use crate::rib::inst::{IlmEntry, IlmType};
-use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibType};
+use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
 // EncapType is only used by `make_rib_entry_v6` test fixture below;
 // production code paths route through `tilfa::build_repair_path_srv6`.
@@ -173,8 +173,18 @@ fn nhop_to_nexthop_uni(
     nhop
 }
 
-fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
+/// Map the IS-IS level a route was computed at onto the RIB subtype the
+/// `show ip route` / `show ipv6 route` renderers display as `L1` / `L2`.
+fn level_subtype(level: Level) -> RibSubType {
+    match level {
+        Level::L1 => RibSubType::IsisLevel1,
+        Level::L2 => RibSubType::IsisLevel2,
+    }
+}
+
+fn make_rib_entry(route: &SpfRoute, level: Level) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+    rib.rsubtype = level_subtype(level);
     rib.distance = 115;
     rib.metric = route.metric;
     // Flatten primaries and (when present) their TI-LFA repair backups
@@ -358,11 +368,11 @@ pub fn diff_apply_flex_algo(
     }
 }
 
-pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
+pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult, level: Level) {
     // Delete.
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, level);
             let msg = rib::Message::Ipv4Del {
                 prefix: *prefix,
                 rib,
@@ -373,7 +383,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
     // Add (changed).
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, level);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -384,7 +394,7 @@ pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult)
     // Add (new).
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
+            let rib = make_rib_entry(route, level);
             let msg = rib::Message::Ipv4Add {
                 prefix: *prefix,
                 rib,
@@ -416,8 +426,9 @@ fn nhop_to_nexthop_uni_v6(
     nhop
 }
 
-fn make_rib_entry_v6(route: &SpfRouteV6) -> rib::entry::RibEntry {
+fn make_rib_entry_v6(route: &SpfRouteV6, level: Level) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
+    rib.rsubtype = level_subtype(level);
     rib.distance = 115;
     rib.metric = route.metric;
     let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
@@ -450,10 +461,14 @@ fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::Nextho
     nhop
 }
 
-pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResultV6) {
+pub fn diff_apply_v6(
+    rib_client: &crate::rib::client::RibClient,
+    diff: &DiffResultV6,
+    level: Level,
+) {
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, level);
             let msg = rib::Message::Ipv6Del {
                 prefix: *prefix,
                 rib,
@@ -463,7 +478,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
     }
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, level);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -473,7 +488,7 @@ pub fn diff_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffResu
     }
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route);
+            let rib = make_rib_entry_v6(route, level);
             let msg = rib::Message::Ipv6Add {
                 prefix: *prefix,
                 rib,
@@ -1060,14 +1075,14 @@ fn apply_routing_updates(
     // Update IPv4 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib.get(&level).iter(), rib.iter());
-        diff_apply(top.rib_client, &diff);
+        diff_apply(top.rib_client, &diff, level);
     }
     *top.rib.get_mut(&level) = rib;
 
     // Update IPv6 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
-        diff_apply_v6(top.rib_client, &diff);
+        diff_apply_v6(top.rib_client, &diff, level);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1868,7 +1883,7 @@ mod tests {
             dest_vertex: None,
             backup_as_primary: false,
         };
-        let entry = make_rib_entry(&route);
+        let entry = make_rib_entry(&route, Level::L2);
         assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
     }
 
@@ -1902,7 +1917,7 @@ mod tests {
             dest_vertex: None,
             backup_as_primary: false,
         };
-        let entry = make_rib_entry(&route);
+        let entry = make_rib_entry(&route, Level::L2);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -1953,7 +1968,7 @@ mod tests {
             dest_vertex: None,
             backup_as_primary: true,
         };
-        let entry = make_rib_entry(&route);
+        let entry = make_rib_entry(&route, Level::L2);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -2044,7 +2059,7 @@ mod tests {
             dest_vertex: None,
             backup_as_primary: false,
         };
-        let entry = make_rib_entry_v6(&route);
+        let entry = make_rib_entry_v6(&route, Level::L1);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -2057,5 +2072,53 @@ mod tests {
         assert_eq!(b.segs, vec![end_sid, endx_sid]);
         assert_eq!(b.encap_type, Some(EncapType::HEncap));
         assert!(b.mpls.is_empty());
+    }
+
+    #[test]
+    fn make_rib_entry_stamps_isis_level_subtype() {
+        // The level a route was computed at is mirrored into the RIB
+        // subtype so `show ip route` can tag the entry L1 / L2.
+        assert_eq!(level_subtype(Level::L1), RibSubType::IsisLevel1);
+        assert_eq!(level_subtype(Level::L2), RibSubType::IsisLevel2);
+
+        let route = spf_route(20, None, &[("10.0.0.1", 10)]);
+        assert_eq!(
+            make_rib_entry(&route, Level::L1).rsubtype,
+            RibSubType::IsisLevel1
+        );
+        assert_eq!(
+            make_rib_entry(&route, Level::L2).rsubtype,
+            RibSubType::IsisLevel2
+        );
+    }
+
+    #[test]
+    fn make_rib_entry_v6_stamps_isis_level_subtype() {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "fe80::a:2".parse().unwrap(),
+            SpfNexthopV6 {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: None,
+            },
+        );
+        let route = SpfRouteV6 {
+            metric: 20,
+            nhops,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+            backup_as_primary: false,
+        };
+        assert_eq!(
+            make_rib_entry_v6(&route, Level::L1).rsubtype,
+            RibSubType::IsisLevel1
+        );
+        assert_eq!(
+            make_rib_entry_v6(&route, Level::L2).rsubtype,
+            RibSubType::IsisLevel2
+        );
     }
 }
