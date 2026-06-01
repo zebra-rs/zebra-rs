@@ -66,6 +66,13 @@ fn rx_transition(local: State, remote: State) -> Transition {
     use State::*;
     // RFC 5880 §6.8.6 — Reception of BFD Control Packets.
     // The two-axis match expresses the spec's nested if/else exactly.
+    // Transitions into / staying Up carry `Diag::None`, not `None`.
+    // RFC 5880 §4.1 defines Diagnostic as the reason for the *last*
+    // state change; coming Up is a success, so the diag must be cleared
+    // to 0. `None` here would mean "leave the existing diag untouched"
+    // (see `Session::handle_event`), which would leave a stale failure
+    // reason (e.g. NeighborSignaledSessionDown from a prior down) on the
+    // wire while the session is healthy — FRR clears it, we didn't.
     match (local, remote) {
         // Remote AdminDown — tear down unless we're already Down.
         (Down, AdminDown) => stay(Down, None),
@@ -73,16 +80,16 @@ fn rx_transition(local: State, remote: State) -> Transition {
 
         // Local Down — only Down/Init from peer makes us move.
         (Down, Down) => stay(Init, None),
-        (Down, Init) => stay(Up, None),
+        (Down, Init) => stay(Up, Some(Diag::None)),
         (Down, Up) => stay(Down, None),
 
         // Local Init — Init or Up from peer brings us Up; Down keeps us.
         (Init, Down) => stay(Init, None),
-        (Init, Init) | (Init, Up) => stay(Up, None),
+        (Init, Init) | (Init, Up) => stay(Up, Some(Diag::None)),
 
         // Local Up — only Down from peer tears us down.
         (Up, Down) => stay(Down, Some(Diag::NeighborSignaledSessionDown)),
-        (Up, Init) | (Up, Up) => stay(Up, None),
+        (Up, Init) | (Up, Up) => stay(Up, Some(Diag::None)),
 
         // Local AdminDown handled in the caller's early-return.
         (AdminDown, _) => unreachable!("AdminDown handled before rx_transition"),
@@ -120,16 +127,16 @@ mod tests {
             (Up, AdminDown, Down, Some(Diag::NeighborSignaledSessionDown)),
             // Local Down
             (Down, Down, Init, None),
-            (Down, Init, Up, None),
+            (Down, Init, Up, Some(Diag::None)),
             (Down, Up, Down, None),
             // Local Init
             (Init, Down, Init, None),
-            (Init, Init, Up, None),
-            (Init, Up, Up, None),
-            // Local Up
+            (Init, Init, Up, Some(Diag::None)),
+            (Init, Up, Up, Some(Diag::None)),
+            // Local Up — staying Up keeps the diag cleared (RFC 5880 §4.1).
             (Up, Down, Down, Some(Diag::NeighborSignaledSessionDown)),
-            (Up, Init, Up, None),
-            (Up, Up, Up, None),
+            (Up, Init, Up, Some(Diag::None)),
+            (Up, Up, Up, Some(Diag::None)),
         ];
         for &(local, remote_state, expected_state, expected_diag) in cases {
             let t = transition(local, Event::Rx { remote_state });

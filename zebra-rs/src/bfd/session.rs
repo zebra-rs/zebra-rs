@@ -465,4 +465,92 @@ mod tests {
         assert!(s.last_up.is_some());
         assert_eq!(s.stats.rx_count, 2);
     }
+
+    /// Regression: the local diagnostic must be cleared to `Diag::None`
+    /// once the session comes back Up, instead of advertising the stale
+    /// reason for the *previous* down forever (RFC 5880 §4.1). Observed
+    /// against FRR: our Up packets carried `NeighborSignaledSessionDown`
+    /// while FRR (correctly) sent `No Diagnostic`. Drives a full
+    /// Up → (peer Down) → Down → Init → Up cycle and asserts the diag is
+    /// set on the way down and cleared on the way back up — including by
+    /// a steady-state Up/Up packet.
+    #[test]
+    fn diag_cleared_when_session_returns_up() {
+        let mut t = SessionTable::new();
+        let k = key(1, 2);
+        let d = t.insert(k, SessionParams::default());
+        let s = t.get_by_disc_mut(d).unwrap();
+
+        let pkt = |state| ControlPacket {
+            state,
+            my_disc: 0xabcd,
+            ..ControlPacket::default()
+        };
+
+        // Bring the session Up (Down→Init→Up).
+        let _ = s.handle_packet(&pkt(State::Down));
+        let _ = s.handle_packet(&pkt(State::Init));
+        assert_eq!(s.local_state, State::Up);
+        assert_eq!(s.local_diag, Diag::None, "clean session has no diag");
+
+        // Peer signals Down → we go Down with the reason recorded.
+        let _ = s.handle_packet(&pkt(State::Down));
+        assert_eq!(s.local_state, State::Down);
+        assert_eq!(
+            s.local_diag,
+            Diag::NeighborSignaledSessionDown,
+            "down carries the reason",
+        );
+
+        // Re-establish: Down→Init is a no-failure transition that leaves
+        // the diag untouched (only the Up-producing arms clear it), so
+        // the stale reason still rides the transient Init packets…
+        let _ = s.handle_packet(&pkt(State::Down));
+        assert_eq!(s.local_state, State::Init);
+        assert_eq!(
+            s.local_diag,
+            Diag::NeighborSignaledSessionDown,
+            "Init still carries the prior reason (transient)",
+        );
+
+        // …and Init→Up clears it — the fix that matches FRR's behaviour.
+        let _ = s.handle_packet(&pkt(State::Init));
+        assert_eq!(s.local_state, State::Up);
+        assert_eq!(s.local_diag, Diag::None, "back Up with a clean diag");
+    }
+
+    /// A steady-state Up/Up packet (no state change, so `handle_event`
+    /// returns `None`) must still scrub a stale diagnostic — the FSM
+    /// assigns the diag before the no-change early-return. Guards the
+    /// case where the very first post-recovery packet is Up/Up.
+    #[test]
+    fn steady_state_up_scrubs_stale_diag() {
+        let mut t = SessionTable::new();
+        let k = key(1, 2);
+        let d = t.insert(k, SessionParams::default());
+        let s = t.get_by_disc_mut(d).unwrap();
+
+        // Force Up with a stale diag left over from an earlier down.
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Down,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Init,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        s.local_diag = Diag::NeighborSignaledSessionDown;
+
+        // An Up/Up packet doesn't change state (no StateChange returned)…
+        let change = s.handle_packet(&ControlPacket {
+            state: State::Up,
+            my_disc: 1,
+            ..ControlPacket::default()
+        });
+        assert!(change.is_none(), "Up/Up is not a state change");
+        // …but the diagnostic is scrubbed all the same.
+        assert_eq!(s.local_diag, Diag::None, "stale diag cleared while Up");
+    }
 }
