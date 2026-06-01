@@ -1682,16 +1682,79 @@ impl Isis {
             tracing::debug!(?key, "isis: bfd not configured; skipping subscribe");
             return;
         };
+        // Resolve the interface's effective Echo config (per-interface `bfd {}`
+        // merged over the instance-level `router isis { bfd {} }` default) and
+        // pass it in the session params. The BFD instance gates Echo further to
+        // single-hop IPv4 with a live reflector, so it's inert on v6 adjacencies.
+        let eff = self
+            .links
+            .get(&key.ifindex)
+            .map(|l| l.config.bfd.resolve(&self.config.bfd))
+            .unwrap_or_else(|| super::link::LinkBfdConfig::default().resolve(&self.config.bfd));
+        let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
+            Some(mode) => (
+                mode,
+                eff.echo_receive_ms.saturating_mul(1000),
+                eff.echo_transmit_ms.saturating_mul(1000),
+            ),
+            None => (crate::bfd::session::EchoMode::Off, 0, 0),
+        };
         let _ = tx.send(crate::bfd::inst::ClientReq::Subscribe {
             client: "isis".to_string(),
             key,
-            // Uses default params for every IS-IS adjacency.
-            // Profile resolution against `/bfd/profile/<name>` (the
-            // per-interface `bfd { profile NAME }` reference) is a
-            // follow-up that needs cross-task config access.
-            params: crate::bfd::session::SessionParams::default(),
+            // Profile resolution against `/bfd/profile/<name>` is still a
+            // follow-up (needs cross-task config access); only Echo is wired.
+            params: crate::bfd::session::SessionParams {
+                echo_mode,
+                required_min_echo_rx_us: echo_rx_us,
+                echo_transmit_us: echo_tx_us,
+                ..crate::bfd::session::SessionParams::default()
+            },
             notifier: self.bfd_event_tx.clone(),
         });
+    }
+
+    /// Re-evaluate BFD for every Up adjacency on every interface — used by the
+    /// `bfd {}` config callbacks (per-interface and instance-level), whose
+    /// changes (notably a blanket `enable`) affect adjacencies that are already
+    /// Up. Subscribe / Unsubscribe is idempotent at the BFD instance (keyed by
+    /// client+key), so we can re-drive without tracking per-adjacency state;
+    /// Echo-param changes take effect on the next session (re)establishment.
+    pub(crate) fn bfd_reconcile_all(&self) {
+        if self.bfd_client_tx.is_none() {
+            return;
+        }
+        let mut actions: Vec<(crate::bfd::session::SessionKey, bool)> = Vec::new();
+        for (ifindex, link) in self.links.iter() {
+            let enable = link.config.bfd.resolve(&self.config.bfd).enable;
+            let Some(local) = link.state.v4addr.first().map(|p| p.addr()) else {
+                continue;
+            };
+            for level in [Level::L1, Level::L2] {
+                for nbr in link.state.nbrs.get(&level).values() {
+                    if nbr.state != NfsmState::Up {
+                        continue;
+                    }
+                    let Some(remote) = nbr.addr4.keys().next().copied() else {
+                        continue;
+                    };
+                    let key = crate::bfd::session::SessionKey {
+                        local: std::net::IpAddr::V4(local),
+                        remote: std::net::IpAddr::V4(remote),
+                        ifindex: *ifindex,
+                        multihop: false,
+                    };
+                    actions.push((key, enable));
+                }
+            }
+        }
+        for (key, enable) in actions {
+            if enable {
+                self.process_bfd_subscribe(key);
+            } else {
+                self.process_bfd_unsubscribe(key);
+            }
+        }
     }
 
     /// Forward an `Unsubscribe` to the BFD instance. No-op when BFD

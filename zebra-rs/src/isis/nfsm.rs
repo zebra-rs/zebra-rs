@@ -121,7 +121,7 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
     // packet.rs regression path that may already have sent the
     // Unsubscribe.
     if was_up
-        && link.config.bfd.enable
+        && link.config.bfd.resolve(&link.up_config.bfd).enable
         && let Some(remote) = bfd_peer_v4
         && let Some(local) = link.state.v4addr.first().map(|p| p.addr())
     {

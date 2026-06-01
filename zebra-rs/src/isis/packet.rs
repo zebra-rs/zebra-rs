@@ -31,7 +31,9 @@ fn bfd_nfsm_dispatch(
     was_up: bool,
     state: NfsmState,
 ) {
-    if !link.config.bfd.enable {
+    // Effective enable = per-interface `bfd {}` merged over the instance-level
+    // `router isis { bfd {} }` default (blanket-enable + per-interface override).
+    if !link.config.bfd.resolve(&link.up_config.bfd).enable {
         return;
     }
     let (Some(remote), Some(local)) = (peer_v4, link.state.v4addr.first().map(|p| p.addr())) else {

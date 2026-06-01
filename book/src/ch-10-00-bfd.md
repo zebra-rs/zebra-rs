@@ -215,11 +215,12 @@ all sessions on that link, and stopped when the last one goes away. It needs
 raw socket); the packaged install grants these. A node with no Echo configured
 runs no helper and advertises `Required Min Echo RX Interval = 0`.
 
-Echo is enabled per attachment — today on OSPF interfaces, where `echo-mode`
+Echo is enabled per attachment — on OSPF and IS-IS interfaces, where `echo-mode`
 selects the role (`transmit` / `receive` / `both`) and
 `echo-transmit-interval` / `echo-receive-interval` set the rates; see
-[OSPF BFD](ch-08-02-ospf-bfd.md#echo). `show bfd peers` reports the negotiated
-`Echo receive interval` / `Echo transmission interval`.
+[OSPF BFD](ch-08-02-ospf-bfd.md#echo) and [IS-IS BFD](ch-07-03-isis-bfd.md#echo).
+`show bfd peers` reports the negotiated `Echo receive interval` /
+`Echo transmission interval`.
 
 ## What happens on failure
 
@@ -244,5 +245,6 @@ native timers would allow.
   (`transmit` / `receive` / `both`) config and an instance-level
   `router ospf { bfd {} }` default inherited and overridden per interface.
 - **Not yet:** configurable control-packet timers (the intervals are
-  fixed at the defaults); Echo on IS-IS and BGP (OSPF only today); BFD
+  fixed at the defaults); Echo on BGP (OSPF + IS-IS today; BGP echo is
+  single-hop-only so it awaits a decision); BFD
   for **static routes**; per-VRF OSPF BFD.

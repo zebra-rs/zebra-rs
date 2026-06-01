@@ -23,21 +23,67 @@ router isis {
 }
 ```
 
-No top-level `bfd { }` block is required — the BFD subsystem starts
-automatically with `router isis`.
+There is no global top-level `bfd { }` block — the BFD subsystem starts
+automatically with `router isis`. The same `bfd {}` leaves can be set once at
+the **instance level** (`router isis { bfd {} }`) as a default for every
+interface, overridden per interface (see
+[Instance-level defaults](#instance-level-defaults)).
 
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
-| `enable` | boolean | `false` | Attach (or detach) BFD for adjacencies on this interface. |
+| `enable` | boolean | _(off)_ | Attach (or detach) BFD for adjacencies on this interface. |
+| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 adjacencies. |
+| `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
+| `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
 
-Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
-timers are not currently tunable — see
+Control-packet intervals use the BFD defaults (300 ms / ×3 ⇒ ~900 ms
+detection) and are not currently tunable — see
 [Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
 
 A session is subscribed when the adjacency comes **Up** and
-unsubscribed when it goes down. Both IPv4 and IPv6 adjacencies are
-supported; IPv6 sessions run over the interface's link-local addresses
-and are demultiplexed per interface.
+unsubscribed when it goes down.
+
+## Echo
+
+`echo-mode` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function) for
+this interface's adjacencies — single-hop **IPv4 only** (IS-IS is an L2 protocol;
+the Echo session is built from the interface's and neighbour's IPv4 addresses,
+so an IPv6-only adjacency is inert). `transmit` originates Echo + detects on the
+return; `receive` advertises + reflects (the peer detects); `both` does both —
+backed by the per-interface `xdp-bfd-echo` helper.
+
+```
+router isis {
+  interface eth0 {
+    bfd {
+      enable true;
+      echo-mode both;
+      echo-transmit-interval 50;
+      echo-receive-interval 50;
+    }
+  }
+}
+```
+
+## Instance-level defaults
+
+A `bfd {}` block directly under `router isis` supplies defaults for **every**
+interface; each leaf's effective value is the per-interface setting if present,
+else the instance default, else the hard default. `enable true` at the instance
+level **blanket-enables** BFD on all IS-IS interfaces; a per-interface
+`bfd { enable false }` opts one out.
+
+```
+router isis {
+  bfd {
+    enable true;          // BFD on every interface…
+    echo-mode receive;    // …default Echo role
+  }
+  interface eth0 {
+    bfd { echo-mode both; }   // override; inherits enable
+  }
+}
+```
 
 ## Verifying
 
