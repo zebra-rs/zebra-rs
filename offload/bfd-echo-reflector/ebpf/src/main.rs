@@ -6,14 +6,17 @@
 //! BFD Echo is a stateless data-plane "hairpin": a peer sends an Echo frame to
 //! UDP/3785 crafted so that our forwarding plane loops it straight back, and the
 //! peer alone times the round trip. This program is that loopback, done in XDP:
-//! a matching frame has its Ethernet source/destination MAC swapped and is sent
-//! back out the same interface with `XDP_TX`.
+//! a matching IPv4 UDP/3785 frame has its Ethernet source/destination MAC
+//! swapped, its IPv4 TTL decremented (header checksum patched), and is sent back
+//! out the same interface with `XDP_TX`.
 //!
-//! It is a pure L2 reflect — no IP/UDP checksum recomputation and no TTL
-//! decrement are needed, because nothing in the IP/UDP layers changes (notes
-//! §2). Everything that is not an IPv4 UDP/3785 frame is passed through
-//! untouched, so normal traffic — including BFD *control* on UDP/3784 — is
-//! unaffected.
+//! The TTL decrement is REQUIRED, not cosmetic: the loop is the remote's
+//! forwarding plane — which is a hop — and FRR's fp-echo receiver
+//! (`bfd_recv_ipv4_fp`) drops any looped frame whose TTL isn't 254. Only the
+//! IPv4 header checksum is recomputed (incrementally, RFC 1141); the UDP checksum
+//! is unaffected since TTL isn't in its pseudo-header. Everything that is not an
+//! IPv4 UDP/3785 frame is `XDP_PASS`ed, so normal traffic — including BFD
+//! *control* on UDP/3784 — is untouched.
 //!
 //! First slice: IPv4 only. IPv6 (EtherType 0x86DD) is a follow-up.
 
