@@ -459,7 +459,7 @@ mod tests {
 
     use super::*;
     use crate::bfd::inst::Bfd;
-    use crate::bfd::session::SessionParams;
+    use crate::bfd::session::{EchoMode, SessionParams};
     use crate::context::ProtoContext;
 
     fn fresh_bfd() -> Bfd {
@@ -580,6 +580,7 @@ mod tests {
         bfd.add_session(
             k,
             SessionParams {
+                echo_mode: EchoMode::Both,
                 required_min_echo_rx_us: 50_000,
                 ..SessionParams::default()
             },

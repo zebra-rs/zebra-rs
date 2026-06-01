@@ -400,12 +400,12 @@ impl Bfd {
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
-        // Echo is single-hop + IPv4 only (the XDP reflector loops IPv4). A
-        // non-zero advertised echo-rx is a promise to loop Echo back, so bring
-        // up the per-interface reflector and only mark the session `echo_ready`
-        // (the build_packet advertise gate) once the child is confirmed up —
-        // otherwise we keep advertising 0, which is honest.
-        if params.required_min_echo_rx_us > 0 && !key.multihop && key.remote.is_ipv4() {
+        // Echo is single-hop + IPv4 only (the XDP helper handles IPv4). Any
+        // active Echo role needs the per-interface helper: `receive` reflects a
+        // peer's Echo, `transmit` sends + detects ours. Bring it up and mark the
+        // session `echo_ready` once the child is confirmed running — until then
+        // we advertise 0 (an honest promise to actually loop Echo back).
+        if !params.echo_mode.is_off() && !key.multihop && key.remote.is_ipv4() {
             self.reflectors.acquire(key.ifindex);
             let ready = self.reflectors.is_ready(key.ifindex);
             if ready && let Some(s) = self.sessions.get_by_key_mut(&key) {
@@ -445,10 +445,10 @@ impl Bfd {
         }
         let removed = self.sessions.remove(key);
         // Mirror the `add_session` acquire predicate exactly (the configured
-        // `required_min_echo_rx_us` is never mutated, so this stays symmetric
-        // even when the session ended up advertising 0).
+        // `echo_mode` is never mutated, so this stays symmetric even when the
+        // session ended up advertising 0).
         if let Some(s) = &removed
-            && s.required_min_echo_rx_us > 0
+            && !s.echo_mode.is_off()
             && !s.key.multihop
             && s.key.remote.is_ipv4()
         {
@@ -726,13 +726,13 @@ impl Bfd {
     /// per-interface helper exactly on the edges (tracked by
     /// [`Session::echo_originating`]).
     ///
-    /// We originate only while the session is **Up**, the peer advertises a
-    /// non-zero Required Min Echo RX Interval (it will loop our Echo back), we
-    /// ourselves advertise a non-zero echo-rx (echo-mode is on), it is
-    /// single-hop, and both endpoints carry a concrete IPv4 address — the helper
-    /// builds a self-addressed L2 IPv4 frame and the forwarding plane hairpins
-    /// it. The transmit interval is the faster of the two echo-rx minimums but
-    /// never below the peer's floor; detection is `interval × detect_mult`.
+    /// We originate only while the session is **Up**, our configured Echo mode
+    /// transmits (`transmit`/`both`), the peer advertises a non-zero Required Min
+    /// Echo RX Interval (it will loop our Echo back), it is single-hop, and both
+    /// endpoints carry a concrete IPv4 address — the helper builds a
+    /// self-addressed L2 IPv4 frame and the forwarding plane hairpins it. The
+    /// transmit interval is our configured `echo-transmit-interval`, clamped up
+    /// to the peer's advertised floor; detection is `interval × detect_mult`.
     fn echo_originate_reconcile(&mut self, key: SessionKey) {
         let Some(s) = self.sessions.get_by_key(&key) else {
             return;
@@ -747,7 +747,7 @@ impl Bfd {
         };
         let want = v4.is_some()
             && s.local_state == bfd_packet::State::Up
-            && s.required_min_echo_rx_us > 0
+            && s.echo_mode.transmits()
             && s.remote_min_echo_rx_us > 0;
         if want == s.echo_originating {
             return;
@@ -757,11 +757,9 @@ impl Bfd {
         if want {
             let (local, peer) = v4.expect("want implies a concrete IPv4 pair");
             // §6.8.9: the interval MUST NOT be below the peer's advertised
-            // Required Min Echo RX Interval. Take the faster of the two mins.
-            let tx_us = s
-                .required_min_echo_rx_us
-                .max(s.remote_min_echo_rx_us)
-                .max(1);
+            // Required Min Echo RX Interval. Send at our configured rate, but
+            // never faster than the peer's floor.
+            let tx_us = s.echo_transmit_us.max(s.remote_min_echo_rx_us).max(1);
             let mult = s.detect_mult.max(1);
             self.reflectors.send_command(
                 ifindex,
@@ -803,6 +801,7 @@ pub fn serve(mut bfd: Bfd) -> Task<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::session::EchoMode;
     use super::*;
 
     fn fresh_bfd() -> Bfd {
@@ -850,6 +849,7 @@ mod tests {
         let mut key = loopback_key(20);
         key.ifindex = 0xFFFF_FFF0; // no such interface
         let params = SessionParams {
+            echo_mode: EchoMode::Both,
             required_min_echo_rx_us: 50_000,
             ..SessionParams::default()
         };
@@ -871,6 +871,7 @@ mod tests {
         key.ifindex = 0xFFFF_FFF1;
         key.multihop = true;
         let params = SessionParams {
+            echo_mode: EchoMode::Both,
             required_min_echo_rx_us: 50_000,
             ..SessionParams::default()
         };

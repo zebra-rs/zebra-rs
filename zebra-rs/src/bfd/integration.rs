@@ -12,7 +12,7 @@ use bfd_packet::State;
 use tokio::sync::mpsc;
 
 use super::inst::{Bfd, BfdEvent, serve};
-use super::session::{SessionKey, SessionParams};
+use super::session::{EchoMode, SessionKey, SessionParams};
 use crate::context::ProtoContext;
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -73,7 +73,9 @@ async fn two_instances_reach_up() {
         // Loopback delivery preserves the egress TTL of 255, so the
         // single-hop GTSM floor is satisfied.
         min_ttl: 255,
+        echo_mode: EchoMode::Off,
         required_min_echo_rx_us: 0,
+        echo_transmit_us: 0,
     };
 
     bfd_a.subscribe("test".into(), loopback_key(), params(port_b), tx_a);
