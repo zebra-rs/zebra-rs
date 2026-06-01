@@ -30,7 +30,9 @@ const ETHERTYPE_IPV4: u16 = 0x0800;
 /// option-less headers (IHL=5) are handled; see `try_reflect`.
 const IP_OFF: usize = ETH_HLEN;
 const IP_VER_IHL_OFF: usize = IP_OFF; // u8: high nibble = version, low = IHL
+const IP_TTL_OFF: usize = IP_OFF + 8; // u8 TTL
 const IP_PROTO_OFF: usize = IP_OFF + 9; // u8
+const IP_CHECK_OFF: usize = IP_OFF + 10; // u16 (big-endian) header checksum
 const IPPROTO_UDP: u8 = 17;
 const IPV4_VER_IHL_NOOPTS: u8 = 0x45; // version 4, IHL 5 (20-byte header)
 
@@ -78,6 +80,40 @@ unsafe fn swap_byte(a: *mut u8, b: *mut u8) {
     }
 }
 
+/// Decrement the IPv4 TTL by one and patch the header checksum (RFC 1141:
+/// checksum += 0x0100 with end-around carry, since the TTL byte is the high
+/// half of the 16-bit word at IP offset 8; the UDP checksum is unaffected as
+/// TTL is not in its pseudo-header). A forwarding-plane loopback IS a hop, and
+/// FRR's fp-echo receiver (`bfd_recv_ipv4_fp`) drops any looped frame whose TTL
+/// isn't 254 — both to confirm a real forwarding loop and to discard its own
+/// egress copy. Returns Err on a truncated header or TTL 0.
+#[inline(always)]
+unsafe fn decrement_ttl(ctx: &XdpContext) -> Result<(), ()> {
+    let start = ctx.data();
+    // Covers the TTL byte (off 22) and the 2-byte checksum (off 24..26).
+    if start + IP_CHECK_OFF + 2 > ctx.data_end() {
+        return Err(());
+    }
+    let ttl_ptr = (start + IP_TTL_OFF) as *mut u8;
+    let sum_ptr = (start + IP_CHECK_OFF) as *mut u8;
+    unsafe {
+        let ttl = core::ptr::read_volatile(ttl_ptr);
+        if ttl == 0 {
+            return Err(());
+        }
+        core::ptr::write_volatile(ttl_ptr, ttl - 1);
+
+        // IP checksum (big-endian numeric) += 0x0100, fold the carry once.
+        let hi = core::ptr::read_volatile(sum_ptr) as u32;
+        let lo = core::ptr::read_volatile(sum_ptr.add(1)) as u32;
+        let mut sum = ((hi << 8) | lo) + 0x0100;
+        sum = (sum & 0xffff) + (sum >> 16);
+        core::ptr::write_volatile(sum_ptr, (sum >> 8) as u8);
+        core::ptr::write_volatile(sum_ptr.add(1), (sum & 0xff) as u8);
+    }
+    Ok(())
+}
+
 #[xdp]
 pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
     match try_reflect(&ctx) {
@@ -105,6 +141,12 @@ fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
     if unsafe { load_u16_be(ctx, UDP_DST_OFF)? } != BFD_ECHO_PORT {
         return Ok(xdp_action::XDP_PASS);
     }
+
+    // Act as a forwarding hop: decrement TTL + patch the IP checksum, so the
+    // looped Echo returns to the originator at TTL 254 (RFC 5880 §6.4 Echo is
+    // looped by the remote's forwarding plane; FRR's fp-echo receiver requires
+    // exactly TTL 254 and drops anything else).
+    unsafe { decrement_ttl(ctx)? };
 
     // Prove the full 14-byte Ethernet header (both MACs) is in bounds, then swap
     // source/destination MAC in place and bounce the frame straight back out.
