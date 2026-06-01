@@ -1,17 +1,24 @@
 //! BFD Echo **sender** datapath for the per-interface helper.
 //!
-//! eBPF/XDP can't originate packets, so the originator's transmit + detection
-//! live here in userspace, driven by zebra-rs over the stdin/stdout line
-//! protocol (see [`EchoEngine::handle_command`]). Per session we periodically
-//! transmit a self-addressed Echo via an `AF_PACKET` raw socket (the peer's
-//! forwarding plane loops it back); the looped frame returns inbound and the
-//! XDP program — recognizing our source IP in `OUR_LOCAL_IPS` — passes it up so
-//! this socket sees it. If no return arrives within `tx-interval × detect-mult`,
-//! we emit `echo-down <discr>` and zebra-rs drives the session Down
-//! (EchoFunctionFailed).
+//! eBPF/XDP can't originate packets, so the Echo *transmit* lives here in
+//! userspace, driven by zebra-rs over the stdin/stdout line protocol (see
+//! [`EchoEngine::handle_command`]). Per session we periodically transmit a
+//! self-addressed Echo via an `AF_PACKET` raw socket; the peer's forwarding
+//! plane loops it back inbound.
 //!
-//! A single periodic tick (no per-session async tasks) does TX scheduling,
-//! detection, and a non-blocking RX drain — ample for ~50 ms Echo intervals.
+//! **Detection is offloaded to the kernel.** The XDP program recognizes our
+//! returning Echo (source ∈ `OUR_LOCAL_IPS`), arms / re-arms a per-session
+//! `bpf_timer` keyed by discriminator in the `ECHO_TIMERS` map, and `XDP_DROP`s
+//! the frame — so in steady state this socket never has to receive anything. If
+//! returns stop for `tx-interval × detect-mult`, the timer fires in softirq and
+//! sets the entry's `down` flag. The periodic tick here only *polls* that flag
+//! (one map read per session) and reports `echo-down <discr>` to zebra-rs, which
+//! drives the session Down (EchoFunctionFailed).
+//!
+//! The kernel timer only arms once the first return is seen, so a session whose
+//! forwarding path is broken from the outset (Up, but Echo never returns) is
+//! covered by a userspace bootstrap fallback: if the timer hasn't armed within
+//! the detection time of `echo-add`, the tick reports `echo-down` itself.
 //!
 //! The `AF_PACKET` socket (which needs `CAP_NET_RAW`) is opened lazily on the
 //! first `echo-add`, so a reflector-only / standalone run never touches it.
@@ -23,8 +30,34 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use aya::Pod;
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use log::{debug, warn};
+
+/// Userspace mirror of the eBPF `EchoState` value in the `ECHO_TIMERS` map.
+/// Byte-identical layout (`#[repr(C)]`, 32 bytes, 8-byte aligned). Userspace
+/// seeds an entry at `echo-add` with the `timer` zeroed (the kernel manages and
+/// re-zeroes it; only XDP may `bpf_timer_init` it) and reads back `armed` /
+/// `down` each tick.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EchoState {
+    /// Opaque kernel `struct bpf_timer` (`[u64; 2]`). Never touched here.
+    timer: [u64; 2],
+    /// Detection time in nanoseconds; the timer's re-arm delay (set by us).
+    detect_ns: u64,
+    /// 1 once XDP has init'd + started the timer (it took over detection).
+    armed: u8,
+    /// 1 when the timer fired (returns stopped). Polled here, reset by XDP on
+    /// the next return.
+    down: u8,
+    _pad: [u8; 6],
+}
+
+// SAFETY: `EchoState` is `#[repr(C)]`, `Copy`, and contains only integer fields
+// with no padding beyond the explicit `_pad`, so it is safe to read/write as raw
+// bytes to/from a BPF map (the contract of `aya::Pod`).
+unsafe impl Pod for EchoState {}
 
 /// Tags our Echo payload so the RX path only ever matches our own frames (a
 /// peer's Echo carries the peer's own opaque payload). ASCII "zbfd".
@@ -49,8 +82,12 @@ struct EchoSession {
     tx: Duration,
     detect: Duration,
     next_tx: Instant,
-    last_rx: Instant,
+    /// When `echo-add` created this session — the start of the bootstrap window
+    /// in which the kernel timer hasn't armed yet (no return seen).
+    added: Instant,
     seq: u32,
+    /// `echo-down` already reported for this session (don't re-report before the
+    /// `echo-del` from zebra-rs arrives).
     down: bool,
 }
 
@@ -62,6 +99,9 @@ pub struct EchoEngine {
     io: Option<(OwnedFd, [u8; 6])>,
     /// Mirror of the XDP `OUR_LOCAL_IPS` map (key = `u32::from(Ipv4Addr)`).
     local_ips: BpfHashMap<MapData, u32, u8>,
+    /// The XDP `ECHO_TIMERS` map (key = discriminator). We seed an entry per
+    /// session and poll its `down`/`armed` flags; the kernel owns the timer.
+    timers: BpfHashMap<MapData, u32, EchoState>,
     /// Refcount of originating sessions per local IP (map entry added on first,
     /// removed on last).
     ip_refs: HashMap<u32, u32>,
@@ -69,12 +109,17 @@ pub struct EchoEngine {
 }
 
 impl EchoEngine {
-    pub fn new(iface: &str, local_ips: BpfHashMap<MapData, u32, u8>) -> Result<Self> {
+    pub fn new(
+        iface: &str,
+        local_ips: BpfHashMap<MapData, u32, u8>,
+        timers: BpfHashMap<MapData, u32, EchoState>,
+    ) -> Result<Self> {
         Ok(Self {
             ifindex: if_nametoindex(iface)?,
             iface: iface.to_string(),
             io: None,
             local_ips,
+            timers,
             ip_refs: HashMap::new(),
             sessions: HashMap::new(),
         })
@@ -137,6 +182,7 @@ impl EchoEngine {
         let _ = self.io(); // open the socket lazily (logs if it can't)
         let now = Instant::now();
         let tx = Duration::from_micros(tx_us.max(1));
+        let detect = tx * mult;
         let key = u32::from(local);
         // First session on this local IP → teach the XDP guard our address.
         let refs = self.ip_refs.entry(key).or_insert(0);
@@ -146,6 +192,19 @@ impl EchoEngine {
             }
         }
         *refs += 1;
+        // Seed the kernel detector. The timer stays zeroed (uninitialized) until
+        // XDP arms it on the first return; the kernel re-zeroes the timer region
+        // on this update regardless. `detect_ns` is the re-arm delay.
+        let st = EchoState {
+            timer: [0, 0],
+            detect_ns: detect.as_nanos().min(u64::MAX as u128) as u64,
+            armed: 0,
+            down: 0,
+            _pad: [0; 6],
+        };
+        if let Err(e) = self.timers.insert(discr, st, 0) {
+            warn!("bfd echo sender: ECHO_TIMERS insert discr={discr}: {e}");
+        }
         self.sessions.insert(
             discr,
             EchoSession {
@@ -153,9 +212,9 @@ impl EchoEngine {
                 peer,
                 peer_mac: arp_lookup(self.ifindex, peer),
                 tx,
-                detect: tx * mult,
+                detect,
                 next_tx: now,
-                last_rx: now, // grace: don't time out before the first round-trip
+                added: now,
                 seq: 0,
                 down: false,
             },
@@ -165,6 +224,9 @@ impl EchoEngine {
 
     fn del(&mut self, discr: u32) {
         if let Some(s) = self.sessions.remove(&discr) {
+            // Removing the map entry frees its embedded `bpf_timer` — the kernel
+            // cancels any pending fire (`bpf_obj_free_fields`).
+            let _ = self.timers.remove(&discr);
             let key = u32::from(s.local);
             if let Some(refs) = self.ip_refs.get_mut(&key) {
                 *refs = refs.saturating_sub(1);
@@ -177,14 +239,13 @@ impl EchoEngine {
         }
     }
 
-    /// Periodic work: drain returns, transmit due Echoes, fire detection. Emits
+    /// Periodic work: transmit due Echoes and poll the kernel detector. Emits
     /// `echo-down <discr>` (once per failure) to `out`. No-op until the socket
     /// is open (i.e. until the first session originates).
     pub fn tick(&mut self, out: &mut impl Write) {
         let Some((fd, if_mac)) = self.io() else {
             return;
         };
-        self.recv_drain(fd);
         let now = Instant::now();
         let ifindex = self.ifindex;
         for (discr, s) in self.sessions.iter_mut() {
@@ -201,44 +262,24 @@ impl EchoEngine {
                 }
                 s.next_tx = now + jitter(s.tx);
             }
-            if !s.down && now.duration_since(s.last_rx) > s.detect {
+            if s.down {
+                continue;
+            }
+            // Steady-state detection is in the kernel: read the timer entry's
+            // `down` flag (set by the bpf_timer callback when returns stopped).
+            // Before the timer arms (`armed == 0`, i.e. no return seen yet), fall
+            // back to a userspace timeout from `echo-add` so a forwarding path
+            // that's broken from the outset is still caught.
+            let fired = match self.timers.get(discr, 0) {
+                Ok(st) => st.down != 0 || (st.armed == 0 && now.duration_since(s.added) > s.detect),
+                // Entry vanished (shouldn't happen between add and del): treat as
+                // a bootstrap timeout so we don't silently stop detecting.
+                Err(_) => now.duration_since(s.added) > s.detect,
+            };
+            if fired {
                 s.down = true;
                 let _ = writeln!(out, "echo-down {discr}");
                 let _ = out.flush();
-            }
-        }
-    }
-
-    /// Drain looped-back Echoes (non-blocking); refresh `last_rx` per session.
-    fn recv_drain(&mut self, fd: i32) {
-        let mut buf = [0u8; 2048];
-        loop {
-            let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-            let mut slen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
-            let n = unsafe {
-                libc::recvfrom(
-                    fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    0,
-                    &mut sll as *mut _ as *mut libc::sockaddr,
-                    &mut slen,
-                )
-            };
-            if n <= 0 {
-                break; // EWOULDBLOCK / EAGAIN: nothing more queued
-            }
-            // Only frames addressed to us (the looped return), never our own TX.
-            if sll.sll_pkttype != libc::PACKET_HOST {
-                continue;
-            }
-            if let Some((discr, src)) = parse_return(&buf[..n as usize]) {
-                if let Some(s) = self.sessions.get_mut(&discr) {
-                    if s.local == src {
-                        s.last_rx = Instant::now();
-                        s.down = false; // recovered; zebra re-arms via the control FSM
-                    }
-                }
             }
         }
     }
@@ -296,6 +337,9 @@ fn build_echo(
 }
 
 /// If `frame` is one of our looped Echoes, return `(discriminator, src-ip)`.
+/// Detection moved to the kernel (XDP matches our returns), so this is now only
+/// exercised by the build/parse round-trip test below.
+#[cfg(test)]
 fn parse_return(frame: &[u8]) -> Option<(u32, Ipv4Addr)> {
     if frame.len() < FRAME_LEN {
         return None;

@@ -204,12 +204,29 @@ system never parses it, it just hairpins it. (Not shown: the TTL drops 255 → 2
 on the return — add `-v` to see it; FRR drops any other TTL.) On zebra-rs,
 `show bfd peers` then reports `Echo receive interval: 50ms`.
 
+## Originator (Echo sender)
+
+Beyond reflecting, the helper also *originates* Echo when zebra-rs asks it to
+(RFC 5880 §6.8.5/§6.8.9), driven over a stdin/stdout line protocol:
+
+- `echo-add <discr> <local-ip> <peer-ip> <tx-us> <detect-mult>` / `echo-del <discr>`
+  from zebra-rs; `echo-down <discr>` back when detection fires.
+- **Transmit** is userspace (XDP can't originate): an `AF_PACKET` socket sends a
+  self-addressed Echo (src=dst=local, udp/3785, TTL 255) every `tx-us` (75–100%
+  jittered); the peer's forwarding plane loops it back.
+- **Detection is offloaded to the kernel.** The XDP program recognizes our
+  returning Echo (source ∈ `OUR_LOCAL_IPS`), arms/re-arms a per-session
+  `bpf_timer` in the `ECHO_TIMERS` BTF map (keyed by discriminator), and drops
+  the frame. If returns stop for `tx-us × detect-mult`, the timer fires in
+  softirq and sets a `down` flag; the helper polls it and emits `echo-down`. A
+  userspace timeout covers the bootstrap window before the first return arms the
+  timer.
+
 ## Limitations / follow-ups
 
 - **IPv4 only** (EtherType 0x0800). IPv6 (0x86DD) is a follow-up.
 - Option-less IPv4 only (IHL=5); BFD Echo frames carry no IP options.
-- **Responder only** — zebra-rs reflects a peer's Echo (and honestly advertises
-  the capability), but does not yet *originate* Echo itself; the sender half
-  needs periodic TX timers + an Echo detect timer.
+- `bpf_timer` detection needs a kernel that supports it (≥ 5.15) and `CAP_BPF`;
+  the responder path has no such requirement.
 - aya deps are pulled from git to match the current build glue; pin a rev for
   reproducible builds.

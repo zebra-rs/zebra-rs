@@ -91,14 +91,20 @@ async fn main() -> anyhow::Result<()> {
         },
     }
 
-    // Take the XDP `OUR_LOCAL_IPS` map for userspace to populate (the loaded
-    // program keeps using the same kernel map); `ebpf` itself stays in scope so
-    // the XDP link persists until exit.
+    // Take the XDP maps for userspace to drive (the loaded program keeps using
+    // the same kernel maps); `ebpf` itself stays in scope so the XDP link
+    // persists until exit. `OUR_LOCAL_IPS` teaches the program our source IPs;
+    // `ECHO_TIMERS` holds the per-session bpf_timer detection state we seed and
+    // poll.
     let local_ips = aya::maps::HashMap::try_from(
         ebpf.take_map("OUR_LOCAL_IPS")
             .context("OUR_LOCAL_IPS map missing from object")?,
     )?;
-    let mut engine = sender::EchoEngine::new(&iface, local_ips)?;
+    let timers = aya::maps::HashMap::try_from(
+        ebpf.take_map("ECHO_TIMERS")
+            .context("ECHO_TIMERS map missing from object")?,
+    )?;
+    let mut engine = sender::EchoEngine::new(&iface, local_ips, timers)?;
 
     info!("BFD Echo datapath up on {iface} (reflect + originate); Ctrl-C/SIGTERM to exit");
 
