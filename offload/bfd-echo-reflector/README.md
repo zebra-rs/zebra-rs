@@ -4,20 +4,30 @@ A standalone proof-of-concept that reflects **BFD Echo** frames (UDP **3785**,
 RFC 5880 §6.4 / RFC 5881 §4) in the data plane using **XDP/eBPF** (via
 [aya](https://aya-rs.dev/)).
 
-A matching IPv4 UDP/3785 frame has its Ethernet source/destination MAC swapped
-and is sent straight back out the same interface (`XDP_TX`). It is a pure L2
-hairpin — no IP/UDP checksum recompute, no TTL decrement. Everything else
-(including BFD **control** on UDP/3784) is passed through untouched.
+A matching IPv4 UDP/3785 frame is reflected back out the same interface
+(`XDP_TX`), acting as a **forwarding-plane hop**: swap the Ethernet
+source/destination MAC, **decrement the IP TTL by one and patch the IP header
+checksum** (RFC 1141). The UDP checksum is untouched (TTL isn't in its
+pseudo-header). Everything else (including BFD **control** on UDP/3784) is
+passed through untouched.
+
+> **Why decrement TTL (interop-critical):** BFD Echo is looped by the remote's
+> *forwarding plane* (RFC 5880 §6.4), which is a hop. FRR's IPv4 fp-echo
+> receiver (`bfd_recv_ipv4_fp`) **drops any looped frame whose TTL isn't 254** —
+> it sends at 255 and requires exactly one decrement, both to confirm a real
+> forwarding loop and to discard its own egress copy (FRR receives Echo on an
+> `AF_PACKET` socket, so a naive MAC-swap-only reflector that left TTL at 255 was
+> silently dropped → BFD flapped). Note `accept_local`/`rp_filter` on the Echo
+> *originator* are irrelevant for the same `AF_PACKET` reason.
 
 This is the smallest, best-fit first piece of the broader BFD/S-BFD/STAMP XDP
-offload effort: the reflector is stateless, so it maps cleanly onto XDP. The
-originator/sender side (which needs periodic TX timers) is **not** part of this
-PoC. See `../../docs/design/bfd-sbfd-stamp-xdp-offload-notes.md` and
-`../../docs/design/bfd-echo-plan.md`.
+offload effort. The originator/sender side (which needs periodic TX timers) is
+**not** part of this PoC. See `../../docs/design/bfd-sbfd-stamp-xdp-offload-notes.md`
+and `../../docs/design/bfd-echo-plan.md`.
 
-> **Status:** scaffolding + program written, **not yet compiled or run** in this
-> repo — the eBPF toolchain (bpf-linker + LLVM) was not installed when it was
-> authored. Build it with the steps below and report back.
+> **Status:** built and **validated end-to-end against FRR `echo-mode`** over a
+> veth/real link — FRR originates Echo, this reflector loops it back at TTL 254,
+> FRR's Echo detection succeeds and the BFD/OSPF session stays Up.
 
 ## Layout
 
