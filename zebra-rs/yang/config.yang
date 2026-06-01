@@ -1279,6 +1279,49 @@ module config {
           }
         }
 
+        container bfd {
+          ext:help "BFD defaults for this IS-IS instance";
+          description
+            "Instance-level BFD defaults applied to every IS-IS
+             interface, overridable per interface. `enable true` here
+             blanket-enables BFD on all of the instance's interfaces; a
+             per-interface `bfd { enable false }` opts one out. Each leaf
+             is overridable per interface.";
+          leaf enable {
+            ext:help "Blanket-enable BFD on all IS-IS interfaces";
+            type boolean;
+            description
+              "When true, attach BFD to every IS-IS interface's
+               adjacencies (overridable per interface).";
+          }
+          leaf profile {
+            ext:help "Default /bfd/profile (stored; not yet applied)";
+            type string;
+          }
+          leaf echo-mode {
+            ext:help "Default BFD Echo role (transmit | receive | both)";
+            type enumeration {
+              enum transmit { description "Originate Echo only."; }
+              enum receive { description "Advertise + reflect only."; }
+              enum both { description "Both."; }
+            }
+            description
+              "Instance-default BFD Echo role for every interface
+               (RFC 5880 §6.4; single-hop IPv4). Overridable per
+               interface; absent ⇒ Echo off.";
+          }
+          leaf echo-transmit-interval {
+            ext:help "Default Echo transmit interval (ms)";
+            type uint32;
+            units "milliseconds";
+          }
+          leaf echo-receive-interval {
+            ext:help "Default advertised Required Min Echo RX (ms)";
+            type uint32;
+            units "milliseconds";
+          }
+        }
+
         leaf is-type {
           type enumeration {
             enum level-1;
@@ -1885,6 +1928,36 @@ module config {
               description
                 "Name of a `/bfd/profile` entry whose parameters
                  apply to BFD sessions formed on this interface.";
+            }
+
+            leaf echo-mode {
+              ext:help "BFD Echo role (transmit | receive | both)";
+              type enumeration {
+                enum transmit { description "Originate Echo only."; }
+                enum receive { description "Advertise + reflect only."; }
+                enum both { description "Both."; }
+              }
+              description
+                "Enable the BFD Echo function (RFC 5880 §6.4) on this
+                 interface's single-hop IPv4 adjacencies, choosing which
+                 half is active. Backed by the per-interface `xdp-bfd-echo`
+                 helper. Overrides the instance default; absent ⇒ inherit.";
+            }
+            leaf echo-transmit-interval {
+              ext:help "Echo transmit interval (ms)";
+              type uint32;
+              units "milliseconds";
+              description
+                "Rate we originate Echo at (echo-mode `transmit`/`both`).
+                 Hard default 50 ms when unset at every level.";
+            }
+            leaf echo-receive-interval {
+              ext:help "Advertised Required Min Echo RX Interval (ms)";
+              type uint32;
+              units "milliseconds";
+              description
+                "Advertised Required Min Echo RX (echo-mode
+                 `receive`/`both`). Hard default 50 ms when unset.";
             }
           }
 

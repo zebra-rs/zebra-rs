@@ -14,6 +14,7 @@ use strum_macros::{Display, EnumString};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+use crate::bfd::session::EchoMode;
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 use crate::isis_event_trace;
@@ -297,14 +298,62 @@ pub struct LinkConfig {
     pub hello_auth: IsisAuthConfig,
 }
 
-/// IS-IS-side mirror of the YANG `bfd { enable, profile }` container.
-/// Empty defaults match the YANG schema; the adjacency FSM reads
-/// this when an adjacency reaches Up to decide whether to
-/// subscribe.
+/// IS-IS-side mirror of the YANG `bfd { ... }` container. Backs **both** the
+/// instance-level default (`router isis { bfd {} }`, `IsisConfig::bfd`) and the
+/// per-interface override (`interface X bfd {}`, `LinkConfig::bfd`); every leaf
+/// is `Option`/`None`-default so the per-interface value overrides the instance
+/// default per leaf (see [`LinkBfdConfig::resolve`]), and "unset" is
+/// distinguishable from a value. The adjacency FSM reads the *resolved* value
+/// when an adjacency reaches Up to decide whether to subscribe + with what Echo.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct LinkBfdConfig {
-    pub enable: bool,
+    /// Activate BFD. Instance-level `Some(true)` blanket-enables every
+    /// interface; per-interface overrides it (`Some(false)` opts out). `None` ⇒
+    /// inherit; off if unset everywhere.
+    pub enable: Option<bool>,
     pub profile: Option<String>,
+    /// BFD Echo role for adjacencies on this interface
+    /// (`transmit` / `receive` / `both`); `None` ⇒ inherit (off if unset
+    /// everywhere). Single-hop IPv4 only — inert on IPv6-only adjacencies.
+    pub echo_mode: Option<EchoMode>,
+    /// Echo transmit interval (ms); `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_transmit_ms: Option<u32>,
+    /// Advertised Required Min Echo RX (ms); `None` ⇒
+    /// [`DEFAULT_ECHO_INTERVAL_MS`].
+    pub echo_receive_ms: Option<u32>,
+}
+
+/// FRR default Echo interval (ms) — the hard default for the transmit/receive
+/// intervals when unset at every level.
+pub const DEFAULT_ECHO_INTERVAL_MS: u32 = 50;
+
+/// Effective BFD settings for one interface after merging its per-interface
+/// `bfd {}` over the instance-level default. (IS-IS has no `min-neighbor-state`
+/// — it subscribes at adjacency Up.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedBfd {
+    pub enable: bool,
+    pub echo_mode: Option<EchoMode>,
+    pub echo_transmit_ms: u32,
+    pub echo_receive_ms: u32,
+}
+
+impl LinkBfdConfig {
+    /// Resolve `self` (per-interface) over `default` (instance-level), per leaf.
+    pub fn resolve(&self, default: &LinkBfdConfig) -> ResolvedBfd {
+        ResolvedBfd {
+            enable: self.enable.or(default.enable).unwrap_or(false),
+            echo_mode: self.echo_mode.or(default.echo_mode),
+            echo_transmit_ms: self
+                .echo_transmit_ms
+                .or(default.echo_transmit_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            echo_receive_ms: self
+                .echo_receive_ms
+                .or(default.echo_receive_ms)
+                .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+        }
+    }
 }
 
 /// IS-IS-side mirror of the YANG `te-metric { ... }` container — the
@@ -821,7 +870,10 @@ pub fn config_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
     let name = args.string()?;
     let enable = args.boolean()?;
     let link = isis.links.get_mut_by_name(&name)?;
-    link.config.bfd.enable = op.is_set() && enable;
+    // `None` ⇒ inherit `router isis { bfd { enable } }`; `Some(false)` opts this
+    // interface out of a blanket instance enable.
+    link.config.bfd.enable = op.is_set().then_some(enable);
+    isis.bfd_reconcile_all();
     Some(())
 }
 
@@ -834,6 +886,106 @@ pub fn config_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
     let profile = args.string()?;
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// Parse the `{transmit|receive|both}` echo-mode enum (set) → `Some(mode)`, or
+/// `None` on delete. Shared by the per-interface and instance-level handlers.
+fn parse_echo_mode(value: &str, op: ConfigOp) -> Option<Option<EchoMode>> {
+    if !op.is_set() {
+        return Some(None);
+    }
+    match value {
+        "transmit" => Some(Some(EchoMode::Transmit)),
+        "receive" => Some(Some(EchoMode::Receive)),
+        "both" => Some(Some(EchoMode::Both)),
+        _ => None,
+    }
+}
+
+/// `interface X bfd echo-mode <transmit|receive|both>` — per-interface Echo role
+/// (RFC 5880 §6.4; single-hop IPv4). Overrides the instance default.
+pub fn config_bfd_echo_mode(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = args.string()?;
+    let mode = parse_echo_mode(&value, op)?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.bfd.echo_mode = mode;
+    isis.bfd_reconcile_all();
+    Some(())
+}
+
+/// `interface X bfd echo-transmit-interval <ms>` — per-interface Echo TX rate.
+pub fn config_bfd_echo_transmit_interval(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let interval = args.u32()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `interface X bfd echo-receive-interval <ms>` — per-interface advertised RX.
+pub fn config_bfd_echo_receive_interval(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let interval = args.u32()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+// ---- instance-level `router isis { bfd { ... } }` defaults ------------------
+
+/// `router isis bfd enable <bool>` — blanket-enable BFD on every IS-IS
+/// interface (a per-interface `bfd { enable false }` opts one out).
+pub fn config_isis_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let enable = args.boolean()?;
+    isis.config.bfd.enable = op.is_set().then_some(enable);
+    isis.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router isis bfd profile <name>` — instance-default profile (stored only).
+pub fn config_isis_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let profile = args.string()?;
+    isis.config.bfd.profile = op.is_set().then_some(profile);
+    Some(())
+}
+
+/// `router isis bfd echo-mode <transmit|receive|both>` — instance default.
+pub fn config_isis_bfd_echo_mode(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = args.string()?;
+    isis.config.bfd.echo_mode = parse_echo_mode(&value, op)?;
+    isis.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router isis bfd echo-transmit-interval <ms>` — instance default.
+pub fn config_isis_bfd_echo_transmit_interval(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let interval = args.u32()?;
+    isis.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `router isis bfd echo-receive-interval <ms>` — instance default.
+pub fn config_isis_bfd_echo_receive_interval(
+    isis: &mut Isis,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let interval = args.u32()?;
+    isis.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
     Some(())
 }
 
@@ -2026,12 +2178,13 @@ mod auth_show_tests {
 mod bfd_config_tests {
     use super::*;
 
-    /// LinkBfdConfig default mirrors the YANG defaults
-    /// (`enable=false`, no profile).
+    /// LinkBfdConfig default mirrors the YANG defaults (all unset ⇒
+    /// inherit; off if unset everywhere, no profile).
     #[test]
     fn default_bfd_is_disabled() {
         let bfd = LinkBfdConfig::default();
-        assert!(!bfd.enable);
+        assert!(bfd.enable.is_none());
+        assert!(!bfd.resolve(&LinkBfdConfig::default()).enable);
         assert!(bfd.profile.is_none());
 
         // Lives on LinkConfig with the same default.
@@ -2045,16 +2198,44 @@ mod bfd_config_tests {
     #[test]
     fn enable_and_profile_round_trip() {
         let mut lc = LinkConfig::default();
-        lc.bfd.enable = true;
+        lc.bfd.enable = Some(true);
         lc.bfd.profile = Some("FAST".to_string());
 
         assert_eq!(
             lc.bfd,
             LinkBfdConfig {
-                enable: true,
+                enable: Some(true),
                 profile: Some("FAST".to_string()),
+                ..LinkBfdConfig::default()
             },
         );
+    }
+
+    /// Per-interface BFD leaves override the instance default; unset inherit.
+    #[test]
+    fn bfd_resolve_merges_per_leaf() {
+        let default = LinkBfdConfig {
+            enable: Some(true), // blanket
+            echo_mode: Some(EchoMode::Receive),
+            echo_transmit_ms: Some(100),
+            ..LinkBfdConfig::default()
+        };
+        // Interface sets nothing → inherits.
+        let inherit = LinkBfdConfig::default().resolve(&default);
+        assert!(inherit.enable);
+        assert_eq!(inherit.echo_mode, Some(EchoMode::Receive));
+        assert_eq!(inherit.echo_transmit_ms, 100);
+        assert_eq!(inherit.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+        // Interface overrides: opt out + change role.
+        let over = LinkBfdConfig {
+            enable: Some(false),
+            echo_mode: Some(EchoMode::Both),
+            ..LinkBfdConfig::default()
+        };
+        let eff = over.resolve(&default);
+        assert!(!eff.enable);
+        assert_eq!(eff.echo_mode, Some(EchoMode::Both));
+        assert_eq!(eff.echo_transmit_ms, 100); // still inherits
     }
 }
 

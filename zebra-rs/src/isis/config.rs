@@ -292,6 +292,33 @@ impl Isis {
             "/router/isis/interface/bfd/profile",
             link::config_bfd_profile,
         );
+        self.callback_add(
+            "/router/isis/interface/bfd/echo-mode",
+            link::config_bfd_echo_mode,
+        );
+        self.callback_add(
+            "/router/isis/interface/bfd/echo-transmit-interval",
+            link::config_bfd_echo_transmit_interval,
+        );
+        self.callback_add(
+            "/router/isis/interface/bfd/echo-receive-interval",
+            link::config_bfd_echo_receive_interval,
+        );
+        // Instance-level `router isis { bfd { ... } }` defaults.
+        self.callback_add("/router/isis/bfd/enable", link::config_isis_bfd_enable);
+        self.callback_add("/router/isis/bfd/profile", link::config_isis_bfd_profile);
+        self.callback_add(
+            "/router/isis/bfd/echo-mode",
+            link::config_isis_bfd_echo_mode,
+        );
+        self.callback_add(
+            "/router/isis/bfd/echo-transmit-interval",
+            link::config_isis_bfd_echo_transmit_interval,
+        );
+        self.callback_add(
+            "/router/isis/bfd/echo-receive-interval",
+            link::config_isis_bfd_echo_receive_interval,
+        );
         // Per-interface hello-authentication.
         self.callback_add(
             "/router/isis/interface/hello-authentication",
@@ -439,6 +466,11 @@ pub struct IsisConfig {
     /// without rewiring the topology. No effect when `ti_lfa_enabled`
     /// is false (no repair gets stamped in the first place).
     pub fast_reroute_backup_as_primary: bool,
+
+    /// Instance-level BFD defaults (`router isis { bfd {} }`), inherited by
+    /// every interface and overridden per interface (see
+    /// [`super::link::LinkBfdConfig::resolve`]).
+    pub bfd: super::link::LinkBfdConfig,
 
     /// True when `/router/isis/multi-topology` carries an MT id.
     /// Drives whether IS-IS originates TLV 229 and the per-MT reach
@@ -653,6 +685,7 @@ impl Default for IsisConfig {
     // boilerplate as adding it to the derive.
     fn default() -> Self {
         Self {
+            bfd: Default::default(),
             net: Default::default(),
             hostname: Default::default(),
             is_type: Default::default(),
