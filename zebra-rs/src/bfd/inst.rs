@@ -77,6 +77,10 @@ pub struct Bfd {
     /// up (the receiver is gone) — v6 simply doesn't work in that case.
     write_tx_v6: UnboundedSender<WriteRequest>,
     timer_handles: HashMap<SessionKey, TimerHandle>,
+    /// Supervises the per-interface XDP Echo reflector child processes.
+    /// Reference-counted by the single-hop echo sessions on each ifindex
+    /// ([`Self::add_session`] / [`Self::remove_session`]).
+    reflectors: super::reflector::EchoReflectors,
 }
 
 /// Sender/receiver pair for the inbound client-request channel.
@@ -294,6 +298,7 @@ impl Bfd {
             write_tx,
             write_tx_v6,
             timer_handles: HashMap::new(),
+            reflectors: super::reflector::EchoReflectors::new(),
         };
         bfd.callback_build();
         bfd.show_build();
@@ -391,6 +396,13 @@ impl Bfd {
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
+        // Echo is single-hop only; a non-zero advertised echo-rx is a promise
+        // to loop Echo back, so bring up the per-interface XDP reflector. The
+        // advertise path stays honest by gating on `reflectors.is_ready`.
+        if params.required_min_echo_rx_us > 0 && !key.multihop {
+            self.reflectors.acquire(key.ifindex);
+        }
+
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let initial = InitialParams {
             // A fresh session starts Down, so the §6.8.3 slow-TX clamp
@@ -421,7 +433,16 @@ impl Bfd {
         if let Some(h) = self.timer_handles.remove(key) {
             let _ = h.cmd_tx.send(TimerCmd::Shutdown);
         }
-        self.sessions.remove(key)
+        let removed = self.sessions.remove(key);
+        // Mirror the `add_session` acquire: drop this interface's reflector
+        // reference when an echo session goes away.
+        if let Some(s) = &removed
+            && s.required_min_echo_rx_us > 0
+            && !s.key.multihop
+        {
+            self.reflectors.release(s.key.ifindex);
+        }
+        removed
     }
 
     /// Look up the show handler for `msg.paths` and invoke it. Mirrors
@@ -721,6 +742,46 @@ mod tests {
         let BfdEvent::StateChange { change, .. } = event;
         assert_eq!(change.from, bfd_packet::State::Down);
         assert_eq!(change.to, bfd_packet::State::Down);
+    }
+
+    /// A single-hop subscribe carrying a non-zero echo-rx refcounts the
+    /// per-interface Echo reflector; unsubscribing the last such session
+    /// releases it. The ifindex has no interface name here, so no child is
+    /// actually spawned — only the refcount bookkeeping is exercised.
+    #[tokio::test]
+    async fn echo_subscribe_refcounts_reflector() {
+        let mut bfd = fresh_bfd();
+        let mut key = loopback_key(20);
+        key.ifindex = 0xFFFF_FFF0; // no such interface
+        let params = SessionParams {
+            required_min_echo_rx_us: 50_000,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        bfd.subscribe("test".into(), key, params, tx);
+        assert_eq!(bfd.reflectors.refcount(key.ifindex), 1);
+
+        bfd.unsubscribe("test", &key);
+        assert_eq!(bfd.reflectors.refcount(key.ifindex), 0);
+    }
+
+    /// Echo is single-hop only (RFC 5883 multihop has no Echo), so a multihop
+    /// session never brings up a reflector even with echo-rx configured.
+    #[tokio::test]
+    async fn echo_multihop_does_not_refcount_reflector() {
+        let mut bfd = fresh_bfd();
+        let mut key = loopback_key(21);
+        key.ifindex = 0xFFFF_FFF1;
+        key.multihop = true;
+        let params = SessionParams {
+            required_min_echo_rx_us: 50_000,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        bfd.subscribe("test".into(), key, params, tx);
+        assert_eq!(bfd.reflectors.refcount(key.ifindex), 0);
     }
 
     /// A control packet whose received TTL is below a single-hop
