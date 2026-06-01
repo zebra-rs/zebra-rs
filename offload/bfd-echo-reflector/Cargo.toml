@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["loader", "ebpf"]
+# `cargo build` (no --workspace) builds only the userspace loader. The loader's
+# build.rs (aya-build) compiles the `ebpf` crate for the `bpfel-unknown-none`
+# target via `rustup run nightly cargo ... -Z build-std=core`, so the eBPF crate
+# must NOT be built for the host as a normal member.
+default-members = ["loader"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+
+# aya is pulled from git to match the current aya-template build glue
+# (aya_build::Package / build_ebpf(.., Toolchain) API on `main`). Pin a rev here
+# if you want fully reproducible builds.
+[workspace.dependencies]
+aya = { git = "https://github.com/aya-rs/aya", default-features = false }
+aya-build = { git = "https://github.com/aya-rs/aya", default-features = false }
+aya-ebpf = { git = "https://github.com/aya-rs/aya", default-features = false }
+aya-log = { git = "https://github.com/aya-rs/aya", default-features = false }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", default-features = false }
+
+anyhow = { version = "1", default-features = false }
+cargo_metadata = { version = "0.23.0", default-features = false }
+# clap currently needs the `std` feature to build.
+clap = { version = "4.5.20", default-features = false, features = ["std"] }
+env_logger = { version = "0.11.5", default-features = false }
+libc = { version = "0.2.159", default-features = false }
+log = { version = "0.4.22", default-features = false }
+tokio = { version = "1.40.0", default-features = false }
+which = { version = "6.0.0", default-features = false }
+
+[profile.release.package.bfd-echo-reflector-ebpf]
+debug = 2
+codegen-units = 1
+strip = false
