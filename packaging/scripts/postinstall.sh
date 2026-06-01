@@ -10,12 +10,13 @@ if [ -x /usr/sbin/vtypam ]; then
     setcap 'cap_dac_read_search,cap_audit_write=ep' /usr/sbin/vtypam
 fi
 
-# The XDP BFD Echo reflector (spawned by zebra-rs to honour a non-zero
-# Required Min Echo RX Interval) loads/attaches an XDP program, which needs
-# cap_bpf (kernel 5.8+) and cap_net_admin. The deb ships it at /usr/sbin
-# (built by the packaging Makefile); the guard keeps this safe if it isn't.
+# The per-interface BFD Echo helper (spawned by zebra-rs) attaches an XDP
+# program (reflect) — needs cap_bpf (kernel 5.8+) + cap_net_admin — and, when
+# zebra-rs also originates Echo, sends/receives raw frames on an AF_PACKET
+# socket — needs cap_net_raw. The deb ships it at /usr/sbin (built by the
+# packaging Makefile); the guard keeps this safe if it isn't.
 if [ -x /usr/sbin/bfd-echo-reflector ]; then
-    setcap 'cap_net_admin,cap_bpf=ep' /usr/sbin/bfd-echo-reflector
+    setcap 'cap_net_admin,cap_bpf,cap_net_raw=ep' /usr/sbin/bfd-echo-reflector
 fi
 
 sudo systemctl daemon-reload

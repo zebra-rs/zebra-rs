@@ -1,17 +1,26 @@
-//! Userspace loader for the XDP BFD Echo reflector.
+//! Userspace loader + datapath for the per-interface BFD Echo helper.
 //!
-//! Loads the eBPF object (embedded at build time), attaches the `bfd_echo_reflect`
-//! XDP program to the requested interface, and runs until Ctrl-C. Attachment
-//! tries native/driver mode first and falls back to generic SKB mode, which is
-//! needed on virtual NICs that lack native XDP (e.g. the Parallels/Apple-Silicon
-//! lab — see the offload notes §9).
+//! Loads the eBPF object (embedded at build time) and attaches the
+//! `bfd_echo_reflect` XDP program — the **responder** (loops a peer's Echo).
+//! Attachment tries native/driver mode first and falls back to generic SKB
+//! mode, needed on virtual NICs that lack native XDP (e.g. the Parallels lab).
+//!
+//! It then runs the **originator** datapath ([`sender`]): driven by zebra-rs
+//! over a stdin/stdout line protocol, it transmits Echo per session and reports
+//! `echo-down` on detection timeout. With no controller (standalone) it simply
+//! reflects. Runs until Ctrl-C / SIGTERM.
+
+use std::time::Duration;
 
 use anyhow::Context as _;
 use aya::programs::{Xdp, XdpMode};
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, info, warn};
+use tokio::io::AsyncBufReadExt as _;
 use tokio::signal;
+
+mod sender;
 
 #[derive(Debug, Parser)]
 #[command(about = "XDP BFD Echo (udp/3785) reflector")]
@@ -82,15 +91,40 @@ async fn main() -> anyhow::Result<()> {
         },
     }
 
-    info!("reflecting BFD Echo (udp/3785) on {iface}; Ctrl-C or SIGTERM to exit");
-    // Wait for SIGINT (Ctrl-C) or SIGTERM. zebra-rs's reflector supervisor
-    // stops children with SIGTERM; handling it lets the XDP program detach
-    // cleanly on the way out (the link drops when `ebpf` does) instead of
-    // being left attached by an un-caught signal.
+    // Take the XDP `OUR_LOCAL_IPS` map for userspace to populate (the loaded
+    // program keeps using the same kernel map); `ebpf` itself stays in scope so
+    // the XDP link persists until exit.
+    let local_ips = aya::maps::HashMap::try_from(
+        ebpf.take_map("OUR_LOCAL_IPS")
+            .context("OUR_LOCAL_IPS map missing from object")?,
+    )?;
+    let mut engine = sender::EchoEngine::new(&iface, local_ips)?;
+
+    info!("BFD Echo datapath up on {iface} (reflect + originate); Ctrl-C/SIGTERM to exit");
+
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    let mut ticker = tokio::time::interval(Duration::from_millis(10));
+    // SIGTERM is how zebra-rs's supervisor stops us; handling it (and Ctrl-C)
+    // lets the XDP link drop cleanly when `ebpf` does.
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-    tokio::select! {
-        _ = signal::ctrl_c() => {}
-        _ = sigterm.recv() => {}
+    // Only consume stdin when it's a pipe/file (zebra-rs's control channel). On a
+    // tty — a standalone, often backgrounded run — reading it would raise SIGTTIN
+    // and stop us; there we just reflect and wait for a signal.
+    let mut stdin_open = unsafe { libc::isatty(0) == 0 };
+    let mut stdout = std::io::stdout();
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => engine.tick(&mut stdout),
+            res = lines.next_line(), if stdin_open => match res {
+                Ok(Some(line)) => engine.handle_command(&line),
+                // stdin closed (controller gone) or errored: stop reading it but
+                // keep reflecting/originating until SIGTERM. Standalone runs
+                // (no controller) just never receive commands.
+                Ok(None) | Err(_) => stdin_open = false,
+            },
+            _ = signal::ctrl_c() => break,
+            _ = sigterm.recv() => break,
+        }
     }
     info!("exiting; detaching XDP program");
     Ok(())
