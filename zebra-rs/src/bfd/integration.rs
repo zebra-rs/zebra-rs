@@ -73,6 +73,7 @@ async fn two_instances_reach_up() {
         // Loopback delivery preserves the egress TTL of 255, so the
         // single-hop GTSM floor is satisfied.
         min_ttl: 255,
+        required_min_echo_rx_us: 0,
     };
 
     bfd_a.subscribe("test".into(), loopback_key(), params(port_b), tx_a);

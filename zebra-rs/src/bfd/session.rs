@@ -55,6 +55,13 @@ pub struct SessionParams {
     pub detect_mult: u8,
     pub dst_port: u16,
     pub min_ttl: u8,
+    /// `bfd.RequiredMinEchoRxInterval` (microseconds) to advertise.
+    /// Zero (the default) means "I will not loop Echo back" (RFC 5880
+    /// §6.8.1) — the conformant state until a responder exists. A
+    /// non-zero value is only set by a client that has the XDP Echo
+    /// reflector active on the session's interface, and is advertised
+    /// only on single-hop sessions ([`Session::build_packet`]).
+    pub required_min_echo_rx_us: u32,
 }
 
 impl Default for SessionParams {
@@ -73,6 +80,9 @@ impl Default for SessionParams {
             detect_mult: super::config::DEFAULT_DETECT_MULT,
             dst_port: super::socket::BFD_SINGLE_HOP_PORT,
             min_ttl: 255,
+            // Echo off by default — advertising non-zero is a promise to
+            // loop Echo packets back, made only once the reflector is up.
+            required_min_echo_rx_us: 0,
         }
     }
 }
@@ -117,6 +127,12 @@ pub struct Session {
     pub required_min_rx_us: u32,
     pub detect_mult: u8,
 
+    /// `bfd.RequiredMinEchoRxInterval` (microseconds) we advertise. Zero
+    /// means "do not send me Echo" (RFC 5880 §6.8.1). Only ever non-zero
+    /// on single-hop sessions whose interface has the Echo reflector
+    /// active; gated again on `!key.multihop` in [`Self::build_packet`].
+    pub required_min_echo_rx_us: u32,
+
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
 
@@ -130,6 +146,11 @@ pub struct Session {
     pub remote_min_tx_us: u32,
     pub remote_min_rx_us: u32,
     pub remote_detect_mult: u8,
+    /// Peer's `Required Min Echo RX Interval` (microseconds): how fast it
+    /// will loop our Echo packets back. Zero ⇒ the peer will not reflect,
+    /// so we must not send Echo to it (RFC 5880 §6.8.1). Cached for the
+    /// future sender half + `show bfd peers`; not acted on yet.
+    pub remote_min_echo_rx_us: u32,
 
     /// Demand mode flags. Always false today — wired here so the
     /// session record matches RFC §6.8.1 even though Demand
@@ -168,9 +189,11 @@ impl Session {
             detect_mult: params.detect_mult,
             dst_port: params.dst_port,
             min_ttl: params.min_ttl,
+            required_min_echo_rx_us: params.required_min_echo_rx_us,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
+            remote_min_echo_rx_us: 0,
             demand: false,
             remote_demand: false,
             stats: Stats::default(),
@@ -229,6 +252,7 @@ impl Session {
         self.remote_min_tx_us = packet.desired_min_tx_interval;
         self.remote_min_rx_us = packet.required_min_rx_interval;
         self.remote_detect_mult = packet.detect_mult;
+        self.remote_min_echo_rx_us = packet.required_min_echo_rx_interval;
         self.remote_demand = packet.demand;
         // A Final (F) completes a Poll Sequence we initiated (RFC 5880
         // §6.8.7): the peer has acknowledged our changed interval, so we
@@ -297,7 +321,15 @@ impl Session {
             // including the §6.8.3 slow-TX clamp while not Up.
             desired_min_tx_interval: self.effective_desired_min_tx_us(),
             required_min_rx_interval: self.required_min_rx_us,
-            required_min_echo_rx_interval: 0,
+            // Echo is single-hop only (RFC 5881 §4; RFC 5883 multihop has
+            // no Echo), so never advertise a non-zero value on a multihop
+            // session. Otherwise advertise our configured value, which is
+            // only non-zero once the reflector is looping on this iface.
+            required_min_echo_rx_interval: if self.key.multihop {
+                0
+            } else {
+                self.required_min_echo_rx_us
+            },
             demand: self.demand,
             poll: self.poll,
             ..ControlPacket::default()
@@ -726,5 +758,58 @@ mod tests {
         });
         assert_eq!(s.local_state, State::Down);
         assert!(s.poll, "fast→slow change opens a Poll Sequence");
+    }
+
+    /// A single-hop session advertises its configured Required Min Echo
+    /// RX Interval verbatim (RFC 5880 §6.8.1 / RFC 5881 §4).
+    #[test]
+    fn echo_rx_advertised_for_single_hop() {
+        let mut t = SessionTable::new();
+        let d = t.insert(
+            key(1, 2), // key() is single-hop (multihop: false)
+            SessionParams {
+                required_min_echo_rx_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        let s = t.get_by_disc(d).unwrap();
+        assert!(!s.key.multihop);
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 50_000);
+    }
+
+    /// Echo is single-hop only (RFC 5883 multihop has no Echo), so a
+    /// multihop session never advertises a non-zero value even when one
+    /// is configured.
+    #[test]
+    fn echo_rx_zero_on_multihop() {
+        let mut t = SessionTable::new();
+        let mut k = key(1, 2);
+        k.multihop = true;
+        let d = t.insert(
+            k,
+            SessionParams {
+                required_min_echo_rx_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        let s = t.get_by_disc(d).unwrap();
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 0);
+    }
+
+    /// The peer's advertised Required Min Echo RX Interval is cached from
+    /// incoming control packets (for the future sender half + show).
+    #[test]
+    fn peer_echo_rx_cached() {
+        let mut t = SessionTable::new();
+        let d = t.insert(key(1, 2), SessionParams::default());
+        let s = t.get_by_disc_mut(d).unwrap();
+        assert_eq!(s.remote_min_echo_rx_us, 0);
+        let _ = s.handle_packet(&ControlPacket {
+            state: State::Down,
+            my_disc: 0xabcd,
+            required_min_echo_rx_interval: 25_000,
+            ..ControlPacket::default()
+        });
+        assert_eq!(s.remote_min_echo_rx_us, 25_000);
     }
 }
