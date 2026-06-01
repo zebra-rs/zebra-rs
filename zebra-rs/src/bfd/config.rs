@@ -1,19 +1,18 @@
 //! BFD configuration model and per-leaf callback dispatcher.
 //!
 //! Mirrors the pattern used by [`crate::ospf::config`] and
-//! [`crate::isis::config`]: each YANG leaf under `/bfd` registers a
-//! callback function. The config manager dispatches incoming
-//! `ConfigRequest`s by path; the callback consumes its key /
+//! [`crate::isis::config`]: each YANG leaf under `/bfd/profile`
+//! registers a callback function. The config manager dispatches
+//! incoming `ConfigRequest`s by path; the callback consumes its key /
 //! value args and mutates the in-memory [`BfdConfig`] held by the
 //! [`super::inst::Bfd`] instance.
 //!
-//! Storage and the callback table live here; turning committed peer
-//! config into live sessions calls
-//! [`crate::bfd::inst::Bfd::add_session`] from `CommitEnd` once the
-//! candidate has been folded into [`BfdConfig`].
+//! Only named profiles are configured here. There is no standalone
+//! `bfd { peer }` config: live BFD sessions are created and torn down
+//! by the protocol modules (BGP / OSPF / IS-IS) through
+//! `ClientReq::Subscribe` / `Unsubscribe`.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 
 use crate::config::{Args, ConfigOp};
 
@@ -57,49 +56,14 @@ impl Default for ProfileConfig {
     }
 }
 
-/// A configured peer. All non-key leaves are `Option` so an unset
-/// leaf cleanly delegates to the referenced [`ProfileConfig`] (and
-/// onward to the profile defaults).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerConfig {
-    pub remote_address: IpAddr,
-    pub multihop: bool,
-    pub local_address: Option<IpAddr>,
-    pub interface: Option<String>,
-    pub profile: Option<String>,
-    pub detect_multiplier: Option<u8>,
-    pub transmit_interval_ms: Option<u32>,
-    pub receive_interval_ms: Option<u32>,
-    pub passive_mode: Option<bool>,
-    pub shutdown: Option<bool>,
-    pub minimum_ttl: Option<u8>,
-}
-
-impl PeerConfig {
-    fn new(remote: IpAddr) -> Self {
-        Self {
-            remote_address: remote,
-            multihop: false,
-            local_address: None,
-            interface: None,
-            profile: None,
-            detect_multiplier: None,
-            transmit_interval_ms: None,
-            receive_interval_ms: None,
-            passive_mode: None,
-            shutdown: None,
-            minimum_ttl: None,
-        }
-    }
-}
-
 /// In-memory mirror of the `container bfd` subtree of the committed
-/// config. Updated by [`Callback`] invocations; the live session
-/// lifecycle reads from here on CommitEnd.
+/// config. Holds the named [`ProfileConfig`] bundles; per-peer BFD
+/// sessions are driven entirely by the protocol modules (BGP / OSPF /
+/// IS-IS) via `ClientReq::Subscribe`, so there is no standalone
+/// `bfd { peer }` config here.
 #[derive(Debug, Default, Clone)]
 pub struct BfdConfig {
     pub profiles: BTreeMap<String, ProfileConfig>,
-    pub peers: BTreeMap<IpAddr, PeerConfig>,
 }
 
 impl Bfd {
@@ -117,18 +81,6 @@ impl Bfd {
         self.config_add("/profile/passive-mode", profile_passive_mode);
         self.config_add("/profile/shutdown", profile_shutdown);
         self.config_add("/profile/minimum-ttl", profile_minimum_ttl);
-
-        // Peer leaves
-        self.config_add("/peer/multihop", peer_multihop);
-        self.config_add("/peer/local-address", peer_local_address);
-        self.config_add("/peer/interface", peer_interface);
-        self.config_add("/peer/profile", peer_profile);
-        self.config_add("/peer/detect-multiplier", peer_detect_multiplier);
-        self.config_add("/peer/transmit-interval", peer_transmit_interval);
-        self.config_add("/peer/receive-interval", peer_receive_interval);
-        self.config_add("/peer/passive-mode", peer_passive_mode);
-        self.config_add("/peer/shutdown", peer_shutdown);
-        self.config_add("/peer/minimum-ttl", peer_minimum_ttl);
     }
 }
 
@@ -205,111 +157,6 @@ fn profile_minimum_ttl(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
-// -----------------------------------------------------------------------
-// Peer callbacks
-// -----------------------------------------------------------------------
-
-fn peer_mut(cfg: &mut BfdConfig, remote: IpAddr, op: ConfigOp) -> Option<&mut PeerConfig> {
-    if op.is_set() {
-        Some(
-            cfg.peers
-                .entry(remote)
-                .or_insert_with(|| PeerConfig::new(remote)),
-        )
-    } else {
-        cfg.peers.get_mut(&remote)
-    }
-}
-
-fn peer_remote(args: &mut Args) -> Option<IpAddr> {
-    // The peer's key leaf accepts either an IPv4 or IPv6 literal —
-    // tried in turn until one parses.
-    if let Some(v4) = args.v4addr() {
-        return Some(IpAddr::V4(v4));
-    }
-    args.v6addr().map(IpAddr::V6)
-}
-
-fn peer_multihop(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.boolean()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.multihop = op.is_set() && v;
-    Some(())
-}
-
-fn peer_local_address(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = peer_remote(&mut args)?; // reuse the address parser for local-address
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.local_address = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_interface(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.string()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.interface = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_profile(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.string()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.profile = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_detect_multiplier(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.u8()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.detect_multiplier = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_transmit_interval(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.u32()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.transmit_interval_ms = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_receive_interval(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.u32()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.receive_interval_ms = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_passive_mode(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.boolean()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.passive_mode = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_shutdown(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.boolean()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.shutdown = op.is_set().then_some(v);
-    Some(())
-}
-
-fn peer_minimum_ttl(bfd: &mut Bfd, mut args: Args, op: ConfigOp) -> Option<()> {
-    let remote = peer_remote(&mut args)?;
-    let v = args.u8()?;
-    let p = peer_mut(&mut bfd.config, remote, op)?;
-    p.minimum_ttl = op.is_set().then_some(v);
-    Some(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -376,46 +223,10 @@ mod tests {
         );
     }
 
-    /// Peer leaves are stored as Option so unset cleanly delegates
-    /// to the profile (or the profile default) at session-creation
-    /// time. Setting the peer-level multiplier marks it Some(_).
-    #[tokio::test]
-    async fn peer_overrides_are_stored_as_options() {
-        let mut bfd = fresh_bfd();
-        peer_multihop(&mut bfd, args(&["10.0.0.2", "true"]), ConfigOp::Set);
-        peer_detect_multiplier(&mut bfd, args(&["10.0.0.2", "9"]), ConfigOp::Set);
-        peer_transmit_interval(&mut bfd, args(&["10.0.0.2", "100"]), ConfigOp::Set);
-
-        let p = bfd
-            .config
-            .peers
-            .get(&std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)))
-            .expect("peer inserted");
-        assert!(p.multihop);
-        assert_eq!(p.detect_multiplier, Some(9));
-        assert_eq!(p.transmit_interval_ms, Some(100));
-        assert_eq!(p.receive_interval_ms, None);
-        assert_eq!(p.profile, None);
-    }
-
-    /// Linking a peer to a profile by name stores the reference;
-    /// resolving the reference into effective parameters is the job
-    /// of the session-spawn path.
-    #[tokio::test]
-    async fn peer_profile_reference_stored() {
-        let mut bfd = fresh_bfd();
-        peer_profile(&mut bfd, args(&["10.0.0.3", "FAST"]), ConfigOp::Set);
-        let p = bfd
-            .config
-            .peers
-            .get(&std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)))
-            .expect("peer inserted");
-        assert_eq!(p.profile.as_deref(), Some("FAST"));
-    }
-
-    /// `callback_build` registers exactly the leaves we expect — a
-    /// missing path here means a CLI verb won't reach the storage
-    /// dispatcher at runtime.
+    /// `callback_build` registers exactly the profile leaves we expect
+    /// — a missing path here means a CLI verb won't reach the storage
+    /// dispatcher at runtime. Per-peer BFD config was removed; sessions
+    /// are driven by the protocol modules via `ClientReq::Subscribe`.
     #[tokio::test]
     async fn callback_table_covers_every_leaf() {
         let bfd = fresh_bfd();
@@ -426,16 +237,6 @@ mod tests {
             "/bfd/profile/passive-mode",
             "/bfd/profile/shutdown",
             "/bfd/profile/minimum-ttl",
-            "/bfd/peer/multihop",
-            "/bfd/peer/local-address",
-            "/bfd/peer/interface",
-            "/bfd/peer/profile",
-            "/bfd/peer/detect-multiplier",
-            "/bfd/peer/transmit-interval",
-            "/bfd/peer/receive-interval",
-            "/bfd/peer/passive-mode",
-            "/bfd/peer/shutdown",
-            "/bfd/peer/minimum-ttl",
         ];
         for path in expected {
             assert!(
@@ -443,5 +244,10 @@ mod tests {
                 "callback for {path} not registered",
             );
         }
+        // No `/bfd/peer/*` callbacks remain.
+        assert!(
+            !bfd.callbacks.keys().any(|k| k.starts_with("/bfd/peer/")),
+            "peer config callbacks must be gone",
+        );
     }
 }
