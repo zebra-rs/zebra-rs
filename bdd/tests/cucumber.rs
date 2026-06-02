@@ -326,15 +326,17 @@ async fn apply_config(world: &mut World, config_file: String, namespace: String)
         .await
         .expect("Failed to apply config");
 
-    // `vtyctl apply` exits 0 even when the server rejects the config —
-    // it prints `error: <command>` (or `applied`) to stdout and returns.
-    // Without this check, a silently-rejected config would let the
-    // scenario continue past the apply step and fail later at a ping or
-    // a show with no obvious cause. Bail loudly with the offending line
-    // so the failure is diagnosable from the cucumber log alone.
+    // `vtyctl apply` exits 0 even when the server rejects the config: it
+    // prints `applied` on success, or `error reply: <command>` for the
+    // first command the server refused. Without this check a silently-
+    // rejected config would let the scenario continue past the apply
+    // step and fail later at a ping or a show with no obvious cause.
+    // Match on `error` so both `error:` and `error reply:` are caught;
+    // no successful apply output contains the word. Bail loudly with the
+    // offending line so the failure is diagnosable from the log alone.
     let trimmed = stdout.trim();
     assert!(
-        !trimmed.starts_with("error:"),
+        !trimmed.contains("error"),
         "vtyctl apply rejected {} in namespace {}: {}",
         config_file,
         scoped,
@@ -604,6 +606,95 @@ async fn show_command_contains(
         "✓ show '{}' in namespace {} contains '{}'",
         show_cmd, scoped, needle
     );
+}
+
+/// Negative sibling of `show_command_contains`: assert the `vtyctl show`
+/// output does NOT contain the given substring. Used to verify a
+/// suppressed entry is absent (e.g. the local Prefix-SID label withdrawn
+/// from `show mpls ilm` once `no-local-prefix-sid` is configured).
+#[then(expr = "show command {string} in namespace {string} should not contain {string}")]
+async fn show_command_not_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+        .await
+        .expect("Failed to run show command");
+    assert!(
+        !output.contains(&needle),
+        "show '{}' in namespace {} unexpectedly contained '{}'\nfull output:\n{}",
+        show_cmd,
+        scoped,
+        needle,
+        output,
+    );
+    println!(
+        "✓ show '{}' in namespace {} does not contain '{}'",
+        show_cmd, scoped, needle
+    );
+}
+
+/// Fetch the local labels installed in the MPLS LFIB of `scoped` via
+/// `vtyctl show -j "show mpls ilm"` (JSON is far more robust than
+/// substring-matching the text table — a bare "16100" could appear as an
+/// outgoing label, a metric, or an address octet).
+async fn ilm_local_labels(scoped: &str) -> Vec<u64> {
+    let output = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show mpls ilm"])
+        .await
+        .expect("Failed to run show mpls ilm");
+    let json: Value = serde_json::from_str(&output).expect("Failed to parse ILM JSON");
+    json.get("entries")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.get("local_label").and_then(|l| l.as_u64()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[then(expr = "mpls ilm in namespace {string} should contain label {int}")]
+async fn ilm_should_contain_label(world: &mut World, namespace: String, label: u64) {
+    let scoped = world.ns(&namespace);
+    let labels = ilm_local_labels(&scoped).await;
+    assert!(
+        labels.contains(&label),
+        "MPLS ILM in {} does not contain label {} (have {:?})",
+        scoped,
+        label,
+        labels,
+    );
+    println!("✓ MPLS ILM in {} contains label {}", scoped, label);
+}
+
+#[then(expr = "mpls ilm in namespace {string} should not contain label {int}")]
+async fn ilm_should_not_contain_label(world: &mut World, namespace: String, label: u64) {
+    let scoped = world.ns(&namespace);
+    let labels = ilm_local_labels(&scoped).await;
+    assert!(
+        !labels.contains(&label),
+        "MPLS ILM in {} unexpectedly contains label {} (have {:?})",
+        scoped,
+        label,
+        labels,
+    );
+    println!("✓ MPLS ILM in {} does not contain label {}", scoped, label);
+}
+
+#[then(expr = "mpls ilm in namespace {string} should be empty")]
+async fn ilm_should_be_empty(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let labels = ilm_local_labels(&scoped).await;
+    assert!(
+        labels.is_empty(),
+        "MPLS ILM in {} is not empty, has labels {:?}",
+        scoped,
+        labels,
+    );
+    println!("✓ MPLS ILM in {} is empty", scoped);
 }
 
 #[then("the test environment should be clean")]
