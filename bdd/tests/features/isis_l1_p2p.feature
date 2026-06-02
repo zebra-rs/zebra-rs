@@ -74,7 +74,7 @@ Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
     And I apply config "z8.yaml" to namespace "z8"
     And I apply config "z9.yaml" to namespace "z9"
     And I apply config "z10.yaml" to namespace "z10"
-    And I wait 35 seconds
+    And I wait 10 seconds
     # Directly-connected reachability over a top-spine and a rung link,
     # dual-stack, proving the P2P links are up and addressed.
     Then ping from "z1" to "10.0.1.2" should succeed
@@ -103,12 +103,12 @@ Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
     Then show command "show isis route" in namespace "z1" should contain "10.0.0.5/32"
     And ping from "z1" to "10.0.0.5" should succeed
     When I make namespace "z1" interface "i2" down
-    And I wait 15 seconds
+    And I wait 5 seconds
     # Reconverged onto the backup out the other interface (i6).
     Then ping from "z1" to "10.0.0.5" should succeed
     And ping from "z1" to "2001:db8:0:ffff::5" should succeed
     When I make namespace "z1" interface "i2" up
-    And I wait 25 seconds
+    And I wait 10 seconds
     # Primary restored.
     Then ping from "z1" to "10.0.0.5" should succeed
     And ping from "z1" to "2001:db8:0:ffff::5" should succeed
@@ -125,10 +125,10 @@ Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
     # Dropping one leg of the left diamond (i1) still leaves z2->z6
     # reachable over the surviving ECMP leg (i7).
     When I make namespace "z2" interface "i1" down
-    And I wait 10 seconds
+    And I wait 5 seconds
     Then ping from "z2" to "10.0.0.6" should succeed
     When I make namespace "z2" interface "i1" up
-    And I wait 20 seconds
+    And I wait 10 seconds
     Then ping from "z2" to "10.0.0.6" should succeed
 
   Scenario: IS-IS stamps the level into the central RIB
