@@ -379,9 +379,16 @@ pub async fn list_pidfiles(dir: &Path, prefix: &str) -> Result<Vec<std::path::Pa
     Ok(out)
 }
 
-/// Ping an IPv6 target from inside a namespace. Returns true on success,
-/// false on failure. Errors only when the ping process itself cannot be run.
-pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
+/// Ping a target from inside a namespace, forcing address family via
+/// `family` (`-4` or `-6`). Returns true on success, false on failure.
+/// Errors only when the ping process itself cannot be run.
+async fn ping_family(
+    netns: &str,
+    family: &str,
+    target: &str,
+    count: u32,
+    timeout_secs: u32,
+) -> Result<bool> {
     let count_str = count.to_string();
     let timeout_str = timeout_secs.to_string();
     let output = Command::new("sudo")
@@ -390,7 +397,7 @@ pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> 
         .arg("exec")
         .arg(netns)
         .arg("ping")
-        .arg("-6")
+        .arg(family)
         .arg("-c")
         .arg(&count_str)
         .arg("-W")
@@ -402,4 +409,16 @@ pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> 
         .await
         .with_context(|| format!("Failed to ping {} from netns {}", target, netns))?;
     Ok(output.status.success())
+}
+
+/// Ping an IPv6 target from inside a namespace. Returns true on success,
+/// false on failure. Errors only when the ping process itself cannot be run.
+pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
+    ping_family(netns, "-6", target, count, timeout_secs).await
+}
+
+/// Ping an IPv4 target from inside a namespace. IPv4 sibling of `ping6`,
+/// used by the dual-stack IS-IS features.
+pub async fn ping4(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
+    ping_family(netns, "-4", target, count, timeout_secs).await
 }

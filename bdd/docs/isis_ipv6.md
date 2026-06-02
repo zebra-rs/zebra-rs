@@ -38,3 +38,4 @@ via a shared bridge.
 | Setup IS-IS L2 over a shared bridge and confirm the link is up | |
 | IS-IS installs reciprocal IPv6 routes to peer loopbacks | |
 | IS-IS adjacency survives a link bounce and routes recover | |
+| Teardown topology | |

@@ -1,0 +1,45 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.5/32
+- if-name: r1-n1
+  ipv4:
+    address: 192.168.0.14/30
+- if-name: r1-n2
+  ipv4:
+    address: 192.168.0.18/30
+- if-name: r1-n3
+  ipv4:
+    address: 192.168.0.22/30
+- if-name: r1-r2
+  ipv4:
+    address: 192.168.0.30/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0005.00
+    hostname: r1
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 500
+    - if-name: r1-n1
+      ipv4:
+        enable: true
+      metric: 1
+    - if-name: r1-n2
+      ipv4:
+        enable: true
+      metric: 1
+    - if-name: r1-n3
+      ipv4:
+        enable: true
+      metric: 1000
+    - if-name: r1-r2
+      ipv4:
+        enable: true
+      metric: 1000
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.5

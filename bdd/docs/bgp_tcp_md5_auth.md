@@ -4,6 +4,7 @@
 
 As a network operator
 I want to protect a BGP session with a TCP MD5 shared secret and
+verify that mismatched secrets prevent the session from coming up.
 
 ## Test Topology
 

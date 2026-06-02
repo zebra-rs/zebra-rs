@@ -246,9 +246,14 @@ async fn wait_seconds(_world: &mut World, seconds: u64) {
 #[then(expr = "ping from {string} to {string} should succeed")]
 async fn ping_should_succeed(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
-    let success = netns::ping6(&scoped, &target, 3, 2)
-        .await
-        .expect("ping6 failed to run");
+    // Pick the address family from the target literal so one step covers
+    // both: anything with a ':' is IPv6, otherwise IPv4.
+    let success = if target.contains(':') {
+        netns::ping6(&scoped, &target, 3, 2).await
+    } else {
+        netns::ping4(&scoped, &target, 3, 2).await
+    }
+    .expect("ping failed to run");
     assert!(
         success,
         "ping from {} to {} did not succeed",
@@ -260,9 +265,12 @@ async fn ping_should_succeed(world: &mut World, namespace: String, target: Strin
 #[then(expr = "ping from {string} to {string} should fail")]
 async fn ping_should_fail(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
-    let success = netns::ping6(&scoped, &target, 1, 1)
-        .await
-        .expect("ping6 failed to run");
+    let success = if target.contains(':') {
+        netns::ping6(&scoped, &target, 1, 1).await
+    } else {
+        netns::ping4(&scoped, &target, 1, 1).await
+    }
+    .expect("ping failed to run");
     assert!(
         !success,
         "ping from {} to {} unexpectedly succeeded",

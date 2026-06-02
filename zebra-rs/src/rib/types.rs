@@ -145,6 +145,19 @@ impl RibSubType {
             Self::Other(_) => "".to_string(),
         }
     }
+
+    /// Machine-readable name for the JSON `subtype` field. The protocol
+    /// prefix is dropped — the sibling `protocol` field already carries
+    /// it — so IS-IS levels render bare as "level1" / "level2". Other
+    /// variants keep their lowercased debug name unchanged.
+    pub fn name(&self) -> String {
+        match self {
+            Self::IsisLevel1 => "level1".to_string(),
+            Self::IsisLevel2 => "level2".to_string(),
+            Self::IsisIntraArea => "intra-area".to_string(),
+            other => format!("{other:?}").to_lowercase(),
+        }
+    }
 }
 
 // ---- redistribute messaging types ------------------------------------
