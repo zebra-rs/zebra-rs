@@ -4,7 +4,7 @@ use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::{
     Algo, ExtAdminGroup, FadSubTlv, IsisSubAdminGrp, IsisSubAsla, IsisSubFadExcludeAg,
     IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
-    IsisSubFlexAlgoDef, IsisSubPrefixSid, SidLabelValue,
+    IsisSubFlexAlgoDef, IsisSubPrefixSid, PrefixSidFlags, SidLabelValue,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -152,10 +152,15 @@ pub fn build_link_asla(
 /// Algorithm field set to the flex-algo id. Iteration order matches
 /// the BTreeMap (ascending algo id) so the wire byte sequence is
 /// deterministic.
-pub fn build_per_algo_prefix_sids(map: &BTreeMap<u8, SidLabelValue>) -> Vec<IsisSubPrefixSid> {
+pub fn build_per_algo_prefix_sids(
+    map: &BTreeMap<u8, SidLabelValue>,
+    node: bool,
+) -> Vec<IsisSubPrefixSid> {
     map.iter()
         .map(|(&algo, sid)| IsisSubPrefixSid {
-            flags: 0.into(),
+            // A per-algo Prefix-SID on a host prefix is a node-SID too
+            // (RFC 9350 §7 + RFC 8667 §2.1.1): mirror the algo-0 N flag.
+            flags: PrefixSidFlags::new().with_n_flag(node),
             algo: Algo::FlexAlgo(algo),
             sid: sid.clone(),
         })
@@ -343,7 +348,7 @@ mod tests {
     #[test]
     fn build_per_algo_prefix_sids_empty_map_yields_empty_vec() {
         let map: BTreeMap<u8, SidLabelValue> = BTreeMap::new();
-        assert!(build_per_algo_prefix_sids(&map).is_empty());
+        assert!(build_per_algo_prefix_sids(&map, true).is_empty());
     }
 
     #[test]
@@ -351,13 +356,21 @@ mod tests {
         let mut map: BTreeMap<u8, SidLabelValue> = BTreeMap::new();
         map.insert(129, SidLabelValue::Index(1129));
         map.insert(128, SidLabelValue::Index(1128));
-        let sids = build_per_algo_prefix_sids(&map);
+        let sids = build_per_algo_prefix_sids(&map, true);
         assert_eq!(sids.len(), 2);
         // BTreeMap iterates ascending → algo 128 first, 129 second.
         assert_eq!(sids[0].algo, Algo::FlexAlgo(128));
         assert_eq!(sids[0].sid, SidLabelValue::Index(1128));
         assert_eq!(sids[1].algo, Algo::FlexAlgo(129));
         assert_eq!(sids[1].sid, SidLabelValue::Index(1129));
+        // Host-prefix per-algo Prefix-SIDs carry the N (Node-SID) flag;
+        // a non-host prefix leaves it clear.
+        assert!(sids.iter().all(|s| s.flags.n_flag()));
+        assert!(
+            build_per_algo_prefix_sids(&map, false)
+                .iter()
+                .all(|s| !s.flags.n_flag())
+        );
     }
 
     #[test]
@@ -365,7 +378,7 @@ mod tests {
         let mut map: BTreeMap<u8, SidLabelValue> = BTreeMap::new();
         map.insert(128, SidLabelValue::Index(42));
         map.insert(129, SidLabelValue::Label(20128));
-        let sids = build_per_algo_prefix_sids(&map);
+        let sids = build_per_algo_prefix_sids(&map, true);
         assert_eq!(sids[0].sid, SidLabelValue::Index(42));
         assert_eq!(sids[1].sid, SidLabelValue::Label(20128));
     }
@@ -420,7 +433,7 @@ mod tests {
         let mut map: BTreeMap<u8, SidLabelValue> = BTreeMap::new();
         map.insert(128, SidLabelValue::Index(1128));
         map.insert(129, SidLabelValue::Label(20129));
-        let sids = build_per_algo_prefix_sids(&map);
+        let sids = build_per_algo_prefix_sids(&map, true);
         // Wrap each into the entry, then pull back via the parser.
         let entry = isis_packet::IsisTlvExtIpReachEntry {
             metric: 10,
