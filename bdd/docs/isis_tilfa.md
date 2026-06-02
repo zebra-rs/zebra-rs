@@ -44,4 +44,6 @@ through the r-plane rather than a plain loop-free alternate.
 | SR-MPLS labels and a TI-LFA repair are installed on the source | |
 | Source reaches the destination over the primary path | |
 | Fast-reroute survives the primary link failure (s-n1) | |
+| no-local-prefix-sid suppresses only the local Prefix-SID in the LFIB | |
+| Deleting segment-routing mpls clears all MPLS ILM entries | |
 | Teardown topology | |

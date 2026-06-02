@@ -104,6 +104,32 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     # Primary restored.
     Then ping from "s" to "10.0.0.8" should succeed
 
+  Scenario: no-local-prefix-sid suppresses only the local Prefix-SID in the LFIB
+    Given the test topology exists
+    # By default s installs its own node-SID label (SID 100 -> 16100) as a
+    # local pop entry, alongside remote node-SIDs (e.g. d's SID 800 -> 16800).
+    Then mpls ilm in namespace "s" should contain label 16100
+    And mpls ilm in namespace "s" should contain label 16800
+    # Re-apply s with `no-local-prefix-sid` under segment-routing mpls.
+    When I apply config "s-nolocal.yaml" to namespace "s"
+    And I wait 5 seconds
+    # The local label is withdrawn from the LFIB; the remote one stays.
+    Then mpls ilm in namespace "s" should not contain label 16100
+    And mpls ilm in namespace "s" should contain label 16800
+
+  Scenario: Deleting segment-routing mpls clears all MPLS ILM entries
+    Given the test topology exists
+    # s still has remote node-SID labels installed (n1 SID 200 -> 16200,
+    # d SID 800 -> 16800).
+    Then mpls ilm in namespace "s" should contain label 16200
+    And mpls ilm in namespace "s" should contain label 16800
+    # Remove `segment-routing mpls` from s entirely.
+    When I apply config "s-nosr.yaml" to namespace "s"
+    And I wait 5 seconds
+    # Disabling SR-MPLS must withdraw every MPLS ILM entry — prefix-SIDs
+    # and adjacency-SIDs — leaving the LFIB completely empty.
+    Then mpls ilm in namespace "s" should be empty
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"
