@@ -83,6 +83,13 @@ pub struct SpfRoute {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
+    /// RFC 8667 §2.1.1 P (no-PHP) flag copied from the destination's
+    /// received Prefix-SID sub-TLV. When set, the penultimate hop (the
+    /// nexthop whose `adjacency` is true) must keep the node-SID label
+    /// instead of popping it, so `make_ilm_entry` installs a swap rather
+    /// than a pop. Part of `PartialEq` so a P-flag flip re-installs the
+    /// ILM through `table_diff`.
+    pub no_php: bool,
     /// SPF vertex id this route was built from. Set by
     /// `build_rib_from_spf`; used by TI-LFA to join routes with
     /// per-destination repair candidates.
@@ -508,7 +515,10 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
-        if !nhop.adjacency {
+        // Penultimate hop (`adjacency`) pops by default (PHP); a no-PHP
+        // Prefix-SID keeps the label (swap label->label) so the SID owner
+        // receives it intact.
+        if !nhop.adjacency || ilm.no_php {
             uni.mpls_label.push(label);
         }
         return IlmEntry {
@@ -524,7 +534,9 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
-        if !nhop.adjacency {
+        // See the single-nexthop arm: no-PHP keeps the label even on a
+        // penultimate-hop adjacency.
+        if !nhop.adjacency || ilm.no_php {
             uni.mpls_label.push(label);
         }
         multi.nexthops.push(uni);
@@ -575,6 +587,13 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub ilm_type: IlmType,
+    /// RFC 8667 §2.1.1 P (no-PHP) flag. When true, `make_ilm_entry`
+    /// keeps the label (swap) even for a penultimate-hop (`adjacency`)
+    /// nexthop instead of installing a pop, so the SID owner receives
+    /// the label intact. Only set for remote Prefix-SID ILMs whose
+    /// origin advertised P; adjacency-SID and self-SID ILMs leave it
+    /// false (PHP / local-pop semantics are unchanged).
+    pub no_php: bool,
 }
 
 /// Build ILM table with adjacency labels from SIDs
@@ -620,6 +639,8 @@ fn build_adjacency_ilm(
         let spf_ilm = SpfIlm {
             nhops,
             ilm_type: IlmType::Adjacency(adj_index),
+            // Adjacency-SID semantics are unaffected by the prefix no-PHP flag.
+            no_php: false,
         };
         ilm.insert(label, spf_ilm);
     }
@@ -739,11 +760,19 @@ fn build_rib_from_spf(
                     None
                 };
 
+                // RFC 8667 §2.1.1 P (no-PHP): when the origin asked us
+                // not to pop, the penultimate-hop ILM swaps instead.
+                let no_php = entry
+                    .prefix_sid()
+                    .map(|ps| ps.flags.p_flag())
+                    .unwrap_or(false);
+
                 let route = SpfRoute {
                     metric: nhops.cost + entry.metric,
                     nhops: spf_nhops.clone(),
                     sid,
                     prefix_sid,
+                    no_php,
                     dest_vertex: Some(*node),
                     backup_as_primary: top.config.fast_reroute_backup_as_primary,
                 };
@@ -797,6 +826,8 @@ fn build_rib_from_spf(
                         }
                         if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
                             curr.prefix_sid = route.prefix_sid;
+                            // Keep no_php aligned with the Prefix-SID we adopt.
+                            curr.no_php = route.no_php;
                         }
                     }
                     // If curr.metric < route.metric, do nothing (keep better route)
@@ -1556,6 +1587,9 @@ fn build_rib_from_flex_algo(
                 nhops: spf_nhops.clone(),
                 sid,
                 prefix_sid,
+                // `peer_algo_sid` stores only the SID value, not the
+                // Prefix-SID flags, so per-algo no-PHP isn't carried yet.
+                no_php: false,
                 dest_vertex: Some(*node),
                 backup_as_primary: top.config.fast_reroute_backup_as_primary,
             };
@@ -1660,6 +1694,9 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
                 SpfIlm {
                     nhops,
                     ilm_type: IlmType::Node(index),
+                    // Self-SID ILM is always a local pop; no-PHP is about
+                    // the penultimate hop, not the owner.
+                    no_php: false,
                 },
             );
         }
@@ -1693,6 +1730,9 @@ pub fn mpls_route(
             let spf_ilm = SpfIlm {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
+                // Carry the destination's no-PHP request so the
+                // penultimate-hop ILM swaps instead of popping.
+                no_php: route.no_php,
             };
             ilm.insert(sid, spf_ilm);
         }
@@ -1751,6 +1791,7 @@ mod tests {
             nhops: nh,
             sid,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: false,
         }
@@ -2003,6 +2044,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: false,
         };
@@ -2037,6 +2079,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: false,
         };
@@ -2088,6 +2131,7 @@ mod tests {
             nhops,
             sid: None,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: true,
         };
@@ -2243,5 +2287,39 @@ mod tests {
             make_rib_entry_v6(&route, Level::L2).rsubtype,
             RibSubType::IsisLevel2
         );
+    }
+
+    fn ilm_uni_labels(label: u32, adjacency: bool, no_php: bool) -> Vec<u32> {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "10.0.0.1".parse::<Ipv4Addr>().unwrap(),
+            SpfNexthop {
+                ifindex: 10,
+                adjacency,
+                sys_id: None,
+                backup: None,
+            },
+        );
+        let ilm = SpfIlm {
+            nhops,
+            ilm_type: IlmType::Node(7),
+            no_php,
+        };
+        let entry = make_ilm_entry(label, &ilm);
+        let rib::Nexthop::Uni(uni) = &entry.nexthop else {
+            panic!("expected Uni, got {:?}", entry.nexthop);
+        };
+        uni.mpls_label.clone()
+    }
+
+    #[test]
+    fn make_ilm_entry_no_php_keeps_label_on_adjacency() {
+        // Penultimate hop (adjacency=true) pops by default: no out-label.
+        assert!(ilm_uni_labels(16800, true, false).is_empty());
+        // ...but a no-PHP Prefix-SID keeps the label (swap label->label).
+        assert_eq!(ilm_uni_labels(16800, true, true), vec![16800]);
+        // Transit hop (adjacency=false) always swaps, no-PHP or not.
+        assert_eq!(ilm_uni_labels(16800, false, false), vec![16800]);
+        assert_eq!(ilm_uni_labels(16800, false, true), vec![16800]);
     }
 }

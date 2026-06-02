@@ -104,18 +104,24 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     # Primary restored.
     Then ping from "s" to "10.0.0.8" should succeed
 
-  Scenario: no-php sets the P (no-PHP) flag on the local Prefix-SID
+  Scenario: no-php sets the P (no-PHP) flag and makes the penultimate hop swap
     Given the test topology exists
     # By default s advertises its loopback Prefix-SID (10.0.0.1/32, SID
     # 100) with PHP in effect, so the P flag is clear everywhere in the
     # LSDB — neither Prefix-SID nor Adjacency-SID renders "P:1".
     Then show command "show isis database detail" in namespace "s" should not contain "P:1"
+    # n1 is the penultimate hop to s's loopback (label 16100); with PHP it
+    # pops the node-SID label before delivering to s.
+    And mpls ilm outgoing label for label 16100 in namespace "n1" should be "Pop"
     # Re-apply s with `no-php` under the loopback's prefix-sid.
     When I apply config "s-nophp.yaml" to namespace "s"
     And I wait 5 seconds
     # Changing no-php re-originates s's self-LSP with the P (no-PHP) flag
     # set on its loopback Prefix-SID, so the flag now shows in the LSDB.
     Then show command "show isis database detail" in namespace "s" should contain "P:1"
+    # And n1 now keeps the label (swap 16100 -> 16100) instead of popping,
+    # so s receives the labeled packet intact.
+    And mpls ilm outgoing label for label 16100 in namespace "n1" should be "16100"
 
   Scenario: no-local-prefix-sid suppresses only the local Prefix-SID in the LFIB
     Given the test topology exists
