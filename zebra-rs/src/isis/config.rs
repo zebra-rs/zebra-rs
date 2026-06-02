@@ -1154,6 +1154,15 @@ fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
     // reconcile here drops the pool immediately.
     isis.reconcile_block_watch();
     isis.reconcile_local_pool();
+    // Toggling SR-MPLS changes what we install in the MPLS LFIB, but
+    // neither handler above schedules SPF. Recompute both levels so
+    // `apply_spf_result` reconciles the per-level ILM — in particular,
+    // disabling withdraws every adjacency-/prefix-SID entry (the self
+    // Prefix-SID is already handled by `update_self_sid_ilm` at
+    // CommitEnd, but the remote prefix-SID and adjacency-SID entries
+    // are only reconciled on an SPF pass).
+    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
+    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
     Some(())
 }
 

@@ -1445,6 +1445,15 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
     mpls_route(&rib, &mut ilm, srgb);
+    // SR-MPLS forwarding gates the whole MPLS LFIB. Prefix-SID labels
+    // resolve from peers' advertisements (`label_map` / reach-map),
+    // independent of our own SR state, so without this an SPF pass after
+    // `no segment-routing mpls` would happily re-install remote
+    // prefix-SID and adjacency-SID entries. Dropping the desired set
+    // here makes `apply_routing_updates` withdraw every ILM entry.
+    if !top.config.sr_mpls_enabled {
+        ilm.clear();
+    }
     apply_routing_updates(top, level, rib, rib_v6, ilm);
 }
 
