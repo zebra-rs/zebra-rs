@@ -433,19 +433,7 @@ pub fn rib_entry_show(
                     rib.link_name(ifindex)
                 )
                 .unwrap();
-                if !uni.mpls.is_empty() {
-                    write!(buf, ", label").unwrap();
-                    for mpls in uni.mpls.iter() {
-                        match mpls {
-                            Label::Implicit(label) => {
-                                write!(buf, " {} (implicit-null)", label).unwrap();
-                            }
-                            Label::Explicit(label) => {
-                                write!(buf, " {}", label).unwrap();
-                            }
-                        }
-                    }
-                }
+                write_mpls_labels(&mut buf, uni);
                 // Single nexthop — `weight` is an ECMP-only column,
                 // so we omit it here. Multi prints it per leg below.
                 writeln!(buf, ", {}", uptime).unwrap();
@@ -463,19 +451,7 @@ pub fn rib_entry_show(
                         rib.link_name(uni.ifindex().unwrap_or(0)),
                     )
                     .unwrap();
-                    if !uni.mpls.is_empty() {
-                        write!(buf, ", label").unwrap();
-                        for mpls in uni.mpls.iter() {
-                            match mpls {
-                                Label::Implicit(label) => {
-                                    write!(buf, " {} implicit-null", label).unwrap();
-                                }
-                                Label::Explicit(label) => {
-                                    write!(buf, " {}", label).unwrap();
-                                }
-                            }
-                        }
-                    }
+                    write_mpls_labels(&mut buf, uni);
                     // ECMP — weight per leg, then the route's age.
                     writeln!(buf, ", weight {}, {}", uni.weight, uptime).unwrap();
                 }
@@ -504,19 +480,7 @@ pub fn rib_entry_show(
                             uni.metric,
                         )
                         .unwrap();
-                        if !uni.mpls.is_empty() {
-                            write!(buf, ", label").unwrap();
-                            for mpls in uni.mpls.iter() {
-                                match mpls {
-                                    Label::Implicit(label) => {
-                                        write!(buf, " {} implicit-null", label).unwrap();
-                                    }
-                                    Label::Explicit(label) => {
-                                        write!(buf, " {}", label).unwrap();
-                                    }
-                                }
-                            }
-                        }
+                        write_mpls_labels(&mut buf, uni);
                         if is_backup {
                             write!(buf, ", backup").unwrap();
                         }
@@ -605,19 +569,7 @@ pub fn rib_entry_show_v6(
                         rib.link_name(ifindex)
                     )
                     .unwrap();
-                    if !uni.mpls.is_empty() {
-                        write!(buf, ", label").unwrap();
-                        for mpls in uni.mpls.iter() {
-                            match mpls {
-                                Label::Implicit(label) => {
-                                    write!(buf, " {} implicit-null", label).unwrap();
-                                }
-                                Label::Explicit(label) => {
-                                    write!(buf, " {}", label).unwrap();
-                                }
-                            }
-                        }
-                    }
+                    write_mpls_labels(&mut buf, uni);
                     // Single nexthop — no `weight` column. ECMP prints it
                     // per leg below.
                     writeln!(buf, ", {}", uptime).unwrap();
@@ -636,19 +588,7 @@ pub fn rib_entry_show_v6(
                         rib.link_name(uni.ifindex().unwrap_or(0)),
                     )
                     .unwrap();
-                    if !uni.mpls.is_empty() {
-                        write!(buf, ", label").unwrap();
-                        for mpls in uni.mpls.iter() {
-                            match mpls {
-                                Label::Implicit(label) => {
-                                    write!(buf, " {} implicit-null", label).unwrap();
-                                }
-                                Label::Explicit(label) => {
-                                    write!(buf, " {}", label).unwrap();
-                                }
-                            }
-                        }
-                    }
+                    write_mpls_labels(&mut buf, uni);
                     writeln!(buf, ", weight {}, {}", uni.weight, uptime).unwrap();
                 }
             }
@@ -676,19 +616,7 @@ pub fn rib_entry_show_v6(
                             uni.metric,
                         )
                         .unwrap();
-                        if !uni.mpls.is_empty() {
-                            write!(buf, ", label").unwrap();
-                            for mpls in uni.mpls.iter() {
-                                match mpls {
-                                    Label::Implicit(label) => {
-                                        write!(buf, " {} implicit-null", label).unwrap();
-                                    }
-                                    Label::Explicit(label) => {
-                                        write!(buf, " {}", label).unwrap();
-                                    }
-                                }
-                            }
-                        }
+                        write_mpls_labels(&mut buf, uni);
                         if is_backup {
                             write!(buf, ", backup").unwrap();
                         }
@@ -701,16 +629,34 @@ pub fn rib_entry_show_v6(
     Ok(buf)
 }
 
+/// Append the `, label …` suffix describing a nexthop's MPLS label
+/// stack to a one-line text route entry. Implicit (implicit-null)
+/// labels render parenthesized, explicit labels bare; no-op when the
+/// stack is empty. Shared by the IPv4 and IPv6 one-line renderers
+/// across their Uni / Multi / List nexthop arms.
+fn write_mpls_labels(buf: &mut String, uni: &NexthopUni) {
+    if uni.mpls.is_empty() {
+        return;
+    }
+    write!(buf, ", label").unwrap();
+    for mpls in uni.mpls.iter() {
+        match mpls {
+            Label::Implicit(label) => write!(buf, " ({})", label).unwrap(),
+            Label::Explicit(label) => write!(buf, " {}", label).unwrap(),
+        }
+    }
+}
+
 /// Render an MPLS label stack in IOS-XR's `{ L1 L2 L3 }` notation.
 /// The stack is written in push order (top of stack first), matching
 /// the order our `Vec<Label>` already carries (see
-/// `repair_segments_to_mpls_labels`). Implicit-null gets its
-/// conventional suffix; otherwise it's a bare number.
+/// `repair_segments_to_mpls_labels`). Implicit-null renders as the
+/// label number in parentheses; otherwise it's a bare number.
 fn fmt_label_stack(labels: &[Label]) -> String {
     let parts: Vec<String> = labels
         .iter()
         .map(|l| match l {
-            Label::Implicit(n) => format!("{n} (implicit-null)"),
+            Label::Implicit(n) => format!("({n})"),
             Label::Explicit(n) => n.to_string(),
         })
         .collect();
@@ -2112,11 +2058,8 @@ mod tests {
             ]),
             "{ 17010 24001 17003 }"
         );
-        // Implicit-null gets a parenthetical hint.
-        assert_eq!(
-            fmt_label_stack(&[Label::Implicit(3)]),
-            "{ 3 (implicit-null) }"
-        );
+        // Implicit-null renders as the label number in parentheses.
+        assert_eq!(fmt_label_stack(&[Label::Implicit(3)]), "{ (3) }");
     }
 
     #[test]
