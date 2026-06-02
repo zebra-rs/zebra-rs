@@ -1063,7 +1063,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 if !prefix.addr().is_loopback() {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
                         let prefix_sid = IsisSubPrefixSid {
-                            flags: 0.into(),
+                            // RFC 8667 §2.1.1: set the N (Node-SID) flag for
+                            // a host prefix (loopback /32) — it identifies
+                            // the originating router. A non-host prefix gets
+                            // a plain Prefix-SID with the flag clear.
+                            flags: PrefixSidFlags::new().with_n_flag(prefix.prefix_len() == 32),
                             algo: Algo::Spf,
                             sid: sid.clone(),
                         };
@@ -1079,6 +1083,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     // for this prefix from a single TLV.
                     let per_algo_sids = super::flex_algo::build_per_algo_prefix_sids(
                         &link.config.ipv4_flex_algo_prefix_sids,
+                        prefix.prefix_len() == 32,
                     );
                     let has_subs = sub_tlv.is_some() || !per_algo_sids.is_empty();
                     let flags = Ipv4ControlInfo::new()
