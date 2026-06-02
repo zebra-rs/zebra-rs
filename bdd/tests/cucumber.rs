@@ -656,6 +656,51 @@ async fn ilm_local_labels(scoped: &str) -> Vec<u64> {
         .unwrap_or_default()
 }
 
+/// Fetch the `outgoing_label` the ILM entry for `local_label` renders:
+/// "Pop" for a penultimate-hop PHP pop, or the numeric out-label (as a
+/// string) for a swap. Returns None when no ILM matches that incoming
+/// label. Used to distinguish PHP from no-PHP (RFC 8667 P flag) on the
+/// penultimate hop.
+async fn ilm_outgoing_label(scoped: &str, local_label: u64) -> Option<String> {
+    let output = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show mpls ilm"])
+        .await
+        .expect("Failed to run show mpls ilm");
+    let json: Value = serde_json::from_str(&output).expect("Failed to parse ILM JSON");
+    json.get("entries")
+        .and_then(|e| e.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|e| e.get("local_label").and_then(|l| l.as_u64()) == Some(local_label))
+        })
+        .and_then(|e| e.get("outgoing_label"))
+        .and_then(|l| l.as_str())
+        .map(|s| s.to_string())
+}
+
+#[then(expr = "mpls ilm outgoing label for label {int} in namespace {string} should be {string}")]
+async fn ilm_outgoing_label_should_be(
+    world: &mut World,
+    label: u64,
+    namespace: String,
+    expected: String,
+) {
+    let scoped = world.ns(&namespace);
+    let actual = ilm_outgoing_label(&scoped, label).await;
+    assert_eq!(
+        actual.as_deref(),
+        Some(expected.as_str()),
+        "MPLS ILM in {} outgoing label for {} is {:?}, expected {:?}",
+        scoped,
+        label,
+        actual,
+        expected,
+    );
+    println!(
+        "✓ MPLS ILM in {} label {} -> outgoing {}",
+        scoped, label, expected
+    );
+}
+
 #[then(expr = "mpls ilm in namespace {string} should contain label {int}")]
 async fn ilm_should_contain_label(world: &mut World, namespace: String, label: u64) {
     let scoped = world.ns(&namespace);
