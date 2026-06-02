@@ -115,7 +115,11 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     And mpls ilm outgoing label for label 16100 in namespace "n1" should be "Pop"
     # Re-apply s with `no-php` under the loopback's prefix-sid.
     When I apply config "s-nophp.yaml" to namespace "s"
-    And I wait 5 seconds
+    # 10s, not the usual 5s: the LSP-generation throttle (IOS-XR-style
+    # backoff, 5000ms secondary/maximum) can delay s's re-origination by
+    # up to ~5s, then the change still has to flood to n1 and drive n1's
+    # SPF + ILM rebuild. 5s lands right on that edge and flakes.
+    And I wait 10 seconds
     # Changing no-php re-originates s's self-LSP with the P (no-PHP) flag
     # set on its loopback Prefix-SID, so the flag now shows in the LSDB.
     Then show command "show isis database detail" in namespace "s" should contain "P:1"
