@@ -77,7 +77,7 @@ impl IsisSubTlv {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct SegmentRoutingCapFlags {
     #[bits(6)]
     pub resvd: u8,
@@ -212,7 +212,7 @@ impl TlvEmitter for IsisSubNodeMaxSidDepth {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct RouterCapFlags {
     #[bits(6)]
     pub resvd: u8,
@@ -278,7 +278,7 @@ impl From<IsisTlvRouterCap> for IsisTlv {
 }
 
 #[bitfield(u16, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct Srv6Flags {
     #[bits(14)]
     pub resvd2: u16,

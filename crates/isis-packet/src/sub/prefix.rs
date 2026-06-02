@@ -32,7 +32,7 @@ pub enum IsisSubTlv {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct PrefixSidFlags {
     #[bits(2)]
     pub resvd: u8,
@@ -300,7 +300,7 @@ impl From<IsisSubIpv6SourceRouterId> for IsisSubTlv {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct Ipv4ControlInfo {
     #[bits(6)]
     pub prefixlen: usize,
@@ -485,7 +485,7 @@ impl From<IsisTlvIpv6Reach> for IsisTlv {
 // 12-15. The previous order produced .id()=0 for an MT 2 LSP because
 // MT ID was being read out of the reserved bits.
 #[bitfield(u16, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct MultiTopologyId {
     #[bits(12)]
     pub id: u16,
@@ -579,7 +579,7 @@ impl From<IsisTlvMtIpv6Reach> for IsisTlv {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct Ipv6ControlInfo {
     #[bits(5)]
     pub resvd: usize,
@@ -742,7 +742,7 @@ impl ParseBe<IsisTlvIpv6ReachEntry> for IsisTlvIpv6ReachEntry {
 }
 
 #[bitfield(u16, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct Srv6TlvFlags {
     #[bits(4)]
     pub resvd: u8,

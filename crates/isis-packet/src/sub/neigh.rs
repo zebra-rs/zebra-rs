@@ -838,7 +838,7 @@ impl From<IsisSubTeMetric> for IsisSubTlv {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(PartialEq)]
 pub struct AdjSidFlags {
     #[bits(2)]
     pub resvd: u8,

@@ -1,6 +1,7 @@
 mod checksum;
 mod disp;
 mod error;
+mod flags_serde;
 mod nsap;
 mod padding;
 mod parser;

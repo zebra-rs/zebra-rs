@@ -295,7 +295,6 @@ impl From<IsisNeighborId> for IsisLspId {
 }
 
 #[bitfield(u8, debug = true)]
-#[derive(Serialize, Deserialize)]
 pub struct IsisLspTypes {
     #[bits(2)]
     pub is_bits: u8,
