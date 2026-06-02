@@ -142,6 +142,41 @@ Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
     And show command "show ipv6 route" in namespace "z1" should contain "L1"
     And show command "show ip route" in namespace "z10" should contain "L1"
 
+  Scenario: Area-wide hmac-sha-256 authentication keeps the network converged
+    Given the test topology exists
+    # Re-apply every router with matching hmac-sha-256 keys: an
+    # area-password signs Level-1 LSPs + SNPs (ISO 10589 / RFC 5310) and
+    # per-link hello-authentication signs the IIHs. The same key-id 1 /
+    # secret is used everywhere, so every adjacency, LSP and SNP verifies.
+    # Adding the key to both ends within a few seconds never exceeds the
+    # 30s hold-time, so adjacencies ride through the rollover without a
+    # bounce (a node with no key configured still accepts a signed PDU).
+    When I apply config "z1-auth.yaml" to namespace "z1"
+    And I apply config "z2-auth.yaml" to namespace "z2"
+    And I apply config "z3-auth.yaml" to namespace "z3"
+    And I apply config "z4-auth.yaml" to namespace "z4"
+    And I apply config "z5-auth.yaml" to namespace "z5"
+    And I apply config "z6-auth.yaml" to namespace "z6"
+    And I apply config "z7-auth.yaml" to namespace "z7"
+    And I apply config "z8-auth.yaml" to namespace "z8"
+    And I apply config "z9-auth.yaml" to namespace "z9"
+    And I apply config "z10-auth.yaml" to namespace "z10"
+    And I wait 12 seconds
+    # Auth is active: the instance summary reports the L1 area-password mode.
+    Then show command "show isis summary" in namespace "z1" should contain "Area-password (L1): mode hmac-sha-256"
+    And show command "show isis summary" in namespace "z10" should contain "Area-password (L1): mode hmac-sha-256"
+    # IIH auth verified: z1's two adjacencies (z2 over i2, z6 over i6) are
+    # still Up. The peer renders by dynamic hostname, which only resolves
+    # when the peer's LSP was accepted — so this also proves LSP auth.
+    And show command "show isis neighbor" in namespace "z1" should contain "z2"
+    And show command "show isis neighbor" in namespace "z1" should contain "z6"
+    # LSP + SNP auth verified across the area, so the far loopbacks still
+    # resolve and end-to-end dual-stack forwarding still works.
+    And show command "show isis route" in namespace "z1" should contain "10.0.0.10/32"
+    And ping from "z1" to "10.0.0.10" should succeed
+    And ping from "z1" to "2001:db8:0:ffff::10" should succeed
+    And ping from "z10" to "10.0.0.1" should succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

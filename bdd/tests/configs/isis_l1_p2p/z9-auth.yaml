@@ -1,0 +1,73 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.9/32
+  ipv6:
+    address: 2001:db8:0:ffff::9/128
+- if-name: i8
+  ipv4:
+    address: 10.0.7.2/30
+  ipv6:
+    address: 2001:db8:7::2/64
+- if-name: i10
+  ipv4:
+    address: 10.0.8.1/30
+  ipv6:
+    address: 2001:db8:8::1/64
+- if-name: i4
+  ipv4:
+    address: 10.0.12.2/30
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0009.00
+    is-type: level-1
+    hostname: z9
+    area-password:
+      password: zebra-isis-secret
+      auth-type: hmac-sha-256
+      key-id: 1
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i8
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 20
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      hello-authentication:
+        password: zebra-isis-secret
+        auth-type: hmac-sha-256
+        key-id: 1
+    - if-name: i10
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 20
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      hello-authentication:
+        password: zebra-isis-secret
+        auth-type: hmac-sha-256
+        key-id: 1
+    - if-name: i4
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 30
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      hello-authentication:
+        password: zebra-isis-secret
+        auth-type: hmac-sha-256
+        key-id: 1
