@@ -372,20 +372,10 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
     }
 }
 
-// Rendering.
-
-static SHOW_IPV4_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
+static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
-       E1/E2 - OSPF external type 1/2 D - DHCP route
-       i - IS-IS, L1/L2 - IS-IS level-1/2, ia - IS-IS inter area
-       > - selected route, * - FIB route, S - Stale route
-
-"#;
-
-static SHOW_IPV6_HEADER: &str = r#"Codes: K - kernel, C - connected, S - static, R - RIP, B - BGP
-       O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
-       E1/E2 - OSPF external type 1/2 D - DHCP route
-       i - IS-IS, L1/L2 - IS-IS level-1/2, ia - IS-IS inter area
+       E1/E2 - OSPF external type 1/2
+       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
        > - selected route, * - FIB route, S - Stale route
 
 "#;
@@ -1036,7 +1026,7 @@ pub fn rib_show(rib: &Rib, _args: Args, json: bool) -> String {
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e))
     } else {
         let mut buf = String::new();
-        buf.push_str(SHOW_IPV4_HEADER);
+        buf.push_str(SHOW_HEADER);
 
         for (prefix, entries) in rib.table.iter() {
             for entry in entries.iter() {
@@ -1110,7 +1100,7 @@ fn rib_show_one(rib: &Rib, prefix: &Ipv4Net, json: bool, detail: bool) -> String
             buf.push_str(&rib_entry_show_detail(rib, prefix, entry));
         }
     } else {
-        buf.push_str(SHOW_IPV4_HEADER);
+        buf.push_str(SHOW_HEADER);
         for entry in entries.iter() {
             let _ = write!(buf, "{}", rib_entry_show(rib, prefix, entry, json).unwrap());
         }
@@ -1185,7 +1175,7 @@ fn rib_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) -> 
                 }
             }
         } else {
-            buf.push_str(SHOW_IPV4_HEADER);
+            buf.push_str(SHOW_HEADER);
             for (prefix, entries) in tables.table.iter() {
                 for entry in entries.iter() {
                     write!(
@@ -1237,7 +1227,7 @@ fn rib6_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) ->
                 }
             }
         } else {
-            buf.push_str(SHOW_IPV6_HEADER);
+            buf.push_str(SHOW_HEADER);
             for (prefix, entries) in tables.table_v6.iter() {
                 for entry in entries.iter() {
                     write!(
@@ -1288,7 +1278,7 @@ pub fn rib6_show(rib: &Rib, _args: Args, json: bool) -> String {
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e))
     } else {
         let mut buf = String::new();
-        buf.push_str(SHOW_IPV6_HEADER);
+        buf.push_str(SHOW_HEADER);
 
         for (prefix, entries) in rib.table_v6.iter() {
             for entry in entries.iter() {
@@ -1359,7 +1349,7 @@ fn rib6_show_one(rib: &Rib, prefix: &Ipv6Net, json: bool, detail: bool) -> Strin
             buf.push_str(&rib_entry_show_v6_detail(rib, prefix, entry));
         }
     } else {
-        buf.push_str(SHOW_IPV6_HEADER);
+        buf.push_str(SHOW_HEADER);
         for entry in entries.iter() {
             let _ = write!(
                 buf,
