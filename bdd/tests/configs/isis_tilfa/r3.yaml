@@ -28,4 +28,5 @@ router:
       metric: 1
     is-type: level-2-only
     segment-routing: mpls
+    fast-reroute: ti-lfa
     te-router-id: 10.0.0.7

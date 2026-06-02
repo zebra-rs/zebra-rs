@@ -14,6 +14,7 @@ router:
     hostname: n2
     is-type: level-2-only
     segment-routing: mpls
+    fast-reroute: ti-lfa
     te-router-id: 10.0.0.3
     interface:
     - if-name: lo
