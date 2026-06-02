@@ -1333,6 +1333,17 @@ module config {
         container segment-routing {
           container mpls {
             presence "Enable Segment Routing over MPLS dataplane";
+            leaf local-prefix-sid {
+              type boolean;
+              default true;
+              description
+                "Install the local (self-originated) Prefix-SID label
+                 into the MPLS forwarding table (LFIB) as a pop entry,
+                 so traffic that arrives carrying this node's own
+                 node-SID label is delivered locally. Default true,
+                 matching IOS-XR / SR-OS which always program the local
+                 node-SID. Only effective while SR-MPLS is enabled.";
+            }
           }
           container srv6 {
             presence "Enable Segment Routing over IPv6 dataplane";

@@ -39,7 +39,10 @@ use super::lsp::{
     target_locator_name,
 };
 use super::nfsm::nbr_hold_timer_expire;
-use super::rib::{SpfIlm, SpfRoute, SpfRouteV6, apply_spf_result, build_spf_input, compute_spf};
+use super::rib::{
+    SpfIlm, SpfRoute, SpfRouteV6, apply_spf_result, build_spf_input, compute_spf,
+    update_self_sid_ilm,
+};
 use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
 use super::throttle::Throttle;
@@ -239,6 +242,13 @@ pub struct Isis {
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
+    /// Currently-installed local (self-originated) Prefix-SID ILM
+    /// entries, keyed by MPLS label. Level-independent (the label is
+    /// derived from interface config + the global SR block, not per-
+    /// level SPF), so this is a single map rather than `Levels<_>`.
+    /// `rib::update_self_sid_ilm` diffs the desired set against this
+    /// after each SPF publish and reconciles the kernel LFIB.
+    pub self_sid_ilm: BTreeMap<u32, SpfIlm>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
     pub spf_throttle: Levels<Throttle>,
@@ -653,6 +663,7 @@ impl Isis {
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
+                self_sid_ilm: BTreeMap::new(),
                 hostname: Levels::<Hostname>::default(),
                 spf_timer: Levels::<Option<Timer>>::default(),
                 spf_throttle: Levels::<Throttle>::default(),
@@ -733,6 +744,14 @@ impl Isis {
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
             self.commit_srlg();
+            // Reconcile the local Prefix-SID ILM against the just-committed
+            // config. This is what withdraws the pop entry when
+            // `prefix-sid` / `segment-routing mpls` / `local-prefix-sid`
+            // is removed — those handlers only mutate config state and
+            // don't schedule SPF, so the `SpfDone` reconcile alone would
+            // never see the deletion. Idempotent: a no-op when nothing
+            // self-SID-relevant changed.
+            update_self_sid_ilm(self);
             return;
         }
         if msg.op == ConfigOp::CommitStart {
@@ -1565,6 +1584,11 @@ impl Isis {
                 if std::mem::take(top.spf_pending.get_mut(&level)) {
                     let _ = self.tx.send(Message::SpfCalc(level));
                 }
+                // Reconcile the local (self-originated) Prefix-SID ILM.
+                // Level-independent (config + global SR block, not SPF),
+                // so done once here after `top`'s borrow ends rather than
+                // in the per-level apply path; idempotent across L1/L2.
+                update_self_sid_ilm(self);
                 // The LSDB is settled after SPF — push the BGP-LS producer's
                 // delta to BGP (RFC 9552). `top` is no longer used, so its
                 // mutable borrow of `self` has ended (NLL) and the disjoint

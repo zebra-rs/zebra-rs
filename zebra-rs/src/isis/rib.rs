@@ -12,6 +12,7 @@ use super::level::Levels;
 use super::throttle::Throttle;
 use crate::context::Timer;
 use crate::rib::inst::{IlmEntry, IlmType};
+use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
 // EncapType is only used by `make_rib_entry_v6` test fixture below;
@@ -22,7 +23,7 @@ use isis_packet::srv6::EncapType;
 use super::config::MtId;
 use super::flex_algo::FlexAlgoEntry;
 use super::graph::{LspMap, graph, graph_flex_algo, graph_mt2};
-use super::inst::{IsisTop, Message};
+use super::inst::{Isis, IsisTop, Message};
 use super::level::Level;
 use super::link::{Afi, LinkTop};
 use super::lsdb::Lsdb;
@@ -1576,6 +1577,92 @@ fn build_rib_from_flex_algo(
     rib
 }
 
+/// Resolve a configured Prefix-SID value to `(label, index)` against
+/// our own SRGB. Index SIDs need the SRGB snapshot (return `None`
+/// without it); absolute-label SIDs resolve directly and derive the
+/// index for `IlmType::Node` / show output.
+fn resolve_self_sid(
+    sid: &SidLabelValue,
+    srgb: Option<&crate::spf::label_block::LabelBlock>,
+) -> Option<(u32, u32)> {
+    match sid {
+        SidLabelValue::Index(index) => srgb.map(|b| (b.start + index, *index)),
+        SidLabelValue::Label(label) => {
+            let index = srgb.map(|b| label.saturating_sub(b.start)).unwrap_or(0);
+            Some((*label, index))
+        }
+    }
+}
+
+/// Reconcile the local (self-originated) Prefix-SID ILM entries against
+/// the kernel LFIB. This is **independent of per-level SPF**: the label
+/// is derived from interface config + the global SR block, so it lives
+/// in a single map (`Isis::self_sid_ilm`), not `Levels<_>`.
+///
+/// For every loopback interface (`flags.is_loopback()`) that has IPv4
+/// enabled, a configured Prefix-SID, and a routable (non-127.0.0.0/8)
+/// address, install a **pop** entry (`adjacency: true`) so traffic that
+/// arrives carrying this node's own node-SID label is delivered locally
+/// — matching IOS-XR / SR-OS. Gated on `segment-routing mpls` plus the
+/// `local-prefix-sid` knob (default on); when either is off the desired
+/// set is empty and any previously-installed self entries are withdrawn.
+///
+/// Idempotent: safe to call on every SPF publish. `table_diff` only
+/// emits `IlmAdd`/`IlmDel` when the set actually changes.
+pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
+    let mut desired: BTreeMap<u32, SpfIlm> = BTreeMap::new();
+
+    if isis.config.sr_mpls_enabled && isis.config.sr_local_prefix_sid {
+        let srgb = isis.sr_block.as_ref().and_then(|b| b.global.as_ref());
+        for (&ifindex, link) in isis.links.iter() {
+            if !link.flags.is_loopback() || !link.config.enable.v4 {
+                continue;
+            }
+            let Some(sid) = link.config.prefix_sid.as_ref() else {
+                continue;
+            };
+            let Some((label, index)) = resolve_self_sid(sid, srgb) else {
+                continue;
+            };
+            // The local delivery nexthop is the loopback's own routable
+            // IPv4 address; skip the 127.0.0.0/8 literal range.
+            let Some(addr) = link
+                .state
+                .v4addr
+                .iter()
+                .map(|p| p.addr())
+                .find(|a| !a.is_loopback())
+            else {
+                continue;
+            };
+            let mut nhops = BTreeMap::new();
+            nhops.insert(
+                addr,
+                SpfNexthop {
+                    ifindex,
+                    adjacency: true,
+                    sys_id: None,
+                    backup: None,
+                },
+            );
+            desired.insert(
+                label,
+                SpfIlm {
+                    nhops,
+                    ilm_type: IlmType::Node(index),
+                },
+            );
+        }
+    }
+
+    let diff = spf::table_diff(
+        isis.self_sid_ilm.iter().map(|(&k, v)| (k, v)),
+        desired.iter().map(|(&k, v)| (k, v)),
+    );
+    diff_ilm_apply(&isis.ctx.rib, &diff);
+    isis.self_sid_ilm = desired;
+}
+
 pub fn mpls_route(
     rib: &PrefixMap<Ipv4Net, SpfRoute>,
     ilm: &mut BTreeMap<u32, SpfIlm>,
@@ -1605,6 +1692,32 @@ pub fn mpls_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_self_sid_index_and_label() {
+        use crate::spf::label_block::LabelBlock;
+        let srgb = LabelBlock {
+            start: 16000,
+            end: 24000,
+        };
+        // Index form: label = SRGB.start + index.
+        assert_eq!(
+            resolve_self_sid(&SidLabelValue::Index(100), Some(&srgb)),
+            Some((16100, 100))
+        );
+        // Index without an SRGB snapshot can't resolve to a label.
+        assert_eq!(resolve_self_sid(&SidLabelValue::Index(100), None), None);
+        // Absolute label resolves directly; index derived from SRGB.
+        assert_eq!(
+            resolve_self_sid(&SidLabelValue::Label(16100), Some(&srgb)),
+            Some((16100, 100))
+        );
+        // Absolute label with no SRGB → index 0 (label still installs).
+        assert_eq!(
+            resolve_self_sid(&SidLabelValue::Label(16100), None),
+            Some((16100, 0))
+        );
+    }
 
     fn mk_uni(addr: &str, metric: u32) -> rib::NexthopUni {
         rib::NexthopUni::new(addr.parse().unwrap(), metric, vec![])

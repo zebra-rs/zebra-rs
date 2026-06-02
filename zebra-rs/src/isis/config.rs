@@ -135,6 +135,10 @@ impl Isis {
         self.callback_add("/router/isis/lsp-mtu-size", config_lsp_mtu_size);
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
+        self.callback_add(
+            "/router/isis/segment-routing/mpls/local-prefix-sid",
+            config_sr_local_prefix_sid,
+        );
         self.callback_add("/router/isis/segment-routing/srv6", config_sr_srv6_enable);
         self.callback_add(
             "/router/isis/segment-routing/srv6/locator",
@@ -435,6 +439,14 @@ pub struct IsisConfig {
     /// "default" block under /segment-routing/block.
     pub sr_mpls_enabled: bool,
 
+    /// Install the local (self-originated) Prefix-SID label into the
+    /// MPLS LFIB as a pop entry (`/router/isis/segment-routing/mpls/
+    /// local-prefix-sid`). Default true — matches IOS-XR / SR-OS, which
+    /// always program the local node-SID label. When false, only remote
+    /// prefix-SIDs and adjacency-SIDs are installed. Only takes effect
+    /// while `sr_mpls_enabled` is set.
+    pub sr_local_prefix_sid: bool,
+
     /// Set when /router/isis/segment-routing/srv6 is committed.
     pub sr_srv6_enabled: bool,
 
@@ -704,6 +716,7 @@ impl Default for IsisConfig {
             enable: Default::default(),
             distribute: Default::default(),
             sr_mpls_enabled: Default::default(),
+            sr_local_prefix_sid: true,
             sr_srv6_enabled: Default::default(),
             sr_srv6_locator: Default::default(),
             sr_srv6_flex_algo_locators: Default::default(),
@@ -1140,6 +1153,17 @@ fn config_sr_mpls_enable(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<(
     // reconcile here drops the pool immediately.
     isis.reconcile_block_watch();
     isis.reconcile_local_pool();
+    Some(())
+}
+
+/// `/router/isis/segment-routing/mpls/local-prefix-sid`. Toggles
+/// installation of the local (self-originated) Prefix-SID label into
+/// the MPLS LFIB. Default true. The install itself is recomputed on the
+/// next SPF publish (`update_self_sid_ilm`), which a config commit
+/// already schedules, so no explicit reconcile is needed here.
+fn config_sr_local_prefix_sid(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = if op.is_set() { args.boolean()? } else { true };
+    isis.config.sr_local_prefix_sid = value;
     Some(())
 }
 
