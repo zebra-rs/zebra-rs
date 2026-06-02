@@ -241,6 +241,13 @@ pub struct LinkConfig {
 
     pub prefix_sid: Option<SidLabelValue>,
 
+    /// RFC 8667 §2.1.1 P (no-PHP) flag for the loopback Prefix-SID
+    /// (`.../ipv4/prefix-sid/no-php`, type empty). When set, the
+    /// penultimate hop must not pop this node-SID label — it forwards
+    /// the packet to us with the label intact. Only meaningful when
+    /// `prefix_sid` is configured.
+    pub prefix_sid_no_php: bool,
+
     /// Per-MT metric overrides — populated from
     /// /router/isis/interface/<name>/multi-topology/<id>/metric.
     /// Empty when no per-MT metric is configured; lookup falls back
@@ -1280,6 +1287,20 @@ pub fn config_ipv4_prefix_sid_index(isis: &mut Isis, mut args: Args, op: ConfigO
         link.config.prefix_sid = None;
     }
 
+    Some(())
+}
+
+/// `/router/isis/interface/<ifname>/ipv4/prefix-sid/no-php` (type empty).
+/// Toggles the RFC 8667 P (no-PHP) flag on the loopback Prefix-SID. The
+/// flag lives in the Prefix-SID sub-TLV of the self-LSP, so re-originate
+/// both levels on change to push it to the wire without waiting for the
+/// refresh timer.
+pub fn config_ipv4_prefix_sid_no_php(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    link.config.prefix_sid_no_php = op.is_set();
+    let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
+    let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     Some(())
 }
 
