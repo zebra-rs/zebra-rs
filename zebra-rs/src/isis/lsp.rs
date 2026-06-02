@@ -1063,11 +1063,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 if !prefix.addr().is_loopback() {
                     let sub_tlv = if let Some(sid) = &link.config.prefix_sid {
                         let prefix_sid = IsisSubPrefixSid {
-                            // RFC 8667 §2.1.1: set the N (Node-SID) flag for
-                            // a host prefix (loopback /32) — it identifies
-                            // the originating router. A non-host prefix gets
-                            // a plain Prefix-SID with the flag clear.
-                            flags: PrefixSidFlags::new().with_n_flag(prefix.prefix_len() == 32),
+                            // RFC 8667 §2.1.1: N (Node-SID) flag for a host
+                            // prefix (loopback /32) — it identifies the
+                            // originating router; P (no-PHP) flag when the
+                            // operator asks the penultimate hop to keep the
+                            // node-SID label rather than pop it.
+                            flags: PrefixSidFlags::new()
+                                .with_n_flag(prefix.prefix_len() == 32)
+                                .with_p_flag(link.config.prefix_sid_no_php),
                             algo: Algo::Spf,
                             sid: sid.clone(),
                         };

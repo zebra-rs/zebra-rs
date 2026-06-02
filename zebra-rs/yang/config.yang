@@ -1833,6 +1833,15 @@ module config {
               leaf absolute {
                 type uint32;
               }
+              leaf no-php {
+                type empty;
+                description
+                  "Set the P (no-PHP) flag (RFC 8667 §2.1.1) on this
+                   Prefix-SID. When present, the penultimate hop keeps
+                   the node-SID label instead of popping it, so the
+                   label arrives at this node intact. Absent (default)
+                   leaves PHP in effect.";
+              }
             }
             list flex-algo-prefix-sid {
               // Per-Flex-Algorithm Prefix-SID for the IPv4 address(es)

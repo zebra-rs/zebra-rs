@@ -352,6 +352,10 @@ impl Isis {
             "/router/isis/interface/ipv4/prefix-sid/index",
             link::config_ipv4_prefix_sid_index,
         );
+        self.callback_add(
+            "/router/isis/interface/ipv4/prefix-sid/no-php",
+            link::config_ipv4_prefix_sid_no_php,
+        );
         self.callback_add("/router/isis/interface/metric", link::config_metric);
         self.callback_add("/router/isis/interface/srlg", link::config_srlg);
         self.callback_add("/router/isis/interface/affinity", link::config_affinity);
