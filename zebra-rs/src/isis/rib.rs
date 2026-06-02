@@ -1603,16 +1603,17 @@ fn resolve_self_sid(
 /// enabled, a configured Prefix-SID, and a routable (non-127.0.0.0/8)
 /// address, install a **pop** entry (`adjacency: true`) so traffic that
 /// arrives carrying this node's own node-SID label is delivered locally
-/// — matching IOS-XR / SR-OS. Gated on `segment-routing mpls` plus the
-/// `local-prefix-sid` knob (default on); when either is off the desired
-/// set is empty and any previously-installed self entries are withdrawn.
+/// — matching IOS-XR / SR-OS. Gated on `segment-routing mpls` and the
+/// absence of the `no-local-prefix-sid` knob; when SR-MPLS is off or
+/// `no-local-prefix-sid` is set the desired set is empty and any
+/// previously-installed self entries are withdrawn.
 ///
 /// Idempotent: safe to call on every SPF publish. `table_diff` only
 /// emits `IlmAdd`/`IlmDel` when the set actually changes.
 pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
     let mut desired: BTreeMap<u32, SpfIlm> = BTreeMap::new();
 
-    if isis.config.sr_mpls_enabled && isis.config.sr_local_prefix_sid {
+    if isis.config.sr_mpls_enabled && !isis.config.sr_no_local_prefix_sid {
         let srgb = isis.sr_block.as_ref().and_then(|b| b.global.as_ref());
         for (&ifindex, link) in isis.links.iter() {
             if !link.flags.is_loopback() || !link.config.enable.v4 {

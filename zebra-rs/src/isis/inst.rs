@@ -746,11 +746,11 @@ impl Isis {
             self.commit_srlg();
             // Reconcile the local Prefix-SID ILM against the just-committed
             // config. This is what withdraws the pop entry when
-            // `prefix-sid` / `segment-routing mpls` / `local-prefix-sid`
-            // is removed — those handlers only mutate config state and
-            // don't schedule SPF, so the `SpfDone` reconcile alone would
-            // never see the deletion. Idempotent: a no-op when nothing
-            // self-SID-relevant changed.
+            // `prefix-sid` / `segment-routing mpls` is removed or
+            // `no-local-prefix-sid` is set — those handlers only mutate
+            // config state and don't schedule SPF, so the `SpfDone`
+            // reconcile alone would never see the change. Idempotent: a
+            // no-op when nothing self-SID-relevant changed.
             update_self_sid_ilm(self);
             return;
         }
