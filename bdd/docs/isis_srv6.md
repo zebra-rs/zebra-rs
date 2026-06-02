@@ -42,3 +42,4 @@ in any IGP.
 | Scenario | Result |
 |----------|--------|
 | Setup the SRv6 chain and ping the far end through the SID | |
+| Teardown topology | |

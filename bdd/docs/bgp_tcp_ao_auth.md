@@ -4,6 +4,8 @@
 
 As a network operator
 I want to protect a BGP session with TCP-AO using an RFC 8177 key
+chain and verify that matching MKTs on both peers establish the
+session.
 
 ## Test Topology
 
@@ -19,6 +21,10 @@ I want to protect a BGP session with TCP-AO using an RFC 8177 key
            │  0.1/24 │     │  0.2/24 │
            └─────────┘     └─────────┘
 ```
+
+## Notes
+
+Requires Linux kernel >= 6.7 on both peers.
 
 ## Config Files
 

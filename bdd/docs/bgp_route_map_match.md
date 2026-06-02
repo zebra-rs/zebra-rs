@@ -4,7 +4,13 @@
 
 As a network operator
 I want zebra-rs policy-list entries to filter received routes by
+as-path-set, next-hop-set, MED comparison, and origin, so that
+inbound policy can express the same conditions as IOS-XR RPL.
 All four match types are exercised against an established eBGP session
+by swapping z2's input policy and asserting which advertised prefixes
+appear in z2's RIB. z1 attaches an outbound policy that stamps MED=100
+on every advertised route so MED match scenarios have something
+deterministic to compare against.
 
 ## Test Topology
 
@@ -33,8 +39,8 @@ All four match types are exercised against an established eBGP session
 - z2-med-eq-fail.yaml: input policy `match med-eq 999` — no match.
 - z2-med-range-pass.yaml: input policy `match med-ge 50, med-le 200`
 - z2-med-range-fail.yaml: input policy `match med-ge 200` — MED=100
-- z2-nh-pass.yaml: input policy `match next-hop 192.168.0.1` — matches the peer's address
-- z2-nh-fail.yaml: input policy `match next-hop 10.10.10.10` — does not match
+- z2-nh-pass.yaml: input policy `match next-hop-set PEER-SUBNET`
+- z2-nh-fail.yaml: input policy `match next-hop-set WRONG-SUBNET`
 
 ## Test Scenarios
 
@@ -49,6 +55,6 @@ All four match types are exercised against an established eBGP session
 | match med-eq rejects routes with a different MED value | |
 | match med-ge and med-le accept routes inside the range | |
 | match med-ge rejects routes below the floor | |
-| match next-hop accepts routes whose nexthop equals the configured address | |
-| match next-hop rejects routes whose nexthop is a different address | |
+| match next-hop-set accepts routes whose nexthop is in the prefix-set | |
+| match next-hop-set rejects routes whose nexthop is outside the prefix-set | |
 | Teardown topology | |
