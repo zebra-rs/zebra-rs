@@ -85,6 +85,17 @@ pub enum RibRx {
     /// `LinkDown` (operational down) — `LinkDel` is permanent for
     /// this ifindex.
     LinkDel(u32),
+    /// The MTU of an already-known link changed (operator
+    /// `interface X mtu N`, or an external `ip link set`). Protocol
+    /// modules cache MTU per interface for packet generation (OSPF DD
+    /// `if_mtu`, IS-IS hello padding / LSP fragmentation) and for their
+    /// own `show <proto> interface`; they update that cached value in
+    /// place rather than rebuilding link state, so adjacencies/FSMs are
+    /// untouched.
+    LinkMtu {
+        ifindex: u32,
+        mtu: u32,
+    },
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
@@ -264,6 +275,14 @@ impl Rib {
         let vrf_id = self.ifindex_vrf_id(ifindex);
         for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkDown(ifindex));
+        }
+    }
+
+    /// Push an MTU change to subscribers bound to this link's VRF.
+    pub fn api_link_mtu(&self, ifindex: u32, mtu: u32) {
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkMtu { ifindex, mtu });
         }
     }
 

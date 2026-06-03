@@ -31,6 +31,14 @@ pub struct Link {
     pub index: u32,
     pub name: String,
     pub mtu: u32,
+    /// MTU the kernel reported when this link was first observed,
+    /// before any operator-configured MTU was applied. Captured once in
+    /// `Link::from` and never updated thereafter, so it survives our own
+    /// `link_set_mtu` echoing back. Restored when the operator deletes
+    /// `interface <name> mtu`. Internal bookkeeping — not part of any
+    /// `show` output, so it stays out of the serialized form.
+    #[serde(skip)]
+    pub original_mtu: u32,
     pub metric: u32,
     #[serde(with = "linkflags_serde")]
     pub flags: LinkFlags,
@@ -50,6 +58,14 @@ pub struct Link {
     /// on VXLAN links. Used as the BGP MP_REACH nexthop for EVPN
     /// advertisements per RFC 8365 §5.1.3.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Last failure reason from applying the operator-configured MTU
+    /// (`mtu_config` keyed by name on `Rib`). `None` once a set
+    /// succeeds. Rendered by `show interface` so a kernel rejection
+    /// (e.g. an MTU below the IPv6 minimum of 1280 on a v6-enabled
+    /// link) is visible to the operator. Display-only — the live MTU
+    /// is always whatever the kernel reports in `mtu`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtu_error: Option<String>,
 }
 
 impl Link {
@@ -58,6 +74,7 @@ impl Link {
             index: link.index,
             name: link.name.to_owned(),
             mtu: link.mtu,
+            original_mtu: link.mtu,
             metric: 1,
             flags: link.flags,
             link_type: link.link_type,
@@ -68,6 +85,7 @@ impl Link {
             master: link.master,
             vni: link.vni,
             vxlan_local: link.vxlan_local,
+            mtu_error: None,
         }
     }
 
@@ -150,6 +168,9 @@ fn link_info_show(rib: &Rib, link: &Link, buf: &mut String, cb: &impl Fn(&String
         link.index, link.metric, link.mtu
     )
     .unwrap();
+    if let Some(err) = &link.mtu_error {
+        writeln!(buf, "  {}", err).unwrap();
+    }
     write!(
         buf,
         "  Link is {}",
@@ -196,6 +217,8 @@ pub struct InterfaceDetailed {
     pub index: u32,
     pub metric: u32,
     pub mtu: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtu_error: Option<String>,
     pub link_status: String,
     pub flags: String,
     pub vrf_binding: String,
@@ -322,6 +345,7 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
         index: link.index,
         metric: link.metric,
         mtu: link.mtu,
+        mtu_error: link.mtu_error.clone(),
         link_status: if link.is_up() {
             "Up".to_string()
         } else {
@@ -460,6 +484,15 @@ impl Rib {
         // calls find no entry in `vni_ifindex_map` and silently skip.
         let prev_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
 
+        // Capture MTU pre-state and the incoming value so a change on an
+        // already-known link (operator `interface X mtu N`, or an
+        // external `ip link set ... mtu`) can be fanned out to protocol
+        // modules that cache it for packet generation (OSPF DD if_mtu,
+        // IS-IS hello padding). `prev_mtu` is None for a brand-new link —
+        // its mtu rides along on `api_link_add` instead.
+        let prev_mtu: Option<u32> = self.links.get(&ifindex).map(|l| l.mtu);
+        let new_mtu: u32 = fib_link.mtu;
+
         // Capture master pre-state so an existing link crossing a VRF
         // boundary (operator `interface X vrf Y`, applied by the kernel
         // as an RTM_NEWLINK on an already-known ifindex) can be
@@ -508,6 +541,11 @@ impl Rib {
             // FDB resolution gets the right bridge.
             link.master = fib_link.master;
             link.vni = fib_link.vni;
+            // Adopt the kernel's current MTU (it may have changed since
+            // we last saw this link — our own `link_set_mtu` echoes back
+            // here, as does an external `ip link set`). The fan-out to
+            // protocols happens after the borrow is released, below.
+            link.mtu = fib_link.mtu;
         } else {
             let link = Link::from(fib_link);
             let _ = sysctl_mpls_enable(&link.name);
@@ -520,9 +558,45 @@ impl Rib {
             // post-block reconciliation below (covers both new-link
             // and existing-link paths uniformly).
 
+            // Replay an operator-configured MTU for a freshly-appeared
+            // link (config-before-interface, or interface re-created).
+            // Only re-issue when the live value differs; the kernel's
+            // echoed RTM_NEWLINK then updates the cached mtu. Scoped to
+            // the new-link branch so plain RTM_NEWLINK echoes don't
+            // re-attempt a previously-rejected set on every event.
+            if let Some(&mtu) = self.mtu_config.get(&link.name)
+                && mtu != link.mtu
+            {
+                let ifindex = link.index;
+                let name = link.name.clone();
+                match self.fib_handle.link_set_mtu(ifindex, mtu).await {
+                    Ok(()) => {
+                        if let Some(l) = self.links.get_mut(&ifindex) {
+                            l.mtu_error = None;
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(l) = self.links.get_mut(&ifindex) {
+                            l.mtu_error = Some(format!("MTU set to {mtu} is failed due to {e}"));
+                        }
+                        tracing::warn!("link_set_mtu({name}, {mtu}) failed: {e}");
+                    }
+                }
+            }
+
             if !link.is_up() {
                 self.make_link_up(link.index).await;
             }
+        }
+
+        // Fan out an MTU change on an already-known link to protocol
+        // subscribers. `prev_mtu` is Some only when the link existed
+        // before this call; a brand-new link carried its mtu on the
+        // `api_link_add` above, so this fires only on genuine changes.
+        if let Some(prev) = prev_mtu
+            && prev != new_mtu
+        {
+            self.api_link_mtu(ifindex, new_mtu);
         }
 
         // A master change that crosses a VRF boundary moves this
@@ -965,6 +1039,64 @@ pub async fn link_config_exec(
             None
         };
         let _ = rib.tx.send(Message::LinkVrfBind { ifname, vrf });
+    } else if path == "/interface/mtu" {
+        // `set interface X mtu N`    → record desired MTU and apply it.
+        // `delete interface X mtu`   → drop the desired MTU and restore
+        // the per-type kernel default (65536 loopback / 1500 otherwise).
+        //
+        // The configured value is durable desired-state in
+        // `rib.mtu_config` (keyed by name) so it survives the interface
+        // disappearing and is replayed by `link_add` when it returns.
+        // We only *issue* the netlink set here; the kernel's echoed
+        // RTM_NEWLINK updates the cached `Link::mtu` (and fans the
+        // change out to protocols) via `link_add`. A rejected set
+        // produces no echo, so we capture the reason in `Link::mtu_error`
+        // for `show interface`.
+        if op.is_set() {
+            let mtu = args.u32().context("missing mtu value")?;
+            rib.mtu_config.insert(ifname.clone(), mtu);
+            if let Some(ifindex) = link_lookup(rib, ifname.clone()) {
+                match rib.fib_handle.link_set_mtu(ifindex, mtu).await {
+                    Ok(()) => {
+                        if let Some(link) = rib.links.get_mut(&ifindex) {
+                            link.mtu_error = None;
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(link) = rib.links.get_mut(&ifindex) {
+                            link.mtu_error = Some(format!("MTU set to {mtu} is failed due to {e}"));
+                        }
+                        tracing::warn!("link_set_mtu({ifname}, {mtu}) failed: {e}");
+                    }
+                }
+            }
+        } else {
+            // Drain a trailing value token if the delete carried one.
+            let _ = args.u32();
+            rib.mtu_config.remove(&ifname);
+            if let Some(ifindex) = link_lookup(rib, ifname.clone()) {
+                // Restore the MTU the kernel reported when we first
+                // observed this link, before any operator MTU was
+                // applied (see `Link::original_mtu`).
+                let original = rib.links.get(&ifindex).map(|l| l.original_mtu);
+                if let Some(original) = original {
+                    match rib.fib_handle.link_set_mtu(ifindex, original).await {
+                        Ok(()) => {
+                            if let Some(link) = rib.links.get_mut(&ifindex) {
+                                link.mtu_error = None;
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(link) = rib.links.get_mut(&ifindex) {
+                                link.mtu_error =
+                                    Some(format!("MTU set to {original} is failed due to {e}"));
+                            }
+                            tracing::warn!("link_set_mtu({ifname}, {original}) failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1061,6 +1193,7 @@ mod tests {
             index: 1,
             name: "test0".to_string(),
             mtu: 1500,
+            original_mtu: 1500,
             metric: 1,
             flags: LinkFlags::empty(),
             link_type: LinkType::Ethernet,
@@ -1071,6 +1204,7 @@ mod tests {
             master: None,
             vni: None,
             vxlan_local: None,
+            mtu_error: None,
         }
     }
 

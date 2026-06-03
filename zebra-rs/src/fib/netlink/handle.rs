@@ -1750,6 +1750,29 @@ impl FibHandle {
         }
     }
 
+    /// Set the MTU of `ifindex` via `RTM_NEWLINK` carrying
+    /// `IFLA_MTU`. Mirrors `ip link set <link> mtu <n>`. Returns the
+    /// kernel error on rejection (e.g. EINVAL when the value is below
+    /// the IPv6 minimum of 1280 on a v6-enabled link) so the caller can
+    /// surface the reason; the success path relies on the kernel's
+    /// echoed `RTM_NEWLINK` to update the cached `Link::mtu`.
+    pub async fn link_set_mtu(&self, ifindex: u32, mtu: u32) -> anyhow::Result<()> {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        msg.attributes.push(LinkAttribute::Mtu(mtu));
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                return Err(anyhow::anyhow!("{}", e));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn addr_add_ipv4(
         &self,
         ifindex: u32,

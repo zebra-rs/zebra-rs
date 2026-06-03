@@ -460,6 +460,12 @@ pub struct Rib {
     /// when a missing interface or VRF master appears later, and clears
     /// the entry once the netlink call succeeds.
     pub pending_vrf_bind: BTreeMap<String, Option<String>>,
+    /// Operator-configured interface MTU, keyed by ifname. This is the
+    /// durable desired-state for `set interface <name> mtu <n>`: it is
+    /// applied to the kernel when set, replayed when a matching link
+    /// (re)appears, and on delete reverts the kernel to the link's
+    /// originally-observed MTU (`Link::original_mtu`).
+    pub mtu_config: BTreeMap<String, u32>,
     pub table: PrefixMap<Ipv4Net, RibEntries>,
     pub table_v6: PrefixMap<Ipv6Net, RibEntries>,
     pub ilm: BTreeMap<u32, IlmEntries>,
@@ -590,6 +596,7 @@ impl Rib {
             vrf_tables: BTreeMap::new(),
             vrf_id_alloc: VrfIdAllocator::new(),
             pending_vrf_bind: BTreeMap::new(),
+            mtu_config: BTreeMap::new(),
             table: PrefixMap::new(),
             table_v6: PrefixMap::new(),
             ilm: BTreeMap::new(),

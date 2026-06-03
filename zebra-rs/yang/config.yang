@@ -2607,6 +2607,19 @@ module config {
            Omitted means the interface lives in the default routing
            instance.";
       }
+      leaf mtu {
+        ext:help "Maximum transmission unit in bytes";
+        type uint32 {
+          range "68..65535";
+        }
+        description
+          "Operator-set interface MTU. When unset the interface keeps
+           the MTU the kernel assigned it (typically 65536 for loopback,
+           1500 otherwise); deleting this leaf restores that originally-
+           observed value. The IPv6 minimum is 1280, so setting a smaller
+           MTU on an interface with IPv6 enabled is rejected by the
+           kernel and reported by `show interface`.";
+      }
       container ipv4 {
         leaf address {
           type inet:ipv4-prefix;

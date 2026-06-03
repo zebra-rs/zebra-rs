@@ -721,6 +721,17 @@ impl Isis {
         }
     }
 
+    /// Refresh the cached interface MTU after a kernel/operator MTU
+    /// change. IS-IS uses it for hello padding (RFC 1195 §8) and LSP
+    /// fragmentation sizing, and renders it in `show isis interface`.
+    /// Those all read the live `state.mtu`, so updating it in place is
+    /// enough — adjacencies stay up.
+    pub fn link_mtu(&mut self, ifindex: u32, mtu: u32) {
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.state.mtu = mtu;
+        }
+    }
+
     /// React to a kernel-side link-down event. Adjacencies on this
     /// link can't continue — packets stop flowing the moment IFF_UP
     /// drops — so tear them down immediately rather than ride out
@@ -1625,6 +1636,7 @@ struct InterfaceDetailJson {
     network_type: String,
     level: String,
     snpa: Option<String>,
+    mtu: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     level_1_info: Option<LevelInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1796,6 +1808,7 @@ pub fn show_detail(
                     network_type: format!("{}", link.config.network_type()),
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
+                    mtu: link.state.mtu,
                     level_1_info: None,
                     level_2_info: None,
                     authentication: build_auth_info(link),
@@ -1833,10 +1846,11 @@ pub fn show_detail(
                 )?;
                 writeln!(
                     buf,
-                    "  Type: {}, Level: {}, SNPA: {}",
+                    "  Type: {}, Level: {}, SNPA: {}, MTU: {}",
                     link.config.network_type(),
                     link.state.level(),
                     link.state.mac.unwrap_or(MacAddr::from([0, 0, 0, 0, 0, 0])),
+                    link.state.mtu,
                 )?;
                 if has_level(link.state.level(), Level::L1) {
                     writeln!(buf, "  Level-1 Information:")?;
