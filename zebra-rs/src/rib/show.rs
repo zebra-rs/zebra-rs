@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     config::Args,
-    rib::{Label, Nexthop, nexthop::NexthopMember, nexthop::NexthopUni},
+    rib::{Label, Nexthop, nexthop::NexthopList, nexthop::NexthopMember, nexthop::NexthopUni},
 };
 
 use super::{
@@ -388,16 +388,18 @@ pub fn rib_entry_show(
 ) -> anyhow::Result<String> {
     let mut buf = String::new();
 
-    // All type route.
-    write!(
-        buf,
-        "{} {} {}",
-        route_tag(&e.rtype, &e.rsubtype),
-        e.selected(),
-        prefix,
-    )?;
+    // All type route. Capture the FIB-marker and `[distance/metric]`
+    // bracket columns so the `Nexthop::List` arm can align each repair
+    // path's own bracket (and `>>` marker) underneath the first line.
+    write!(buf, "{} ", route_tag(&e.rtype, &e.rsubtype))?;
+    let marker_col = buf.len();
+    write!(buf, "{} {}", e.selected(), prefix)?;
+    let bracket_col = buf.len() + 1;
 
-    if !e.is_connected() {
+    // `Nexthop::List` prints a per-path bracket in its own arm (each
+    // repair path can carry a different metric), so skip the shared
+    // route-level bracket for it.
+    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_)) {
         write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
     }
 
@@ -457,36 +459,7 @@ pub fn rib_entry_show(
                 }
             }
             Nexthop::List(pro) => {
-                // Walk members so we can distinguish primaries (first
-                // member, idx == 0) from TI-LFA backups (idx > 0).
-                let mut row = 0;
-                for (member_idx, member) in pro.nexthops.iter().enumerate() {
-                    let is_backup = member_idx > 0;
-                    let unis: Vec<&NexthopUni> = match member {
-                        NexthopMember::Uni(u) => vec![u],
-                        NexthopMember::Multi(m) => m.nexthops.iter().collect(),
-                    };
-                    for uni in unis {
-                        if row != 0 {
-                            buf.push_str(&" ".repeat(offset));
-                        }
-                        row += 1;
-                        write!(
-                            buf,
-                            " {} {}, {}, metric {}",
-                            via_word(uni),
-                            via_addr(uni),
-                            rib.link_name(uni.ifindex().unwrap_or(0)),
-                            uni.metric,
-                        )
-                        .unwrap();
-                        write_mpls_labels(&mut buf, uni);
-                        if is_backup {
-                            write!(buf, ", backup").unwrap();
-                        }
-                        writeln!(buf, ", {}", uptime).unwrap();
-                    }
-                }
+                write_nexthop_list(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
             }
         }
     }
@@ -502,16 +475,18 @@ pub fn rib_entry_show_v6(
 ) -> anyhow::Result<String> {
     let mut buf = String::new();
 
-    // All type route.
-    write!(
-        buf,
-        "{} {} {}",
-        route_tag(&e.rtype, &e.rsubtype),
-        e.selected(),
-        prefix,
-    )?;
+    // All type route. Capture the FIB-marker and `[distance/metric]`
+    // bracket columns so the `Nexthop::List` arm can align each repair
+    // path's own bracket (and `>>` marker) underneath the first line.
+    write!(buf, "{} ", route_tag(&e.rtype, &e.rsubtype))?;
+    let marker_col = buf.len();
+    write!(buf, "{} {}", e.selected(), prefix)?;
+    let bracket_col = buf.len() + 1;
 
-    if !e.is_connected() {
+    // `Nexthop::List` prints a per-path bracket in its own arm (each
+    // repair path can carry a different metric), so skip the shared
+    // route-level bracket for it.
+    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_)) {
         write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
     }
 
@@ -593,40 +568,90 @@ pub fn rib_entry_show_v6(
                 }
             }
             Nexthop::List(pro) => {
-                // Walk members so we can distinguish primaries (first
-                // member, idx == 0) from TI-LFA backups (idx > 0).
-                let mut row = 0;
-                for (member_idx, member) in pro.nexthops.iter().enumerate() {
-                    let is_backup = member_idx > 0;
-                    let unis: Vec<&NexthopUni> = match member {
-                        NexthopMember::Uni(u) => vec![u],
-                        NexthopMember::Multi(m) => m.nexthops.iter().collect(),
-                    };
-                    for uni in unis {
-                        if row != 0 {
-                            buf.push_str(&" ".repeat(offset));
-                        }
-                        row += 1;
-                        write!(
-                            buf,
-                            " {} {}, {}, metric {}",
-                            via_word(uni),
-                            via_addr(uni),
-                            rib.link_name(uni.ifindex().unwrap_or(0)),
-                            uni.metric,
-                        )
-                        .unwrap();
-                        write_mpls_labels(&mut buf, uni);
-                        if is_backup {
-                            write!(buf, ", backup").unwrap();
-                        }
-                        writeln!(buf, ", {}", uptime).unwrap();
-                    }
-                }
+                write_nexthop_list(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
             }
         }
     }
     Ok(buf)
+}
+
+/// Render the `Nexthop::List` arm shared by the IPv4 and IPv6 one-line
+/// route views. Each path prints on its own line carrying its own
+/// `[distance/metric]` bracket — the metric is per-nexthop, so a TI-LFA
+/// repair path can advertise a higher cost than the primary. Backup
+/// paths (every member past the first) drop the FIB `*>` marker for a
+/// `>>` repair marker in the same column, e.g.:
+///   L2 *> 10.0.0.0/24 [0/100] via 10.211.55.1, enp0s5, 00:04:15
+///      *>>            [0/1002] via 10.211.55.1, enp0s5, 00:04:15
+fn write_nexthop_list(
+    buf: &mut String,
+    rib: &Rib,
+    e: &RibEntry,
+    pro: &NexthopList,
+    marker_col: usize,
+    bracket_col: usize,
+    uptime: &str,
+) {
+    // Backups keep the route's FIB state in the marker column and add a
+    // second `>` to flag the repair path: `*>>` (FIB) or ` >>` (not).
+    let backup_marker = if e.fib { "*>>" } else { " >>" };
+    let mut row = 0;
+    for (member_idx, member) in pro.nexthops.iter().enumerate() {
+        let is_backup = member_idx > 0;
+        let unis: Vec<&NexthopUni> = match member {
+            NexthopMember::Uni(u) => vec![u],
+            NexthopMember::Multi(m) => m.nexthops.iter().collect(),
+        };
+        for uni in unis {
+            if row == 0 {
+                // First path shares the line already carrying the tag,
+                // FIB marker and prefix; just append its bracket.
+                write!(buf, " [{}/{}]", e.distance, uni.metric).unwrap();
+            } else {
+                // Continuation path: rebuild the marker and bracket
+                // columns so each line shows its own [distance/metric]
+                // aligned under the first, with backups marked by `>>`.
+                let marker = if is_backup { backup_marker } else { "" };
+                buf.push_str(&list_continuation_prefix(
+                    marker_col,
+                    bracket_col,
+                    marker,
+                    e.distance,
+                    uni.metric,
+                ));
+            }
+            row += 1;
+            write!(
+                buf,
+                " {} {}, {}",
+                via_word(uni),
+                via_addr(uni),
+                rib.link_name(uni.ifindex().unwrap_or(0)),
+            )
+            .unwrap();
+            write_mpls_labels(buf, uni);
+            writeln!(buf, ", {}", uptime).unwrap();
+        }
+    }
+}
+
+/// Leading whitespace + repair marker + `[distance/metric]` bracket for a
+/// `Nexthop::List` continuation line. `marker` is placed in the FIB-marker
+/// column (`*>>` for backups, empty for extra primary ECMP legs) and the
+/// bracket is padded to align under the first line's. Kept `Rib`-free so the
+/// column math stays unit-testable.
+fn list_continuation_prefix(
+    marker_col: usize,
+    bracket_col: usize,
+    marker: &str,
+    distance: u8,
+    metric: u32,
+) -> String {
+    let mut s = " ".repeat(marker_col);
+    s.push_str(marker);
+    s.push_str(&" ".repeat(bracket_col.saturating_sub(marker_col + marker.len())));
+    write!(s, "[{}/{}]", distance, metric).unwrap();
+    s
 }
 
 /// Append the `, label …` suffix describing a nexthop's MPLS label
@@ -2078,6 +2103,26 @@ mod tests {
         assert_eq!(fmt_protection_role(0), "Protected");
         assert_eq!(fmt_protection_role(1), "Backup (TI-LFA)");
         assert_eq!(fmt_protection_role(7), "Backup (TI-LFA)");
+    }
+
+    #[test]
+    fn list_continuation_prefix_aligns_bracket_and_backup_marker() {
+        // Columns taken from the `L2 *> 10.0.0.0/24 [0/100] …` first line:
+        // tag+space = 3 (`L2 `), `[` opens at column 18.
+        let marker_col = "L2 ".len(); // 3
+        let bracket_col = "L2 *> 10.0.0.0/24 ".len(); // 18
+
+        // A backup path: `*>>` sits in the FIB-marker column, the bracket
+        // re-aligns under the first line, and the metric is the path's own.
+        let backup = list_continuation_prefix(marker_col, bracket_col, "*>>", 0, 1002);
+        assert_eq!(backup, "   *>>            [0/1002]");
+        assert_eq!(backup.find('[').unwrap(), bracket_col);
+
+        // An extra primary ECMP leg carries no marker, just an aligned
+        // bracket.
+        let primary = list_continuation_prefix(marker_col, bracket_col, "", 0, 100);
+        assert_eq!(primary, "                  [0/100]");
+        assert_eq!(primary.find('[').unwrap(), bracket_col);
     }
 
     #[test]
