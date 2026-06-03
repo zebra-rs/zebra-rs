@@ -1772,6 +1772,22 @@ module config {
              peer is required to accept.";
         }
 
+        leaf lsp-mtu {
+          ext:help "Maximum LSP size transmitted on an interface";
+          type uint16 {
+            range "400..9490";
+          }
+          units "bytes";
+          description
+            "Maximum byte size of an LSP PDU this router transmits. IS-IS
+             LSPs are flooded as a single link-layer frame and are never
+             fragmented at the link layer, so when lsp-mtu exceeds an
+             interface's MTU an LSP of that size cannot fit on the wire.
+             LSPs are then dropped on send for that interface (logged at
+             warning level) rather than emitted as an over-sized frame.
+             Default 1497.";
+        }
+
         list interface {
           ext:help "Per-interface IS-IS configuration";
           // Last item in "router isis" node.

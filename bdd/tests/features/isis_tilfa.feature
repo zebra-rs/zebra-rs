@@ -154,6 +154,32 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     # and adjacency-SIDs — leaving the LFIB completely empty.
     Then mpls ilm in namespace "s" should be empty
 
+  Scenario: lsp-mtu above the link MTU is flagged on the source's interfaces
+    Given the test topology exists
+    # s's point-to-point links are veth pairs with the default 1500-byte
+    # MTU. s-lspmtu.yaml raises lsp-mtu to 9000, so an LSP at that size
+    # can't fit a single frame on s-n1/s-n2/s-n3; the flood path drops it
+    # (logged at warning level) and show flags each link.
+    When I apply config "s-lspmtu.yaml" to namespace "s"
+    And I wait 15 seconds
+    Then show command "show isis interface detail" in namespace "s" should contain "exceeds interface MTU"
+
+  Scenario: lsp-mtu above the link MTU drops s's LSP so n1 never learns the new prefix
+    Given the test topology exists
+    # s-lspmtu.yaml advertises 100.99.0.1/32, but with lsp-mtu over the
+    # link MTU s's LSP is dropped on every link, so n1 never receives it.
+    Then show command "show isis route" in namespace "n1" should not contain "100.99.0.1/32"
+
+  Scenario: Lowering lsp-mtu under the link MTU lets s's LSP flood to n1
+    Given the test topology exists
+    When I apply config "s-lspmtu-ok.yaml" to namespace "s"
+    And I wait 20 seconds
+    # lsp-mtu 1400 < 1500, so the flood path no longer drops s's LSP: the
+    # interfaces are no longer flagged and n1 installs the previously-
+    # dropped network, proving the drop was the over-MTU lsp-mtu.
+    Then show command "show isis interface detail" in namespace "s" should not contain "exceeds interface MTU"
+    And show command "show isis route" in namespace "n1" should contain "100.99.0.1/32"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"

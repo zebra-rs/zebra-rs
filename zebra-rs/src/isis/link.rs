@@ -1637,6 +1637,10 @@ struct InterfaceDetailJson {
     level: String,
     snpa: Option<String>,
     mtu: u32,
+    lsp_mtu: u16,
+    /// True when `lsp_mtu` exceeds the interface MTU — LSPs are then
+    /// dropped on send for this interface (see flood::srm_advertise).
+    lsp_mtu_exceeds_interface: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     level_1_info: Option<LevelInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1809,6 +1813,8 @@ pub fn show_detail(
                     level: format!("{}", link.state.level()),
                     snpa: link.state.mac.map(|mac| mac.to_string()),
                     mtu: link.state.mtu,
+                    lsp_mtu: isis.config.lsp_mtu(),
+                    lsp_mtu_exceeds_interface: isis.config.lsp_mtu() as u32 > link.state.mtu,
                     level_1_info: None,
                     level_2_info: None,
                     authentication: build_auth_info(link),
@@ -1852,6 +1858,19 @@ pub fn show_detail(
                     link.state.mac.unwrap_or(MacAddr::from([0, 0, 0, 0, 0, 0])),
                     link.state.mtu,
                 )?;
+                // LSP MTU vs interface MTU. When lsp-mtu exceeds the
+                // interface MTU, LSPs are dropped on send (see
+                // flood::srm_advertise), so flag it here.
+                let lsp_mtu = isis.config.lsp_mtu();
+                if lsp_mtu as u32 > link.state.mtu {
+                    writeln!(
+                        buf,
+                        "  LSP MTU: {} (exceeds interface MTU {} - LSPs dropped on send)",
+                        lsp_mtu, link.state.mtu,
+                    )?;
+                } else {
+                    writeln!(buf, "  LSP MTU: {}", lsp_mtu)?;
+                }
                 if has_level(link.state.level(), Level::L1) {
                     writeln!(buf, "  Level-1 Information:")?;
                     show_detail_entry(&mut buf, link, Level::L1)?;

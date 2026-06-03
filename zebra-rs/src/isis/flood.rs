@@ -158,6 +158,32 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
         adj.srm.0.keys().cloned().collect()
     };
 
+    // An LSP is flooded as a single link-layer frame — IS-IS PDUs are
+    // never fragmented at the link layer. When the configured lsp-mtu
+    // is larger than this interface's MTU, an LSP generated at that
+    // size cannot fit on the wire, so drop it rather than emit a frame
+    // the kernel (or peer) will reject. The SRM flags are still cleared
+    // below so we don't busy-loop re-arming the send timer; the LSPs
+    // re-flood once the MTU mismatch is resolved and origination next
+    // marks them.
+    let lsp_mtu = top.up_config.lsp_mtu() as u32;
+    let if_mtu = top.state.mtu;
+    if lsp_mtu > if_mtu {
+        tracing::warn!(
+            "[LspFlood] {}: dropping {} LSP flood: lsp-mtu {} exceeds interface MTU {}",
+            top.state.name,
+            level,
+            lsp_mtu,
+            if_mtu
+        );
+        if let Some(adj) = top.lsdb.get_mut(&level).adj.get_mut(&ifindex) {
+            for lsp_id in &srm_entries {
+                adj.srm.0.remove(lsp_id);
+            }
+        }
+        return;
+    }
+
     // Send LSPs for each SRM entry.
     for lsp_id in srm_entries {
         let lsdb = top.lsdb.get(&level);

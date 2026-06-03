@@ -1,0 +1,49 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: s-n1
+  ipv4:
+    address: 192.168.0.1/30
+- if-name: s-n2
+  ipv4:
+    address: 192.168.0.5/30
+- if-name: s-n3
+  ipv4:
+    address: 192.168.0.9/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: s
+    # Recovery config for the lsp-mtu drop test: lsp-mtu is now 1400,
+    # below the 1500-byte MTU of s's links, so s's LSP floods normally
+    # again and n1 finally installs the 100.99.0.1/32 network that was
+    # dropped while lsp-mtu sat above the interface MTU (see
+    # s-lspmtu.yaml).
+    lsp-mtu: 1400
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 100.99.0.1/32
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 100
+    - if-name: s-n1
+      ipv4:
+        enable: true
+      metric: 1
+    - if-name: s-n2
+      ipv4:
+        enable: true
+      metric: 1
+    - if-name: s-n3
+      ipv4:
+        enable: true
+      metric: 1000
+    is-type: level-2-only
+    segment-routing: mpls
+    fast-reroute: ti-lfa
+    te-router-id: 10.0.0.1

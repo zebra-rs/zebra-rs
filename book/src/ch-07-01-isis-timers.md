@@ -391,6 +391,7 @@ Gaps relative to IOS-XR that zebra-rs does not yet implement:
 `prc-interval` (no partial route calculation distinct from full
 SPF), `lsp-interval` (LSP send pacing), `retransmit-interval` /
 `retransmit-throttle-interval` (no periodic LSP retransmit-until-ack
-on point-to-point), `lsp-mtu` (no LSP fragmentation yet),
-`adjacency-stagger`, and BFD client integration for IS-IS
-adjacencies.
+on point-to-point), and `adjacency-stagger`. LSP sizing and
+fragmentation (IOS-XR's `lsp-mtu`) *are* implemented — see
+[LSP MTU and Fragmentation](ch-07-05-isis-lsp-mtu.md) — as is BFD
+client integration for IS-IS adjacencies (see [BFD](ch-07-03-isis-bfd.md)).

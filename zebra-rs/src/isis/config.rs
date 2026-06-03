@@ -133,6 +133,7 @@ impl Isis {
             config_lsp_gen_maximum_wait,
         );
         self.callback_add("/router/isis/lsp-mtu-size", config_lsp_mtu_size);
+        self.callback_add("/router/isis/lsp-mtu", config_lsp_mtu);
         self.callback_add("/router/isis/te-router-id", config_te_router_id);
         self.callback_add("/router/isis/segment-routing/mpls", config_sr_mpls_enable);
         self.callback_add(
@@ -432,6 +433,15 @@ pub struct IsisConfig {
     /// drives the send-side packer's fragment boundary. Default
     /// 1492 — the universally-accepted IS-IS PDU size.
     pub lsp_mtu_size: Option<u16>,
+
+    /// Maximum byte size of an LSP PDU transmitted on an interface
+    /// (`/router/isis/lsp-mtu`). IS-IS LSPs are flooded as a single
+    /// link-layer frame and are never fragmented at the link layer, so
+    /// when `lsp_mtu` exceeds an interface's MTU the LSP cannot fit on
+    /// the wire — the send path drops it (with a warning) for that
+    /// interface. Default 1497 (fits standard 1500-byte Ethernet);
+    /// raise it on jumbo-frame domains.
+    pub lsp_mtu: Option<u16>,
     pub te_router_id: Option<Ipv4Addr>,
     pub rib_router_id: Option<Ipv4Addr>,
     pub enable: Afis<usize>,
@@ -716,6 +726,7 @@ impl Default for IsisConfig {
             lsp_gen_secondary_wait: Default::default(),
             lsp_gen_maximum_wait: Default::default(),
             lsp_mtu_size: Default::default(),
+            lsp_mtu: Default::default(),
             te_router_id: Default::default(),
             rib_router_id: Default::default(),
             enable: Default::default(),
@@ -760,6 +771,10 @@ impl IsisConfig {
     /// implementation is required to accept. Larger values are valid
     /// on links where every peer agrees, but 1492 is the safe default.
     pub const DEFAULT_LSP_MTU_SIZE: u16 = 1492;
+    /// Default transmit-side LSP MTU. 1497 fits a standard 1500-byte
+    /// Ethernet frame, so the over-MTU drop check stays inert on normal
+    /// links; operators raise it on jumbo-frame domains.
+    pub const DEFAULT_LSP_MTU: u16 = 1497;
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
@@ -824,6 +839,10 @@ impl IsisConfig {
 
     pub fn lsp_mtu_size(&self) -> u16 {
         self.lsp_mtu_size.unwrap_or(Self::DEFAULT_LSP_MTU_SIZE)
+    }
+
+    pub fn lsp_mtu(&self) -> u16 {
+        self.lsp_mtu.unwrap_or(Self::DEFAULT_LSP_MTU)
     }
 
     /// True when either SR dataplane is enabled. Used to gate emission
@@ -1143,6 +1162,22 @@ fn config_lsp_mtu_size(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
             let _ = isis.tx.send(Message::LspOriginate(level, None));
         }
     }
+    Some(())
+}
+
+/// `/router/isis/lsp-mtu` — the maximum LSP PDU size this router will
+/// transmit on an interface. The flood (SRM) send path compares this
+/// against each interface's MTU; an LSP that would exceed the link MTU
+/// is dropped rather than emitted, since IS-IS PDUs are never
+/// fragmented at the link layer. Storage-only here — the check lives in
+/// `flood::srm_advertise` and reads the value per send.
+fn config_lsp_mtu(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let size = args.u16()?;
+    isis.config.lsp_mtu = if op == ConfigOp::Set {
+        Some(size)
+    } else {
+        None
+    };
     Some(())
 }
 
