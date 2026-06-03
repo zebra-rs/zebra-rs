@@ -1343,6 +1343,9 @@ impl Isis {
             RibRx::LinkDown(ifindex) => {
                 self.link_state_down(ifindex);
             }
+            RibRx::LinkMtu { ifindex, mtu } => {
+                self.link_mtu(ifindex, mtu);
+            }
             RibRx::AddrAdd(addr) => {
                 // isis_info!("Isis::AddrAdd {}", addr.addr);
                 self.addr_add(addr);

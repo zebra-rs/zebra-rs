@@ -814,6 +814,16 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// The kernel MTU of an interface changed. Refresh the cached
+    /// value used to stamp the DD packet's `if_mtu` (RFC 2328 §10.6 MTU
+    /// mismatch) and shown by `show ip[v6] ospf interface`. Shared by
+    /// v2 and v3; updating in place keeps the IFSM/adjacency untouched.
+    fn link_mtu(&mut self, ifindex: u32, mtu: u32) {
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.mtu = mtu;
+        }
+    }
+
     /// The kernel link is gone. If OSPF was enabled on it, fire
     /// `Disable` so the IFSM tears the adjacency down, then drop
     /// the link from `self.links`. Shared by v2 and v3.
@@ -3998,6 +4008,9 @@ impl Ospf<Ospfv2> {
             RibRx::LinkDel(ifindex) => {
                 self.link_del(ifindex);
             }
+            RibRx::LinkMtu { ifindex, mtu } => {
+                self.link_mtu(ifindex, mtu);
+            }
             RibRx::AddrAdd(addr) => {
                 self.addr_add(addr);
             }
@@ -4338,6 +4351,7 @@ impl Ospf<Ospfv3> {
             RibRx::LinkUp(ifindex) => self.link_up(ifindex),
             RibRx::LinkDown(ifindex) => self.link_down(ifindex),
             RibRx::LinkDel(ifindex) => self.link_del(ifindex),
+            RibRx::LinkMtu { ifindex, mtu } => self.link_mtu(ifindex, mtu),
             RibRx::AddrAdd(addr) => self.addr_add(addr),
             RibRx::AddrDel(addr) => self.addr_del(addr),
             // VRF master lifecycle (default instance only): spawn /

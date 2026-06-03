@@ -195,6 +195,7 @@ mod tests {
             index,
             name: name.to_string(),
             mtu: 1500,
+            original_mtu: 1500,
             metric: 1,
             flags: LinkFlags::default(),
             link_type: LinkType::Ethernet,
@@ -205,6 +206,7 @@ mod tests {
             master: None,
             vni: None,
             vxlan_local: None,
+            mtu_error: None,
         }
     }
 
