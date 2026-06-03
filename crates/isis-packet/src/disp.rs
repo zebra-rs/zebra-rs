@@ -233,6 +233,29 @@ impl Display for IsisSysId {
     }
 }
 
+impl FromStr for IsisSysId {
+    type Err = ();
+
+    /// Parse the canonical `xxxx.xxxx.xxxx` system-id form — three
+    /// dot-separated groups of four hex digits, the exact shape
+    /// `Display` emits. Used by `clear isis neighbor <system-id>`.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 3 {
+            return Err(());
+        }
+        let mut id = [0u8; 6];
+        for (i, part) in parts.iter().enumerate() {
+            if part.len() != 4 {
+                return Err(());
+            }
+            id[i * 2] = u8::from_str_radix(&part[0..2], 16).map_err(|_| ())?;
+            id[i * 2 + 1] = u8::from_str_radix(&part[2..4], 16).map_err(|_| ())?;
+        }
+        Ok(IsisSysId { id })
+    }
+}
+
 impl Display for IsisNeighborId {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(
@@ -471,5 +494,33 @@ impl Display for IsisTlvRestart {
             write!(f, " neighbor={}", id)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::IsisSysId;
+
+    #[test]
+    fn sys_id_from_str_roundtrip() {
+        let id: IsisSysId = "0000.0000.0001".parse().unwrap();
+        assert_eq!(id.id, [0, 0, 0, 0, 0, 1]);
+        assert_eq!(id.to_string(), "0000.0000.0001");
+
+        let id: IsisSysId = "1921.6800.1001".parse().unwrap();
+        assert_eq!(id.id, [0x19, 0x21, 0x68, 0x00, 0x10, 0x01]);
+        assert_eq!(id.to_string(), "1921.6800.1001");
+    }
+
+    #[test]
+    fn sys_id_from_str_invalid() {
+        // Wrong group count.
+        assert!("0000.0000".parse::<IsisSysId>().is_err());
+        assert!("0000.0000.0001.0000".parse::<IsisSysId>().is_err());
+        // Wrong group width.
+        assert!("000.0000.0001".parse::<IsisSysId>().is_err());
+        assert!("00000.0000.0001".parse::<IsisSysId>().is_err());
+        // Non-hex.
+        assert!("zzzz.0000.0001".parse::<IsisSysId>().is_err());
     }
 }
