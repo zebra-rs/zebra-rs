@@ -1,0 +1,31 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: i2
+  ipv4:
+    address: 10.0.12.1/30
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-1
+    hostname: r1
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
