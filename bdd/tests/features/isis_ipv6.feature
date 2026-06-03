@@ -1,5 +1,6 @@
 @serial
 @isis_ipv6
+@isis
 Feature: IS-IS IPv6 single-topology
   As a network operator
   I want two zebra-rs instances to form an IS-IS L2 adjacency over a

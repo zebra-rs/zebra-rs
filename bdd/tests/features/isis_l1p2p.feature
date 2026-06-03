@@ -1,5 +1,6 @@
 @serial
-@isis_l1_p2p
+@isis_l1p2p
+@isis
 Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder
   As a network operator
   I want ten zebra-rs instances arranged in a 2x5 "ladder" to form IS-IS

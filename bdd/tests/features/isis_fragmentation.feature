@@ -1,5 +1,6 @@
 @serial
 @isis_fragmentation
+@isis
 Feature: IS-IS LSP fragmentation under a tight lsp-mtu-size
   As a network operator
   I want zebra-rs to fragment its self-originated LSP across multiple

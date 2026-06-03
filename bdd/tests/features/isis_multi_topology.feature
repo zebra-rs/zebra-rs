@@ -1,5 +1,6 @@
 @serial
 @isis_multi_topology
+@isis
 Feature: IS-IS multi-topology (RFC 5120)
   As a network operator
   I want two zebra-rs instances to participate in IS-IS multi-topology

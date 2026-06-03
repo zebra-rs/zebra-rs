@@ -1,5 +1,6 @@
 @serial
 @isis_srv6
+@isis
 Feature: IS-IS SRv6 end-to-end with H.Encap and End.DT6
   As a network operator
   I want a 4-router IS-IS L2 chain to converge with SRv6 locators,
