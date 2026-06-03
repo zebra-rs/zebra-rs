@@ -1,4 +1,3 @@
-@serial
 @isis_l1p2p
 @isis
 Feature: IS-IS Level-1-only over an all-point-to-point 10-router ladder

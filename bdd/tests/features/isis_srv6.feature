@@ -1,4 +1,3 @@
-@serial
 @isis_srv6
 @isis
 Feature: IS-IS SRv6 end-to-end with H.Encap and End.DT6

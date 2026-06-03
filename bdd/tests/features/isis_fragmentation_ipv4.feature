@@ -1,4 +1,3 @@
-@serial
 @isis_fragmentation_ipv4
 @isis
 Feature: IS-IS LSP fragmentation (IPv4) at lsp-mtu-size 400 and 1500

@@ -1,4 +1,3 @@
-@serial
 @isis_ipv6
 @isis
 Feature: IS-IS IPv6 single-topology

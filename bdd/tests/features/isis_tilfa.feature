@@ -1,4 +1,3 @@
-@serial
 @isis_tilfa
 @isis
 Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
