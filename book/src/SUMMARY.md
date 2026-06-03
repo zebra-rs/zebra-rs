@@ -28,6 +28,7 @@
 - [OSPFv2](ch-08-00-ospf.md)
   - [Configuration](ch-08-01-ospf-configuration.md)
   - [BFD](ch-08-02-ospf-bfd.md)
+  - [Clearing OSPF State](ch-08-03-ospf-clear.md)
 
 ## Failure Detection
 
