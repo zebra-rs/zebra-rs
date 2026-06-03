@@ -1,0 +1,47 @@
+# Peer of z1.yaml -- same key-chain name + key material so the IIH
+# authentication TLV verifies in both directions.
+
+key-chains:
+  key-chain:
+  - name: ISIS-HELLO
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "zebra-isis-hello-secret"
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+  ipv6:
+    address: 2001:db8:0:ffff::2/128
+- if-name: i1
+  ipv4:
+    address: 10.0.1.2/30
+  ipv6:
+    address: 2001:db8:1::2/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    is-type: level-1
+    hostname: z2
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i1
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      # Authenticate IIH/CSNP/PSNP on this link via the ISIS-HELLO chain.
+      hello-authentication:
+        key-chain: ISIS-HELLO

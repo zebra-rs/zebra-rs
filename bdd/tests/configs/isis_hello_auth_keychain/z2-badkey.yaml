@@ -1,0 +1,50 @@
+# z2 with the ISIS-HELLO chain re-keyed to a secret that z1 does NOT
+# share. The chain name, key-id, and crypto-algorithm are unchanged --
+# only the key-string differs -- so the failure isolates a key mismatch
+# (not an algorithm or key-id mismatch). z2 now signs its IIHs with a
+# digest z1 cannot verify and rejects z1's IIHs in turn, so the
+# Hello-authenticated adjacency tears down once the hold timers expire.
+
+key-chains:
+  key-chain:
+  - name: ISIS-HELLO
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "WRONG-key-not-shared-with-z1"
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+  ipv6:
+    address: 2001:db8:0:ffff::2/128
+- if-name: i1
+  ipv4:
+    address: 10.0.1.2/30
+  ipv6:
+    address: 2001:db8:1::2/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    is-type: level-1
+    hostname: z2
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i1
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      hello-authentication:
+        key-chain: ISIS-HELLO
