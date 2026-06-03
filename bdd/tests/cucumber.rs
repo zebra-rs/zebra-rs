@@ -369,6 +369,19 @@ async fn clear_bgp_neighbor(world: &mut World, namespace: String, neighbor: Stri
     );
 }
 
+/// Run an operational command (anything `vtyctl clear "<cmd>"` accepts —
+/// the `clear ...` surface) inside a namespace. Generic sibling of the
+/// BGP-specific `clear_bgp_neighbor`; used by the OSPF feature to issue
+/// `clear ospf neighbor [<router-id>]`.
+#[when(expr = "I run {string} in namespace {string}")]
+async fn run_exec_command(world: &mut World, command: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "vtyctl", &["clear", &command])
+        .await
+        .unwrap_or_else(|e| panic!("Failed to run '{}' in {}: {}", command, scoped, e));
+    println!("✓ Ran '{}' in namespace {}", command, scoped);
+}
+
 #[when(expr = "I delete namespace {string}")]
 async fn delete_namespace(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
@@ -634,6 +647,90 @@ async fn show_command_not_contains(
     println!(
         "✓ show '{}' in namespace {} does not contain '{}'",
         show_cmd, scoped, needle
+    );
+}
+
+/// Parse the OSPF `show ip ospf neighbor` up-time string (the
+/// `format_uptime` output: "0m08s", "1h02m03s", "1d02h03m") into whole
+/// seconds. Any hours/days component is far past the thresholds this
+/// test uses, so the coarse conversion is sufficient.
+fn parse_ospf_uptime(s: &str) -> Option<u64> {
+    let mut secs = 0u64;
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else {
+            let v: u64 = num.parse().ok()?;
+            num.clear();
+            secs += match ch {
+                'd' => v * 86400,
+                'h' => v * 3600,
+                'm' => v * 60,
+                's' => v,
+                _ => return None,
+            };
+        }
+    }
+    Some(secs)
+}
+
+/// Assert an OSPFv2 neighbor's up-time is below a bound, read from
+/// `vtyctl show -j "show ip ospf neighbor"`. A freshly (re)formed
+/// adjacency has a small up-time; this is the deterministic proof that
+/// `clear ospf neighbor` actually destroyed and re-learned the
+/// neighbor instance rather than leaving it untouched (whose up-time
+/// would keep climbing past the bound).
+#[then(expr = "ospf neighbor {string} uptime in namespace {string} should be under {int} seconds")]
+async fn ospf_neighbor_uptime_under(
+    world: &mut World,
+    neighbor_id: String,
+    namespace: String,
+    max_secs: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip ospf neighbor"])
+        .await
+        .expect("Failed to run show ip ospf neighbor");
+    let nbrs: serde_json::Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!(
+            "show ip ospf neighbor -j in {} was not valid JSON: {}\nfull output:\n{}",
+            scoped, e, output
+        )
+    });
+    let arr = nbrs.as_array().unwrap_or_else(|| {
+        panic!(
+            "ospf neighbor JSON in {} was not an array:\n{}",
+            scoped, output
+        )
+    });
+    let nbr = arr
+        .iter()
+        .find(|n| n.get("neighbor_id").and_then(|v| v.as_str()) == Some(neighbor_id.as_str()))
+        .unwrap_or_else(|| {
+            panic!(
+                "neighbor {} not present in {} ospf neighbor table:\n{}",
+                neighbor_id, scoped, output
+            )
+        });
+    let up = nbr
+        .get("up_time")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("neighbor {} has no up_time field:\n{}", neighbor_id, output));
+    let secs = parse_ospf_uptime(up)
+        .unwrap_or_else(|| panic!("could not parse neighbor {} up_time {:?}", neighbor_id, up));
+    assert!(
+        secs < max_secs,
+        "neighbor {} up-time {} ({}s) in {} was not under {}s — clear did not reset the adjacency",
+        neighbor_id,
+        up,
+        secs,
+        scoped,
+        max_secs
+    );
+    println!(
+        "✓ neighbor {} up-time {} (<{}s) in {}",
+        neighbor_id, up, max_secs, scoped
     );
 }
 
