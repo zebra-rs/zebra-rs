@@ -563,6 +563,19 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// Candidate completions for `ext:dynamic "ospf:neighbor"` — the
+    /// current neighbor addresses (the `OspfLink.nbrs` keys; for v2
+    /// the neighbor's interface source IP). Feeds tab-completion of
+    /// `clear ospf neighbor <addr>`. Deduped + sorted via `BTreeSet`
+    /// since the same address could appear on more than one link.
+    fn neighbor_comps(&self) -> Vec<String> {
+        let mut addrs: BTreeSet<Ipv4Addr> = BTreeSet::new();
+        for link in self.links.values() {
+            addrs.extend(link.nbrs.keys().copied());
+        }
+        addrs.iter().map(|addr| addr.to_string()).collect()
+    }
+
     /// Record a rewritten per-VRF config line (default instance only).
     /// Appends to the VRF's replay log and, if its child is already
     /// running, forwards the line live to the child's config inbox.
@@ -971,6 +984,22 @@ impl Ospf<Ospfv2> {
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
             self.commit_flex_algo_tables();
+            return;
+        }
+
+        // Dynamic tab-completion (`ext:dynamic "ospf:<handler>"`): the
+        // manager sends the handler name as the sole path segment and
+        // waits on `msg.resp` for the candidate list. Answer directly —
+        // these are instance-level, not VRF-scoped.
+        if msg.op == ConfigOp::Completion {
+            let (path, _) = path_from_command(&msg.paths);
+            let comps = match path.as_str() {
+                "/neighbor" => self.neighbor_comps(),
+                _ => Vec::new(),
+            };
+            if let Some(resp) = msg.resp {
+                let _ = resp.send(comps);
+            }
             return;
         }
 
