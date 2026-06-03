@@ -1188,7 +1188,7 @@ fn verify_pdu_auth(
 ) -> bool {
     // Snapshot config fields so we don't hold an immutable borrow of
     // link.config/up_config while mutating link.state.auth_rx_* below.
-    let (cfg, mode, send_only) = {
+    let (cfg, send_only) = {
         let cfg = match scope {
             AuthScope::HelloLink => &link.config.hello_auth,
             AuthScope::AreaPassword => &link.up_config.area_password,
@@ -1199,7 +1199,7 @@ fn verify_pdu_auth(
         if cfg.password.is_none() && cfg.key_chain.is_none() {
             return true;
         }
-        (cfg.clone(), cfg.auth_type, cfg.send_only)
+        (cfg.clone(), cfg.send_only)
     };
     if send_only {
         return true; // sign-only-on-tx rollover mode
@@ -1215,17 +1215,11 @@ fn verify_pdu_auth(
         return false;
     };
 
-    // Pull the on-wire RFC 5310 key-id out of the auth TLV prefix
-    // when the configured mode is generic-crypto; MD5 / Text PDUs
-    // don't carry one. The chain receive path uses this to pick the
-    // exact key the sender stamped.
-    let wire_key_id = if mode.is_generic_crypto() && auth_tlv.value.len() >= 2 {
-        Some(u16::from_be_bytes([auth_tlv.value[0], auth_tlv.value[1]]))
-    } else {
-        None
-    };
-    let Some(key) =
-        auth::resolve_recv(&cfg, link.key_chains, mode, wire_key_id, chrono::Utc::now())
+    // The verify algorithm + key come from the chain key the sender
+    // stamped (selected by the wire Key ID / Auth-Type) for the
+    // key-chain path, or from the configured auth-type + inline
+    // password — see `auth::resolve_recv`.
+    let Some((mode, key)) = auth::resolve_recv(&cfg, link.key_chains, auth_tlv, chrono::Utc::now())
     else {
         // Resolution failed: chain missing, no matching key-id,
         // expired accept-lifetime, or algo mismatch. Treat as a
