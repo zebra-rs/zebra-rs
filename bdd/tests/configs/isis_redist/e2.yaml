@@ -1,0 +1,17 @@
+# e2 — an edge host that does NOT run IS-IS. It reaches the network
+# (including e1's redistributed loopback) through a static default
+# route pointing at r3 (10.2.0.1).
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.2.2.2/32
+- if-name: ir3
+  ipv4:
+    address: 10.2.0.2/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.2.0.1

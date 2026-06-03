@@ -1,0 +1,46 @@
+# r1 with static redistribution withdrawn. Identical to r1.yaml except
+# the `afi-safi ipv4 / redistribute static` block is gone, so applying
+# this file makes the config diff DELETE the redistribution. The static
+# route to e1 stays, so e1 is still locally reachable from r1 — only the
+# IS-IS advertisement of 10.1.1.1/32 is withdrawn from the area.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ie1
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: i2
+  ipv4:
+    address: 10.0.12.1/30
+- if-name: i4
+  ipv4:
+    address: 10.0.14.1/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.1.1.1/32
+        nexthop:
+        - address: 10.1.0.2
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-1
+    hostname: r1
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: i4
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

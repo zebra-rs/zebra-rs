@@ -1,0 +1,46 @@
+# r3 — the far border, where e2 attaches. Its edge link "ie2" toward
+# e2 IS an IS-IS interface so the 10.2.0.0/30 edge subnet is advertised
+# into the area; that gives r1 a route back to e2's source address, so
+# the e2 -> e1 reply path resolves even though e2 itself runs no IS-IS
+# and never forms an adjacency on that link.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: i2
+  ipv4:
+    address: 10.0.23.2/30
+- if-name: i5
+  ipv4:
+    address: 10.0.35.2/30
+- if-name: ie2
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    is-type: level-1
+    hostname: r3
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: i5
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: ie2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

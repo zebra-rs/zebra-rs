@@ -1,0 +1,52 @@
+# r1 — the redistributing border. It has a static route to e1's
+# loopback (10.1.1.1/32) over the non-IS-IS edge link "ie1", and
+# redistributes static into IS-IS at Level-1 so the rest of the L1
+# area learns e1's loopback. Note "ie1" carries an address but is NOT
+# an IS-IS interface, so 10.1.1.1/32 can only enter the IS-IS domain
+# via redistribution.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ie1
+  ipv4:
+    address: 10.1.0.1/30
+- if-name: i2
+  ipv4:
+    address: 10.0.12.1/30
+- if-name: i4
+  ipv4:
+    address: 10.0.14.1/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.1.1.1/32
+        nexthop:
+        - address: 10.1.0.2
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-1
+    hostname: r1
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        static:
+          level: level-1
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: i4
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
