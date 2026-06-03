@@ -1169,7 +1169,7 @@ fn config_lsp_mtu_size(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
 /// transmit on an interface. The flood (SRM) send path compares this
 /// against each interface's MTU; an LSP that would exceed the link MTU
 /// is dropped rather than emitted, since IS-IS PDUs are never
-/// fragmented at the link layer. Storage-only here — the check lives in
+/// fragmented at the link layer. The check lives in
 /// `flood::srm_advertise` and reads the value per send.
 fn config_lsp_mtu(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let size = args.u16()?;
@@ -1178,6 +1178,21 @@ fn config_lsp_mtu(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     } else {
         None
     };
+
+    // Re-originate so the new transmit cap takes effect on the existing
+    // self-LSPs immediately. Lowering lsp-mtu back under an interface's
+    // MTU must re-flood any LSP the over-MTU value had been dropping on
+    // send (`flood::srm_advertise` clears the SRM flags on drop, so the
+    // peer never sees those LSPs until origination re-marks them).
+    // Without this trigger the recovery only happens at the next natural
+    // origination (periodic refresh, minutes away). Raising lsp-mtu has
+    // no harmful effect here — the regenerated LSP is simply dropped on
+    // send again while the value exceeds the link MTU.
+    for level in [Level::L1, Level::L2] {
+        if has_level(isis.config.is_type(), level) {
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
+        }
+    }
     Some(())
 }
 
