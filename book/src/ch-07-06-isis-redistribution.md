@@ -187,8 +187,27 @@ underlying static (or connected/BGP/OSPF) route, so it will not appear
 in that router's *IS-IS* route table — only on the routers that learned
 it from the LSP.
 
+To confirm a prefix was actually placed into (or removed from) the
+**originating** router's self-LSP, look at its own LSP body, which
+`show isis database detail` prints TLV-by-TLV. The redistributed prefix
+shows up as an Extended IP Reachability entry under r1's LSP (the one
+flagged `*`):
+
+```text
+zebra# show isis database detail
+...
+r1.00-00  *  ...
+  ...
+  Extended IP Reachability: 10.1.1.1/32 (Metric: 0)
+```
+
+This is the authoritative check for redistribution and withdrawal: `no
+redistribute` must make that line disappear from the originator's own
+LSP, not merely from some downstream router's route table.
+
 This behaviour is exercised end-to-end by the `isis_redist` BDD feature
 (`bdd/tests/features/isis-redist.feature`), which redistributes a
-static route into a five-router Level-1 area, confirms every router
-installs it, fails it over onto a backup path, and verifies it is
-withdrawn when redistribution is removed.
+static route into a five-router Level-1 area, confirms it lands in r1's
+self-originated LSP and that every router installs it, fails it over
+onto a backup path, and verifies `no redistribute` clears the prefix
+from r1's own LSP (and therefore from the whole area).

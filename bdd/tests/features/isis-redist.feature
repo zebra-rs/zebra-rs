@@ -92,11 +92,17 @@ Feature: IS-IS redistribution of static routes into a Level-1 area
 
   Scenario: r1 redistributes e1's loopback into IS-IS and it floods across the area
     Given the test topology exists
+    # Origination: r1 carries e1's loopback in its OWN self-originated
+    # LSP as an Extended IP Reachability. `show isis database detail`
+    # prints every reachability TLV from the LSP body, so seeing the
+    # prefix in r1's database proves the redistribution actually entered
+    # the self-LSP (not just the local RIB).
+    Then show command "show isis database detail" in namespace "r1" should contain "10.1.1.1/32"
     # The redistributed prefix is an external IP reachability originated
     # by r1; every other router runs SPF against it and installs it. Its
     # presence in `show isis route` proves the per-level SPF picked it
     # up; in `show ip route` proves it reached the central RIB.
-    Then show command "show isis route" in namespace "r2" should contain "10.1.1.1/32"
+    And show command "show isis route" in namespace "r2" should contain "10.1.1.1/32"
     And show command "show isis route" in namespace "r3" should contain "10.1.1.1/32"
     And show command "show isis route" in namespace "r5" should contain "10.1.1.1/32"
     And show command "show ip route" in namespace "r3" should contain "10.1.1.1/32"
@@ -136,26 +142,32 @@ Feature: IS-IS redistribution of static routes into a Level-1 area
     And I wait 15 seconds
     Then ping from "e2" to "10.1.1.1" should succeed
 
-  Scenario: Withdrawing redistribution removes e1's loopback from the area
+  Scenario: "no redistribute" withdraws e1's loopback from r1's own LSP
     Given the test topology exists
-    # Re-apply r1 with the `redistribute static` block removed (the
-    # static route to e1 stays). The config diff deletes the
-    # redistribution, so r1 re-originates its LSP without the external
-    # reachability and the area withdraws 10.1.1.1/32.
+    # Precondition: redistribution is still active from the build
+    # scenario, so r1's self-originated LSP carries e1's loopback.
+    Then show command "show isis database detail" in namespace "r1" should contain "10.1.1.1/32"
+    # Withdraw redistribution. r1-noredist.yaml is identical to r1.yaml
+    # except the `redistribute static` block is gone, so the config diff
+    # only DELETES the redistribution — the static route to e1 stays in
+    # place. r1 must re-originate its LSP without the external reachability.
     When I apply config "r1-noredist.yaml" to namespace "r1"
     And I wait 10 seconds
-    Then show command "show isis route" in namespace "r3" should not contain "10.1.1.1/32"
+    # Core assertion: the prefix is gone from r1's OWN self-originated
+    # LSP. This is the source of truth — if 10.1.1.1/32 lingered here,
+    # "no redistribute" failed to withdraw the route from the LSP it
+    # originated, which is a real bug (not merely a stale downstream
+    # route someone else still holds).
+    Then show command "show isis database detail" in namespace "r1" should not contain "10.1.1.1/32"
+    # The withdrawal propagates from the now-clean LSP: r3 drops the
+    # route from both its IS-IS table and the central RIB, and the data
+    # plane follows.
+    And show command "show isis route" in namespace "r3" should not contain "10.1.1.1/32"
     And show command "show ip route" in namespace "r3" should not contain "10.1.1.1/32"
     And ping from "e2" to "10.1.1.1" should fail
     # r1 still has the local static route, so e1's loopback is reachable
     # from r1 itself — only the IS-IS advertisement was withdrawn.
     And ping from "r1" to "10.1.1.1" should succeed
-    # Re-enable redistribution; the area relearns the prefix and
-    # end-to-end reachability returns.
-    When I apply config "r1.yaml" to namespace "r1"
-    And I wait 10 seconds
-    Then show command "show isis route" in namespace "r3" should contain "10.1.1.1/32"
-    And ping from "e2" to "10.1.1.1" should succeed
 
   Scenario: Teardown topology
     Given the test topology exists
