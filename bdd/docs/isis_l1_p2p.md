@@ -41,4 +41,5 @@ z4<->z10.
 | Primary path fails over to a different interface (z1 -> z5) | |
 | The two deliberate ECMP diamonds resolve (z2->z6 and z4->z10) | |
 | IS-IS stamps the level into the central RIB | |
+| Area-wide hmac-sha-256 authentication keeps the network converged | |
 | Teardown topology | |

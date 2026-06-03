@@ -40,6 +40,11 @@ isis_tilfa:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_tilfa"
 
+isis:
+	rm -rf allure-results
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_l1_p2p or @isis_tilfa"
+
 bgp_evpn_capability:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_evpn_capability"
