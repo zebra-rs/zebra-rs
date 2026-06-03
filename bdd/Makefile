@@ -48,6 +48,10 @@ isis_l1l2:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_l1l2"
 
+isis_hello_auth_keychain:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_hello_auth_keychain"
+
 ospf_clear_neighbor:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@ospf_clear_neighbor"
@@ -100,4 +104,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 isis_fragmentation isis_fragmentation_ipv4 isis_l1_p2p isis_tilfa isis_l1l2 ospf_clear_neighbor bgp_evpn_capability bgp_vrf_evpn_type5 bgp_route_map_match bgp_policy_dynamic_update bgp_community_no_export_advertise generate open docs FORCE
+.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 isis_fragmentation isis_fragmentation_ipv4 isis_l1_p2p isis_tilfa isis_l1l2 isis_hello_auth_keychain ospf_clear_neighbor bgp_evpn_capability bgp_vrf_evpn_type5 bgp_route_map_match bgp_policy_dynamic_update bgp_community_no_export_advertise generate open docs FORCE

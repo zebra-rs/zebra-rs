@@ -1,0 +1,57 @@
+# IS-IS Hello (IIH) authentication using a named RFC 8177 key-chain.
+#
+# The per-interface `hello-authentication` block references the chain by
+# name instead of carrying an inline `password`. The chain's active key
+# is self-describing: it supplies the algorithm (from `crypto-algorithm`),
+# the RFC 5310 Key ID, and the key material at both sign and verify time.
+# So neither `auth-type` nor `key-id` needs to be repeated on the
+# interface -- the send path stamps them from the chain and the receive
+# path recovers the algorithm from the key the wire Key ID selects.
+#
+# z2 must define the same chain name with an identical key (same key-id,
+# crypto-algorithm, and key-string) for the adjacency to come up.
+
+key-chains:
+  key-chain:
+  - name: ISIS-HELLO
+    key:
+    - key-id: 1
+      crypto-algorithm: hmac-sha-256
+      key-string:
+        keystring: "zebra-isis-hello-secret"
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8:0:ffff::1/128
+- if-name: i2
+  ipv4:
+    address: 10.0.1.1/30
+  ipv6:
+    address: 2001:db8:1::1/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-1
+    hostname: z1
+    interface:
+    - if-name: lo
+      circuit-type: level-1
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: i2
+      circuit-type: level-1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      # Authenticate IIH/CSNP/PSNP on this link via the ISIS-HELLO chain.
+      hello-authentication:
+        key-chain: ISIS-HELLO

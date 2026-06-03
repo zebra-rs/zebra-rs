@@ -103,54 +103,75 @@ pub fn resolve_send(
     })
 }
 
-/// Resolve the receive-side key bytes for an incoming PDU.
+/// Resolve the verify `(algorithm, key bytes)` for an incoming PDU
+/// from its on-wire Auth TLV.
 ///
-/// Inline `password` always wins — operators of the historical
-/// simple-password setup keep their behavior, and the `key-chain`
-/// leaf is only consulted when no inline password is set. For the
-/// chain path:
-///   - generic-crypto wire types carry the sender's RFC 5310 key-id
-///     in the TLV prefix; the caller passes that as `wire_key_id`
-///     and the lookup is an exact match.
-///   - RFC 5304 MD5 doesn't carry a key-id; the caller passes
-///     `None` and the helper picks the lowest accept-active key
-///     whose algo matches `expected_mode`.
+/// Inline `password` always wins — its algorithm is the configured
+/// `auth_type` and the key is the password bytes; the `key-chain` leaf
+/// is only consulted when no inline password is set. Crucially, on the
+/// chain path the algorithm is taken from the *chain key*, not from
+/// `cfg.auth_type`: RFC 5310 puts only a Key ID on the wire (Auth-Type
+/// 3) and the SHA variant is whatever the local key bound to that Key
+/// ID says it is. This is what lets a `key-chain`-only interface (no
+/// `auth-type` leaf) verify inbound generic-crypto PDUs — send and
+/// receive both self-describe from the chain.
 ///
-/// The chosen key's algo must match `expected_mode` so the verify
-/// path doesn't compare digests of differing lengths.
+///   - generic-crypto (Auth-Type 3): read the 2-byte Key ID prefix,
+///     look the key up exactly, and verify with its algorithm. A key
+///     bound to a non-generic algorithm can't verify it.
+///   - HMAC-MD5 (Auth-Type 54): no wire Key ID; pick the lowest
+///     accept-active key whose algorithm is md5.
+///   - cleartext (Auth-Type 1): not representable by a chain key
+///     (RFC 8177 has no cleartext crypto-algorithm), so the chain path
+///     rejects it.
+///
+/// Returns `None` when no accept-active key matches — a hard reject so
+/// peers using the wrong key or algorithm don't slip through.
 pub fn resolve_recv(
     cfg: &IsisAuthConfig,
     chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
-    expected_mode: IsisAuthType,
-    wire_key_id: Option<u16>,
+    auth_tlv: &IsisTlvAuth,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<Vec<u8>> {
+) -> Option<(IsisAuthType, Vec<u8>)> {
+    // Inline password wins; its algorithm is the configured auth-type.
     if let Some(pw) = cfg.password.as_deref() {
-        return Some(pw.as_bytes().to_vec());
+        return Some((cfg.auth_type, pw.as_bytes().to_vec()));
     }
-    let chain_name = cfg.key_chain.as_deref()?;
-    let chain = chains.get(chain_name)?;
-    let key = match wire_key_id {
-        Some(id) => chain.keys.get(&u64::from(id))?,
-        None => {
-            // No wire key-id — find the lowest accept-active key
-            // whose algo matches what the wire claims.
-            chain.keys.values().find(|k| {
-                chain_key_is_accept_active(k, now)
-                    && k.algo
-                        .and_then(isis_algo_from_policy)
-                        .is_some_and(|a| a == expected_mode)
-            })?
+    let chain = chains.get(cfg.key_chain.as_deref()?)?;
+
+    match auth_tlv.auth_type {
+        ISIS_AUTH_TYPE_GENERIC => {
+            // RFC 5310: the 2-byte Key ID prefix selects the exact key,
+            // and that key's own algorithm is the verify mode.
+            if auth_tlv.value.len() < ISIS_AUTH_GENERIC_KEY_ID_LEN {
+                return None;
+            }
+            let wire_key_id = u16::from_be_bytes([auth_tlv.value[0], auth_tlv.value[1]]);
+            let key = chain.keys.get(&u64::from(wire_key_id))?;
+            if !chain_key_is_accept_active(key, now) {
+                return None;
+            }
+            let algo = isis_algo_from_policy(key.algo?)?;
+            // A key bound to md5/cleartext can't verify a generic-crypto
+            // PDU — the digest lengths wouldn't even match.
+            if !algo.is_generic_crypto() {
+                return None;
+            }
+            Some((algo, key.key_material.clone()))
         }
-    };
-    if !chain_key_is_accept_active(key, now) {
-        return None;
+        ISIS_AUTH_TYPE_HMAC_MD5 => {
+            // RFC 5304 MD5 carries no Key ID — pick the lowest
+            // accept-active key whose algorithm is md5.
+            let key = chain.keys.values().find(|k| {
+                chain_key_is_accept_active(k, now)
+                    && k.algo.and_then(isis_algo_from_policy) == Some(IsisAuthType::Md5)
+            })?;
+            Some((IsisAuthType::Md5, key.key_material.clone()))
+        }
+        // Cleartext (Auth-Type 1) can't be carried by a chain key, and
+        // any other Auth-Type is unknown — reject.
+        _ => None,
     }
-    let algo = isis_algo_from_policy(key.algo?)?;
-    if algo != expected_mode {
-        return None;
-    }
-    Some(key.key_material.clone())
 }
 
 /// HMAC-MD5 over `data` keyed by `key` (RFC 2104 / RFC 5304 §3).
@@ -612,6 +633,106 @@ mod tests {
         let cfg = IsisAuthConfig::default();
         let resolved = resolve_send(&cfg, &chains, now);
         assert_eq!(auth_tlv_wire_size(resolved.as_ref()), 0);
+    }
+
+    /// The receive path must take the verify algorithm from the chain
+    /// key the wire Key ID selects — NOT from `cfg.auth_type`. This is
+    /// the regression guard for a key-chain-only `hello-authentication`
+    /// block: with `auth_type` left at its `Text` default, an inbound
+    /// generic-crypto (RFC 5310) PDU must still resolve to the chain
+    /// key's HMAC-SHA-256 instead of being dropped.
+    #[test]
+    fn resolve_recv_takes_algorithm_from_chain_key() {
+        use crate::policy::{CryptoAlgorithm, Key, KeyChain};
+
+        let now = chrono::Utc::now();
+        let secret = b"zebra-isis-hello-secret".to_vec();
+
+        let chain = |algo| {
+            let mut keys = std::collections::BTreeMap::new();
+            keys.insert(
+                1u64,
+                Key {
+                    algo: Some(algo),
+                    key_material: secret.clone(),
+                    ..Default::default()
+                },
+            );
+            let mut chains = std::collections::BTreeMap::new();
+            chains.insert(
+                "ISIS-HELLO".to_string(),
+                KeyChain {
+                    keys,
+                    ..Default::default()
+                },
+            );
+            chains
+        };
+        let sha_chains = chain(CryptoAlgorithm::HmacSha256);
+
+        // key-chain set, auth_type at the `Text` default (the config
+        // shape that previously dropped every inbound PDU).
+        let cfg = IsisAuthConfig {
+            password: None,
+            auth_type: IsisAuthType::Text,
+            key_id: 0,
+            send_only: false,
+            key_chain: Some("ISIS-HELLO".into()),
+        };
+
+        // Wire: generic-crypto, Key ID 1, digest bytes (content
+        // irrelevant — resolve_recv only reads the Key ID prefix).
+        let generic_tlv = |key_id: u16| IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_GENERIC,
+            value: {
+                let mut v = key_id.to_be_bytes().to_vec();
+                v.extend_from_slice(&[0u8; 32]);
+                v
+            },
+        };
+        let (algo, key) =
+            resolve_recv(&cfg, &sha_chains, &generic_tlv(1), now).expect("chain key resolves");
+        assert_eq!(algo, IsisAuthType::HmacSha256);
+        assert_eq!(key, secret);
+
+        // Unknown wire Key ID → no key → reject.
+        assert!(resolve_recv(&cfg, &sha_chains, &generic_tlv(7), now).is_none());
+
+        // Wire claims cleartext, but a chain key can't carry cleartext
+        // (RFC 8177 has no cleartext crypto-algorithm) → reject.
+        let cleartext_tlv = IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_CLEARTEXT,
+            value: b"whatever".to_vec(),
+        };
+        assert!(resolve_recv(&cfg, &sha_chains, &cleartext_tlv, now).is_none());
+
+        // A chain key bound to md5 can't verify a generic-crypto PDU.
+        let md5_chains = chain(CryptoAlgorithm::Md5);
+        assert!(resolve_recv(&cfg, &md5_chains, &generic_tlv(1), now).is_none());
+
+        // RFC 5304 MD5 wire (Auth-Type 54, no Key ID) resolves the md5
+        // chain key.
+        let md5_tlv = IsisTlvAuth {
+            auth_type: ISIS_AUTH_TYPE_HMAC_MD5,
+            value: vec![0u8; ISIS_AUTH_HMAC_MD5_LEN],
+        };
+        let (algo, key) =
+            resolve_recv(&cfg, &md5_chains, &md5_tlv, now).expect("md5 chain key resolves");
+        assert_eq!(algo, IsisAuthType::Md5);
+        assert_eq!(key, secret);
+
+        // Inline password still wins and uses the configured auth-type.
+        let inline = IsisAuthConfig {
+            password: Some("hunter2".into()),
+            auth_type: IsisAuthType::Md5,
+            key_id: 0,
+            send_only: false,
+            key_chain: None,
+        };
+        let (algo, key) =
+            resolve_recv(&inline, &sha_chains, &generic_tlv(1), now).expect("inline password");
+        assert_eq!(algo, IsisAuthType::Md5);
+        assert_eq!(key, b"hunter2");
     }
 
     /// End-to-end HMAC-MD5 round-trip across a real CSNP — same
