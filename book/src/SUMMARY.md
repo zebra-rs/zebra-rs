@@ -64,6 +64,10 @@
   - [Logging Integration](ch-03-04-logging-integration.md)
   - [Logging Troubleshooting](ch-03-05-logging-troubleshooting.md)
 
+## Testing
+
+- [BDD Integration Tests](ch-11-00-bdd-tests.md)
+
 ---
 
 # Appendices

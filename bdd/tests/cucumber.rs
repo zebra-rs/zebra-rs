@@ -306,8 +306,26 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     );
 }
 
+/// When `BDD_KEEP` is set in the environment, the teardown steps
+/// (`stop zebra-rs`, `delete namespace`/`bridge`, and the clean-environment
+/// check) turn into no-ops so the daemons, namespaces, and bridge survive the
+/// run and can be inspected by hand. Use it to debug a scenario without
+/// editing the feature file: `BDD_KEEP=1 make ospf_clear_neighbor`. The next
+/// run's `Given a clean test environment` sweeps whatever was left behind, so
+/// a kept topology never leaks into a later run of the same feature.
+fn keep_topology() -> bool {
+    std::env::var_os("BDD_KEEP").is_some()
+}
+
 #[when(expr = "I stop zebra-rs in namespace {string}")]
 async fn stop_zebra_rs(world: &mut World, namespace: String) {
+    if keep_topology() {
+        println!(
+            "⏭  BDD_KEEP set — leaving zebra-rs running in namespace {}",
+            world.ns(&namespace)
+        );
+        return;
+    }
     let pid_file = world.pid_file(&namespace);
     let _ = netns::kill_pidfile(Path::new(&pid_file)).await;
     println!(
@@ -385,6 +403,10 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
 #[when(expr = "I delete namespace {string}")]
 async fn delete_namespace(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
+    if keep_topology() {
+        println!("⏭  BDD_KEEP set — leaving namespace {} up", scoped);
+        return;
+    }
     netns::delete_netns(&scoped)
         .await
         .expect("Failed to delete namespace");
@@ -395,6 +417,10 @@ async fn delete_namespace(world: &mut World, namespace: String) {
 #[when(expr = "I delete bridge {string}")]
 async fn delete_bridge(world: &mut World, bridge_name: String) {
     let scoped = world.bridge(&bridge_name);
+    if keep_topology() {
+        println!("⏭  BDD_KEEP set — leaving bridge {} up", scoped);
+        return;
+    }
     netns::delete_bridge(&scoped)
         .await
         .expect("Failed to delete bridge");
@@ -841,6 +867,13 @@ async fn ilm_should_be_empty(world: &mut World, namespace: String) {
 
 #[then("the test environment should be clean")]
 async fn verify_clean_environment(world: &mut World) {
+    if keep_topology() {
+        // The teardown steps were skipped, so the namespaces/bridge/pid files
+        // are still present by design — asserting cleanliness here would
+        // falsely fail. Skip the check and leave everything for inspection.
+        println!("⏭  BDD_KEEP set — skipping clean-environment check (topology left up)");
+        return;
+    }
     let ns_prefix = format!("{}_", world.feature_tag);
     let leftover_ns = netns::list_netns_with_prefix(&ns_prefix)
         .await
