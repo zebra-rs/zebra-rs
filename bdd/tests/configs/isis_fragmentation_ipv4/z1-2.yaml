@@ -1,0 +1,233 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.1/32
+- if-name: vz1ns
+  ipv4:
+    address: 10.0.1.1/24
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: z1
+    # Force fragmentation at the standard Ethernet MTU: a 1500-byte cap
+    # on each LSP PDU leaves a 1473-byte TLV budget (lsp-mtu-size - 27
+    # bytes of PDU overhead). 200 /32 networks at 9 wire bytes each
+    # (RFC 5305: 4 metric + 1 control/flags + 4 prefix bytes) -> ~1800
+    # bytes of TLV 135 value, overflowing one fragment. The splitter
+    # caps each TLV 135 instance at the 255-byte length-field ceiling
+    # (~8 instances here); the packer then bins those instances into
+    # LSP fragments, so z1's self-LSP spans >= 2 fragments.
+    lsp-mtu-size: 1500
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 100.64.0.1/32
+      - prefix: 100.64.0.2/32
+      - prefix: 100.64.0.3/32
+      - prefix: 100.64.0.4/32
+      - prefix: 100.64.0.5/32
+      - prefix: 100.64.0.6/32
+      - prefix: 100.64.0.7/32
+      - prefix: 100.64.0.8/32
+      - prefix: 100.64.0.9/32
+      - prefix: 100.64.0.10/32
+      - prefix: 100.64.0.11/32
+      - prefix: 100.64.0.12/32
+      - prefix: 100.64.0.13/32
+      - prefix: 100.64.0.14/32
+      - prefix: 100.64.0.15/32
+      - prefix: 100.64.0.16/32
+      - prefix: 100.64.0.17/32
+      - prefix: 100.64.0.18/32
+      - prefix: 100.64.0.19/32
+      - prefix: 100.64.0.20/32
+      - prefix: 100.64.0.21/32
+      - prefix: 100.64.0.22/32
+      - prefix: 100.64.0.23/32
+      - prefix: 100.64.0.24/32
+      - prefix: 100.64.0.25/32
+      - prefix: 100.64.0.26/32
+      - prefix: 100.64.0.27/32
+      - prefix: 100.64.0.28/32
+      - prefix: 100.64.0.29/32
+      - prefix: 100.64.0.30/32
+      - prefix: 100.64.0.31/32
+      - prefix: 100.64.0.32/32
+      - prefix: 100.64.0.33/32
+      - prefix: 100.64.0.34/32
+      - prefix: 100.64.0.35/32
+      - prefix: 100.64.0.36/32
+      - prefix: 100.64.0.37/32
+      - prefix: 100.64.0.38/32
+      - prefix: 100.64.0.39/32
+      - prefix: 100.64.0.40/32
+      - prefix: 100.64.0.41/32
+      - prefix: 100.64.0.42/32
+      - prefix: 100.64.0.43/32
+      - prefix: 100.64.0.44/32
+      - prefix: 100.64.0.45/32
+      - prefix: 100.64.0.46/32
+      - prefix: 100.64.0.47/32
+      - prefix: 100.64.0.48/32
+      - prefix: 100.64.0.49/32
+      - prefix: 100.64.0.50/32
+      - prefix: 100.64.0.51/32
+      - prefix: 100.64.0.52/32
+      - prefix: 100.64.0.53/32
+      - prefix: 100.64.0.54/32
+      - prefix: 100.64.0.55/32
+      - prefix: 100.64.0.56/32
+      - prefix: 100.64.0.57/32
+      - prefix: 100.64.0.58/32
+      - prefix: 100.64.0.59/32
+      - prefix: 100.64.0.60/32
+      - prefix: 100.64.0.61/32
+      - prefix: 100.64.0.62/32
+      - prefix: 100.64.0.63/32
+      - prefix: 100.64.0.64/32
+      - prefix: 100.64.0.65/32
+      - prefix: 100.64.0.66/32
+      - prefix: 100.64.0.67/32
+      - prefix: 100.64.0.68/32
+      - prefix: 100.64.0.69/32
+      - prefix: 100.64.0.70/32
+      - prefix: 100.64.0.71/32
+      - prefix: 100.64.0.72/32
+      - prefix: 100.64.0.73/32
+      - prefix: 100.64.0.74/32
+      - prefix: 100.64.0.75/32
+      - prefix: 100.64.0.76/32
+      - prefix: 100.64.0.77/32
+      - prefix: 100.64.0.78/32
+      - prefix: 100.64.0.79/32
+      - prefix: 100.64.0.80/32
+      - prefix: 100.64.0.81/32
+      - prefix: 100.64.0.82/32
+      - prefix: 100.64.0.83/32
+      - prefix: 100.64.0.84/32
+      - prefix: 100.64.0.85/32
+      - prefix: 100.64.0.86/32
+      - prefix: 100.64.0.87/32
+      - prefix: 100.64.0.88/32
+      - prefix: 100.64.0.89/32
+      - prefix: 100.64.0.90/32
+      - prefix: 100.64.0.91/32
+      - prefix: 100.64.0.92/32
+      - prefix: 100.64.0.93/32
+      - prefix: 100.64.0.94/32
+      - prefix: 100.64.0.95/32
+      - prefix: 100.64.0.96/32
+      - prefix: 100.64.0.97/32
+      - prefix: 100.64.0.98/32
+      - prefix: 100.64.0.99/32
+      - prefix: 100.64.0.100/32
+      - prefix: 100.64.0.101/32
+      - prefix: 100.64.0.102/32
+      - prefix: 100.64.0.103/32
+      - prefix: 100.64.0.104/32
+      - prefix: 100.64.0.105/32
+      - prefix: 100.64.0.106/32
+      - prefix: 100.64.0.107/32
+      - prefix: 100.64.0.108/32
+      - prefix: 100.64.0.109/32
+      - prefix: 100.64.0.110/32
+      - prefix: 100.64.0.111/32
+      - prefix: 100.64.0.112/32
+      - prefix: 100.64.0.113/32
+      - prefix: 100.64.0.114/32
+      - prefix: 100.64.0.115/32
+      - prefix: 100.64.0.116/32
+      - prefix: 100.64.0.117/32
+      - prefix: 100.64.0.118/32
+      - prefix: 100.64.0.119/32
+      - prefix: 100.64.0.120/32
+      - prefix: 100.64.0.121/32
+      - prefix: 100.64.0.122/32
+      - prefix: 100.64.0.123/32
+      - prefix: 100.64.0.124/32
+      - prefix: 100.64.0.125/32
+      - prefix: 100.64.0.126/32
+      - prefix: 100.64.0.127/32
+      - prefix: 100.64.0.128/32
+      - prefix: 100.64.0.129/32
+      - prefix: 100.64.0.130/32
+      - prefix: 100.64.0.131/32
+      - prefix: 100.64.0.132/32
+      - prefix: 100.64.0.133/32
+      - prefix: 100.64.0.134/32
+      - prefix: 100.64.0.135/32
+      - prefix: 100.64.0.136/32
+      - prefix: 100.64.0.137/32
+      - prefix: 100.64.0.138/32
+      - prefix: 100.64.0.139/32
+      - prefix: 100.64.0.140/32
+      - prefix: 100.64.0.141/32
+      - prefix: 100.64.0.142/32
+      - prefix: 100.64.0.143/32
+      - prefix: 100.64.0.144/32
+      - prefix: 100.64.0.145/32
+      - prefix: 100.64.0.146/32
+      - prefix: 100.64.0.147/32
+      - prefix: 100.64.0.148/32
+      - prefix: 100.64.0.149/32
+      - prefix: 100.64.0.150/32
+      - prefix: 100.64.0.151/32
+      - prefix: 100.64.0.152/32
+      - prefix: 100.64.0.153/32
+      - prefix: 100.64.0.154/32
+      - prefix: 100.64.0.155/32
+      - prefix: 100.64.0.156/32
+      - prefix: 100.64.0.157/32
+      - prefix: 100.64.0.158/32
+      - prefix: 100.64.0.159/32
+      - prefix: 100.64.0.160/32
+      - prefix: 100.64.0.161/32
+      - prefix: 100.64.0.162/32
+      - prefix: 100.64.0.163/32
+      - prefix: 100.64.0.164/32
+      - prefix: 100.64.0.165/32
+      - prefix: 100.64.0.166/32
+      - prefix: 100.64.0.167/32
+      - prefix: 100.64.0.168/32
+      - prefix: 100.64.0.169/32
+      - prefix: 100.64.0.170/32
+      - prefix: 100.64.0.171/32
+      - prefix: 100.64.0.172/32
+      - prefix: 100.64.0.173/32
+      - prefix: 100.64.0.174/32
+      - prefix: 100.64.0.175/32
+      - prefix: 100.64.0.176/32
+      - prefix: 100.64.0.177/32
+      - prefix: 100.64.0.178/32
+      - prefix: 100.64.0.179/32
+      - prefix: 100.64.0.180/32
+      - prefix: 100.64.0.181/32
+      - prefix: 100.64.0.182/32
+      - prefix: 100.64.0.183/32
+      - prefix: 100.64.0.184/32
+      - prefix: 100.64.0.185/32
+      - prefix: 100.64.0.186/32
+      - prefix: 100.64.0.187/32
+      - prefix: 100.64.0.188/32
+      - prefix: 100.64.0.189/32
+      - prefix: 100.64.0.190/32
+      - prefix: 100.64.0.191/32
+      - prefix: 100.64.0.192/32
+      - prefix: 100.64.0.193/32
+      - prefix: 100.64.0.194/32
+      - prefix: 100.64.0.195/32
+      - prefix: 100.64.0.196/32
+      - prefix: 100.64.0.197/32
+      - prefix: 100.64.0.198/32
+      - prefix: 100.64.0.199/32
+      - prefix: 100.64.0.200/32
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv4:
+        enable: true
+    - if-name: vz1ns
+      circuit-type: level-2-only
+      ipv4:
+        enable: true
