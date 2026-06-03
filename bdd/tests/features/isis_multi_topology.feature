@@ -53,3 +53,12 @@ Feature: IS-IS multi-topology (RFC 5120)
     And show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability (MT-ID 2)"
     And show command "show isis database detail" in namespace "z2" should contain "Multi-Topology"
     And show command "show isis database detail" in namespace "z2" should contain "MT IPv6 Reachability (MT-ID 2)"
+
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    And I delete bridge "br0"
+    Then the test environment should be clean
