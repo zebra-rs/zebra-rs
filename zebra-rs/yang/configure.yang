@@ -96,12 +96,26 @@ module configure {
     ext:help "Clear operational state";
     container isis {
       ext:help "IS-IS clear actions";
-      // Force-recalculate the IS-IS SPF for both L1 and L2 instead
-      // of waiting for the next LSDB update or the debounce timer.
-      // Useful when manual diagnosis suspects a stuck route after
-      // an LSDB-side fix.
-      leaf spf {
-        type empty;
+      // Force-recalculate the IS-IS SPF instead of waiting for the
+      // next LSDB update or the debounce timer. Useful when manual
+      // diagnosis suspects a stuck route after an LSDB-side fix.
+      //
+      // Modeled as a presence list so the bare `clear isis spf` is a
+      // valid terminal (-> recalculate both L1 and L2) yet still
+      // accepts an optional `level-1`/`level-2` key (-> recalculate
+      // just that level), the same shape as `clear ospf neighbor
+      // [<router-id>]`.
+      list spf {
+        ext:help "Force SPF recalculation (bare does both levels)";
+        ext:presence "Recalculate both L1 and L2 SPF";
+        key level;
+        leaf level {
+          ext:help "Recalculate only this IS-IS level";
+          type enumeration {
+            enum level-1;
+            enum level-2;
+          }
+        }
       }
       container checkpoint {
         // Debug entry for the graceful-restart checkpoint storage
