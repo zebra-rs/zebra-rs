@@ -55,5 +55,5 @@ r1 a route back to e2's source address for the e2 -> e1 reply path.
 | r1 redistributes e1's loopback into IS-IS and it floods across the area | |
 | e2 reaches e1 end-to-end across the IS-IS domain | |
 | The redistributed route reconverges onto the backup path | |
-| Withdrawing redistribution removes e1's loopback from the area | |
+| "no redistribute" withdraws e1's loopback from r1's own LSP | |
 | Teardown topology | |
