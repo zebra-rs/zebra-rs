@@ -771,7 +771,7 @@ impl Isis {
             return;
         }
 
-        let (path, args) = path_from_command(&msg.paths);
+        let (path, mut args) = path_from_command(&msg.paths);
 
         // Clear ops don't go through the YANG callback table — they
         // map directly to runtime side-effects (kick SPF, drop a
@@ -781,7 +781,10 @@ impl Isis {
         if msg.op == ConfigOp::Clear {
             match path.as_str() {
                 "/clear/isis/spf" => {
-                    self.clear_spf();
+                    // Bare `clear isis spf` (no arg) recalculates both
+                    // levels; `clear isis spf level-1|level-2` carries
+                    // the level as a matched enum key in `args`.
+                    self.clear_spf(args.string().as_deref());
                 }
                 "/clear/isis/checkpoint/write" => {
                     self.checkpoint_write_debug();
@@ -859,14 +862,21 @@ impl Isis {
         }
     }
 
-    /// Force-recalculate the IS-IS SPF for both L1 and L2. Mirrors
-    /// FRR's `clear isis spf` — useful when an operator wants to
-    /// re-derive the route table without waiting for the next LSDB
-    /// update or the debounce timer to fire. Levels with no SPF
-    /// state yet are no-ops on the receiver side.
-    fn clear_spf(&mut self) {
-        let _ = self.tx.send(Message::SpfCalc(Level::L1));
-        let _ = self.tx.send(Message::SpfCalc(Level::L2));
+    /// Force-recalculate the IS-IS SPF. Mirrors FRR's `clear isis
+    /// spf` — useful when an operator wants to re-derive the route
+    /// table without waiting for the next LSDB update or the debounce
+    /// timer to fire. `level` selects a single level (`level-1` /
+    /// `level-2`); `None` (the bare command) recalculates both.
+    /// Levels with no SPF state yet are no-ops on the receiver side.
+    fn clear_spf(&mut self, level: Option<&str>) {
+        let levels: &[Level] = match level {
+            Some("level-1") => &[Level::L1],
+            Some("level-2") => &[Level::L2],
+            _ => &[Level::L1, Level::L2],
+        };
+        for level in levels {
+            let _ = self.tx.send(Message::SpfCalc(*level));
+        }
     }
 
     /// Debug entry — capture the current IS-IS state and atomically
