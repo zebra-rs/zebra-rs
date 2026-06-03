@@ -93,7 +93,9 @@ module configure {
   }
 
   container clear {
+    ext:help "Clear operational state";
     container isis {
+      ext:help "IS-IS clear actions";
       // Force-recalculate the IS-IS SPF for both L1 and L2 instead
       // of waiting for the next LSDB update or the debounce timer.
       // Useful when manual diagnosis suspects a stuck route after
@@ -138,6 +140,7 @@ module configure {
       }
     }
     container ospf {
+      ext:help "OSPFv2 clear actions";
       // Force-recalculate the OSPFv2 SPF for every attached area
       // instead of waiting for the next LSDB event or the 1-second
       // coalescing timer. Mirrors FRR's `clear ip ospf process`
@@ -204,6 +207,7 @@ module configure {
       }
     }
     container ospfv3 {
+      ext:help "OSPFv3 clear actions";
       // Force-recalculate the OSPFv3 SPF for every attached area.
       // Sibling of `clear ospf spf` for the v3 instance.
       leaf spf {
