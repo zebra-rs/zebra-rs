@@ -324,14 +324,37 @@ pub fn graph_mt2(
         nodes_to_process.push((neighbor_id, is_originated, lsp));
     }
 
+    // Same local-adjacency → ifindex map as graph(). Used to stamp
+    // link_id = ifindex onto the first-hop edges emitted from our own
+    // router LSP so build_rib_from_spf_v6 can resolve each MT 2 nexthop
+    // back to a local interface. Without it every MT 2 edge would carry
+    // link_id = 0, which the v6 rib-builder skips — leaving the MT 2
+    // IPv6 RIB empty. For LAN adjacencies the key is the
+    // (DIS_sys_id, pseudo_id) of the pseudonode.
+    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
+    for (ifindex, link) in top.links.iter() {
+        if let Some((adj, _)) = link.state.adj.get(&level) {
+            local_adj_to_ifindex.insert(*adj, *ifindex);
+        }
+    }
+
     for (neighbor_id, is_originated, lsp) in nodes_to_process {
         let node_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
         // Same source rule as graph(): only set when our own router
         // LSP is processed, never a pseudonode we may have originated.
-        if is_originated && !lsp.lsp_id.is_pseudo() {
+        let own_router_lsp = is_originated && !lsp.lsp_id.is_pseudo();
+        if own_router_lsp {
             source_node = Some(node_id);
         }
-        let vertex = create_graph_vertex_mt2(top, level, node_id, &neighbor_id, &lsp);
+        let vertex = create_graph_vertex_mt2(
+            top,
+            level,
+            node_id,
+            &neighbor_id,
+            &lsp,
+            own_router_lsp,
+            &local_adj_to_ifindex,
+        );
         graph.insert(node_id, vertex);
     }
 
@@ -344,6 +367,8 @@ fn create_graph_vertex_mt2(
     node_id: usize,
     neighbor_id: &IsisNeighborId,
     lsp: &IsisLsp,
+    own_router_lsp: bool,
+    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
 ) -> spf::Vertex {
     let sys_id = neighbor_id.sys_id();
     let is_pseudo = lsp.lsp_id.is_pseudo();
@@ -376,7 +401,15 @@ fn create_graph_vertex_mt2(
         ..Default::default()
     };
 
-    process_outgoing_links_mt2(top, level, node_id, lsp, &mut vertex.olinks);
+    process_outgoing_links_mt2(
+        top,
+        level,
+        node_id,
+        lsp,
+        own_router_lsp,
+        local_adj_to_ifindex,
+        &mut vertex.olinks,
+    );
 
     vertex
 }
@@ -386,6 +419,8 @@ fn process_outgoing_links_mt2(
     level: Level,
     from_id: usize,
     lsp: &IsisLsp,
+    own_router_lsp: bool,
+    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
     links: &mut Vec<spf::Link>,
 ) {
     if lsp.lsp_id.is_pseudo() {
@@ -427,7 +462,15 @@ fn process_outgoing_links_mt2(
             && mt_reach.mt.id() == 2
         {
             for entry in &mt_reach.entries {
-                process_neighbor_link_mt2(top, level, from_id, entry, links);
+                process_neighbor_link_mt2(
+                    top,
+                    level,
+                    from_id,
+                    entry,
+                    own_router_lsp,
+                    local_adj_to_ifindex,
+                    links,
+                );
             }
         }
     }
@@ -438,6 +481,8 @@ fn process_neighbor_link_mt2(
     level: Level,
     from_id: usize,
     entry: &IsisTlvExtIsReachEntry,
+    own_router_lsp: bool,
+    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
     links: &mut Vec<spf::Link>,
 ) {
     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
@@ -466,6 +511,19 @@ fn process_neighbor_link_mt2(
         }
     }
 
+    // link_id is meaningful only for edges out of our own router LSP —
+    // the SPF's first-hop slot the v6 rib-builder resolves to a local
+    // interface. Edges from other routers' LSPs carry link_id = 0.
+    // Mirrors graph()'s legacy ExtIsReach handling.
+    let link_id = if own_router_lsp {
+        local_adj_to_ifindex
+            .get(&entry.neighbor_id)
+            .copied()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     let to_id = top
         .lsp_map
         .get_mut(&level)
@@ -474,7 +532,7 @@ fn process_neighbor_link_mt2(
         from: from_id,
         to: to_id,
         cost: entry.metric,
-        link_id: 0,
+        link_id,
     });
 }
 
