@@ -16,6 +16,12 @@ Feature: IS-IS LSP fragmentation (IPv4) at lsp-mtu-size 400 and 1500
   (fragmentation needs 200 networks), confirming both the small-MTU
   path and that a runtime lsp-mtu-size change re-fragments correctly.
 
+  Finally, the same topology exercises the separate transmit-side
+  `lsp-mtu` knob: raising it above an interface's MTU makes the flood
+  path drop z1's LSP on send (logged at warning level), which `show isis
+  interface detail` flags and a receiver can prove by never learning a
+  freshly-added prefix until lsp-mtu is lowered back under the MTU.
+
   Test Topology:
   ```
   ┌────────────────────────────────────────┐
@@ -107,6 +113,36 @@ Feature: IS-IS LSP fragmentation (IPv4) at lsp-mtu-size 400 and 1500
     # last /32 sits well past fragment 0, so its presence in z2's RIB
     # proves the receiver re-merged the freshly re-fragmented LSP.
     Then show command "show isis route" in namespace "z2" should contain "100.64.0.200/32"
+
+  Scenario: lsp-mtu above the interface MTU is flagged in show isis interface detail
+    Given the test topology exists
+    When I apply config "z1-3.yaml" to namespace "z1"
+    And I wait 15 seconds
+    # z1-3.yaml sets lsp-mtu 9000 — larger than vz1ns's 1500-byte MTU.
+    # An LSP at that size can't fit a single link-layer frame, so the
+    # interface is flagged (and LSPs are dropped on send for it).
+    Then show command "show isis interface detail" in namespace "z1" should contain "exceeds interface MTU"
+
+  Scenario: lsp-mtu above the interface MTU drops z1's LSP on send so z2 never learns the new prefix
+    Given the test topology exists
+    # z1-3.yaml also added 100.64.0.201/32, but lsp-mtu 9000 > 1500 means
+    # the re-originated LSP cannot be flooded over vz1ns and is dropped,
+    # so z2 never receives the update.
+    Then show command "show isis route" in namespace "z2" should not contain "100.64.0.201/32"
+    # Dropping the send does not purge z2's existing LSDB, so z2 still
+    # reaches z1's loopback over the LSP it learned before the change.
+    And ping from "z2" to "10.255.0.1" should succeed
+
+  Scenario: Lowering lsp-mtu under the interface MTU lets z1's LSP flood again
+    Given the test topology exists
+    When I apply config "z1-4.yaml" to namespace "z1"
+    And I wait 20 seconds
+    # z1-4.yaml drops lsp-mtu to 1400 (< 1500), so the flood path no
+    # longer drops z1's LSP and the interface is no longer flagged.
+    Then show command "show isis interface detail" in namespace "z1" should not contain "exceeds interface MTU"
+    # z2 finally installs the previously-dropped network, proving the
+    # drop was caused by the over-MTU lsp-mtu rather than anything else.
+    And show command "show isis route" in namespace "z2" should contain "100.64.0.201/32"
 
   Scenario: Teardown topology
     Given the test topology exists
