@@ -1,4 +1,3 @@
-@serial
 @isis_fragmentation
 @isis
 Feature: IS-IS LSP fragmentation under a tight lsp-mtu-size

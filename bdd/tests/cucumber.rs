@@ -1,8 +1,14 @@
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bdd::netns;
-use cucumber::{World as CucumberWorld, WriterExt, given, then, when, writer};
+use cucumber::tag::Ext as _;
+use cucumber::writer::Stats as _;
+use cucumber::{World as CucumberWorld, WriterExt, cli, given, then, when, writer};
+use futures::stream::{self, StreamExt};
 use serde_json::Value;
 
 #[derive(Debug, Default, CucumberWorld)]
@@ -906,6 +912,42 @@ async fn verify_clean_environment(world: &mut World) {
     println!("✓ Test environment is clean");
 }
 
+/// Output sink for a single feature's [`writer::Basic`] console report.
+///
+/// Serial runs (feature-concurrency 1) write to the real stdout, preserving
+/// the previous single-stream behaviour. Concurrent runs send each feature's
+/// report to its own `logs/<feature>.cucumber.log` so parallel features don't
+/// interleave their output on the terminal.
+enum FeatureOut {
+    Stdout(std::io::Stdout),
+    File(fs::File),
+}
+
+impl Write for FeatureOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Stdout(o) => o.write(buf),
+            Self::File(f) => f.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Stdout(o) => o.flush(),
+            Self::File(f) => f.flush(),
+        }
+    }
+}
+
+/// Result of running one feature in its own cucumber instance.
+struct FeatureOutcome {
+    name: String,
+    /// Scenarios that passed the `--tags` / `--name` filter (0 ⇒ skipped).
+    matched: usize,
+    failed: bool,
+    failed_steps: usize,
+}
+
 #[tokio::main]
 async fn main() {
     // Per-namespace daemon logs land in `logs/` so they don't litter
@@ -914,30 +956,159 @@ async fn main() {
     // would otherwise fail with "no such file or directory" when
     // zebra-rs opens its --log-file.
     let _ = fs::create_dir_all("logs");
-
-    // Scope Allure output by PID so concurrent `cargo test` invocations
-    // don't clobber each other's results.json.
     let _ = fs::create_dir_all("allure-results");
-    let results_path = format!("allure-results/results-{}.json", std::process::id());
-    let file = fs::File::create(&results_path).unwrap();
-    World::cucumber()
-        .before(|feature, _rule, _scenario, world| {
-            Box::pin(async move {
-                // Get first feature tag (excluding special tags like @serial)
-                world.feature_tag = feature
-                    .tags
-                    .iter()
-                    .find(|t| *t != "serial" && *t != "allow.skipped")
-                    .cloned()
-                    .unwrap_or_default();
-            })
+
+    // Parse the standard cucumber CLI ourselves. Each feature is run in its
+    // own cucumber instance with scenarios forced serial (and in declaration
+    // order) via `max_concurrent_scenarios(1)`, while *different* features run
+    // concurrently here. So `--concurrency=N` means "run up to N features at
+    // the same time" (not N scenarios); `--tags` / `--name` filter scenarios
+    // as usual. This is safe because every feature scopes its netns / bridge /
+    // veth / pid by its feature tag (see `World`), and Allure output is scoped
+    // per-PID *and* per-feature below.
+    type CliOpts = cli::Opts<
+        cucumber::parser::basic::Cli,
+        cucumber::runner::basic::Cli,
+        cucumber::writer::basic::Cli,
+        cli::Empty,
+    >;
+    let opts = CliOpts::parsed();
+    let feature_concurrency = opts.runner.concurrency.unwrap_or(1).max(1);
+    let tags_filter = opts.tags_filter;
+    let re_filter = opts.re_filter;
+
+    let mut features: Vec<PathBuf> = fs::read_dir("tests/features")
+        .expect("read tests/features directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("feature"))
+        .collect();
+    features.sort();
+
+    let pid = std::process::id();
+    let outcomes: Vec<FeatureOutcome> = stream::iter(features)
+        .map(|path| {
+            let tags_filter = tags_filter.clone();
+            let re_filter = re_filter.clone();
+            async move {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("feature")
+                    .to_owned();
+
+                // Scope Allure output by PID *and* feature so concurrent
+                // features (and concurrent `cargo test` invocations) don't
+                // clobber each other's results.
+                let json_path = format!("allure-results/results-{pid}-{name}.json");
+                let log_path = format!("logs/{name}.cucumber.log");
+                let json_file = fs::File::create(&json_path).expect("create Allure results file");
+
+                let (out, coloring) = if feature_concurrency > 1 {
+                    let log = fs::File::create(&log_path).expect("create cucumber log file");
+                    (FeatureOut::File(log), writer::Coloring::Never)
+                } else {
+                    (
+                        FeatureOut::Stdout(std::io::stdout()),
+                        writer::Coloring::Auto,
+                    )
+                };
+
+                // Count scenarios that pass the filter so we can drop the
+                // empty artifacts of features with no matching scenarios
+                // (e.g. non-IS-IS features under `--tags @isis`).
+                let matched = Arc::new(AtomicUsize::new(0));
+                let counter = Arc::clone(&matched);
+
+                let writer = World::cucumber()
+                    .max_concurrent_scenarios(1)
+                    .before(|feature, _rule, _scenario, world| {
+                        Box::pin(async move {
+                            // First feature tag (excluding special tags like
+                            // @serial) — drives per-feature resource scoping.
+                            world.feature_tag = feature
+                                .tags
+                                .iter()
+                                .find(|t| *t != "serial" && *t != "allow.skipped")
+                                .cloned()
+                                .unwrap_or_default();
+                        })
+                    })
+                    .with_writer(
+                        writer::Basic::new(out, coloring, writer::Verbosity::Default)
+                            .summarized()
+                            .tee::<World, _>(writer::Json::for_tee(json_file))
+                            .normalized(),
+                    )
+                    // Ignore the process CLI for the per-feature runner so
+                    // `--concurrency` doesn't override `max_concurrent_scenarios`;
+                    // the tag / name filter is re-applied in the closure below.
+                    .with_default_cli()
+                    .filter_run(path, move |feat, rule, scenario| {
+                        let pass = match &re_filter {
+                            Some(re) => re.is_match(&scenario.name),
+                            None => match &tags_filter {
+                                // Mirrors cucumber's own Feature → Rule →
+                                // Scenario tag merge order.
+                                Some(tags) => tags.eval(
+                                    feat.tags
+                                        .iter()
+                                        .chain(rule.iter().flat_map(|r| &r.tags))
+                                        .chain(scenario.tags.iter()),
+                                ),
+                                None => true,
+                            },
+                        };
+                        if pass {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        pass
+                    })
+                    .await;
+
+                let matched = matched.load(Ordering::Relaxed);
+                let outcome = FeatureOutcome {
+                    name,
+                    matched,
+                    failed: writer.execution_has_failed(),
+                    failed_steps: writer.failed_steps(),
+                };
+                drop(writer);
+
+                if matched == 0 {
+                    let _ = fs::remove_file(&json_path);
+                    if feature_concurrency > 1 {
+                        let _ = fs::remove_file(&log_path);
+                    }
+                }
+                outcome
+            }
         })
-        .with_writer(
-            writer::Basic::stdout()
-                .summarized()
-                .tee::<World, _>(writer::Json::for_tee(file))
-                .normalized(),
-        )
-        .run("tests/features")
+        .buffer_unordered(feature_concurrency)
+        .collect()
         .await;
+
+    // Aggregate summary for humans watching the terminal. Suite pass/fail is
+    // still reported through the Allure results files — like before, this
+    // harness does not set the process exit code.
+    let mut ran: Vec<&FeatureOutcome> = outcomes.iter().filter(|o| o.matched > 0).collect();
+    ran.sort_by(|a, b| a.name.cmp(&b.name));
+    let failed = ran.iter().filter(|o| o.failed).count();
+
+    println!("\n──── cucumber summary ({feature_concurrency}-way feature concurrency) ────");
+    for o in &ran {
+        let mark = if o.failed { "✗" } else { "✓" };
+        let detail = if o.failed {
+            format!(" — {} step(s) failed", o.failed_steps)
+        } else {
+            String::new()
+        };
+        println!("  {mark} {} ({} scenario(s){detail})", o.name, o.matched);
+    }
+    println!(
+        "{} feature(s) ran, {} passed, {} failed",
+        ran.len(),
+        ran.len() - failed,
+        failed,
+    );
 }

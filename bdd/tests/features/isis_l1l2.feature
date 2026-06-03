@@ -1,4 +1,3 @@
-@serial
 @isis_l1l2
 @isis
 Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbone

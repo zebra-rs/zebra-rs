@@ -1,4 +1,3 @@
-@serial
 @isis_multi_topology
 @isis
 Feature: IS-IS multi-topology (RFC 5120)
