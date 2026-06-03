@@ -68,14 +68,34 @@ zebra# clear isis neighbor <TAB>
 ## Forcing an SPF run — `clear isis spf`
 
 ```
-clear isis spf
+clear isis spf [level-1 | level-2]
 ```
 
-Force an immediate shortest-path-first recomputation for both Level-1
-and Level-2 instead of waiting for the next LSDB update or the SPF
-debounce timer. This recomputes routes from the **current** database;
-it does not re-exchange anything with neighbours. It is useful when
-manual diagnosis suspects a stale route after an LSDB-side change.
+Force an immediate shortest-path-first recomputation instead of waiting
+for the next LSDB update or the SPF debounce timer. This recomputes
+routes from the **current** database; it does not re-exchange anything
+with neighbours. It is useful when manual diagnosis suspects a stale
+route after an LSDB-side change.
+
+IS-IS keeps a separate SPF tree per level — Level-1 for intra-area
+paths and Level-2 for the inter-area backbone — so the command can
+target one level or both:
+
+```
+clear isis spf            # recompute both Level-1 and Level-2
+clear isis spf level-1    # recompute only the Level-1 SPF
+clear isis spf level-2    # recompute only the Level-2 SPF
+```
+
+The bare form (no level) recomputes both levels. On an L1-only or
+L2-only router the level it does not run is simply a no-op, so the bare
+form is always safe. Tab-completion offers the two levels alongside the
+bare `<cr>`:
+
+```
+zebra# clear isis spf <TAB>
+level-1  level-2
+```
 
 ## Graceful restart — `clear isis graceful-restart`
 
