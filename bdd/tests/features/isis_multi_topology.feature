@@ -49,10 +49,10 @@ Feature: IS-IS multi-topology (RFC 5120)
 
   Scenario: LSPs carry the multi-topology TLVs
     Given the test topology exists
-    Then show command "show isis database detail" in namespace "z1" should contain "Multi-Topology"
-    And show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability (MT-ID 2)"
-    And show command "show isis database detail" in namespace "z2" should contain "Multi-Topology"
-    And show command "show isis database detail" in namespace "z2" should contain "MT IPv6 Reachability (MT-ID 2)"
+    Then show command "show isis database detail" in namespace "z1" should contain "MT Router Info: ipv6-unicast"
+    And show command "show isis database detail" in namespace "z1" should contain "MT IPv6 Reachability:"
+    And show command "show isis database detail" in namespace "z2" should contain "MT Router Info: ipv6-unicast"
+    And show command "show isis database detail" in namespace "z2" should contain "MT IPv6 Reachability:"
 
   Scenario: Teardown topology
     Given the test topology exists
