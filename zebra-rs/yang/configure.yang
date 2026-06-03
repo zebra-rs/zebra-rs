@@ -117,6 +117,29 @@ module configure {
           }
         }
       }
+      // `clear isis neighbor [<system-id>]`. The bare (presence)
+      // form tears down every IS-IS adjacency on the instance;
+      // with a value it tears down only the neighbor whose System
+      // ID (the "System Id" column in `show isis neighbor`)
+      // matches. The teardown reuses the hold-timer-expiry path —
+      // the adjacency is dropped, Hello+LSP re-originated, the DIS
+      // re-elected on LAN, labels/SIDs released and SPF
+      // rescheduled — so a live peer's Hellos re-form it from
+      // scratch (Down -> Up). Mirrors the OSPF `clear ospf
+      // neighbor` shape: a presence list so the bare node is a
+      // valid terminal (-> reset all) yet still takes a positional
+      // key (-> reset one). The System ID is `xxxx.xxxx.xxxx`, so
+      // the arg type is a plain string.
+      list neighbor {
+        ext:help "Reset IS-IS adjacencies (bare resets all)";
+        ext:presence "Reset every IS-IS adjacency";
+        key id;
+        leaf id {
+          ext:help "Reset only the neighbor with this System ID";
+          ext:dynamic "isis:neighbor";
+          type string;
+        }
+      }
       container checkpoint {
         // Debug entry for the graceful-restart checkpoint storage
         // layer (Phase 5b of docs/design/isis-graceful-restart-

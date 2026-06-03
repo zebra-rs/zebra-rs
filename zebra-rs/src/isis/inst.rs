@@ -758,6 +758,22 @@ impl Isis {
             return;
         }
 
+        // Dynamic tab-completion (`ext:dynamic "isis:<handler>"`): the
+        // manager sends the handler name as the sole path segment and
+        // waits on `msg.resp` for the candidate list. Answer directly —
+        // these are instance-level, not VRF-scoped.
+        if msg.op == ConfigOp::Completion {
+            let (path, _) = path_from_command(&msg.paths);
+            let comps = match path.as_str() {
+                "/neighbor" => self.neighbor_comps(),
+                _ => Vec::new(),
+            };
+            if let Some(resp) = msg.resp {
+                let _ = resp.send(comps);
+            }
+            return;
+        }
+
         // `/router/isis/vrf/<name>/...` belongs to a per-VRF instance,
         // not the default one. Strip the `vrf <name>` selector and
         // buffer the rewritten line (replayed into the child at spawn;
@@ -785,6 +801,22 @@ impl Isis {
                     // levels; `clear isis spf level-1|level-2` carries
                     // the level as a matched enum key in `args`.
                     self.clear_spf(args.string().as_deref());
+                }
+                "/clear/isis/neighbor" => {
+                    // `clear isis neighbor [<system-id>]`. The bare form
+                    // (no arg) tears down every adjacency; a trailing
+                    // `xxxx.xxxx.xxxx` system-id tears down only that
+                    // neighbor. Ignore an unparseable id rather than
+                    // falling through to "clear all" — a typo shouldn't
+                    // reset the whole instance.
+                    match args.string() {
+                        None => self.clear_neighbor(None),
+                        Some(s) => {
+                            if let Ok(sys_id) = s.parse::<IsisSysId>() {
+                                self.clear_neighbor(Some(sys_id));
+                            }
+                        }
+                    }
                 }
                 "/clear/isis/checkpoint/write" => {
                     self.checkpoint_write_debug();
@@ -877,6 +909,57 @@ impl Isis {
         for level in levels {
             let _ = self.tx.send(Message::SpfCalc(*level));
         }
+    }
+
+    /// `clear isis neighbor [<system-id>]` — tear down adjacencies the
+    /// same way a hold-timer expiry would. With `id == None` every
+    /// adjacency on the instance is reset; with a system-id only the
+    /// neighbor(s) whose System ID matches (a neighbor can appear on
+    /// more than one link / level). We reuse the existing
+    /// `Message::Nfsm(HoldTimerExpire, …)` path — the same one the
+    /// inactivity timer fires — so the teardown (drop the adjacency,
+    /// re-originate Hello+LSP, re-elect the DIS on LAN, release
+    /// labels/SIDs, unsubscribe BFD, reschedule SPF) runs through one
+    /// code path. A live peer keeps Helloing, so the adjacency re-forms
+    /// from scratch (Down -> Up). Snapshot the targets first so the
+    /// borrow on `self.links` is released before we send (mirrors the
+    /// OSPF `clear_neighbor`).
+    fn clear_neighbor(&self, id: Option<IsisSysId>) {
+        let mut targets: Vec<(Level, u32, IsisSysId)> = Vec::new();
+        for (ifindex, link) in self.links.iter() {
+            for level in [Level::L1, Level::L2] {
+                for sys_id in link.state.nbrs.get(&level).keys() {
+                    if id.is_none_or(|want| want == *sys_id) {
+                        targets.push((level, *ifindex, *sys_id));
+                    }
+                }
+            }
+        }
+        for (level, ifindex, sys_id) in targets {
+            let _ = self.tx.send(Message::Nfsm(
+                NfsmEvent::HoldTimerExpire,
+                level,
+                ifindex,
+                sys_id,
+            ));
+        }
+    }
+
+    /// Candidate completions for `ext:dynamic "isis:neighbor"` — the
+    /// System IDs of the current adjacencies (the "System Id" column in
+    /// `show isis neighbor`), formatted `xxxx.xxxx.xxxx`. Deduped +
+    /// sorted via `BTreeSet` (a neighbor can appear on more than one
+    /// link / level).
+    fn neighbor_comps(&self) -> Vec<String> {
+        let mut ids: BTreeSet<IsisSysId> = BTreeSet::new();
+        for link in self.links.values() {
+            for level in [Level::L1, Level::L2] {
+                for sys_id in link.state.nbrs.get(&level).keys() {
+                    ids.insert(*sys_id);
+                }
+            }
+        }
+        ids.iter().map(|id| id.to_string()).collect()
     }
 
     /// Debug entry — capture the current IS-IS state and atomically
