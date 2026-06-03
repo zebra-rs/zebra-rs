@@ -1268,12 +1268,14 @@ module config {
       container isis {
         presence "Enables configuration of IS-IS";
         leaf net {
+          ext:help "Network Entity Title (area address + system-id)";
           // First entry in "router isis" node.
           ext:sort "1";
           type isis:net;
         }
 
         container distribute {
+          ext:help "Control installing IS-IS routes into the RIB";
           leaf rib {
             type boolean;
           }
@@ -1323,6 +1325,7 @@ module config {
         }
 
         leaf is-type {
+          ext:help "IS-IS level for this instance (L1 / L1-2 / L2-only)";
           type enumeration {
             enum level-1;
             enum level-1-2;
@@ -1331,6 +1334,7 @@ module config {
         }
 
         container segment-routing {
+          ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
           container mpls {
             presence "Enable Segment Routing over MPLS dataplane";
             leaf no-local-prefix-sid {
@@ -1376,6 +1380,7 @@ module config {
         }
 
         list flex-algo {
+          ext:help "Flexible Algorithm definitions (RFC 9350)";
           // IS-IS Flexible Algorithm (RFC 9350) definition. Each list
           // entry describes one algorithm this router participates in
           // and is keyed by the on-the-wire numeric identifier
@@ -1473,6 +1478,7 @@ module config {
         }
 
         container fast-reroute {
+          ext:help "Fast-reroute / TI-LFA protection (RFC 9490)";
           // IS-IS fast-reroute mechanisms. Empty container is a no-op;
           // the per-mechanism child presence containers turn features on.
           container ti-lfa {
@@ -1494,6 +1500,7 @@ module config {
         }
 
         container graceful-restart {
+          ext:help "Graceful restart helper / restarter (RFC 5306)";
           // RFC 5306 helper and restarter configuration. Defaults
           // match FRR: helper enabled out of the box (transparent /
           // lossless), restarter OFF until the exit-wiring (Phase
@@ -1530,6 +1537,7 @@ module config {
         }
 
         leaf multi-topology {
+          ext:help "Multi-Topology routing (RFC 5120)";
           // RFC 5120 M-ISIS Multi Topology (MT). IPv6 unicast is the
           // only option used in the industry today, so the enum
           // carries just that one value.
@@ -1539,6 +1547,7 @@ module config {
         }
 
         list afi-safi {
+          ext:help "Per-address-family networks and redistribution";
           // Configured-network advertisement, BGP-style.
           // Each `network` entry under afi-safi=ipv4|ipv6 is emitted in
           // every self-originated LSP as an IP-reach TLV (135 / 236 /
@@ -1579,14 +1588,17 @@ module config {
         }
 
         leaf te-router-id {
+          ext:help "Traffic-engineering stable Router ID";
           type inet:ipv4-address;
         }
 
         leaf hostname {
+          ext:help "Dynamic hostname advertised in TLV 137 (RFC 5301)";
           type string;
         }
 
         container area-password {
+          ext:help "Level-1 area authentication";
           presence "L1 area-wide IS-IS authentication";
           description
             "Authentication key applied to Level-1 self-originated LSPs
@@ -1642,6 +1654,7 @@ module config {
         }
 
         container domain-password {
+          ext:help "Level-2 domain authentication";
           presence "L2 domain-wide IS-IS authentication";
           description
             "Authentication key applied to Level-2 self-originated LSPs
@@ -1679,6 +1692,7 @@ module config {
         }
 
         container timers {
+          ext:help "IS-IS protocol timers";
           // `hold-time` (hyphen) matches the callback registered at
           // `/router/isis/timers/hold-time`; the previous `hold_time`
           // spelling never dispatched (dead leaf).
@@ -1700,6 +1714,7 @@ module config {
         }
 
         container spf-interval {
+          ext:help "SPF calculation throttle timers";
           leaf initial-wait {
             type uint32 {
               range "1..120000";
@@ -1721,6 +1736,7 @@ module config {
         }
 
         container lsp-gen-interval {
+          ext:help "LSP generation throttle timers";
           leaf initial-wait {
             type uint32 {
               range "1..120000";
@@ -1742,6 +1758,7 @@ module config {
         }
 
         leaf lsp-mtu-size {
+          ext:help "Maximum size of generated LSPs";
           type uint16 {
             range "128..16384";
           }
@@ -1756,6 +1773,7 @@ module config {
         }
 
         list interface {
+          ext:help "Per-interface IS-IS configuration";
           // Last item in "router isis" node.
           ext:sort "-10";
           key "if-name";
@@ -2070,6 +2088,7 @@ module config {
           }
         }
         container tracing {
+          ext:help "IS-IS debug tracing";
           leaf all {
             type boolean;
             description "Enable all ISIS tracing";
@@ -2185,6 +2204,7 @@ module config {
         }
 
         list vrf {
+          ext:help "Per-VRF IS-IS instance";
           // Per-VRF IS-IS instance. Mirrors the (default) top-level
           // IS-IS config tree for each named VRF: the default
           // `router isis` task forwards every `vrf <name> ...` line —
