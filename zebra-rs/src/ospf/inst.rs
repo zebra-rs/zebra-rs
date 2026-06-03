@@ -536,6 +536,33 @@ impl<V: OspfVersion> Ospf<V> {
         ));
     }
 
+    /// Reset OSPF adjacencies on operator request (`clear ospf
+    /// neighbor [<addr>]`). `None` resets every neighbor on every
+    /// link; `Some(a)` resets only the neighbor whose interface
+    /// address is `a` — for v2 that address is the `OspfLink.nbrs`
+    /// map key, so the match is a direct key comparison. Each reset
+    /// drives the neighbor down through the dead-timer
+    /// (`InactivityTimer`) path — the same teardown the hold-timer
+    /// and BFD-down (RFC 5882 §5) use — so Router-LSA re-origination
+    /// and SPF follow naturally.
+    fn clear_neighbor(&self, addr: Option<Ipv4Addr>) {
+        let mut targets: Vec<(u32, Ipv4Addr)> = Vec::new();
+        for (ifindex, link) in self.links.iter() {
+            for nbr_addr in link.nbrs.keys() {
+                if addr.is_none_or(|a| a == *nbr_addr) {
+                    targets.push((*ifindex, *nbr_addr));
+                }
+            }
+        }
+        for (ifindex, nbr_addr) in targets {
+            let _ = self.tx.send(Message::Nfsm(
+                ifindex,
+                nbr_addr,
+                super::nfsm::NfsmEvent::InactivityTimer,
+            ));
+        }
+    }
+
     /// Record a rewritten per-VRF config line (default instance only).
     /// Appends to the VRF's replay log and, if its child is already
     /// running, forwards the line live to the child's config inbox.
@@ -956,7 +983,7 @@ impl Ospf<Ospfv2> {
             return;
         }
 
-        let (path, args) = path_from_command(&msg.paths);
+        let (path, mut args) = path_from_command(&msg.paths);
 
         // Clear ops bypass the YANG callback table — they map
         // straight to runtime side-effects (kick SPF, drop a peer,
@@ -978,6 +1005,12 @@ impl Ospf<Ospfv2> {
                 self.gr_restart_abort();
             } else if path == "/clear/ospf/graceful-restart/commit" {
                 let _ = self.gr_restart_commit();
+            } else if path == "/clear/ospf/neighbor" {
+                // `clear ospf neighbor [<addr>]` — the bare form
+                // resets every adjacency; a trailing address resets
+                // only the neighbor at that interface IP (the v2
+                // `nbrs` map key). Empty args -> v4addr() is None.
+                self.clear_neighbor(args.v4addr());
             }
             return;
         }

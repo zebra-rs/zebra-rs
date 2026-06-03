@@ -145,6 +145,29 @@ module configure {
       leaf spf {
         type empty;
       }
+      // Juniper-style `clear ospf neighbor [<addr>]`. The bare
+      // (presence) form resets every OSPFv2 adjacency on the
+      // instance; with an address it resets only the neighbor whose
+      // interface (source) IPv4 address matches -- for v2 that
+      // address is the `OspfLink.nbrs` map key (RFC 2328), so it is
+      // a direct lookup with no scan.
+      //
+      // Modeled as a presence list so the node is a valid terminal
+      // on its own (-> reset all) yet still accepts a positional key
+      // (-> reset one), the same shape as `show bgp ipv4 neighbors
+      // [<addr>]`. No `all` keyword is needed (unlike
+      // zebra-bgp-clear.yang) because the bare presence already
+      // carries the "every neighbor" meaning.
+      list neighbor {
+        ext:help "Reset OSPF adjacencies (bare resets all)";
+        ext:presence "Reset every OSPF adjacency";
+        key address;
+        leaf address {
+          ext:help "Reset only the neighbor at this interface address";
+          ext:dynamic "ospf:neighbor";
+          type inet:ipv4-address;
+        }
+      }
       container checkpoint {
         // Debug entry for the graceful-restart checkpoint storage
         // layer (Phase 5b). Becomes operator-facing once the
