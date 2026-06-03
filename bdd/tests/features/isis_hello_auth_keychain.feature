@@ -1,5 +1,6 @@
 @serial
 @isis_hello_auth_keychain
+@isis
 Feature: IS-IS Hello authentication via an RFC 8177 key-chain
   As a network operator
   I want to authenticate IS-IS Hello (IIH) PDUs on a point-to-point link

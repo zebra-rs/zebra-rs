@@ -11,7 +11,7 @@ YAMLs and `.feature` files are generated from.
 
 |              | all P2P            | all LAN            | mixed P2P+LAN      |
 |--------------|--------------------|--------------------|--------------------|
-| **L1-only**  | `isis_l1_p2p`      | `isis_l1_lan`      | `isis_l1_mixed`    |
+| **L1-only**  | `isis_l1p2p`       | `isis_l1_lan`      | `isis_l1_mixed`    |
 | **L2-only**  | `isis_l2_p2p`      | `isis_l2_lan`      | `isis_l2_mixed`    |
 | **L1L2 mix** | `isis_l1l2_p2p`    | `isis_l1l2_lan`    | `isis_l1l2_mixed`  |
 
@@ -190,7 +190,7 @@ The logical adjacency graph is identical; only the L2 medium + IS-IS
 1. **New step — attach a named interface to a bridge.** Current bridge steps
    bind exactly one veth per namespace (`v{ns}ns`); a 10-router LAN/mixed
    topology needs `I connect namespace "zI" interface "iJ" to bridge "brX"`.
-2. ~~**New step — IPv4 ping.**~~ **DONE** (`isis_l1_p2p` slice). `ping6`/`ping4`
+2. ~~**New step — IPv4 ping.**~~ **DONE** (`isis_l1p2p` slice). `ping6`/`ping4`
    now share a `ping_family` helper in `bdd/src/netns.rs`, and the existing
    `ping from "zI" to "<addr>" should succeed/fail` steps pick the family from
    the target literal (`:` → IPv6, else IPv4), so one step covers dual-stack.
@@ -214,5 +214,5 @@ The logical adjacency graph is identical; only the L2 medium + IS-IS
 - **Mixed-variant link split.** Spines-P2P / rungs-LAN (above) vs odd/even vs
   per-row. Pick the one that best exercises a P2P↔LAN boundary on the same
   router.
-- **Build order.** First slice = `isis_l1_p2p` (no harness change); then the
+- **Build order.** First slice = `isis_l1p2p` (no harness change); then the
   LAN harness step unlocks the rest of the matrix.

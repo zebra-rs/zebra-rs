@@ -1,5 +1,6 @@
 @serial
 @isis_l1l2
+@isis
 Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbone
   As a network operator
   I want a single L1/L2 router to anchor a Level-1 area on one side and the

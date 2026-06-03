@@ -1,5 +1,6 @@
 @serial
 @isis_tilfa
+@isis
 Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
   As a network operator
   I want eight zebra-rs instances running IS-IS Level-2 with SR-MPLS and

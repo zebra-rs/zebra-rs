@@ -39,3 +39,4 @@ TLV 237 (MT IPv6 Reach).
 | Setup IS-IS L2 with MT 2 over a shared bridge and confirm the link is up | |
 | MT 2 SPF installs reciprocal IPv6 routes to peer loopbacks | |
 | LSPs carry the multi-topology TLVs | |
+| Teardown topology | |
