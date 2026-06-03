@@ -537,43 +537,50 @@ impl<V: OspfVersion> Ospf<V> {
     }
 
     /// Reset OSPF adjacencies on operator request (`clear ospf
-    /// neighbor [<addr>]`). `None` resets every neighbor on every
-    /// link; `Some(a)` resets only the neighbor whose interface
-    /// address is `a` — for v2 that address is the `OspfLink.nbrs`
-    /// map key, so the match is a direct key comparison. Each reset
-    /// drives the neighbor down through the dead-timer
-    /// (`InactivityTimer`) path — the same teardown the hold-timer
-    /// and BFD-down (RFC 5882 §5) use — so Router-LSA re-origination
-    /// and SPF follow naturally.
-    fn clear_neighbor(&self, addr: Option<Ipv4Addr>) {
+    /// neighbor [<router-id>]`). `None` resets every neighbor on
+    /// every link; `Some(id)` resets only the neighbor whose OSPF
+    /// Router-ID (the "Neighbor ID" column in `show ip ospf
+    /// neighbor`) is `id`. We match on `ident.router_id`, but key the
+    /// `Message::Nfsm` teardown by the `nbrs` map key (the interface
+    /// source IP for v2) the handler looks the neighbor up by.
+    ///
+    /// Each target is driven with `InactivityTimer` — the same event
+    /// the dead-timer fires — so a clear is identical to a timeout:
+    /// the neighbor instance is destroyed (see `nfsm_kill_neighbor`),
+    /// and because a live peer keeps Helloing it is re-learned from
+    /// scratch (Down → … → Full), bouncing the adjacency.
+    fn clear_neighbor(&self, id: Option<Ipv4Addr>) {
         let mut targets: Vec<(u32, Ipv4Addr)> = Vec::new();
         for (ifindex, link) in self.links.iter() {
-            for nbr_addr in link.nbrs.keys() {
-                if addr.is_none_or(|a| a == *nbr_addr) {
-                    targets.push((*ifindex, *nbr_addr));
+            for (nbr_key, nbr) in link.nbrs.iter() {
+                if id.is_none_or(|want| want == nbr.ident.router_id) {
+                    targets.push((*ifindex, *nbr_key));
                 }
             }
         }
-        for (ifindex, nbr_addr) in targets {
+        for (ifindex, nbr_key) in targets {
             let _ = self.tx.send(Message::Nfsm(
                 ifindex,
-                nbr_addr,
+                nbr_key,
                 super::nfsm::NfsmEvent::InactivityTimer,
             ));
         }
     }
 
     /// Candidate completions for `ext:dynamic "ospf:neighbor"` — the
-    /// current neighbor addresses (the `OspfLink.nbrs` keys; for v2
-    /// the neighbor's interface source IP). Feeds tab-completion of
-    /// `clear ospf neighbor <addr>`. Deduped + sorted via `BTreeSet`
-    /// since the same address could appear on more than one link.
+    /// current neighbor Router-IDs (the "Neighbor ID" column in
+    /// `show ip ospf neighbor`), since `clear ospf neighbor
+    /// <router-id>` matches on the Router-ID, not the interface
+    /// address. Deduped + sorted via `BTreeSet` (a Router-ID can
+    /// appear on more than one link via parallel adjacencies).
     fn neighbor_comps(&self) -> Vec<String> {
-        let mut addrs: BTreeSet<Ipv4Addr> = BTreeSet::new();
+        let mut ids: BTreeSet<Ipv4Addr> = BTreeSet::new();
         for link in self.links.values() {
-            addrs.extend(link.nbrs.keys().copied());
+            for nbr in link.nbrs.values() {
+                ids.insert(nbr.ident.router_id);
+            }
         }
-        addrs.iter().map(|addr| addr.to_string()).collect()
+        ids.iter().map(|id| id.to_string()).collect()
     }
 
     /// Record a rewritten per-VRF config line (default instance only).
@@ -2663,6 +2670,63 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// Destroy a neighbor whose inactivity timer fired — dead-timer
+    /// expiry, BFD-down (RFC 5882 §5), or an operator `clear ospf
+    /// neighbor`. `ospf_nfsm` has already run `ospf_nfsm_reset_nbr` on
+    /// it; here we finish the teardown its early-return defers to "the
+    /// caller":
+    ///
+    ///   * GR-helper neighbors are spared — `ospf_nfsm_inactivity_timer`
+    ///     re-armed their timer and kept them Full, so we must not drop
+    ///     them mid-restart.
+    ///   * otherwise the instance is removed from `link.nbrs`, its BFD
+    ///     subscription (if any) released, and the Full-transition
+    ///     cleanup run (Router-LSA / Network-LSA / Adj-SID / SPF) with a
+    ///     DR re-election when it had reached 2-Way.
+    ///
+    /// A later Hello re-creates the neighbor from `Down`, so clearing a
+    /// live neighbor bounces the adjacency while a real timeout simply
+    /// leaves it gone.
+    fn nfsm_kill_neighbor(&mut self, ifindex: u32, src: Ipv4Addr, old_state: Option<NfsmState>) {
+        let Some(old_state) = old_state else {
+            return;
+        };
+        // Snapshot the BFD key before removal; bail if GR-helper
+        // suppression kept the neighbor (its timer was re-armed).
+        let bfd_key = match self.links.get(&ifindex).and_then(|l| l.nbrs.get(&src)) {
+            Some(nbr) if nbr.gr_helper.is_some() => return,
+            Some(nbr) => nbr.bfd_session_key,
+            None => return,
+        };
+
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.nbrs.remove(&src);
+        }
+
+        // Release the BFD session for the gone neighbor. (BFD-down
+        // already cleared the key before firing InactivityTimer, so
+        // this only does work on the timeout / clear paths.)
+        if let Some(key) = bfd_key
+            && let Some(client_tx) = self.bfd_client_tx.as_ref()
+        {
+            let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: Ospfv2::PROTO.to_string(),
+                key,
+            });
+        }
+
+        // Drive the Full → Down side effects now that the neighbor is
+        // gone (the helper re-counts Full adjacencies from the map, so
+        // removing first is correct), then re-elect the DR if it had
+        // formed at least a 2-Way adjacency.
+        self.process_neighbor_state_change(ifindex, src, old_state, NfsmState::Down);
+        if old_state >= NfsmState::TwoWay {
+            let _ = self
+                .tx
+                .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
+        }
+    }
+
     /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1).
     fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
         self.gr_helper_exit(ifindex, router_id, "grace period expired");
@@ -3783,18 +3847,28 @@ impl Ospf<Ospfv2> {
                     ospf_nfsm(&mut link, nbr, ev, ident);
                 }
 
-                let new_state = self
-                    .links
-                    .get(&index)
-                    .and_then(|link| link.nbrs.get(&src))
-                    .map(|nbr| nbr.state);
+                if matches!(ev, NfsmEvent::InactivityTimer) {
+                    // InactivityTimer destroys the neighbor (dead-timer
+                    // expiry, BFD-down, or `clear ospf neighbor`).
+                    // `ospf_nfsm` reset its lists but, per its "the
+                    // caller will delete it" contract, left the actual
+                    // removal to us; do it so the instance is really
+                    // gone and a later Hello re-forms it from scratch.
+                    self.nfsm_kill_neighbor(index, src, old_state);
+                } else {
+                    let new_state = self
+                        .links
+                        .get(&index)
+                        .and_then(|link| link.nbrs.get(&src))
+                        .map(|nbr| nbr.state);
 
-                if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
-                    self.process_neighbor_state_change(index, src, old_state, new_state);
-                    // Re-evaluate the BFD session against the configured
-                    // threshold (the reconcile reads the now-current
-                    // neighbor state, so it covers both 2-Way and Full).
-                    self.bfd_reconcile_nbr(index, src);
+                    if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                        self.process_neighbor_state_change(index, src, old_state, new_state);
+                        // Re-evaluate the BFD session against the configured
+                        // threshold (the reconcile reads the now-current
+                        // neighbor state, so it covers both 2-Way and Full).
+                        self.bfd_reconcile_nbr(index, src);
+                    }
                 }
             }
             Message::HelloTimer(index) => {
@@ -4179,6 +4253,22 @@ impl Ospf<Ospfv3> {
             return;
         }
 
+        // Dynamic tab-completion (`ext:dynamic "ospfv3:<handler>"`):
+        // the manager sends the handler name as the sole path segment
+        // and waits on `msg.resp`. Answer directly — instance-level,
+        // not VRF-scoped. Mirrors the v2 sibling.
+        if msg.op == ConfigOp::Completion {
+            let (path, _) = path_from_command(&msg.paths);
+            let comps = match path.as_str() {
+                "/neighbor" => self.neighbor_comps(),
+                _ => Vec::new(),
+            };
+            if let Some(resp) = msg.resp {
+                let _ = resp.send(comps);
+            }
+            return;
+        }
+
         // `/router/ospfv3/vrf/<name>/...` belongs to a per-VRF child.
         // Strip the `vrf <name>` selector and buffer + forward the
         // rewritten line; never dispatch it through the default
@@ -4188,7 +4278,7 @@ impl Ospf<Ospfv3> {
             return;
         }
 
-        let (path, args) = path_from_command(&msg.paths);
+        let (path, mut args) = path_from_command(&msg.paths);
 
         // Clear ops bypass the YANG callback table; see the v2
         // sibling. Path-filter so the v3 instance ignores the v2
@@ -4196,6 +4286,11 @@ impl Ospf<Ospfv3> {
         if msg.op == ConfigOp::Clear {
             if path == "/clear/ospfv3/spf" {
                 self.clear_spf();
+            } else if path == "/clear/ospfv3/neighbor" {
+                // v3 sibling of `clear ospf neighbor`. For v3 the
+                // `nbrs` map key already IS the Router-ID, but
+                // clear_neighbor matches `ident.router_id` either way.
+                self.clear_neighbor(args.v4addr());
             }
             return;
         }
@@ -5567,18 +5662,26 @@ impl Ospf<Ospfv3> {
                     super::nfsm::ospf_nfsm(&mut link, nbr, ev, ident);
                 }
 
-                let new_state = self
-                    .links
-                    .get(&index)
-                    .and_then(|link| link.nbrs.get(&src))
-                    .map(|nbr| nbr.state);
+                if matches!(ev, NfsmEvent::InactivityTimer) {
+                    // InactivityTimer destroys the neighbor (dead-timer
+                    // expiry, BFD-down, or `clear ospfv3 neighbor`);
+                    // `ospf_nfsm` reset its lists but leaves the actual
+                    // removal to us. Mirrors the v2 sibling.
+                    self.nfsm_kill_neighbor(index, src, old_state);
+                } else {
+                    let new_state = self
+                        .links
+                        .get(&index)
+                        .and_then(|link| link.nbrs.get(&src))
+                        .map(|nbr| nbr.state);
 
-                if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
-                    self.process_neighbor_state_change(index, src, old_state, new_state);
-                    // Re-evaluate the BFD session against the configured
-                    // threshold (the reconcile reads the now-current
-                    // neighbor state, so it covers both 2-Way and Full).
-                    self.bfd_reconcile_nbr(index, src);
+                    if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                        self.process_neighbor_state_change(index, src, old_state, new_state);
+                        // Re-evaluate the BFD session against the configured
+                        // threshold (the reconcile reads the now-current
+                        // neighbor state, so it covers both 2-Way and Full).
+                        self.bfd_reconcile_nbr(index, src);
+                    }
                 }
             }
             Message::SpfSchedule(area_id) => {
@@ -6287,6 +6390,49 @@ impl Ospf<Ospfv3> {
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(area_id, &lsa);
             }
+        }
+    }
+
+    /// Destroy a neighbor whose inactivity timer fired — dead-timer
+    /// expiry, BFD-down (RFC 5882 §5), or an operator `clear ospfv3
+    /// neighbor`. v3 sibling of `Ospf<Ospfv2>::nfsm_kill_neighbor`:
+    /// `ospf_nfsm` has already reset the neighbor's lists; here we
+    /// finish the teardown — skip GR-helper neighbors (their timer was
+    /// re-armed), else remove the instance from `link.nbrs`, release
+    /// any BFD subscription, run the Full-transition cleanup
+    /// (Router-LSA / Network-LSA / SPF) and re-elect the DR if it had
+    /// reached 2-Way. A later Hello re-creates the neighbor from
+    /// `Down`.
+    fn nfsm_kill_neighbor(&mut self, ifindex: u32, src: Ipv4Addr, old_state: Option<NfsmState>) {
+        let Some(old_state) = old_state else {
+            return;
+        };
+        // Snapshot the BFD key before removal; bail if GR-helper
+        // suppression kept the neighbor (its timer was re-armed).
+        let bfd_key = match self.links.get(&ifindex).and_then(|l| l.nbrs.get(&src)) {
+            Some(nbr) if nbr.gr_helper.is_some() => return,
+            Some(nbr) => nbr.bfd_session_key,
+            None => return,
+        };
+
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.nbrs.remove(&src);
+        }
+
+        if let Some(key) = bfd_key
+            && let Some(client_tx) = self.bfd_client_tx.as_ref()
+        {
+            let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+                client: Ospfv3::PROTO.to_string(),
+                key,
+            });
+        }
+
+        self.process_neighbor_state_change(ifindex, src, old_state, NfsmState::Down);
+        if old_state >= NfsmState::TwoWay {
+            let _ = self
+                .tx
+                .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
         }
     }
 

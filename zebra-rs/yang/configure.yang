@@ -145,12 +145,13 @@ module configure {
       leaf spf {
         type empty;
       }
-      // Juniper-style `clear ospf neighbor [<addr>]`. The bare
+      // Juniper-style `clear ospf neighbor [<router-id>]`. The bare
       // (presence) form resets every OSPFv2 adjacency on the
-      // instance; with an address it resets only the neighbor whose
-      // interface (source) IPv4 address matches -- for v2 that
-      // address is the `OspfLink.nbrs` map key (RFC 2328), so it is
-      // a direct lookup with no scan.
+      // instance; with a value it resets only the neighbor whose OSPF
+      // Router-ID (the "Neighbor ID" column in `show ip ospf
+      // neighbor`) matches. The Router-ID is a dotted-quad, so the
+      // arg type is `inet:ipv4-address`; the runtime matches it
+      // against `Neighbor.ident.router_id`, not the interface address.
       //
       // Modeled as a presence list so the node is a valid terminal
       // on its own (-> reset all) yet still accepts a positional key
@@ -161,9 +162,9 @@ module configure {
       list neighbor {
         ext:help "Reset OSPF adjacencies (bare resets all)";
         ext:presence "Reset every OSPF adjacency";
-        key address;
-        leaf address {
-          ext:help "Reset only the neighbor at this interface address";
+        key id;
+        leaf id {
+          ext:help "Reset only the neighbor with this OSPF Router-ID";
           ext:dynamic "ospf:neighbor";
           type inet:ipv4-address;
         }
@@ -207,6 +208,24 @@ module configure {
       // Sibling of `clear ospf spf` for the v3 instance.
       leaf spf {
         type empty;
+      }
+      // `clear ospfv3 neighbor [<router-id>]` — v3 sibling of the
+      // `clear ospf neighbor` surface. Bare (presence) resets every
+      // OSPFv3 adjacency; with a value it resets only the neighbor
+      // whose OSPF Router-ID (the "Neighbor ID" in `show ipv6 ospf
+      // neighbor`) matches. The Router-ID is a dotted-quad, so the
+      // arg stays `inet:ipv4-address`; for v3 it is also the
+      // `OspfLink.nbrs` map key (RFC 5340 §10). Same presence-list
+      // shape as the v2 sibling — see the `container ospf` comment.
+      list neighbor {
+        ext:help "Reset OSPFv3 adjacencies (bare resets all)";
+        ext:presence "Reset every OSPFv3 adjacency";
+        key id;
+        leaf id {
+          ext:help "Reset only the neighbor with this OSPF Router-ID";
+          ext:dynamic "ospfv3:neighbor";
+          type inet:ipv4-address;
+        }
       }
     }
   }
