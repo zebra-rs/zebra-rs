@@ -359,14 +359,7 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        ipv4_route_sync(
-            &mut self.table,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-            true,
-        )
-        .await;
+        self.ipv4_default_sync(true).await;
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
@@ -375,13 +368,7 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        ipv6_route_sync(
-            &mut self.table_v6,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-        )
-        .await;
+        self.ipv6_default_sync().await;
         self.schedule_rib_sync();
     }
 
@@ -520,14 +507,7 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        ipv4_route_sync(
-            &mut self.table,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-            true,
-        )
-        .await;
+        self.ipv4_default_sync(true).await;
         ipv6_nexthop_sync(
             &mut self.nmap,
             &self.table_v6,
@@ -536,13 +516,7 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        ipv6_route_sync(
-            &mut self.table_v6,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-        )
-        .await;
+        self.ipv6_default_sync().await;
         // Mirror link_down: schedule a deferred Resolve so recursive
         // groups (e.g. a static whose first segment was unreachable
         // while the link was down) re-evaluate now that the IS-IS
@@ -899,6 +873,74 @@ impl Rib {
         self.schedule_rib_sync();
     }
 
+    /// Sync the default IPv4 table, then push any selected-entry
+    /// transitions to redistribute subscribers. This is the steady-state
+    /// hook that closes the resolve-path gap: selection changes driven by
+    /// nexthop resolution / topology churn (link up/down, address add/del,
+    /// the debounced resolve) flow to subscribers, not just explicit
+    /// route add/del. When no subscriber is registered the plain sync runs
+    /// with zero snapshot overhead.
+    pub(super) async fn ipv4_default_sync(&mut self, ifdown: bool) -> bool {
+        if self.redist_filters.is_empty() {
+            return ipv4_route_sync(
+                &mut self.table,
+                &mut self.nmap,
+                &self.fib_handle,
+                RT_TABLE_MAIN,
+                ifdown,
+            )
+            .await;
+        }
+        let (retry, deltas) = ipv4_route_sync_collect(
+            &mut self.table,
+            &mut self.nmap,
+            &self.fib_handle,
+            RT_TABLE_MAIN,
+            ifdown,
+        )
+        .await;
+        for (prefix, before, after) in deltas {
+            super::redist::notify_v4_delta(
+                &self.redist_filters,
+                &self.client_registry,
+                &prefix,
+                before.as_ref(),
+                after.as_ref(),
+            );
+        }
+        retry
+    }
+
+    /// IPv6 sibling of `ipv4_default_sync`.
+    pub(super) async fn ipv6_default_sync(&mut self) -> bool {
+        if self.redist_filters.is_empty() {
+            return ipv6_route_sync(
+                &mut self.table_v6,
+                &mut self.nmap,
+                &self.fib_handle,
+                RT_TABLE_MAIN,
+            )
+            .await;
+        }
+        let (retry, deltas) = ipv6_route_sync_collect(
+            &mut self.table_v6,
+            &mut self.nmap,
+            &self.fib_handle,
+            RT_TABLE_MAIN,
+        )
+        .await;
+        for (prefix, before, after) in deltas {
+            super::redist::notify_v6_delta(
+                &self.redist_filters,
+                &self.client_registry,
+                &prefix,
+                before.as_ref(),
+                after.as_ref(),
+            );
+        }
+        retry
+    }
+
     pub async fn ipv6_route_resolve(&mut self) {
         ipv6_nexthop_sync(
             &mut self.nmap,
@@ -908,13 +950,7 @@ impl Rib {
             &self.fib_handle,
         )
         .await;
-        let mut retry = ipv6_route_sync(
-            &mut self.table_v6,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-        )
-        .await;
+        let mut retry = self.ipv6_default_sync().await;
         let table_ids: Vec<u32> = self.vrf_tables.keys().copied().collect();
         for table_id in table_ids {
             if let Some(t) = self.vrf_tables.get_mut(&table_id) {
@@ -941,14 +977,7 @@ impl Rib {
         .await;
         // `false` = not an ifdown sweep; this resolve cycle is for FIB-update
         // re-resolution, not link-down recovery.
-        let mut retry = ipv4_route_sync(
-            &mut self.table,
-            &mut self.nmap,
-            &self.fib_handle,
-            RT_TABLE_MAIN,
-            false,
-        )
-        .await;
+        let mut retry = self.ipv4_default_sync(false).await;
         // Re-sync each VRF table against its own kernel table id so a
         // VRF route whose nexthop only just became resolvable gets
         // installed.
@@ -1170,6 +1199,13 @@ pub async fn ipv4_nexthop_sync(
     }
 }
 
+/// Per-prefix selected-entry transition produced by a sync pass:
+/// `(prefix, before, after)`. Fed to the redistribute steady-state
+/// delta hook so resolution/topology-driven selection changes reach
+/// subscribers, not just explicit route add/del.
+pub type RedistDeltaV4 = (Ipv4Net, Option<RibEntry>, Option<RibEntry>);
+pub type RedistDeltaV6 = (Ipv6Net, Option<RibEntry>, Option<RibEntry>);
+
 pub async fn ipv4_route_sync(
     table: &mut PrefixMap<Ipv4Net, RibEntries>,
     nmap: &mut NexthopMap,
@@ -1177,18 +1213,56 @@ pub async fn ipv4_route_sync(
     table_id: u32,
     ifdown: bool,
 ) -> bool {
+    ipv4_route_sync_inner(table, nmap, fib, table_id, ifdown, false)
+        .await
+        .0
+}
+
+/// Like `ipv4_route_sync` but also returns the per-prefix selected-entry
+/// transitions (so the caller can notify redistribute subscribers about
+/// resolution/topology-driven selection changes). Only the default
+/// table should collect: `notify_v4_delta` delivers to `vrf_id == 0`
+/// subscribers, so VRF-table deltas must not flow through it.
+pub async fn ipv4_route_sync_collect(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    table_id: u32,
+    ifdown: bool,
+) -> (bool, Vec<RedistDeltaV4>) {
+    ipv4_route_sync_inner(table, nmap, fib, table_id, ifdown, true).await
+}
+
+async fn ipv4_route_sync_inner(
+    table: &mut PrefixMap<Ipv4Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    table_id: u32,
+    ifdown: bool,
+    collect: bool,
+) -> (bool, Vec<RedistDeltaV4>) {
     // Collect prefixes first so we don't hold the !Send `IterMut`
     // across the `ipv4_entry_selection` await.
     let prefixes: Vec<Ipv4Net> = table.iter().map(|(p, _)| p).collect();
     let mut retry = false;
+    let mut deltas: Vec<RedistDeltaV4> = Vec::new();
     for p in prefixes {
         let Some(entries) = table.get_mut(&p) else {
             continue;
         };
+        let before = collect
+            .then(|| entries.iter().find(|e| e.is_selected()).cloned())
+            .flatten();
         ipv4_entry_resolve(entries, nmap, ifdown);
         retry |= ipv4_entry_selection(&p, entries, None, nmap, fib, table_id, ifdown).await;
+        if collect {
+            let after = entries.iter().find(|e| e.is_selected()).cloned();
+            if super::redist::selected_changed_v4(&p, before.as_ref(), after.as_ref()) {
+                deltas.push((p, before, after));
+            }
+        }
     }
-    retry
+    (retry, deltas)
 }
 
 fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool) {
@@ -1871,18 +1945,51 @@ pub async fn ipv6_route_sync(
     fib: &FibHandle,
     table_id: u32,
 ) -> bool {
+    ipv6_route_sync_inner(table, nmap, fib, table_id, false)
+        .await
+        .0
+}
+
+/// IPv6 sibling of `ipv4_route_sync_collect`. See its docstring for the
+/// default-table-only collection rule.
+pub async fn ipv6_route_sync_collect(
+    table: &mut PrefixMap<Ipv6Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    table_id: u32,
+) -> (bool, Vec<RedistDeltaV6>) {
+    ipv6_route_sync_inner(table, nmap, fib, table_id, true).await
+}
+
+async fn ipv6_route_sync_inner(
+    table: &mut PrefixMap<Ipv6Net, RibEntries>,
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    table_id: u32,
+    collect: bool,
+) -> (bool, Vec<RedistDeltaV6>) {
     // Collect prefixes first so we don't hold the !Send `IterMut`
     // across the `ipv6_entry_selection` await.
     let prefixes: Vec<Ipv6Net> = table.iter().map(|(p, _)| p).collect();
     let mut retry = false;
+    let mut deltas: Vec<RedistDeltaV6> = Vec::new();
     for p in prefixes {
         let Some(entries) = table.get_mut(&p) else {
             continue;
         };
+        let before = collect
+            .then(|| entries.iter().find(|e| e.is_selected()).cloned())
+            .flatten();
         ipv6_entry_resolve(entries, nmap);
         retry |= ipv6_entry_selection(&p, entries, None, nmap, fib, table_id).await;
+        if collect {
+            let after = entries.iter().find(|e| e.is_selected()).cloned();
+            if super::redist::selected_changed_v6(&p, before.as_ref(), after.as_ref()) {
+                deltas.push((p, before, after));
+            }
+        }
     }
-    retry
+    (retry, deltas)
 }
 
 fn ipv6_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap) {

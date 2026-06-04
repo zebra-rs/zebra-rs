@@ -2,17 +2,24 @@
 //!
 //! Owns the per-(proto, AFI, rtype) subtype filter sets, the one-shot
 //! FIB walker that pushes the current matching set at subscription
-//! time, and the steady-state delta hook that fires from
-//! `ipv{4,6}_route_{add,del}` after a mutation flips the selected
-//! entry. Self-route filtering is enforced unconditionally — a
-//! subscription whose `proto` maps to its own `rtype` is silently
-//! dropped at registration time.
+//! time, and the steady-state delta hook. Self-route filtering is
+//! enforced unconditionally — a subscription whose `proto` maps to its
+//! own `rtype` is silently dropped at registration time.
 //!
-//! Known gap: nexthop-resolution-driven selection changes that don't
-//! flow through `ipv{4,6}_route_{add,del}` (e.g. the debounced
-//! `ipv4_route_resolve` path) are not yet hooked. The initial walk
-//! at subscription time still covers those, but they won't update
-//! in steady state until a follow-up generalizes the hook.
+//! Two triggers feed the steady-state delta hook, both via
+//! `notify_v{4,6}_delta`:
+//!   - explicit route add/del — `ipv{4,6}_route_{add,del}` snapshot the
+//!     selected entry before/after the mutation;
+//!   - resolution / topology change — `ipv{4,6}_route_sync_collect`
+//!     reports per-prefix selected-entry transitions, which
+//!     `Rib::ipv{4,6}_default_sync` forwards. This closes the former
+//!     gap where a redistributed route stranded in the advertisement
+//!     after its nexthop became (un)resolvable via the debounced
+//!     resolve / link up-down / address add-del paths.
+//!
+//! Still default-table only: `notify_v{4,6}_delta` delivers to
+//! `vrf_id == 0` subscribers, so VRF-table selection changes need a
+//! separate per-VRF hook (see `notify_v4_delta`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -263,15 +270,10 @@ fn flush_v6(
 // ---- steady-state delta notification --------------------------------
 //
 // Called from the route_{add,del} entry points after a FIB mutation
-// has updated the selected entry. Compares the before/after selected
-// entries per subscriber and emits single-entry RouteAdd / RouteDel
-// messages for each filter row that's affected.
-//
-// Known gap: nexthop-resolution-driven selection changes that don't
-// flow through `ipv{4,6}_route_{add,del}` (e.g. the debounced
-// `ipv4_route_resolve` path) are not yet hooked. The initial walk
-// at subscription time still covers those, but they won't update
-// in steady state until the hook is generalized.
+// has updated the selected entry, and from the resolve/sync paths via
+// `selected_changed_v{4,6}` + `Rib::ipv{4,6}_default_sync`. Compares the
+// before/after selected entries per subscriber and emits single-entry
+// RouteAdd / RouteDel messages for each filter row that's affected.
 
 fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
     let nh = first_v4_nexthop(&e.nexthop)?;
@@ -295,6 +297,38 @@ fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
         tag: 0,
         ifindex: e.ifindex,
     })
+}
+
+/// Whether the redistribute-relevant projection of the selected entry
+/// at `prefix` differs between `before` and `after`. The resolve/sync
+/// notify hook uses this to skip no-op selection passes: it compares
+/// the owning `rtype` plus the delivered `RouteEntryV4` (the exact
+/// inputs a subscriber filter keys on — nexthop, metric, subtype,
+/// ifindex), so a recursive nexthop churn that leaves the delivered
+/// form unchanged produces no spurious withdraw/re-add, while a real
+/// select/deselect, rtype swap, or metric change does.
+pub(super) fn selected_changed_v4(
+    prefix: &Ipv4Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+) -> bool {
+    fn key(prefix: &Ipv4Net, e: Option<&RibEntry>) -> Option<(RibType, RouteEntryV4)> {
+        let e = e?;
+        Some((e.rtype, build_v4_entry(prefix, e)?))
+    }
+    key(prefix, before) != key(prefix, after)
+}
+
+pub(super) fn selected_changed_v6(
+    prefix: &Ipv6Net,
+    before: Option<&RibEntry>,
+    after: Option<&RibEntry>,
+) -> bool {
+    fn key(prefix: &Ipv6Net, e: Option<&RibEntry>) -> Option<(RibType, RouteEntryV6)> {
+        let e = e?;
+        Some((e.rtype, build_v6_entry(prefix, e)?))
+    }
+    key(prefix, before) != key(prefix, after)
 }
 
 /// Notify every default-VRF subscriber whose filter matches the
@@ -480,4 +514,89 @@ fn send_v6_one(tx: &UnboundedSender<RibRx>, rtype: RibType, op: WalkOp, entry: R
         },
     };
     let _ = tx.send(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rib::nexthop::NexthopUni;
+    use std::net::IpAddr;
+
+    fn static_uni(addr: &str, metric: u32) -> RibEntry {
+        let mut e = RibEntry::new(RibType::Static);
+        e.metric = metric;
+        e.nexthop = Nexthop::Uni(NexthopUni::new(
+            addr.parse::<IpAddr>().unwrap(),
+            metric,
+            vec![],
+        ));
+        e
+    }
+
+    fn p() -> Ipv4Net {
+        "1.2.3.4/32".parse().unwrap()
+    }
+
+    #[test]
+    fn no_change_when_both_unselected() {
+        assert!(!selected_changed_v4(&p(), None, None));
+    }
+
+    #[test]
+    fn deselect_is_a_change() {
+        // The resolve-path strand: a redistributed route that was
+        // selected becomes unselected (nexthop unresolvable) — must be
+        // seen as a change so the withdraw reaches subscribers.
+        let before = static_uni("10.0.0.2", 0);
+        assert!(selected_changed_v4(&p(), Some(&before), None));
+    }
+
+    #[test]
+    fn select_is_a_change() {
+        let after = static_uni("10.0.0.2", 0);
+        assert!(selected_changed_v4(&p(), None, Some(&after)));
+    }
+
+    #[test]
+    fn identical_selection_is_no_change() {
+        // A no-op resolve pass over an unchanged selected route must not
+        // emit a spurious withdraw/re-add.
+        let a = static_uni("10.0.0.2", 0);
+        let b = static_uni("10.0.0.2", 0);
+        assert!(!selected_changed_v4(&p(), Some(&a), Some(&b)));
+    }
+
+    #[test]
+    fn metric_change_is_a_change() {
+        let a = static_uni("10.0.0.2", 10);
+        let b = static_uni("10.0.0.2", 20);
+        assert!(selected_changed_v4(&p(), Some(&a), Some(&b)));
+    }
+
+    #[test]
+    fn rtype_swap_is_a_change() {
+        // Same delivered nexthop/metric but a different owning protocol
+        // — subscribers filter on rtype, so this must register.
+        let a = static_uni("10.0.0.2", 10);
+        let mut b = static_uni("10.0.0.2", 10);
+        b.rtype = RibType::Ospf;
+        assert!(selected_changed_v4(&p(), Some(&a), Some(&b)));
+    }
+
+    #[test]
+    fn nexthop_change_is_a_change() {
+        let a = static_uni("10.0.0.2", 0);
+        let b = static_uni("10.0.0.3", 0);
+        assert!(selected_changed_v4(&p(), Some(&a), Some(&b)));
+    }
+
+    #[test]
+    fn link_only_nexthop_never_delivered() {
+        // A Link-only (non-deliverable) selected entry projects to None;
+        // gaining or losing it produces no redistribute delta.
+        let mut link = RibEntry::new(RibType::Static);
+        link.nexthop = Nexthop::Link(7);
+        assert!(!selected_changed_v4(&p(), Some(&link), None));
+        assert!(!selected_changed_v4(&p(), None, Some(&link)));
+    }
 }
