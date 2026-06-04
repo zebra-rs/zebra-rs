@@ -376,7 +376,7 @@ static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, C - connected, 
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
        L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
-       > - selected route, * - FIB route, S - Stale route
+       > - selected route, * - FIB route, S - Stale route, ? - backup route
 
 "#;
 
@@ -580,9 +580,9 @@ pub fn rib_entry_show_v6(
 /// `[distance/metric]` bracket — the metric is per-nexthop, so a TI-LFA
 /// repair path can advertise a higher cost than the primary. Backup
 /// paths (every member past the first) drop the FIB `*>` marker for a
-/// `>>` repair marker in the same column, e.g.:
+/// `?` repair marker in the same column, e.g.:
 ///   L2 *> 10.0.0.0/24 [0/100] via 10.211.55.1, enp0s5, 00:04:15
-///      *>>            [0/1002] via 10.211.55.1, enp0s5, 00:04:15
+///      *?             [0/1002] via 10.211.55.1, enp0s5, 00:04:15
 fn write_nexthop_list(
     buf: &mut String,
     rib: &Rib,
@@ -593,8 +593,8 @@ fn write_nexthop_list(
     uptime: &str,
 ) {
     // Backups keep the route's FIB state in the marker column and add a
-    // second `>` to flag the repair path: `*>>` (FIB) or ` >>` (not).
-    let backup_marker = if e.fib { "*>>" } else { " >>" };
+    // `?` to flag the repair path: `*? ` (FIB) or ` ? ` (not).
+    let backup_marker = if e.fib { "*? " } else { " ? " };
     let mut row = 0;
     for (member_idx, member) in pro.nexthops.iter().enumerate() {
         let is_backup = member_idx > 0;
@@ -637,7 +637,7 @@ fn write_nexthop_list(
 
 /// Leading whitespace + repair marker + `[distance/metric]` bracket for a
 /// `Nexthop::List` continuation line. `marker` is placed in the FIB-marker
-/// column (`*>>` for backups, empty for extra primary ECMP legs) and the
+/// column (`*? ` for backups, empty for extra primary ECMP legs) and the
 /// bracket is padded to align under the first line's. Kept `Rib`-free so the
 /// column math stays unit-testable.
 fn list_continuation_prefix(
@@ -2112,10 +2112,10 @@ mod tests {
         let marker_col = "L2 ".len(); // 3
         let bracket_col = "L2 *> 10.0.0.0/24 ".len(); // 18
 
-        // A backup path: `*>>` sits in the FIB-marker column, the bracket
+        // A backup path: `*? ` sits in the FIB-marker column, the bracket
         // re-aligns under the first line, and the metric is the path's own.
-        let backup = list_continuation_prefix(marker_col, bracket_col, "*>>", 0, 1002);
-        assert_eq!(backup, "   *>>            [0/1002]");
+        let backup = list_continuation_prefix(marker_col, bracket_col, "*? ", 0, 1002);
+        assert_eq!(backup, "   *?             [0/1002]");
         assert_eq!(backup.find('[').unwrap(), bracket_col);
 
         // An extra primary ECMP leg carries no marker, just an aligned
