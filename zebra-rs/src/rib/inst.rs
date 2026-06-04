@@ -16,8 +16,7 @@ use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
 use crate::rib::route::{
-    AddrRecoveryState, ipv4_nexthop_sync, ipv4_route_sync, ipv6_nexthop_sync, ipv6_route_sync,
-    nexthop_orphan_gc,
+    AddrRecoveryState, ipv4_nexthop_sync, ipv6_nexthop_sync, nexthop_orphan_gc,
 };
 use crate::rib::{Bridge, RibEntries};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -2062,14 +2061,7 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv4_route_sync(
-                    &mut self.table,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                    true,
-                )
-                .await;
+                self.ipv4_default_sync(true).await;
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
@@ -2078,13 +2070,7 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv6_route_sync(
-                    &mut self.table_v6,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                )
-                .await;
+                self.ipv6_default_sync().await;
                 self.router_id_update();
             }
             FibMessage::DelAddr(addr) => {
@@ -2108,14 +2094,7 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv4_route_sync(
-                    &mut self.table,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                    true,
-                )
-                .await;
+                self.ipv4_default_sync(true).await;
                 ipv6_nexthop_sync(
                     &mut self.nmap,
                     &self.table_v6,
@@ -2124,13 +2103,7 @@ impl Rib {
                     &self.fib_handle,
                 )
                 .await;
-                ipv6_route_sync(
-                    &mut self.table_v6,
-                    &mut self.nmap,
-                    &self.fib_handle,
-                    RT_TABLE_MAIN,
-                )
-                .await;
+                self.ipv6_default_sync().await;
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
