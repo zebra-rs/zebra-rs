@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::btree_map::{Iter, IterMut};
+use std::collections::btree_map::Iter;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -94,10 +94,6 @@ impl IsisLinks {
 
     pub fn iter(&self) -> Iter<'_, u32, IsisLink> {
         self.map.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> IterMut<'_, u32, IsisLink> {
-        self.map.iter_mut()
     }
 
     pub fn values(&self) -> std::collections::btree_map::Values<'_, u32, IsisLink> {

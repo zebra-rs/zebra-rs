@@ -245,6 +245,17 @@ pub fn nbr_hello_interpret(
     (has_mac, has_my_sys_id, helper_edge)
 }
 
+/// ISO 10589 §8.4.3 / RFC 1195 §3.3: a Level-1 adjacency may form only with
+/// a neighbour that shares at least one Area Address. `our_area` is our
+/// manual area (NET-derived, AFI-prefixed); we scan the IIH's Area Address
+/// TLVs (type 1) for a match. Level-2 adjacencies are area-independent and
+/// never call this. Returns false when the neighbour advertises no area we
+/// hold — the caller then refuses the L1 adjacency.
+fn l1_area_compatible(our_area: &[u8], tlvs: &[IsisTlv]) -> bool {
+    tlvs.iter()
+        .any(|tlv| matches!(tlv, IsisTlv::AreaAddr(a) if a.area_addr.as_slice() == our_area))
+}
+
 #[isis_pdu_handler(Hello, Recv)]
 pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<MacAddr>) {
     use IfsmEvent::*;
@@ -261,6 +272,18 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // Check link type.
     if !link.is_lan() {
         isis_pdu_trace!(link, &level, "[Hello:Recv] Link type is not LAN");
+        return;
+    }
+
+    // ISO 10589 §8.4.3: a Level-1 adjacency requires a shared area address.
+    // Refuse the IIH (form no neighbour) when our area isn't among the
+    // sender's Area Address TLVs. Level-2 is area-independent.
+    if level == Level::L1 && !l1_area_compatible(&link.up_config.net.area_id(), &pdu.tlvs) {
+        isis_pdu_trace!(
+            link,
+            &level,
+            "[Hello:Recv] L1 area mismatch — adjacency refused"
+        );
         return;
     }
 
@@ -482,6 +505,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
     // P2P Hello contains circuit_type indicating what levels the sender supports
     let pdu_level = pdu.circuit_type;
 
+    // Our manual area, for the per-level Level-1 area gate below.
+    let our_area = link.up_config.net.area_id();
+
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
         // Logging.
@@ -505,6 +531,20 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
                 "[P2P Hello:Recv] Link type is not point-to-point"
             );
             return;
+        }
+
+        // ISO 10589 §8.4.3: a Level-1 adjacency requires a shared area
+        // address. Skip this level (form no L1 neighbour) when our area
+        // isn't among the sender's Area Address TLVs — even though both
+        // ends run Level-1, a Level-1 adjacency across an area boundary is
+        // invalid. Level-2 is area-independent.
+        if level == Level::L1 && !l1_area_compatible(&our_area, &pdu.tlvs) {
+            isis_pdu_trace!(
+                link,
+                &level,
+                "[P2P Hello:Recv] L1 area mismatch — adjacency refused"
+            );
+            continue;
         }
 
         // Create or update neighbor for this level

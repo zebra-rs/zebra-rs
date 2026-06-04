@@ -21,6 +21,7 @@ use super::inst::MsgSender;
 use super::link::LinkTop;
 use super::{
     Level, LspFlood,
+    ifsm::has_level,
     inst::IsisTop,
     link::Afi,
     lsp::{lsp_emit, lsp_flood},
@@ -676,6 +677,19 @@ fn lsp_clone_with_seqno_inc(lsp: &IsisLsp) -> IsisLsp {
 }
 
 pub fn refresh_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
+    // A router that no longer participates in this level must not
+    // re-originate self-LSPs here. This matters right after an is-type
+    // demotion: `process_lsp_purge` floods a purge for the abandoned
+    // level and stores it with a short (~1s) refresh timer, and
+    // `insert_self_originate` re-arms that timer on every emission. Left
+    // unguarded, the first refresh would clone the purge into a fresh
+    // live LSP at a bumped sequence — un-purging it and looping every
+    // second (the seq number climbs without bound) — so peers keep our
+    // stale LSP instead of dropping it. The purge's hold timer
+    // (ZeroAgeLifetime) still evicts the local entry on schedule.
+    if !has_level(top.config.is_type(), level) {
+        return;
+    }
     if let Some(lsa) = top.lsdb.get(&level).get(&key) {
         let mut lsp = lsp_clone_with_seqno_inc(&lsa.lsp);
         let auth_cfg = crate::isis::lsp::level_auth_cfg(top.config, level).clone();
