@@ -15,17 +15,18 @@ Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbon
 
   Test Topology:
   ```
-        Area 49.0001  (Level-1 area)            Backbone (Level-2)
-    ┌──────────────────────────────────┐     ┌──────────────────────┐
-
-        r1 ───L1─── r2 ───L1─── r3 ════L2════ r4
-       (L1)        (L1)        (L1L2)         (L2-only)
-      lo .1        lo .2       lo .3           lo .4
-     49.0001      49.0001      49.0001         49.0000
+        Area 49.0001  (Level-1 area)        Backbone (Level-2)   Area 49.0000
+    ┌──────────────────────────────────┐  ┌──────────────────┐
+                                                                  (L1, idle)
+        r1 ───L1─── r2 ───L1─── r3 ════L2════ r4 ┄┄┄┄┄┄┄┄┄┄┄┄ r5
+       (L1)        (L1)        (L1L2)        (L2-only)         (L1-only)
+      lo .1        lo .2       lo .3          lo .4             lo .5
+     49.0001      49.0001      49.0001        49.0000           49.0000
 
     loopbacks: rI -> 10.0.0.I/32  and  2001:db8::I/128
     links:     r1-r2 10.0.12.0/30  r2-r3 10.0.23.0/30  r3-r4 10.0.34.0/30
-               (IPv6 2001:db8:12::/64, 2001:db8:23::/64, 2001:db8:34::/64)
+               r4-r5 10.0.45.0/30
+               (IPv6 2001:db8:NN::/64 matching each /30)
   ```
 
   r3 is the only Level-1/Level-2 router. Its circuit toward r2 (i2) is
@@ -33,6 +34,16 @@ Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbon
   r4 (i4) is circuit-type level-2-only. r3's loopback is circuit-type
   level-1-2, so 10.0.0.3/2001:db8::3 is advertised into *both* the L1 LSP
   (reachable from the area) and the L2 LSP (reachable from the backbone).
+
+  r5 is an L1-only router in the backbone area 49.0000, wired to r4 over a
+  circuit-type level-1-2 link (r4 side) — an L1L2 circuit facing a
+  single-level neighbor, which exercises the per-circuit P2P three-way
+  handshake (RFC 5303). It starts idle: while r4 is
+  level-2-only the r4-r5 link runs L2 only, so the L1-only r5 forms no
+  adjacency. The trailing scenarios promote r4 to level-1-2 (an L1 adjacency
+  with r5 then forms and r4's L1 LSP floods to r5) and demote it again (r4
+  purges that L1 LSP and r5 drops it) — exercising is-type-driven self-LSP
+  origination and purge end-to-end across a real adjacency.
 
   Note on scope: zebra-rs builds each level's LSP only from prefixes whose
   circuit participates at that level — there is no automatic L1->L2 leaking
@@ -48,17 +59,21 @@ Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbon
     And I create namespace "r2"
     And I create namespace "r3"
     And I create namespace "r4"
+    And I create namespace "r5"
     And I connect namespace "r1" interface "i2" to namespace "r2" interface "i1"
     And I connect namespace "r2" interface "i3" to namespace "r3" interface "i2"
     And I connect namespace "r3" interface "i4" to namespace "r4" interface "i3"
+    And I connect namespace "r4" interface "i5" to namespace "r5" interface "i4"
     And I start zebra-rs in namespace "r1"
     And I start zebra-rs in namespace "r2"
     And I start zebra-rs in namespace "r3"
     And I start zebra-rs in namespace "r4"
+    And I start zebra-rs in namespace "r5"
     And I apply config "r1.yaml" to namespace "r1"
     And I apply config "r2.yaml" to namespace "r2"
     And I apply config "r3.yaml" to namespace "r3"
     And I apply config "r4.yaml" to namespace "r4"
+    And I apply config "r5.yaml" to namespace "r5"
     And I wait 25 seconds
     # Directly-connected reachability over the L1 access link and the L2
     # backbone link, dual-stack, proving both P2P circuits are up.
@@ -74,6 +89,11 @@ Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbon
     And show command "show isis neighbor" in namespace "r3" should contain "r4"
     And show command "show isis neighbor" in namespace "r1" should contain "r2"
     And show command "show isis neighbor" in namespace "r4" should contain "r3"
+    # r5 is an L1-only router in the *backbone* area 49.0000, wired to r4.
+    # At setup r4 is still level-2-only, so the r4-r5 link runs L2 only while
+    # r5 speaks L1 only — the levels don't overlap, so no adjacency forms and
+    # r5 stays isolated until r4 is promoted to level-1-2 in a later scenario.
+    And show command "show isis neighbor" in namespace "r4" should not contain "r5"
 
   Scenario: The border keeps two independent Link State Databases
     Given the test topology exists
@@ -151,14 +171,81 @@ Feature: IS-IS Level-1 / Level-2 interaction across an L1 area and an L2 backbon
     And ping from "r4" to "10.0.0.1" should fail
     And ping from "r4" to "2001:db8::1" should fail
 
+  Scenario: Promoting the L2-only border r4 to L1/L2 originates a self-LSP at both levels
+    Given the test topology exists
+    # r4 starts life as `is-type level-2-only`, so it owns a single
+    # self-originated LSP — in its L2 LSDB only. Deleting the
+    # `is-type level-2-only` line falls back to the default level-1-2,
+    # which must make r4 originate a self-LSP into BOTH its L1 and its L2
+    # database. We re-apply r4's config with that one line removed; the
+    # diff-based apply deletes the is-type setting from the running config.
+    When I apply config "r4-l1l2.yaml" to namespace "r4"
+    And I wait 10 seconds
+    # JSON proof (the `originated` flag) that a self-LSP now exists at each
+    # level — the L1 self-LSP is the one the old level-2-only r4 never had.
+    Then isis database in namespace "r4" has a self-originated LSP at "L1"
+    And isis database in namespace "r4" has a self-originated LSP at "L2"
+
+  Scenario: r4's new L1 LSP floods to the L1-only r5 in the backbone area
+    Given the test topology exists
+    # r4 was promoted to level-1-2 in the previous scenario. Its i5 circuit
+    # toward r5 is circuit-type level-1-2, so now that r4 is level-1-2 the
+    # circuit runs both levels; r5 is L1-only, so they form an L1 adjacency
+    # (shared area 49.0000). This is the L1L2-circuit / single-level-neighbor
+    # case that needs the per-circuit P2P 3-way handshake to avoid flapping.
+    # r4's L1 self-LSP
+    # therefore floods to r5, landing in r5's (only) L1 database as a learned
+    # (non-self) LSP. The wait covers the dynamically-formed L1 adjacency
+    # (default 10s Hello interval → up to ~3 intervals for the P2P 3-way)
+    # plus the flood. We match r4 by its system-id 0000.0000.0004 rather than
+    # its hostname: the lsp_id is present the moment the LSP is installed,
+    # whereas the dynamic hostname only resolves after TLV 137 is processed.
+    When I wait 25 seconds
+    Then isis database in namespace "r5" at "L1" has LSP from "0000.0000.0004"
+
+  Scenario: Demoting r4 back to level-2-only purges its L1 LSP from r5
+    Given the test topology exists
+    # Re-apply the original r4 config: the only difference from the promoted
+    # config is the `is-type level-2-only` line, so the diff-based apply flips
+    # *only* is-type back (the i5 circuit-type stays level-1-2). r4 must purge
+    # its self-originated L1 LSP; the purge floods over the still-live L1
+    # adjacency to r5 before that adjacency tears down.
+    When I apply config "r4.yaml" to namespace "r4"
+    # A received purge lingers at zero RemainingLifetime for ZeroAgeLifetime
+    # (60s) before eviction, so wait past that window to prove r5 truly
+    # deleted r4's L1 LSP rather than merely holding a zero-age copy.
+    And I wait 70 seconds
+    Then isis database in namespace "r5" at "L1" does not have LSP from "0000.0000.0004"
+
+  Scenario: A Level-1 adjacency is refused across the r3-r4 area boundary
+    Given the test topology exists
+    # Widen the r3-r4 backbone to level-1-2 on both ends and bring r4 back up
+    # as a level-1-2 router, so both routers now attempt BOTH levels over the
+    # link. r3 lives in area 49.0001 and r4 in area 49.0000, so per ISO 10589
+    # §8.4.3 a Level-1 adjacency requires a common area address and must NOT
+    # form — while the Level-2 backbone adjacency, which is area-independent,
+    # still comes up. (zebra-rs currently lacks the L1 area gate, so the L1
+    # adjacency wrongly establishes and this scenario fails until it's added.)
+    When I apply config "r3-backbone-l1l2.yaml" to namespace "r3"
+    And I apply config "r4-backbone-l1l2.yaml" to namespace "r4"
+    And I wait 25 seconds
+    # The Level-2 backbone adjacency is unaffected by the area mismatch.
+    Then isis neighbor in namespace "r3" at level 2 on interface "i4" should be up
+    And isis neighbor in namespace "r4" at level 2 on interface "i3" should be up
+    # But the Level-1 adjacency must be refused on both ends (different areas).
+    And isis neighbor in namespace "r3" at level 1 on interface "i4" should not be up
+    And isis neighbor in namespace "r4" at level 1 on interface "i3" should not be up
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "r1"
     And I stop zebra-rs in namespace "r2"
     And I stop zebra-rs in namespace "r3"
     And I stop zebra-rs in namespace "r4"
+    And I stop zebra-rs in namespace "r5"
     And I delete namespace "r1"
     And I delete namespace "r2"
     And I delete namespace "r3"
     And I delete namespace "r4"
+    And I delete namespace "r5"
     Then the test environment should be clean
