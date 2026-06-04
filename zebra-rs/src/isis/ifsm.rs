@@ -239,8 +239,27 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         }
     }
 
-    // Three way handshake.
-    let tlv = if let Some((_, nbr)) = link.state.nbrs.get(&level).first_key_value() {
+    // Three-way handshake (RFC 5303). On a point-to-point circuit the
+    // adjacency is per-circuit, not per-level: one neighbor is reachable
+    // over the link and the P2P IIH carries a single P2P-3way TLV
+    // regardless of which level(s) the circuit runs. So look the neighbor
+    // up across both levels rather than only the firing timer's `level`.
+    //
+    // Why it matters: on an L1L2 circuit a per-level lookup makes the L2
+    // Hello (when the peer is L1-only, so there is no L2 neighbor) emit
+    // neighbor_id=None. The peer reads that as "you no longer list me" —
+    // `nbr_hello_interpret` leaves has_my_sys_id false and the Up->Init
+    // guard in `hello_p2p_recv` tears the adjacency back down — so it flaps
+    // against the L1 Hello (which does list the peer) and LSP sync never
+    // completes. Reporting the same neighbor on every level's IIH keeps the
+    // 3-way state consistent.
+    let nbr = link
+        .state
+        .nbrs
+        .get(&Level::L1)
+        .first_key_value()
+        .or_else(|| link.state.nbrs.get(&Level::L2).first_key_value());
+    let tlv = if let Some((_, nbr)) = nbr {
         IsisTlvP2p3Way {
             state: nbr.state.into(),
             circuit_id: link.ifindex,

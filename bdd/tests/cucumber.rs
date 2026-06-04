@@ -682,6 +682,219 @@ async fn show_command_not_contains(
     );
 }
 
+/// Assert the IS-IS LSDB at the given level (`L1` or `L2`) in a namespace
+/// holds at least one self-originated LSP. Reads
+/// `vtyctl show -j "show isis database"`, whose JSON is
+/// `{ "level_1": [...], "level_2": [...] }` with each entry carrying an
+/// `originated` boolean. A level-1-2 router must originate a self-LSP into
+/// BOTH databases — checking the `originated` flag in JSON is far more
+/// precise than substring-matching the text table (the hostname appears
+/// for every LSP, self-originated or learned).
+#[then(expr = "isis database in namespace {string} has a self-originated LSP at {string}")]
+async fn isis_database_self_originated(world: &mut World, namespace: String, level: String) {
+    let scoped = world.ns(&namespace);
+    let key = match level.as_str() {
+        "L1" => "level_1",
+        "L2" => "level_2",
+        other => panic!("invalid IS-IS level '{}', expected 'L1' or 'L2'", other),
+    };
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show isis database"])
+        .await
+        .expect("Failed to run show isis database");
+    let db: Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!(
+            "show isis database -j in {} was not valid JSON: {}\nfull output:\n{}",
+            scoped, e, output
+        )
+    });
+    let entries = db.get(key).and_then(|v| v.as_array()).unwrap_or_else(|| {
+        panic!(
+            "show isis database -j in {} had no '{}' array:\n{}",
+            scoped, key, output
+        )
+    });
+    let has_self = entries
+        .iter()
+        .any(|e| e.get("originated").and_then(|o| o.as_bool()) == Some(true));
+    assert!(
+        has_self,
+        "IS-IS {} database in {} has no self-originated LSP:\n{}",
+        level, scoped, output
+    );
+    println!(
+        "✓ IS-IS {} database in {} has a self-originated LSP",
+        level, scoped
+    );
+}
+
+/// Map an `L1`/`L2` level label to the JSON key used by
+/// `show isis database -j` (`level_1` / `level_2`).
+fn isis_db_level_key(level: &str) -> &'static str {
+    match level {
+        "L1" => "level_1",
+        "L2" => "level_2",
+        other => panic!("invalid IS-IS level '{}', expected 'L1' or 'L2'", other),
+    }
+}
+
+/// Whether the IS-IS LSDB at `level` in `scoped` holds an LSP matching
+/// `ident` in either its `lsp_id` or its `system_id` field. Match `ident`
+/// against the originator's system-id (e.g. `0000.0000.0004`) for a check
+/// that is robust the instant the LSP is installed; the dynamic hostname
+/// in `system_id` only resolves once the peer's TLV-137 LSP has been
+/// processed, which lags adjacency formation. Returns the match flag plus
+/// the raw JSON so callers can quote it on failure.
+async fn isis_db_level_has_lsp_from(scoped: &str, level: &str, ident: &str) -> (bool, String) {
+    let key = isis_db_level_key(level);
+    let output = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show isis database"])
+        .await
+        .expect("Failed to run show isis database");
+    let db: Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!(
+            "show isis database -j in {} was not valid JSON: {}\nfull output:\n{}",
+            scoped, e, output
+        )
+    });
+    let found = db
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|entries| {
+            entries.iter().any(|e| {
+                ["lsp_id", "system_id"].iter().any(|field| {
+                    e.get(*field)
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|s| s.contains(ident))
+                })
+            })
+        })
+        .unwrap_or(false);
+    (found, output)
+}
+
+/// Assert the IS-IS LSDB at `level` in a namespace holds an LSP from the
+/// given originator (matched by system-id or dynamic hostname). Used to
+/// confirm a flooded LSP reached this router's database.
+#[then(expr = "isis database in namespace {string} at {string} has LSP from {string}")]
+async fn isis_database_has_lsp_from(
+    world: &mut World,
+    namespace: String,
+    level: String,
+    ident: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (found, output) = isis_db_level_has_lsp_from(&scoped, &level, &ident).await;
+    assert!(
+        found,
+        "IS-IS {} database in {} has no LSP from '{}':\n{}",
+        level, scoped, ident, output
+    );
+    println!(
+        "✓ IS-IS {} database in {} has LSP from '{}'",
+        level, scoped, ident
+    );
+}
+
+/// Negative sibling: assert the IS-IS LSDB at `level` holds NO LSP from
+/// the given originator. Used to confirm a purge fully evicted the peer's
+/// LSP (after the ZeroAgeLifetime hold-down, not just RemainingLifetime=0).
+#[then(expr = "isis database in namespace {string} at {string} does not have LSP from {string}")]
+async fn isis_database_not_has_lsp_from(
+    world: &mut World,
+    namespace: String,
+    level: String,
+    ident: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (found, output) = isis_db_level_has_lsp_from(&scoped, &level, &ident).await;
+    assert!(
+        !found,
+        "IS-IS {} database in {} still has an LSP from '{}':\n{}",
+        level, scoped, ident, output
+    );
+    println!(
+        "✓ IS-IS {} database in {} has no LSP from '{}'",
+        level, scoped, ident
+    );
+}
+
+/// Whether an IS-IS adjacency at `level` (1/2) on `interface` in `scoped`
+/// has reached the Up state. Reads `show isis neighbor -j`, a flat array of
+/// `{system_id, interface, level, state, ...}`. Matching by (interface,
+/// level) rather than by the peer's hostname is robust: it does not depend
+/// on the dynamic hostname having propagated, and pins the assertion to the
+/// specific circuit under test. Returns the flag plus raw JSON for failures.
+async fn isis_neighbor_up(scoped: &str, level: u64, interface: &str) -> (bool, String) {
+    let output = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show isis neighbor"])
+        .await
+        .expect("Failed to run show isis neighbor");
+    let nbrs: Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!(
+            "show isis neighbor -j in {} was not valid JSON: {}\nfull output:\n{}",
+            scoped, e, output
+        )
+    });
+    let up = nbrs
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|n| {
+                n.get("level").and_then(|l| l.as_u64()) == Some(level)
+                    && n.get("interface").and_then(|i| i.as_str()) == Some(interface)
+                    && n.get("state").and_then(|s| s.as_str()) == Some("Up")
+            })
+        })
+        .unwrap_or(false);
+    (up, output)
+}
+
+/// Assert an IS-IS adjacency at the given level on the given interface is
+/// Up — e.g. the area-independent Level-2 backbone adjacency.
+#[then(
+    expr = "isis neighbor in namespace {string} at level {int} on interface {string} should be up"
+)]
+async fn isis_neighbor_should_be_up(
+    world: &mut World,
+    namespace: String,
+    level: u64,
+    interface: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (up, output) = isis_neighbor_up(&scoped, level, &interface).await;
+    assert!(
+        up,
+        "no Up L{} IS-IS adjacency on {} in {}:\n{}",
+        level, interface, scoped, output
+    );
+    println!(
+        "✓ L{} IS-IS adjacency on {} in {} is Up",
+        level, interface, scoped
+    );
+}
+
+/// Negative sibling: assert NO Up adjacency at the given level on the given
+/// interface. Used to verify a Level-1 adjacency across an area boundary is
+/// (correctly) refused — the L1 common-area gate of ISO 10589 §8.4.3.
+#[then(
+    expr = "isis neighbor in namespace {string} at level {int} on interface {string} should not be up"
+)]
+async fn isis_neighbor_should_not_be_up(
+    world: &mut World,
+    namespace: String,
+    level: u64,
+    interface: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (up, output) = isis_neighbor_up(&scoped, level, &interface).await;
+    assert!(
+        !up,
+        "unexpected Up L{} IS-IS adjacency on {} in {}:\n{}",
+        level, interface, scoped, output
+    );
+    println!(
+        "✓ no Up L{} IS-IS adjacency on {} in {} (as expected)",
+        level, interface, scoped
+    );
+}
+
 /// Parse the OSPF `show ip ospf neighbor` up-time string (the
 /// `format_uptime` output: "0m08s", "1h02m03s", "1d02h03m") into whole
 /// seconds. Any hours/days component is far past the thresholds this

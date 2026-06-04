@@ -17,7 +17,6 @@ interface:
 router:
   isis:
     net: 49.0000.0000.0000.0004.00
-    is-type: level-2-only
     hostname: r4
     interface:
     - if-name: lo

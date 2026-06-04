@@ -875,12 +875,76 @@ fn config_is_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
         isis.config.is_type = None;
     }
     let curr = isis.config.is_type();
-    if prev != curr {
-        for (_, link) in isis.links.iter_mut() {
-            let is_level = link::config_level_common(curr, link.config.circuit_type());
-            link.state.set_level(is_level);
+    if prev == curr {
+        return Some(());
+    }
+
+    // Re-derive each circuit's operational level from the new instance
+    // is-type and bring its per-level Hello timers in line. `set_level`
+    // only flips a field; the Hello timer is armed per level at
+    // `ifsm::start`, so a circuit that newly gains a level must arm that
+    // level's timer (otherwise its Hellos never start and the adjacency
+    // can't form — most visibly on a broadcast circuit, where each level
+    // has its own Hello PDU), and one that loses a level must drop it.
+    //
+    // We deliberately leave the LSDB `adj` entry of a lost level intact:
+    // the self-LSP purge below has to flood over that adjacency before it
+    // ages out, and the receive-side `has_level` gate (see `packet.rs`)
+    // retires the now-mismatched adjacency on its own hold timer.
+    let ifindexes: Vec<u32> = isis.links.iter().map(|(ifindex, _)| *ifindex).collect();
+    for ifindex in ifindexes {
+        let Some(mut top) = isis.link_top(ifindex) else {
+            continue;
+        };
+        let old_level = top.state.level();
+        let new_level = link::config_level_common(curr, top.config.circuit_type());
+        top.state.set_level(new_level);
+        for level in [Level::L1, Level::L2] {
+            match (has_level(old_level, level), has_level(new_level, level)) {
+                (false, true) => super::ifsm::hello_originate(&mut top, level),
+                (true, false) => {
+                    *top.timer.hello.get_mut(&level) = None;
+                    *top.state.hello.get_mut(&level) = None;
+                }
+                _ => {}
+            }
         }
     }
+
+    // The set of levels this instance participates in just changed, so
+    // the self-originated LSP set has to follow:
+    //
+    //  * A level we now participate in but didn't before (e.g. promoting
+    //    level-2-only -> level-1-2 gains L1) must originate a self-LSP.
+    //    No other trigger fires on its own — adjacencies don't form until
+    //    the circuit starts emitting that level's Hellos — so without this
+    //    the new level's LSDB would hold no self-LSP at all.
+    //
+    //  * A level we no longer participate in (e.g. demoting level-1-2 ->
+    //    level-2-only drops L1) must purge our self-originated LSP(s)
+    //    (router fragments and any pseudonode LSPs we own) so peers in
+    //    that level flush them promptly rather than holding stale
+    //    reachability until MaxAge expires.
+    let self_sys = isis.config.net.sys_id();
+    for level in [Level::L1, Level::L2] {
+        let was = has_level(prev, level);
+        let now = has_level(curr, level);
+        if now && !was {
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
+        } else if was && !now {
+            let purge_ids: Vec<IsisLspId> = isis
+                .lsdb
+                .get(&level)
+                .iter()
+                .filter(|(id, lsa)| lsa.originated && id.sys_id() == self_sys)
+                .map(|(id, _)| *id)
+                .collect();
+            for lsp_id in purge_ids {
+                let _ = isis.tx.send(Message::LspPurge(level, lsp_id));
+            }
+        }
+    }
+
     Some(())
 }
 

@@ -47,4 +47,7 @@ through the r-plane rather than a plain loop-free alternate.
 | no-php sets the P (no-PHP) flag and makes the penultimate hop swap | |
 | no-local-prefix-sid suppresses only the local Prefix-SID in the LFIB | |
 | Deleting segment-routing mpls clears all MPLS ILM entries | |
+| lsp-mtu above the link MTU is flagged on the source's interfaces | |
+| lsp-mtu above the link MTU drops s's LSP so n1 never learns the new prefix | |
+| Lowering lsp-mtu under the link MTU lets s's LSP flood to n1 | |
 | Teardown topology | |

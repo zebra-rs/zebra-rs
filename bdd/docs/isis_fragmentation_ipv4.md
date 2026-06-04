@@ -14,6 +14,11 @@ This is verified at two LSP MTUs over one topology: first a tight
 live reconfiguration of z1 — the standard 1500-byte Ethernet MTU
 (fragmentation needs 200 networks), confirming both the small-MTU
 path and that a runtime lsp-mtu-size change re-fragments correctly.
+Finally, the same topology exercises the separate transmit-side
+`lsp-mtu` knob: raising it above an interface's MTU makes the flood
+path drop z1's LSP on send (logged at warning level), which `show isis
+interface detail` flags and a receiver can prove by never learning a
+freshly-added prefix until lsp-mtu is lowered back under the MTU.
 
 ## Test Topology
 
@@ -52,4 +57,7 @@ path and that a runtime lsp-mtu-size change re-fragments correctly.
 | MTU 1500 — z2 still observes z1's self-LSP as multiple fragments | |
 | MTU 1500 — z2 reaches z1's loopback despite z1's self-LSP being fragmented | |
 | MTU 1500 — z2 installs a /32 network carried in one of z1's higher fragments | |
+| lsp-mtu above the interface MTU is flagged in show isis interface detail | |
+| lsp-mtu above the interface MTU drops z1's LSP on send so z2 never learns the new prefix | |
+| Lowering lsp-mtu under the interface MTU lets z1's LSP flood again | |
 | Teardown topology | |
