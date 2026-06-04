@@ -1,6 +1,6 @@
-@isis_fragmentation
+@isis_fragmentation_ipv6
 @isis
-Feature: IS-IS LSP fragmentation under a tight lsp-mtu-size
+Feature: IS-IS LSP fragmentation under a tight lsp-mtu-size (IPv6)
   As a network operator
   I want zebra-rs to fragment its self-originated LSP across multiple
   PDUs when the TLV content exceeds `lsp-mtu-size`, deliver every

@@ -1,4 +1,4 @@
-# IS-IS LSP fragmentation under a tight lsp-mtu-size
+# IS-IS LSP fragmentation under a tight lsp-mtu-size (IPv6)
 
 ## Overview
 
