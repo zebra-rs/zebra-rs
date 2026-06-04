@@ -1514,6 +1514,17 @@ fn redist_set_presence(
         isis.config.redistribute.entry((afi, src)).or_default();
     } else {
         isis.config.redistribute.remove(&(afi, src));
+        // The RedistDel below stops future RIB updates for this
+        // (afi, src), but the RIB does not replay withdrawals for routes
+        // it already delivered. Purge the cached entries here so a later
+        // re-add of the presence container doesn't resurface stale routes
+        // before the RIB re-walks. The builder's config gate masks them
+        // from the LSP today, but the cache would otherwise drift.
+        let rtype = wire_rtype(src);
+        match afi {
+            IsisRedistAfi::Ipv4 => isis.redist_v4.retain(|(rt, _), _| *rt != rtype),
+            IsisRedistAfi::Ipv6 => isis.redist_v6.retain(|(rt, _), _| *rt != rtype),
+        }
     }
     send_redist(isis, afi, src, first_time && op.is_set());
     notify_lsp_reorigination(isis);
