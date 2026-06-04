@@ -6,9 +6,9 @@ use tokio::fs;
 use tokio::process::Command;
 
 /// Per-process counter for generating unique temporary veth names in
-/// `connect_netns_pair`. Names get renamed and moved into namespaces
-/// immediately after creation, so they only need to be unique on the
-/// host between `ip link add` and `ip link set`.
+/// `connect_netns_pair` and `connect_netns_to_bridge`. Names get renamed
+/// and moved into namespaces immediately after creation, so they only need
+/// to be unique on the host between `ip link add` and `ip link set`.
 static PAIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Run a command and check for success
@@ -82,8 +82,18 @@ pub async fn create_netns(netns: &str) -> Result<()> {
     Ok(())
 }
 
-/// Delete a network namespace
+/// Delete a network namespace.
+///
+/// Best-effort on a namespace that was never created: if setup fails partway
+/// (e.g. the second of two namespaces is never reached), the teardown
+/// scenario still runs `delete namespace` for the missing one. Erroring there
+/// would abort the scenario before its later `delete bridge` step, leaking
+/// the bridge into the next run. A namespace that exists but genuinely fails
+/// to delete still surfaces the error.
 pub async fn delete_netns(netns: &str) -> Result<()> {
+    if !netns_exists(netns).await.unwrap_or(false) {
+        return Ok(());
+    }
     run_cmd(
         &["ip", "netns", "del", netns],
         &format!("Failed to delete netns {}", netns),
@@ -122,24 +132,41 @@ pub async fn delete_bridge(bridge_name: &str) -> Result<()> {
 /// unique within that namespace; YAML configs and feature-file step
 /// arguments reference this name, so callers typically pick the bare
 /// `v{logical}ns` form (e.g. `vz1ns`).
+///
+/// `short_id` is the caller's per-feature hash, used only to derive a
+/// collision-free throwaway name for the namespace end while it lives in
+/// the host namespace. The bare `veth_ns` (e.g. `vz1ns`) is NOT unique
+/// across features, so creating the pair under that name races with any
+/// other feature creating its own `vz1ns` concurrently — the second
+/// `ip link add ... peer name vz1ns` fails with "File exists". We instead
+/// create the pair with a unique temp name and rename it to `veth_ns` as
+/// it moves into the namespace, the same trick `connect_netns_pair` uses.
 pub async fn connect_netns_to_bridge(
+    short_id: &str,
     netns: &str,
     bridge_name: &str,
     veth_host: &str,
     veth_ns: &str,
 ) -> Result<()> {
+    // Unique throwaway name for the namespace end during the brief window
+    // it sits in the host namespace (between `ip link add` and the move).
+    let n = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_ns = format!("v{}_b{}", short_id, n);
+
     // Create veth pair
     run_cmd(
         &[
-            "ip", "link", "add", veth_host, "type", "veth", "peer", "name", veth_ns,
+            "ip", "link", "add", veth_host, "type", "veth", "peer", "name", &tmp_ns,
         ],
         &format!("Failed to create veth pair for {}", netns),
     )
     .await?;
 
-    // Move veth to namespace
+    // Move veth into the namespace, renaming it to the caller's `veth_ns`.
     run_cmd(
-        &["ip", "link", "set", veth_ns, "netns", netns],
+        &[
+            "ip", "link", "set", &tmp_ns, "netns", netns, "name", veth_ns,
+        ],
         &format!("Failed to move veth to namespace {}", netns),
     )
     .await?;

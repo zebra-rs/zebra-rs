@@ -155,6 +155,7 @@ async fn create_namespace_with_ip(
 ) {
     let scoped_ns = world.ns(&namespace);
     let scoped_br = world.bridge(&bridge_name);
+    let short = world.short_id();
     let host_veth = world.host_veth(&namespace);
     let ns_veth = world.ns_veth(&namespace);
 
@@ -162,7 +163,7 @@ async fn create_namespace_with_ip(
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&scoped_ns, &scoped_br, &host_veth, &ns_veth)
+    netns::connect_netns_to_bridge(&short, &scoped_ns, &scoped_br, &host_veth, &ns_veth)
         .await
         .expect("Failed to connect namespace to bridge");
 
@@ -182,6 +183,7 @@ async fn create_namespace_with_ip(
 async fn create_namespace_with_loopback(world: &mut World, namespace: String, bridge_name: String) {
     let scoped_ns = world.ns(&namespace);
     let scoped_br = world.bridge(&bridge_name);
+    let short = world.short_id();
     let host_veth = world.host_veth(&namespace);
     let ns_veth = world.ns_veth(&namespace);
 
@@ -189,7 +191,7 @@ async fn create_namespace_with_loopback(world: &mut World, namespace: String, br
         .await
         .expect("Failed to create namespace");
 
-    netns::connect_netns_to_bridge(&scoped_ns, &scoped_br, &host_veth, &ns_veth)
+    netns::connect_netns_to_bridge(&short, &scoped_ns, &scoped_br, &host_veth, &ns_veth)
         .await
         .expect("Failed to connect namespace to bridge");
 
