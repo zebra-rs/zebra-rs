@@ -273,15 +273,32 @@ async fn ping_should_succeed(world: &mut World, namespace: String, target: Strin
 #[then(expr = "ping from {string} to {string} should fail")]
 async fn ping_should_fail(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
-    let success = if target.contains(':') {
-        netns::ping6(&scoped, &target, 1, 1).await
-    } else {
-        netns::ping4(&scoped, &target, 1, 1).await
+    let is_v6 = target.contains(':');
+    // A route just withdrawn from the IS-IS RIB can linger briefly in the
+    // kernel FIB — more so under concurrent load — so a single immediate ping
+    // may still succeed even though forwarding is on its way down. Poll until
+    // the target becomes unreachable; only a target still reachable after the
+    // whole window is a real failure. The common case (no route at all) fails
+    // on the first probe and breaks immediately, adding no delay.
+    const ATTEMPTS: u32 = 10;
+    let mut reachable = true;
+    for i in 0..ATTEMPTS {
+        reachable = if is_v6 {
+            netns::ping6(&scoped, &target, 1, 1).await
+        } else {
+            netns::ping4(&scoped, &target, 1, 1).await
+        }
+        .expect("ping failed to run");
+        if !reachable {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
     }
-    .expect("ping failed to run");
     assert!(
-        !success,
-        "ping from {} to {} unexpectedly succeeded",
+        !reachable,
+        "ping from {} to {} still succeeded after waiting for it to become unreachable",
         scoped, target
     );
     println!("✓ ping from {} to {} failed (as expected)", scoped, target);
