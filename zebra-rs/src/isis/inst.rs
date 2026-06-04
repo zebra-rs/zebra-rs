@@ -1525,31 +1525,71 @@ impl Isis {
     }
 
     fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
-        match batch {
+        let changed = match batch {
             crate::rib::RouteBatch::V4(entries) => {
+                let changed = !entries.is_empty();
                 for e in entries {
                     self.redist_v4.insert((rtype, e.prefix), e);
                 }
+                changed
             }
             crate::rib::RouteBatch::V6(entries) => {
+                let changed = !entries.is_empty();
                 for e in entries {
                     self.redist_v6.insert((rtype, e.prefix), e);
                 }
+                changed
             }
+        };
+        if changed {
+            self.reoriginate_self_lsps("redistribute route add");
         }
     }
 
     fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        let mut changed = false;
         match batch {
             crate::rib::RouteBatch::V4(entries) => {
                 for e in entries {
-                    self.redist_v4.remove(&(rtype, e.prefix));
+                    if self.redist_v4.remove(&(rtype, e.prefix)).is_some() {
+                        changed = true;
+                    }
                 }
             }
             crate::rib::RouteBatch::V6(entries) => {
                 for e in entries {
-                    self.redist_v6.remove(&(rtype, e.prefix));
+                    if self.redist_v6.remove(&(rtype, e.prefix)).is_some() {
+                        changed = true;
+                    }
                 }
+            }
+        }
+        if changed {
+            self.reoriginate_self_lsps("redistribute route delete");
+        }
+    }
+
+    /// Re-originate the fragment-0 self-LSP at both levels after a state
+    /// change (e.g. a redistributed route added/withdrawn by RIB). Only
+    /// fires for a level that already holds a self-LSP — matching
+    /// `rib_router_id_update`; when no self-LSP exists yet the eventual
+    /// initial origination reads the current `redist_v{4,6}` maps. The
+    /// per-level `LspOriginate` events coalesce through the throttle, so
+    /// a bulk RIB walk collapses into a single origination run rather
+    /// than one per chunk.
+    fn reoriginate_self_lsps(&self, reason: &str) {
+        let key = IsisLspId::new(self.config.net.sys_id(), 0, 0);
+        for level in [Level::L1, Level::L2] {
+            if self.lsdb.get(&level).get(&key).is_some() {
+                isis_event_trace!(
+                    self.tracing,
+                    LspOriginate,
+                    &level,
+                    "LSP Originate {} due to {}",
+                    level,
+                    reason
+                );
+                let _ = self.tx.send(Message::LspOriginate(level, None));
             }
         }
     }
