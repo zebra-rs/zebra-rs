@@ -24,7 +24,7 @@ rib_static_ipv6:
 isis:
 	rm -rf allure-results
 	mkdir -p allure-results
-	cargo test --test cucumber -- --concurrency=1 --tags "@isis"
+	cargo test --test cucumber -- --concurrency=10 --tags "@isis"
 
 isis_ipv6:
 	mkdir -p allure-results
