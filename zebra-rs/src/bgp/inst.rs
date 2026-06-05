@@ -320,6 +320,17 @@ pub struct Bgp {
     /// to the OS hostname; if that also fails, no FQDN capability is
     /// emitted. See `Bgp::hostname()` for the resolution order.
     pub hostname: Option<String>,
+    /// `router bgp global no-fib-install`. When true, this instance's
+    /// `ctx.rib` drops every forwarding install (IPv4/IPv6 unicast plus
+    /// VPN/EVPN/labeled-unicast MPLS ILMs) so selected routes never
+    /// reach the kernel FIB. The Loc-RIB is still built and routes are
+    /// still reflected/advertised — this is the pure route-reflector
+    /// mode for a speaker out of the forwarding path. The actual gate
+    /// lives on the shared `RibClient` flag
+    /// ([`crate::rib::client::RibClient::set_suppress_install`]); this
+    /// field mirrors it for `show` / re-application. Scope is the
+    /// default-VRF instance; per-VRF suppression is a follow-up.
+    pub no_fib_install: bool,
     pub peers: PeerMap,
     /// Instance-level BFD defaults (`router bgp { bfd {} }`), inherited by
     /// every neighbor and overridden per neighbor (see
@@ -621,6 +632,7 @@ impl Bgp {
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             hostname: None,
+            no_fib_install: false,
             peers: PeerMap::new(),
             bfd: PeerBfdConfig::default(),
             tx,

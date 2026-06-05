@@ -296,6 +296,20 @@ pub enum Message {
     },
 }
 
+impl Message {
+    /// Whether this message programs a forwarding entry into the kernel
+    /// FIB/LFIB. Used by [`crate::rib::client::RibClient`] to drop only
+    /// forwarding installs when a subscriber asks to stay out of the
+    /// data path (BGP route reflector `no-fib-install`); withdrawals and
+    /// every control-plane message return `false` so they still flow.
+    pub fn is_fib_install(&self) -> bool {
+        matches!(
+            self,
+            Message::Ipv4Add { .. } | Message::Ipv6Add { .. } | Message::IlmAdd { .. }
+        )
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum IlmType {
     #[default]
