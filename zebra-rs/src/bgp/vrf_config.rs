@@ -29,6 +29,7 @@ use std::str::FromStr;
 use bgp_packet::RouteDistinguisher;
 use ipnet::{Ipv4Net, Ipv6Net};
 
+use crate::bgp_vrf_trace;
 use crate::config::{Args, ConfigOp};
 
 use super::Bgp;
@@ -387,7 +388,8 @@ pub fn log_commit_diff(bgp: &Bgp) {
         return;
     }
     for (name, cfg) in &bgp.vrfs {
-        tracing::debug!(
+        bgp_vrf_trace!(
+            bgp.tracing,
             vrf = %name,
             rd = ?cfg.rd,
             router_id = ?cfg.router_id,

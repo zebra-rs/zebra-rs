@@ -6,6 +6,7 @@ use crate::bfd::inst::ClientReq;
 use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
 use crate::bfd::socket::{BFD_MULTI_HOP_PORT, BFD_MULTIHOP_DEFAULT_MIN_TTL, BFD_SINGLE_HOP_PORT};
 use crate::bgp::InOut;
+use crate::bgp_bfd_trace;
 use crate::config::{Args, ConfigOp};
 use crate::policy;
 use crate::policy::com_list::*;
@@ -552,7 +553,8 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
 
     let Some(client_tx) = bgp.bfd_client_tx.as_ref() else {
         if enable {
-            tracing::debug!(
+            bgp_bfd_trace!(
+                bgp.tracing,
                 peer = %addr,
                 "bgp: bfd enabled but bfd_client_tx is None (BFD not yet spawned)",
             );

@@ -69,6 +69,14 @@ module zebra-bgp-tracing {
      key off set vs delete and never read a value, so `type empty` is
      the honest type here.";
 
+  revision 2026-06-06 {
+    description
+      "Add categories vpn, srv6, vrf and bfd so the conditional
+       tracing taxonomy covers the L3VPN import/export, SRv6 SID
+       resolution, per-VRF task lifecycle and BFD-interaction log
+       sites that were previously unconditional.";
+  }
+
   revision 2026-06-05 {
     description
       "Initial revision — shared instance + per-neighbor tracing
@@ -201,6 +209,41 @@ module zebra-bgp-tracing {
         description
           "Log routes leaving via the outbound Adj-RIB (what is
            advertised to the scope after export policy).";
+      }
+
+      leaf vpn {
+        ext:help "Trace L3VPN import / export";
+        type empty;
+        description
+          "Log L3VPN route import/export: per-VRF prefixes written to
+           the VPNv4 / VPNv6 Loc-RIB and advertised to PE/CE peers,
+           with their RD, route-targets and MPLS label.";
+      }
+
+      leaf srv6 {
+        ext:help "Trace SRv6 locator / SID resolution";
+        type empty;
+        description
+          "Log SRv6 locator resolution and per-VRF End.DT46 service-SID
+           reconciliation used for L3VPN over SRv6.";
+      }
+
+      leaf vrf {
+        ext:help "Trace per-VRF task lifecycle";
+        type empty;
+        description
+          "Log per-VRF BGP task lifecycle — spawn / respawn / despawn /
+           shutdown, inbound-connection routing, and the staged per-VRF
+           config observed at commit.";
+      }
+
+      leaf bfd {
+        ext:help "Trace BFD session interaction";
+        type empty;
+        description
+          "Log BGP's interaction with the BFD client — session state
+           changes and client-readiness — that drive RFC 5882 peer
+           teardown.";
       }
     }
   }

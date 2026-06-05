@@ -13,7 +13,10 @@ use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib::MacAddr;
 use crate::rib::api::{FdbEntry, RibRx};
-use crate::{bgp_fsm_trace, bgp_label_trace, bgp_packet_trace};
+use crate::{
+    bgp_bfd_trace, bgp_fsm_trace, bgp_label_trace, bgp_packet_trace, bgp_srv6_trace, bgp_vpn_trace,
+    bgp_vrf_trace,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
@@ -783,10 +786,10 @@ impl Bgp {
                 }
                 match new_prefix {
                     Some(prefix) => {
-                        tracing::info!(locator = %name, %prefix, "bgp: SRv6 locator resolved");
+                        bgp_srv6_trace!(self.tracing, locator = %name, %prefix, "bgp: SRv6 locator resolved");
                     }
                     None => {
-                        tracing::info!(locator = %name, "bgp: SRv6 locator withdrawn");
+                        bgp_srv6_trace!(self.tracing, locator = %name, "bgp: SRv6 locator withdrawn");
                     }
                 }
                 self.reconcile_srv6_vrfs();
@@ -901,7 +904,7 @@ impl Bgp {
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
-        tracing::info!(vrf = %name, "bgp: reconciled SRv6 service SID for VRF");
+        bgp_srv6_trace!(self.tracing, vrf = %name, "bgp: reconciled SRv6 service SID for VRF");
     }
 
     /// Update the BGP router-id and propagate it to every peer's
@@ -1367,7 +1370,8 @@ impl Bgp {
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
-        tracing::info!(
+        bgp_vrf_trace!(
+            self.tracing,
             vrf = %name,
             table_id,
             "bgp: respawned per-VRF task with real ProtoContext::for_vrf",
@@ -2615,7 +2619,8 @@ impl Bgp {
                     &mut self.peers,
                 );
 
-                tracing::info!(
+                bgp_vpn_trace!(
+                    self.tracing,
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
@@ -2641,7 +2646,8 @@ impl Bgp {
             }
             super::vrf::BgpGlobalMsg::WithdrawExport { vrf, prefix } => {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
-                    tracing::debug!(
+                    bgp_vpn_trace!(
+                        self.tracing,
                         vrf = %vrf,
                         %prefix,
                         "bgp: withdraw-export dropped — VRF has no RD configured",
@@ -2719,7 +2725,8 @@ impl Bgp {
                     &mut self.peers,
                 );
 
-                tracing::info!(
+                bgp_vpn_trace!(
+                    self.tracing,
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
@@ -2862,7 +2869,8 @@ impl Bgp {
                     &mut self.peers,
                 );
 
-                tracing::info!(
+                bgp_vpn_trace!(
+                    self.tracing,
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
@@ -2945,7 +2953,8 @@ impl Bgp {
                     &mut self.peers,
                 );
 
-                tracing::info!(
+                bgp_vpn_trace!(
+                    self.tracing,
                     vrf = %vrf,
                     %prefix,
                     rd = %rd,
@@ -3006,7 +3015,8 @@ impl Bgp {
     /// to establish.
     pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
         let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
-        tracing::info!(
+        bgp_bfd_trace!(
+            self.tracing,
             ?key,
             from = %change.from,
             to = %change.to,
@@ -3028,7 +3038,11 @@ impl Bgp {
         // lookup. A missing peer means the user removed the
         // neighbor since BGP last subscribed; safe to ignore.
         let Some(peer) = self.peers.get(&key.remote) else {
-            tracing::debug!(?key, "bgp: bfd-down for unknown peer; ignoring",);
+            bgp_bfd_trace!(
+                self.tracing,
+                ?key,
+                "bgp: bfd-down for unknown peer; ignoring",
+            );
             return;
         };
         let peer_idx = peer.ident;

@@ -59,6 +59,12 @@ isis_debug!("LSP received from {}", neighbor);
 
 ## BGP Logging
 
+BGP can additionally turn on detailed per-category traces at runtime via
+the `router bgp tracing` config block — see
+[BGP Conditional Tracing](ch-02-10-bgp-tracing.md). Those lines are tagged
+`proto="bgp"` plus a `category` field (`fsm`, `packet`, `vpn`, `srv6`,
+`vrf`, `bfd`, …), so the filters below work on them directly.
+
 BGP-related logs include protocol identification:
 
 **Common BGP Log Messages:**

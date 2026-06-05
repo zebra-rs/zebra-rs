@@ -127,6 +127,52 @@ macro_rules! bgp_label_trace {
     };
 }
 
+/// Conditional L3VPN import/export trace. Instance-scoped — VPN export
+/// runs off the instance Loc-RIB and fans out to every PE/CE peer, so
+/// it takes a `&BgpTracing` directly rather than a single peer.
+#[macro_export]
+macro_rules! bgp_vpn_trace {
+    ($tracing:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_vpn() {
+            tracing::info!(proto = "bgp", category = "vpn", $($arg)*);
+        }
+    };
+}
+
+/// Conditional SRv6 locator / SID trace. Instance-scoped (SID
+/// resolution is keyed by locator, not a peer).
+#[macro_export]
+macro_rules! bgp_srv6_trace {
+    ($tracing:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_srv6() {
+            tracing::info!(proto = "bgp", category = "srv6", $($arg)*);
+        }
+    };
+}
+
+/// Conditional per-VRF task lifecycle trace (spawn / respawn / despawn /
+/// shutdown / inbound-connection routing). Instance-scoped.
+#[macro_export]
+macro_rules! bgp_vrf_trace {
+    ($tracing:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_vrf() {
+            tracing::info!(proto = "bgp", category = "vrf", $($arg)*);
+        }
+    };
+}
+
+/// Conditional BFD-interaction trace (session state changes,
+/// client-readiness). Instance-scoped — the BFD client is a single
+/// per-instance channel, not a per-peer resource.
+#[macro_export]
+macro_rules! bgp_bfd_trace {
+    ($tracing:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_bfd() {
+            tracing::info!(proto = "bgp", category = "bfd", $($arg)*);
+        }
+    };
+}
+
 // ============================================================
 // BgpTracing — runtime tracing configuration
 // ============================================================
@@ -241,6 +287,10 @@ pub struct BgpTracing {
     pub label: bool,
     pub adj_in: bool,
     pub adj_out: bool,
+    pub vpn: bool,
+    pub srv6: bool,
+    pub vrf: bool,
+    pub bfd: bool,
 }
 
 impl BgpTracing {
@@ -291,6 +341,22 @@ impl BgpTracing {
 
     pub fn should_trace_adj_out(&self) -> bool {
         self.all || self.adj_out
+    }
+
+    pub fn should_trace_vpn(&self) -> bool {
+        self.all || self.vpn
+    }
+
+    pub fn should_trace_srv6(&self) -> bool {
+        self.all || self.srv6
+    }
+
+    pub fn should_trace_vrf(&self) -> bool {
+        self.all || self.vrf
+    }
+
+    pub fn should_trace_bfd(&self) -> bool {
+        self.all || self.bfd
     }
 }
 
@@ -348,6 +414,10 @@ fn apply_tracing(t: &mut BgpTracing, rest: &str, args: &mut Args, op: ConfigOp) 
         "/label" => t.label = op.is_set(),
         "/adj-in" => t.adj_in = op.is_set(),
         "/adj-out" => t.adj_out = op.is_set(),
+        "/vpn" => t.vpn = op.is_set(),
+        "/srv6" => t.srv6 = op.is_set(),
+        "/vrf" => t.vrf = op.is_set(),
+        "/bfd" => t.bfd = op.is_set(),
         other => {
             let pkt = other.strip_prefix("/packet/")?;
             let (typ, sub) = match pkt.split_once('/') {
@@ -432,6 +502,14 @@ mod tests {
         apply_tracing(&mut t, "/adj-in", &mut args(&[]), ConfigOp::Set);
         apply_tracing(&mut t, "/adj-out", &mut args(&[]), ConfigOp::Set);
         assert!(t.fsm && t.label && t.adj_in && t.adj_out);
+
+        apply_tracing(&mut t, "/vpn", &mut args(&[]), ConfigOp::Set);
+        apply_tracing(&mut t, "/srv6", &mut args(&[]), ConfigOp::Set);
+        apply_tracing(&mut t, "/vrf", &mut args(&[]), ConfigOp::Set);
+        apply_tracing(&mut t, "/bfd", &mut args(&[]), ConfigOp::Set);
+        assert!(t.vpn && t.srv6 && t.vrf && t.bfd);
+        apply_tracing(&mut t, "/vpn", &mut args(&[]), ConfigOp::Delete);
+        assert!(!t.vpn);
     }
 
     #[test]
@@ -568,6 +646,10 @@ mod tests {
         assert!(t.should_trace_label());
         assert!(t.should_trace_adj_in());
         assert!(t.should_trace_adj_out());
+        assert!(t.should_trace_vpn());
+        assert!(t.should_trace_srv6());
+        assert!(t.should_trace_vrf());
+        assert!(t.should_trace_bfd());
         // `all` is summary-level only — it does not imply detail.
         assert!(!t.packet_detail(PacketKind::Notification, Direction::Recv));
     }
