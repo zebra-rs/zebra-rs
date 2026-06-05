@@ -64,6 +64,10 @@ module config {
     prefix zotr;
   }
 
+  import zebra-isis-tracing {
+    prefix zitr;
+  }
+
   import zebra-bgp-color-policy {
     prefix zbcp;
   }
@@ -2043,121 +2047,6 @@ module config {
             // the pattern used by segment-routing `block` and
             // `locator` references above.
             type string;
-          }
-        }
-        container tracing {
-          ext:help "IS-IS debug tracing";
-          leaf all {
-            type boolean;
-            description "Enable all ISIS tracing";
-          }
-
-          list packet {
-            key "type";
-            leaf "type" {
-              type enumeration {
-                enum "hello";
-                enum "lsp";
-                enum "csnp";
-                enum "psnp";
-                enum "all";
-              }
-            }
-            leaf direction {
-              type enumeration {
-                enum "send";
-                enum "receive";
-                enum "both";
-              }
-              default "both";
-              description "Packet direction to trace";
-            }
-            leaf level {
-              type enumeration {
-                enum "level-1";
-                enum "level-2";
-                enum "both";
-              }
-              default "both";
-              description "ISIS level to trace";
-            }
-          }
-
-          list event {
-            key "type";
-            leaf "type" {
-              type enumeration {
-                enum "dis";
-                enum "lsp-originate";
-                enum "lsp-refresh";
-                enum "lsp-purge";
-                enum "spf-calculation";
-                enum "adjacency";
-                enum "flooding";
-                enum "all";
-              }
-            }
-            leaf level {
-              type enumeration {
-                enum "level-1";
-                enum "level-2";
-                enum "both";
-              }
-              default "both";
-              description "ISIS level to trace";
-            }
-          }
-
-          list fsm {
-            key "type";
-            leaf "type" {
-              type enumeration {
-                enum "ifsm";
-                enum "nfsm";
-                enum "all";
-              }
-            }
-            leaf detail {
-              type boolean;
-              default false;
-              description "Enable detailed FSM state transition tracing";
-            }
-          }
-
-          list database {
-            key "type";
-            leaf "type" {
-              type enumeration {
-                enum "lsdb";
-                enum "spf-tree";
-                enum "rib";
-                enum "all";
-              }
-            }
-            leaf level {
-              type enumeration {
-                enum "level-1";
-                enum "level-2";
-                enum "both";
-              }
-              default "both";
-              description "ISIS level to trace";
-            }
-          }
-
-          container segment-routing {
-            leaf enable {
-              type boolean;
-              description "Enable Segment Routing tracing";
-            }
-            leaf prefix-sid {
-              type boolean;
-              description "Trace prefix SID operations";
-            }
-            leaf adjacency-sid {
-              type boolean;
-              description "Trace adjacency SID operations";
-            }
           }
         }
 

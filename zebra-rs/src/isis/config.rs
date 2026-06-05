@@ -10,9 +10,8 @@ use crate::config::{Args, ConfigOp};
 
 use super::Isis;
 use super::ifsm::has_level;
-use super::inst::{Callback, Message};
+use super::inst::Message;
 use super::link::Afis;
-use super::tracing::{PacketConfig, PacketDirection};
 use super::{Level, link};
 
 use isis_packet::IsisLspId;
@@ -44,13 +43,6 @@ impl MtId {
 }
 
 impl Isis {
-    const TRACING: &str = "/router/isis/tracing";
-
-    pub fn tracing_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks
-            .insert(format!("{}{}", Self::TRACING, path), cb);
-    }
-
     pub fn callback_build(&mut self) {
         self.callback_add("/router/isis/net", config_net);
         self.callback_add("/router/isis/is-type", config_is_type);
@@ -254,11 +246,6 @@ impl Isis {
             link::config_mt_metric,
         );
         self.callback_add("/router/isis/interface/priority", link::config_priority);
-        self.tracing_add("/event", config_tracing_event);
-        self.tracing_add("/fsm", config_tracing_fsm);
-        self.tracing_add("/packet", config_tracing_packet);
-        self.tracing_add("/packet/direction", config_tracing_packet);
-        self.tracing_add("/database", config_tracing_database);
         self.callback_add(
             "/router/isis/interface/circuit-type",
             link::config_circuit_type,
@@ -1805,115 +1792,6 @@ fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
     } else {
         isis.config.te_router_id = None;
     }
-    Some(())
-}
-
-fn config_tracing_event(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let ev = args.string()?;
-
-    match ev.as_str() {
-        "dis" => {
-            isis.tracing.event.dis.enabled = op.is_set();
-        }
-        "lsp-originate" => {
-            isis.tracing.event.lsp_originate.enabled = op.is_set();
-        }
-        _ => {
-            if op.is_set() {
-                // println!("Trace on {} (not implemented)", ev);
-            } else {
-                //println!("Trace off {} (not implemented)", ev);
-            }
-        }
-    }
-
-    Some(())
-}
-
-fn config_tracing_fsm(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let typ = args.string()?;
-
-    match typ.as_str() {
-        "nfsm" => {
-            isis.tracing.fsm.nfsm.enabled = op.is_set();
-        }
-        "ifsm" => {
-            isis.tracing.fsm.ifsm.enabled = op.is_set();
-        }
-        _ => {
-            //
-        }
-    }
-
-    Some(())
-}
-
-fn parse_direction(args: &mut Args) -> PacketDirection {
-    match args.string().as_deref() {
-        Some("send") => PacketDirection::Send,
-        Some("recv") | Some("receive") => PacketDirection::Recv,
-        Some("both") | None => PacketDirection::Both,
-        Some(_) => PacketDirection::Both,
-    }
-}
-
-fn set_packet_config(config: &mut PacketConfig, op: ConfigOp, direction: PacketDirection) {
-    if op.is_set() {
-        config.enabled = true;
-        config.direction = direction;
-    } else {
-        config.enabled = false;
-        config.direction = PacketDirection::Both;
-    }
-}
-
-fn config_tracing_packet(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let typ = args.string()?;
-    let direction = parse_direction(&mut args);
-
-    match typ.as_str() {
-        "all" => {
-            set_packet_config(&mut isis.tracing.packet.hello, op, direction);
-            set_packet_config(&mut isis.tracing.packet.lsp, op, direction);
-            set_packet_config(&mut isis.tracing.packet.csnp, op, direction);
-            set_packet_config(&mut isis.tracing.packet.psnp, op, direction);
-        }
-        "hello" => {
-            set_packet_config(&mut isis.tracing.packet.hello, op, direction);
-        }
-        "lsp" => {
-            set_packet_config(&mut isis.tracing.packet.lsp, op, direction);
-        }
-        "csnp" => {
-            set_packet_config(&mut isis.tracing.packet.csnp, op, direction);
-        }
-        "psnp" => {
-            set_packet_config(&mut isis.tracing.packet.psnp, op, direction);
-        }
-        _ => {
-            println!("Unknown packet type: {}", typ);
-        }
-    }
-
-    Some(())
-}
-
-fn config_tracing_database(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let ev = args.string()?;
-
-    match ev.as_str() {
-        "lsdb" => {
-            isis.tracing.database.lsdb.enabled = op.is_set();
-        }
-        _ => {
-            if op.is_set() {
-                println!("Trace on {} (not implemented)", ev);
-            } else {
-                println!("Trace off {} (not implemented)", ev);
-            }
-        }
-    }
-
     Some(())
 }
 

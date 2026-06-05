@@ -528,7 +528,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
     }
 
     // Logging.
-    if link.tracing.fsm.nfsm.enabled {
+    if link.tracing.should_trace_fsm() {
         tracing::info!(
             "[NBR] DIS selection on {} up neighbor count {}",
             link.ifindex,
@@ -565,7 +565,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         // path in hello_recv re-fires DisSelection once lan_id arrives,
         // and that run will complete the transition cleanly.
         if nbr.lan_id.is_empty() {
-            if link.tracing.fsm.nfsm.enabled {
+            if link.tracing.should_trace_fsm() {
                 tracing::info!(
                     "[NBR] DIS election: {} elected but LAN ID not yet known, deferring transition",
                     nbr.sys_id
@@ -593,7 +593,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         (DisStatus::Myself, sys_id, None, reason)
     };
 
-    if link.tracing.fsm.nfsm.enabled {
+    if link.tracing.should_trace_fsm() {
         tracing::info!(
             "[NBR] DIS selection {:?} -> {:?} {}",
             old_status,
@@ -631,7 +631,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
             }
             DisStatus::Other => {
                 use IfsmEvent::*;
-                if link.tracing.fsm.nfsm.enabled {
+                if link.tracing.should_trace_fsm() {
                     tracing::info!(
                         "[NBR] Adjacency {:?} LAN ID {}",
                         link.state.adj.get(&level),
@@ -641,7 +641,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
                 if link.state.adj.get(&level).is_none()
                     && let Some(lan_id) = lan_id
                 {
-                    if link.tracing.fsm.nfsm.enabled {
+                    if link.tracing.should_trace_fsm() {
                         tracing::info!("[NBR] Adjacency set {}", lan_id);
                     }
                     *link.state.adj.get_mut(&level) = Some((lan_id, None));

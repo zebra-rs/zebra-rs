@@ -1,0 +1,229 @@
+module zebra-isis-tracing {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-isis-tracing";
+  prefix "zitr";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Conditional IS-IS tracing, attachable at the `router isis` instance:
+
+       * `router isis tracing { ... }`
+
+     This mirrors the OSPF / BGP `tracing` model (a typed config block
+     consulted by gated log macros, so categories can be turned on at
+     runtime without a rebuild) with the IS-IS-specific category set: the
+     four PDU types, the neighbor state machine, LSP origination / purge,
+     and the link-state database. The IS-IS-specific addition over the
+     OSPF model is a functional `level` filter (level-1 / level-2) on the
+     packet and event categories.
+
+     Example:
+
+       router isis {
+         tracing {
+           packet {
+             hello { direction receive; }   // received Hellos only
+             lsp   { level level-2; }        // L2 LSPs only
+           }
+           fsm { nfsm; }
+           lsp-originate;
+         }
+       }
+
+     Each category is a presence container — name it to enable, delete it
+     to disable; absence means the category is silent. Enabling by
+     presence (rather than a `true` value) matches OSPF / BGP `tracing`:
+     the config dispatch keys off set vs delete and never reads a value.";
+
+  revision 2026-06-05 {
+    description
+      "Initial revision — `router isis tracing` migrated out of the
+       inline config.yang container into a dedicated augment module on
+       the OSPF / BGP presence-container model. Categories: an `all`
+       master switch, packet {all,hello,lsp,csnp,psnp} (each with
+       optional direction and level), fsm {nfsm}, and the
+       lsp-originate / lsp-purge / lsdb event toggles (each with an
+       optional level). The `level` filter is functional (level-1 /
+       level-2; omit for both). Categories without a trace site in the
+       current code (interface FSM, DIS election) are intentionally
+       omitted rather than exposed as no-op knobs.";
+  }
+
+  grouping isis-tracing-packet-options {
+    description
+      "Optional refinements shared by every per-PDU-type tracing toggle.
+       The enclosing container's presence is what enables tracing for
+       that PDU type; these children only narrow it.";
+
+    leaf direction {
+      ext:help "Restrict tracing to a single direction";
+      type enumeration {
+        enum send {
+          description "Trace only transmitted PDUs.";
+        }
+        enum receive {
+          description "Trace only received PDUs.";
+        }
+      }
+      description
+        "Limit tracing to one direction. Omit to trace both send and
+         receive — there is no explicit `both` value; absence means
+         both.";
+    }
+    leaf level {
+      ext:help "Restrict tracing to a single IS-IS level";
+      type enumeration {
+        enum level-1 {
+          description "Trace only Level-1 PDUs.";
+        }
+        enum level-2 {
+          description "Trace only Level-2 PDUs.";
+        }
+      }
+      description
+        "Limit tracing to one IS-IS level. Omit to trace both levels —
+         there is no explicit `both` value; absence means both.";
+    }
+  }
+
+  grouping isis-tracing-level-options {
+    description
+      "Optional level refinement shared by the event toggles
+       (dis / lsp-originate / lsp-purge / lsdb).";
+
+    leaf level {
+      ext:help "Restrict tracing to a single IS-IS level";
+      type enumeration {
+        enum level-1 {
+          description "Trace only Level-1 events.";
+        }
+        enum level-2 {
+          description "Trace only Level-2 events.";
+        }
+      }
+      description
+        "Limit tracing to one IS-IS level. Omit for both levels.";
+    }
+  }
+
+  grouping isis-tracing-extension {
+    description
+      "The `tracing` block attached to the `router isis` instance.";
+
+    container tracing {
+      ext:help "IS-IS conditional tracing";
+      description
+        "Per-category IS-IS log toggles, applied to this routing
+         instance (every interface and neighbor).";
+
+      leaf all {
+        ext:help "Enable every tracing category";
+        type empty;
+        description
+          "Master switch — when present, every category below is traced
+           regardless of its individual toggle.";
+      }
+
+      container packet {
+        ext:help "Trace IS-IS protocol PDUs";
+        description
+          "Per-PDU-type tracing. Each PDU type is a presence container:
+           naming it (e.g. `tracing packet hello`) enables tracing for
+           that type in both directions and levels, and the `direction`
+           / `level` children refine it. `all` covers every PDU type at
+           once.";
+
+        container all {
+          ext:help "Trace all IS-IS PDU types";
+          presence "Trace every IS-IS PDU type";
+          uses isis-tracing-packet-options;
+        }
+        container hello {
+          ext:help "Trace IIH (Hello) PDUs";
+          presence "Trace Hello PDUs";
+          uses isis-tracing-packet-options;
+        }
+        container lsp {
+          ext:help "Trace Link State PDUs";
+          presence "Trace LSP PDUs";
+          uses isis-tracing-packet-options;
+        }
+        container csnp {
+          ext:help "Trace Complete SNPs";
+          presence "Trace CSNP PDUs";
+          uses isis-tracing-packet-options;
+        }
+        container psnp {
+          ext:help "Trace Partial SNPs";
+          presence "Trace PSNP PDUs";
+          uses isis-tracing-packet-options;
+        }
+      }
+
+      container fsm {
+        ext:help "Trace IS-IS neighbor state machine";
+        description
+          "Neighbor (adjacency) state-machine tracing. `nfsm` is a
+           presence container — naming it (`tracing fsm nfsm`) enables
+           adjacency transition logging. (The interface FSM has no trace
+           sites yet; add an `ifsm` toggle here when it grows one.)";
+
+        container nfsm {
+          ext:help "Trace the neighbor (adjacency) state machine";
+          presence "Trace neighbor FSM transitions";
+        }
+      }
+
+      container lsp-originate {
+        ext:help "Trace LSP origination";
+        presence "Trace self-LSP origination";
+        uses isis-tracing-level-options;
+      }
+      container lsp-purge {
+        ext:help "Trace LSP purge";
+        presence "Trace LSP purge events";
+        uses isis-tracing-level-options;
+      }
+      container lsdb {
+        ext:help "Trace the link-state database";
+        presence "Trace LSDB install / flooding decisions";
+        uses isis-tracing-level-options;
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/config:isis" {
+    description
+      "`router isis tracing` in the candidate-set subtree.";
+    uses isis-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router/config:isis" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router isis tracing ...` is path-valid.";
+    uses isis-tracing-extension;
+  }
+}
