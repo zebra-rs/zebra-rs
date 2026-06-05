@@ -6,7 +6,6 @@ use super::OspfLink;
 use super::area::{AreaTypeKind, ExternalMetricType, NssaTranslatorRole, RedistEntry};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
 use super::link::{NbrStateThreshold, OspfAuthMode, OspfNetworkType};
-use super::tracing::{config_tracing_fsm, config_tracing_packet};
 use super::version::{OspfVersion, Ospfv2};
 
 use crate::bfd::session::EchoMode;
@@ -21,15 +20,9 @@ pub type Callback<V = Ospfv2> = fn(&mut Ospf<V>, Args, ConfigOp) -> Option<()>;
 
 impl Ospf {
     const OSPF: &str = "/router/ospf";
-    const TRACING: &str = "/router/ospf/tracing";
 
     pub fn ospf_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(format!("{}{}", Self::OSPF, path), cb);
-    }
-
-    pub fn tracing_add(&mut self, path: &str, cb: Callback) {
-        self.callbacks
-            .insert(format!("{}{}", Self::TRACING, path), cb);
     }
 
     pub fn callback_build(&mut self) {
@@ -215,8 +208,11 @@ impl Ospf {
             "/graceful-restart/drain-time-ms",
             config_ospf_gr_drain_time_ms,
         );
-        self.tracing_add("/fsm", config_tracing_fsm);
-        self.tracing_add("/packet", config_tracing_packet);
+        // `/router/ospf/tracing/...` is handled by the subtree dispatcher
+        // `super::tracing::config_tracing_dispatch` (called from
+        // `process_cm_msg` for paths this callback table does not claim),
+        // not by per-node callbacks — the message-type names are YANG
+        // presence containers, so they live in the path, not in args.
     }
 }
 

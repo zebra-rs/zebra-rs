@@ -31,6 +31,7 @@ use crate::{
         path_from_command, vrf_redirect_split,
     },
     context::Task,
+    ospf_event_trace, ospf_fsm_trace,
 };
 
 use super::area::{OspfArea, OspfAreaMap};
@@ -981,6 +982,8 @@ impl Ospf<Ospfv2> {
             ospf.gr_restart_load_checkpoint();
         }
 
+        ospf.tracing.proto = Ospfv2::PROTO;
+
         let tx = ospf.tx.clone();
         let sock = ospf.sock.clone();
         tokio::spawn(async move {
@@ -1075,6 +1078,12 @@ impl Ospf<Ospfv2> {
 
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        } else {
+            // `/router/ospf/tracing/...` is not in the callback table —
+            // its message-type names are YANG presence containers, so a
+            // single subtree dispatcher parses the path tail. Returns
+            // `None` (ignored) for any other unmatched path.
+            super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
         }
     }
 
@@ -2080,6 +2089,16 @@ impl Ospf<Ospfv2> {
         // Unpack the widened key back into v2-typed components for the
         // v2-bound match arms / method calls below.
         let (ls_type, ls_id, adv_router) = v2_lsa_key_unpack(key);
+
+        ospf_event_trace!(
+            self.tracing,
+            Lsdb,
+            event = ?ev,
+            ls_type = ?ls_type,
+            ls_id = %ls_id,
+            adv_router = %adv_router,
+            "LSDB event"
+        );
 
         // Handle SelfOriginatedReceived before borrowing lsdb, since
         // re-origination needs full &mut self access.
@@ -3840,7 +3859,20 @@ impl Ospf<Ospfv2> {
                     // refresh; the originator gates on its own
                     // preconditions and flushes when they no longer
                     // hold. P2P sees no semantic change here.
-                    if new_state.is_some_and(|s| s != prev_state) {
+                    if let Some(new) = new_state
+                        && new != prev_state
+                    {
+                        let ifname = self.links.get(&index).map(|l| l.name.clone());
+                        ospf_fsm_trace!(
+                            self.tracing,
+                            Ifsm,
+                            false,
+                            ifindex = index,
+                            interface = ifname.as_deref().unwrap_or("?"),
+                            from = ?prev_state,
+                            to = ?new,
+                            "IFSM transition"
+                        );
                         self.ext_link_lsa_originate(index);
                     }
                 }
@@ -3873,6 +3905,18 @@ impl Ospf<Ospfv2> {
                         .map(|nbr| nbr.state);
 
                     if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                        if old_state != new_state {
+                            ospf_fsm_trace!(
+                                self.tracing,
+                                Nfsm,
+                                false,
+                                neighbor = %src,
+                                event = ?ev,
+                                from = ?old_state,
+                                to = ?new_state,
+                                "NFSM transition"
+                            );
+                        }
                         self.process_neighbor_state_change(index, src, old_state, new_state);
                         // Re-evaluate the BFD session against the configured
                         // threshold (the reconcile reads the now-current
@@ -3884,10 +3928,11 @@ impl Ospf<Ospfv2> {
             Message::HelloTimer(index) => {
                 let now = chrono::Utc::now();
                 let chains = &self.key_chains;
+                let tracing = &self.tracing;
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
-                ospf_hello_send(link, chains, now);
+                ospf_hello_send(link, chains, now, tracing);
             }
             Message::Lsdb(ev, area_id, key) => {
                 self.process_lsdb(ev, area_id, key);
@@ -4244,6 +4289,7 @@ impl Ospf<Ospfv3> {
             bfd_event_tx,
             bfd_event_rx,
         };
+        ospf.tracing.proto = Ospfv3::PROTO;
         ospf.callback_build();
         ospf.show_build();
         // v3 has no on-disk GR checkpoint load today, so nothing to
@@ -4322,6 +4368,9 @@ impl Ospf<Ospfv3> {
 
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        } else {
+            // `/router/ospfv3/tracing/...` subtree — see the v2 sibling.
+            super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
         }
     }
 
@@ -5648,7 +5697,20 @@ impl Ospf<Ospfv3> {
                     // refresh the LSA; the originator's own gating
                     // makes the call a no-op when the preconditions
                     // don't hold (P2P sees no semantic change).
-                    if new_state.is_some_and(|s| s != prev_state) {
+                    if let Some(new) = new_state
+                        && new != prev_state
+                    {
+                        let ifname = self.links.get(&index).map(|l| l.name.clone());
+                        ospf_fsm_trace!(
+                            self.tracing,
+                            Ifsm,
+                            false,
+                            ifindex = index,
+                            interface = ifname.as_deref().unwrap_or("?"),
+                            from = ?prev_state,
+                            to = ?new,
+                            "IFSM transition"
+                        );
                         self.e_router_v3_lsa_originate(index);
                     }
                 }
@@ -5656,13 +5718,14 @@ impl Ospf<Ospfv3> {
             Message::HelloTimer(index) => {
                 let now = chrono::Utc::now();
                 let chains = &self.key_chains;
+                let tracing = &self.tracing;
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
                 let Some(tx) = self.v3_send_tx.as_ref() else {
                     return;
                 };
-                super::packet_v3::ospfv3_hello_send(link, tx, chains, now);
+                super::packet_v3::ospfv3_hello_send(link, tx, chains, now, tracing);
             }
             Message::Nfsm(index, src, ev) => {
                 let old_state = self
@@ -5690,6 +5753,18 @@ impl Ospf<Ospfv3> {
                         .map(|nbr| nbr.state);
 
                     if let (Some(old_state), Some(new_state)) = (old_state, new_state) {
+                        if old_state != new_state {
+                            ospf_fsm_trace!(
+                                self.tracing,
+                                Nfsm,
+                                false,
+                                neighbor = %src,
+                                event = ?ev,
+                                from = ?old_state,
+                                to = ?new_state,
+                                "NFSM transition"
+                            );
+                        }
                         self.process_neighbor_state_change(index, src, old_state, new_state);
                         // Re-evaluate the BFD session against the configured
                         // threshold (the reconcile reads the now-current
@@ -5752,6 +5827,13 @@ impl Ospf<Ospfv3> {
                 self.process_retransmit(ifindex, router_id);
             }
             Message::Lsdb(ev, area_id, key) => {
+                ospf_event_trace!(
+                    self.tracing,
+                    Lsdb,
+                    event = ?ev,
+                    area = ?area_id,
+                    "LSDB event"
+                );
                 // RFC 2328 §13.4: a peer flooded our own LSA back to
                 // us at a higher sequence number (typical post-restart
                 // scenario). Re-originate at an even higher seq so
@@ -6892,10 +6974,11 @@ impl Ospf<Ospfv3> {
 
         match &packet.payload {
             Ospfv3Payload::Hello(_) => {
+                let tracing = &self.tracing;
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
                 };
-                super::packet_v3::ospfv3_hello_recv(&our_router_id, link, &packet, &src);
+                super::packet_v3::ospfv3_hello_recv(&our_router_id, link, &packet, &src, tracing);
             }
             Ospfv3Payload::DbDesc(_) => {
                 // v3 keys neighbors by router-id, which lives on the
@@ -8936,6 +9019,13 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
+    ospf_event_trace!(
+        top.tracing,
+        Spf,
+        area = %area_id,
+        duration_us = duration.as_micros() as u64,
+        "SPF calculation complete"
+    );
 
     // Per-algo IPv6 RIBs from the per-algo SPF results (top borrowed
     // immutably, so collect locally then swap the field). Single
@@ -9725,6 +9815,13 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
+    ospf_event_trace!(
+        top.tracing,
+        Spf,
+        area = %area_id,
+        duration_us = duration.as_micros() as u64,
+        "SPF calculation complete"
+    );
 
     let rib = build_rib_from_spf(top, area_id, source, &spf_result, &tilfa_result);
 

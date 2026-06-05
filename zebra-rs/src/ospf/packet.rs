@@ -456,12 +456,14 @@ pub fn ospf_hello_recv(
     }
 }
 
+#[ospf_packet_handler(Hello, Send)]
 pub fn ospf_hello_send(
     oi: &mut OspfLink,
     chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
+    tracing: &OspfTracing,
 ) {
-    // tracing::info!("[Hello:Send] on {} flag {}", oi.name, oi.flags.hello_sent());
+    ospf_pdu_trace!(tracing, "[Hello:Send] on {}", oi.name);
 
     let packet = ospf_hello_packet(oi, chains, now).unwrap();
     if let Err(e) = oi.ptx.send(Message::Send(packet, oi.index, None)) {
@@ -478,11 +480,18 @@ pub fn ospf_packet_db_desc_set(nbr: &mut Neighbor, dd: &mut OspfDbDesc) {
     }
 }
 
+#[ospf_packet_handler(DbDesc, Send)]
 pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
     let area = link.area_id;
     let mut dd = OspfDbDesc::default();
 
-    tracing::info!("DB_DESC: send {:?}", nbr.dd.flags);
+    ospf_pdu_trace!(
+        link.tracing,
+        "[DBD:Send] to {} flags={:?} seq={}",
+        nbr.ident.prefix.addr(),
+        nbr.dd.flags,
+        nbr.dd.seqnum
+    );
 
     dd.if_mtu = link.mtu as u16;
 
@@ -517,8 +526,6 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::DbDesc(dd));
     apply_link_auth(&mut packet, &link.auth_send_ctx());
-    tracing::info!("DB_DESC: Send");
-    // tracing::info!("{}", packet);
     let _ = nbr.ptx.send(Message::Send(
         packet,
         nbr.ifindex,
@@ -532,6 +539,7 @@ pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
     }
 }
 
+#[ospf_packet_handler(LsRequest, Send)]
 pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &Identity) {
     let area = link.area_id;
     let mut ls_req = OspfLsRequest::default();
@@ -540,8 +548,12 @@ pub fn ospf_ls_req_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &I
 
     let mut packet = Ospfv2Packet::new(&oident.router_id, &area, Ospfv2Payload::LsRequest(ls_req));
     apply_link_auth(&mut packet, &link.auth_send_ctx());
-    tracing::info!("[DB Desc:Send]");
-    tracing::info!("{}", packet);
+    ospf_pdu_trace!(
+        link.tracing,
+        "[LSReq:Send] to {} entries={}",
+        nbr.ident.prefix.addr(),
+        nbr.ls_req.len()
+    );
     nbr.ptx
         .send(Message::Send(
             packet,
@@ -622,6 +634,7 @@ fn nbr_sched_event(nbr: &Neighbor, ev: NfsmEvent) {
         .unwrap();
 }
 
+#[ospf_packet_handler(DbDesc, Recv)]
 pub fn ospf_db_desc_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -629,7 +642,7 @@ pub fn ospf_db_desc_recv(
     src: &Ipv4Addr,
 ) {
     use NfsmState::*;
-    tracing::info!("DB_DESC: Recv {}", src);
+    ospf_pdu_trace!(oi.tracing, "[DBD:Recv] from {}", src);
 
     // Get DD.
     let Ospfv2Payload::DbDesc(ref dd) = packet.payload else {
@@ -793,15 +806,21 @@ fn ospf_db_desc_resend(oi: &OspfInterface, nbr: &Neighbor) {
     ));
 }
 
+#[ospf_packet_handler(LsUpdate, Send)]
 pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSUpd:Send] to {} lsas={}",
+        nbr.ident.prefix.addr(),
+        lsas.len()
+    );
     let ls_upd = OspfLsUpdate {
         num_adv: lsas.len() as u32,
         lsas,
     };
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
     apply_link_auth(&mut packet, &oi.auth_send_ctx());
-    tracing::info!("[LS Update:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
             packet,
@@ -811,12 +830,18 @@ pub fn ospf_ls_upd_send(oi: &OspfInterface, nbr: &Neighbor, lsas: Vec<OspfLsa>) 
         .unwrap();
 }
 
+#[ospf_packet_handler(LsAck, Send)]
 pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<OspfLsaHeader>) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSAck:Send] to {} headers={}",
+        nbr.ident.prefix.addr(),
+        lsa_headers.len()
+    );
     let ls_ack = OspfLsAck { lsa_headers };
     let mut packet = Ospfv2Packet::new(&oi.ident.router_id, &area, Ospfv2Payload::LsAck(ls_ack));
     apply_link_auth(&mut packet, &oi.auth_send_ctx());
-    tracing::info!("[LS Ack:Send] to {}", nbr.ident.prefix.addr());
     nbr.ptx
         .send(Message::Send(
             packet,
@@ -828,6 +853,7 @@ pub fn ospf_ls_ack_send(oi: &OspfInterface, nbr: &Neighbor, lsa_headers: Vec<Osp
 
 // ospf_ls_req_recv -- RFC2328 Section 10.7
 // Following ref/ospfd/ospf_packet.c ospf_ls_req()
+#[ospf_packet_handler(LsRequest, Recv)]
 pub fn ospf_ls_req_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -843,8 +869,9 @@ pub fn ospf_ls_req_recv(
         return;
     };
 
-    tracing::info!(
-        "[LS Request:Recv] from {} entries={}",
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSReq:Recv] from {} entries={}",
         src,
         ls_req.reqs.len()
     );
@@ -1298,6 +1325,7 @@ fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfL
     );
 }
 
+#[ospf_packet_handler(LsUpdate, Recv)]
 pub fn ospf_ls_upd_recv(
     oi: &mut OspfInterface,
     nbr: &mut Neighbor,
@@ -1312,14 +1340,20 @@ pub fn ospf_ls_upd_recv(
         return;
     };
 
-    tracing::info!("[LS Update:Recv] from {} lsas={}", src, ls_upd.lsas.len());
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSUpd:Recv] from {} lsas={}",
+        src,
+        ls_upd.lsas.len()
+    );
 
     ospf_ls_upd_validate_proc(oi, nbr, ls_upd, src);
 }
 
 // LS Ack receive handler -- RFC 2328 Section 13.7.
+#[ospf_packet_handler(LsAck, Recv)]
 pub fn ospf_ls_ack_recv(
-    _oi: &mut OspfInterface,
+    oi: &mut OspfInterface,
     nbr: &mut Neighbor,
     packet: &Ospfv2Packet,
     src: &Ipv4Addr,
@@ -1332,8 +1366,9 @@ pub fn ospf_ls_ack_recv(
         return;
     };
 
-    tracing::info!(
-        "[LS Ack:Recv] from {} headers={}",
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSAck:Recv] from {} headers={}",
         src,
         ls_ack.lsa_headers.len()
     );

@@ -7,6 +7,7 @@
 use std::net::Ipv6Addr;
 
 use ipnet::Ipv6Net;
+use ospf_macros::ospf_packet_handler;
 use ospf_packet::{
     OSPFV3_NSSA_LSA_TYPE, Ospfv3AuthTrailer, Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck,
     Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader,
@@ -15,11 +16,13 @@ use ospf_packet::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::network_v6::Ospfv3Send;
+use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv3};
 use super::{
     Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
     inst::OspfInterface,
 };
+use crate::ospf_pdu_trace;
 
 /// RFC 7166 §3.5 Apad — a per-algorithm hex pattern used to fill
 /// the Authentication Data field while computing the HMAC. The
@@ -289,12 +292,15 @@ fn build_hello_packet(link: &OspfLink<Ospfv3>) -> Option<Ospfv3Packet> {
 /// Emit a Hello on `link` via the v3 send loop. Analogue of v2's
 /// `ospf_hello_send`. Returns silently if no link-local source is
 /// available yet (the link will retry on the next hello-timer fire).
+#[ospf_packet_handler(Hello, Send)]
 pub fn ospfv3_hello_send(
     link: &mut OspfLink<Ospfv3>,
     v3_send_tx: &UnboundedSender<Ospfv3Send>,
     chains: &std::collections::BTreeMap<String, crate::policy::KeyChain>,
     now: chrono::DateTime<chrono::Utc>,
+    tracing: &OspfTracing,
 ) {
+    ospf_pdu_trace!(tracing, "[Hello:Send] on {}", link.name);
     let Some(src) = link_local_src(link) else {
         tracing::debug!(
             "[v3 Hello:Send] {} has no link-local source yet, skipping",
@@ -358,15 +364,19 @@ fn hello_is_nbr_changed(nbr: &Neighbor<Ospfv3>, prev: &super::Identity<Ospfv3>) 
 /// `src` is the v6 link-local from `Ospfv3Recv`. We store it as a
 /// `/128` in the neighbor's prefix so the existing IFSM helpers
 /// that look up `nbr.ident.prefix` keep working.
+#[ospf_packet_handler(Hello, Recv)]
 pub fn ospfv3_hello_recv(
     our_router_id: &std::net::Ipv4Addr,
     oi: &mut OspfLink<Ospfv3>,
     packet: &Ospfv3Packet,
     src: &Ipv6Addr,
+    tracing: &OspfTracing,
 ) {
     if oi.is_passive() {
         return;
     }
+
+    ospf_pdu_trace!(tracing, "[Hello:Recv] on {} from {}", oi.name, src);
 
     let Ospfv3Payload::Hello(ref hello) = packet.payload else {
         return;
@@ -498,12 +508,20 @@ fn db_desc_pack(nbr: &mut Neighbor<Ospfv3>, dd: &mut Ospfv3DbDesc) {
 ///   `Ospfv3::send_db_desc` (in `version.rs`) routes here.
 /// - Destination is the neighbor's link-local v6 (a `/128` we
 ///   captured from the Hello recv). Source is our own link-local.
+#[ospf_packet_handler(DbDesc, Send)]
 pub fn ospfv3_db_desc_send(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
     oident: &Identity<Ospfv3>,
 ) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[DBD:Send] to {} flags={:?} seq={}",
+        nbr.ident.router_id,
+        nbr.dd.flags,
+        nbr.dd.seqnum
+    );
     let mut dd = Ospfv3DbDesc {
         if_mtu: oi.mtu as u16,
         flags: nbr.dd.flags,
@@ -728,6 +746,7 @@ fn ospfv3_db_desc_proc(
 ///   `Ipv4Addr`.
 /// - No netmask check (v3 Hello doesn't carry one; DBD MTU check
 ///   is the same).
+#[ospf_packet_handler(DbDesc, Recv)]
 pub fn ospfv3_db_desc_recv(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
@@ -735,6 +754,8 @@ pub fn ospfv3_db_desc_recv(
     src: &Ipv6Addr,
 ) {
     use NfsmState::*;
+
+    ospf_pdu_trace!(oi.tracing, "[DBD:Recv] from {}", src);
 
     let Ospfv3Payload::DbDesc(ref dd) = packet.payload else {
         return;
@@ -861,12 +882,19 @@ fn ospfv3_packet_ls_req_set(nbr: &Neighbor<Ospfv3>, ls_req: &mut Ospfv3LsRequest
 /// LSA the peer holds but we don't (populated by
 /// `ospfv3_db_desc_proc` in #779). Sent unicast to the neighbor's
 /// link-local v6 via the dedicated v3 send channel.
+#[ospf_packet_handler(LsRequest, Send)]
 pub fn ospfv3_ls_req_send(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
     oident: &Identity<Ospfv3>,
 ) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSReq:Send] to {} entries={}",
+        nbr.ident.router_id,
+        nbr.ls_req.len()
+    );
     let mut ls_req = Ospfv3LsRequest::default();
     ospfv3_packet_ls_req_set(nbr, &mut ls_req);
 
@@ -903,12 +931,19 @@ pub fn ospfv3_ls_req_send(
 /// the given LSAs to the specified neighbor. Mirrors v2's
 /// `ospf_ls_upd_send`. Body is `num_lsa: u32` followed by the LSAs
 /// in serialized form.
+#[ospf_packet_handler(LsUpdate, Send)]
 pub fn ospfv3_ls_upd_send(
     oi: &OspfInterface<Ospfv3>,
     nbr: &Neighbor<Ospfv3>,
     lsas: Vec<Ospfv3Lsa>,
 ) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSUpd:Send] to {} lsas={}",
+        nbr.ident.router_id,
+        lsas.len()
+    );
     let ls_upd = Ospfv3LsUpdate { lsas };
 
     let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsUpdate(ls_upd));
@@ -941,6 +976,7 @@ pub fn ospfv3_ls_upd_send(
 /// requested LSA we don't hold triggers `BadLSReq` (RFC 2328 §10.7),
 /// which the NFSM treats as a fatal exchange error and forces
 /// renegotiation from ExStart.
+#[ospf_packet_handler(LsRequest, Recv)]
 pub fn ospfv3_ls_req_recv(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
@@ -957,7 +993,12 @@ pub fn ospfv3_ls_req_recv(
         return;
     };
 
-    tracing::info!("[v3 LSReq:Recv] from {} entries={}", src, ls_req.reqs.len());
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSReq:Recv] from {} entries={}",
+        src,
+        ls_req.reqs.len()
+    );
 
     let mut lsas: Vec<Ospfv3Lsa> = Vec::new();
     for req in ls_req.reqs.iter() {
@@ -984,12 +1025,19 @@ pub fn ospfv3_ls_req_recv(
 /// Emit an OSPFv3 LS Acknowledgement packet (RFC 5340 §A.3.6)
 /// containing the supplied LSA headers. Mirrors v2's
 /// `ospf_ls_ack_send`. Unicast to the neighbor's link-local.
+#[ospf_packet_handler(LsAck, Send)]
 pub fn ospfv3_ls_ack_send(
     oi: &OspfInterface<Ospfv3>,
     nbr: &Neighbor<Ospfv3>,
     lsa_headers: Vec<Ospfv3LsaHeader>,
 ) {
     let area = oi.area_id;
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSAck:Send] to {} headers={}",
+        nbr.ident.router_id,
+        lsa_headers.len()
+    );
     let ls_ack = Ospfv3LsAck { lsa_headers };
 
     let mut packet = Ospfv3Packet::new(oi.router_id, &area, 0, Ospfv3Payload::LsAck(ls_ack));
@@ -1021,8 +1069,9 @@ pub fn ospfv3_ls_ack_send(
 /// the matching LSA in the neighbor's retransmit list and remove
 /// it iff the ack's sequence number and checksum match what we
 /// hold. Mirrors v2's `ospf_ls_ack_recv`.
+#[ospf_packet_handler(LsAck, Recv)]
 pub fn ospfv3_ls_ack_recv(
-    _oi: &mut OspfInterface<Ospfv3>,
+    oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
     packet: &Ospfv3Packet,
     src: &Ipv6Addr,
@@ -1035,8 +1084,9 @@ pub fn ospfv3_ls_ack_recv(
         return;
     };
 
-    tracing::info!(
-        "[v3 LSAck:Recv] from {} headers={}",
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSAck:Recv] from {} headers={}",
         src,
         ls_ack.lsa_headers.len()
     );
@@ -1463,6 +1513,7 @@ fn ospfv3_ls_upd_proc(
 /// `Installed` or `AckAndDiscard` contribute their header to a
 /// single direct LS Ack response. A `BadLSReq` result aborts the
 /// rest of the packet without acking.
+#[ospf_packet_handler(LsUpdate, Recv)]
 pub fn ospfv3_ls_upd_recv(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
@@ -1477,7 +1528,12 @@ pub fn ospfv3_ls_upd_recv(
         return;
     };
 
-    tracing::info!("[v3 LSUpd:Recv] from {} lsas={}", src, ls_upd.lsas.len());
+    ospf_pdu_trace!(
+        oi.tracing,
+        "[LSUpd:Recv] from {} lsas={}",
+        src,
+        ls_upd.lsas.len()
+    );
 
     let mut ack_headers: Vec<Ospfv3LsaHeader> = Vec::new();
 
