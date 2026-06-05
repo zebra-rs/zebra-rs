@@ -579,6 +579,14 @@ pub struct LinkState {
     // Up neighbors.
     pub nbrs_up: Levels<u32>,
 
+    // Neighbours whose attached BFD session is currently Down (RFC 5882
+    // §3.2 hold-down). While a neighbour's system-id sits in this set the
+    // NFSM refuses to (re-)promote its adjacency to Up even though IIHs keep
+    // arriving, and the BFD session is kept subscribed so it can detect the
+    // peer coming back. The entry is cleared when BFD reports the session Up
+    // again, or when the neighbour is torn down for real (hold-timer expiry).
+    pub bfd_holddown: Levels<BTreeSet<IsisSysId>>,
+
     // DIS status.
     pub dis_status: Levels<DisStatus>,
 

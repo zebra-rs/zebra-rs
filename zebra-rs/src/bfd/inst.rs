@@ -380,12 +380,13 @@ impl Bfd {
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
-        // Echo is single-hop + IPv4 only (the XDP helper handles IPv4). Any
-        // active Echo role needs the per-interface helper: `receive` reflects a
-        // peer's Echo, `transmit` sends + detects ours. Bring it up and mark the
-        // session `echo_ready` once the child is confirmed running — until then
-        // we advertise 0 (an honest promise to actually loop Echo back).
-        if !params.echo_mode.is_off() && !key.multihop && key.remote.is_ipv4() {
+        // Echo is single-hop only; both IPv4 and IPv6 are handled (the XDP helper
+        // reflects either family). Any active Echo role needs the per-interface
+        // helper: `receive` reflects a peer's Echo, `transmit` sends + detects
+        // ours. Bring it up and mark the session `echo_ready` once the child is
+        // confirmed running — until then we advertise 0 (an honest promise to
+        // actually loop Echo back).
+        if !params.echo_mode.is_off() && !key.multihop {
             self.reflectors.acquire(key.ifindex);
             let ready = self.reflectors.is_ready(key.ifindex);
             if ready && let Some(s) = self.sessions.get_by_key_mut(&key) {
@@ -430,7 +431,6 @@ impl Bfd {
         if let Some(s) = &removed
             && !s.echo_mode.is_off()
             && !s.key.multihop
-            && s.key.remote.is_ipv4()
         {
             // Stop any originator first, while the helper is still alive — the
             // release below may be the last reference and tear the child down.
@@ -710,23 +710,29 @@ impl Bfd {
     /// We originate only while the session is **Up**, our configured Echo mode
     /// transmits (`transmit`/`both`), the peer advertises a non-zero Required Min
     /// Echo RX Interval (it will loop our Echo back), it is single-hop, and both
-    /// endpoints carry a concrete IPv4 address — the helper builds a
-    /// self-addressed L2 IPv4 frame and the forwarding plane hairpins it. The
+    /// endpoints carry a concrete address (IPv4, or an IPv6 link-local) — the
+    /// helper builds a self-addressed L2 frame and the forwarding plane hairpins
+    /// it. The
     /// transmit interval is our configured `echo-transmit-interval`, clamped up
     /// to the peer's advertised floor; detection is `interval × detect_mult`.
     fn echo_originate_reconcile(&mut self, key: SessionKey) {
         let Some(s) = self.sessions.get_by_key(&key) else {
             return;
         };
-        // Echo is single-hop IPv4 only; `local` must be a concrete source the
-        // helper can stamp as src==dst on the self-addressed frame.
-        let v4 = match (s.key.local, s.key.remote) {
+        // Echo is single-hop only; `local` must be a concrete (non-unspecified)
+        // source the helper can stamp as src==dst on the self-addressed frame.
+        // Both families are supported — the helper builds a v4 or v6 frame from
+        // the addresses (an IPv6 pair uses the two ends' link-locals).
+        let pair = match (s.key.local, s.key.remote) {
             (IpAddr::V4(local), IpAddr::V4(peer)) if !s.key.multihop && !local.is_unspecified() => {
-                Some((local, peer))
+                Some((IpAddr::V4(local), IpAddr::V4(peer)))
+            }
+            (IpAddr::V6(local), IpAddr::V6(peer)) if !s.key.multihop && !local.is_unspecified() => {
+                Some((IpAddr::V6(local), IpAddr::V6(peer)))
             }
             _ => None,
         };
-        let want = v4.is_some()
+        let want = pair.is_some()
             && s.local_state == bfd_packet::State::Up
             && s.echo_mode.transmits()
             && s.remote_min_echo_rx_us > 0;
@@ -736,7 +742,7 @@ impl Bfd {
         let ifindex = s.key.ifindex;
         let discr = s.local_disc;
         if want {
-            let (local, peer) = v4.expect("want implies a concrete IPv4 pair");
+            let (local, peer) = pair.expect("want implies a concrete address pair");
             // §6.8.9: the interval MUST NOT be below the peer's advertised
             // Required Min Echo RX Interval. Send at our configured rate, but
             // never faster than the peer's floor.

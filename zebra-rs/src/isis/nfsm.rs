@@ -48,8 +48,17 @@ pub fn nfsm_hold_timer(nbr: &Neighbor, level: Level) -> Timer {
     })
 }
 
-pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId) {
+pub fn nbr_hold_timer_expire(
+    link: &mut LinkTop,
+    level: Level,
+    sys_id: IsisSysId,
+    release_bfd: bool,
+) {
     use IfsmEvent::*;
+
+    // RFC 5882 §3.2: this adjacency is being torn down for real, so drop any
+    // BFD hold-down pin for it (a no-op when none is set).
+    link.state.bfd_holddown.get_mut(&level).remove(&sys_id);
 
     let is_p2p = link.is_p2p();
 
@@ -68,10 +77,11 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
 
     let was_up = nbr.state == NfsmState::Up;
     let ifindex = nbr.ifindex;
-    // Snapshot the peer's IPv4 so we can send a BFD Unsubscribe
-    // after dropping the nbr borrow. nbr's addr4 is about to be
-    // wiped along with the entire entry below.
+    // Snapshot the peer's IPv4 and IPv6 link-local so we can send a BFD
+    // Unsubscribe after dropping the nbr borrow. nbr's addr maps are about to
+    // be wiped along with the entire entry below.
     let bfd_peer_v4 = nbr.addr4.keys().next().copied();
+    let bfd_peer_v6ll = nbr.addr6l.first().copied();
 
     // Originate Hello and LSP.
     if is_p2p {
@@ -116,21 +126,16 @@ pub fn nbr_hold_timer_expire(link: &mut LinkTop, level: Level, sys_id: IsisSysId
         *counter = counter.saturating_sub(1);
     }
 
-    // RFC 5882 §5: if the timed-out adjacency was Up and had BFD
-    // attached, release the BFD session. Idempotent with the
-    // packet.rs regression path that may already have sent the
-    // Unsubscribe.
-    if was_up
+    // RFC 5882 §5: if the timed-out adjacency was Up and had BFD attached,
+    // release the BFD session — but only when `release_bfd` is set. The
+    // BFD-down hold-down path passes `false` so the session keeps probing and
+    // can detect the peer returning. Idempotent with the packet.rs regression
+    // path that may already have sent the Unsubscribe.
+    if release_bfd
+        && was_up
         && link.config.bfd.resolve(&link.up_config.bfd).enable
-        && let Some(remote) = bfd_peer_v4
-        && let Some(local) = link.state.v4addr.first().map(|p| p.addr())
+        && let Some(key) = super::packet::bfd_session_key(link, bfd_peer_v4, bfd_peer_v6ll)
     {
-        let key = crate::bfd::session::SessionKey {
-            local: std::net::IpAddr::V4(local),
-            remote: std::net::IpAddr::V4(remote),
-            ifindex: link.ifindex,
-            multihop: false,
-        };
         let _ = link.tx.send(Message::BfdUnsubscribe(key));
     }
 

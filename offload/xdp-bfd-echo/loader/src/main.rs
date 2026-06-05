@@ -101,11 +101,15 @@ async fn main() -> anyhow::Result<()> {
         ebpf.take_map("OUR_LOCAL_IPS")
             .context("OUR_LOCAL_IPS map missing from object")?,
     )?;
+    let local_ips_v6 = aya::maps::HashMap::try_from(
+        ebpf.take_map("OUR_LOCAL_IPS_V6")
+            .context("OUR_LOCAL_IPS_V6 map missing from object")?,
+    )?;
     let timers = aya::maps::HashMap::try_from(
         ebpf.take_map("ECHO_TIMERS")
             .context("ECHO_TIMERS map missing from object")?,
     )?;
-    let mut engine = sender::EchoEngine::new(&iface, local_ips, timers)?;
+    let mut engine = sender::EchoEngine::new(&iface, local_ips, local_ips_v6, timers)?;
 
     info!("BFD Echo datapath up on {iface} (reflect + originate); Ctrl-C/SIGTERM to exit");
 
