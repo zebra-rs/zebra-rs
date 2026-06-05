@@ -1709,8 +1709,12 @@ impl Bgp {
                     Some(super::vrf::VrfLabelAllocator::bounded(start, start + size))
             }
         }
-        // Condition "bgp tracing label".
-        tracing::info!(start, size, "bgp: dynamic MPLS label block granted");
+        bgp_label_trace!(
+            self.tracing,
+            start,
+            size,
+            "bgp: dynamic MPLS label block granted"
+        );
 
         let unlabelled: Vec<String> = self
             .vrf_registry
