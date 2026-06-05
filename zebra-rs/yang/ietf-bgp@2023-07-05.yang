@@ -321,6 +321,22 @@ module ietf-bgp {
              hostname is used; when neither is available the
              capability is not sent.";
         }
+        leaf no-fib-install {
+          type boolean;
+          default "false";
+          description
+            "When true, routes selected by this BGP speaker are not
+             installed into the forwarding table (FIB). The Loc-RIB is
+             still built and routes are still reflected and advertised
+             to peers, but no kernel forwarding entry is programmed for
+             IPv4/IPv6 unicast or for VPN, EVPN and labeled-unicast
+             MPLS routes. Next-hop tracking and best-path selection are
+             unaffected. Intended for a dedicated route reflector that
+             is out of the forwarding path. Best set at startup;
+             toggling at run time applies to subsequent route updates
+             rather than retroactively withdrawing already-installed
+             entries.";
+        }
         container srv6 {
           description
             "SRv6 parameters for BGP services over an SRv6 underlay

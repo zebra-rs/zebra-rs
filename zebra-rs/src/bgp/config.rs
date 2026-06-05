@@ -52,6 +52,20 @@ fn config_global_hostname(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
+/// `set router bgp global no-fib-install <true|false>` — route reflector
+/// mode. When enabled, the instance's RIB client drops every forwarding
+/// install so selected routes stay out of the kernel FIB while the
+/// Loc-RIB and peer advertisement keep running. Flips the shared
+/// `RibClient` gate (observed by every FSM / listen / timer clone of
+/// `ctx.rib`) and mirrors the value on `Bgp` for `show`.
+fn config_global_no_fib_install(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let flag = args.boolean()?;
+    let enabled = op.is_set() && flag;
+    bgp.no_fib_install = enabled;
+    bgp.ctx.rib.set_suppress_install(enabled);
+    Some(())
+}
+
 /// `set router bgp global srv6 locator <name>` — names the SRv6
 /// locator BGP carves per-VRF End.DT46 service SIDs from for L3VPN
 /// over SRv6 (RFC 9252). Drives the RIB locator watch; SID
@@ -1736,6 +1750,10 @@ impl Bgp {
         self.callback_add("/router/bgp/global/as", config_global_asn);
         self.callback_add("/router/bgp/global/identifier", config_global_identifier);
         self.callback_add("/router/bgp/global/hostname", config_global_hostname);
+        self.callback_add(
+            "/router/bgp/global/no-fib-install",
+            config_global_no_fib_install,
+        );
         self.callback_add(
             "/router/bgp/global/srv6/locator",
             config_global_srv6_locator,

@@ -15,6 +15,8 @@
 //! inspect, compare, serialise, or branch on it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::SendError;
@@ -85,20 +87,53 @@ impl std::fmt::Debug for RibInbound {
 pub struct RibClient {
     inner: UnboundedSender<RibInbound>,
     proto_id: ProtoId,
+    /// When set, [`Self::send`] silently drops forwarding-install
+    /// messages (see [`Message::is_fib_install`]) so the subscriber's
+    /// selected routes never reach the kernel FIB. Control-plane
+    /// traffic — next-hop tracking, label-block requests, SR locator
+    /// watches, subscribe — is unaffected, so best-path computation and
+    /// peer advertisement keep working.
+    ///
+    /// Backed by an `Arc` so every clone of a client shares one flag:
+    /// the config callback flips it on the instance's `ctx.rib` and the
+    /// FSM / listen / timer clones that actually emit installs observe
+    /// the change. Used by BGP's `router bgp global no-fib-install` to
+    /// run a pure route reflector that is out of the forwarding path.
+    suppress_install: Arc<AtomicBool>,
 }
 
 impl RibClient {
     pub fn new(inner: UnboundedSender<RibInbound>, proto_id: ProtoId) -> Self {
-        Self { inner, proto_id }
+        Self {
+            inner,
+            proto_id,
+            suppress_install: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Send a `Message` to RIB, automatically wrapped in a
     /// `RibInbound` carrying this client's `proto_id`.
+    ///
+    /// When [`Self::set_suppress_install`] has been called with `true`,
+    /// forwarding-install messages are dropped here and reported as a
+    /// successful send: the subscriber's pipeline is unchanged, only the
+    /// kernel programming is elided. Withdrawals (`*Del`) are *not*
+    /// dropped, so flipping the flag on lets any later route churn clean
+    /// stale entries out of the FIB.
     pub fn send(&self, msg: Message) -> Result<(), SendError<RibInbound>> {
+        if msg.is_fib_install() && self.suppress_install.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         self.inner.send(RibInbound {
             from: self.proto_id,
             msg,
         })
+    }
+
+    /// Toggle FIB-install suppression for this client and every clone
+    /// that shares its `Arc`. Idempotent.
+    pub fn set_suppress_install(&self, suppress: bool) {
+        self.suppress_install.store(suppress, Ordering::Relaxed);
     }
 }
 
@@ -393,5 +428,63 @@ mod tests {
         let env_b = inbound_rx.recv().await.unwrap();
         assert_eq!(env_a.from, ProtoId::from_raw(3));
         assert_eq!(env_b.from, ProtoId::from_raw(3));
+    }
+
+    fn ipv4_add() -> Message {
+        Message::Ipv4Add {
+            prefix: "10.0.0.0/8".parse().unwrap(),
+            rib: crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp),
+        }
+    }
+
+    fn ipv4_del() -> Message {
+        Message::Ipv4Del {
+            prefix: "10.0.0.0/8".parse().unwrap(),
+            rib: crate::rib::entry::RibEntry::new(crate::rib::RibType::Bgp),
+        }
+    }
+
+    #[tokio::test]
+    async fn suppress_install_drops_only_forwarding_installs() {
+        // Route-reflector mode: forwarding installs are dropped, but
+        // withdrawals and control-plane messages still flow so best-path
+        // and peer advertisement keep working.
+        let (inbound_tx, mut inbound_rx) = unbounded_channel::<RibInbound>();
+        let client = RibClient::new(inbound_tx, ProtoId::from_raw(1));
+        client.set_suppress_install(true);
+
+        // Dropped, but reported as a successful send.
+        client.send(ipv4_add()).expect("send reports ok");
+        // Not dropped — these must reach RIB.
+        client.send(ipv4_del()).unwrap();
+        client.send(Message::Resolve).unwrap();
+
+        let first = inbound_rx.recv().await.expect("del delivered");
+        assert!(matches!(first.msg, Message::Ipv4Del { .. }));
+        let second = inbound_rx.recv().await.expect("resolve delivered");
+        assert!(matches!(second.msg, Message::Resolve));
+        // The Ipv4Add must not be sitting in the channel.
+        assert!(inbound_rx.try_recv().is_err(), "Ipv4Add should be dropped");
+    }
+
+    #[tokio::test]
+    async fn suppress_install_flag_is_shared_across_clones() {
+        // The gate lives behind an Arc: flipping it on one handle (e.g.
+        // the config callback's `ctx.rib`) must be observed by the clone
+        // that actually emits installs (the FSM / timer copy).
+        let (inbound_tx, mut inbound_rx) = unbounded_channel::<RibInbound>();
+        let config_handle = RibClient::new(inbound_tx, ProtoId::from_raw(2));
+        let install_handle = config_handle.clone();
+
+        config_handle.set_suppress_install(true);
+        install_handle.send(ipv4_add()).unwrap();
+        assert!(inbound_rx.try_recv().is_err(), "clone observes suppression");
+
+        config_handle.set_suppress_install(false);
+        install_handle.send(ipv4_add()).unwrap();
+        assert!(
+            inbound_rx.recv().await.is_some(),
+            "clearing the flag re-enables installs"
+        );
     }
 }
