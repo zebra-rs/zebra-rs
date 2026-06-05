@@ -7,6 +7,7 @@ Zebra-rs provides flexible logging capabilities with multiple output destination
 - **Multiple Output Destinations**: stdout, syslog, file
 - **Multiple Formats**: terminal (human-readable), JSON, Elasticsearch-compatible
 - **Protocol-Aware Logging**: Automatic protocol field inclusion (ISIS, BGP, OSPF)
+- **Config-Driven RIB/FIB Tracing**: Runtime-toggleable trace categories under `system tracing` (see [RIB/FIB Tracing](ch-03-06-rib-fib-tracing.md))
 - **Structured Logging**: Rich metadata for filtering and analysis
 - **Fallback Mechanisms**: Automatic fallback when preferred output is unavailable
 

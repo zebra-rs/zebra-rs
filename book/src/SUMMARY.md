@@ -67,6 +67,7 @@
   - [Log Output Destinations](ch-03-01-log-output-destinations.md)
   - [Log Formats](ch-03-02-log-formats.md)
   - [Protocol-Specific Logging](ch-03-03-protocol-logging.md)
+  - [RIB/FIB Tracing](ch-03-06-rib-fib-tracing.md)
   - [Logging Integration](ch-03-04-logging-integration.md)
   - [Logging Troubleshooting](ch-03-05-logging-troubleshooting.md)
 
