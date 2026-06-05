@@ -11,6 +11,7 @@ use crate::bgp::timer::{start_adv_timer_evpn, start_stale_timer};
 use crate::policy::{AsPathPrependConfig, CommunityMatcher, PolicyList, StandardMatcher};
 use crate::rib::route::DEBUG_EVPN;
 use crate::rib::{self, MacAddr, api::FdbEntry};
+use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 
 use super::cap::CapAfiMap;
 use super::peer::{BgpTop, Event, Peer, PeerType};
@@ -2156,6 +2157,7 @@ fn compute_advertise_outcome(
 ) -> AdvertiseOutcome {
     if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
         if let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) {
+            bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
             AdvertiseOutcome::Withdraw
@@ -4907,6 +4909,14 @@ pub fn route_from_peer(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    if let Some(peer) = peers.get_by_idx(peer_id) {
+        bgp_adj_in_trace!(
+            peer,
+            updates = packet.ipv4_update.len(),
+            withdraws = packet.ipv4_withdraw.len(),
+            "recv UPDATE NLRI"
+        );
+    }
     // Convert UpdatePacket to BgpAttr.
     // let attr = BgpAttr::from(&packet.attrs);
 

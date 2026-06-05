@@ -23,8 +23,10 @@ use caps::CapabilityPacket;
 use crate::bfd::session::{EchoMode, SessionKey};
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
+use crate::bgp::tracing::{Direction, PacketKind};
 use crate::bgp::{AdjRib, In, Out};
 use crate::bgp::{stale_route_withdraw, timer};
+use crate::bgp_packet_trace;
 use crate::config::Args;
 use crate::context::task::*;
 
@@ -533,10 +535,17 @@ pub struct Peer {
 
     /// Per-neighbor conditional tracing config (zebra-bgp-tracing.yang
     /// `router bgp neighbor <addr> tracing`). Written by the tracing
-    /// config dispatch; read by the gated `bgp_*_trace!` macros
-    /// (follow-up).
-    #[allow(dead_code)]
+    /// config dispatch; read (additively with `tracing_instance`) by
+    /// the `trace_*` accessors the gated `bgp_*_trace!` macros call.
     pub tracing: super::tracing::BgpTracing,
+
+    /// Snapshot of the instance-wide tracing config (`router bgp
+    /// tracing`), refreshed at peer creation and whenever the instance
+    /// config changes (`propagate_instance_tracing`). Per-neighbor
+    /// tracing is *additive* to this, so the `trace_*` accessors OR the
+    /// two — a peer with no per-neighbor config still gets instance
+    /// tracing. Mirrors the `adv_interval` snapshot pattern.
+    pub tracing_instance: super::tracing::BgpTracing,
 }
 
 impl Peer {
@@ -606,6 +615,7 @@ impl Peer {
             adv_interval: timer::AdvInterval::default(),
             bfd_session_key: None,
             tracing: super::tracing::BgpTracing::default(),
+            tracing_instance: super::tracing::BgpTracing::default(),
         };
         peer.config
             .mp
@@ -622,6 +632,33 @@ impl Peer {
 
     pub fn is_passive(&self) -> bool {
         self.config.transport.passive
+    }
+
+    // ---- effective (instance ∪ per-neighbor) tracing checks --------
+    // Per-neighbor tracing is additive to the instance config, so each
+    // check ORs the peer's snapshot of the instance config
+    // (`tracing_instance`) with its own per-neighbor config (`tracing`).
+    // A peer with no per-neighbor config falls back to instance-only.
+
+    pub fn trace_fsm(&self) -> bool {
+        self.tracing_instance.should_trace_fsm() || self.tracing.should_trace_fsm()
+    }
+
+    pub fn trace_packet(&self, kind: PacketKind, dir: Direction) -> bool {
+        self.tracing_instance.should_trace_packet(kind, dir)
+            || self.tracing.should_trace_packet(kind, dir)
+    }
+
+    pub fn trace_packet_detail(&self, kind: PacketKind, dir: Direction) -> bool {
+        self.tracing_instance.packet_detail(kind, dir) || self.tracing.packet_detail(kind, dir)
+    }
+
+    pub fn trace_adj_in(&self) -> bool {
+        self.tracing_instance.should_trace_adj_in() || self.tracing.should_trace_adj_in()
+    }
+
+    pub fn trace_adj_out(&self) -> bool {
+        self.tracing_instance.should_trace_adj_out() || self.tracing.should_trace_adj_out()
     }
 
     pub fn max_packet_size(&self) -> usize {
@@ -1482,6 +1519,7 @@ pub fn peer_send_open(peer: &mut Peer) {
     };
     let bytes = build_open_packet(peer);
     peer.counter[BgpType::Open as usize].sent += 1;
+    bgp_packet_trace!(peer, PacketKind::Open, Direction::Send, "send OPEN");
     let _ = packet_tx.send(bytes);
 }
 
@@ -1584,6 +1622,14 @@ pub fn peer_send_notification(peer: &mut Peer, code: NotifyCode, sub_code: u8, d
         bytes[16..18].copy_from_slice(&length.to_be_bytes());
     }
     peer.counter[BgpType::Notification as usize].sent += 1;
+    bgp_packet_trace!(
+        peer,
+        PacketKind::Notification,
+        Direction::Send,
+        code = ?code,
+        sub_code,
+        "send NOTIFICATION"
+    );
     let _ = packet_tx.send(bytes);
 }
 
@@ -1594,6 +1640,12 @@ pub fn peer_send_keepalive(peer: &mut Peer) {
     let header = BgpHeader::new(BgpType::Keepalive, BGP_HEADER_LEN);
     let bytes: BytesMut = header.into();
     peer.counter[BgpType::Keepalive as usize].sent += 1;
+    bgp_packet_trace!(
+        peer,
+        PacketKind::Keepalive,
+        Direction::Send,
+        "send KEEPALIVE"
+    );
     let _ = packet_tx.send(bytes);
 }
 
@@ -1609,6 +1661,14 @@ pub fn peer_send_route_refresh(peer: &mut Peer, afi: u16, safi: u8) {
     let pkt = RouteRefreshPacket::new(afi, safi);
     let bytes: BytesMut = pkt.into();
     peer.counter[BgpType::RouteRefresh as usize].sent += 1;
+    bgp_packet_trace!(
+        peer,
+        PacketKind::RouteRefresh,
+        Direction::Send,
+        afi,
+        safi,
+        "send ROUTE-REFRESH"
+    );
     let _ = packet_tx.send(bytes);
 }
 
@@ -1652,6 +1712,12 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     // Mirror peer_send_open but target the collision packet_tx.
     let bytes = build_open_packet(peer);
     peer.counter[BgpType::Open as usize].sent += 1;
+    bgp_packet_trace!(
+        peer,
+        PacketKind::Open,
+        Direction::Send,
+        "send OPEN (collision conn)"
+    );
     let _ = packet_tx.send(bytes);
 }
 
@@ -1754,6 +1820,7 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
         bgp.tx.clone(),
         bgp.ctx.clone(),
     );
+    peer.tracing_instance = bgp.tracing.clone();
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
     peer.config.transport.passive = true;

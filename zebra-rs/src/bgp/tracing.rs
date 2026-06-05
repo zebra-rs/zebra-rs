@@ -43,17 +43,101 @@ macro_rules! bgp_trace {
     };
 }
 
+/// Conditional FSM-transition trace. Fires when this peer's effective
+/// (instance ∪ per-neighbor) config enables `tracing fsm`.
+#[macro_export]
+macro_rules! bgp_fsm_trace {
+    ($peer:expr, $($arg:tt)*) => {
+        if $peer.trace_fsm() {
+            tracing::info!(
+                proto = "bgp",
+                category = "fsm",
+                peer = %$peer.address,
+                $($arg)*
+            );
+        }
+    };
+}
+
+/// Conditional BGP-message trace. `$kind` is a
+/// [`PacketKind`](crate::bgp::tracing::PacketKind), `$dir` the actual
+/// [`Direction`](crate::bgp::tracing::Direction) of the message. Fires
+/// when this peer's effective config traces that type in that
+/// direction; the `detail` field records whether full decoding was
+/// requested.
+#[macro_export]
+macro_rules! bgp_packet_trace {
+    ($peer:expr, $kind:expr, $dir:expr, $($arg:tt)*) => {{
+        let __kind = $kind;
+        let __dir = $dir;
+        if $peer.trace_packet(__kind, __dir) {
+            tracing::info!(
+                proto = "bgp",
+                category = "packet",
+                peer = %$peer.address,
+                packet = __kind.as_str(),
+                direction = __dir.as_str(),
+                detail = $peer.trace_packet_detail(__kind, __dir),
+                $($arg)*
+            );
+        }
+    }};
+}
+
+/// Conditional Adj-RIB-In trace. Fires when this peer's effective
+/// config enables `tracing adj-in`.
+#[macro_export]
+macro_rules! bgp_adj_in_trace {
+    ($peer:expr, $($arg:tt)*) => {
+        if $peer.trace_adj_in() {
+            tracing::info!(
+                proto = "bgp",
+                category = "adj-in",
+                peer = %$peer.address,
+                $($arg)*
+            );
+        }
+    };
+}
+
+/// Conditional Adj-RIB-Out trace. Fires when this peer's effective
+/// config enables `tracing adj-out`.
+#[macro_export]
+macro_rules! bgp_adj_out_trace {
+    ($peer:expr, $($arg:tt)*) => {
+        if $peer.trace_adj_out() {
+            tracing::info!(
+                proto = "bgp",
+                category = "adj-out",
+                peer = %$peer.address,
+                $($arg)*
+            );
+        }
+    };
+}
+
+/// Conditional MPLS-label trace. Instance-scoped (label allocation is
+/// not tied to a peer), so it takes a `&BgpTracing` directly.
+#[macro_export]
+macro_rules! bgp_label_trace {
+    ($tracing:expr, $($arg:tt)*) => {
+        if $tracing.should_trace_label() {
+            tracing::info!(proto = "bgp", category = "label", $($arg)*);
+        }
+    };
+}
+
 // ============================================================
 // BgpTracing — runtime tracing configuration
 // ============================================================
 //
 // Backs the `router bgp tracing { ... }` (instance-wide) and
 // `router bgp neighbor <addr> tracing { ... }` (per-neighbor) config
-// trees defined in zebra-bgp-tracing.yang. The config callbacks below
-// write it; the gated `bgp_*_trace!` macros that READ it (with
-// `should_trace_*` accessors) land in a follow-up. Until those readers
-// exist the fields are written-only, so the data structs and the
-// `tracing` fields on `Bgp` / `Peer` carry `#[allow(dead_code)]`.
+// trees defined in zebra-bgp-tracing.yang. The config dispatch below
+// writes it; the gated `bgp_*_trace!` macros above read it through the
+// `should_trace_*` accessors. Per-neighbor config is additive to the
+// instance config — see `Peer::trace_*`, which OR the peer's snapshot
+// of the instance config with its own per-neighbor config.
 
 use super::Bgp;
 use crate::config::{Args, ConfigOp};
@@ -68,10 +152,47 @@ pub enum Direction {
     Recv,
 }
 
+impl Direction {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Direction::Both => "both",
+            Direction::Send => "send",
+            Direction::Recv => "receive",
+        }
+    }
+
+    /// Whether a message flowing in `actual` direction passes this
+    /// filter. `Both` matches either direction.
+    fn matches(self, actual: Direction) -> bool {
+        self == Direction::Both || self == actual
+    }
+}
+
+/// BGP message type, used to select a per-type toggle at a trace site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketKind {
+    Open,
+    Update,
+    Keepalive,
+    Notification,
+    RouteRefresh,
+}
+
+impl PacketKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PacketKind::Open => "open",
+            PacketKind::Update => "update",
+            PacketKind::Keepalive => "keepalive",
+            PacketKind::Notification => "notification",
+            PacketKind::RouteRefresh => "route-refresh",
+        }
+    }
+}
+
 /// Per-message-type tracing toggle. `enabled` is the presence of the
 /// `packet <type>` container; `detail` and `direction` are its optional
 /// refinements.
-#[allow(dead_code)] // read side (bgp_*_trace! macros) lands in a follow-up
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PacketConfig {
     pub enabled: bool,
@@ -81,7 +202,6 @@ pub struct PacketConfig {
 
 /// Per-message-type tracing block. `all` is a catch-all applied on top
 /// of the individual per-type toggles.
-#[allow(dead_code)] // read side (bgp_*_trace! macros) lands in a follow-up
 #[derive(Debug, Clone, Default)]
 pub struct PacketTracing {
     pub all: PacketConfig,
@@ -113,7 +233,6 @@ impl PacketTracing {
 /// (instance-wide) and one on each `Peer` (per-neighbor override),
 /// sharing this shape because both scopes `uses` the same YANG
 /// grouping.
-#[allow(dead_code)] // read side (bgp_*_trace! macros) lands in a follow-up
 #[derive(Debug, Clone, Default)]
 pub struct BgpTracing {
     pub all: bool,
@@ -122,6 +241,57 @@ pub struct BgpTracing {
     pub label: bool,
     pub adj_in: bool,
     pub adj_out: bool,
+}
+
+impl BgpTracing {
+    fn packet_cfg(&self, kind: PacketKind) -> &PacketConfig {
+        match kind {
+            PacketKind::Open => &self.packet.open,
+            PacketKind::Update => &self.packet.update,
+            PacketKind::Keepalive => &self.packet.keepalive,
+            PacketKind::Notification => &self.packet.notification,
+            PacketKind::RouteRefresh => &self.packet.route_refresh,
+        }
+    }
+
+    /// Whether a `kind` message in `dir` should be traced. The `all`
+    /// master switch and the `packet all` catch-all both apply on top
+    /// of the per-type toggle.
+    pub fn should_trace_packet(&self, kind: PacketKind, dir: Direction) -> bool {
+        if self.all {
+            return true;
+        }
+        let cfg = self.packet_cfg(kind);
+        (self.packet.all.enabled && self.packet.all.direction.matches(dir))
+            || (cfg.enabled && cfg.direction.matches(dir))
+    }
+
+    /// Whether full-decode detail was requested for a `kind` message in
+    /// `dir`. Independent of the `all` master switch — that turns
+    /// everything on at summary level only.
+    pub fn packet_detail(&self, kind: PacketKind, dir: Direction) -> bool {
+        let cfg = self.packet_cfg(kind);
+        (self.packet.all.enabled
+            && self.packet.all.direction.matches(dir)
+            && self.packet.all.detail)
+            || (cfg.enabled && cfg.direction.matches(dir) && cfg.detail)
+    }
+
+    pub fn should_trace_fsm(&self) -> bool {
+        self.all || self.fsm
+    }
+
+    pub fn should_trace_label(&self) -> bool {
+        self.all || self.label
+    }
+
+    pub fn should_trace_adj_in(&self) -> bool {
+        self.all || self.adj_in
+    }
+
+    pub fn should_trace_adj_out(&self) -> bool {
+        self.all || self.adj_out
+    }
 }
 
 fn parse_direction(args: &mut Args) -> Direction {
@@ -218,9 +388,24 @@ pub fn config_tracing_dispatch(
         let peer = bgp.peers.get_mut(&addr)?;
         apply_tracing(&mut peer.tracing, rest, &mut args, op)
     } else if let Some(rest) = path.strip_prefix("/router/bgp/tracing") {
-        apply_tracing(&mut bgp.tracing, rest, &mut args, op)
+        let result = apply_tracing(&mut bgp.tracing, rest, &mut args, op);
+        // Re-snapshot the instance config onto every peer so the
+        // peer-context trace sites (which only see a `Peer`) can OR it
+        // with the per-neighbor config. Same propagation pattern as
+        // `adv_interval`.
+        propagate_instance_tracing(bgp);
+        result
     } else {
         None
+    }
+}
+
+/// Copy the instance tracing config onto every peer's snapshot, so each
+/// peer's effective (additive) config picks up an instance-level change.
+pub fn propagate_instance_tracing(bgp: &mut Bgp) {
+    let snapshot = bgp.tracing.clone();
+    for (_, peer) in bgp.peers.iter_mut_all() {
+        peer.tracing_instance = snapshot.clone();
     }
 }
 
@@ -346,5 +531,106 @@ mod tests {
             apply_tracing(&mut t, "/packet/open/bogus", &mut args(&[]), ConfigOp::Set),
             None
         );
+    }
+
+    // ---- read side: should_trace_* -------------------------------
+
+    #[test]
+    fn should_trace_packet_respects_direction() {
+        let mut t = BgpTracing::default();
+        apply_tracing(
+            &mut t,
+            "/packet/open/direction",
+            &mut args(&["send"]),
+            ConfigOp::Set,
+        );
+        assert!(t.should_trace_packet(PacketKind::Open, Direction::Send));
+        // A recv OPEN is filtered out by the send-only direction.
+        assert!(!t.should_trace_packet(PacketKind::Open, Direction::Recv));
+        // Other types are unaffected.
+        assert!(!t.should_trace_packet(PacketKind::Update, Direction::Send));
+    }
+
+    #[test]
+    fn should_trace_packet_both_matches_either_direction() {
+        let mut t = BgpTracing::default();
+        apply_tracing(&mut t, "/packet/update", &mut args(&[]), ConfigOp::Set);
+        assert!(t.should_trace_packet(PacketKind::Update, Direction::Send));
+        assert!(t.should_trace_packet(PacketKind::Update, Direction::Recv));
+    }
+
+    #[test]
+    fn all_master_switch_traces_every_packet() {
+        let mut t = BgpTracing::default();
+        apply_tracing(&mut t, "/all", &mut args(&[]), ConfigOp::Set);
+        assert!(t.should_trace_packet(PacketKind::Notification, Direction::Recv));
+        assert!(t.should_trace_fsm());
+        assert!(t.should_trace_label());
+        assert!(t.should_trace_adj_in());
+        assert!(t.should_trace_adj_out());
+        // `all` is summary-level only — it does not imply detail.
+        assert!(!t.packet_detail(PacketKind::Notification, Direction::Recv));
+    }
+
+    #[test]
+    fn packet_all_catchall_applies_per_type() {
+        let mut t = BgpTracing::default();
+        apply_tracing(&mut t, "/packet/all", &mut args(&[]), ConfigOp::Set);
+        assert!(t.should_trace_packet(PacketKind::Keepalive, Direction::Send));
+        assert!(t.should_trace_packet(PacketKind::RouteRefresh, Direction::Recv));
+    }
+
+    #[test]
+    fn detail_requires_matching_direction() {
+        let mut t = BgpTracing::default();
+        apply_tracing(
+            &mut t,
+            "/packet/update/direction",
+            &mut args(&["receive"]),
+            ConfigOp::Set,
+        );
+        apply_tracing(
+            &mut t,
+            "/packet/update/detail",
+            &mut args(&[]),
+            ConfigOp::Set,
+        );
+        assert!(t.packet_detail(PacketKind::Update, Direction::Recv));
+        // Detail only applies in the configured (recv) direction.
+        assert!(!t.packet_detail(PacketKind::Update, Direction::Send));
+    }
+
+    // ---- additive (instance ∪ per-neighbor) semantics ------------
+    // Mirrors `Peer::trace_*`, which OR the instance snapshot with the
+    // per-neighbor config.
+
+    fn additive(a: &BgpTracing, b: &BgpTracing, kind: PacketKind, dir: Direction) -> bool {
+        a.should_trace_packet(kind, dir) || b.should_trace_packet(kind, dir)
+    }
+
+    #[test]
+    fn neighbor_adds_to_instance() {
+        let mut inst = BgpTracing::default();
+        apply_tracing(&mut inst, "/fsm", &mut args(&[]), ConfigOp::Set);
+        let mut peer = BgpTracing::default();
+        apply_tracing(&mut peer, "/packet/update", &mut args(&[]), ConfigOp::Set);
+
+        // Instance-only FSM still applies via the instance side.
+        assert!(inst.should_trace_fsm() || peer.should_trace_fsm());
+        // Per-neighbor UPDATE applies via the peer side.
+        assert!(additive(&inst, &peer, PacketKind::Update, Direction::Recv));
+        // Neither side traces OPEN.
+        assert!(!additive(&inst, &peer, PacketKind::Open, Direction::Recv));
+    }
+
+    #[test]
+    fn empty_neighbor_falls_back_to_instance() {
+        let mut inst = BgpTracing::default();
+        apply_tracing(&mut inst, "/packet/open", &mut args(&[]), ConfigOp::Set);
+        let peer = BgpTracing::default(); // no per-neighbor config
+
+        // With no neighbor config, the effective decision is instance-only.
+        assert!(additive(&inst, &peer, PacketKind::Open, Direction::Send));
+        assert!(!additive(&inst, &peer, PacketKind::Update, Direction::Send));
     }
 }
