@@ -120,30 +120,55 @@ interfaces in a single step.
 
 ## Tracing and diagnostics
 
-Diagnostic tracing for OSPFv2 lives under `router ospf tracing`:
+Conditional tracing is a runtime debug switch: a category is silent
+until you name it in the config, at which point the matching log
+sites start emitting. It mirrors the BGP and IS-IS `tracing` model —
+each toggle is a *presence* flag (name it to enable, delete it to
+disable), and the gated log macros consult the live config on every
+packet, transition, and event, so categories turn on and off without
+a restart.
+
+The block is identical for both versions, attached to `router ospf`
+(OSPFv2) and `router ospfv3` (OSPFv3); the two emit `proto=ospf` and
+`proto=ospfv3` respectively so their logs stay filterable apart.
 
 ```
 router ospf {
   tracing {
-    packet hello { direction both; }
-    packet ls-update { direction send; }
-    fsm nfsm { detail true; }
-    database lsdb;
+    fsm { nfsm; }                    # neighbor FSM transitions
+    packet {
+      hello;                         # both directions, summary
+      ls-update { detail; }          # both directions, full decode
+      dd { direction receive; }      # received DBDs only
+    }
+    spf;                             # SPF calculation events
   }
+}
+
+router ospfv3 {
+  tracing { all; }                   # master switch: every category
 }
 ```
 
-| Category | Subtypes |
+| Category | Toggles |
 |---|---|
-| `packet` | `hello`, `dd`, `ls-request`, `ls-update`, `ls-ack` |
-| `event` | `lsp-originate`, `lsp-refresh`, `spf-calculation`, `adjacency`, `flooding`, `all` |
-| `fsm` | `ifsm`, `nfsm`, `all` (with optional `detail true`) |
-| `database` | `lsdb`, `spf-tree`, `rib`, `all` |
+| `all` | master switch — traces every category below |
+| `packet` | `hello`, `dd`, `ls-req`, `ls-update`, `ls-ack`, `all` |
+| `fsm` | `ifsm`, `nfsm`, `all` |
+| `spf` | SPF (shortest-path-first) calculation |
+| `lsdb` | LSA origination / installation / flooding |
 
-Each `packet` entry takes a `direction` of `send`, `receive`, or
-`both` (default `both`). FSM tracing with `detail true` logs every
-state-transition event, not just regressive transitions; useful
-during adjacency-formation debugging, noisy in steady-state.
+Each `packet` toggle is a presence container carrying two optional
+refinements: `direction` (`send` or `receive`; omit for both) and
+`detail` (log the fully decoded packet instead of a one-line
+summary). Each `fsm` toggle carries an optional `detail` that widens
+it from summary transitions to detail-level transition lines. `spf`
+and `lsdb` are bare presence leaves.
+
+Every gated line carries structured fields — `proto`, `category`
+(`packet` / `fsm` / `event`), and, for packets, `packet`,
+`direction`, and `detail` — so the output can be filtered downstream
+by protocol and category.
 
 ## Moving an interface between areas
 
