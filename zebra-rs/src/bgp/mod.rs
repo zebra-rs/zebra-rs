@@ -27,8 +27,6 @@ pub mod cap;
 
 pub mod tracing;
 
-pub mod debug;
-
 pub mod timer;
 
 pub mod policy;

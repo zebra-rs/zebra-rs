@@ -1716,33 +1716,6 @@ fn config_peer_tcp_ao_include_tcp_options(
     Some(())
 }
 
-fn config_debug_category(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let category = args.string()?;
-    let enable = op == ConfigOp::Set;
-
-    match category.as_str() {
-        "all" => {
-            if enable {
-                bgp.debug_flags.enable_all();
-            } else {
-                bgp.debug_flags.disable_all();
-            }
-        }
-        "event" => bgp.debug_flags.event = enable,
-        "update" => bgp.debug_flags.update = enable,
-        "open" => bgp.debug_flags.open = enable,
-        "notification" => bgp.debug_flags.notification = enable,
-        "keepalive" => bgp.debug_flags.keepalive = enable,
-        "fsm" => bgp.debug_flags.fsm = enable,
-        "graceful-restart" => bgp.debug_flags.graceful_restart = enable,
-        "route" => bgp.debug_flags.route = enable,
-        "policy" => bgp.debug_flags.policy = enable,
-        "packet-dump" => bgp.debug_flags.packet_dump = enable,
-        _ => return None,
-    }
-    Some(())
-}
-
 impl Bgp {
     fn callback_peer(&mut self, path: &str, cb: Callback) {
         let prefix = String::from("/router/bgp/neighbor");
@@ -2003,9 +1976,6 @@ impl Bgp {
         self.pcallback_add("/community-list", config_com_list);
         self.pcallback_add("/community-list/seq", config_com_list_seq);
         self.pcallback_add("/community-list/seq/action", config_com_list_action);
-
-        // Debug configuration
-        self.callback_add("/router/bgp/debug", config_debug_category);
 
         // Network configuration
         self.callback_add("/router/bgp/afi-safi/network", config_network);
