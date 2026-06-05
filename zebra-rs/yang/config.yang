@@ -80,6 +80,10 @@ module config {
     prefix zbtr;
   }
 
+  import zebra-rib-tracing {
+    prefix zrft;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }

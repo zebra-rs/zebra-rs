@@ -1,0 +1,263 @@
+module zebra-rib-tracing {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-rib-tracing";
+  prefix "zrft";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Conditional tracing for the central RIB and the FIB dataplane,
+     attached under the top-level `system` container:
+
+       system {
+         tracing { ... }
+       }
+
+     The RIB instance owns both the routing tables and the netlink
+     FIB handle in one task, so there is a single scope here (unlike
+     the BGP block's instance / per-neighbor split). The block is
+     divided by plane to mirror the operator's mental model and the
+     Juniper `routing-options` (RIB) vs `forwarding-options` (FIB)
+     traceoptions split:
+
+       * `tracing rib { ... }` — the control-plane RIB: route
+         add/withdraw and best-path selection, recursive nexthop
+         resolution / Next-Hop Tracking, redistribution to and from
+         protocol clients, MPLS ILM, and static-route processing.
+       * `tracing fib { ... }` — the dataplane: what is programmed
+         into the kernel over netlink (routes, nexthop groups, the
+         raw southbound messages in either direction, the MPLS LFIB,
+         and the ARP / ND neighbor table).
+
+     `route` and `nexthop` deliberately appear on both planes: it is
+     the single most useful split this block buys you — a route can
+     be resolved and best in the RIB yet never make it into the
+     kernel, and only side-by-side `rib route` + `fib route` traces
+     show where it stalled.
+
+     This follows the same gated-macro design as the IS-IS / OSPF /
+     BGP `tracing` blocks: a typed config struct consulted by log
+     macros, so categories turn on at runtime without a rebuild.
+
+     Example:
+
+       system {
+         tracing {
+           rib {
+             route { detail; }   // route churn, fully decoded
+             nexthop;            // resolution + NHT, summary
+           }
+           fib {
+             route;                          // kernel route program
+             kernel { direction receive; }   // only events FROM the kernel
+           }
+         }
+       }
+
+     Each leaf is a presence flag — name it to enable, delete it to
+     disable; absence means the category is silent. Enabling by
+     presence (rather than a `true` value) matches the IS-IS / OSPF /
+     BGP `tracing` blocks: the config callbacks key off set vs delete
+     and never read a value, so `type empty` is the honest type.";
+
+  revision 2026-06-05 {
+    description
+      "Initial revision — `system tracing` block split into a `rib`
+       plane (route, nexthop, redistribute, label, static) and a
+       `fib` plane (route, nexthop, kernel, label, neighbor), plus an
+       `all` master switch. `route` / `nexthop` on each plane and the
+       `fib kernel` toggle are presence containers carrying an
+       optional `detail`; `fib kernel` additionally takes a
+       `direction` (send|receive; omit for both).";
+  }
+
+  grouping rib-tracing-detail-option {
+    description
+      "The `detail` refinement shared by the presence-container
+       toggles (`rib route`, `rib nexthop`, `fib route`,
+       `fib nexthop`, `fib kernel`). The enclosing container's
+       presence is what enables tracing for that category; `detail`
+       only widens each event from a one-line summary to a fully
+       decoded record.";
+
+    leaf detail {
+      ext:help "Log the fully decoded entry, not just a one-line summary";
+      type empty;
+      description
+        "When present, log the complete entry (all prefixes /
+         nexthops / flags / encap) instead of a one-line summary.";
+    }
+  }
+
+  grouping rib-tracing-extension {
+    description
+      "The `tracing` block grafted under `system`. Kept in a grouping
+       so the candidate-`set` and `delete` subtrees stay identical by
+       construction.";
+
+    container tracing {
+      ext:help "RIB / FIB conditional tracing";
+      description
+        "Per-category RIB and FIB log toggles, grouped by plane.";
+
+      leaf all {
+        ext:help "Enable every tracing category";
+        type empty;
+        description
+          "Master switch — when present, every category under both
+           `rib` and `fib` is traced regardless of its individual
+           leaf.";
+      }
+
+      container rib {
+        ext:help "Trace control-plane RIB processing";
+        description
+          "Control-plane RIB categories: route table changes,
+           recursive nexthop resolution, client redistribution,
+           MPLS ILM, and static-route processing.";
+
+        container route {
+          ext:help "Trace route add / withdraw and best-path selection";
+          presence "Trace RIB route changes";
+          description
+            "Log IPv4 / IPv6 route add and withdraw into the RIB and
+             the best-path selection among competing entries for a
+             prefix (administrative distance / metric resolution).";
+          uses rib-tracing-detail-option;
+        }
+        container nexthop {
+          ext:help "Trace nexthop resolution and Next-Hop Tracking";
+          presence "Trace RIB nexthop resolution";
+          description
+            "Log recursive nexthop resolution and Next-Hop Tracking
+             (NHT) register / notify — the reachability gating that
+             decides whether a route's nexthop is usable.";
+          uses rib-tracing-detail-option;
+        }
+        leaf redistribute {
+          ext:help "Trace route exchange with protocol clients";
+          type empty;
+          description
+            "Log routes exchanged with protocol clients (BGP / IS-IS /
+             OSPF) through the RIB client registry — both what clients
+             redistribute in and what the RIB notifies back out.";
+        }
+        leaf label {
+          ext:help "Trace MPLS ILM handling in the RIB";
+          type empty;
+          description
+            "Log MPLS ILM (incoming-label-map) handling in the RIB:
+             local-label allocation and label-to-nexthop bindings.";
+        }
+        leaf static {
+          ext:help "Trace static-route processing";
+          type empty;
+          description
+            "Log static-route configuration processing — how
+             configured static routes are resolved and handed to the
+             RIB.";
+        }
+      }
+
+      container fib {
+        ext:help "Trace FIB dataplane programming";
+        description
+          "Dataplane categories: what is programmed into the kernel
+           over netlink — routes, nexthop groups, the raw southbound
+           messages, the MPLS LFIB, and the ARP / ND table.";
+
+        container route {
+          ext:help "Trace route programming to the kernel";
+          presence "Trace FIB route programming";
+          description
+            "Log route programming to the kernel FIB over netlink
+             (route add / delete as the RIB's best paths are
+             installed and withdrawn).";
+          uses rib-tracing-detail-option;
+        }
+        container nexthop {
+          ext:help "Trace nexthop-group programming to the kernel";
+          presence "Trace FIB nexthop-group programming";
+          description
+            "Log nexthop-group programming to the kernel FIB — the
+             shared nexthop objects that installed routes reference.";
+          uses rib-tracing-detail-option;
+        }
+        container kernel {
+          ext:help "Trace raw netlink messages on the southbound socket";
+          presence "Trace raw netlink messages";
+          description
+            "Log raw netlink messages on the southbound socket. With
+             no `direction`, both are traced: `send` is what zebra-rs
+             programs into the kernel, `receive` is what the kernel
+             reports back (link up / down, address changes, and routes
+             owned by other daemons).";
+          uses rib-tracing-detail-option;
+          leaf direction {
+            ext:help "Restrict tracing to a single netlink direction";
+            type enumeration {
+              enum send {
+                description "Trace only messages programmed to the kernel.";
+              }
+              enum receive {
+                description "Trace only messages received from the kernel.";
+              }
+            }
+            description
+              "Limit tracing to one netlink direction. Omit to trace
+               both — there is no explicit `both` value; absence means
+               both.";
+          }
+        }
+        leaf label {
+          ext:help "Trace MPLS LFIB programming to the kernel";
+          type empty;
+          description
+            "Log MPLS LFIB programming to the kernel — ILM entries
+             (label swap / pop / php) pushed over netlink.";
+        }
+        leaf neighbor {
+          ext:help "Trace ARP / ND neighbor table programming";
+          type empty;
+          description
+            "Log ARP / ND (IPv4 / IPv6 neighbor) table programming to
+             the kernel.";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:system" {
+    description
+      "`system tracing` in the candidate-set subtree.";
+    uses rib-tracing-extension;
+  }
+
+  augment "/configure:delete/config:system" {
+    description
+      "Same attachment for the delete subtree so
+       `delete system tracing ...` is path-valid.";
+    uses rib-tracing-extension;
+  }
+}
