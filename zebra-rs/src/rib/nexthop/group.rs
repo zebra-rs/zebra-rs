@@ -10,9 +10,7 @@ use crate::rib::entry::RibEntries;
 use crate::rib::resolve::{Resolve, ResolveOpt, rib_resolve, rib_resolve_v6};
 
 use super::NexthopUni;
-
-// Flip to true to re-enable IPv6 nexthop resolution diagnostic prints.
-const DEBUG_V6: bool = false;
+use crate::rib::tracing::rib_nexthop;
 
 #[derive(Debug)]
 pub enum Group {
@@ -133,7 +131,7 @@ impl GroupUni {
         // can't be disambiguated by table lookup — every interface
         // advertises fe80::/64.
         if let Some(ifindex) = self.ifindex_origin {
-            if DEBUG_V6 {
+            if rib_nexthop() {
                 println!(
                     "[GroupUni::resolve_v6] addr={} ifindex_origin={} (skipping table walk)",
                     self.addr, ifindex,
@@ -150,7 +148,7 @@ impl GroupUni {
                 // produce a real egress ifindex; the Group cares about that,
                 // not the path category.
                 Resolve::Onlink(ifindex) | Resolve::Recursive(ifindex) => {
-                    if DEBUG_V6 {
+                    if rib_nexthop() {
                         println!(
                             "[GroupUni::resolve_v6] {} -> ifindex_resolved={}",
                             ipv6_addr, ifindex
@@ -160,7 +158,7 @@ impl GroupUni {
                     self.set_valid(true);
                 }
                 Resolve::NotFound => {
-                    if DEBUG_V6 {
+                    if rib_nexthop() {
                         println!("[GroupUni::resolve_v6] {} -> NotFound", ipv6_addr);
                     }
                 }

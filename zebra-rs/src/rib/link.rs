@@ -12,7 +12,7 @@ use crate::fib::os_traffic_dump;
 use crate::fib::sysctl::{sysctl_keep_addr_on_down, sysctl_mpls_enable, sysctl_seg6_enable};
 
 use super::entry::RibEntry;
-use super::route::{DEBUG_ADDR, DEBUG_EVPN};
+use super::tracing::rib_interface;
 use super::util::IpNetExt;
 use super::{LinkFlagsExt, MacAddr, Message, Rib, RibType};
 
@@ -452,7 +452,7 @@ pub fn link_addr_del(link: &mut Link, addr: LinkAddr) -> Option<()> {
 
 impl Rib {
     pub async fn link_add(&mut self, fib_link: FibLink) {
-        if DEBUG_EVPN {
+        if rib_interface() {
             tracing::info!(
                 "link_add: ifindex {} name {} vni {:?} master {:?}",
                 fib_link.index,
@@ -508,7 +508,7 @@ impl Rib {
             // down event handling.
             if link.is_up() {
                 if !fib_link.flags.is_up() {
-                    if DEBUG_ADDR {
+                    if rib_interface() {
                         tracing::info!(
                             "kernel: link {} (ifindex {}) Up => Down",
                             link.name,
@@ -522,7 +522,7 @@ impl Rib {
                     });
                 }
             } else if fib_link.flags.is_up() {
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "kernel: link {} (ifindex {}) Down => Up; recovering connected routes",
                         link.name,
