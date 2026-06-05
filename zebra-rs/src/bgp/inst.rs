@@ -508,6 +508,11 @@ pub struct Bgp {
     /// does not yet share work across members. See
     /// `docs/design/bgp-update-groups.md`.
     pub update_groups: super::update_group::UpdateGroupMap,
+    /// Instance-wide conditional tracing config (zebra-bgp-tracing.yang
+    /// `router bgp tracing`). Written by the tracing config dispatch;
+    /// read by the gated `bgp_*_trace!` macros (follow-up).
+    #[allow(dead_code)]
+    pub tracing: super::tracing::BgpTracing,
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
     /// Handle into the BFD instance's client-request channel — used
@@ -658,6 +663,7 @@ impl Bgp {
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
+            tracing: super::tracing::BgpTracing::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
             bfd_client_tx,
@@ -1325,6 +1331,13 @@ impl Bgp {
                 let (path, args) = path_from_command(&msg.paths);
                 if let Some(f) = self.callbacks.get(&path) {
                     f(self, args, msg.op);
+                } else {
+                    // Tracing lives under `…/tracing/…` with per-message
+                    // -type *containers* (not list keys), so the type is
+                    // in the path rather than `args`. A single parser
+                    // handles the whole subtree instead of registering a
+                    // callback per node; non-tracing paths return None.
+                    super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -1644,6 +1657,7 @@ impl Bgp {
                     Some(super::vrf::VrfLabelAllocator::bounded(start, start + size))
             }
         }
+        // Condition "bgp tracing label".
         tracing::info!(start, size, "bgp: dynamic MPLS label block granted");
 
         let unlabelled: Vec<String> = self

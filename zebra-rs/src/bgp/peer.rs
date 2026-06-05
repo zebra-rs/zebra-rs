@@ -530,6 +530,13 @@ pub struct Peer {
     /// callbacks that arrive in any order within a commit never leak or
     /// duplicate a session.
     pub bfd_session_key: Option<SessionKey>,
+
+    /// Per-neighbor conditional tracing config (zebra-bgp-tracing.yang
+    /// `router bgp neighbor <addr> tracing`). Written by the tracing
+    /// config dispatch; read by the gated `bgp_*_trace!` macros
+    /// (follow-up).
+    #[allow(dead_code)]
+    pub tracing: super::tracing::BgpTracing,
 }
 
 impl Peer {
@@ -598,6 +605,7 @@ impl Peer {
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
             bfd_session_key: None,
+            tracing: super::tracing::BgpTracing::default(),
         };
         peer.config
             .mp
