@@ -3,6 +3,7 @@ use super::peer::{BgpTop, Event, PeerBfdConfig, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use crate::bgp::peer::accept;
+use crate::bgp::tracing::{Direction, PacketKind};
 use crate::bgp::{InOut, peer};
 use crate::config::{
     Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
@@ -12,6 +13,7 @@ use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
 use crate::rib::MacAddr;
 use crate::rib::api::{FdbEntry, RibRx};
+use crate::{bgp_fsm_trace, bgp_label_trace, bgp_packet_trace};
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
@@ -508,6 +510,11 @@ pub struct Bgp {
     /// does not yet share work across members. See
     /// `docs/design/bgp-update-groups.md`.
     pub update_groups: super::update_group::UpdateGroupMap,
+    /// Instance-wide conditional tracing config (zebra-bgp-tracing.yang
+    /// `router bgp tracing`). Written by the tracing config dispatch;
+    /// read by the gated `bgp_*_trace!` macros (follow-up).
+    #[allow(dead_code)]
+    pub tracing: super::tracing::BgpTracing,
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
     /// Handle into the BFD instance's client-request channel — used
@@ -658,6 +665,7 @@ impl Bgp {
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
+            tracing: super::tracing::BgpTracing::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
             bfd_client_tx,
@@ -972,21 +980,46 @@ impl Bgp {
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(ident, event) => {
-                match event {
-                    Event::BGPOpen(_, ref _msg) => {
-                        // tracing::info!("Open from: {}", peer);
-                    }
-                    Event::UpdateMsg(ref _msg) => {
-                        // tracing::info!("Update from: {}", peer);
-                    }
-                    Event::KeepAliveMsg(_) => {
-                        // tracing::info!("Keepalive from: {}", peer);
-                    }
-                    Event::KeepaliveTimerExpires => {
-                        // tracing::info!("KeepaliveTimerExpires for {}", peer);
-                    }
-                    _ => {
-                        // tracing::info!("Other Event: {:?} for {}", event, peer);
+                // Inbound BGP message tracing (recv direction), gated by
+                // the peer's effective (instance ∪ per-neighbor) config.
+                if let Some(peer) = self.peers.get_by_idx(ident) {
+                    match &event {
+                        Event::BGPOpen(..) => {
+                            bgp_packet_trace!(peer, PacketKind::Open, Direction::Recv, "recv OPEN")
+                        }
+                        Event::UpdateMsg(..) => {
+                            bgp_packet_trace!(
+                                peer,
+                                PacketKind::Update,
+                                Direction::Recv,
+                                "recv UPDATE"
+                            )
+                        }
+                        Event::KeepAliveMsg(..) => {
+                            bgp_packet_trace!(
+                                peer,
+                                PacketKind::Keepalive,
+                                Direction::Recv,
+                                "recv KEEPALIVE"
+                            )
+                        }
+                        Event::NotifMsg(..) => {
+                            bgp_packet_trace!(
+                                peer,
+                                PacketKind::Notification,
+                                Direction::Recv,
+                                "recv NOTIFICATION"
+                            )
+                        }
+                        Event::RouteRefreshMsg(..) => {
+                            bgp_packet_trace!(
+                                peer,
+                                PacketKind::RouteRefresh,
+                                Direction::Recv,
+                                "recv ROUTE-REFRESH"
+                            )
+                        }
+                        _ => {}
                     }
                 }
                 // Capture peer state before the FSM mutates it so we
@@ -1028,6 +1061,19 @@ impl Bgp {
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
+
+                // FSM-transition tracing: compare the captured pre-FSM
+                // state with the state the FSM left the peer in.
+                if let (Some(prev), Some(peer)) = (prev_state, self.peers.get_by_idx(ident))
+                    && peer.state != prev
+                {
+                    bgp_fsm_trace!(
+                        peer,
+                        from = prev.to_str(),
+                        to = peer.state.to_str(),
+                        "FSM transition"
+                    );
+                }
 
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
             }
@@ -1325,6 +1371,13 @@ impl Bgp {
                 let (path, args) = path_from_command(&msg.paths);
                 if let Some(f) = self.callbacks.get(&path) {
                     f(self, args, msg.op);
+                } else {
+                    // Tracing lives under `…/tracing/…` with per-message
+                    // -type *containers* (not list keys), so the type is
+                    // in the path rather than `args`. A single parser
+                    // handles the whole subtree instead of registering a
+                    // callback per node; non-tracing paths return None.
+                    super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {
@@ -1644,6 +1697,7 @@ impl Bgp {
                     Some(super::vrf::VrfLabelAllocator::bounded(start, start + size))
             }
         }
+        // Condition "bgp tracing label".
         tracing::info!(start, size, "bgp: dynamic MPLS label block granted");
 
         let unlabelled: Vec<String> = self
@@ -1722,7 +1776,7 @@ impl Bgp {
         );
         self.register_vrf_show(name, &new_handle);
         self.vrf_registry.insert(name.to_string(), new_handle);
-        tracing::info!(vrf = %name, label, "bgp: assigned dynamic label to VRF");
+        bgp_label_trace!(self.tracing, vrf = %name, label, "bgp: assigned dynamic label to VRF");
     }
 
     /// Apply a NHT resolution change: refresh the cached resolution

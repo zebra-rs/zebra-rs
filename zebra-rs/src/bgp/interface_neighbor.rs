@@ -112,6 +112,7 @@ pub fn materialize_peer(
         bgp.tx.clone(),
         bgp.ctx.clone(),
     );
+    peer.tracing_instance = bgp.tracing.clone();
     peer.origin = PeerOrigin::Interface { ifindex };
     // Required for the kernel connect(2) to a fe80:: target —
     // SocketAddrV6 without a scope_id returns EINVAL. The connect

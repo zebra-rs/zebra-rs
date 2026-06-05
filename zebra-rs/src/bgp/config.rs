@@ -69,7 +69,7 @@ fn config_global_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
-        let peer = Peer::new(
+        let mut peer = Peer::new(
             0, // PeerMap will assign the stable index
             bgp.asn,
             bgp.router_id,
@@ -79,6 +79,11 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             bgp.tx.clone(),
             bgp.ctx.clone(),
         );
+        // Seed the per-peer snapshot of the instance tracing config so
+        // the additive (instance ∪ per-neighbor) checks work from the
+        // start; later instance-config changes refresh it via
+        // `propagate_instance_tracing`.
+        peer.tracing_instance = bgp.tracing.clone();
         bgp.peers.insert(addr, peer);
     } else {
         let peer_idx = match bgp.peers.get(&addr) {
