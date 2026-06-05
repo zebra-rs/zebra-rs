@@ -11,23 +11,11 @@ use crate::rib::{Link, LinkFlagsExt, Nexthop};
 use super::entry::RibEntry;
 use super::inst::{IlmEntry, RT_TABLE_MAIN, Rib};
 use super::nexthop::NexthopUni;
+use super::tracing::{rib_interface, rib_nexthop, rib_route};
 use super::{
     Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti, RibEntries,
     RibType,
 };
-
-// Flip to true to re-enable IPv6 RIB/FIB diagnostic trace.
-const DEBUG_V6: bool = false;
-
-// Flip to true to re-enable IP address diagnostic trace.
-pub const DEBUG_ADDR: bool = false;
-
-// Flip to true to log EVPN-related diagnostic traces (VXLAN VNI
-// register/unregister, mac_add / mac_del / mdb_add / mdb_del,
-// link_add EVPN bridge association, BGP RT→VNI extraction). Errors
-// from the kernel are reported regardless. Imported by the FIB and
-// BGP modules so all EVPN diagnostics share one switch.
-pub const DEBUG_EVPN: bool = false;
 
 /// Hold-down policy for kernel-driven address recovery.
 ///
@@ -112,7 +100,7 @@ impl Rib {
     async fn addr_reinstall(&self, ifindex: u32, link_name: &str, addr: &IpNet) {
         match addr {
             IpNet::V4(net) => {
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "addr_reinstall: {} re-installing IPv4 {} to kernel",
                         link_name,
@@ -129,7 +117,7 @@ impl Rib {
                 }
             }
             IpNet::V6(net) => {
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "addr_reinstall: {} re-installing IPv6 {} to kernel",
                         link_name,
@@ -230,7 +218,7 @@ impl Rib {
                 true
             }
             RecoveryDecision::Recover => {
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "addr_recover: {} {} kernel-deleted, still in config — \
                          re-installing (history len now {})",
@@ -374,7 +362,7 @@ impl Rib {
 
     pub async fn link_up(&mut self, ifindex: u32) {
         let Some(link) = self.links.get(&ifindex) else {
-            if DEBUG_ADDR {
+            if rib_interface() {
                 tracing::info!(
                     "link_up: ifindex {} not found in link table; skipping connected route recovery",
                     ifindex
@@ -384,7 +372,7 @@ impl Rib {
         };
         let link_name = link.name.clone();
 
-        if DEBUG_ADDR {
+        if rib_interface() {
             tracing::info!(
                 "link_up: {} (ifindex {}) recovering {} IPv4 + {} IPv6 connected addresses",
                 link_name,
@@ -405,7 +393,7 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "link_up: {} re-adding IPv4 connected prefix {}",
                         link_name,
@@ -434,7 +422,7 @@ impl Rib {
                 entry.ifindex = ifindex;
                 entry.set_valid(true);
 
-                if DEBUG_ADDR {
+                if rib_interface() {
                     tracing::info!(
                         "link_up: {} re-adding IPv6 connected prefix {}",
                         link_name,
@@ -795,7 +783,7 @@ impl Rib {
     }
 
     pub async fn ipv6_route_add(&mut self, prefix: &Ipv6Net, mut entry: RibEntry, table_id: u32) {
-        if DEBUG_V6 {
+        if rib_route() {
             tracing::info!(
                 "[ipv6_route_add] prefix={} rtype={:?} is_protocol={} is_connected={} valid_in={}",
                 prefix,
@@ -823,7 +811,7 @@ impl Rib {
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);
-            if DEBUG_V6 {
+            if rib_route() {
                 println!(
                     "[ipv6_route_add] after resolve: entry.valid={} nexthop={:?}",
                     entry.is_valid(),
@@ -1732,7 +1720,7 @@ async fn ipv6_entry_selection(
     fib: &FibHandle,
     table_id: u32,
 ) -> bool {
-    if DEBUG_V6 {
+    if rib_route() {
         println!(
             "[ipv6_entry_selection] prefix={} entries={} replace={}",
             prefix,
@@ -1774,7 +1762,7 @@ async fn ipv6_entry_selection(
     // New select.
     let next = rib_next(entries);
 
-    if DEBUG_V6 {
+    if rib_route() {
         println!("[ipv6_entry_selection] prev={:?} next={:?}", prev, next);
     }
 
@@ -2057,19 +2045,19 @@ fn resolve_nexthop_uni_v6(
     table: &PrefixMap<Ipv6Net, RibEntries>,
     table_id: u32,
 ) -> bool {
-    if DEBUG_V6 {
+    if rib_nexthop() {
         println!(
             "[resolve_nexthop_uni_v6] addr={} gid_before={}",
             uni.addr, uni.gid
         );
     }
     let Some(Group::Uni(group)) = nmap.fetch(uni, table_id) else {
-        if DEBUG_V6 {
+        if rib_nexthop() {
             println!("[resolve_nexthop_uni_v6] nmap.fetch returned None");
         }
         return false;
     };
-    if DEBUG_V6 {
+    if rib_nexthop() {
         println!(
             "[resolve_nexthop_uni_v6] fetched group gid={} refcnt={} valid={} ifindex={:?}",
             group.gid(),
@@ -2080,7 +2068,7 @@ fn resolve_nexthop_uni_v6(
     }
     if group.refcnt() == 0 {
         group.resolve_v6(table);
-        if DEBUG_V6 {
+        if rib_nexthop() {
             println!(
                 "[resolve_nexthop_uni_v6] after resolve_v6 valid={} ifindex={:?}",
                 group.is_valid(),
@@ -2098,7 +2086,7 @@ fn resolve_nexthop_uni_v6(
     uni.ifindex_resolved = group.ifindex_resolved;
 
     let valid = group.is_valid();
-    if DEBUG_V6 {
+    if rib_nexthop() {
         println!(
             "[resolve_nexthop_uni_v6] returning uni.gid={} uni.ifindex={:?} valid={}",
             uni.gid,
@@ -2116,12 +2104,12 @@ pub async fn ipv6_nexthop_sync(
     links: &BTreeMap<u32, Link>,
     fib: &FibHandle,
 ) {
-    if DEBUG_V6 {
+    if rib_nexthop() {
         println!("[ipv6_nexthop_sync] start; v6 table size={}", table.len());
     }
     for nhop in nmap.groups.iter_mut().flatten() {
         if let Group::Uni(uni) = nhop {
-            if DEBUG_V6 {
+            if rib_nexthop() {
                 println!(
                     "[ipv6_nexthop_sync] visiting uni gid={} addr={} ifindex={:?} valid={} installed={}",
                     uni.gid(),
@@ -2166,7 +2154,7 @@ pub async fn ipv6_nexthop_sync(
                 Some(rt) => rib_resolve_v6(rt, ipv6_addr, &ResolveOpt::default()).is_valid(),
                 None => 0,
             };
-            if DEBUG_V6 {
+            if rib_nexthop() {
                 println!(
                     "[ipv6_nexthop_sync] resolved ifindex={} (0 means unresolved)",
                     ifindex
@@ -2188,7 +2176,7 @@ pub async fn ipv6_nexthop_sync(
             }
         }
     }
-    if DEBUG_V6 {
+    if rib_nexthop() {
         println!("[ipv6_nexthop_sync] done");
     }
 }

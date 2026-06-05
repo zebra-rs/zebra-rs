@@ -36,7 +36,7 @@ use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibAddr, FibLink, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
-use crate::rib::route::{DEBUG_ADDR, DEBUG_EVPN};
+use crate::rib::tracing::{fib_l2_fdb, fib_l2_mdb, fib_l2_vxlan, fib_nexthop, fib_route, fib_srv6};
 use crate::rib::{
     AddrGenMode, Bridge, Group, GroupTrait, MacAddr, Nexthop, NexthopMulti, NexthopUni, RibType,
     Vxlan, link, nexthop::NexthopMember,
@@ -135,16 +135,6 @@ fn fmt_group_for_trace(group: &Group) -> String {
 /// (`RTNLGRP_NEXTHOP`, linux/rtnetlink.h). Numbered past the legacy
 /// `RTMGRP_*` bind mask, so it's joined via `add_membership`.
 const RTNLGRP_NEXTHOP: u32 = 32;
-
-// Flip to true to re-enable IPv6 FIB install diagnostic prints.
-const DEBUG_V6: bool = false;
-
-// Flip to true to log every SRv6 SID FIB install / uninstall — the
-// pre-send netlink attribute dump for the seg6local route, the
-// nexthop-skip notice, and the rib-side resolution trace. Errors from
-// the kernel are reported regardless. Mirrored by RIB via this same
-// constant (re-exported as `crate::fib::netlink::handle::DEBUG_SID`).
-pub const DEBUG_SID: bool = false;
 
 /// Mask the lower (128 - prefix_len) bits of an IPv6 address. The
 /// kernel ignores bits past the prefix length on install, but masking
@@ -625,7 +615,7 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) -> bool {
-        if DEBUG_V6 {
+        if fib_route() {
             tracing::info!(
                 "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
                 prefix,
@@ -709,7 +699,7 @@ impl FibHandle {
                 return false;
             }
             if let Nexthop::Uni(uni) = &nexthop {
-                if DEBUG_V6 {
+                if fib_route() {
                     tracing::info!(
                         "[IPv6 route_add_uni] using nhid: gid={} metric={}",
                         uni.gid,
@@ -721,7 +711,7 @@ impl FibHandle {
                 msg.attributes.push(attr);
             }
             if let Nexthop::Multi(multi) = &nexthop {
-                if DEBUG_V6 {
+                if fib_route() {
                     tracing::info!(
                         "[IPv6 route_add_uni] using nhid (multi): gid={} metric={}",
                         multi.gid,
@@ -734,7 +724,7 @@ impl FibHandle {
             }
         } else {
             if let Nexthop::Uni(uni) = &nexthop {
-                if DEBUG_V6 {
+                if fib_route() {
                     tracing::info!(
                         "[IPv6 route_add_uni] embed nexthop: addr={} ifindex={:?} metric={}",
                         uni.addr,
@@ -797,7 +787,7 @@ impl FibHandle {
             }
         }
 
-        if DEBUG_V6 {
+        if fib_route() {
             tracing::info!(
                 "[IPv6 route_add_uni] netlink request: af={:?} dest_prefix_len={} attrs={:?}",
                 msg.header.address_family,
@@ -972,7 +962,7 @@ impl FibHandle {
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload
-                && DEBUG_ADDR
+                && fib_route()
             {
                 tracing::info!(
                     "DelRoute IPv6 error: {prefix} {e} table={table_id} rtype={:?} metric={} use_nhid={} nh={}",
@@ -1026,7 +1016,7 @@ impl FibHandle {
                 gid = uni.gid();
                 refcnt = uni.refcnt();
 
-                if DEBUG_V6 {
+                if fib_nexthop() {
                     tracing::info!(
                         "[nexthop_add Uni] gid={} addr={} ifindex={:?} valid={} installed={}",
                         gid,
@@ -1045,7 +1035,7 @@ impl FibHandle {
                 // refcounts the logical group for dedup / cleanup
                 // bookkeeping inside zebra-rs.
                 if uni.seg6local_action.is_some() {
-                    if DEBUG_SID {
+                    if fib_srv6() {
                         tracing::info!(
                             "[nexthop_add seg6local] gid={} skipped — seg6local \
                              install rides on the route, not the nh_id",
@@ -1100,7 +1090,7 @@ impl FibHandle {
                 let attr = NexthopAttribute::Oif(uni.ifindex().unwrap_or(0));
                 msg.attributes.push(attr);
 
-                if DEBUG_V6 {
+                if fib_nexthop() {
                     tracing::info!(
                         "[nexthop_add Uni] netlink: af={:?} attrs={:?}",
                         msg.header.address_family,
@@ -1326,7 +1316,7 @@ impl FibHandle {
         msg.attributes.push(encap);
         msg.attributes.push(encap_type);
 
-        if DEBUG_SID {
+        if fib_srv6() {
             tracing::info!(
                 "[route_sid_install] addr={}/{} behavior={:?} ifindex={} nh6={:?} gid={} \
                  use_nhid={} kind={:?} protocol={:?} attrs={:?}",
@@ -1349,8 +1339,8 @@ impl FibHandle {
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
                 // warn level so kernel rejections show up without
-                // requiring DEBUG_SID — silent failures here are how
-                // a misshaped seg6local install slips through.
+                // requiring `system tracing fib srv6` — silent failures
+                // here are how a misshaped seg6local install slips through.
                 tracing::warn!(
                     "NewRoute SID install error: addr={} behavior={:?} \
                      prefix_len={} table={} kind={:?} ifindex={} nh6={:?} \
@@ -2051,7 +2041,7 @@ impl FibHandle {
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
-        if DEBUG_EVPN {
+        if fib_l2_vxlan() {
             tracing::info!(
                 "[FIB] Registered VXLAN VNI {} with ifindex {}",
                 vni,
@@ -2063,7 +2053,7 @@ impl FibHandle {
 
     /// Unregister VXLAN interface mapping
     pub fn unregister_vxlan_ifindex(&mut self, vni: u32) {
-        if DEBUG_EVPN {
+        if fib_l2_vxlan() {
             tracing::info!("[FIB] Unregistered VXLAN VNI {}", vni);
         }
         self.vni_ifindex_map.remove(&vni);
@@ -2102,7 +2092,7 @@ impl FibHandle {
         esi: Option<[u8; 10]>,
     ) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            if DEBUG_EVPN {
+            if fib_l2_fdb() {
                 tracing::info!(
                     "mac_add: no local VXLAN for VNI {} — skipping (mac {})",
                     vni,
@@ -2112,7 +2102,7 @@ impl FibHandle {
             return;
         };
 
-        if DEBUG_EVPN {
+        if fib_l2_fdb() {
             tracing::info!(
                 "mac_add: VNI {} mac {} ifindex {} dst {}",
                 vni,
@@ -2168,7 +2158,7 @@ impl FibHandle {
         // will be wired when ECMP nexthop groups are supported.
         if let Some(esi_val) = esi
             && esi_val != [0u8; 10]
-            && DEBUG_EVPN
+            && fib_l2_fdb()
         {
             tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
@@ -2265,7 +2255,7 @@ impl FibHandle {
         // `unwrap_or(vni)` would have issued a stray RTM_DELNEIGH
         // against a random interface.
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            if DEBUG_EVPN {
+            if fib_l2_fdb() {
                 tracing::info!(
                     "mac_del: no local VXLAN for VNI {} — skipping (mac {})",
                     vni,
@@ -2275,7 +2265,7 @@ impl FibHandle {
             return;
         };
 
-        if DEBUG_EVPN {
+        if fib_l2_fdb() {
             tracing::info!("mac_del: VNI {} mac {} ifindex {}", vni, mac, vxlan_ifindex);
         }
 
@@ -2340,7 +2330,7 @@ impl FibHandle {
         _seq: u32,
     ) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            if DEBUG_EVPN {
+            if fib_l2_mdb() {
                 tracing::info!(
                     "mdb_add: no local VXLAN for VNI {} — skipping (group {})",
                     vni,
@@ -2350,7 +2340,7 @@ impl FibHandle {
             return;
         };
 
-        if DEBUG_EVPN {
+        if fib_l2_mdb() {
             tracing::info!(
                 "mdb_add: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
                 vni,
@@ -2384,7 +2374,7 @@ impl FibHandle {
     /// Counterpart of `mdb_add`; same rationale on naming.
     pub async fn mdb_del(&self, vni: u32, group: IpAddr, _source: Option<IpAddr>, _ifindex: u32) {
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
-            if DEBUG_EVPN {
+            if fib_l2_mdb() {
                 tracing::info!(
                     "mdb_del: no local VXLAN for VNI {} — skipping (group {})",
                     vni,
@@ -2394,7 +2384,7 @@ impl FibHandle {
             return;
         };
 
-        if DEBUG_EVPN {
+        if fib_l2_mdb() {
             tracing::info!(
                 "mdb_del: VNI {} dst {} ifindex {} (zero-MAC FDB / ingress replication)",
                 vni,

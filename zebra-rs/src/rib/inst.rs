@@ -961,7 +961,7 @@ impl Rib {
         {
             sid.ifindex = ifindex;
         }
-        if crate::fib::netlink::handle::DEBUG_SID {
+        if crate::rib::tracing::rib_srv6() {
             tracing::info!(
                 "[sid_install] addr={} behavior={:?} locator={} owner={} \
                  ifindex={} (orig={}) nh6={:?}",
@@ -997,7 +997,7 @@ impl Rib {
         let gid = group.gid();
         let need_install = !group.is_installed();
         group.refcnt_inc();
-        if crate::fib::netlink::handle::DEBUG_SID {
+        if crate::rib::tracing::rib_srv6() {
             tracing::info!(
                 "[sid_install] addr={} resolved gid={} need_install={} refcnt={}",
                 sid.addr,
@@ -2198,6 +2198,8 @@ impl Rib {
                     let _ = self.block_config.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/segment-routing/locator") {
                     let _ = self.locator_config.exec(path, args, msg.op);
+                } else if path.as_str().starts_with("/system/tracing") {
+                    crate::rib::tracing::config_dispatch(&path, args, msg.op);
                 }
             }
             ConfigOp::CommitEnd => {

@@ -64,6 +64,8 @@ pub use mac_addr::*;
 pub mod logging;
 pub use logging::*;
 
+pub mod tracing;
+
 pub mod bridge;
 pub use bridge::*;
 
