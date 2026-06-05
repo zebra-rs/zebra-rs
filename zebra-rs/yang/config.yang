@@ -60,6 +60,10 @@ module config {
     prefix zob;
   }
 
+  import zebra-ospf-tracing {
+    prefix zotr;
+  }
+
   import zebra-bgp-color-policy {
     prefix zbcp;
   }

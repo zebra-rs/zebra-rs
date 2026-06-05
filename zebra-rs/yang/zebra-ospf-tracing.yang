@@ -1,0 +1,245 @@
+module zebra-ospf-tracing {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ospf-tracing";
+  prefix "zotr";
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Conditional OSPF tracing, attachable at the OSPFv2 (`router ospf`)
+     and OSPFv3 (`router ospfv3`) instances, which share one set of
+     options:
+
+       * `router ospf   tracing { ... }`
+       * `router ospfv3 tracing { ... }`
+
+     This mirrors the BGP / IS-IS `tracing` model (a typed config block
+     consulted by gated log macros, so categories can be turned on at
+     runtime without a rebuild) with the OSPF-specific category set: the
+     five OSPF packet types, the interface and neighbor state machines,
+     and the SPF / LSDB events.
+
+     Example:
+
+       router ospf {
+         tracing {
+           fsm { nfsm; }
+           packet {
+             hello;                     // both directions, summary
+             ls-update { detail; }      // both directions, decoded
+             dd { direction receive; }  // received DBDs only
+           }
+           spf;
+         }
+       }
+
+     Each leaf is a presence flag — name it to enable, delete it to
+     disable; absence means the category is silent. Enabling by presence
+     (rather than a `true` value) matches BGP / IS-IS `tracing`: the
+     config dispatch keys off set vs delete and never reads a value, so
+     `type empty` is the honest type here.";
+
+  revision 2026-06-05 {
+    description
+      "Initial revision — shared OSPFv2 / OSPFv3 tracing block (an `all`
+       master switch, fsm {ifsm,nfsm,all}, packet {hello,dd,ls-req,
+       ls-update,ls-ack,all}, spf, lsdb). Each packet message-type is a
+       presence container carrying optional `detail` and `direction`
+       (send|receive; omit for both); each fsm type carries optional
+       `detail`.";
+  }
+
+  grouping ospf-tracing-packet-options {
+    description
+      "Optional refinements shared by every per-message-type tracing
+       toggle. The enclosing container's presence is what enables
+       tracing for that message type; these children only narrow it.";
+
+    leaf detail {
+      ext:help "Decode the full packet, not just a one-line summary";
+      type empty;
+      description
+        "When present, log the fully decoded packet instead of a
+         one-line summary.";
+    }
+    leaf direction {
+      ext:help "Restrict tracing to a single direction";
+      type enumeration {
+        enum send {
+          description "Trace only transmitted packets.";
+        }
+        enum receive {
+          description "Trace only received packets.";
+        }
+      }
+      description
+        "Limit tracing to one direction. Omit to trace both send and
+         receive — there is no explicit `both` value; absence means
+         both.";
+    }
+  }
+
+  grouping ospf-tracing-fsm-options {
+    description
+      "Optional refinement shared by every per-FSM tracing toggle. The
+       enclosing container's presence enables tracing for that state
+       machine; `detail` widens it to detail-level transition lines.";
+
+    leaf detail {
+      ext:help "Log detail-level state-machine transitions";
+      type empty;
+      description
+        "When present, also log detail-level FSM transitions; otherwise
+         only summary transitions are traced.";
+    }
+  }
+
+  grouping ospf-tracing-extension {
+    description
+      "The `tracing` block shared by the OSPFv2 and OSPFv3 instances.
+       `uses` at both augment points so the two versions stay identical
+       by construction.";
+
+    container tracing {
+      ext:help "OSPF conditional tracing";
+      description
+        "Per-category OSPF log toggles, applied to this routing
+         instance (every interface and neighbor).";
+
+      leaf all {
+        ext:help "Enable every tracing category";
+        type empty;
+        description
+          "Master switch — when present, every category below is traced
+           regardless of its individual leaf.";
+      }
+
+      container fsm {
+        ext:help "Trace OSPF state-machine transitions";
+        description
+          "Per-state-machine tracing. Each state machine is a presence
+           container: naming it (e.g. `tracing fsm nfsm`) enables
+           summary transitions, and the `detail` child widens it. `all`
+           covers both state machines at once.";
+
+        container all {
+          ext:help "Trace both interface and neighbor FSMs";
+          presence "Trace every OSPF state machine";
+          uses ospf-tracing-fsm-options;
+        }
+        container ifsm {
+          ext:help "Trace the interface state machine";
+          presence "Trace interface FSM transitions";
+          uses ospf-tracing-fsm-options;
+        }
+        container nfsm {
+          ext:help "Trace the neighbor state machine";
+          presence "Trace neighbor FSM transitions";
+          uses ospf-tracing-fsm-options;
+        }
+      }
+
+      container packet {
+        ext:help "Trace OSPF protocol packets";
+        description
+          "Per-packet-type tracing. Each packet type is a presence
+           container: naming it (e.g. `tracing packet hello`) enables
+           tracing for that type in both directions at summary level,
+           and the `detail` / `direction` children refine it. `all`
+           covers every packet type at once.";
+
+        container all {
+          ext:help "Trace all OSPF packet types";
+          presence "Trace every OSPF packet type";
+          uses ospf-tracing-packet-options;
+        }
+        container hello {
+          ext:help "Trace Hello packets";
+          presence "Trace Hello packets";
+          uses ospf-tracing-packet-options;
+        }
+        container dd {
+          ext:help "Trace Database Description packets";
+          presence "Trace Database Description packets";
+          uses ospf-tracing-packet-options;
+        }
+        container ls-req {
+          ext:help "Trace Link State Request packets";
+          presence "Trace Link State Request packets";
+          uses ospf-tracing-packet-options;
+        }
+        container ls-update {
+          ext:help "Trace Link State Update packets";
+          presence "Trace Link State Update packets";
+          uses ospf-tracing-packet-options;
+        }
+        container ls-ack {
+          ext:help "Trace Link State Acknowledgment packets";
+          presence "Trace Link State Acknowledgment packets";
+          uses ospf-tracing-packet-options;
+        }
+      }
+
+      leaf spf {
+        ext:help "Trace SPF (shortest-path-first) calculation";
+        type empty;
+        description
+          "Log SPF runs (trigger, duration, route changes).";
+      }
+
+      leaf lsdb {
+        ext:help "Trace link-state database and LSA flooding";
+        type empty;
+        description
+          "Log LSA origination, installation, and flooding decisions.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/config:ospf" {
+    description
+      "`router ospf tracing` in the candidate-set subtree.";
+    uses ospf-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router/config:ospf" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router ospf tracing ...` is path-valid.";
+    uses ospf-tracing-extension;
+  }
+
+  augment "/configure:set/config:router/config:ospfv3" {
+    description
+      "`router ospfv3 tracing` in the candidate-set subtree.";
+    uses ospf-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router/config:ospfv3" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router ospfv3 tracing ...` is path-valid.";
+    uses ospf-tracing-extension;
+  }
+}
