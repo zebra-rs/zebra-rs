@@ -302,7 +302,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         ));
 
     // Logging.
-    if link.tracing.fsm.nfsm.enabled {
+    if link.tracing.should_trace_fsm() {
         if nbr.created {
             tracing::info!(
                 "[NBR] {} Created on {} state {}",
@@ -404,7 +404,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // system and the source of the PDU (R) is two-way. However R shall be
         // included in future Level n LAN IIH PDUs transmitted by this system.
         state = NfsmState::Init;
-        if link.tracing.fsm.nfsm.enabled {
+        if link.tracing.should_trace_fsm() {
             tracing::info!("[NBR] {} Down -> Init", nbr.sys_id);
         }
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
@@ -417,7 +417,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // e) generate an adjacencyStateChange (Up)” event.
         if has_mac {
             state = NfsmState::Up;
-            if link.tracing.fsm.nfsm.enabled {
+            if link.tracing.should_trace_fsm() {
                 tracing::info!("[NBR] {} Init -> Up", nbr.sys_id);
             }
             // XXX Adjacency(Up)
@@ -438,7 +438,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // b) generate an adjacencyStateChange (Down) event.
         if !has_mac {
             state = NfsmState::Init;
-            if link.tracing.fsm.nfsm.enabled {
+            if link.tracing.should_trace_fsm() {
                 tracing::info!("[NBR] {} {} -> Init", nbr.sys_id, nbr.state);
             }
             // XXX Adjacency(Down)
@@ -455,7 +455,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // election will transition to Other and register the adjacency
     // through the normal path (no inline state mutation here).
     if nbr.is_dis() && !nbr.lan_id.is_empty() && link.state.adj.get(&level).is_none() {
-        if link.tracing.fsm.nfsm.enabled {
+        if link.tracing.should_trace_fsm() {
             tracing::info!(
                 "[NBR] Late LAN ID {} from elected DIS {} - re-running DIS selection",
                 nbr.lan_id,
@@ -617,7 +617,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             state = NfsmState::Up;
 
             // Set adjacency.
-            if link.tracing.fsm.nfsm.enabled {
+            if link.tracing.should_trace_fsm() {
                 tracing::info!("[NBR] Adjacency set {}", nbr.sys_id);
             }
             *link.state.adj.get_mut(&level) =
@@ -639,7 +639,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // peer comes back (labels and End.X SID stay allocated).
         if state == NfsmState::Up && !has_my_sys_id {
             state = NfsmState::Init;
-            if link.tracing.fsm.nfsm.enabled {
+            if link.tracing.should_trace_fsm() {
                 tracing::info!(
                     "[NBR] {} Up -> Init (peer no longer reports our sys-id)",
                     nbr.sys_id

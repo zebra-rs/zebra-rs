@@ -854,6 +854,12 @@ impl Isis {
 
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
+        } else if path.starts_with("/router/isis/tracing") {
+            // `/router/isis/tracing/...` is not in the callback table —
+            // its category names are YANG presence containers, so a
+            // single subtree dispatcher parses the path tail (mirrors
+            // OSPF's `config_tracing_dispatch`).
+            super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
         }
     }
 
