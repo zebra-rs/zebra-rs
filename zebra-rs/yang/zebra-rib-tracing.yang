@@ -40,11 +40,21 @@ module zebra-rib-tracing {
        * `tracing rib { ... }` — the control-plane RIB: route
          add/withdraw and best-path selection, recursive nexthop
          resolution / Next-Hop Tracking, redistribution to and from
-         protocol clients, MPLS ILM, and static-route processing.
+         protocol clients, MPLS ILM, static-route processing,
+         interface / connected-address handling, VRF lifecycle, and
+         SRv6 SID resolution.
        * `tracing fib { ... }` — the dataplane: what is programmed
          into the kernel over netlink (routes, nexthop groups, the
          raw southbound messages in either direction, the MPLS LFIB,
-         and the ARP / ND neighbor table).
+         the ARP / ND neighbor table, interface / address programming,
+         VRF devices, SRv6 `seg6local` SIDs, and L2 / EVPN objects
+         (bridge, VXLAN, FDB, MDB)).
+
+     The category set was derived by cataloguing every existing
+     `tracing::` site in `src/rib` and `src/fib` and giving each a
+     home; genuine error-level `warn!` sites stay unconditional, so a
+     category gates only the verbose informational traces beside
+     them.
 
      `route` and `nexthop` deliberately appear on both planes: it is
      the single most useful split this block buys you — a route can
@@ -80,22 +90,25 @@ module zebra-rib-tracing {
   revision 2026-06-05 {
     description
       "Initial revision — `system tracing` block split into a `rib`
-       plane (route, nexthop, redistribute, label, static) and a
-       `fib` plane (route, nexthop, kernel, label, neighbor), plus an
-       `all` master switch. `route` / `nexthop` on each plane and the
-       `fib kernel` toggle are presence containers carrying an
-       optional `detail`; `fib kernel` additionally takes a
-       `direction` (send|receive; omit for both).";
+       plane (route, nexthop, redistribute, label, static, interface,
+       vrf, srv6) and a `fib` plane (route, nexthop, kernel, label,
+       neighbor, interface, vrf, srv6, l2{bridge,vxlan,fdb,mdb}), plus
+       an `all` master switch. The verbose categories (route, nexthop,
+       interface, srv6 on each plane, plus `fib kernel`) are presence
+       containers carrying an optional `detail`; `fib kernel`
+       additionally takes a `direction` (send|receive; omit for
+       both). The category set covers every existing trace site in
+       src/rib and src/fib.";
   }
 
   grouping rib-tracing-detail-option {
     description
-      "The `detail` refinement shared by the presence-container
-       toggles (`rib route`, `rib nexthop`, `fib route`,
-       `fib nexthop`, `fib kernel`). The enclosing container's
-       presence is what enables tracing for that category; `detail`
-       only widens each event from a one-line summary to a fully
-       decoded record.";
+      "The `detail` refinement shared by the verbose presence-container
+       toggles (`rib route` / `nexthop` / `interface` / `srv6`,
+       `fib route` / `nexthop` / `kernel` / `interface` / `srv6`). The
+       enclosing container's presence is what enables tracing for that
+       category; `detail` only widens each event from a one-line
+       summary to a fully decoded record.";
 
     leaf detail {
       ext:help "Log the fully decoded entry, not just a one-line summary";
@@ -131,7 +144,9 @@ module zebra-rib-tracing {
         description
           "Control-plane RIB categories: route table changes,
            recursive nexthop resolution, client redistribution,
-           MPLS ILM, and static-route processing.";
+           MPLS ILM, static-route processing, interface /
+           connected-address handling, VRF lifecycle, and SRv6 SID
+           resolution.";
 
         container route {
           ext:help "Trace route add / withdraw and best-path selection";
@@ -174,6 +189,36 @@ module zebra-rib-tracing {
              configured static routes are resolved and handed to the
              RIB.";
         }
+        container interface {
+          ext:help "Trace interface / connected-address handling";
+          presence "Trace RIB interface and connected-address events";
+          description
+            "Log link-table and connected-address handling: link
+             up / down transitions, MTU changes, and connected-route
+             recovery (re-installing configured addresses the kernel
+             dropped, with the external-actor flap suppression that
+             guards it).";
+          uses rib-tracing-detail-option;
+        }
+        leaf vrf {
+          ext:help "Trace VRF lifecycle";
+          type empty;
+          description
+            "Log VRF lifecycle in the RIB: VRF add / delete (including
+             adoption of an existing kernel VRF), per-VRF table
+             allocation, and interface-to-VRF binding (deferred until
+             both the link and the VRF are present).";
+        }
+        container srv6 {
+          ext:help "Trace SRv6 SID resolution";
+          presence "Trace RIB SRv6 SID handling";
+          description
+            "Log SRv6 SID handling in the RIB: End / End.X / End.DT
+             SID resolution (behavior, locator, owner, SID device
+             ifindex, nexthop) before the SID is programmed into the
+             FIB. Distinct from `label`, which is MPLS-only.";
+          uses rib-tracing-detail-option;
+        }
       }
 
       container fib {
@@ -181,7 +226,9 @@ module zebra-rib-tracing {
         description
           "Dataplane categories: what is programmed into the kernel
            over netlink — routes, nexthop groups, the raw southbound
-           messages, the MPLS LFIB, and the ARP / ND table.";
+           messages, the MPLS LFIB, the ARP / ND table, interface /
+           address programming, VRF devices, SRv6 `seg6local` SIDs,
+           and L2 / EVPN objects (bridge, VXLAN, FDB, MDB).";
 
         container route {
           ext:help "Trace route programming to the kernel";
@@ -239,6 +286,70 @@ module zebra-rib-tracing {
           description
             "Log ARP / ND (IPv4 / IPv6 neighbor) table programming to
              the kernel.";
+        }
+        container interface {
+          ext:help "Trace interface / address programming to the kernel";
+          presence "Trace FIB interface and address programming";
+          description
+            "Log interface and connected-address programming to the
+             kernel: link admin up, MTU set, dummy-device create /
+             delete, and address add / delete over netlink.";
+          uses rib-tracing-detail-option;
+        }
+        leaf vrf {
+          ext:help "Trace VRF device programming to the kernel";
+          type empty;
+          description
+            "Log VRF dataplane programming: VRF device create / delete
+             and enslaving an interface to a VRF master over netlink.";
+        }
+        container srv6 {
+          ext:help "Trace SRv6 SID programming to the kernel";
+          presence "Trace FIB SRv6 SID programming";
+          description
+            "Log SRv6 SID programming to the kernel: End-behavior
+             `seg6local` routes (install / uninstall) and the SID
+             device they point at. Distinct from `label`, which is
+             the MPLS LFIB.";
+          uses rib-tracing-detail-option;
+        }
+        container l2 {
+          ext:help "Trace L2 / EVPN dataplane programming";
+          description
+            "Log L2 / EVPN dataplane programming to the kernel. Each
+             leaf is an independent presence toggle; the EVPN control
+             plane itself is out of scope here — this covers only what
+             the FIB pushes over netlink.";
+
+          leaf bridge {
+            ext:help "Trace bridge device programming";
+            type empty;
+            description
+              "Log bridge-device create / delete and address-
+               generation-mode changes.";
+          }
+          leaf vxlan {
+            ext:help "Trace VXLAN device programming";
+            type empty;
+            description
+              "Log VXLAN-device create / delete and address-
+               generation-mode changes, plus VNI-to-ifindex
+               registration.";
+          }
+          leaf fdb {
+            ext:help "Trace MAC / FDB entry programming";
+            type empty;
+            description
+              "Log bridge FDB programming: MAC add / delete (including
+               ESI / EVPN-sourced entries) over netlink.";
+          }
+          leaf mdb {
+            ext:help "Trace multicast (MDB) entry programming";
+            type empty;
+            description
+              "Log multicast forwarding database (MDB) add / delete
+               over netlink.";
+          }
         }
       }
     }
