@@ -47,15 +47,15 @@ module zebra-bgp-tracing {
          tracing {
            fsm;
            packet {
-             open;
-             notification;
+             open;                       // both directions, summary
+             notification { detail; }    // both directions, decoded
            }
          }
          neighbor 10.0.0.5 {
            remote-as 65501;
            tracing {
              packet {
-               update;
+               update { direction receive; }   // received UPDATEs only
              }
              adj-in;
            }
@@ -74,7 +74,39 @@ module zebra-bgp-tracing {
       "Initial revision — shared instance + per-neighbor tracing
        block (fsm, packet {open,update,keepalive,notification,
        route-refresh}, label, adj-in, adj-out, plus an `all`
-       master switch).";
+       master switch). Each packet message-type is a presence
+       container carrying optional `detail` and `direction`
+       (send|receive; omit for both).";
+  }
+
+  grouping bgp-tracing-packet-options {
+    description
+      "Optional refinements shared by every per-message-type tracing
+       toggle. The enclosing container's presence is what enables
+       tracing for that message type; these children only narrow it.";
+
+    leaf detail {
+      ext:help "Decode the full message body, not just a one-line summary";
+      type empty;
+      description
+        "When present, log the fully decoded message (all attributes /
+         NLRI / capabilities) instead of a one-line summary.";
+    }
+    leaf direction {
+      ext:help "Restrict tracing to a single direction";
+      type enumeration {
+        enum send {
+          description "Trace only transmitted messages.";
+        }
+        enum receive {
+          description "Trace only received messages.";
+        }
+      }
+      description
+        "Limit tracing to one direction. Omit to trace both send and
+         receive — there is no explicit `both` value; absence means
+         both.";
+    }
   }
 
   grouping bgp-tracing-extension {
@@ -109,33 +141,41 @@ module zebra-bgp-tracing {
       container packet {
         ext:help "Trace BGP protocol messages";
         description
-          "Per-message-type toggles. `all` traces every BGP message;
-           the individual leaves trace one message type each, in both
-           the send and receive directions.";
+          "Per-message-type tracing. Each message type is a presence
+           container: naming it (e.g. `tracing packet open`) enables
+           tracing for that type in both directions at summary level,
+           and the `detail` / `direction` children refine it. `all`
+           covers every message type at once.";
 
-        leaf all {
+        container all {
           ext:help "Trace all BGP message types";
-          type empty;
+          presence "Trace every BGP message type";
+          uses bgp-tracing-packet-options;
         }
-        leaf open {
+        container open {
           ext:help "Trace OPEN messages";
-          type empty;
+          presence "Trace OPEN messages";
+          uses bgp-tracing-packet-options;
         }
-        leaf update {
+        container update {
           ext:help "Trace UPDATE messages";
-          type empty;
+          presence "Trace UPDATE messages";
+          uses bgp-tracing-packet-options;
         }
-        leaf keepalive {
+        container keepalive {
           ext:help "Trace KEEPALIVE messages";
-          type empty;
+          presence "Trace KEEPALIVE messages";
+          uses bgp-tracing-packet-options;
         }
-        leaf notification {
+        container notification {
           ext:help "Trace NOTIFICATION messages";
-          type empty;
+          presence "Trace NOTIFICATION messages";
+          uses bgp-tracing-packet-options;
         }
-        leaf route-refresh {
+        container route-refresh {
           ext:help "Trace ROUTE-REFRESH messages";
-          type empty;
+          presence "Trace ROUTE-REFRESH messages";
+          uses bgp-tracing-packet-options;
         }
       }
 
