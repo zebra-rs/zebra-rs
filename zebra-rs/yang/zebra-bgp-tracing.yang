@@ -45,26 +45,29 @@ module zebra-bgp-tracing {
 
        router bgp {
          tracing {
-           fsm true;
+           fsm;
            packet {
-             open true;
-             notification true;
+             open;
+             notification;
            }
          }
          neighbor 10.0.0.5 {
            remote-as 65501;
            tracing {
              packet {
-               update true;
+               update;
              }
-             adj-in true;
+             adj-in;
            }
          }
        }
 
-     Each leaf is a plain on/off toggle (set true to enable, delete to
-     disable) — the same encoding IS-IS / OSPF `tracing` use. Absence
-     means the category is silent.";
+     Each leaf is a presence flag — name it to enable, delete it to
+     disable; absence means the category is silent. Enabling by
+     presence (rather than a `true` value) matches how IS-IS / OSPF
+     `tracing` turn a category on by listing it: the config callbacks
+     key off set vs delete and never read a value, so `type empty` is
+     the honest type here.";
 
   revision 2026-06-05 {
     description
@@ -89,15 +92,15 @@ module zebra-bgp-tracing {
 
       leaf all {
         ext:help "Enable every tracing category";
-        type boolean;
+        type empty;
         description
-          "Master switch — when true, every category below is traced
+          "Master switch — when present, every category below is traced
            regardless of its individual leaf.";
       }
 
       leaf fsm {
         ext:help "Trace BGP finite-state-machine transitions";
-        type boolean;
+        type empty;
         description
           "Log peer FSM state changes (Idle/Connect/Active/OpenSent/
            OpenConfirm/Established) and the events that drive them.";
@@ -112,33 +115,33 @@ module zebra-bgp-tracing {
 
         leaf all {
           ext:help "Trace all BGP message types";
-          type boolean;
+          type empty;
         }
         leaf open {
           ext:help "Trace OPEN messages";
-          type boolean;
+          type empty;
         }
         leaf update {
           ext:help "Trace UPDATE messages";
-          type boolean;
+          type empty;
         }
         leaf keepalive {
           ext:help "Trace KEEPALIVE messages";
-          type boolean;
+          type empty;
         }
         leaf notification {
           ext:help "Trace NOTIFICATION messages";
-          type boolean;
+          type empty;
         }
         leaf route-refresh {
           ext:help "Trace ROUTE-REFRESH messages";
-          type boolean;
+          type empty;
         }
       }
 
       leaf label {
         ext:help "Trace MPLS label allocation / binding";
-        type boolean;
+        type empty;
         description
           "Log label operations for labeled-unicast / L3VPN routes
            learned from or advertised to this scope.";
@@ -146,7 +149,7 @@ module zebra-bgp-tracing {
 
       leaf adj-in {
         ext:help "Trace Adj-RIB-In route processing";
-        type boolean;
+        type empty;
         description
           "Log routes entering the inbound Adj-RIB (pre-policy
            received NLRI and their post-policy disposition).";
@@ -154,7 +157,7 @@ module zebra-bgp-tracing {
 
       leaf adj-out {
         ext:help "Trace Adj-RIB-Out route processing";
-        type boolean;
+        type empty;
         description
           "Log routes leaving via the outbound Adj-RIB (what is
            advertised to the scope after export policy).";
