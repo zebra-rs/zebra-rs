@@ -76,6 +76,10 @@ module config {
     prefix zbtm;
   }
 
+  import zebra-bgp-tracing {
+    prefix zbtr;
+  }
+
   import openconfig-isis-types {
     prefix isis;
   }
