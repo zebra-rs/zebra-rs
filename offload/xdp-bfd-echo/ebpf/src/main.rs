@@ -28,7 +28,11 @@
 //! helper polls that flag and reports `echo-down` to zebra-rs. This is the Echo
 //! *sender*'s detection offload — no userspace packet RX in steady state.
 //!
-//! First slice: IPv4 only. IPv6 (EtherType 0x86DD) is a follow-up.
+//! Both IPv4 (EtherType 0x0800) and IPv6 (0x86DD) Echo frames are handled. The
+//! IPv6 path is the exact analogue: a 40-byte fixed header, Hop Limit in place
+//! of TTL, and — because IPv6 has no header checksum and the Echo is
+//! self-addressed (src == dst) — no checksum fix-up at all on reflect (the UDP
+//! pseudo-header is symmetric in src/dst, and Hop Limit isn't in it).
 
 use aya_ebpf::{
     bindings::{bpf_timer, xdp_action},
@@ -48,6 +52,11 @@ use aya_ebpf::{
 /// pure-responder deployments.
 #[map]
 static OUR_LOCAL_IPS: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
+
+/// IPv6 analogue of [`OUR_LOCAL_IPS`], keyed by the 16-byte address (as read off
+/// the wire). Filled by the loader for sessions where we originate IPv6 Echo.
+#[map]
+static OUR_LOCAL_IPS_V6: HashMap<[u8; 16], u8> = HashMap::with_max_entries(256, 0);
 
 /// Per-session Echo detection state, keyed by our local BFD discriminator.
 ///
@@ -115,6 +124,24 @@ const PL_DISCR_OFF: usize = PAYLOAD_OFF + 4; // u32 (big-endian) our local discr
 /// ASCII "zbfd" — tags our own Echo payload.
 const ECHO_MAGIC: u32 = 0x7a62_6664;
 
+const ETHERTYPE_IPV6: u16 = 0x86DD;
+
+/// IPv6 fixed-header fields (relative to the start of the frame). Extension
+/// headers are not expected on a BFD Echo frame; a non-UDP Next Header is
+/// `XDP_PASS`ed. There is no header checksum (unlike IPv4).
+const IP6_OFF: usize = ETH_HLEN;
+const IP6_NEXTHDR_OFF: usize = IP6_OFF + 6; // u8 Next Header
+const IP6_HOPLIMIT_OFF: usize = IP6_OFF + 7; // u8 Hop Limit
+const IP6_SRC_OFF: usize = IP6_OFF + 8; // [u8; 16] source address
+const IP6_HLEN: usize = 40;
+
+/// UDP header after a 40-byte IPv6 header, and the Echo payload after it.
+const UDP6_OFF: usize = IP6_OFF + IP6_HLEN;
+const UDP6_DST_OFF: usize = UDP6_OFF + 2; // u16 (big-endian) destination port
+const PAYLOAD6_OFF: usize = UDP6_OFF + 8;
+const PL6_MAGIC_OFF: usize = PAYLOAD6_OFF; // u32 (big-endian) "zbfd"
+const PL6_DISCR_OFF: usize = PAYLOAD6_OFF + 4; // u32 (big-endian) our discriminator
+
 /// Read a `u8` at `off` bytes into the frame, after a verifier-friendly bounds
 /// check against `data_end`.
 #[inline(always)]
@@ -153,6 +180,38 @@ unsafe fn load_u32_be(ctx: &XdpContext, off: usize) -> Result<u32, ()> {
         let b2 = *((ptr + 2) as *const u8) as u32;
         let b3 = *((ptr + 3) as *const u8) as u32;
         Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+    }
+}
+
+/// Read the 16-byte IPv6 address at `off`: one bounds check, then 16
+/// constant-offset byte reads (so the verifier accepts each access against the
+/// single `+ 16` check). Octets are in wire order, ready to key
+/// [`OUR_LOCAL_IPS_V6`].
+#[inline(always)]
+unsafe fn load_ip6(ctx: &XdpContext, off: usize) -> Result<[u8; 16], ()> {
+    let ptr = ctx.data() + off;
+    if ptr + 16 > ctx.data_end() {
+        return Err(());
+    }
+    unsafe {
+        Ok([
+            *(ptr as *const u8),
+            *((ptr + 1) as *const u8),
+            *((ptr + 2) as *const u8),
+            *((ptr + 3) as *const u8),
+            *((ptr + 4) as *const u8),
+            *((ptr + 5) as *const u8),
+            *((ptr + 6) as *const u8),
+            *((ptr + 7) as *const u8),
+            *((ptr + 8) as *const u8),
+            *((ptr + 9) as *const u8),
+            *((ptr + 10) as *const u8),
+            *((ptr + 11) as *const u8),
+            *((ptr + 12) as *const u8),
+            *((ptr + 13) as *const u8),
+            *((ptr + 14) as *const u8),
+            *((ptr + 15) as *const u8),
+        ])
     }
 }
 
@@ -204,6 +263,27 @@ unsafe fn decrement_ttl(ctx: &XdpContext) -> Result<(), ()> {
     Ok(())
 }
 
+/// Decrement the IPv6 Hop Limit by one. Unlike IPv4 there is no header checksum
+/// to patch, and the UDP checksum is unaffected (Hop Limit is not in the
+/// pseudo-header, and the self-addressed Echo has src == dst). Returns Err on a
+/// truncated header or Hop Limit 0.
+#[inline(always)]
+unsafe fn decrement_hop_limit(ctx: &XdpContext) -> Result<(), ()> {
+    let start = ctx.data();
+    if start + IP6_HOPLIMIT_OFF + 1 > ctx.data_end() {
+        return Err(());
+    }
+    let hl_ptr = (start + IP6_HOPLIMIT_OFF) as *mut u8;
+    unsafe {
+        let hl = core::ptr::read_volatile(hl_ptr);
+        if hl == 0 {
+            return Err(());
+        }
+        core::ptr::write_volatile(hl_ptr, hl - 1);
+    }
+    Ok(())
+}
+
 /// `bpf_timer` callback: fires `detect_ns` after the last return, i.e. when our
 /// originated Echo stopped coming back. Runs in softirq with the timed-out map
 /// element as `value`. It is one-shot (not re-armed here), so it sets the `down`
@@ -223,12 +303,12 @@ unsafe extern "C" fn echo_timeout(_map: *mut c_void, _key: *mut c_void, value: *
 /// `Ok` lets the caller `XDP_DROP` the frame — in steady state the userspace
 /// sender never has to touch returns; the kernel times them.
 #[inline(always)]
-unsafe fn record_return(ctx: &XdpContext) -> Result<(), ()> {
-    if unsafe { load_u32_be(ctx, PL_MAGIC_OFF)? } != ECHO_MAGIC {
+unsafe fn record_return(ctx: &XdpContext, magic_off: usize, discr_off: usize) -> Result<(), ()> {
+    if unsafe { load_u32_be(ctx, magic_off)? } != ECHO_MAGIC {
         // Source is one of our IPs but the payload isn't ours — leave it alone.
         return Ok(());
     }
-    let discr = unsafe { load_u32_be(ctx, PL_DISCR_OFF)? };
+    let discr = unsafe { load_u32_be(ctx, discr_off)? };
     // Userspace seeds the entry at `echo-add`; a miss means we don't track this
     // discriminator (race or stale return) — nothing to do.
     let Some(st) = ECHO_TIMERS.get_ptr_mut(&discr) else {
@@ -258,54 +338,12 @@ unsafe fn record_return(ctx: &XdpContext) -> Result<(), ()> {
     Ok(())
 }
 
-#[xdp]
-pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
-    match try_reflect(&ctx) {
-        Ok(action) => action,
-        // A truncated/short frame just falls through to the stack.
-        Err(()) => xdp_action::XDP_PASS,
-    }
-}
-
-fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
-    // Ethernet II, IPv4 only for this first slice.
-    if unsafe { load_u16_be(ctx, ETH_TYPE_OFF)? } != ETHERTYPE_IPV4 {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Only option-less IPv4 (IHL=5). BFD Echo frames carry no IP options; a
-    // packet with options would shift the UDP header and is left to the stack.
-    if unsafe { load_u8(ctx, IP_VER_IHL_OFF)? } != IPV4_VER_IHL_NOOPTS {
-        return Ok(xdp_action::XDP_PASS);
-    }
-    if unsafe { load_u8(ctx, IP_PROTO_OFF)? } != IPPROTO_UDP {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    if unsafe { load_u16_be(ctx, UDP_DST_OFF)? } != BFD_ECHO_PORT {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // Our own originated Echo, looped back by the peer, is self-addressed to one
-    // of our local IPs. Don't re-reflect it (that loops forever) — feed the
-    // in-kernel detector (arm/re-arm this session's bpf_timer) and drop it. A
-    // peer's Echo (any other source) falls through to the reflect path below.
-    let src_ip = unsafe { load_u32_be(ctx, IP_SRC_OFF)? };
-    if unsafe { OUR_LOCAL_IPS.get(&src_ip) }.is_some() {
-        unsafe { record_return(ctx)? };
-        return Ok(xdp_action::XDP_DROP);
-    }
-
-    // Act as a forwarding hop: decrement TTL + patch the IP checksum, so the
-    // looped Echo returns to the originator at TTL 254 (RFC 5880 §6.4 Echo is
-    // looped by the remote's forwarding plane; FRR's fp-echo receiver requires
-    // exactly TTL 254 and drops anything else).
-    unsafe { decrement_ttl(ctx)? };
-
-    // Prove the full 14-byte Ethernet header (both MACs) is in bounds, then swap
-    // source/destination MAC in place and bounce the frame straight back out.
-    // Swap byte-by-byte at constant offsets (see `swap_byte`) so the copy is
-    // never lowered to a verifier-rejected memcpy.
+/// Prove the full 14-byte Ethernet header (both MACs) is in bounds, then swap
+/// source/destination MAC in place so the frame bounces straight back out.
+/// Byte-by-byte at constant offsets (see [`swap_byte`]) so the copy is never
+/// lowered to a verifier-rejected memcpy.
+#[inline(always)]
+unsafe fn swap_macs(ctx: &XdpContext) -> Result<(), ()> {
     let start = ctx.data();
     if start + ETH_HLEN > ctx.data_end() {
         return Err(());
@@ -320,10 +358,82 @@ fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
         swap_byte(dst.add(4), src.add(4));
         swap_byte(dst.add(5), src.add(5));
     }
+    Ok(())
+}
 
-    // No per-packet logging here: aya-log in XDP is heavyweight (and overflowed
-    // its ringbuf record), and logging every reflected frame is undesirable at
-    // line rate. Reflection is observable via tcpdump / the XDP_TX action.
+#[xdp]
+pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
+    match try_reflect(&ctx) {
+        Ok(action) => action,
+        // A truncated/short frame just falls through to the stack.
+        Err(()) => xdp_action::XDP_PASS,
+    }
+}
+
+fn try_reflect(ctx: &XdpContext) -> Result<u32, ()> {
+    match unsafe { load_u16_be(ctx, ETH_TYPE_OFF)? } {
+        ETHERTYPE_IPV4 => try_reflect_v4(ctx),
+        ETHERTYPE_IPV6 => try_reflect_v6(ctx),
+        // Anything that isn't IP — and any non-Echo UDP, including BFD *control*
+        // on 3784 — is left for the stack.
+        _ => Ok(xdp_action::XDP_PASS),
+    }
+}
+
+fn try_reflect_v4(ctx: &XdpContext) -> Result<u32, ()> {
+    // Only option-less IPv4 (IHL=5). BFD Echo frames carry no IP options; a
+    // packet with options would shift the UDP header and is left to the stack.
+    if unsafe { load_u8(ctx, IP_VER_IHL_OFF)? } != IPV4_VER_IHL_NOOPTS {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { load_u8(ctx, IP_PROTO_OFF)? } != IPPROTO_UDP {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { load_u16_be(ctx, UDP_DST_OFF)? } != BFD_ECHO_PORT {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Our own originated Echo, looped back by the peer, is self-addressed to one
+    // of our local IPs. Don't re-reflect it (that loops forever) — feed the
+    // in-kernel detector (arm/re-arm this session's bpf_timer) and drop it. A
+    // peer's Echo (any other source) falls through to the reflect path below.
+    let src_ip = unsafe { load_u32_be(ctx, IP_SRC_OFF)? };
+    if unsafe { OUR_LOCAL_IPS.get(&src_ip) }.is_some() {
+        unsafe { record_return(ctx, PL_MAGIC_OFF, PL_DISCR_OFF)? };
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Act as a forwarding hop: decrement TTL + patch the IP checksum, so the
+    // looped Echo returns to the originator at TTL 254 (RFC 5880 §6.4 Echo is
+    // looped by the remote's forwarding plane; FRR's fp-echo receiver requires
+    // exactly TTL 254 and drops anything else).
+    unsafe { decrement_ttl(ctx)? };
+    unsafe { swap_macs(ctx)? };
+    Ok(xdp_action::XDP_TX)
+}
+
+fn try_reflect_v6(ctx: &XdpContext) -> Result<u32, ()> {
+    // Base IPv6 header only (no extension headers): Next Header must be UDP. A
+    // BFD Echo frame carries none, so a chained header is left for the stack.
+    if unsafe { load_u8(ctx, IP6_NEXTHDR_OFF)? } != IPPROTO_UDP {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    if unsafe { load_u16_be(ctx, UDP6_DST_OFF)? } != BFD_ECHO_PORT {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Our own originated Echo, looped back by the peer (self-addressed to one of
+    // our link-locals): feed the in-kernel detector and drop, don't re-reflect.
+    let src = unsafe { load_ip6(ctx, IP6_SRC_OFF)? };
+    if unsafe { OUR_LOCAL_IPS_V6.get(&src) }.is_some() {
+        unsafe { record_return(ctx, PL6_MAGIC_OFF, PL6_DISCR_OFF)? };
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Forwarding-hop loopback: decrement the Hop Limit (no header/UDP checksum
+    // fix-up needed — see decrement_hop_limit), swap MACs, bounce out.
+    unsafe { decrement_hop_limit(ctx)? };
+    unsafe { swap_macs(ctx)? };
     Ok(xdp_action::XDP_TX)
 }
 

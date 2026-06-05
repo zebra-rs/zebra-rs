@@ -205,11 +205,18 @@ struct BfdPeerDetailJson {
     negotiated_transmit_interval_us: u32,
     detection_time_us: u32,
     /// `Required Min Echo RX Interval` we advertise (0 = disabled). Non-zero
-    /// only while the XDP reflector is up on a single-hop IPv4 session.
+    /// only while the XDP reflector is up on a single-hop session.
     echo_receive_interval_us: u32,
     /// Echo transmission interval. Always 0 — zebra-rs is responder-only
     /// (it loops a peer's Echo back but does not originate Echo).
     echo_transmission_interval_us: u32,
+    /// Echo roles currently active on this session. `echo_transmit_active` is
+    /// set while we originate Echo (`transmit`/`both`, single-hop, peer
+    /// reflecting); `echo_receive_active` while we advertise a non-zero Required
+    /// Min Echo RX with a live reflector (`receive`/`both`). Drive the
+    /// per-direction view in `show bfd peers -j`.
+    echo_transmit_active: bool,
+    echo_receive_active: bool,
     remote_detect_multiplier: u8,
     remote_receive_interval_us: u32,
     remote_transmit_interval_us: u32,
@@ -249,6 +256,8 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         detection_time_us: s.detection_time_us(),
         echo_receive_interval_us: s.advertised_echo_rx_us(),
         echo_transmission_interval_us: 0,
+        echo_transmit_active: s.echo_originating,
+        echo_receive_active: s.advertised_echo_rx_us() > 0,
         remote_detect_multiplier: s.remote_detect_mult,
         remote_receive_interval_us: s.remote_min_rx_us,
         remote_transmit_interval_us: s.remote_min_tx_us,

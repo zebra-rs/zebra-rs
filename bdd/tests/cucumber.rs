@@ -914,6 +914,210 @@ async fn isis_neighbor_should_not_be_up(
     );
 }
 
+/// Whether a single-hop BFD session on `interface` in `scoped` has reached the
+/// Up state. Reads `show bfd peers -j`, a flat array of session objects
+/// carrying `{interface, local_state, peer, local, ...}`. Matching by
+/// `interface` rather than the peer address keeps the assertion stable for
+/// IPv6 link-local sessions, whose `fe80::` addresses are EUI-derived and not
+/// known to the test. Returns the flag plus the raw JSON for failure output.
+async fn bfd_session_up(scoped: &str, interface: &str) -> (bool, String) {
+    let output = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bfd peers"])
+        .await
+        .expect("Failed to run show bfd peers");
+    let peers: Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+        panic!(
+            "show bfd peers -j in {} was not valid JSON: {}\nfull output:\n{}",
+            scoped, e, output
+        )
+    });
+    let up = peers
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|p| {
+                p.get("interface").and_then(|i| i.as_str()) == Some(interface)
+                    && p.get("local_state").and_then(|s| s.as_str()) == Some("Up")
+            })
+        })
+        .unwrap_or(false);
+    (up, output)
+}
+
+/// Assert a single-hop BFD session on the given interface reaches Up. Polls for
+/// a short window so the step tolerates the session's negotiation / detection
+/// latency without the feature needing a hard-coded long wait.
+#[then(expr = "bfd session in namespace {string} on interface {string} should be up")]
+async fn bfd_session_should_be_up(world: &mut World, namespace: String, interface: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 20;
+    let mut up = false;
+    let mut output = String::new();
+    for i in 0..ATTEMPTS {
+        let (u, o) = bfd_session_up(&scoped, &interface).await;
+        up = u;
+        output = o;
+        if up {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    assert!(
+        up,
+        "no Up BFD session on {} in {}:\n{}",
+        interface, scoped, output
+    );
+    println!("✓ BFD session on {} in {} is Up", interface, scoped);
+}
+
+/// Negative sibling: assert the BFD session on the interface is NOT Up — it has
+/// either gone Down or been torn down entirely (when IS-IS unsubscribes on
+/// adjacency teardown the session disappears from `show bfd peers`). Both
+/// satisfy "not Up". Polls until the session leaves Up so the step is robust
+/// against detection timing.
+#[then(expr = "bfd session in namespace {string} on interface {string} should be down")]
+async fn bfd_session_should_be_down(world: &mut World, namespace: String, interface: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 20;
+    let mut up = true;
+    let mut output = String::new();
+    for i in 0..ATTEMPTS {
+        let (u, o) = bfd_session_up(&scoped, &interface).await;
+        up = u;
+        output = o;
+        if !up {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    assert!(
+        !up,
+        "BFD session on {} in {} is still Up (expected Down):\n{}",
+        interface, scoped, output
+    );
+    println!(
+        "✓ BFD session on {} in {} is not Up (as expected)",
+        interface, scoped
+    );
+}
+
+/// Assert the Echo role active on a BFD session, as reported by
+/// `show bfd peers -j`. `role` is one of `transmit` (we originate Echo),
+/// `receive` (we reflect a peer's Echo), `both`, or `off`. The JSON exposes
+/// per-session `echo_transmit_active` / `echo_receive_active` booleans
+/// (absent ⇒ false), so this stays red until the IPv6 Echo dataplane is wired.
+/// Polls because Echo activates only once the session is Up and the reflector
+/// child is confirmed running.
+#[then(expr = "bfd session in namespace {string} on interface {string} should have echo {word}")]
+async fn bfd_session_should_have_echo(
+    world: &mut World,
+    namespace: String,
+    interface: String,
+    role: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 20;
+    let mut ok = false;
+    let mut output = String::new();
+    for i in 0..ATTEMPTS {
+        output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bfd peers"])
+            .await
+            .expect("Failed to run show bfd peers");
+        let peers: Value = serde_json::from_str(&output).unwrap_or_else(|e| {
+            panic!(
+                "show bfd peers -j in {} was not valid JSON: {}\nfull output:\n{}",
+                scoped, e, output
+            )
+        });
+        ok = peers
+            .as_array()
+            .map(|arr| {
+                arr.iter().any(|p| {
+                    if p.get("interface").and_then(|i| i.as_str()) != Some(interface.as_str()) {
+                        return false;
+                    }
+                    let tx = p
+                        .get("echo_transmit_active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let rx = p
+                        .get("echo_receive_active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    match role.as_str() {
+                        "transmit" => tx && !rx,
+                        "receive" => rx && !tx,
+                        "both" => tx && rx,
+                        "off" => !tx && !rx,
+                        other => panic!(
+                            "invalid echo role '{}', expected transmit|receive|both|off",
+                            other
+                        ),
+                    }
+                })
+            })
+            .unwrap_or(false);
+        if ok {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    assert!(
+        ok,
+        "BFD session on {} in {} did not have echo '{}':\n{}",
+        interface, scoped, role, output
+    );
+    println!(
+        "✓ BFD session on {} in {} has echo '{}'",
+        interface, scoped, role
+    );
+}
+
+/// Drop inbound single-hop BFD control packets (UDP/3784) inside a namespace.
+/// The interface stays up and IS-IS hellos (L2 ISO PDUs, not IP/UDP) keep
+/// flowing, so the peer's BFD session times out while the adjacency would
+/// otherwise stay up — isolating BFD as the cause of the teardown (vs. carrier
+/// loss or the much slower IS-IS hold timer). RFC 5882 hold-down then keeps the
+/// adjacency down until the drop is removed. Per-netns ip6tables rules vanish
+/// when the namespace is deleted, so no explicit cleanup step is needed.
+///
+/// Fallback trigger (no new IS-IS state required) if ip6tables is unavailable:
+/// `tc qdisc add dev <peer-if> root netem loss 100%` on the peer's egress.
+#[when(expr = "I drop bfd control packets in namespace {string}")]
+async fn drop_bfd_control_packets(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(
+        &scoped,
+        "ip6tables",
+        &["-I", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
+    )
+    .await
+    .expect("Failed to install ip6tables BFD drop rule");
+    println!(
+        "✓ Dropping inbound BFD control packets (UDP/3784) in {}",
+        scoped
+    );
+}
+
+/// Remove the BFD-control drop rule installed by the step above, letting the
+/// session re-establish and IS-IS lift the hold-down.
+#[when(expr = "I restore bfd control packets in namespace {string}")]
+async fn restore_bfd_control_packets(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(
+        &scoped,
+        "ip6tables",
+        &["-D", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
+    )
+    .await
+    .expect("Failed to remove ip6tables BFD drop rule");
+    println!("✓ Restored BFD control packets (UDP/3784) in {}", scoped);
+}
+
 /// Parse the OSPF `show ip ospf neighbor` up-time string (the
 /// `format_uptime` output: "0m08s", "1h02m03s", "1d02h03m") into whole
 /// seconds. Any hours/days component is far past the thresholds this

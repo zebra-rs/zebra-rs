@@ -1671,7 +1671,9 @@ impl Isis {
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
-                nbr_hold_timer_expire(&mut link, level, sys_id);
+                // Genuine hold-timer expiry: the peer is gone, so release the
+                // BFD session too (release_bfd = true).
+                nbr_hold_timer_expire(&mut link, level, sys_id, true);
 
                 link.state.nbrs.get_mut(&level).remove(&sys_id);
             }
@@ -1893,20 +1895,28 @@ impl Isis {
         let mut actions: Vec<(crate::bfd::session::SessionKey, bool)> = Vec::new();
         for (ifindex, link) in self.links.iter() {
             let enable = link.config.bfd.resolve(&self.config.bfd).enable;
-            let Some(local) = link.state.v4addr.first().map(|p| p.addr()) else {
-                continue;
-            };
+            let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+            let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
             for level in [Level::L1, Level::L2] {
                 for nbr in link.state.nbrs.get(&level).values() {
                     if nbr.state != NfsmState::Up {
                         continue;
                     }
-                    let Some(remote) = nbr.addr4.keys().next().copied() else {
+                    // v4-preferred / v6-link-local fallback, same selection as
+                    // the NFSM subscribe path (see packet::bfd_session_key).
+                    let remote_v4 = nbr.addr4.keys().next().copied();
+                    let remote_v6ll = nbr.addr6l.first().copied();
+                    let Some((local, remote)) = super::packet::bfd_session_addrs(
+                        local_v4,
+                        remote_v4,
+                        local_v6ll,
+                        remote_v6ll,
+                    ) else {
                         continue;
                     };
                     let key = crate::bfd::session::SessionKey {
-                        local: std::net::IpAddr::V4(local),
-                        remote: std::net::IpAddr::V4(remote),
+                        local,
+                        remote,
                         ifindex: *ifindex,
                         multihop: false,
                     };
@@ -2328,16 +2338,45 @@ impl Isis {
         }
     }
 
-    /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD
-    /// instance. RFC 5882 §5: a BFD signal of session Down is
-    /// treated as a path-failure indication for the IS-IS
-    /// adjacency — we drive the same cleanup path as a hold-timer
-    /// expiry (`nbr_hold_timer_expire`), which drops the neighbor
-    /// entry, re-originates the local LSP, and kicks SPF.
+    /// Resolve the `(level, sys_id)` of the neighbour a BFD session belongs to
+    /// by matching `key.remote` against the neighbour's addresses on the
+    /// session's interface — `addr4` for an IPv4 session, the link-local
+    /// `addr6l` (or global `addr6`) for an IPv6 session. `require_up` restricts
+    /// the match to Up adjacencies (the Down path only tears an Up neighbour);
+    /// the Up path passes `false` because a held neighbour sits at Init.
+    fn bfd_resolve_neighbor(
+        &self,
+        key: &crate::bfd::session::SessionKey,
+        require_up: bool,
+    ) -> Option<(Level, IsisSysId)> {
+        let link = self.links.get(&key.ifindex)?;
+        for level in [Level::L1, Level::L2] {
+            let found = link.state.nbrs.get(&level).iter().find(|(_, nbr)| {
+                if require_up && nbr.state != NfsmState::Up {
+                    return false;
+                }
+                match key.remote {
+                    std::net::IpAddr::V4(r) => nbr.addr4.contains_key(&r),
+                    std::net::IpAddr::V6(r) => {
+                        nbr.addr6l.contains(&r) || nbr.addr6.contains_key(&r)
+                    }
+                }
+            });
+            if let Some((sys_id, _)) = found {
+                return Some((level, *sys_id));
+            }
+        }
+        None
+    }
+
+    /// Handle a [`crate::bfd::inst::BfdEvent`] forwarded by the BFD instance.
+    /// RFC 5882: a session going **Down** is a path-failure for the IS-IS
+    /// adjacency — tear it down and pin it in hold-down ([`Self::process_bfd_down`]);
+    /// a session coming **Up** lifts that pin ([`Self::process_bfd_up`]).
     ///
-    /// Synthetic Down→Down events (emitted by `Bfd::subscribe` so a
-    /// new subscriber can act on the current state immediately) are
-    /// ignored — they carry no real transition.
+    /// Synthetic Down→Down events (emitted by `Bfd::subscribe` so a new
+    /// subscriber can act on the current state immediately) carry no real
+    /// transition and are ignored.
     pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
         let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
         tracing::info!(
@@ -2351,48 +2390,67 @@ impl Isis {
         if change.from == change.to {
             return;
         }
-        if change.to != bfd_packet::State::Down {
-            return;
+        match change.to {
+            bfd_packet::State::Down => self.process_bfd_down(&key, &change),
+            bfd_packet::State::Up => self.process_bfd_up(&key),
+            // Init / AdminDown are not actionable for the adjacency.
+            _ => {}
         }
+    }
 
-        // SessionKey carries (local, remote, ifindex). Find the matching
-        // (level, sys_id) by scanning the link's neighbor table on both
-        // levels for an entry whose `addr4` contains `remote`.
-        let std::net::IpAddr::V4(remote_v4) = key.remote else {
-            // IPv6 sessions arrive in a later PR.
-            return;
-        };
-        let ifindex = key.ifindex;
-
-        let target = self.links.get(&ifindex).and_then(|link| {
-            for level in [Level::L1, Level::L2] {
-                if let Some((sys_id, _)) = link.state.nbrs.get(&level).iter().find(|(_, nbr)| {
-                    nbr.state == NfsmState::Up && nbr.addr4.contains_key(&remote_v4)
-                }) {
-                    return Some((level, *sys_id));
-                }
-            }
-            None
-        });
-
-        let Some((level, sys_id)) = target else {
+    /// BFD session went Down: tear the adjacency (RFC 5882 §5) and pin it in
+    /// hold-down so subsequent IIHs cannot re-promote it. The BFD session is
+    /// kept subscribed (`release_bfd = false`) so it keeps probing and can
+    /// detect the peer returning, at which point [`Self::process_bfd_up`]
+    /// lifts the pin.
+    fn process_bfd_down(
+        &mut self,
+        key: &crate::bfd::session::SessionKey,
+        change: &crate::bfd::session::StateChange,
+    ) {
+        let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, true) else {
             tracing::debug!(
                 ?key,
                 "isis: bfd-down for unknown / non-Up neighbor; ignoring"
             );
             return;
         };
+        let ifindex = key.ifindex;
         let Some(mut link) = self.link_top(ifindex) else {
             return;
         };
         tracing::warn!(
-            peer = %remote_v4,
+            peer = %key.remote,
             ifindex,
             ?level,
             diag = %change.diag,
             "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
         );
-        nbr_hold_timer_expire(&mut link, level, sys_id);
+        // Tear the adjacency but keep the BFD session probing. This clears any
+        // prior hold-down pin, so set the pin afterwards.
+        nbr_hold_timer_expire(&mut link, level, sys_id, false);
+        link.state.bfd_holddown.get_mut(&level).insert(sys_id);
+    }
+
+    /// BFD session came Up: lift any hold-down pin for the neighbour so the
+    /// next received IIH promotes its adjacency back to Up. A no-op when the
+    /// neighbour was not held (e.g. the normal first-Up after adjacency form).
+    fn process_bfd_up(&mut self, key: &crate::bfd::session::SessionKey) {
+        let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, false) else {
+            return;
+        };
+        let Some(link) = self.links.get_mut(&key.ifindex) else {
+            return;
+        };
+        if link.state.bfd_holddown.get_mut(&level).remove(&sys_id) {
+            tracing::info!(
+                peer = %key.remote,
+                ifindex = key.ifindex,
+                ?level,
+                "isis: bfd recovered; lifting adjacency hold-down",
+            );
+            // The next received IIH re-promotes the held (Init) neighbour.
+        }
     }
     pub fn top(&mut self) -> IsisTop<'_> {
         IsisTop {
@@ -3064,6 +3122,46 @@ mod bfd_wiring_tests {
             Ipv4Addr::new(10, 99, 99, 99),
             State::Up,
             State::Down,
+        ));
+    }
+
+    fn make_event_v6(remote: std::net::Ipv6Addr, from: State, to: State) -> BfdEvent {
+        BfdEvent::StateChange {
+            key: SessionKey {
+                local: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                remote: IpAddr::V6(remote),
+                ifindex: 0,
+                multihop: false,
+            },
+            change: StateChange {
+                from,
+                to,
+                diag: Diag::None,
+            },
+        }
+    }
+
+    /// An IPv6 BFD Down for an unknown peer exercises the v6 match arm of
+    /// `bfd_resolve_neighbor` (addr6l / addr6) and is a clean no-op when no
+    /// link / nbr matches — the IPv6 analogue of the IPv4 case above.
+    #[tokio::test]
+    async fn bfd_down_for_unknown_v6_peer_is_noop() {
+        let (mut isis, _bfd_rx) = fresh_isis_with_bfd();
+        isis.process_bfd_event(make_event_v6(
+            "fe80::1".parse().unwrap(),
+            State::Up,
+            State::Down,
+        ));
+    }
+
+    /// An IPv6 BFD Up with no held neighbour lifts nothing and must not panic.
+    #[tokio::test]
+    async fn bfd_up_for_unknown_v6_peer_is_noop() {
+        let (mut isis, _bfd_rx) = fresh_isis_with_bfd();
+        isis.process_bfd_event(make_event_v6(
+            "fe80::2".parse().unwrap(),
+            State::Init,
+            State::Up,
         ));
     }
 }

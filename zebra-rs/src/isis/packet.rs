@@ -20,14 +20,56 @@ use crate::isis::{IfsmEvent, Message, NfsmState};
 use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
 
+/// Pick the single-hop BFD endpoint addresses for an adjacency. Prefer a
+/// shared IPv4 pair (interface address + neighbour address); fall back to
+/// IPv6 link-local (interface link-local + neighbour link-local) for an
+/// IPv6-only adjacency — matching how IS-IS forms the adjacency and how
+/// single-hop BFD/NDP address the wire. Returns `(local, remote)`, or `None`
+/// when neither family has a usable pair.
+pub(super) fn bfd_session_addrs(
+    local_v4: Option<Ipv4Addr>,
+    remote_v4: Option<Ipv4Addr>,
+    local_v6ll: Option<Ipv6Addr>,
+    remote_v6ll: Option<Ipv6Addr>,
+) -> Option<(IpAddr, IpAddr)> {
+    if let (Some(l), Some(r)) = (local_v4, remote_v4) {
+        return Some((IpAddr::V4(l), IpAddr::V4(r)));
+    }
+    if let (Some(l), Some(r)) = (local_v6ll, remote_v6ll) {
+        return Some((IpAddr::V6(l), IpAddr::V6(r)));
+    }
+    None
+}
+
+/// Build the single-hop BFD `SessionKey` for an adjacency from a snapshot of
+/// the neighbour's addresses (`peer_v4` / `peer_v6ll`, taken before the `nbr`
+/// borrow is released) and the interface's own addresses. `None` when no
+/// usable address pair exists for either family.
+pub(super) fn bfd_session_key(
+    link: &super::link::LinkTop<'_>,
+    peer_v4: Option<Ipv4Addr>,
+    peer_v6ll: Option<Ipv6Addr>,
+) -> Option<SessionKey> {
+    let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+    let local_v6ll = link.state.v6laddr.first().map(|p| p.addr());
+    let (local, remote) = bfd_session_addrs(local_v4, peer_v4, local_v6ll, peer_v6ll)?;
+    Some(SessionKey {
+        local,
+        remote,
+        ifindex: link.ifindex,
+        multihop: false,
+    })
+}
+
 /// Dispatch a BFD `Subscribe` or `Unsubscribe` based on an NFSM
 /// transition, called once per Hello *after* the mutable `nbr`
-/// borrow has been released. `peer_v4` is the snapshot taken before
-/// the nbr-mutating block so we don't need to reach back into
+/// borrow has been released. `peer_v4` / `peer_v6ll` are snapshots taken
+/// before the nbr-mutating block so we don't need to reach back into
 /// `link.state.nbrs` while `link.state.v4addr` is also borrowed.
 fn bfd_nfsm_dispatch(
     link: &super::link::LinkTop<'_>,
     peer_v4: Option<Ipv4Addr>,
+    peer_v6ll: Option<Ipv6Addr>,
     was_up: bool,
     state: NfsmState,
 ) {
@@ -36,14 +78,8 @@ fn bfd_nfsm_dispatch(
     if !link.config.bfd.resolve(&link.up_config.bfd).enable {
         return;
     }
-    let (Some(remote), Some(local)) = (peer_v4, link.state.v4addr.first().map(|p| p.addr())) else {
+    let Some(key) = bfd_session_key(link, peer_v4, peer_v6ll) else {
         return;
-    };
-    let key = SessionKey {
-        local: IpAddr::V4(local),
-        remote: IpAddr::V4(remote),
-        ifindex: link.ifindex,
-        multihop: false,
     };
     let is_up = state == NfsmState::Up;
     if !was_up && is_up {
@@ -287,6 +323,13 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         return;
     }
 
+    // RFC 5882 §3.2 BFD hold-down: while this neighbour's attached BFD
+    // session is Down we keep its adjacency from (re-)reaching Up even though
+    // IIHs keep arriving. Snapshot the flag before borrowing `nbr` from
+    // `link.state.nbrs` (that borrow lasts until the post-FSM dispatch below).
+    let held = link.config.bfd.resolve(&link.up_config.bfd).enable
+        && link.state.bfd_holddown.get(&level).contains(&pdu.source_id);
+
     // Find neighbor by system id or create a new one.
     let nbr = link
         .state
@@ -396,6 +439,9 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // scope and we can no longer reach back into `link.state.nbrs`
     // while link.state.v4addr is also borrowed.
     let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
+    // IPv6-only adjacency: the single-hop BFD session is keyed on the
+    // neighbour's link-local (learned via TLV 232) and our own link-local.
+    let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
 
     if state == NfsmState::Down {
         // 8.4.2.5.1
@@ -414,8 +460,10 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // 8.4.2.5.1
         // When R reports the local system’s SNPA address in its Level n LAN IIH PDUs, the IS shall
         // d) set the adjacency’s adjacencyState to “Up”, and
-        // e) generate an adjacencyStateChange (Up)” event.
-        if has_mac {
+        // e) generate an adjacencyStateChange (Up)” event. The `!held` guard
+        // implements RFC 5882 §3.2: a neighbour whose BFD session is Down is
+        // pinned at Init until BFD recovers, even while IIHs keep arriving.
+        if has_mac && !held {
             state = NfsmState::Up;
             if link.tracing.should_trace_fsm() {
                 tracing::info!("[NBR] {} Init -> Up", nbr.sys_id);
@@ -470,6 +518,12 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         // tracing::info!("NFSM {} => {}", nbr.state, state);
     }
 
+    // Defensive: a held neighbour must never sit at Up (the promotion guard
+    // above already prevents Init→Up; this also covers a stale Up snapshot).
+    if held && state == NfsmState::Up {
+        state = NfsmState::Init;
+    }
+
     nbr.state = state;
 
     // Up→{Init,Down} regressed by the peer (TLV 6 no longer reports
@@ -486,7 +540,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
     // we can read link.state.v4addr / link.config.bfd freely.
-    bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
+    bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
 
     // CSNP + SRM kick on first RR. Deferred to here so we can take
     // `&mut link` after the `nbr` borrow has expired.
@@ -547,6 +601,11 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             continue;
         }
 
+        // RFC 5882 §3.2 BFD hold-down — see the LAN handler. Snapshot the flag
+        // (per level) before borrowing `nbr` from `link.state.nbrs`.
+        let held = link.config.bfd.resolve(&link.up_config.bfd).enable
+            && link.state.bfd_holddown.get(&level).contains(&pdu.source_id);
+
         // Create or update neighbor for this level
         let nbr = link
             .state
@@ -605,6 +664,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         let was_up = state == NfsmState::Up;
         // Snapshot before any mut-nbr work; see LAN handler comment.
         let bfd_peer_v4: Option<Ipv4Addr> = nbr.addr4.keys().next().copied();
+        let bfd_peer_v6ll: Option<Ipv6Addr> = nbr.addr6l.first().copied();
 
         // When it is three way handshake.
         if state == NfsmState::Down {
@@ -612,8 +672,9 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         }
 
-        // Fall down from previous.
-        if state == NfsmState::Init && has_my_sys_id {
+        // Fall down from previous. The `!held` guard pins a BFD-down
+        // neighbour at Init (RFC 5882 §3.2) until BFD recovers.
+        if state == NfsmState::Init && has_my_sys_id && !held {
             state = NfsmState::Up;
 
             // Set adjacency.
@@ -657,6 +718,11 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             // tracing::info!("NFSM {}:{} => {}", nbr.sys_id, nbr.state, state);
         }
 
+        // Defensive: a held neighbour must never sit at Up (see LAN handler).
+        if held && state == NfsmState::Up {
+            state = NfsmState::Init;
+        }
+
         nbr.state = state;
 
         // Same fast-converge as the LAN soft-down path: re-originate
@@ -670,7 +736,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // the LAN handler — defer until after the `nbr` mutable
         // borrow is gone so we can read link.state / link.config
         // freely.
-        bfd_nfsm_dispatch(link, bfd_peer_v4, was_up, state);
+        bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
 
         // CSNP+SRM kick on first RR. P2P always wins the
         // helper_elected_for_csnp predicate, so this fires every

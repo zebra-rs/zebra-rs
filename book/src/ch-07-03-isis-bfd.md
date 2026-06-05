@@ -32,7 +32,7 @@ interface, overridden per interface (see
 | Leaf | Type | Default | Meaning |
 |---|---|---|---|
 | `enable` | boolean | _(off)_ | Attach (or detach) BFD for adjacencies on this interface. |
-| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 adjacencies. |
+| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop adjacencies (IPv4 or IPv6). |
 | `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
 | `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
 
@@ -46,11 +46,12 @@ unsubscribed when it goes down.
 ## Echo
 
 `echo-mode` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function) for
-this interface's adjacencies — single-hop **IPv4 only** (IS-IS is an L2 protocol;
-the Echo session is built from the interface's and neighbour's IPv4 addresses,
-so an IPv6-only adjacency is inert). `transmit` originates Echo + detects on the
-return; `receive` advertises + reflects (the peer detects); `both` does both —
-backed by the per-interface `xdp-bfd-echo` helper.
+this interface's adjacencies — single-hop only. Both IPv4 and IPv6 are
+supported: the Echo session is built from the interface's and neighbour's
+addresses (an IPv6-only adjacency uses the two ends' link-locals). `transmit`
+originates Echo + detects on the return; `receive` advertises + reflects (the
+peer detects); `both` does both — backed by the per-interface `xdp-bfd-echo`
+helper, whose XDP reflector handles 0x0800 and 0x86DD frames alike.
 
 ```
 router isis {

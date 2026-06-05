@@ -226,8 +226,12 @@ Beyond reflecting, the helper also *originates* Echo when zebra-rs asks it to
 
 ## Limitations / follow-ups
 
-- **IPv4 only** (EtherType 0x0800). IPv6 (0x86DD) is a follow-up.
-- Option-less IPv4 only (IHL=5); BFD Echo frames carry no IP options.
+- IPv4 (EtherType 0x0800) and IPv6 (0x86DD) are both reflected/originated. The
+  IPv6 path needs no checksum fix-up on reflect (no header checksum, and the
+  self-addressed Echo's symmetric src/dst leave the UDP checksum valid); it
+  decrements the Hop Limit just as the IPv4 path decrements the TTL.
+- Option-less IPv4 only (IHL=5) and base IPv6 headers only (no extension
+  headers); BFD Echo frames carry neither.
 - `bpf_timer` detection needs a kernel that supports it (≥ 5.15) and `CAP_BPF`;
   the responder path has no such requirement.
 - aya deps are pulled from git to match the current build glue; pin a rev for
