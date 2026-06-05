@@ -324,7 +324,7 @@ impl FibHandle {
             .socket_mut()
             .add_membership(RTNLGRP_NEXTHOP)
         {
-            Ok(()) => tracing::info!("fib: joined RTNLGRP_NEXTHOP for nexthop reconciliation"),
+            Ok(()) => tracing::debug!("fib: joined RTNLGRP_NEXTHOP for nexthop reconciliation"),
             Err(e) => tracing::warn!(
                 "fib: could not join RTNLGRP_NEXTHOP ({e}); nexthop reconciliation disabled"
             ),
