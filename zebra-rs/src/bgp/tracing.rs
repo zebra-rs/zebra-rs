@@ -35,17 +35,6 @@ macro_rules! bgp_debug {
     };
 }
 
-/// Log a debug-level message with category filtering
-/// Usage: bgp_debug_cat!(bgp_instance, category = "update", "message", args...)
-#[macro_export]
-macro_rules! bgp_debug_cat {
-    ($bgp:expr, category = $cat:expr, $($arg:tt)*) => {
-        if $bgp.debug_flags.is_enabled($cat) {
-            tracing::debug!(proto = "bgp", category = $cat, $($arg)*)
-        }
-    };
-}
-
 /// Log a trace-level message with proto="bgp" field
 #[macro_export]
 macro_rules! bgp_trace {

@@ -2,7 +2,6 @@ use super::BgpAttrStore;
 use super::peer::{BgpTop, Event, PeerBfdConfig, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
-use crate::bgp::debug::BgpDebugFlags;
 use crate::bgp::peer::accept;
 use crate::bgp::{InOut, peer};
 use crate::config::{
@@ -509,8 +508,6 @@ pub struct Bgp {
     /// does not yet share work across members. See
     /// `docs/design/bgp-update-groups.md`.
     pub update_groups: super::update_group::UpdateGroupMap,
-    /// Debug configuration flags
-    pub debug_flags: BgpDebugFlags,
     pub policy_tx: UnboundedSender<policy::Message>,
     pub policy_rx: UnboundedReceiver<policy::PolicyRx>,
     /// Handle into the BFD instance's client-request channel — used
@@ -661,7 +658,6 @@ impl Bgp {
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             update_groups: super::update_group::empty_map(),
-            debug_flags: BgpDebugFlags::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
             bfd_client_tx,

@@ -1,0 +1,240 @@
+module zebra-bgp-tracing {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-tracing";
+  prefix "zbtr";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Conditional BGP tracing, attachable at two scopes that share one
+     set of options:
+
+       * `router bgp tracing { ... }` — instance-wide, applies to
+         every peer.
+       * `router bgp neighbor <addr> tracing { ... }` — per-neighbor
+         override, scoped to a single session.
+
+     This mirrors the IS-IS / OSPF `tracing` model (a typed config
+     block consulted by gated log macros, so categories can be turned
+     on at runtime without a rebuild) but with the BGP-specific
+     category set: the per-peer FSM, the five BGP message types,
+     MPLS label operations, and the inbound / outbound Adj-RIB.
+
+     Example:
+
+       router bgp {
+         tracing {
+           fsm;
+           packet {
+             open;                       // both directions, summary
+             notification { detail; }    // both directions, decoded
+           }
+         }
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           tracing {
+             packet {
+               update { direction receive; }   // received UPDATEs only
+             }
+             adj-in;
+           }
+         }
+       }
+
+     Each leaf is a presence flag — name it to enable, delete it to
+     disable; absence means the category is silent. Enabling by
+     presence (rather than a `true` value) matches how IS-IS / OSPF
+     `tracing` turn a category on by listing it: the config callbacks
+     key off set vs delete and never read a value, so `type empty` is
+     the honest type here.";
+
+  revision 2026-06-05 {
+    description
+      "Initial revision — shared instance + per-neighbor tracing
+       block (fsm, packet {open,update,keepalive,notification,
+       route-refresh}, label, adj-in, adj-out, plus an `all`
+       master switch). Each packet message-type is a presence
+       container carrying optional `detail` and `direction`
+       (send|receive; omit for both).";
+  }
+
+  grouping bgp-tracing-packet-options {
+    description
+      "Optional refinements shared by every per-message-type tracing
+       toggle. The enclosing container's presence is what enables
+       tracing for that message type; these children only narrow it.";
+
+    leaf detail {
+      ext:help "Decode the full message body, not just a one-line summary";
+      type empty;
+      description
+        "When present, log the fully decoded message (all attributes /
+         NLRI / capabilities) instead of a one-line summary.";
+    }
+    leaf direction {
+      ext:help "Restrict tracing to a single direction";
+      type enumeration {
+        enum send {
+          description "Trace only transmitted messages.";
+        }
+        enum receive {
+          description "Trace only received messages.";
+        }
+      }
+      description
+        "Limit tracing to one direction. Omit to trace both send and
+         receive — there is no explicit `both` value; absence means
+         both.";
+    }
+  }
+
+  grouping bgp-tracing-extension {
+    description
+      "The `tracing` block shared by the BGP instance and each BGP
+       neighbor. `uses` at both augment points so the two scopes stay
+       identical by construction.";
+
+    container tracing {
+      ext:help "BGP conditional tracing";
+      description
+        "Per-category BGP log toggles. When applied under a neighbor,
+         the block scopes tracing to that session; under the instance
+         it applies to every peer.";
+
+      leaf all {
+        ext:help "Enable every tracing category";
+        type empty;
+        description
+          "Master switch — when present, every category below is traced
+           regardless of its individual leaf.";
+      }
+
+      leaf fsm {
+        ext:help "Trace BGP finite-state-machine transitions";
+        type empty;
+        description
+          "Log peer FSM state changes (Idle/Connect/Active/OpenSent/
+           OpenConfirm/Established) and the events that drive them.";
+      }
+
+      container packet {
+        ext:help "Trace BGP protocol messages";
+        description
+          "Per-message-type tracing. Each message type is a presence
+           container: naming it (e.g. `tracing packet open`) enables
+           tracing for that type in both directions at summary level,
+           and the `detail` / `direction` children refine it. `all`
+           covers every message type at once.";
+
+        container all {
+          ext:help "Trace all BGP message types";
+          presence "Trace every BGP message type";
+          uses bgp-tracing-packet-options;
+        }
+        container open {
+          ext:help "Trace OPEN messages";
+          presence "Trace OPEN messages";
+          uses bgp-tracing-packet-options;
+        }
+        container update {
+          ext:help "Trace UPDATE messages";
+          presence "Trace UPDATE messages";
+          uses bgp-tracing-packet-options;
+        }
+        container keepalive {
+          ext:help "Trace KEEPALIVE messages";
+          presence "Trace KEEPALIVE messages";
+          uses bgp-tracing-packet-options;
+        }
+        container notification {
+          ext:help "Trace NOTIFICATION messages";
+          presence "Trace NOTIFICATION messages";
+          uses bgp-tracing-packet-options;
+        }
+        container route-refresh {
+          ext:help "Trace ROUTE-REFRESH messages";
+          presence "Trace ROUTE-REFRESH messages";
+          uses bgp-tracing-packet-options;
+        }
+      }
+
+      leaf label {
+        ext:help "Trace MPLS label allocation / binding";
+        type empty;
+        description
+          "Log label operations for labeled-unicast / L3VPN routes
+           learned from or advertised to this scope.";
+      }
+
+      leaf adj-in {
+        ext:help "Trace Adj-RIB-In route processing";
+        type empty;
+        description
+          "Log routes entering the inbound Adj-RIB (pre-policy
+           received NLRI and their post-policy disposition).";
+      }
+
+      leaf adj-out {
+        ext:help "Trace Adj-RIB-Out route processing";
+        type empty;
+        description
+          "Log routes leaving via the outbound Adj-RIB (what is
+           advertised to the scope after export policy).";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Instance-wide `router bgp tracing` in the candidate-set subtree.";
+    uses bgp-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp tracing ...` is path-valid.";
+    uses bgp-tracing-extension;
+  }
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Per-neighbor `router bgp neighbor <addr> tracing` in the
+       candidate-set subtree.";
+    uses bgp-tracing-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor <addr> tracing ...` is path-valid.";
+    uses bgp-tracing-extension;
+  }
+}
