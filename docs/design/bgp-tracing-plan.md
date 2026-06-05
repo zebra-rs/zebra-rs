@@ -22,12 +22,15 @@ Reference implementations to mirror:
 - `zebra-rs/src/ospf/tracing.rs` — second instance of the same pattern,
   confirming it is the house style.
 
-## Status (2026-06-05)
+## Status (2026-06-06)
 
-**Not started — analysis only.** No BGP code changed by this plan yet.
-The only committed change on the `feature/bgp-tracing-consistency`
-branch so far is an unrelated FIB log-level downgrade
-(`fib/netlink/handle.rs`: `RTNLGRP_NEXTHOP` join `info!`→`debug!`).
+**Largely implemented.** The core landed in PR #1199 (with per-neighbour
+scope, which this plan listed as deferred), and the category taxonomy was
+extended in #1202 (`label`) and #1205 (`vpn`/`srv6`/`vrf`/`bfd`). The
+remaining work — the `proto="bgp"` warn/error sweep (Phase 4 below),
+per-VRF task propagation, and optional `auth`/`evpn` categories — is
+tracked in [`bgp-tracing-followups.md`](bgp-tracing-followups.md). The
+sections below are the original design, kept for rationale.
 
 ## The reference pattern (IS-IS / OSPF)
 
