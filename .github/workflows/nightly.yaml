@@ -3,8 +3,8 @@ name: Nightly Rolling Build
 on:
   # push:
   #  branches: [main]
-  # schedule:
-  #  - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
+  schedule:
+    - cron: '0 18 * * *'    # 03:00 JST (UTC 18:00)
   workflow_dispatch:
 
 permissions:
