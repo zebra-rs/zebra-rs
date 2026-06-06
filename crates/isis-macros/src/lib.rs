@@ -13,7 +13,7 @@ use syn::{ItemFn, Token, parse_macro_input};
 /// #[isis_pdu_handler(Hello, Recv)]
 /// pub fn hello_p2p_recv(top: &mut IsisTop, packet: IsisPacket, ifindex: u32, mac: Option<MacAddr>) {
 ///     // _ISIS_PKT_TYPE and _ISIS_PKT_DIR are now available
-///     isis_pkt_trace!(top.tracing, &level, "[P2P Hello] recv on link {}", link.state.name);
+///     isis_pkt_trace!(top.tracing, &level, "[Hello P2P] recv on link {}", link.state.name);
 /// }
 /// ```
 #[proc_macro_attribute]
