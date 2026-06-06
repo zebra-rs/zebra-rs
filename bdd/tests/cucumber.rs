@@ -85,10 +85,14 @@ async fn clean_test_environment(world: &mut World) {
         }
     }
 
-    // 2. Sweep stale namespaces from a crashed prior run of THIS
-    // feature. Deleting a netns auto-destroys its in-namespace
-    // interfaces (including the ns end of any veth pair, which by
-    // veth semantics also destroys the host end).
+    // 2. Sweep stale namespaces from a crashed prior run of THIS feature.
+    // Note: `ip netns del` returns in-namespace interfaces to the host
+    // namespace rather than destroying them, so host-side veths may linger.
+    // The normal-path cleanup in `delete_namespace` deletes the host veth
+    // explicitly (which also destroys the ns-side peer); for a crash-recovery
+    // sweep we accept that orphaned veths may remain — they do not block the
+    // namespace creation path since the namespace itself is gone and the
+    // per-scenario setup creates veths with unique names per-run.
     if let Ok(stale) = netns::list_netns_with_prefix(&ns_prefix).await {
         for ns in stale {
             let _ = netns::delete_netns(&ns).await;
@@ -431,10 +435,19 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
 #[when(expr = "I delete namespace {string}")]
 async fn delete_namespace(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
+    let host_veth = world.host_veth(&namespace);
     if keep_topology() {
         println!("⏭  BDD_KEEP set — leaving namespace {} up", scoped);
         return;
     }
+    // Delete the host-side veth before deleting the namespace. Deleting one
+    // end of a veth pair removes both ends regardless of which netns each
+    // lives in, so this also destroys the ns-side peer. Without this, the
+    // ns-side veth is returned to the host namespace by `ip netns del` and
+    // both halves linger, causing "File exists" when the next scenario tries
+    // to create a veth with the same host name. No-op for P2P topologies
+    // (no host-side veth with this name exists there).
+    let _ = netns::delete_veth(&host_veth).await;
     netns::delete_netns(&scoped)
         .await
         .expect("Failed to delete namespace");
