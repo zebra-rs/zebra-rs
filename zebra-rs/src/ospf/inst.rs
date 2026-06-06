@@ -136,6 +136,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// two areas no longer clobber each other, and Type-3 origination
     /// reads these per-area slices to decide what to re-advertise.
     pub rib_areas: BTreeMap<Ipv4Addr, PrefixMap<Ipv4Net, SpfRoute>>,
+    /// Per-area SPF results, keyed by area-id. Mirrors `rib_areas`
+    /// but stores the raw vertex-id → Path map so Type-4 Summary-ASBR
+    /// origination can look up the exact SPF cost to any vertex in any
+    /// area without being limited to the last-computed area snapshot
+    /// stored in `spf_result`.
+    pub spf_results: BTreeMap<Ipv4Addr, BTreeMap<usize, crate::spf::calc::Path>>,
     /// MPLS LFIB shadow. Keyed by absolute incoming label, value
     /// carries the swap/pop action + the nexthops where the kernel
     /// should forward labeled traffic. Diffed against the freshly
@@ -953,6 +959,7 @@ impl Ospf<Ospfv2> {
             rib6_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             rib_areas: BTreeMap::new(),
+            spf_results: BTreeMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
             local_pool: None,
@@ -1571,6 +1578,185 @@ impl Ospf<Ospfv2> {
             area.lsdb.flush_lsa(
                 OspfLsType::Summary,
                 ls_id,
+                self.router_id,
+                &self.tx,
+                Some(area_id),
+            )
+        } else {
+            None
+        };
+        if let Some(lsa) = flushed {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// (Re)originate / flush Type-4 Summary-ASBR LSAs for all ASBRs
+    /// known to this ABR (RFC 2328 §12.4.3). Called from
+    /// `apply_spf_result` alongside `abr_summary_originate`.
+    pub fn abr_summary_asbr_originate(&mut self) {
+        if self.in_restart() {
+            return;
+        }
+
+        let attached: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, a)| !a.links.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+
+        if attached.len() < 2 {
+            let all: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+            for area_id in all {
+                self.abr_summary_asbr_sync_area(area_id, &BTreeMap::new());
+            }
+            return;
+        }
+
+        for &area_a in &attached {
+            let desired = self.abr_summary_asbr_desired(area_a, &attached);
+            self.abr_summary_asbr_sync_area(area_a, &desired);
+        }
+    }
+
+    /// Compute the `asbr_router_id → metric` map of Type-4 LSAs to
+    /// advertise into `area_a`. Walks all other attached areas and
+    /// checks each router vertex for the E-bit (ASBR flag) in its
+    /// Router-LSA. The ABR's SPF cost to that vertex (from the
+    /// per-area SPF result) becomes the Type-4 metric.
+    fn abr_summary_asbr_desired(
+        &self,
+        area_a: Ipv4Addr,
+        attached: &[Ipv4Addr],
+    ) -> BTreeMap<Ipv4Addr, u32> {
+        const E_BIT: u16 = 0x0002;
+        const LS_INFINITY: u32 = 0x00FF_FFFF;
+
+        let mut desired: BTreeMap<Ipv4Addr, u32> = BTreeMap::new();
+
+        for &area_b in attached {
+            if area_b == area_a {
+                continue;
+            }
+            let Some(spf_b) = self.spf_results.get(&area_b) else {
+                continue;
+            };
+            let Some(area_b_ref) = self.areas.get(area_b) else {
+                continue;
+            };
+            // Walk all Router-LSAs in area B; if E-bit set → ASBR.
+            for ((_ls_id, _adv), lsa) in area_b_ref.lsdb.iter_by_type(OspfLsType::Router) {
+                let OspfLsp::Router(ref body) = lsa.data.lsp else {
+                    continue;
+                };
+                if (body.flags & E_BIT) == 0 {
+                    continue;
+                }
+                let asbr_id = lsa.data.h.adv_router;
+                if asbr_id == self.router_id {
+                    continue;
+                }
+                let Some(vertex) = self.lsp_map.lookup(asbr_id) else {
+                    continue;
+                };
+                let Some(path) = spf_b.get(&vertex) else {
+                    continue;
+                };
+                let metric = path.cost.min(LS_INFINITY - 1);
+                desired
+                    .entry(asbr_id)
+                    .and_modify(|m| *m = (*m).min(metric))
+                    .or_insert(metric);
+            }
+        }
+        desired
+    }
+
+    /// Reconcile self-originated Type-4 LSAs in `area_id` against `desired`.
+    fn abr_summary_asbr_sync_area(&mut self, area_id: Ipv4Addr, desired: &BTreeMap<Ipv4Addr, u32>) {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+        let current: Vec<(Ipv4Addr, u32)> = {
+            let Some(area) = self.areas.get(area_id) else {
+                return;
+            };
+            area.lsdb
+                .iter_by_type(OspfLsType::SummaryAsbr)
+                .filter(|(_, lsa)| lsa.data.h.adv_router == self.router_id)
+                .filter(|(_, lsa)| lsa.data.h.ls_age < OSPF_MAX_AGE)
+                .filter_map(|((ls_id, _), lsa)| {
+                    let OspfLsp::Summary(ref s) = lsa.data.lsp else {
+                        return None;
+                    };
+                    Some((ls_id, s.metric))
+                })
+                .collect()
+        };
+
+        for (asbr_id, _) in &current {
+            if !desired.contains_key(asbr_id) {
+                self.summary_asbr_lsa_flush(area_id, *asbr_id);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.asbr_summaries_originated.remove(asbr_id);
+                }
+            }
+        }
+
+        for (asbr_id, metric) in desired {
+            let unchanged = current.iter().any(|(id, m)| id == asbr_id && m == metric);
+            if !unchanged {
+                self.summary_asbr_lsa_originate(area_id, *asbr_id, *metric);
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.asbr_summaries_originated.insert(*asbr_id);
+                }
+            }
+        }
+    }
+
+    /// Originate (or refresh) one Type-4 Summary-ASBR LSA for `asbr_id`
+    /// into `area_id`. Uses the same SummaryLsa body as Type-3 but with
+    /// `ls_type = SummaryAsbr`, `netmask = 0.0.0.0`, and
+    /// `ls_id = asbr_id` (RFC 2328 §12.4.3).
+    fn summary_asbr_lsa_originate(&mut self, area_id: Ipv4Addr, asbr_id: Ipv4Addr, metric: u32) {
+        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+            let current_seq = area
+                .lsdb
+                .lookup_by_id(OspfLsType::SummaryAsbr, asbr_id, self.router_id)
+                .map(|lsa| lsa.h.ls_seq_number);
+
+            let lsah = OspfLsaHeader::new(OspfLsType::SummaryAsbr, asbr_id, self.router_id);
+            let mut lsa = OspfLsa::from(
+                lsah,
+                OspfLsp::Summary(SummaryLsa {
+                    netmask: Ipv4Addr::UNSPECIFIED,
+                    tos: 0,
+                    metric: metric & 0x00FF_FFFF,
+                    tos_routes: vec![],
+                }),
+            );
+            if let Some(seq) = current_seq {
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
+            }
+            lsa.update();
+            let flood_lsa = lsa.clone();
+            area.lsdb
+                .insert_self_originated(lsa, &self.tx, Some(area_id));
+            Some(flood_lsa)
+        } else {
+            None
+        };
+        if let Some(lsa) = flood_lsa {
+            self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// Flush one self-originated Type-4 Summary-ASBR LSA for `asbr_id`
+    /// from `area_id`.
+    fn summary_asbr_lsa_flush(&mut self, area_id: Ipv4Addr, asbr_id: Ipv4Addr) {
+        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.flush_lsa(
+                OspfLsType::SummaryAsbr,
+                asbr_id,
                 self.router_id,
                 &self.tx,
                 Some(area_id),
@@ -4688,6 +4874,7 @@ impl Ospf<Ospfv3> {
             rib6_flex_algo: BTreeMap::new(),
             rib: PrefixMap::new(),
             rib_areas: BTreeMap::new(),
+            spf_results: BTreeMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
             local_pool: None,
@@ -8550,10 +8737,9 @@ fn build_rib_from_spf(
     add_inter_area_routes(top, area_id, spf_result, &mut rib);
 
     // AS-external: walk Type 5 LSAs and install via SPF nexthop to the
-    // originating ASBR. Uses this area's SPF result to resolve the
-    // ASBR -- correct for single-area today; multi-area routers should
-    // pick the best per-area SPF cost when this lands.
-    add_as_external_routes(top, spf_result, &mut rib);
+    // originating ASBR. Falls back to Type-4 Summary-ASBR LSAs for
+    // ASBRs reachable only via other areas (RFC 2328 §16.4 step 5).
+    add_as_external_routes(top, area_id, spf_result, &mut rib);
 
     // NSSA Type-7: walk this area's Type 7 LSAs when the area is
     // NSSA. Type-7s flood with area scope (RFC 3101 §2.5), so the
@@ -8897,6 +9083,7 @@ fn build_rib6_from_flex_algo(
 /// route, which is a separate code path.
 fn add_as_external_routes(
     top: &Ospf,
+    area_id: Ipv4Addr,
     spf_result: &BTreeMap<usize, spf::Path>,
     rib: &mut PrefixMap<Ipv4Net, SpfRoute>,
 ) {
@@ -8924,18 +9111,54 @@ fn add_as_external_routes(
             continue;
         }
 
-        let Some(asbr_vertex) = top.lsp_map.lookup(lsa.data.h.adv_router) else {
+        let asbr_id = lsa.data.h.adv_router;
+        let Some(asbr_vertex) = top.lsp_map.lookup(asbr_id) else {
             continue;
         };
-        let Some(asbr_path) = spf_result.get(&asbr_vertex) else {
-            continue;
-        };
+
+        // Try the local (intra-area) SPF result first. If the ASBR is
+        // in another area, fall back to a Type-4 Summary-ASBR LSA
+        // advertised by an ABR that is reachable from this area
+        // (RFC 2328 §16.4 step 5).
+        let (asbr_cost, nexthop_vertex, nexthop_path) =
+            if let Some(path) = spf_result.get(&asbr_vertex) {
+                (path.cost, asbr_vertex, path.clone())
+            } else {
+                // Look for a Type-4 in this area whose ls_id == asbr_id.
+                let type4 = top.areas.get(area_id).and_then(|area| {
+                    area.lsdb
+                        .iter_by_type(OspfLsType::SummaryAsbr)
+                        .filter(|((ls_id_t4, _), lsa_t4)| {
+                            *ls_id_t4 == asbr_id
+                                && lsa_t4.data.h.ls_age < OSPF_MAX_AGE
+                                && lsa_t4.data.h.adv_router != top.router_id
+                        })
+                        .filter_map(|((_, _), lsa_t4)| {
+                            let OspfLsp::Summary(ref s) = lsa_t4.data.lsp else {
+                                return None;
+                            };
+                            let abr_id = lsa_t4.data.h.adv_router;
+                            let abr_vertex = top.lsp_map.lookup(abr_id)?;
+                            let abr_path = spf_result.get(&abr_vertex)?;
+                            Some((
+                                abr_path.cost.saturating_add(s.metric),
+                                abr_vertex,
+                                abr_path.clone(),
+                            ))
+                        })
+                        .min_by_key(|(cost, _, _)| *cost)
+                });
+                match type4 {
+                    Some(t) => t,
+                    None => continue,
+                }
+            };
 
         let is_type2 = (ext.ext_and_resvd & E_FLAG) != 0;
         let metric = if is_type2 {
             ext.metric
         } else {
-            asbr_path.cost.saturating_add(ext.metric)
+            asbr_cost.saturating_add(ext.metric)
         };
 
         let mask = u32::from(ext.netmask).leading_ones() as u8;
@@ -8944,7 +9167,7 @@ fn add_as_external_routes(
         };
         let prefix = prefix.trunc();
 
-        let nhops = build_spf_nexthops(top, asbr_vertex, asbr_path);
+        let nhops = build_spf_nexthops(top, nexthop_vertex, &nexthop_path);
         if nhops.is_empty() {
             continue;
         }
@@ -8955,8 +9178,7 @@ fn add_as_external_routes(
             nhops,
             sid: None,
             prefix_sid: None,
-            // Protect the path to the ASBR.
-            dest_vertex: Some(asbr_vertex),
+            dest_vertex: Some(nexthop_vertex),
             backup_as_primary: top.fast_reroute_backup_as_primary,
         };
         rib_insert(rib, prefix, spf_route);
@@ -10299,6 +10521,7 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     // Store the SPF result, graph, and TI-LFA repair lists on the
     // instance (single last-computed-area snapshot, like spf_result).
     // `show ip ospf ti-lfa` renders tilfa_result against graph.
+    top.spf_results.insert(area_id, spf_result.clone());
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
     top.tilfa_result = Some(tilfa_result);
@@ -10333,6 +10556,10 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     // schedule our own SPF, so a converged topology re-floods nothing
     // and this terminates rather than looping SPF→summary→SPF.
     top.abr_summary_originate();
+    // ABR: (re)originate / flush Type-4 Summary-ASBR LSAs for ASBRs
+    // reachable in the other area. Enables non-backbone routers to
+    // compute E1 metrics to ASBRs they cannot reach intra-area.
+    top.abr_summary_asbr_originate();
 }
 
 /// Merge every attached area's route slice (`rib_areas`) into one
