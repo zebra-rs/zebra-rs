@@ -13,51 +13,34 @@ use super::flex_algo::{FadMetricType, FlexAlgoEntry, link_passes_fad, local_link
 use super::inst::IsisTop;
 use super::level::Level;
 
-#[derive(Default)]
-pub struct ReachMap {
-    map: BTreeMap<IsisSysId, Vec<IsisTlvExtIpReachEntry>>,
+pub struct ReachMap<E> {
+    map: BTreeMap<IsisSysId, Vec<E>>,
 }
 
-impl ReachMap {
-    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<IsisTlvExtIpReachEntry>> {
+impl<E> Default for ReachMap<E> {
+    fn default() -> Self {
+        Self {
+            map: BTreeMap::new(),
+        }
+    }
+}
+
+impl<E> ReachMap<E> {
+    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<E>> {
         self.map.get(key)
     }
 
-    pub fn insert(
-        &mut self,
-        key: IsisSysId,
-        value: Vec<IsisTlvExtIpReachEntry>,
-    ) -> Option<Vec<IsisTlvExtIpReachEntry>> {
+    pub fn insert(&mut self, key: IsisSysId, value: Vec<E>) -> Option<Vec<E>> {
         self.map.insert(key, value)
     }
 
-    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<IsisTlvExtIpReachEntry>> {
+    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<E>> {
         self.map.remove(key)
     }
 }
 
-#[derive(Default)]
-pub struct ReachMapV6 {
-    map: BTreeMap<IsisSysId, Vec<IsisTlvIpv6ReachEntry>>,
-}
-
-impl ReachMapV6 {
-    pub fn get(&self, key: &IsisSysId) -> Option<&Vec<IsisTlvIpv6ReachEntry>> {
-        self.map.get(key)
-    }
-
-    pub fn insert(
-        &mut self,
-        key: IsisSysId,
-        value: Vec<IsisTlvIpv6ReachEntry>,
-    ) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
-        self.map.insert(key, value)
-    }
-
-    pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<IsisTlvIpv6ReachEntry>> {
-        self.map.remove(key)
-    }
-}
+pub type ReachMapV4 = ReachMap<IsisTlvExtIpReachEntry>;
+pub type ReachMapV6 = ReachMap<IsisTlvIpv6ReachEntry>;
 
 /// Stable mapping between IS-IS LSP identities and the integer
 /// vertex ids used by the SPF graph. Keyed by `IsisNeighborId`

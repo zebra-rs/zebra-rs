@@ -27,11 +27,8 @@ use bgp_packet::{
     BGPLS_ATTR_TE_DEFAULT_METRIC, BgpLsAttr, BgpLsNlri, LsLinkDescriptor, LsLinkNlri,
     LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri, LsProtocolId,
 };
-use ipnet::{Ipv4Net, Ipv6Net};
-use isis_packet::{
-    IsisLsp, IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvExtIsReachEntry,
-    IsisTlvIpv6ReachEntry,
-};
+use ipnet::IpNet;
+use isis_packet::{IsisLsp, IsisSysId, IsisTlv, IsisTlvExtIsReachEntry};
 use tokio::sync::mpsc::Sender;
 
 use super::level::Level;
@@ -54,24 +51,14 @@ fn node_descriptor(sys_id: &IsisSysId) -> LsNodeDescriptor {
 
 /// Minimal-octet IP Reachability prefix descriptor: the prefix length in
 /// bits plus the high-order `ceil(len/8)` address octets (RFC 9552 §5.2.3).
-fn ipv4_reach(net: &Ipv4Net) -> LsPrefixDescriptor {
+fn ip_reach(net: IpNet) -> LsPrefixDescriptor {
     let prefix_len = net.prefix_len();
     let nbytes = prefix_len.div_ceil(8) as usize;
-    let octets = net.network().octets();
-    LsPrefixDescriptor::IpReachability {
-        prefix_len,
-        prefix: octets[..nbytes].to_vec(),
-    }
-}
-
-fn ipv6_reach(net: &Ipv6Net) -> LsPrefixDescriptor {
-    let prefix_len = net.prefix_len();
-    let nbytes = prefix_len.div_ceil(8) as usize;
-    let octets = net.network().octets();
-    LsPrefixDescriptor::IpReachability {
-        prefix_len,
-        prefix: octets[..nbytes].to_vec(),
-    }
+    let prefix = match net {
+        IpNet::V4(n) => n.network().octets()[..nbytes].to_vec(),
+        IpNet::V6(n) => n.network().octets()[..nbytes].to_vec(),
+    };
+    LsPrefixDescriptor::IpReachability { prefix_len, prefix }
 }
 
 /// The BGP-LS Attribute (path attribute type 29) carried alongside an NLRI.
@@ -135,28 +122,20 @@ fn link_object(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvExtIsReachEntr
     (nlri, link_attr(e))
 }
 
-fn ipv4_prefix_object(
-    proto: LsProtocolId,
-    local: &IsisSysId,
-    e: &IsisTlvExtIpReachEntry,
-) -> Object {
-    let nlri = BgpLsNlri::Ipv4Prefix(LsPrefixNlri {
+fn prefix_object(proto: LsProtocolId, local: &IsisSysId, prefix: IpNet, metric: u32) -> Object {
+    let is_v4 = matches!(prefix, IpNet::V4(_));
+    let inner = LsPrefixNlri {
         protocol_id: proto,
         identifier: 0,
         local_node: node_descriptor(local),
-        prefix_descs: vec![ipv4_reach(&e.prefix)],
-    });
-    (nlri, prefix_attr(e.metric))
-}
-
-fn ipv6_prefix_object(proto: LsProtocolId, local: &IsisSysId, e: &IsisTlvIpv6ReachEntry) -> Object {
-    let nlri = BgpLsNlri::Ipv6Prefix(LsPrefixNlri {
-        protocol_id: proto,
-        identifier: 0,
-        local_node: node_descriptor(local),
-        prefix_descs: vec![ipv6_reach(&e.prefix)],
-    });
-    (nlri, prefix_attr(e.metric))
+        prefix_descs: vec![ip_reach(prefix)],
+    };
+    let nlri = if is_v4 {
+        BgpLsNlri::Ipv4Prefix(inner)
+    } else {
+        BgpLsNlri::Ipv6Prefix(inner)
+    };
+    (nlri, prefix_attr(metric))
 }
 
 /// Translate every Link-State object implied by one IS-IS LSP into BGP-LS
@@ -196,22 +175,22 @@ pub fn lsp_to_objects(level: Level, lsp: &IsisLsp) -> Vec<Object> {
             }
             IsisTlv::ExtIpReach(t) => {
                 for e in &t.entries {
-                    out.push(ipv4_prefix_object(proto, &local, e));
+                    out.push(prefix_object(proto, &local, e.prefix.into(), e.metric));
                 }
             }
             IsisTlv::MtIpReach(t) => {
                 for e in &t.entries {
-                    out.push(ipv4_prefix_object(proto, &local, e));
+                    out.push(prefix_object(proto, &local, e.prefix.into(), e.metric));
                 }
             }
             IsisTlv::Ipv6Reach(t) => {
                 for e in &t.entries {
-                    out.push(ipv6_prefix_object(proto, &local, e));
+                    out.push(prefix_object(proto, &local, e.prefix.into(), e.metric));
                 }
             }
             IsisTlv::MtIpv6Reach(t) => {
                 for e in &t.entries {
-                    out.push(ipv6_prefix_object(proto, &local, e));
+                    out.push(prefix_object(proto, &local, e.prefix.into(), e.metric));
                 }
             }
             _ => {}
@@ -399,7 +378,8 @@ mod tests {
         assert!(advertised.is_empty());
     }
     use isis_packet::{
-        IsisLspId, IsisNeighborId, IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvExtIsReachEntry,
+        IsisLspId, IsisNeighborId, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvExtIsReach,
+        IsisTlvExtIsReachEntry,
     };
 
     fn sysid(last: u8) -> IsisSysId {
