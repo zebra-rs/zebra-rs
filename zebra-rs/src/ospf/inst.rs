@@ -4249,7 +4249,7 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    fn router_id_update(&mut self, router_id: Ipv4Addr) {
+    pub(super) fn router_id_update(&mut self, router_id: Ipv4Addr) {
         self.router_id = router_id;
         for (_, link) in self.links.iter_mut() {
             link.ident.router_id = router_id;
@@ -4265,9 +4265,23 @@ impl Ospf<Ospfv2> {
         let IpNet::V4(prefix) = &addr.addr else {
             return;
         };
-        let addr = OspfAddr::from(&addr, prefix);
-        link.addr.push(addr.clone());
+        let ospf_addr = OspfAddr::from(&addr, prefix);
+        link.addr.push(ospf_addr);
         link.ident.prefix = *prefix;
+
+        // If this address made an enabled-but-Down interface usable,
+        // re-fire `InterfaceUp` so the FSM can progress past the
+        // empty-`addr` short-circuit in `ospf_ifsm_interface_up`.
+        // OSPF-enable can be processed before the interface address
+        // has propagated from netlink (config commit applies both at
+        // once); without this re-fire a transit interface stays Down
+        // forever — no Hellos, no multicast join, no adjacency. v3's
+        // `addr_add` already did this; v2 was missing it.
+        if link.enabled && link.state == IfsmState::Down {
+            let _ = self
+                .tx
+                .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
+        }
     }
 
     fn addr_del(&mut self, addr: LinkAddr) {
@@ -5058,6 +5072,19 @@ impl Ospf<Ospfv3> {
                 .tx
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
         }
+    }
+
+    /// Apply a configured Router-ID to this OSPFv3 instance. Mirror of
+    /// the v2 `router_id_update`; wired from `config_ospfv3_router_id`
+    /// so `router ospfv3 { router-id ... }` is honoured (previously
+    /// v3 had no per-instance Router-ID path at all and every instance
+    /// kept the constructor default 10.0.0.1).
+    pub(super) fn router_id_update(&mut self, router_id: Ipv4Addr) {
+        self.router_id = router_id;
+        for (_, link) in self.links.iter_mut() {
+            link.ident.router_id = router_id;
+        }
+        self.router_lsa_originate();
     }
 
     /// Remove an IPv6 address from the matching link's `addr` list
