@@ -53,6 +53,9 @@ pub async fn clear(host: &str, command: &str) -> Result<()> {
 
     if !reply.str.is_empty() {
         print!("{}", reply.str);
+        if !reply.str.ends_with('\n') {
+            println!();
+        }
     }
 
     Ok(())
