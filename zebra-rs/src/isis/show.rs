@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::Hostname;
 use super::lsdb::Lsdb;
-use super::rib::{SpfNexthop, SpfRoute, V4, V6};
+use super::rib::{IsisRibFamily, SpfNexthop, SpfRoute, V4, V6};
 use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
 
@@ -602,40 +602,19 @@ struct FrrSummary {
     multi_segment: usize,
 }
 
-/// Tally TI-LFA protection state across the IPv4 RIB at one level.
-fn summarize_frr_v4(isis: &Isis, level: &Level) -> FrrSummary {
+/// Tally TI-LFA protection state across one level's RIB.  The SR
+/// steering depth — MPLS label-stack depth for V4, SRv6 segment-list
+/// length for V6 — is dispatched through `F::backup_sr_len`.
+fn summarize_frr<F: IsisRibFamily>(rib: &PrefixMap<F::Prefix, SpfRoute<F>>) -> FrrSummary {
     let mut s = FrrSummary::default();
-    for (_, route) in isis.rib.get(level).iter() {
+    for (_, route) in rib.iter() {
         s.total += 1;
         let first_backup = route.nhops.values().find_map(|n| n.backup.as_ref());
         match first_backup {
             None => s.unprotected += 1,
             Some(b) => {
                 s.protected += 1;
-                match b.labels.len() {
-                    0 => s.trivial += 1,
-                    1 => s.one_segment += 1,
-                    _ => s.multi_segment += 1,
-                }
-            }
-        }
-    }
-    s
-}
-
-/// IPv6 sibling — label-stack length test is replaced by SRv6
-/// `segs` length since that's the SR steering dimension in the SRv6
-/// dataplane.
-fn summarize_frr_v6(isis: &Isis, level: &Level) -> FrrSummary {
-    let mut s = FrrSummary::default();
-    for (_, route) in isis.rib_v6.get(level).iter() {
-        s.total += 1;
-        let first_backup = route.nhops.values().find_map(|n| n.backup.as_ref());
-        match first_backup {
-            None => s.unprotected += 1,
-            Some(b) => {
-                s.protected += 1;
-                match b.segs.len() {
+                match F::backup_sr_len(b) {
                     0 => s.trivial += 1,
                     1 => s.one_segment += 1,
                     _ => s.multi_segment += 1,
@@ -672,8 +651,8 @@ fn show_isis_fast_reroute_summary(
     writeln!(buf, "Area {}:", format_area_id(&isis.config.net))?;
     let mut wrote_any = false;
     for level in &[Level::L1, Level::L2] {
-        let v4 = summarize_frr_v4(isis, level);
-        let v6 = summarize_frr_v6(isis, level);
+        let v4 = summarize_frr::<V4>(isis.rib.get(level));
+        let v6 = summarize_frr::<V6>(isis.rib_v6.get(level));
         if v4.total == 0 && v6.total == 0 {
             continue;
         }
@@ -1725,13 +1704,30 @@ fn write_isis_backup_v6_detail(
 /// `show isis route detail` per-level IPv4 RIB renderer. Replaces
 /// the columnar `write_rib_v4` layout with per-prefix blocks that
 /// surface TI-LFA backup paths.
-fn write_rib_v4_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
+fn write_rib_detail<F>(
+    buf: &mut String,
+    isis: &Isis,
+    level: &Level,
+    rib: &PrefixMap<F::Prefix, SpfRoute<F>>,
+    write_nhop: fn(
+        &mut String,
+        &Isis,
+        &Level,
+        &SpfRoute<F>,
+        &F::Addr,
+        &SpfNexthop<F>,
+    ) -> std::fmt::Result,
+) -> std::fmt::Result
+where
+    F: IsisRibFamily,
+    F::Prefix: std::fmt::Display,
+{
     let level_short = match level {
         Level::L1 => "L1",
         Level::L2 => "L2",
     };
 
-    let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
+    let mut entries: Vec<_> = rib.iter().collect();
     entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
@@ -1741,29 +1737,7 @@ fn write_rib_v4_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt
             continue;
         }
         for (addr, nhop) in route.nhops.iter() {
-            write_isis_nhop_v4_detail(buf, isis, level, route, addr, nhop)?;
-        }
-    }
-    Ok(())
-}
-
-fn write_rib_v6_detail(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
-    let level_short = match level {
-        Level::L1 => "L1",
-        Level::L2 => "L2",
-    };
-
-    let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| *p);
-
-    for (prefix, route) in entries {
-        writeln!(buf, "{} {} [metric {}]", level_short, prefix, route.metric)?;
-        if route.nhops.is_empty() {
-            writeln!(buf, "  (directly connected / no nexthop)")?;
-            continue;
-        }
-        for (addr, nhop) in route.nhops.iter() {
-            write_isis_nhop_v6_detail(buf, isis, level, route, addr, nhop)?;
+            write_nhop(buf, isis, level, route, addr, nhop)?;
         }
     }
     Ok(())
@@ -1792,12 +1766,24 @@ fn write_show_isis_route_text_detail(isis: &Isis) -> std::result::Result<String,
         writeln!(buf)?;
         writeln!(buf, "IS-IS {} IPv4 routing table:", level_short)?;
         writeln!(buf)?;
-        write_rib_v4_detail(&mut buf, isis, level)?;
+        write_rib_detail::<V4>(
+            &mut buf,
+            isis,
+            level,
+            isis.rib.get(level),
+            write_isis_nhop_v4_detail,
+        )?;
 
         writeln!(buf)?;
         writeln!(buf, "IS-IS {} IPv6 routing table:", level_short)?;
         writeln!(buf)?;
-        write_rib_v6_detail(&mut buf, isis, level)?;
+        write_rib_detail::<V6>(
+            &mut buf,
+            isis,
+            level,
+            isis.rib_v6.get(level),
+            write_isis_nhop_v6_detail,
+        )?;
     }
 
     if !wrote_any {

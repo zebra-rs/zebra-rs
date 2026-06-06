@@ -30,7 +30,7 @@ use crate::{
 
 use super::config::{IsisConfig, MtId};
 use super::flood;
-use super::graph::{LspMap, ReachMap, ReachMapV6};
+use super::graph::{LspMap, ReachMapV4, ReachMapV6};
 use super::ifsm::{csnp_timer, has_level};
 use super::link::{Afis, IsisLinks, LinkTop};
 use super::lsdb::insert_self_originate;
@@ -179,7 +179,7 @@ pub struct Isis {
     pub tracing: IsisTracing,
     pub lsdb: Levels<Lsdb>,
     pub lsp_map: Levels<LspMap>,
-    pub reach_map: Levels<Afis<ReachMap>>,
+    pub reach_map: Levels<Afis<ReachMapV4>>,
     pub reach_map_v6: Levels<ReachMapV6>,
 
     /// MT 2 (IPv6 unicast) IPv6 reach indexed per peer. Populated from
@@ -482,7 +482,7 @@ pub struct IsisTop<'a> {
     pub tracing: &'a IsisTracing,
     pub lsdb: &'a mut Levels<Lsdb>,
     pub lsp_map: &'a mut Levels<LspMap>,
-    pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub reach_map: &'a mut Levels<Afis<ReachMapV4>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
@@ -640,7 +640,7 @@ impl Isis {
                 tracing: IsisTracing::default(),
                 lsdb: Levels::<Lsdb>::default(),
                 lsp_map: Levels::<LspMap>::default(),
-                reach_map: Levels::<Afis<ReachMap>>::default(),
+                reach_map: Levels::<Afis<ReachMapV4>>::default(),
                 reach_map_v6: Levels::<ReachMapV6>::default(),
                 mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
                 mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),

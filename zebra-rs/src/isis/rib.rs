@@ -38,13 +38,17 @@ use super::tilfa::{
 /// Mirrors the `StaticFamily` pattern in `rib/static/config.rs`.
 pub trait IsisRibFamily: Sized + 'static {
     type Addr: Ord + Copy + std::fmt::Debug + PartialEq;
-    type Prefix: Ord + Copy;
+    type Prefix: Ord + Copy + prefix_trie::Prefix;
     type Backup: std::fmt::Debug + Clone + PartialEq;
 
     fn addr_to_ip(addr: Self::Addr) -> IpAddr;
     fn backup_to_nexthop_uni(backup: &Self::Backup, metric: u32) -> rib::NexthopUni;
     fn rib_add(prefix: Self::Prefix, entry: crate::rib::entry::RibEntry) -> crate::rib::Message;
     fn rib_del(prefix: Self::Prefix, entry: crate::rib::entry::RibEntry) -> crate::rib::Message;
+    /// Number of SR steering segments in `backup` — MPLS label stack
+    /// depth for V4, SRv6 segment-list length for V6.  Used to bucket
+    /// TI-LFA protection into trivial / 1-segment / N-segment tallies.
+    fn backup_sr_len(backup: &Self::Backup) -> usize;
 }
 
 pub struct V4;
@@ -69,6 +73,10 @@ impl IsisRibFamily for V4 {
 
     fn rib_del(prefix: Ipv4Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
         crate::rib::Message::Ipv4Del { prefix, rib: entry }
+    }
+
+    fn backup_sr_len(backup: &RepairPathMpls) -> usize {
+        backup.labels.len()
     }
 }
 
@@ -96,6 +104,10 @@ impl IsisRibFamily for V6 {
 
     fn rib_del(prefix: Ipv6Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
         crate::rib::Message::Ipv6Del { prefix, rib: entry }
+    }
+
+    fn backup_sr_len(backup: &RepairPathSrv6) -> usize {
+        backup.segs.len()
     }
 }
 

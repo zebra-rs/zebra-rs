@@ -25,7 +25,7 @@ use super::config::{
     self, IsisAuthConfig, IsisConfig, MtId, auth_set_key_id, auth_set_password, auth_set_send_only,
     auth_set_type,
 };
-use super::graph::{ReachMap, ReachMapV6};
+use super::graph::{ReachMapV4, ReachMapV6};
 use super::ifsm::{self, has_level};
 use super::lsp::PacketMessage;
 use super::neigh::Neighbor;
@@ -134,7 +134,7 @@ pub struct LinkTop<'a> {
     pub timer: &'a mut LinkTimer,
     pub local_pool: &'a mut Option<LabelPool>,
     pub hostname: &'a mut Levels<Hostname>,
-    pub reach_map: &'a mut Levels<Afis<ReachMap>>,
+    pub reach_map: &'a mut Levels<Afis<ReachMapV4>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership:

@@ -15,7 +15,7 @@ use crate::isis::{
 };
 
 use super::config::MtId;
-use super::graph::{ReachMap, ReachMapV6};
+use super::graph::{ReachMapV4, ReachMapV6};
 use super::hostname::Hostname;
 use super::inst::MsgSender;
 use super::link::LinkTop;
@@ -176,7 +176,7 @@ pub struct LspCapView<'a> {
 pub(super) struct SysStateRefs<'a> {
     pub hostname: &'a mut Hostname,
     pub label_map: &'a mut IsisLabelMap,
-    pub reach_v4: &'a mut ReachMap,
+    pub reach_v4: &'a mut ReachMapV4,
     pub reach_v6: &'a mut ReachMapV6,
     pub mt_membership: &'a mut BTreeMap<IsisSysId, BTreeSet<MtId>>,
     pub mt2_reach_v6: &'a mut ReachMapV6,
@@ -799,7 +799,7 @@ mod tests {
 
         let mut hostname = Hostname::default();
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
@@ -913,7 +913,7 @@ mod tests {
         hostname.insert_originate(me, "real".to_string());
 
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
@@ -987,7 +987,7 @@ mod tests {
 
         let mut hostname = Hostname::default();
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
@@ -1104,7 +1104,7 @@ mod tests {
 
         let mut hostname = Hostname::default();
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
@@ -1203,7 +1203,7 @@ mod tests {
 
         let mut hostname = Hostname::default();
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
@@ -1291,7 +1291,7 @@ mod tests {
 
         let mut hostname = Hostname::default();
         let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMap::default();
+        let mut reach_v4 = ReachMapV4::default();
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
