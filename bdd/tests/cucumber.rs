@@ -310,8 +310,11 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     let log_file = format!("logs/{}.log", scoped);
     let pid_file = world.pid_file(&namespace);
 
-    let _child = netns::spawn_in_netns(
+    let _child = netns::spawn_in_netns_env(
         &scoped,
+        // veth interfaces (used in all BDD topologies) need SKB mode: native
+        // XDP attaches without error on veth but does not loop packets back.
+        &[("ZEBRA_XDP_BFD_ECHO_MODE", "skb")],
         "zebra-rs",
         &[
             "--log-output=file",
