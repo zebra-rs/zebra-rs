@@ -40,8 +40,7 @@ use super::lsp::{
 };
 use super::nfsm::nbr_hold_timer_expire;
 use super::rib::{
-    SpfIlm, SpfRoute, SpfRouteV6, apply_spf_result, build_spf_input, compute_spf,
-    update_self_sid_ilm,
+    SpfIlm, SpfRoute, V4, V6, apply_spf_result, build_spf_input, compute_spf, update_self_sid_ilm,
 };
 use super::srlg::{SrlgGroup, SrlgGroupBuilder};
 use super::srmpls::IsisLabelMap;
@@ -239,8 +238,8 @@ pub struct Isis {
     /// not contain the algo being computed (RFC 9350 §5.2
     /// participation requirement). Cleared on peer purge.
     pub peer_algos: Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
-    pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute>>,
-    pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
+    pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
+    pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
     /// Currently-installed local (self-originated) Prefix-SID ILM
     /// entries, keyed by MPLS label. Level-independent (the label is
@@ -311,7 +310,7 @@ pub struct Isis {
     /// entries derived from these routes do install (labels are
     /// globally unique, so they merge into the same `Isis::ilm` map
     /// alongside the algo-0 entries).
-    pub rib_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>,
+    pub rib_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>,
 
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
@@ -514,8 +513,8 @@ pub struct IsisTop<'a> {
     /// rebuild path can populate it from peer Router Capability
     /// SR-Algorithms sub-TLVs.
     pub peer_algos: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
-    pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute>>,
-    pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRouteV6>>,
+    pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
+    pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
@@ -545,7 +544,7 @@ pub struct IsisTop<'a> {
     /// Per-algorithm IPv4 RIB (see `Isis::rib_flex_algo`). Threaded
     /// so `apply_spf_result` can install the per-algo RIB snapshot
     /// after each SPF cycle.
-    pub rib_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>,
+    pub rib_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>,
 
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
@@ -660,8 +659,8 @@ impl Isis {
                     BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
                 >::default(),
                 peer_algos: Levels::<BTreeMap<IsisSysId, BTreeSet<u8>>>::default(),
-                rib: Levels::<PrefixMap<Ipv4Net, SpfRoute>>::default(),
-                rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRouteV6>>::default(),
+                rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
+                rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
                 hostname: Levels::<Hostname>::default(),
@@ -688,7 +687,7 @@ impl Isis {
                 graph_flex_algo: Levels::<BTreeMap<u8, Option<spf::Graph>>>::default(),
                 spf_flex_algo: Levels::<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>::default(
                 ),
-                rib_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>>::default(),
+                rib_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>::default(),
                 sr_rx,
                 watched_block: None,
                 watched_locator: None,

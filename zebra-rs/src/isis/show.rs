@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::Hostname;
 use super::lsdb::Lsdb;
-use super::rib::{SpfNexthop, SpfNexthopV6, SpfRoute, SpfRouteV6};
+use super::rib::{SpfNexthop, SpfRoute, V4, V6};
 use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
 
@@ -1599,9 +1599,9 @@ fn write_isis_nhop_v4_detail(
     buf: &mut String,
     isis: &Isis,
     level: &Level,
-    route: &SpfRoute,
+    route: &SpfRoute<V4>,
     addr: &std::net::Ipv4Addr,
-    nhop: &SpfNexthop,
+    nhop: &SpfNexthop<V4>,
 ) -> std::fmt::Result {
     let nbr_hostname = nhop
         .sys_id
@@ -1675,9 +1675,9 @@ fn write_isis_nhop_v6_detail(
     buf: &mut String,
     isis: &Isis,
     level: &Level,
-    _route: &SpfRouteV6,
+    _route: &SpfRoute<V6>,
     addr: &std::net::Ipv6Addr,
-    nhop: &SpfNexthopV6,
+    nhop: &SpfNexthop<V6>,
 ) -> std::fmt::Result {
     let nbr_hostname = nhop
         .sys_id
@@ -2548,7 +2548,7 @@ fn label_value_str(label: &crate::rib::Label) -> String {
 fn collect_repair_rows(isis: &Isis) -> Vec<RepairRowJson> {
     let mut rows = Vec::new();
     for level in [Level::L1, Level::L2] {
-        let v4: &PrefixMap<Ipv4Net, SpfRoute> = isis.rib.get(&level);
+        let v4: &PrefixMap<Ipv4Net, SpfRoute<V4>> = isis.rib.get(&level);
         for (prefix, route) in v4.iter() {
             for (addr, nhop) in route.nhops.iter() {
                 let Some(backup) = nhop.backup.as_ref() else {
@@ -2577,7 +2577,7 @@ fn collect_repair_rows(isis: &Isis) -> Vec<RepairRowJson> {
                 });
             }
         }
-        let v6: &PrefixMap<Ipv6Net, SpfRouteV6> = isis.rib_v6.get(&level);
+        let v6: &PrefixMap<Ipv6Net, SpfRoute<V6>> = isis.rib_v6.get(&level);
         for (prefix, route) in v6.iter() {
             for (addr, nhop) in route.nhops.iter() {
                 let Some(backup) = nhop.backup.as_ref() else {

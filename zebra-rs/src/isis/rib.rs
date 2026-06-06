@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use ipnet::{Ipv4Net, Ipv6Net};
@@ -15,7 +15,7 @@ use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
-// EncapType is only used by `make_rib_entry_v6` test fixture below;
+// EncapType is only used by the IPv6 backup test fixture below;
 // production code paths route through `tilfa::build_repair_path_srv6`.
 #[cfg(test)]
 use isis_packet::srv6::EncapType;
@@ -32,6 +32,72 @@ use super::tilfa::{
     RepairPathMpls, RepairPathSrv6, build_repair_path_mpls, build_repair_path_srv6,
     first_router_hop_id, tilfa_repair_path,
 };
+
+/// Address-family marker — ties together the address type, prefix type, and
+/// TI-LFA backup-path type for a single IS-IS RIB family (IPv4 or IPv6).
+/// Mirrors the `StaticFamily` pattern in `rib/static/config.rs`.
+pub trait IsisRibFamily: Sized + 'static {
+    type Addr: Ord + Copy + std::fmt::Debug + PartialEq;
+    type Prefix: Ord + Copy;
+    type Backup: std::fmt::Debug + Clone + PartialEq;
+
+    fn addr_to_ip(addr: Self::Addr) -> IpAddr;
+    fn backup_to_nexthop_uni(backup: &Self::Backup, metric: u32) -> rib::NexthopUni;
+    fn rib_add(prefix: Self::Prefix, entry: crate::rib::entry::RibEntry) -> crate::rib::Message;
+    fn rib_del(prefix: Self::Prefix, entry: crate::rib::entry::RibEntry) -> crate::rib::Message;
+}
+
+pub struct V4;
+impl IsisRibFamily for V4 {
+    type Addr = Ipv4Addr;
+    type Prefix = Ipv4Net;
+    type Backup = RepairPathMpls;
+
+    fn addr_to_ip(addr: Ipv4Addr) -> IpAddr {
+        IpAddr::V4(addr)
+    }
+
+    fn backup_to_nexthop_uni(backup: &RepairPathMpls, metric: u32) -> rib::NexthopUni {
+        let mut nhop = rib::NexthopUni::new(IpAddr::V4(backup.addr), metric, backup.labels.clone());
+        nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+        nhop
+    }
+
+    fn rib_add(prefix: Ipv4Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
+        crate::rib::Message::Ipv4Add { prefix, rib: entry }
+    }
+
+    fn rib_del(prefix: Ipv4Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
+        crate::rib::Message::Ipv4Del { prefix, rib: entry }
+    }
+}
+
+pub struct V6;
+impl IsisRibFamily for V6 {
+    type Addr = Ipv6Addr;
+    type Prefix = Ipv6Net;
+    type Backup = RepairPathSrv6;
+
+    fn addr_to_ip(addr: Ipv6Addr) -> IpAddr {
+        IpAddr::V6(addr)
+    }
+
+    fn backup_to_nexthop_uni(backup: &RepairPathSrv6, metric: u32) -> rib::NexthopUni {
+        let mut nhop = rib::NexthopUni::new(IpAddr::V6(backup.addr), metric, vec![]);
+        nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
+        nhop.segs = backup.segs.clone();
+        nhop.encap_type = Some(backup.encap);
+        nhop
+    }
+
+    fn rib_add(prefix: Ipv6Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
+        crate::rib::Message::Ipv6Add { prefix, rib: entry }
+    }
+
+    fn rib_del(prefix: Ipv6Net, entry: crate::rib::entry::RibEntry) -> crate::rib::Message {
+        crate::rib::Message::Ipv6Del { prefix, rib: entry }
+    }
+}
 
 fn spf_timer_ms(tx: &UnboundedSender<Message>, level: Level, ms: u64) -> Timer {
     let tx = tx.clone();
@@ -77,10 +143,13 @@ pub fn spf_schedule_top(top: &mut IsisTop, level: Level) {
     spf_schedule_inner(top.spf_timer, top.spf_throttle, top.tx, top.config, level);
 }
 
-#[derive(Debug, PartialEq)]
-pub struct SpfRoute {
+/// Per-destination IS-IS route produced by SPF. Generic over the address
+/// family via `F: IsisRibFamily`. `SpfRoute<V4>` uses `Ipv4Addr` nexthop
+/// keys and MPLS TI-LFA backups; `SpfRoute<V6>` uses `Ipv6Addr` keys and
+/// SRv6 TI-LFA backups. All other fields are address-family-independent.
+pub struct SpfRoute<F: IsisRibFamily> {
     pub metric: u32,
-    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub nhops: BTreeMap<F::Addr, SpfNexthop<F>>,
     pub sid: Option<u32>,
     pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
     /// RFC 8667 §2.1.1 P (no-PHP) flag copied from the destination's
@@ -88,7 +157,8 @@ pub struct SpfRoute {
     /// nexthop whose `adjacency` is true) must keep the node-SID label
     /// instead of popping it, so `make_ilm_entry` installs a swap rather
     /// than a pop. Part of `PartialEq` so a P-flag flip re-installs the
-    /// ILM through `table_diff`.
+    /// ILM through `table_diff`. Always `false` for IPv6 (SR-MPLS is
+    /// IPv4-only today).
     pub no_php: bool,
     /// SPF vertex id this route was built from. Set by
     /// `build_rib_from_spf`; used by TI-LFA to join routes with
@@ -105,45 +175,74 @@ pub struct SpfRoute {
     pub backup_as_primary: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpfNexthop {
+impl<F: IsisRibFamily> std::fmt::Debug for SpfRoute<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpfRoute")
+            .field("metric", &self.metric)
+            .field("nhops", &self.nhops)
+            .field("sid", &self.sid)
+            .field("prefix_sid", &self.prefix_sid)
+            .field("no_php", &self.no_php)
+            .field("dest_vertex", &self.dest_vertex)
+            .field("backup_as_primary", &self.backup_as_primary)
+            .finish()
+    }
+}
+
+impl<F: IsisRibFamily> PartialEq for SpfRoute<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.metric == other.metric
+            && self.nhops == other.nhops
+            && self.sid == other.sid
+            && self.prefix_sid == other.prefix_sid
+            && self.no_php == other.no_php
+            && self.dest_vertex == other.dest_vertex
+            && self.backup_as_primary == other.backup_as_primary
+    }
+}
+
+/// Per-nexthop IS-IS state produced by SPF. `F::Backup` is
+/// `RepairPathMpls` for IPv4 and `RepairPathSrv6` for IPv6.
+pub struct SpfNexthop<F: IsisRibFamily> {
     pub ifindex: u32,
     pub adjacency: bool,
     pub sys_id: Option<IsisSysId>,
-    /// TI-LFA post-convergence repair for this primary nexthop. Empty
-    /// (None) until ti_lfa_compute runs and fills it in; for now no
-    /// caller sets it. Sorted-after-primary install is handled by
+    /// TI-LFA post-convergence repair for this primary nexthop. `None`
+    /// until the TI-LFA post-loop pass fills it in for single-primary
+    /// routes. Sorted-after-primary install is handled by
     /// `build_rib_nexthop` via the metric-offset convention.
-    pub backup: Option<RepairPathMpls>,
+    pub backup: Option<F::Backup>,
 }
 
-// IPv6 single-topology mirror of SpfRoute / SpfNexthop. Nexthop key is the
-// peer's IPv6 link-local address (TLV 232 from IIH); ECMP is supported by
-// keying multiple link-locals into the same SpfRouteV6.
-#[derive(Debug, PartialEq)]
-pub struct SpfRouteV6 {
-    pub metric: u32,
-    pub nhops: BTreeMap<Ipv6Addr, SpfNexthopV6>,
-    pub sid: Option<u32>,
-    pub prefix_sid: Option<(SidLabelValue, LabelConfig)>,
-    /// Same role as `SpfRoute.dest_vertex` — populated by
-    /// `build_rib_from_spf_v6` for the IPv6 repair-path join.
-    pub dest_vertex: Option<usize>,
-    /// Same role as `SpfRoute.backup_as_primary` — carried so the
-    /// flag is part of the `table_diff` equality that gates RIB
-    /// updates. See that field for the full rationale.
-    pub backup_as_primary: bool,
+impl<F: IsisRibFamily> std::fmt::Debug for SpfNexthop<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpfNexthop")
+            .field("ifindex", &self.ifindex)
+            .field("adjacency", &self.adjacency)
+            .field("sys_id", &self.sys_id)
+            .field("backup", &self.backup)
+            .finish()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpfNexthopV6 {
-    pub ifindex: u32,
-    pub adjacency: bool,
-    pub sys_id: Option<IsisSysId>,
-    /// TI-LFA post-convergence repair for this primary nexthop. The
-    /// SRv6 form carries an SRH segment list + encap mode instead of
-    /// an MPLS label stack.
-    pub backup: Option<RepairPathSrv6>,
+impl<F: IsisRibFamily> Clone for SpfNexthop<F> {
+    fn clone(&self) -> Self {
+        Self {
+            ifindex: self.ifindex,
+            adjacency: self.adjacency,
+            sys_id: self.sys_id,
+            backup: self.backup.clone(),
+        }
+    }
+}
+
+impl<F: IsisRibFamily> PartialEq for SpfNexthop<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ifindex == other.ifindex
+            && self.adjacency == other.adjacency
+            && self.sys_id == other.sys_id
+            && self.backup == other.backup
+    }
 }
 
 /// Sort offset between the primary nhop's metric and its TI-LFA
@@ -154,14 +253,13 @@ pub struct SpfNexthopV6 {
 /// `u32::MAX` sentinels.
 pub const BACKUP_METRIC_OFFSET: u32 = 1;
 
-pub type DiffResult<'a> = spf::TableDiffResult<'a, Ipv4Net, SpfRoute>;
-pub type DiffResultV6<'a> = spf::TableDiffResult<'a, Ipv6Net, SpfRouteV6>;
+pub type DiffResult<'a, F> = spf::TableDiffResult<'a, <F as IsisRibFamily>::Prefix, SpfRoute<F>>;
 pub type DiffIlmResult<'a> = spf::TableDiffResult<'a, u32, SpfIlm>;
 
-fn nhop_to_nexthop_uni(
-    key: &Ipv4Addr,
-    route: &SpfRoute,
-    value: &SpfNexthop,
+fn nhop_to_nexthop_uni<F: IsisRibFamily>(
+    key: &F::Addr,
+    route: &SpfRoute<F>,
+    value: &SpfNexthop<F>,
     metric: u32,
 ) -> rib::NexthopUni {
     let mut mpls = vec![];
@@ -172,7 +270,7 @@ fn nhop_to_nexthop_uni(
             rib::Label::Explicit(sid)
         });
     }
-    let mut nhop = rib::NexthopUni::from(*key, metric, mpls);
+    let mut nhop = rib::NexthopUni::new(F::addr_to_ip(*key), metric, mpls);
     // IS-IS knows the egress link from the adjacency state machine —
     // record it as the origin so the RIB resolver doesn't re-derive
     // (and potentially mis-derive) the link via a recursive table
@@ -190,7 +288,7 @@ fn level_subtype(level: Level) -> RibSubType {
     }
 }
 
-fn make_rib_entry(route: &SpfRoute, level: Level) -> rib::entry::RibEntry {
+fn make_rib_entry<F: IsisRibFamily>(route: &SpfRoute<F>, level: Level) -> rib::entry::RibEntry {
     let mut rib = rib::entry::RibEntry::new(RibType::Isis);
     rib.rsubtype = level_subtype(level);
     rib.distance = 115;
@@ -214,26 +312,16 @@ fn make_rib_entry(route: &SpfRoute, level: Level) -> rib::entry::RibEntry {
         .nhops
         .iter()
         .flat_map(|(key, value)| {
-            let primary = nhop_to_nexthop_uni(key, route, value, primary_metric);
+            let primary = nhop_to_nexthop_uni::<F>(key, route, value, primary_metric);
             let backup = value
                 .backup
                 .as_ref()
-                .map(|b| backup_to_nexthop_uni(b, backup_metric));
+                .map(|b| F::backup_to_nexthop_uni(b, backup_metric));
             std::iter::once(primary).chain(backup)
         })
         .collect();
     rib.nexthop = build_rib_nexthop(nhops);
     rib
-}
-
-fn backup_to_nexthop_uni(backup: &RepairPathMpls, metric: u32) -> rib::NexthopUni {
-    let mut nhop = rib::NexthopUni::new(
-        std::net::IpAddr::V4(backup.addr),
-        metric,
-        backup.labels.clone(),
-    );
-    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
-    nhop
 }
 
 // Dispatch a flat list of NexthopUni into the right rib::Nexthop
@@ -297,7 +385,7 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
 fn make_flex_algo_route(
     algo: u8,
     prefix: Ipv4Net,
-    route: &SpfRoute,
+    route: &SpfRoute<V4>,
 ) -> Option<crate::rib::api::FlexAlgoRoute> {
     let outer_label = route.sid?;
     let nexthops: Vec<crate::rib::api::FlexAlgoNexthop> = route
@@ -333,11 +421,11 @@ fn make_flex_algo_route(
 /// prefix" match what RIB already sees from algo-0.
 pub fn diff_apply_flex_algo(
     rib_client: &crate::rib::client::RibClient,
-    prev: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
-    next: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>>,
+    prev: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>,
+    next: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>,
 ) {
     let all_algos: BTreeSet<u8> = prev.keys().chain(next.keys()).copied().collect();
-    let empty: PrefixMap<Ipv4Net, SpfRoute> = PrefixMap::new();
+    let empty: PrefixMap<Ipv4Net, SpfRoute<V4>> = PrefixMap::new();
     for algo in all_algos {
         let prev_table = prev.get(&algo).unwrap_or(&empty);
         let next_table = next.get(&algo).unwrap_or(&empty);
@@ -376,132 +464,27 @@ pub fn diff_apply_flex_algo(
     }
 }
 
-pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult, level: Level) {
-    // Delete.
-    for (prefix, route) in diff.only_curr.iter() {
-        if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, level);
-            let msg = rib::Message::Ipv4Del {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
-        }
-    }
-    // Add (changed).
-    for (prefix, _, route) in diff.different.iter() {
-        if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, level);
-            let msg = rib::Message::Ipv4Add {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
-        }
-    }
-    // Add (new).
-    for (prefix, route) in diff.only_next.iter() {
-        if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route, level);
-            let msg = rib::Message::Ipv4Add {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
-        }
-    }
-}
-
-fn nhop_to_nexthop_uni_v6(
-    key: &Ipv6Addr,
-    route: &SpfRouteV6,
-    value: &SpfNexthopV6,
-    metric: u32,
-) -> rib::NexthopUni {
-    let mut mpls = vec![];
-    if let Some(sid) = route.sid {
-        mpls.push(if value.adjacency {
-            rib::Label::Implicit(sid)
-        } else {
-            rib::Label::Explicit(sid)
-        });
-    }
-    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(*key), metric, mpls);
-    // IPv6 link-local nexthops can't be disambiguated by table
-    // lookup — every interface advertises fe80::/64. The adjacency
-    // already pinned the egress link, so record it as the origin.
-    nhop.ifindex_origin = (value.ifindex != 0).then_some(value.ifindex);
-    nhop
-}
-
-fn make_rib_entry_v6(route: &SpfRouteV6, level: Level) -> rib::entry::RibEntry {
-    let mut rib = rib::entry::RibEntry::new(RibType::Isis);
-    rib.rsubtype = level_subtype(level);
-    rib.distance = 115;
-    rib.metric = route.metric;
-    let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
-    let (primary_metric, backup_metric) = if route.backup_as_primary {
-        (offset_metric, route.metric)
-    } else {
-        (route.metric, offset_metric)
-    };
-    let nhops: Vec<rib::NexthopUni> = route
-        .nhops
-        .iter()
-        .flat_map(|(key, value)| {
-            let primary = nhop_to_nexthop_uni_v6(key, route, value, primary_metric);
-            let backup = value
-                .backup
-                .as_ref()
-                .map(|b| backup_to_nexthop_uni_v6(b, backup_metric));
-            std::iter::once(primary).chain(backup)
-        })
-        .collect();
-    rib.nexthop = build_rib_nexthop(nhops);
-    rib
-}
-
-fn backup_to_nexthop_uni_v6(backup: &RepairPathSrv6, metric: u32) -> rib::NexthopUni {
-    let mut nhop = rib::NexthopUni::new(std::net::IpAddr::V6(backup.addr), metric, vec![]);
-    nhop.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
-    nhop.segs = backup.segs.clone();
-    nhop.encap_type = Some(backup.encap);
-    nhop
-}
-
-pub fn diff_apply_v6(
+pub fn diff_apply<F: IsisRibFamily>(
     rib_client: &crate::rib::client::RibClient,
-    diff: &DiffResultV6,
+    diff: &DiffResult<'_, F>,
     level: Level,
 ) {
     for (prefix, route) in diff.only_curr.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, level);
-            let msg = rib::Message::Ipv6Del {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
+            let entry = make_rib_entry::<F>(route, level);
+            rib_client.send(F::rib_del(*prefix, entry)).unwrap();
         }
     }
     for (prefix, _, route) in diff.different.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, level);
-            let msg = rib::Message::Ipv6Add {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
+            let entry = make_rib_entry::<F>(route, level);
+            rib_client.send(F::rib_add(*prefix, entry)).unwrap();
         }
     }
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
-            let rib = make_rib_entry_v6(route, level);
-            let msg = rib::Message::Ipv6Add {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
+            let entry = make_rib_entry::<F>(route, level);
+            rib_client.send(F::rib_add(*prefix, entry)).unwrap();
         }
     }
 }
@@ -511,7 +494,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
         && let Some((&addr, nhop)) = ilm.nhops.iter().next()
     {
         let mut uni = NexthopUni {
-            addr: std::net::IpAddr::V4(addr),
+            addr: IpAddr::V4(addr),
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
@@ -530,7 +513,7 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
     let mut multi = NexthopMulti::default();
     for (&addr, nhop) in ilm.nhops.iter() {
         let mut uni = NexthopUni {
-            addr: std::net::IpAddr::V4(addr),
+            addr: IpAddr::V4(addr),
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
@@ -585,7 +568,7 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
 }
 #[derive(Debug, PartialEq)]
 pub struct SpfIlm {
-    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
+    pub nhops: BTreeMap<Ipv4Addr, SpfNexthop<V4>>,
     pub ilm_type: IlmType,
     /// RFC 8667 §2.1.1 P (no-PHP) flag. When true, `make_ilm_entry`
     /// keeps the label (swap) even for a penultimate-hop (`adjacency`)
@@ -624,7 +607,7 @@ fn build_adjacency_ilm(
         for (ifindex, link) in top.links.iter() {
             if let Some(nbr) = link.state.nbrs.get(&level).get(nhop_id) {
                 for (addr, _) in nbr.addr4.iter() {
-                    let nhop = SpfNexthop {
+                    let nhop = SpfNexthop::<V4> {
                         ifindex: *ifindex,
                         adjacency: true,
                         sys_id: Some(*nhop_id),
@@ -655,8 +638,8 @@ fn build_rib_from_spf(
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
     tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
-) -> PrefixMap<Ipv4Net, SpfRoute> {
-    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
+) -> PrefixMap<Ipv4Net, SpfRoute<V4>> {
+    let mut rib = PrefixMap::<Ipv4Net, SpfRoute<V4>>::new();
 
     // Process each node in the SPF result
     for (node, nhops) in spf_result {
@@ -715,7 +698,7 @@ fn build_rib_from_spf(
                     continue;
                 };
                 for (addr, _) in nbr.addr4.iter() {
-                    let nhop = SpfNexthop {
+                    let nhop = SpfNexthop::<V4> {
                         ifindex: *link_id,
                         adjacency: *node == nhop_id,
                         sys_id: Some(nhop_sys_id),
@@ -903,8 +886,8 @@ fn build_rib_from_spf_v6(
     spf_result: &BTreeMap<usize, spf::Path>,
     tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
     mt2_mode: bool,
-) -> PrefixMap<Ipv6Net, SpfRouteV6> {
-    let mut rib = PrefixMap::<Ipv6Net, SpfRouteV6>::new();
+) -> PrefixMap<Ipv6Net, SpfRoute<V6>> {
+    let mut rib = PrefixMap::<Ipv6Net, SpfRoute<V6>>::new();
 
     // NLPID gate set — only used in legacy mode.
     let ipv6_capable = if mt2_mode {
@@ -981,7 +964,7 @@ fn build_rib_from_spf_v6(
                     continue;
                 };
                 for addr in nbr.addr6l.iter() {
-                    let nhop = SpfNexthopV6 {
+                    let nhop = SpfNexthop::<V6> {
                         ifindex: *link_id,
                         adjacency: is_adjacency,
                         sys_id: Some(nhop_sys_id),
@@ -1009,11 +992,12 @@ fn build_rib_from_spf_v6(
         };
         if let Some(entries) = reach {
             for entry in entries.iter() {
-                let route = SpfRouteV6 {
+                let route = SpfRoute::<V6> {
                     metric: nhops.cost + entry.metric,
                     nhops: spf_nhops.clone(),
                     sid: None,
                     prefix_sid: None,
+                    no_php: false,
                     dest_vertex: Some(*node),
                     backup_as_primary: top.config.fast_reroute_backup_as_primary,
                 };
@@ -1082,8 +1066,8 @@ fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
 fn apply_routing_updates(
     top: &mut IsisTop,
     level: Level,
-    rib: PrefixMap<Ipv4Net, SpfRoute>,
-    rib_v6: PrefixMap<Ipv6Net, SpfRouteV6>,
+    rib: PrefixMap<Ipv4Net, SpfRoute<V4>>,
+    rib_v6: PrefixMap<Ipv6Net, SpfRoute<V6>>,
     ilm: BTreeMap<u32, SpfIlm>,
 ) {
     // Update MPLS ILM
@@ -1114,7 +1098,7 @@ fn apply_routing_updates(
     // Update IPv6 RIB
     if top.config.distribute.rib {
         let diff = spf::table_diff(top.rib_v6.get(&level).iter(), rib_v6.iter());
-        diff_apply_v6(top.rib_client, &diff, level);
+        diff_apply::<V6>(top.rib_client, &diff, level);
     }
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
@@ -1429,7 +1413,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // so stale graphs / SPFs / RIBs don't survive a delete.
     let mut new_flex_algo_graphs: BTreeMap<u8, Option<spf::Graph>> = BTreeMap::new();
     let mut new_flex_algo_spfs: BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>> = BTreeMap::new();
-    let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+    let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
     for FlexAlgoOutput {
         algo,
         graph: algo_graph,
@@ -1447,7 +1431,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
                 mpls_route(&r, &mut ilm, srgb);
                 r
             }
-            _ => PrefixMap::<Ipv4Net, SpfRoute>::new(),
+            _ => PrefixMap::<Ipv4Net, SpfRoute<V4>>::new(),
         };
 
         new_flex_algo_graphs.insert(algo, Some(algo_graph));
@@ -1510,8 +1494,8 @@ fn build_rib_from_flex_algo(
     algo: u8,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-) -> PrefixMap<Ipv4Net, SpfRoute> {
-    let mut rib = PrefixMap::<Ipv4Net, SpfRoute>::new();
+) -> PrefixMap<Ipv4Net, SpfRoute<V4>> {
+    let mut rib = PrefixMap::<Ipv4Net, SpfRoute<V4>>::new();
 
     for (node, nhops) in spf_result {
         if *node == source {
@@ -1546,7 +1530,7 @@ fn build_rib_from_flex_algo(
                     continue;
                 };
                 for (addr, _) in nbr.addr4.iter() {
-                    let nhop = SpfNexthop {
+                    let nhop = SpfNexthop::<V4> {
                         ifindex: *link_id,
                         adjacency: *node == nhop_id,
                         sys_id: Some(nhop_sys_id),
@@ -1682,7 +1666,7 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
             let mut nhops = BTreeMap::new();
             nhops.insert(
                 addr,
-                SpfNexthop {
+                SpfNexthop::<V4> {
                     ifindex,
                     adjacency: true,
                     sys_id: None,
@@ -1711,7 +1695,7 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
 }
 
 pub fn mpls_route(
-    rib: &PrefixMap<Ipv4Net, SpfRoute>,
+    rib: &PrefixMap<Ipv4Net, SpfRoute<V4>>,
     ilm: &mut BTreeMap<u32, SpfIlm>,
     srgb: Option<&crate::spf::label_block::LabelBlock>,
 ) {
@@ -1773,12 +1757,12 @@ mod tests {
         rib::NexthopUni::new(addr.parse().unwrap(), metric, vec![])
     }
 
-    fn spf_route(metric: u32, sid: Option<u32>, nhops: &[(&str, u32)]) -> SpfRoute {
+    fn spf_route(metric: u32, sid: Option<u32>, nhops: &[(&str, u32)]) -> SpfRoute<V4> {
         let mut nh = BTreeMap::new();
         for (addr, ifindex) in nhops {
             nh.insert(
                 addr.parse::<Ipv4Addr>().unwrap(),
-                super::SpfNexthop {
+                super::SpfNexthop::<V4> {
                     ifindex: *ifindex,
                     adjacency: false,
                     sys_id: None,
@@ -1786,7 +1770,7 @@ mod tests {
                 },
             );
         }
-        SpfRoute {
+        SpfRoute::<V4> {
             metric,
             nhops: nh,
             sid,
@@ -1849,7 +1833,7 @@ mod tests {
     #[test]
     fn diff_apply_flex_algo_emits_add_for_new_route() {
         let (client, mut rx) = rib_client_for_test();
-        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut t = PrefixMap::new();
         t.insert(
             pfx("10.0.0.1/32"),
@@ -1870,7 +1854,7 @@ mod tests {
     #[test]
     fn diff_apply_flex_algo_emits_del_for_removed_algo() {
         let (client, mut rx) = rib_client_for_test();
-        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut t = PrefixMap::new();
         t.insert(
             pfx("10.0.0.1/32"),
@@ -1896,7 +1880,7 @@ mod tests {
     #[test]
     fn diff_apply_flex_algo_changed_route_emits_single_add() {
         let (client, mut rx) = rib_client_for_test();
-        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut p = PrefixMap::new();
         p.insert(
             pfx("10.0.0.1/32"),
@@ -1904,7 +1888,7 @@ mod tests {
         );
         prev.insert(128, p);
 
-        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut n = PrefixMap::new();
         // Same prefix, different metric → counts as `different`.
         n.insert(
@@ -1926,7 +1910,7 @@ mod tests {
     #[test]
     fn diff_apply_flex_algo_changed_route_losing_sid_collapses_to_del() {
         let (client, mut rx) = rib_client_for_test();
-        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut prev: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut p = PrefixMap::new();
         p.insert(
             pfx("10.0.0.1/32"),
@@ -1934,7 +1918,7 @@ mod tests {
         );
         prev.insert(128, p);
 
-        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute>> = BTreeMap::new();
+        let mut next: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
         let mut n = PrefixMap::new();
         // Lost SID — no per-algo forwarding plane, must be a Del.
         n.insert(pfx("10.0.0.1/32"), spf_route(30, None, &[("10.0.0.5", 9)]));
@@ -2032,14 +2016,14 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             "10.0.0.1".parse().unwrap(),
-            SpfNexthop {
+            SpfNexthop::<V4> {
                 ifindex: 10,
                 adjacency: true,
                 sys_id: None,
                 backup: None,
             },
         );
-        let route = SpfRoute {
+        let route = SpfRoute::<V4> {
             metric: 20,
             nhops,
             sid: None,
@@ -2063,7 +2047,7 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             primary_addr,
-            SpfNexthop {
+            SpfNexthop::<V4> {
                 ifindex: 10,
                 adjacency: true,
                 sys_id: None,
@@ -2074,7 +2058,7 @@ mod tests {
                 }),
             },
         );
-        let route = SpfRoute {
+        let route = SpfRoute::<V4> {
             metric: 20,
             nhops,
             sid: None,
@@ -2115,7 +2099,7 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             primary_addr,
-            SpfNexthop {
+            SpfNexthop::<V4> {
                 ifindex: 10,
                 adjacency: true,
                 sys_id: None,
@@ -2126,7 +2110,7 @@ mod tests {
                 }),
             },
         );
-        let route = SpfRoute {
+        let route = SpfRoute::<V4> {
             metric: 20,
             nhops,
             sid: None,
@@ -2170,8 +2154,8 @@ mod tests {
 
         let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
 
-        let mut prev: BTreeMap<Ipv4Net, SpfRoute> = BTreeMap::new();
-        let mut next: BTreeMap<Ipv4Net, SpfRoute> = BTreeMap::new();
+        let mut prev: BTreeMap<Ipv4Net, SpfRoute<V4>> = BTreeMap::new();
+        let mut next: BTreeMap<Ipv4Net, SpfRoute<V4>> = BTreeMap::new();
 
         let off = spf_route(20, None, &[("10.0.0.1", 10)]);
         let mut on = spf_route(20, None, &[("10.0.0.1", 10)]);
@@ -2206,7 +2190,7 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             primary_addr,
-            SpfNexthopV6 {
+            SpfNexthop::<V6> {
                 ifindex: 10,
                 adjacency: true,
                 sys_id: None,
@@ -2218,15 +2202,16 @@ mod tests {
                 }),
             },
         );
-        let route = SpfRouteV6 {
+        let route = SpfRoute::<V6> {
             metric: 20,
             nhops,
             sid: None,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: false,
         };
-        let entry = make_rib_entry_v6(&route, Level::L1);
+        let entry = make_rib_entry::<V6>(&route, Level::L1);
 
         let rib::Nexthop::List(list) = &entry.nexthop else {
             panic!("expected List, got {:?}", entry.nexthop);
@@ -2264,27 +2249,28 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             "fe80::a:2".parse().unwrap(),
-            SpfNexthopV6 {
+            SpfNexthop::<V6> {
                 ifindex: 10,
                 adjacency: true,
                 sys_id: None,
                 backup: None,
             },
         );
-        let route = SpfRouteV6 {
+        let route = SpfRoute::<V6> {
             metric: 20,
             nhops,
             sid: None,
             prefix_sid: None,
+            no_php: false,
             dest_vertex: None,
             backup_as_primary: false,
         };
         assert_eq!(
-            make_rib_entry_v6(&route, Level::L1).rsubtype,
+            make_rib_entry::<V6>(&route, Level::L1).rsubtype,
             RibSubType::IsisLevel1
         );
         assert_eq!(
-            make_rib_entry_v6(&route, Level::L2).rsubtype,
+            make_rib_entry::<V6>(&route, Level::L2).rsubtype,
             RibSubType::IsisLevel2
         );
     }
@@ -2293,7 +2279,7 @@ mod tests {
         let mut nhops = BTreeMap::new();
         nhops.insert(
             "10.0.0.1".parse::<Ipv4Addr>().unwrap(),
-            SpfNexthop {
+            SpfNexthop::<V4> {
                 ifindex: 10,
                 adjacency,
                 sys_id: None,
