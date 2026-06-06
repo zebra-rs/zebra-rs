@@ -301,13 +301,23 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // Check link capability for the level.
     if !has_level(link.state.level(), level) {
-        isis_pdu_trace!(link, &level, "[Hello:Recv] Link does not have the level");
+        isis_pdu_trace!(
+            link,
+            &level,
+            "[Hello:Recv] {} Link does not have the level",
+            link.state.name
+        );
         return;
     }
 
     // Check link type.
     if !link.is_lan() {
-        isis_pdu_trace!(link, &level, "[Hello:Recv] Link type is not LAN");
+        isis_pdu_trace!(
+            link,
+            &level,
+            "[Hello:Recv] {} Link type is not LAN",
+            link.state.name
+        );
         return;
     }
 
@@ -564,25 +574,28 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
-        // Logging.
-        isis_pdu_trace!(link, &level, "[P2P Hello:Recv] on link {}", link.state.name);
-
         // Check if both sender and receiver support this level
         if !has_level(link_level, level) || !has_level(pdu_level, level) {
-            isis_pdu_trace!(
-                link,
-                &level,
-                "[P2P Hello:Recv] Link does not have enough level"
-            );
+            // Logging if level mismatch.
+            if has_level(link_level, level) || has_level(pdu_level, level) {
+                isis_pdu_trace!(
+                    link,
+                    &level,
+                    "[Hello P2P:Recv] Link level {link_level} and PDU level {pdu_level} mismatch",
+                );
+            }
             continue;
         }
+
+        // Logging.
+        isis_pdu_trace!(link, &level, "[Hello P2P:Recv] on link {}", link.state.name);
 
         // Check link type.
         if !link.is_p2p() {
             isis_pdu_trace!(
                 link,
                 &level,
-                "[P2P Hello:Recv] Link type is not point-to-point"
+                "[Hello P2P:Recv] Link type is not point-to-point"
             );
             return;
         }
@@ -596,7 +609,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             isis_pdu_trace!(
                 link,
                 &level,
-                "[P2P Hello:Recv] L1 area mismatch — adjacency refused"
+                "[Hello P2P:Recv] L1 area mismatch — adjacency refused"
             );
             continue;
         }
