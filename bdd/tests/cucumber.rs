@@ -1307,6 +1307,27 @@ async fn ilm_should_be_empty(world: &mut World, namespace: String) {
     println!("✓ MPLS ILM in {} is empty", scoped);
 }
 
+/// Add a secondary IP address to an existing interface inside a namespace.
+/// Used to create a truly-external prefix (not in the OSPF domain) for
+/// redistribute-connected AS-External testing without needing a separate
+/// veth pair or physical interface.
+#[when(expr = "I add address {string} to interface {string} in namespace {string}")]
+async fn add_address_to_interface(
+    world: &mut World,
+    addr: String,
+    iface: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "ip", &["addr", "add", &addr, "dev", &iface])
+        .await
+        .expect("Failed to add address to interface");
+    println!(
+        "✓ Added address {} to {} in namespace {}",
+        addr, iface, scoped
+    );
+}
+
 #[then("the test environment should be clean")]
 async fn verify_clean_environment(world: &mut World) {
     if keep_topology() {

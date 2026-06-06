@@ -250,6 +250,11 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     /// identify the pair. Maintained by
     /// `Ospf::nssa_translate_resync` in `inst.rs`.
     pub nssa_translated: BTreeSet<Ipv4Addr>,
+
+    /// Router-IDs of ASBRs for which this ABR has originated a
+    /// Type-4 Summary-ASBR LSA into this area. Flushed when the
+    /// ABR loses connectivity to the ASBR or the area.
+    pub asbr_summaries_originated: BTreeSet<Ipv4Addr>,
 }
 
 impl<V: OspfVersion> OspfArea<V> {
@@ -265,6 +270,7 @@ impl<V: OspfVersion> OspfArea<V> {
             redistribute: AreaRedistribute::default(),
             redist_connected_originated: BTreeSet::new(),
             nssa_translated: BTreeSet::new(),
+            asbr_summaries_originated: BTreeSet::new(),
         }
     }
 }
