@@ -1,4 +1,4 @@
-name: Nightly Rolling Build
+name: Nightly Build
 
 on:
   # push:
@@ -166,7 +166,7 @@ jobs:
           path: ./packaging/*.deb
 
   # =====================================================================
-  # Publish all six .deb files as a Rolling "nightly" Release
+  # Publish all six .deb files as a "nightly" Release
   # =====================================================================
   release:
     name: Publish Nightly Release
@@ -203,7 +203,7 @@ jobs:
           name: "Nightly Build"
           prerelease: true
           body: |
-            Rolling nightly build from commit ${{ github.sha }}
+            Nightly build from commit ${{ github.sha }}
 
             Built at: ${{ github.event.repository.updated_at }}
 
