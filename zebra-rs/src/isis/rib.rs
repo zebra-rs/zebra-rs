@@ -635,19 +635,31 @@ pub fn diff_apply<F: IsisRibFamily>(
     diff: &DiffResult<'_, F>,
     level: Level,
 ) {
+    // Mirrors `diff_apply_flex_algo`: a prefix that left the table, or
+    // changed to a route with no forwarding plane, must always be
+    // withdrawn. `rib_del` is keyed on RibType, so it is a harmless
+    // no-op when nothing is installed — but skipping it leaks a
+    // previously-installed route whose nexthops were later cleared.
+    // (An earlier V4 builder could cache empty-nexthop entries; guarding
+    // the delete on `!nhops.is_empty()` then dropped their withdrawal and
+    // orphaned the kernel FIB route.)
     for (prefix, route) in diff.only_curr.iter() {
-        if !route.nhops.is_empty() {
-            let entry = make_rib_entry::<F>(route, level);
-            rib_client.send(F::rib_del(*prefix, entry)).unwrap();
-        }
+        let entry = make_rib_entry::<F>(route, level);
+        rib_client.send(F::rib_del(*prefix, entry)).unwrap();
     }
     for (prefix, _, route) in diff.different.iter() {
-        if !route.nhops.is_empty() {
-            let entry = make_rib_entry::<F>(route, level);
+        let entry = make_rib_entry::<F>(route, level);
+        if route.nhops.is_empty() {
+            // Lost all nexthops: collapse the change to a withdrawal so
+            // the stale install is removed rather than left behind.
+            rib_client.send(F::rib_del(*prefix, entry)).unwrap();
+        } else {
             rib_client.send(F::rib_add(*prefix, entry)).unwrap();
         }
     }
     for (prefix, route) in diff.only_next.iter() {
+        // A brand-new prefix with no nexthops has nothing to install and
+        // no prior FIB state to withdraw, so it is simply skipped.
         if !route.nhops.is_empty() {
             let entry = make_rib_entry::<F>(route, level);
             rib_client.send(F::rib_add(*prefix, entry)).unwrap();
@@ -1997,6 +2009,71 @@ mod tests {
         };
         let entry = make_rib_entry(&route, Level::L2);
         assert!(matches!(entry.nexthop, rib::Nexthop::Uni(_)));
+    }
+
+    // Collect the prefixes `diff_apply` withdraws (Ipv4Del) and installs
+    // (Ipv4Add) when fed `curr`→`next`, so the empty-nexthop tests can
+    // assert on the exact messages without a live RIB task.
+    fn run_diff_apply(
+        curr: &PrefixMap<Ipv4Net, SpfRoute<V4>>,
+        next: &PrefixMap<Ipv4Net, SpfRoute<V4>>,
+    ) -> (Vec<Ipv4Net>, Vec<Ipv4Net>) {
+        use crate::rib::client::{ProtoId, RibClient};
+
+        let diff = spf::table_diff(curr.iter(), next.iter());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = RibClient::new(tx, ProtoId::from_raw(1));
+        diff_apply::<V4>(&client, &diff, Level::L1);
+        drop(client); // close the channel so the drain terminates
+
+        let (mut dels, mut adds) = (vec![], vec![]);
+        while let Ok(env) = rx.try_recv() {
+            match env.msg {
+                crate::rib::Message::Ipv4Del { prefix, .. } => dels.push(prefix),
+                crate::rib::Message::Ipv4Add { prefix, .. } => adds.push(prefix),
+                _ => panic!("unexpected message variant"),
+            }
+        }
+        (dels, adds)
+    }
+
+    #[test]
+    fn diff_apply_withdraws_empty_nexthop_route() {
+        // A cached route whose nexthops were cleared still has to be
+        // withdrawn when the prefix leaves the table. Guarding the delete
+        // on `!nhops.is_empty()` once leaked the kernel FIB route here.
+        let prefix: Ipv4Net = "10.0.0.2/32".parse().unwrap();
+        let mut curr = PrefixMap::new();
+        curr.insert(prefix, spf_route(10, None, &[])); // empty nexthops
+        let next = PrefixMap::new();
+
+        let (dels, adds) = run_diff_apply(&curr, &next);
+        assert_eq!(
+            dels,
+            vec![prefix],
+            "withdrawal must fire for empty-nhop route"
+        );
+        assert!(adds.is_empty());
+    }
+
+    #[test]
+    fn diff_apply_collapses_emptied_route_to_del() {
+        // A route that changes to a no-nexthop state (in both tables, so
+        // it lands in `different`) must collapse to a withdrawal, not be
+        // skipped — otherwise the prior install lingers in the FIB.
+        let prefix: Ipv4Net = "10.0.0.2/32".parse().unwrap();
+        let mut curr = PrefixMap::new();
+        curr.insert(prefix, spf_route(10, None, &[("10.0.1.2", 2)])); // had a nexthop
+        let mut next = PrefixMap::new();
+        next.insert(prefix, spf_route(20, None, &[])); // now empty -> "different"
+
+        let (dels, adds) = run_diff_apply(&curr, &next);
+        assert_eq!(
+            dels,
+            vec![prefix],
+            "emptied route must collapse to a delete"
+        );
+        assert!(adds.is_empty(), "must not re-add a nexthop-less route");
     }
 
     #[test]
