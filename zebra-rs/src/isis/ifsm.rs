@@ -122,13 +122,16 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     let area_addr = link.up_config.net.area_id();
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
-    for prefix in &link.state.v4addr {
-        hello.tlvs.push(
-            IsisTlvIpv4IfAddr {
-                addr: prefix.addr(),
-            }
-            .into(),
-        );
+
+    if link.config.enable.v4 {
+        for prefix in &link.state.v4addr {
+            hello.tlvs.push(
+                IsisTlvIpv4IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
     }
 
     // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
@@ -213,13 +216,15 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     hello.tlvs.push(tlv.into());
 
     // Add IPv4 interface addresses
-    for prefix in &link.state.v4addr {
-        hello.tlvs.push(
-            IsisTlvIpv4IfAddr {
-                addr: prefix.addr(),
-            }
-            .into(),
-        );
+    if link.config.enable.v4 {
+        for prefix in &link.state.v4addr {
+            hello.tlvs.push(
+                IsisTlvIpv4IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
     }
 
     // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
