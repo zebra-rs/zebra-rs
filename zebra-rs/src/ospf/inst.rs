@@ -1175,7 +1175,13 @@ impl Ospf<Ospfv2> {
     /// NfsmState::Full` filters below honour the invariant
     /// implicitly — do not switch them to a tighter "still receiving
     /// Hellos" check without re-establishing equivalence here.
-    fn router_lsa_build(&self) -> RouterLsa {
+    /// Build the Router-LSA this router originates into `area_id`.
+    /// RFC 2328 §12.4.1: a router that belongs to several areas
+    /// originates a separate Router-LSA into each, listing only the
+    /// links that attach to that area. The caller
+    /// (`router_lsa_originate_with_min_seq`) loops over every attached
+    /// area; here we just filter `self.links` down to `area_id`.
+    fn router_lsa_build(&self, area_id: Ipv4Addr) -> RouterLsa {
         let mut router_lsa = RouterLsa::default();
 
         // RFC 2328 §A.4.2 / RFC 3101 §3.1 Router-LSA flags:
@@ -1187,19 +1193,22 @@ impl Ospf<Ospfv2> {
         // `is_nssa_translator_for`) reads other routers' B-bits out
         // of NSSA Router-LSAs to pick the elected translator.
         //
-        // Nt-bit is intentionally NOT set here. The Nt-bit MUST sit
-        // in the Router-LSA scoped to the NSSA itself (RFC 3101
-        // §3.1), but `router_lsa_originate` currently emits a single
-        // Router-LSA into AREA0 — per-area emission is a separate
-        // refactor. Election is locally-computed across all OSPF
-        // implementations, so omitting Nt-bit is interop-safe; the
-        // bit becomes meaningful once per-area Router-LSAs land.
+        // Nt-bit is still intentionally NOT set here. Per-area
+        // emission now lands (this LSA is scoped to `area_id`), so the
+        // bit *could* be stamped on the NSSA-scoped copy, but election
+        // is locally-computed across all OSPF implementations, so
+        // omitting it stays interop-safe; wiring the Nt-bit is left to
+        // the NSSA-translator work.
         if self.is_abr() {
             router_lsa.flags |= 0x0001;
         }
 
         for link in self.links.values() {
             if !link.enabled {
+                continue;
+            }
+            // Only this area's links belong in this area's Router-LSA.
+            if link.area_id != area_id {
                 continue;
             }
 
@@ -1287,34 +1296,48 @@ impl Ospf<Ospfv2> {
         if self.in_restart() {
             return;
         }
-        let router_lsa = self.router_lsa_build();
-        let flood_lsa = if let Some(area) = self.areas.get_mut(AREA0) {
-            let current_seq = area
-                .lsdb
-                .lookup_by_id(OspfLsType::Router, self.router_id, self.router_id)
-                .map(|lsa| lsa.h.ls_seq_number);
+        // RFC 2328 §12.4.1: originate one Router-LSA per attached area
+        // (an area is "attached" once it has at least one enabled
+        // link). Each carries only that area's links, lives in that
+        // area's LSDB, and floods only on that area's interfaces.
+        let area_ids: Vec<Ipv4Addr> = self
+            .areas
+            .iter()
+            .filter(|(_, area)| !area.links.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
 
-            let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
-            let mut lsa = OspfLsa::from(lsah, router_lsa.into());
+        for area_id in area_ids {
+            let router_lsa = self.router_lsa_build(area_id);
+            let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
+                let current_seq = area
+                    .lsdb
+                    .lookup_by_id(OspfLsType::Router, self.router_id, self.router_id)
+                    .map(|lsa| lsa.h.ls_seq_number);
 
-            if let Some(seq) = current_seq {
-                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
+                let lsah = OspfLsaHeader::new(OspfLsType::Router, self.router_id, self.router_id);
+                let mut lsa = OspfLsa::from(lsah, router_lsa.into());
+
+                if let Some(seq) = current_seq {
+                    lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
+                }
+                if let Some(seq) = min_seq {
+                    lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
+                }
+
+                lsa.update();
+                let flood_lsa = lsa.clone();
+                area.lsdb
+                    .insert_self_originated(lsa, &self.tx, Some(area_id));
+                Self::ospf_spf_schedule(&self.tx, area);
+                Some(flood_lsa)
+            } else {
+                None
+            };
+
+            if let Some(lsa) = flood_lsa {
+                self.flood_self_originated_lsa(area_id, &lsa);
             }
-            if let Some(seq) = min_seq {
-                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, seq.saturating_add(1));
-            }
-
-            lsa.update();
-            let flood_lsa = lsa.clone();
-            area.lsdb.insert_self_originated(lsa, &self.tx, Some(AREA0));
-            Self::ospf_spf_schedule(&self.tx, area);
-            Some(flood_lsa)
-        } else {
-            None
-        };
-
-        if let Some(lsa) = flood_lsa {
-            self.flood_self_originated_lsa(AREA0, &lsa);
         }
     }
 
