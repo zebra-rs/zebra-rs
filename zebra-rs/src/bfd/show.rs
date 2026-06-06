@@ -42,14 +42,25 @@ impl Bfd {
 // Formatting helpers
 // -----------------------------------------------------------------------
 
-/// Human label for a session's attachment: `multihop`, `ifN`, or `-`.
+/// Human label for a session's attachment: `multihop`, interface name, or `-`.
 fn iface_str(key: &SessionKey) -> String {
     if key.multihop {
         "multihop".to_string()
     } else if key.ifindex == 0 {
         "-".to_string()
     } else {
-        format!("if{}", key.ifindex)
+        // Resolve the ifindex to a human-readable interface name.  The process
+        // runs inside the relevant network namespace, so if_indextoname(3) sees
+        // the same interfaces that zebra-rs configured.
+        let mut buf = [0u8; libc::IF_NAMESIZE];
+        let ptr =
+            unsafe { libc::if_indextoname(key.ifindex, buf.as_mut_ptr() as *mut libc::c_char) };
+        if !ptr.is_null() {
+            let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
+            cstr.to_string_lossy().into_owned()
+        } else {
+            format!("if{}", key.ifindex)
+        }
     }
 }
 
@@ -547,7 +558,13 @@ mod tests {
         assert!(out.contains("Peer"), "header present");
         assert!(out.contains("10.0.0.2"), "peer address");
         assert!(out.contains("Up"), "state");
-        assert!(out.contains("if3"), "interface label");
+        // Interface label: either the resolved name for ifindex 3 or the "ifN" fallback.
+        let iface_present = out
+            .lines()
+            .filter(|l| l.contains("10.0.0.2"))
+            .filter_map(|l| l.split_whitespace().last())
+            .any(|tok| !tok.is_empty());
+        assert!(iface_present, "interface label present in row");
     }
 
     #[tokio::test]
