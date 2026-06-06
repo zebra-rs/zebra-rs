@@ -714,7 +714,7 @@ fn show_isis_fast_reroute_prefix_detail(
         }
 
         for (addr, nhop) in route.nhops.iter() {
-            write_isis_nhop_v4_detail(&mut buf, isis, level, route, addr, nhop)?;
+            write_isis_nhop_detail::<V4>(&mut buf, isis, level, route, addr, nhop)?;
         }
     }
     if !found {
@@ -1103,7 +1103,7 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         writeln!(buf)?;
         writeln!(buf, "IS-IS {} IPv4 routing table:", level_short)?;
         writeln!(buf)?;
-        write_rib_v4(&mut buf, isis, level)?;
+        write_rib_table::<V4>(&mut buf, isis, isis.rib.get(level))?;
 
         // IPv6 SPF tree. MT 2 enabled → MT 2 SPF; legacy otherwise.
         let mt2 = mt2_v6_active(isis);
@@ -1136,7 +1136,7 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         writeln!(buf)?;
         writeln!(buf, "IS-IS {} IPv6 routing table:", level_short)?;
         writeln!(buf)?;
-        write_rib_v6(&mut buf, isis, level)?;
+        write_rib_table::<V6>(&mut buf, isis, isis.rib_v6.get(level))?;
     }
 
     if !wrote_any_level {
@@ -1571,17 +1571,136 @@ fn fmt_isis_srv6_segs(segs: &[std::net::Ipv6Addr]) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-/// Emit one nhop block for the IPv4 detail view. Walks the primary
-/// (addr + iface + neighbor hostname + SRGB), the route's
-/// prefix-SID if present, and the backup path when stamped.
-fn write_isis_nhop_v4_detail(
+/// Per-family show extensions for the RIB table and nhop-detail
+/// renderers.  Lives entirely in show.rs so rib.rs stays free of
+/// display concerns.
+trait IsisRibFamilyShow: IsisRibFamily {
+    const W_PREFIX: usize;
+    const W_NEXTHOP: usize;
+    /// Render the Label(s) column for one tabular row.
+    /// `nhop` is `None` for the no-nexthop (directly-connected) row.
+    fn label_col(route: &SpfRoute<Self>, nhop: Option<&SpfNexthop<Self>>) -> String;
+    /// Append optional suffix text (e.g. SRGB Base) after
+    /// `via addr, iface, nbr` but before the newline.
+    fn write_nhop_extra(
+        buf: &mut String,
+        isis: &Isis,
+        level: &Level,
+        nhop: &SpfNexthop<Self>,
+    ) -> std::fmt::Result;
+    /// Write the Prefix-SID block when present.
+    fn write_sid_block(
+        buf: &mut String,
+        route: &SpfRoute<Self>,
+        nhop: &SpfNexthop<Self>,
+    ) -> std::fmt::Result;
+    /// Write the backup-path stanza.
+    fn write_backup(
+        buf: &mut String,
+        isis: &Isis,
+        level: &Level,
+        nhop: &SpfNexthop<Self>,
+    ) -> std::fmt::Result;
+}
+
+impl IsisRibFamilyShow for V4 {
+    const W_PREFIX: usize = 18;
+    const W_NEXTHOP: usize = 16;
+    fn label_col(route: &SpfRoute<V4>, nhop: Option<&SpfNexthop<V4>>) -> String {
+        match (route.sid, nhop) {
+            (None, _) => "-".into(),
+            (Some(sid), None) => sid.to_string(),
+            (Some(sid), Some(nhop)) => {
+                if nhop.adjacency {
+                    format!("{} (impl-null)", sid)
+                } else {
+                    sid.to_string()
+                }
+            }
+        }
+    }
+    fn write_nhop_extra(
+        buf: &mut String,
+        isis: &Isis,
+        level: &Level,
+        nhop: &SpfNexthop<V4>,
+    ) -> std::fmt::Result {
+        if let Some(srgb) = nhop.sys_id.and_then(|s| srgb_base_for(isis, level, &s)) {
+            write!(buf, ", SRGB Base: {}", srgb)?;
+        }
+        Ok(())
+    }
+    fn write_sid_block(
+        buf: &mut String,
+        route: &SpfRoute<V4>,
+        nhop: &SpfNexthop<V4>,
+    ) -> std::fmt::Result {
+        if let Some(sid) = route.sid {
+            let tag = if nhop.adjacency { " (impl-null)" } else { "" };
+            writeln!(buf, "    Prefix-SID: {}{}", sid, tag)?;
+        }
+        Ok(())
+    }
+    fn write_backup(
+        buf: &mut String,
+        isis: &Isis,
+        level: &Level,
+        nhop: &SpfNexthop<V4>,
+    ) -> std::fmt::Result {
+        if let Some(backup) = &nhop.backup {
+            write_isis_backup_v4_detail(buf, isis, level, backup)?;
+        }
+        Ok(())
+    }
+}
+
+impl IsisRibFamilyShow for V6 {
+    const W_PREFIX: usize = 22;
+    const W_NEXTHOP: usize = 26;
+    fn label_col(_route: &SpfRoute<V6>, _nhop: Option<&SpfNexthop<V6>>) -> String {
+        "-".into()
+    }
+    fn write_nhop_extra(
+        _buf: &mut String,
+        _isis: &Isis,
+        _level: &Level,
+        _nhop: &SpfNexthop<V6>,
+    ) -> std::fmt::Result {
+        Ok(())
+    }
+    fn write_sid_block(
+        _buf: &mut String,
+        _route: &SpfRoute<V6>,
+        _nhop: &SpfNexthop<V6>,
+    ) -> std::fmt::Result {
+        Ok(())
+    }
+    fn write_backup(
+        buf: &mut String,
+        isis: &Isis,
+        level: &Level,
+        nhop: &SpfNexthop<V6>,
+    ) -> std::fmt::Result {
+        if let Some(backup) = &nhop.backup {
+            write_isis_backup_v6_detail(buf, isis, level, backup)?;
+        }
+        Ok(())
+    }
+}
+
+/// Generic nhop-detail writer for `show isis route detail`.
+fn write_isis_nhop_detail<F>(
     buf: &mut String,
     isis: &Isis,
     level: &Level,
-    route: &SpfRoute<V4>,
-    addr: &std::net::Ipv4Addr,
-    nhop: &SpfNexthop<V4>,
-) -> std::fmt::Result {
+    route: &SpfRoute<F>,
+    addr: &F::Addr,
+    nhop: &SpfNexthop<F>,
+) -> std::fmt::Result
+where
+    F: IsisRibFamilyShow,
+    F::Addr: std::fmt::Display,
+{
     let nbr_hostname = nhop
         .sys_id
         .map(|s| hostname_for(isis, level, &s))
@@ -1593,19 +1712,10 @@ fn write_isis_nhop_v4_detail(
         isis.ifname(nhop.ifindex),
         nbr_hostname
     )?;
-    if let Some(srgb) = nhop.sys_id.and_then(|s| srgb_base_for(isis, level, &s)) {
-        write!(buf, ", SRGB Base: {}", srgb)?;
-    }
+    F::write_nhop_extra(buf, isis, level, nhop)?;
     writeln!(buf)?;
-
-    if let Some(sid) = route.sid {
-        let tag = if nhop.adjacency { " (impl-null)" } else { "" };
-        writeln!(buf, "    Prefix-SID: {}{}", sid, tag)?;
-    }
-
-    if let Some(backup) = &nhop.backup {
-        write_isis_backup_v4_detail(buf, isis, level, backup)?;
-    }
+    F::write_sid_block(buf, route, nhop)?;
+    F::write_backup(buf, isis, level, nhop)?;
     Ok(())
 }
 
@@ -1648,34 +1758,6 @@ fn write_isis_backup_v4_detail(
     Ok(())
 }
 
-/// IPv6 sibling — same shape but SRH segments instead of MPLS
-/// labels.
-fn write_isis_nhop_v6_detail(
-    buf: &mut String,
-    isis: &Isis,
-    level: &Level,
-    _route: &SpfRoute<V6>,
-    addr: &std::net::Ipv6Addr,
-    nhop: &SpfNexthop<V6>,
-) -> std::fmt::Result {
-    let nbr_hostname = nhop
-        .sys_id
-        .map(|s| hostname_for(isis, level, &s))
-        .unwrap_or_else(|| "-".into());
-    writeln!(
-        buf,
-        "  via {}, {}, {}",
-        addr,
-        isis.ifname(nhop.ifindex),
-        nbr_hostname
-    )?;
-
-    if let Some(backup) = &nhop.backup {
-        write_isis_backup_v6_detail(buf, isis, level, backup)?;
-    }
-    Ok(())
-}
-
 fn write_isis_backup_v6_detail(
     buf: &mut String,
     _isis: &Isis,
@@ -1701,9 +1783,8 @@ fn write_isis_backup_v6_detail(
     Ok(())
 }
 
-/// `show isis route detail` per-level IPv4 RIB renderer. Replaces
-/// the columnar `write_rib_v4` layout with per-prefix blocks that
-/// surface TI-LFA backup paths.
+/// Per-level RIB renderer for `show isis route detail`. Emits
+/// per-prefix blocks that surface TI-LFA backup paths.
 fn write_rib_detail<F>(
     buf: &mut String,
     isis: &Isis,
@@ -1771,7 +1852,7 @@ fn write_show_isis_route_text_detail(isis: &Isis) -> std::result::Result<String,
             isis,
             level,
             isis.rib.get(level),
-            write_isis_nhop_v4_detail,
+            write_isis_nhop_detail::<V4>,
         )?;
 
         writeln!(buf)?;
@@ -1782,7 +1863,7 @@ fn write_show_isis_route_text_detail(isis: &Isis) -> std::result::Result<String,
             isis,
             level,
             isis.rib_v6.get(level),
-            write_isis_nhop_v6_detail,
+            write_isis_nhop_detail::<V6>,
         )?;
     }
 
@@ -1792,11 +1873,20 @@ fn write_show_isis_route_text_detail(isis: &Isis) -> std::result::Result<String,
     Ok(buf)
 }
 
-fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
-    const W_PREFIX: usize = 18;
+fn write_rib_table<F>(
+    buf: &mut String,
+    isis: &Isis,
+    rib: &PrefixMap<F::Prefix, SpfRoute<F>>,
+) -> std::fmt::Result
+where
+    F: IsisRibFamilyShow,
+    F::Prefix: std::fmt::Display,
+    F::Addr: std::fmt::Display,
+{
     const W_METRIC: usize = 7;
     const W_INTERFACE: usize = 10;
-    const W_NEXTHOP: usize = 16;
+    let wp = F::W_PREFIX;
+    let wn = F::W_NEXTHOP;
 
     writeln!(
         buf,
@@ -1805,24 +1895,20 @@ fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
         "Metric",
         "Interface",
         "Nexthop",
-        wp = W_PREFIX,
+        wp = wp,
         wm = W_METRIC,
         wi = W_INTERFACE,
-        wn = W_NEXTHOP,
+        wn = wn,
     )?;
-    let total = 1 + W_PREFIX + 1 + W_METRIC + 1 + W_INTERFACE + 1 + W_NEXTHOP + 1 + 9;
+    let total = 1 + wp + 1 + W_METRIC + 1 + W_INTERFACE + 1 + wn + 1 + 9;
     writeln!(buf, " {}", "-".repeat(total - 2))?;
 
-    let mut entries: Vec<_> = isis.rib.get(level).iter().collect();
+    let mut entries: Vec<_> = rib.iter().collect();
     entries.sort_by_key(|(p, _)| *p);
 
     for (prefix, route) in entries {
         if route.nhops.is_empty() {
-            // Locally connected / no nexthop.
-            let label = route
-                .sid
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "-".into());
+            let label = F::label_col(route, None);
             writeln!(
                 buf,
                 " {:<wp$} {:<wm$} {:<wi$} {:<wn$} {}",
@@ -1831,23 +1917,15 @@ fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
                 "-",
                 "-",
                 label,
-                wp = W_PREFIX,
+                wp = wp,
                 wm = W_METRIC,
                 wi = W_INTERFACE,
-                wn = W_NEXTHOP,
+                wn = wn,
             )?;
             continue;
         }
         for (addr, nhop) in route.nhops.iter() {
-            let label = if let Some(sid) = route.sid {
-                if nhop.adjacency {
-                    format!("{} (impl-null)", sid)
-                } else {
-                    sid.to_string()
-                }
-            } else {
-                "-".into()
-            };
+            let label = F::label_col(route, Some(nhop));
             writeln!(
                 buf,
                 " {:<wp$} {:<wm$} {:<wi$} {:<wn$} {}",
@@ -1856,68 +1934,10 @@ fn write_rib_v4(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Resul
                 isis.ifname(nhop.ifindex),
                 addr,
                 label,
-                wp = W_PREFIX,
+                wp = wp,
                 wm = W_METRIC,
                 wi = W_INTERFACE,
-                wn = W_NEXTHOP,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn write_rib_v6(buf: &mut String, isis: &Isis, level: &Level) -> std::fmt::Result {
-    const W_PREFIX: usize = 22;
-    const W_METRIC: usize = 7;
-    const W_INTERFACE: usize = 10;
-    const W_NEXTHOP: usize = 26;
-
-    writeln!(
-        buf,
-        " {:<wp$} {:<wm$} {:<wi$} {:<wn$} Label(s)",
-        "Prefix",
-        "Metric",
-        "Interface",
-        "Nexthop",
-        wp = W_PREFIX,
-        wm = W_METRIC,
-        wi = W_INTERFACE,
-        wn = W_NEXTHOP,
-    )?;
-    let total = 1 + W_PREFIX + 1 + W_METRIC + 1 + W_INTERFACE + 1 + W_NEXTHOP + 1 + 9;
-    writeln!(buf, " {}", "-".repeat(total - 2))?;
-
-    let mut entries: Vec<_> = isis.rib_v6.get(level).iter().collect();
-    entries.sort_by_key(|(p, _)| *p);
-
-    for (prefix, route) in entries {
-        if route.nhops.is_empty() {
-            writeln!(
-                buf,
-                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} -",
-                prefix.to_string(),
-                route.metric,
-                "-",
-                "-",
-                wp = W_PREFIX,
-                wm = W_METRIC,
-                wi = W_INTERFACE,
-                wn = W_NEXTHOP,
-            )?;
-            continue;
-        }
-        for (addr, nhop) in route.nhops.iter() {
-            writeln!(
-                buf,
-                " {:<wp$} {:<wm$} {:<wi$} {:<wn$} -",
-                prefix.to_string(),
-                route.metric,
-                isis.ifname(nhop.ifindex),
-                addr,
-                wp = W_PREFIX,
-                wm = W_METRIC,
-                wi = W_INTERFACE,
-                wn = W_NEXTHOP,
+                wn = wn,
             )?;
         }
     }
