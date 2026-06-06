@@ -145,7 +145,6 @@ fn config_builder(prefix: &str) -> ConfigBuilder {
     const BOOL_ERR: &str = "flex-algo boolean arg parse error";
     const U8_ERR: &str = "flex-algo u8 arg parse error";
     const ENUM_ERR: &str = "flex-algo enum arg parse error";
-    const NAME_ERR: &str = "flex-algo name arg parse error";
 
     ConfigBuilder::default()
         .path(prefix)
@@ -242,54 +241,65 @@ fn config_builder(prefix: &str) -> ConfigBuilder {
         })
         .path(&format!("{prefix}/affinity/include-any"))
         .set(|config, cache, algo, args| {
+            // A YANG leaf-list delivers every value in a single args
+            // deque (see `path_from_command`), so drain it rather than
+            // reading just the first element.
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_any.insert(name);
+            while let Some(name) = args.string() {
+                e.include_any.insert(name);
+            }
             Ok(())
         })
         .del(|config, cache, algo, args| {
             let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_any.remove(&name);
+            while let Some(name) = args.string() {
+                e.include_any.remove(&name);
+            }
             Ok(())
         })
         .path(&format!("{prefix}/affinity/include-all"))
         .set(|config, cache, algo, args| {
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_all.insert(name);
+            while let Some(name) = args.string() {
+                e.include_all.insert(name);
+            }
             Ok(())
         })
         .del(|config, cache, algo, args| {
             let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.include_all.remove(&name);
+            while let Some(name) = args.string() {
+                e.include_all.remove(&name);
+            }
             Ok(())
         })
         .path(&format!("{prefix}/affinity/exclude-any"))
         .set(|config, cache, algo, args| {
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.exclude_any.insert(name);
+            while let Some(name) = args.string() {
+                e.exclude_any.insert(name);
+            }
             Ok(())
         })
         .del(|config, cache, algo, args| {
             let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.exclude_any.remove(&name);
+            while let Some(name) = args.string() {
+                e.exclude_any.remove(&name);
+            }
             Ok(())
         })
         .path(&format!("{prefix}/srlg-exclude"))
         .set(|config, cache, algo, args| {
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.srlg_exclude.insert(name);
+            while let Some(name) = args.string() {
+                e.srlg_exclude.insert(name);
+            }
             Ok(())
         })
         .del(|config, cache, algo, args| {
             let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
-            let name = args.string().context(NAME_ERR)?;
-            e.srlg_exclude.remove(&name);
+            while let Some(name) = args.string() {
+                e.srlg_exclude.remove(&name);
+            }
             Ok(())
         })
         .path(&format!("{prefix}/fast-reroute/ti-lfa"))
@@ -371,6 +381,28 @@ mod tests {
         assert_eq!(e.exclude_any.len(), 2);
         assert!(e.exclude_any.contains("blue"));
         assert!(e.exclude_any.contains("red"));
+    }
+
+    // Regression for the real dispatch shape: a YANG leaf-list arrives
+    // as ONE exec call with every value in the args deque (not one call
+    // per element). All values must be stored — reading just the first
+    // dropped every constraint past the first, silently breaking the
+    // flex-algo SPF affinity prune (e.g. `exclude-any [eu, transatlantic]`
+    // stored only `eu`).
+    #[test]
+    fn affinity_exclude_any_keeps_all_values_from_one_leaf_list_call() {
+        let mut fa = FlexAlgoConfig::new(P);
+        fa.exec(
+            format!("{P}/affinity/exclude-any"),
+            args(&["128", "eu", "transatlantic"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+        let e = fa.config.get(&128).unwrap();
+        assert_eq!(e.exclude_any.len(), 2);
+        assert!(e.exclude_any.contains("eu"));
+        assert!(e.exclude_any.contains("transatlantic"));
     }
 
     #[test]

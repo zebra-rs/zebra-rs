@@ -664,13 +664,16 @@ fn config_ospf_interface_cost(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> 
 fn config_ospf_interface_affinity(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let _area_id = parse_area_id(&args.string()?)?;
     let name = args.string()?;
-    let affinity = args.string()?;
 
     let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    if op.is_set() {
-        link.config.affinity.insert(affinity);
-    } else {
-        link.config.affinity.remove(&affinity);
+    // `affinity` is a leaf-list: every color arrives in one args deque,
+    // so drain it rather than reading only the first.
+    while let Some(affinity) = args.string() {
+        if op.is_set() {
+            link.config.affinity.insert(affinity);
+        } else {
+            link.config.affinity.remove(&affinity);
+        }
     }
     Some(())
 }
