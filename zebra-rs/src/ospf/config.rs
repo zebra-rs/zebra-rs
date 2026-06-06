@@ -5,7 +5,7 @@ use super::Ospf;
 use super::OspfLink;
 use super::area::{AreaTypeKind, ExternalMetricType, NssaTranslatorRole, RedistEntry};
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
-use super::link::{NbrStateThreshold, OspfAuthMode, OspfNetworkType};
+use super::link::{NbrStateThreshold, OSPF_DEFAULT_OUTPUT_COST, OspfAuthMode, OspfNetworkType};
 use super::version::{OspfVersion, Ospfv2};
 
 use crate::bfd::session::EchoMode;
@@ -96,6 +96,7 @@ impl Ospf {
             config_ospf_interface_network_type,
         );
         self.ospf_add("/area/interface/priority", config_ospf_interface_priority);
+        self.ospf_add("/area/interface/cost", config_ospf_interface_cost);
         self.ospf_add("/area/interface/affinity", config_ospf_interface_affinity);
         self.ospf_add(
             "/area/interface/te-metric/unidirectional-delay",
@@ -611,6 +612,30 @@ fn config_ospf_interface_priority(ospf: &mut Ospf, mut args: Args, op: ConfigOp)
     let _ = link
         .tx
         .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
+
+    Some(())
+}
+
+/// `/router/ospf/area/<id>/interface/<name>/cost` — RFC 2328 §C.3
+/// interface output cost, i.e. the metric stamped on this link in the
+/// Router-LSA (and the SPF edge weight). Stored straight into
+/// `link.output_cost`; clearing restores the protocol default (10).
+/// Because the metric rides in every attached area's Router-LSA,
+/// re-originate — which re-emits one Router-LSA per area and schedules
+/// that area's SPF — so the new cost takes effect immediately.
+fn config_ospf_interface_cost(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let cost = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.output_cost = if op.is_set() {
+        cost as u32
+    } else {
+        OSPF_DEFAULT_OUTPUT_COST
+    };
+
+    ospf.router_lsa_originate();
 
     Some(())
 }
