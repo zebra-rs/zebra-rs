@@ -703,6 +703,44 @@ async fn show_command_contains(
 /// output does NOT contain the given substring. Used to verify a
 /// suppressed entry is absent (e.g. the local Prefix-SID label withdrawn
 /// from `show mpls ilm` once `no-local-prefix-sid` is configured).
+#[then(expr = "show command {string} in namespace {string} should eventually not contain {string}")]
+async fn show_command_eventually_not_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    // Poll until the output no longer contains the needle. This is needed
+    // when the check spans multiple layers (e.g. IS-IS RIB withdrawal must
+    // propagate through the zebra-rs RIB task and into the kernel FIB before
+    // a subsequent ping-should-fail can pass). The common case (already gone)
+    // exits on the first attempt with no added delay.
+    const ATTEMPTS: u32 = 60;
+    let mut still_contains = true;
+    for i in 0..ATTEMPTS {
+        let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if !output.contains(&needle) {
+            still_contains = false;
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    assert!(
+        !still_contains,
+        "show '{}' in namespace {} still contained '{}' after {} attempts",
+        show_cmd, scoped, needle, ATTEMPTS
+    );
+    println!(
+        "✓ show '{}' in namespace {} does not contain '{}'",
+        show_cmd, scoped, needle
+    );
+}
+
 #[then(expr = "show command {string} in namespace {string} should not contain {string}")]
 async fn show_command_not_contains(
     world: &mut World,

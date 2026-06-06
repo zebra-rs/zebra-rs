@@ -77,7 +77,11 @@ Feature: IS-IS Hello authentication via an RFC 8177 key-chain
     And show command "show isis neighbor" in namespace "z2" should not contain "z1"
     # Forwarding over the now-unauthenticated link is broken: the
     # IS-IS-learned loopback is withdrawn and no longer reachable.
-    And show command "show isis route" in namespace "z1" should not contain "10.0.0.2/32"
+    # Poll the main RIB (not just IS-IS's own table) so we know the RIB task
+    # has processed the withdrawal and the kernel FIB is already clean before
+    # the ping-should-fail check runs.  Under 20-way concurrent load the RIB
+    # task can lag IS-IS's own table update by tens of seconds.
+    And show command "show ip route" in namespace "z1" should eventually not contain "10.0.0.2"
     And ping from "z1" to "10.0.0.2" should fail
     # The link itself is fine -- the directly-connected address still
     # answers, proving it's the adjacency (not the wire) that went away.
