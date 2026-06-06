@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::btree_map::Iter;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use strum_macros::{Display, EnumString};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::bfd::session::EchoMode;
+use crate::bfd::session::{EchoMode, SessionKey};
 use crate::config::{Args, ConfigOp};
 use crate::context::Timer;
 use crate::isis_event_trace;
@@ -585,6 +586,14 @@ pub struct LinkState {
     // peer coming back. The entry is cleared when BFD reports the session Up
     // again, or when the neighbour is torn down for real (hold-timer expiry).
     pub bfd_holddown: Levels<BTreeSet<IsisSysId>>,
+
+    // Reverse map from BFD SessionKey → (Level, IsisSysId). Populated by
+    // process_bfd_down alongside bfd_holddown so that process_bfd_up can
+    // clear the hold-down pin even when the neighbour entry was already
+    // removed from `nbrs` by nbr_hold_timer_expire (race: BFD recovers
+    // before the next IIH re-creates the entry). Cleaned up by
+    // nbr_hold_timer_expire and process_bfd_up on use.
+    pub bfd_holddown_nbr: HashMap<SessionKey, (Level, IsisSysId)>,
 
     // DIS status.
     pub dis_status: Levels<DisStatus>,

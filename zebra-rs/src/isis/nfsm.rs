@@ -59,6 +59,9 @@ pub fn nbr_hold_timer_expire(
     // RFC 5882 §3.2: this adjacency is being torn down for real, so drop any
     // BFD hold-down pin for it (a no-op when none is set).
     link.state.bfd_holddown.get_mut(&level).remove(&sys_id);
+    link.state
+        .bfd_holddown_nbr
+        .retain(|_, (l, s)| *l != level || *s != sys_id);
 
     let is_p2p = link.is_p2p();
 
