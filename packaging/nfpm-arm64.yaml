@@ -16,7 +16,7 @@ replaces:
   - zebra-rs
 provides:
   - zebra-rs
-maintainer: "Kunihiro Ishiguro <kunihiro@zebra.dev>"
+maintainer: "Kunihiro Ishiguro <kunihiro@zebra.rs>"
 description: |
   zebra-rs is reincarnation of GNU zebra in Rust.
 homepage: "https://zebra.dev"
