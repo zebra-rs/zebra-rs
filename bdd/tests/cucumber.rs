@@ -85,10 +85,10 @@ async fn clean_test_environment(world: &mut World) {
         }
     }
 
-    // 2. Sweep stale namespaces from a crashed prior run of THIS
-    // feature. Deleting a netns auto-destroys its in-namespace
-    // interfaces (including the ns end of any veth pair, which by
-    // veth semantics also destroys the host end).
+    // 2. Sweep stale namespaces from a crashed prior run of THIS feature.
+    // Note: `ip netns del` returns in-namespace interfaces to the host
+    // namespace rather than destroying them, so host-side veths may linger;
+    // step 4 below sweeps those separately.
     if let Ok(stale) = netns::list_netns_with_prefix(&ns_prefix).await {
         for ns in stale {
             let _ = netns::delete_netns(&ns).await;
@@ -100,6 +100,19 @@ async fn clean_test_environment(world: &mut World) {
     if let Ok(stale) = netns::list_bridges_with_prefix(&bridge_name).await {
         for br in stale {
             let _ = netns::delete_bridge(&br).await;
+        }
+    }
+
+    // 4. Sweep orphaned host-side veths from bridge topologies. These are
+    // named `{logical}_{short_id}` — a `_{short_id}` suffix uniquely
+    // identifies this feature's veths. A crashed prior scenario may leave
+    // them behind even after the namespace and bridge are gone, because
+    // `ip netns del` moves the ns-side veth to the host namespace rather than
+    // deleting it, and neither end is auto-removed when the bridge is deleted.
+    let veth_suffix = format!("_{}", world.short_id());
+    if let Ok(stale) = netns::list_veths_with_suffix(&veth_suffix).await {
+        for veth in stale {
+            let _ = netns::delete_veth(&veth).await;
         }
     }
 
@@ -310,8 +323,11 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     let log_file = format!("logs/{}.log", scoped);
     let pid_file = world.pid_file(&namespace);
 
-    let _child = netns::spawn_in_netns(
+    let _child = netns::spawn_in_netns_env(
         &scoped,
+        // veth interfaces (used in all BDD topologies) need SKB mode: native
+        // XDP attaches without error on veth but does not loop packets back.
+        &[("ZEBRA_XDP_BFD_ECHO_MODE", "skb")],
         "zebra-rs",
         &[
             "--log-output=file",
@@ -428,10 +444,19 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
 #[when(expr = "I delete namespace {string}")]
 async fn delete_namespace(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
+    let host_veth = world.host_veth(&namespace);
     if keep_topology() {
         println!("⏭  BDD_KEEP set — leaving namespace {} up", scoped);
         return;
     }
+    // Delete the host-side veth before deleting the namespace. Deleting one
+    // end of a veth pair removes both ends regardless of which netns each
+    // lives in, so this also destroys the ns-side peer. Without this, the
+    // ns-side veth is returned to the host namespace by `ip netns del` and
+    // both halves linger, causing "File exists" when the next scenario tries
+    // to create a veth with the same host name. No-op for P2P topologies
+    // (no host-side veth with this name exists there).
+    let _ = netns::delete_veth(&host_veth).await;
     netns::delete_netns(&scoped)
         .await
         .expect("Failed to delete namespace");

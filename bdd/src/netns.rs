@@ -272,16 +272,30 @@ pub async fn spawn_in_netns(
     cmd: &str,
     args: &[&str],
 ) -> Result<tokio::process::Child> {
-    Command::new("sudo")
-        .arg("ip")
-        .arg("netns")
-        .arg("exec")
-        .arg(netns)
-        .arg(cmd)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    spawn_in_netns_env(netns, &[], cmd, args).await
+}
+
+/// Spawn a process in a network namespace with extra environment variables.
+///
+/// Uses `env KEY=VAL …` before the command so the variables survive the
+/// `sudo ip netns exec` chain (sudo resets the environment by default).
+pub async fn spawn_in_netns_env(
+    netns: &str,
+    env: &[(&str, &str)],
+    cmd: &str,
+    args: &[&str],
+) -> Result<tokio::process::Child> {
+    let mut c = Command::new("sudo");
+    c.arg("ip").arg("netns").arg("exec").arg(netns);
+    if !env.is_empty() {
+        c.arg("env");
+        for (k, v) in env {
+            c.arg(format!("{k}={v}"));
+        }
+    }
+    c.arg(cmd).args(args);
+    c.stdout(Stdio::null()).stderr(Stdio::null());
+    c.spawn()
         .with_context(|| format!("Failed to spawn {} in netns {}", cmd, netns))
 }
 
@@ -382,6 +396,30 @@ pub async fn list_bridges_with_prefix(prefix: &str) -> Result<Vec<String>> {
         if let Some(rest) = line.split_once(": ")
             && let Some((name, _)) = rest.1.split_once(": ")
             && name.starts_with(prefix)
+        {
+            out.push(name.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// List host-namespace veth interfaces whose names end with `suffix`.
+/// Used by the crash-recovery sweep in `clean_test_environment` to find
+/// orphaned bridge-topology host-side veths (named `{logical}_{short_id}`).
+pub async fn list_veths_with_suffix(suffix: &str) -> Result<Vec<String>> {
+    let output = Command::new("sudo")
+        .args(["ip", "-o", "link", "show", "type", "veth"])
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to list veth interfaces")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // `ip -o link show` lines: "12: z1_4c4f5c2e: <BROADCAST,...> ..."
+        if let Some(rest) = line.split_once(": ")
+            && let Some((name, _)) = rest.1.split_once(": ")
+            && name.ends_with(suffix)
         {
             out.push(name.to_string());
         }
