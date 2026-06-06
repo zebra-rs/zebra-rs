@@ -87,15 +87,6 @@ module zebra-ospf-bfd {
          off.";
     }
 
-    leaf profile {
-      ext:help "Named /bfd/profile to apply (stored; not yet applied)";
-      type string;
-      description
-        "Name of a BFD profile to apply to these sessions. Stored but not
-         yet resolved into session parameters — a shared follow-up across
-         BGP / IS-IS / OSPF; sessions currently use the BFD defaults.";
-    }
-
     leaf min-neighbor-state {
       ext:help "Neighbor state at which BFD starts (two-way|full)";
       type enumeration {

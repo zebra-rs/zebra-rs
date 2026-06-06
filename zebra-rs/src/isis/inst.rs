@@ -1870,8 +1870,8 @@ impl Isis {
         let _ = tx.send(crate::bfd::inst::ClientReq::Subscribe {
             client: "isis".to_string(),
             key,
-            // Profile resolution against `/bfd/profile/<name>` is still a
-            // follow-up (needs cross-task config access); only Echo is wired.
+            // Only Echo params are wired here; everything else uses the BFD
+            // session defaults.
             params: crate::bfd::session::SessionParams {
                 echo_mode,
                 required_min_echo_rx_us: echo_rx_us,

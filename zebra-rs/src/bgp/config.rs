@@ -695,13 +695,6 @@ fn config_bgp_bfd_enable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     Some(())
 }
 
-/// `router bgp bfd profile <name>` — instance-default profile (stored only).
-fn config_bgp_bfd_profile(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let profile = args.string()?;
-    bgp.bfd.profile = op.is_set().then_some(profile);
-    Some(())
-}
-
 /// `router bgp bfd echo-mode <transmit|receive|both>` — instance default.
 fn config_bgp_bfd_echo_mode(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = args.string()?;
@@ -734,18 +727,6 @@ fn unspecified_for(remote: &IpAddr) -> IpAddr {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
     }
-}
-
-/// `set router bgp neighbor X bfd profile NAME` — selects the BFD
-/// profile applied when this neighbor's BFD session is created.
-/// Stored verbatim; resolution against `/bfd/profile/<name>` is
-/// the responsibility of the subscribe path.
-fn config_peer_bfd_profile(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = args.addr()?;
-    let name = args.string()?;
-    let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.bfd.profile = op.is_set().then_some(name);
-    Some(())
 }
 
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1942,7 +1923,6 @@ impl Bgp {
         // `peer.config.bfd` and wires the runtime subscribe /
         // unsubscribe path to the BFD client API.
         self.callback_peer("/bfd/enable", config_peer_bfd_enable);
-        self.callback_peer("/bfd/profile", config_peer_bfd_profile);
         self.callback_peer("/bfd/multihop", config_peer_bfd_multihop);
         self.callback_peer("/bfd/minimum-ttl", config_peer_bfd_min_ttl);
         self.callback_peer("/bfd/echo-mode", config_peer_bfd_echo_mode);
@@ -1950,7 +1930,6 @@ impl Bgp {
         self.callback_peer("/bfd/echo-receive-interval", config_peer_bfd_echo_rx);
         // Instance-level `router bgp { bfd { ... } }` defaults.
         self.callback_add("/router/bgp/bfd/enable", config_bgp_bfd_enable);
-        self.callback_add("/router/bgp/bfd/profile", config_bgp_bfd_profile);
         self.callback_add("/router/bgp/bfd/echo-mode", config_bgp_bfd_echo_mode);
         self.callback_add(
             "/router/bgp/bfd/echo-transmit-interval",

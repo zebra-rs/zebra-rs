@@ -1247,10 +1247,6 @@ module config {
               "When true, attach BFD to every IS-IS interface's
                adjacencies (overridable per interface).";
           }
-          leaf profile {
-            ext:help "Default /bfd/profile (stored; not yet applied)";
-            type string;
-          }
           leaf echo-mode {
             ext:help "Default BFD Echo role (transmit | receive | both)";
             type enumeration {
@@ -1927,13 +1923,6 @@ module config {
                 "Activates the BFD session for adjacencies on this
                  interface. Disabling (or removing the `bfd` block)
                  detaches the session.";
-            }
-
-            leaf profile {
-              type string;
-              description
-                "Name of a `/bfd/profile` entry whose parameters
-                 apply to BFD sessions formed on this interface.";
             }
 
             leaf echo-mode {

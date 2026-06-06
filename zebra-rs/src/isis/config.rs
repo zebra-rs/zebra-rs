@@ -281,10 +281,6 @@ impl Isis {
         // Per-interface BFD attachment.
         self.callback_add("/router/isis/interface/bfd/enable", link::config_bfd_enable);
         self.callback_add(
-            "/router/isis/interface/bfd/profile",
-            link::config_bfd_profile,
-        );
-        self.callback_add(
             "/router/isis/interface/bfd/echo-mode",
             link::config_bfd_echo_mode,
         );
@@ -298,7 +294,6 @@ impl Isis {
         );
         // Instance-level `router isis { bfd { ... } }` defaults.
         self.callback_add("/router/isis/bfd/enable", link::config_isis_bfd_enable);
-        self.callback_add("/router/isis/bfd/profile", link::config_isis_bfd_profile);
         self.callback_add(
             "/router/isis/bfd/echo-mode",
             link::config_isis_bfd_echo_mode,

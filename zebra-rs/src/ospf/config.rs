@@ -56,10 +56,6 @@ impl Ospf {
             config_ospf_interface_bfd_enable,
         );
         self.ospf_add(
-            "/area/interface/bfd/profile",
-            config_ospf_interface_bfd_profile,
-        );
-        self.ospf_add(
             "/area/interface/bfd/min-neighbor-state",
             config_ospf_interface_bfd_min_neighbor_state,
         );
@@ -77,7 +73,6 @@ impl Ospf {
         );
         // Instance-level `router ospf { bfd { ... } }` defaults.
         self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
-        self.ospf_add("/bfd/profile", config_ospf_bfd_profile);
         self.ospf_add(
             "/bfd/min-neighbor-state",
             config_ospf_bfd_min_neighbor_state,
@@ -760,23 +755,6 @@ pub(super) fn config_ospf_interface_bfd_enable<V: OspfVersion>(
     Some(())
 }
 
-/// `interface <if> bfd profile <name>` — stored verbatim; profile
-/// resolution into session parameters is a shared follow-up (BGP /
-/// IS-IS defer it too), so no reconcile is needed.
-pub(super) fn config_ospf_interface_bfd_profile<V: OspfVersion>(
-    ospf: &mut Ospf<V>,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let _area_id = parse_area_id(&args.string()?)?;
-    let name = args.string()?;
-    let profile = args.string()?;
-
-    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.bfd.profile = op.is_set().then_some(profile);
-    Some(())
-}
-
 /// `interface <if> bfd echo-mode <transmit|receive|both>` — which BFD Echo
 /// role is active on this interface (RFC 5880 §6.4): `transmit` originates,
 /// `receive` advertises + reflects, `both` does both. Single-hop IPv4 only.
@@ -886,18 +864,6 @@ pub(super) fn config_ospf_bfd_enable<V: OspfVersion>(
     let enable = args.boolean()?;
     ospf.bfd.enable = op.is_set().then_some(enable);
     ospf.bfd_reconcile_all();
-    Some(())
-}
-
-/// `router ospf bfd profile <name>` — instance-default profile. Stored only
-/// (profile resolution is a shared follow-up); no reconcile.
-pub(super) fn config_ospf_bfd_profile<V: OspfVersion>(
-    ospf: &mut Ospf<V>,
-    mut args: Args,
-    op: ConfigOp,
-) -> Option<()> {
-    let profile = args.string()?;
-    ospf.bfd.profile = op.is_set().then_some(profile);
     Some(())
 }
 
