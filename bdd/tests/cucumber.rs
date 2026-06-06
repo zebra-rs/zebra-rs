@@ -293,7 +293,9 @@ async fn ping_should_fail(world: &mut World, namespace: String, target: String) 
     // the target becomes unreachable; only a target still reachable after the
     // whole window is a real failure. The common case (no route at all) fails
     // on the first probe and breaks immediately, adding no delay.
-    const ATTEMPTS: u32 = 10;
+    // 30 attempts (up to 29s) covers heavy concurrent runs (20-way) where
+    // the netlink write path is delayed well past the IS-IS RIB withdrawal.
+    const ATTEMPTS: u32 = 30;
     let mut reachable = true;
     for i in 0..ATTEMPTS {
         reachable = if is_v6 {
