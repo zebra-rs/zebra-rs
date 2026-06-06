@@ -892,6 +892,9 @@ async fn isis_neighbor_should_be_up(
 /// Negative sibling: assert NO Up adjacency at the given level on the given
 /// interface. Used to verify a Level-1 adjacency across an area boundary is
 /// (correctly) refused — the L1 common-area gate of ISO 10589 §8.4.3.
+///
+/// Polls for up to 10 seconds: the BFD-down event propagates asynchronously
+/// from the BFD task to IS-IS, so an immediate check races the teardown.
 #[then(
     expr = "isis neighbor in namespace {string} at level {int} on interface {string} should not be up"
 )]
@@ -902,7 +905,20 @@ async fn isis_neighbor_should_not_be_up(
     interface: String,
 ) {
     let scoped = world.ns(&namespace);
-    let (up, output) = isis_neighbor_up(&scoped, level, &interface).await;
+    const ATTEMPTS: u32 = 10;
+    let mut up = true;
+    let mut output = String::new();
+    for i in 0..ATTEMPTS {
+        let (u, o) = isis_neighbor_up(&scoped, level, &interface).await;
+        up = u;
+        output = o;
+        if !up {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
     assert!(
         !up,
         "unexpected Up L{} IS-IS adjacency on {} in {}:\n{}",

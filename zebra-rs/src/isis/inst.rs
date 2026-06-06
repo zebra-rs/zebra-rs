@@ -2419,16 +2419,19 @@ impl Isis {
     /// kept subscribed (`release_bfd = false`) so it keeps probing and can
     /// detect the peer returning, at which point [`Self::process_bfd_up`]
     /// lifts the pin.
+    ///
+    /// `require_up = false`: the P2P 3-way rule may step the adjacency from
+    /// Up → Init (peer stops reporting our sys-id) before this BFD Down event
+    /// is processed. Using `require_up = true` would miss that neighbor, leave
+    /// the hold-down pin unset, and allow the adjacency to recover while BFD
+    /// is still Down.
     fn process_bfd_down(
         &mut self,
         key: &crate::bfd::session::SessionKey,
         change: &crate::bfd::session::StateChange,
     ) {
-        let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, true) else {
-            tracing::debug!(
-                ?key,
-                "isis: bfd-down for unknown / non-Up neighbor; ignoring"
-            );
+        let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, false) else {
+            tracing::debug!(?key, "isis: bfd-down for unknown neighbor; ignoring");
             return;
         };
         let ifindex = key.ifindex;
