@@ -10297,7 +10297,7 @@ fn apply_routing_updates_v3(
 
     let diff = spf::table_diff(top.rib6.iter(), new_rib.iter());
 
-    // Withdrawals.
+    // Withdrawals: always fire, even for an empty-nexthop cached route.
     for (prefix, route) in diff.only_curr.iter() {
         let entry = make_rib6_entry(route);
         let _ = top.ctx.rib.send(rib::Message::Ipv6Del {
@@ -10305,21 +10305,31 @@ fn apply_routing_updates_v3(
             rib: entry,
         });
     }
-    // Changed.
+    // Changed: a route that lost all nexthops collapses to a withdrawal.
     for (prefix, _, route) in diff.different.iter() {
         let entry = make_rib6_entry(route);
-        let _ = top.ctx.rib.send(rib::Message::Ipv6Add {
-            prefix: *prefix,
-            rib: entry,
-        });
+        let msg = if route.nhops.is_empty() {
+            rib::Message::Ipv6Del {
+                prefix: *prefix,
+                rib: entry,
+            }
+        } else {
+            rib::Message::Ipv6Add {
+                prefix: *prefix,
+                rib: entry,
+            }
+        };
+        let _ = top.ctx.rib.send(msg);
     }
-    // New.
+    // New: nothing to install without nexthops.
     for (prefix, route) in diff.only_next.iter() {
-        let entry = make_rib6_entry(route);
-        let _ = top.ctx.rib.send(rib::Message::Ipv6Add {
-            prefix: *prefix,
-            rib: entry,
-        });
+        if !route.nhops.is_empty() {
+            let entry = make_rib6_entry(route);
+            let _ = top.ctx.rib.send(rib::Message::Ipv6Add {
+                prefix: *prefix,
+                rib: entry,
+            });
+        }
     }
 
     top.rib6 = new_rib;
@@ -10713,29 +10723,39 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
 }
 
 pub fn diff_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffResult) {
-    // Delete.
+    // Withdraw any prefix that left the table, unconditionally. `Ipv4Del`
+    // is keyed on RibType, so it is a harmless no-op when nothing is
+    // installed — but guarding it on `!nhops.is_empty()` would leak a
+    // previously-installed FIB route whose nexthops were later cleared.
+    // `build_rib_from_spf` already skips empty-nexthop destinations, so
+    // this is defense-in-depth; it mirrors the IS-IS `diff_apply` fix.
     for (prefix, route) in diff.only_curr.iter() {
-        if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
-            let msg = rib::Message::Ipv4Del {
-                prefix: *prefix,
-                rib,
-            };
-            rib_client.send(msg).unwrap();
-        }
+        let rib = make_rib_entry(route);
+        let msg = rib::Message::Ipv4Del {
+            prefix: *prefix,
+            rib,
+        };
+        rib_client.send(msg).unwrap();
     }
-    // Add (changed).
+    // Changed: a route that lost all nexthops collapses to a withdrawal
+    // rather than being skipped (which would orphan the prior install).
     for (prefix, _, route) in diff.different.iter() {
-        if !route.nhops.is_empty() {
-            let rib = make_rib_entry(route);
-            let msg = rib::Message::Ipv4Add {
+        let rib = make_rib_entry(route);
+        let msg = if route.nhops.is_empty() {
+            rib::Message::Ipv4Del {
                 prefix: *prefix,
                 rib,
-            };
-            rib_client.send(msg).unwrap();
-        }
+            }
+        } else {
+            rib::Message::Ipv4Add {
+                prefix: *prefix,
+                rib,
+            }
+        };
+        rib_client.send(msg).unwrap();
     }
-    // Add (new).
+    // New: a brand-new nexthop-less prefix has nothing to install and no
+    // prior FIB state to withdraw, so it is simply skipped.
     for (prefix, route) in diff.only_next.iter() {
         if !route.nhops.is_empty() {
             let rib = make_rib_entry(route);
@@ -10788,23 +10808,29 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
 }
 
 pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResult) {
+    // Always withdraw a label that left the table (keyed on the incoming
+    // label, so the IlmDel is a no-op when nothing is installed). See
+    // `diff_apply` for the empty-nexthop rationale.
     for (label, ilm) in diff.only_curr.iter() {
-        if !ilm.nhops.is_empty() {
-            let msg = rib::Message::IlmDel {
-                label: *label,
-                ilm: make_ilm_entry(*label, ilm),
-            };
-            rib_client.send(msg).unwrap();
-        }
+        let msg = rib::Message::IlmDel {
+            label: *label,
+            ilm: make_ilm_entry(*label, ilm),
+        };
+        rib_client.send(msg).unwrap();
     }
     for (label, _, ilm) in diff.different.iter() {
-        if !ilm.nhops.is_empty() {
-            let msg = rib::Message::IlmAdd {
+        let msg = if ilm.nhops.is_empty() {
+            rib::Message::IlmDel {
                 label: *label,
                 ilm: make_ilm_entry(*label, ilm),
-            };
-            rib_client.send(msg).unwrap();
-        }
+            }
+        } else {
+            rib::Message::IlmAdd {
+                label: *label,
+                ilm: make_ilm_entry(*label, ilm),
+            }
+        };
+        rib_client.send(msg).unwrap();
     }
     for (label, ilm) in diff.only_next.iter() {
         if !ilm.nhops.is_empty() {
@@ -10890,23 +10916,29 @@ fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
 }
 
 pub fn diff_ilm_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResultV3) {
+    // Always withdraw a label that left the table (keyed on the incoming
+    // label, so the IlmDel is a no-op when nothing is installed). See
+    // `diff_apply` for the empty-nexthop rationale.
     for (label, ilm) in diff.only_curr.iter() {
-        if !ilm.nhops.is_empty() {
-            let msg = rib::Message::IlmDel {
-                label: *label,
-                ilm: make_ilm_entry_v6(*label, ilm),
-            };
-            rib_client.send(msg).unwrap();
-        }
+        let msg = rib::Message::IlmDel {
+            label: *label,
+            ilm: make_ilm_entry_v6(*label, ilm),
+        };
+        rib_client.send(msg).unwrap();
     }
     for (label, _, ilm) in diff.different.iter() {
-        if !ilm.nhops.is_empty() {
-            let msg = rib::Message::IlmAdd {
+        let msg = if ilm.nhops.is_empty() {
+            rib::Message::IlmDel {
                 label: *label,
                 ilm: make_ilm_entry_v6(*label, ilm),
-            };
-            rib_client.send(msg).unwrap();
-        }
+            }
+        } else {
+            rib::Message::IlmAdd {
+                label: *label,
+                ilm: make_ilm_entry_v6(*label, ilm),
+            }
+        };
+        rib_client.send(msg).unwrap();
     }
     for (label, ilm) in diff.only_next.iter() {
         if !ilm.nhops.is_empty() {
@@ -11500,5 +11532,95 @@ mod multi_area_tests {
         rib_insert(&mut rib, p, route(20, RouteType::InterArea));
         rib_insert(&mut rib, p, route(40, RouteType::InterArea));
         assert_eq!(rib.get(&p).unwrap().metric, 20);
+    }
+}
+
+#[cfg(test)]
+mod diff_apply_tests {
+    use super::{RouteType, SpfNexthop, SpfRoute, diff_apply};
+    use crate::rib::client::{ProtoId, RibClient};
+    use crate::spf;
+    use ipnet::Ipv4Net;
+    use prefix_trie::PrefixMap;
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+
+    fn spf_route(metric: u32, nhops: &[(&str, u32)]) -> SpfRoute {
+        let mut nh = BTreeMap::new();
+        for (addr, ifindex) in nhops {
+            nh.insert(
+                addr.parse::<Ipv4Addr>().unwrap(),
+                SpfNexthop {
+                    ifindex: *ifindex,
+                    adjacency: false,
+                    router_id: None,
+                    backup: None,
+                },
+            );
+        }
+        SpfRoute {
+            metric,
+            path_type: RouteType::IntraArea,
+            nhops: nh,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+            backup_as_primary: false,
+        }
+    }
+
+    // Returns (withdrawn prefixes, installed prefixes) emitted by
+    // `diff_apply` for `curr`→`next`, captured off an in-memory channel
+    // so no live RIB task is needed.
+    fn run_diff_apply(
+        curr: &PrefixMap<Ipv4Net, SpfRoute>,
+        next: &PrefixMap<Ipv4Net, SpfRoute>,
+    ) -> (Vec<Ipv4Net>, Vec<Ipv4Net>) {
+        let diff = spf::table_diff(curr.iter(), next.iter());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = RibClient::new(tx, ProtoId::from_raw(1));
+        diff_apply(&client, &diff);
+        drop(client);
+
+        let (mut dels, mut adds) = (vec![], vec![]);
+        while let Ok(env) = rx.try_recv() {
+            match env.msg {
+                crate::rib::Message::Ipv4Del { prefix, .. } => dels.push(prefix),
+                crate::rib::Message::Ipv4Add { prefix, .. } => adds.push(prefix),
+                _ => panic!("unexpected message variant"),
+            }
+        }
+        (dels, adds)
+    }
+
+    #[test]
+    fn diff_apply_withdraws_empty_nexthop_route() {
+        // A cached route with no nexthops must still be withdrawn when its
+        // prefix leaves the table — guarding the delete on `!nhops.is_empty()`
+        // would leak the kernel FIB route (the IS-IS keychain leak class).
+        let prefix: Ipv4Net = "10.0.0.2/32".parse().unwrap();
+        let mut curr = PrefixMap::new();
+        curr.insert(prefix, spf_route(10, &[]));
+        let next = PrefixMap::new();
+
+        let (dels, adds) = run_diff_apply(&curr, &next);
+        assert_eq!(dels, vec![prefix]);
+        assert!(adds.is_empty());
+    }
+
+    #[test]
+    fn diff_apply_collapses_emptied_route_to_del() {
+        // A route that changes to a no-nexthop state (present in both
+        // tables, so it lands in `different`) must collapse to a delete,
+        // not be skipped and leave the stale install behind.
+        let prefix: Ipv4Net = "10.0.0.2/32".parse().unwrap();
+        let mut curr = PrefixMap::new();
+        curr.insert(prefix, spf_route(10, &[("10.0.1.2", 2)]));
+        let mut next = PrefixMap::new();
+        next.insert(prefix, spf_route(20, &[]));
+
+        let (dels, adds) = run_diff_apply(&curr, &next);
+        assert_eq!(dels, vec![prefix]);
+        assert!(adds.is_empty());
     }
 }
