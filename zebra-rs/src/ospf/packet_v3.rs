@@ -537,6 +537,18 @@ pub fn ospfv3_db_desc_send(
 
     db_desc_pack(nbr, &mut dd);
 
+    // RFC 2328 §10.8 / RFC 5340 §4.2.2: the More (M) bit must be cleared
+    // once the whole DB summary has been drained, or `ExchangeDone` never
+    // fires and the neighbours exchange empty DD packets forever. Mirror
+    // of the v2 fix in `ospf_db_desc_send`; only recompute outside the
+    // ExStart negotiation phase (while `init` is set, the empty
+    // negotiation DD keeps M set).
+    if !nbr.dd.flags.init() {
+        let more = !nbr.db_sum.is_empty();
+        nbr.dd.flags.set_more(more);
+        dd.flags.set_more(more);
+    }
+
     // Remember the DD we sent so it can be retransmitted by the
     // master while waiting for the slave's response, or resent by
     // the slave when the master sends a duplicate. RFC 2328 §10.8 /

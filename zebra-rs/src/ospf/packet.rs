@@ -506,6 +506,21 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 
     ospf_packet_db_desc_set(nbr, &mut dd);
 
+    // RFC 2328 §10.8: the More (M) bit reflects whether further DD packets
+    // follow. `ospf_packet_db_desc_set` drains the entire DB summary into
+    // this one packet, so once `db_sum` is empty there is nothing more to
+    // send and M must be cleared — otherwise the master's
+    // `ExchangeDone` test (`!dd.flags.more() && !nbr.dd.flags.more()`) can
+    // never become true and the two routers exchange empty DD packets
+    // forever (stuck in Exchange). Only recompute outside the ExStart
+    // negotiation phase: while `init` is set the empty negotiation DD must
+    // keep M set per §10.8.
+    if !nbr.dd.flags.init() {
+        let more = !nbr.db_sum.is_empty();
+        nbr.dd.flags.set_more(more);
+        dd.flags.set_more(more);
+    }
+
     // RFC 2328 §10.8: remember the DD we sent so it can be retransmitted by
     // the master while waiting for the slave's response, or resent by the
     // slave when the master sends a duplicate.

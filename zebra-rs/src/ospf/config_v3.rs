@@ -38,6 +38,7 @@ impl Ospf<Ospfv3> {
     pub fn callback_build(&mut self) {
         let prefix = OSPFV3;
         let entries: &[(&str, Callback<Ospfv3>)] = &[
+            ("/router-id", config_ospfv3_router_id),
             ("/area/area-type", config_ospfv3_area_type),
             ("/area/no-summary", config_ospfv3_area_no_summary),
             (
@@ -206,6 +207,19 @@ fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp
     // we are an ABR with translator-role = Always or are the
     // Candidate-elected winner).
     ospf.nssa_translate_resync(area_id);
+    Some(())
+}
+
+/// `router ospfv3 { router-id ... }`. Mirrors v2's
+/// `config_ospf_router_id`: apply the configured Router-ID to the
+/// instance (and every interface's `ident`) and re-originate.
+/// Previously OSPFv3 had no per-instance Router-ID callback at all,
+/// so every v3 instance kept the constructor default 10.0.0.1.
+fn config_ospfv3_router_id(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
+    let router_id = args.v4addr()?;
+    if op.is_set() {
+        ospf.router_id_update(router_id);
+    }
     Some(())
 }
 

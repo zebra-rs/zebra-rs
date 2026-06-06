@@ -270,9 +270,18 @@ pub(super) fn apply_link_enable_transition<V: OspfVersion>(
     }
 }
 
-fn config_ospf_router_id(_ospf: &mut Ospf, mut args: Args, _op: ConfigOp) -> Option<()> {
-    let _router_id = args.v4addr()?;
-    None
+fn config_ospf_router_id(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let router_id = args.v4addr()?;
+    if op.is_set() {
+        // Apply the configured Router-ID to the instance, push it into
+        // every interface's `ident`, and re-originate. Previously this
+        // callback parsed the value and dropped it, so every OSPFv2
+        // instance kept the constructor default (10.0.0.1) — making all
+        // routers share one Router-ID, so each treated every neighbour's
+        // Hello as self-originated and no adjacency ever formed.
+        ospf.router_id_update(router_id);
+    }
+    Some(())
 }
 
 /// After mutating `ospf.areas[area_id].area_type`, push the new
