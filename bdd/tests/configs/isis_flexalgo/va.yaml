@@ -1,0 +1,65 @@
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: va-ch
+  ipv4:
+    address: 192.168.1.6/30
+- if-name: va-fr
+  ipv4:
+    address: 192.168.1.13/30
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    hostname: va
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 13
+        - algo: 129
+          index: 23
+    - if-name: va-ch
+      ipv4:
+        enable: true
+      affinity:
+      - us
+    - if-name: va-fr
+      ipv4:
+        enable: true
+      affinity:
+      - transatlantic
+    flex-algo:
+    - algo: 128
+      advertise-definition: false
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: false
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us
