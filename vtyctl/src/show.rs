@@ -53,8 +53,15 @@ pub async fn show(host: &str, command: &str, json: bool) -> Result<()> {
 
     let mut stream = response.into_inner();
 
+    let mut last_ended_with_newline = true;
     while let Some(reply) = stream.message().await? {
         print!("{}", reply.str);
+        if !reply.str.is_empty() {
+            last_ended_with_newline = reply.str.ends_with('\n');
+        }
+    }
+    if !last_ended_with_newline {
+        println!();
     }
 
     Ok(())
