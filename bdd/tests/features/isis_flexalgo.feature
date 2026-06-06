@@ -1,5 +1,4 @@
 @isis_flexalgo
-@isis
 Feature: IS-IS Flexible Algorithm with affinity-based topology constraints
   As a network operator running a global backbone (inspired by the Graphiant
   backbone topology), I want IS-IS Flex-Algo (RFC 9350) to confine traffic to
