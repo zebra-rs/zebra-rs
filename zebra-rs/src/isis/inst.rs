@@ -803,17 +803,24 @@ impl Isis {
                     self.clear_spf(args.string().as_deref());
                 }
                 "/clear/isis/neighbor" => {
-                    // `clear isis neighbor [<system-id>]`. The bare form
-                    // (no arg) tears down every adjacency; a trailing
-                    // `xxxx.xxxx.xxxx` system-id tears down only that
-                    // neighbor. Ignore an unparseable id rather than
-                    // falling through to "clear all" — a typo shouldn't
-                    // reset the whole instance.
+                    // `clear isis neighbor [<system-id|name>]`. The bare
+                    // form (no arg) tears down every adjacency; a trailing
+                    // argument tears down only that neighbor. Accept either
+                    // the canonical `xxxx.xxxx.xxxx` system-id or the
+                    // hostname mapped in L1/L2. Ignore unresolvable input
+                    // rather than falling through to "clear all" — a typo
+                    // shouldn't reset the whole instance.
                     match args.string() {
                         None => self.clear_neighbor(None),
                         Some(s) => {
-                            if let Ok(sys_id) = s.parse::<IsisSysId>() {
-                                self.clear_neighbor(Some(sys_id));
+                            let sys_id = s.parse::<IsisSysId>().ok().or_else(|| {
+                                self.hostname
+                                    .l1
+                                    .lookup_by_name(&s)
+                                    .or_else(|| self.hostname.l2.lookup_by_name(&s))
+                            });
+                            if let Some(id) = sys_id {
+                                self.clear_neighbor(Some(id));
                             }
                         }
                     }
@@ -965,7 +972,16 @@ impl Isis {
                 }
             }
         }
-        ids.iter().map(|id| id.to_string()).collect()
+        ids.iter()
+            .map(|id| {
+                self.hostname
+                    .l1
+                    .get(id)
+                    .or_else(|| self.hostname.l2.get(id))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| id.to_string())
+            })
+            .collect()
     }
 
     /// Debug entry — capture the current IS-IS state and atomically
