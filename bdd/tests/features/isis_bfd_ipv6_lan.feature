@@ -86,6 +86,7 @@ Feature: IS-IS BFD over an IPv6-only LAN (broadcast) link
     When I restore bfd control packets in namespace "z2"
     And I wait 20 seconds
     Then bfd session in namespace "z1" on interface "vz1ns" should be up
+    And isis neighbor in namespace "z1" at level 2 on interface "vz1ns" should be up
     And ping from "z1" to "2001:db8:0:ffff::2" should succeed
     When I stop zebra-rs in namespace "z1"
     And I stop zebra-rs in namespace "z2"
@@ -116,6 +117,7 @@ Feature: IS-IS BFD over an IPv6-only LAN (broadcast) link
     When I restore bfd control packets in namespace "z2"
     And I wait 20 seconds
     Then bfd session in namespace "z1" on interface "vz1ns" should be up
+    And isis neighbor in namespace "z1" at level 2 on interface "vz1ns" should be up
     And ping from "z1" to "2001:db8:0:ffff::2" should succeed
     When I stop zebra-rs in namespace "z1"
     And I stop zebra-rs in namespace "z2"
