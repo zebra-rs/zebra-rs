@@ -389,6 +389,19 @@ impl Session {
         }
     }
 
+    /// The Echo transmit interval we actually originate at, or 0 when not
+    /// originating. Mirrors the rate computed in `echo_originate_reconcile`
+    /// (§6.8.9: never faster than the peer's advertised Required Min Echo RX),
+    /// gated on `echo_originating` so `show` reports the live state rather than
+    /// the configured-but-inert rate. Used by `show`.
+    pub fn echo_transmit_interval_us(&self) -> u32 {
+        if self.echo_originating {
+            self.echo_transmit_us.max(self.remote_min_echo_rx_us).max(1)
+        } else {
+            0
+        }
+    }
+
     /// Build an outgoing BFD control packet that reflects the
     /// session's current state. The Length field and `auth_present`
     /// flag are populated by the encoder.
@@ -909,6 +922,33 @@ mod tests {
                 "advertise for {mode:?}",
             );
         }
+    }
+
+    /// `echo_transmit_interval_us` (used by `show`) reports the live rate only
+    /// while `echo_originating`, and clamps up to the peer's floor per §6.8.9.
+    /// It must read 0 — `show` prints `disabled` — when we're not originating,
+    /// even with `echo_transmit_us` configured.
+    #[test]
+    fn echo_transmit_interval_reports_live_rate() {
+        let mut t = SessionTable::new();
+        let d = t.insert(
+            key(1, 2), // single-hop IPv4
+            SessionParams {
+                echo_mode: EchoMode::Both,
+                echo_transmit_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        let s = t.get_by_disc_mut(d).unwrap();
+        // Configured but not yet originating: inert, reads 0.
+        assert_eq!(s.echo_transmit_interval_us(), 0);
+        // Originating: report our configured rate.
+        s.echo_originating = true;
+        s.remote_min_echo_rx_us = 25_000;
+        assert_eq!(s.echo_transmit_interval_us(), 50_000);
+        // Peer's advertised floor is higher: clamp up to it (§6.8.9).
+        s.remote_min_echo_rx_us = 100_000;
+        assert_eq!(s.echo_transmit_interval_us(), 100_000);
     }
 
     /// IPv6 single-hop sessions advertise Required Min Echo RX once the

@@ -266,7 +266,7 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         negotiated_transmit_interval_us: s.tx_interval_us(),
         detection_time_us: s.detection_time_us(),
         echo_receive_interval_us: s.advertised_echo_rx_us(),
-        echo_transmission_interval_us: 0,
+        echo_transmission_interval_us: s.echo_transmit_interval_us(),
         echo_transmit_active: s.echo_originating,
         echo_receive_active: s.advertised_echo_rx_us() > 0,
         remote_detect_multiplier: s.remote_detect_mult,
@@ -354,8 +354,11 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
         "            Echo receive interval: {}",
         echo_ms(s.advertised_echo_rx_us())
     )?;
-    // Responder-only: we loop a peer's Echo back but never originate it.
-    writeln!(buf, "            Echo transmission interval: disabled")?;
+    writeln!(
+        buf,
+        "            Echo transmission interval: {}",
+        echo_ms(s.echo_transmit_interval_us())
+    )?;
 
     writeln!(buf, "        Remote timers:")?;
     writeln!(
