@@ -28,12 +28,17 @@ pub enum IfsmEvent {
     DisSelection,
 }
 
-pub fn proto_supported(enable: &Afis<usize>) -> IsisTlvProtoSupported {
+/// Build the Protocols Supported TLV (RFC 1195 TLV 129) from the
+/// per-interface AFI configuration. The NLPIDs advertised in an IIH
+/// must reflect what *this circuit* runs, not what the instance runs
+/// somewhere else: a v4-only interface must not advertise IPv6 just
+/// because another interface in the same instance has IPv6 enabled.
+pub fn proto_supported(enable: &Afis<bool>) -> IsisTlvProtoSupported {
     let mut nlpids = vec![];
-    if enable.v4 > 0 {
+    if enable.v4 {
         nlpids.push(IsisProto::Ipv4.into());
     }
-    if enable.v6 > 0 {
+    if enable.v6 {
         nlpids.push(IsisProto::Ipv6.into());
     }
     IsisTlvProtoSupported { nlpids }
@@ -111,7 +116,7 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
         lan_id,
         tlvs: Vec::new(),
     };
-    let tlv = proto_supported(&link.up_config.enable);
+    let tlv = proto_supported(&link.config.enable);
     hello.tlvs.push(tlv.into());
 
     let area_addr = link.up_config.net.area_id();
@@ -199,8 +204,7 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
         tlvs: Vec::new(),
     };
 
-    // Add protocol support TLV
-    let tlv = proto_supported(&link.up_config.enable);
+    let tlv = proto_supported(&link.config.enable);
     hello.tlvs.push(tlv.into());
 
     // Add area address TLV
