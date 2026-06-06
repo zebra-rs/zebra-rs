@@ -1,0 +1,65 @@
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+- if-name: ln-ch
+  ipv4:
+    address: 192.168.1.10/30
+- if-name: ln-fr
+  ipv4:
+    address: 192.168.1.17/30
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0004.00
+    hostname: ln
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.4
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 4
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 14
+        - algo: 129
+          index: 24
+    - if-name: ln-ch
+      ipv4:
+        enable: true
+      affinity:
+      - transatlantic
+    - if-name: ln-fr
+      ipv4:
+        enable: true
+      affinity:
+      - eu
+    flex-algo:
+    - algo: 128
+      advertise-definition: false
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: false
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us
