@@ -1182,13 +1182,15 @@ pub fn config_srlg(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
 // Extended Admin Group bitmap (RFC 7308) inside ASLA (RFC 9479).
 pub fn config_affinity(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
-    let name = args.string()?;
-
     let link = isis.links.get_mut_by_name(&ifname)?;
-    if op.is_set() {
-        link.config.affinity.insert(name);
-    } else {
-        link.config.affinity.remove(&name);
+    // `affinity` is a leaf-list: every color arrives in one args deque,
+    // so drain it rather than reading only the first.
+    while let Some(name) = args.string() {
+        if op.is_set() {
+            link.config.affinity.insert(name);
+        } else {
+            link.config.affinity.remove(&name);
+        }
     }
     Some(())
 }
