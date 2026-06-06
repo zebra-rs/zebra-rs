@@ -376,17 +376,13 @@ impl Session {
     /// The `Required Min Echo RX Interval` (microseconds) we actually
     /// advertise. Non-zero only when ALL hold: our Echo mode advertises
     /// (`receive`/`both`); Echo is single-hop (RFC 5881 §4; RFC 5883 multihop
-    /// has no Echo); the session is IPv4 (our XDP reflector loops IPv4 only);
-    /// and the reflector is confirmed up (`echo_ready`) — so a non-zero
-    /// advertisement is an honest promise to loop Echo back. A `transmit`-only
-    /// session advertises 0 (we send Echo but don't ask the peer to). Used by
-    /// both [`Self::build_packet`] and `show`.
+    /// has no Echo); and the reflector is confirmed up (`echo_ready`) — so a
+    /// non-zero advertisement is an honest promise to loop Echo back. Both IPv4
+    /// and IPv6 single-hop sessions are supported (the XDP helper loops either
+    /// family). A `transmit`-only session advertises 0 (we send Echo but don't
+    /// ask the peer to). Used by both [`Self::build_packet`] and `show`.
     pub fn advertised_echo_rx_us(&self) -> u32 {
-        if self.echo_mode.advertises()
-            && self.echo_ready
-            && !self.key.multihop
-            && self.key.remote.is_ipv4()
-        {
+        if self.echo_mode.advertises() && self.echo_ready && !self.key.multihop {
             self.required_min_echo_rx_us
         } else {
             0
@@ -913,6 +909,34 @@ mod tests {
                 "advertise for {mode:?}",
             );
         }
+    }
+
+    /// IPv6 single-hop sessions advertise Required Min Echo RX once the
+    /// reflector is ready — the XDP helper supports both families.
+    #[test]
+    fn echo_rx_advertised_for_ipv6_single_hop() {
+        use std::net::Ipv6Addr;
+        let mut t = SessionTable::new();
+        let k = SessionKey {
+            local: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 1, 1, 1)),
+            remote: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 2, 2, 2, 2)),
+            ifindex: 1,
+            multihop: false,
+        };
+        let d = t.insert(
+            k,
+            SessionParams {
+                echo_mode: EchoMode::Receive,
+                required_min_echo_rx_us: 50_000,
+                ..SessionParams::default()
+            },
+        );
+        let s = t.get_by_disc_mut(d).unwrap();
+        // Before reflector confirms: honest 0.
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 0);
+        s.echo_ready = true;
+        // After reflector confirms: advertise the configured interval.
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 50_000);
     }
 
     /// The peer's advertised Required Min Echo RX Interval is cached from
