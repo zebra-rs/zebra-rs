@@ -699,10 +699,86 @@ async fn show_command_contains(
     );
 }
 
+/// Best-effort diagnostic snapshot for debugging a route that fails to
+/// withdraw. Gathers the IS-IS adjacency / LSDB / route views, the
+/// zebra-rs RIB, and the kernel FIB for the namespace, concatenated into
+/// one string so a failing route assertion can embed it in its panic
+/// message — which the per-feature cucumber log (`logs/<feature>.cucumber.log`
+/// under concurrent runs) captures verbatim. Each probe is best-effort;
+/// a failed command is recorded inline rather than aborting the dump.
+async fn route_failure_diagnostics(scoped: &str) -> String {
+    let mut buf = String::from("---- route-withdrawal diagnostics ----");
+    for cmd in [
+        "show isis neighbor",
+        "show isis database detail",
+        "show isis route",
+        "show ip route",
+        "show ipv6 route",
+    ] {
+        let out = match netns::exec_in_netns(scoped, "vtyctl", &["show", cmd]).await {
+            Ok(s) => s,
+            Err(e) => format!("<failed: {e}>"),
+        };
+        buf.push_str(&format!("\n===== vtyctl {cmd} =====\n{}", out.trim_end()));
+    }
+    for (label, args) in [
+        ("kernel ip route", &["route"][..]),
+        ("kernel ip -6 route", &["-6", "route"][..]),
+    ] {
+        let out = match netns::exec_in_netns(scoped, "ip", args).await {
+            Ok(s) => s,
+            Err(e) => format!("<failed: {e}>"),
+        };
+        buf.push_str(&format!("\n===== {label} =====\n{}", out.trim_end()));
+    }
+    buf
+}
+
 /// Negative sibling of `show_command_contains`: assert the `vtyctl show`
 /// output does NOT contain the given substring. Used to verify a
 /// suppressed entry is absent (e.g. the local Prefix-SID label withdrawn
 /// from `show mpls ilm` once `no-local-prefix-sid` is configured).
+#[then(expr = "show command {string} in namespace {string} should eventually not contain {string}")]
+async fn show_command_eventually_not_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    // Poll until the output no longer contains the needle. This is needed
+    // when the check spans multiple layers (e.g. an IS-IS withdrawal must
+    // propagate through the zebra-rs RIB task and into the kernel FIB before
+    // a subsequent ping-should-fail can pass). The common case (already gone)
+    // exits on the first attempt with no added delay.
+    const ATTEMPTS: u32 = 60;
+    let mut still_contains = true;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if !last_output.contains(&needle) {
+            still_contains = false;
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    if still_contains {
+        let diag = route_failure_diagnostics(&scoped).await;
+        panic!(
+            "show '{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}\n{}",
+            show_cmd, scoped, needle, ATTEMPTS, last_output, diag
+        );
+    }
+    println!(
+        "✓ show '{}' in namespace {} does not contain '{}'",
+        show_cmd, scoped, needle
+    );
+}
+
 #[then(expr = "show command {string} in namespace {string} should not contain {string}")]
 async fn show_command_not_contains(
     world: &mut World,
