@@ -30,6 +30,13 @@ impl Hostname {
         self.map.remove(key)
     }
 
+    pub fn lookup_by_name(&self, name: &str) -> Option<IsisSysId> {
+        self.map
+            .iter()
+            .find(|(_, (h, _))| h == name)
+            .map(|(id, _)| *id)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
