@@ -1,0 +1,33 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+- if-name: ethd
+  ipv4:
+    address: 10.0.14.1/30
+- if-name: ethe
+  ipv4:
+    address: 10.0.15.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+      - if-name: ethd
+        enable: true
+        network-type: point-to-point
+        cost: 20
+    - area-id: 0.0.0.1
+      interface:
+      - if-name: ethe
+        enable: true
+        network-type: point-to-point
