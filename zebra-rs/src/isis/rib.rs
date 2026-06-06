@@ -27,6 +27,7 @@ use super::inst::{Isis, IsisTop, Message};
 use super::level::Level;
 use super::link::{Afi, LinkTop};
 use super::lsdb::Lsdb;
+use super::neigh::Neighbor;
 use super::srmpls::LabelConfig;
 use super::tilfa::{
     RepairPathMpls, RepairPathSrv6, build_repair_path_mpls, build_repair_path_srv6,
@@ -40,6 +41,9 @@ pub trait IsisRibFamily: Sized + 'static {
     type Addr: Ord + Copy + std::fmt::Debug + PartialEq;
     type Prefix: Ord + Copy + prefix_trie::Prefix;
     type Backup: std::fmt::Debug + Clone + PartialEq;
+    /// Concrete reach-entry type (IPv4: `IsisTlvExtIpReachEntry`,
+    /// IPv6: `IsisTlvIpv6ReachEntry`).
+    type Entry;
 
     fn addr_to_ip(addr: Self::Addr) -> IpAddr;
     fn backup_to_nexthop_uni(backup: &Self::Backup, metric: u32) -> rib::NexthopUni;
@@ -49,6 +53,45 @@ pub trait IsisRibFamily: Sized + 'static {
     /// depth for V4, SRv6 segment-list length for V6.  Used to bucket
     /// TI-LFA protection into trivial / 1-segment / N-segment tallies.
     fn backup_sr_len(backup: &Self::Backup) -> usize;
+
+    /// Collect nexthop addresses for this family from one neighbor record.
+    fn nhop_addrs(nbr: &Neighbor) -> Vec<Self::Addr>;
+
+    /// Look up the family's reach entries for `sys_id`.
+    /// `mt2_mode` selects `mt2_reach_map_v6` vs `reach_map_v6` for V6;
+    /// ignored by V4 which always reads `reach_map`.
+    fn reach_entries<'a>(
+        top: &'a IsisTop,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Option<&'a Vec<Self::Entry>>;
+
+    /// Extract the network prefix from a reach entry.
+    fn entry_prefix(e: &Self::Entry) -> Self::Prefix;
+
+    /// Extract the metric from a reach entry.
+    fn entry_metric(e: &Self::Entry) -> u32;
+
+    /// Resolve the Prefix-SID (if present) for a reach entry.
+    /// Returns `(sid_label, prefix_sid_tuple, no_php)`.
+    /// V6 always returns `(None, None, false)` until SRv6 Prefix-SID lands.
+    fn resolve_sid(
+        top: &IsisTop,
+        level: &Level,
+        sys_id: &IsisSysId,
+        e: &Self::Entry,
+    ) -> (Option<u32>, Option<(SidLabelValue, LabelConfig)>, bool);
+
+    /// Build the TI-LFA repair path for this family.
+    fn build_repair(
+        top: &mut IsisTop,
+        level: Level,
+        repair: &spf::RepairPath,
+    ) -> Option<Self::Backup>;
+
+    /// Return the canonical (host-bits-masked) form of `p`.
+    fn trunc_prefix(p: Self::Prefix) -> Self::Prefix;
 }
 
 pub struct V4;
@@ -56,6 +99,7 @@ impl IsisRibFamily for V4 {
     type Addr = Ipv4Addr;
     type Prefix = Ipv4Net;
     type Backup = RepairPathMpls;
+    type Entry = IsisTlvExtIpReachEntry;
 
     fn addr_to_ip(addr: Ipv4Addr) -> IpAddr {
         IpAddr::V4(addr)
@@ -78,6 +122,68 @@ impl IsisRibFamily for V4 {
     fn backup_sr_len(backup: &RepairPathMpls) -> usize {
         backup.labels.len()
     }
+
+    fn nhop_addrs(nbr: &Neighbor) -> Vec<Ipv4Addr> {
+        nbr.addr4.keys().copied().collect()
+    }
+
+    fn reach_entries<'a>(
+        top: &'a IsisTop,
+        level: &Level,
+        sys_id: &IsisSysId,
+        _mt2_mode: bool,
+    ) -> Option<&'a Vec<IsisTlvExtIpReachEntry>> {
+        top.reach_map.get(level).get(&Afi::Ip).get(sys_id)
+    }
+
+    fn entry_prefix(e: &IsisTlvExtIpReachEntry) -> Ipv4Net {
+        e.prefix
+    }
+
+    fn entry_metric(e: &IsisTlvExtIpReachEntry) -> u32 {
+        e.metric
+    }
+
+    fn resolve_sid(
+        top: &IsisTop,
+        level: &Level,
+        sys_id: &IsisSysId,
+        e: &IsisTlvExtIpReachEntry,
+    ) -> (Option<u32>, Option<(SidLabelValue, LabelConfig)>, bool) {
+        let sid = if let Some(prefix_sid) = e.prefix_sid() {
+            match prefix_sid.sid {
+                SidLabelValue::Index(index) => top
+                    .label_map
+                    .get(level)
+                    .get(sys_id)
+                    .map(|block| block.global.start + index),
+                SidLabelValue::Label(label) => Some(label),
+            }
+        } else {
+            None
+        };
+        let prefix_sid = if let Some(ps) = e.prefix_sid()
+            && let Some(block) = top.label_map.get(level).get(sys_id)
+        {
+            Some((ps.sid.clone(), block.clone()))
+        } else {
+            None
+        };
+        let no_php = e.prefix_sid().map(|ps| ps.flags.p_flag()).unwrap_or(false);
+        (sid, prefix_sid, no_php)
+    }
+
+    fn build_repair(
+        top: &mut IsisTop,
+        level: Level,
+        repair: &spf::RepairPath,
+    ) -> Option<RepairPathMpls> {
+        build_repair_path_mpls(top, level, repair)
+    }
+
+    fn trunc_prefix(p: Ipv4Net) -> Ipv4Net {
+        p.trunc()
+    }
 }
 
 pub struct V6;
@@ -85,6 +191,7 @@ impl IsisRibFamily for V6 {
     type Addr = Ipv6Addr;
     type Prefix = Ipv6Net;
     type Backup = RepairPathSrv6;
+    type Entry = IsisTlvIpv6ReachEntry;
 
     fn addr_to_ip(addr: Ipv6Addr) -> IpAddr {
         IpAddr::V6(addr)
@@ -108,6 +215,53 @@ impl IsisRibFamily for V6 {
 
     fn backup_sr_len(backup: &RepairPathSrv6) -> usize {
         backup.segs.len()
+    }
+
+    fn nhop_addrs(nbr: &Neighbor) -> Vec<Ipv6Addr> {
+        nbr.addr6l.clone()
+    }
+
+    fn reach_entries<'a>(
+        top: &'a IsisTop,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Option<&'a Vec<IsisTlvIpv6ReachEntry>> {
+        if mt2_mode {
+            top.mt2_reach_map_v6.get(level).get(sys_id)
+        } else {
+            top.reach_map_v6.get(level).get(sys_id)
+        }
+    }
+
+    fn entry_prefix(e: &IsisTlvIpv6ReachEntry) -> Ipv6Net {
+        e.prefix
+    }
+
+    fn entry_metric(e: &IsisTlvIpv6ReachEntry) -> u32 {
+        e.metric
+    }
+
+    fn resolve_sid(
+        _top: &IsisTop,
+        _level: &Level,
+        _sys_id: &IsisSysId,
+        _e: &IsisTlvIpv6ReachEntry,
+    ) -> (Option<u32>, Option<(SidLabelValue, LabelConfig)>, bool) {
+        // Prefix-SID plumbing for IPv6 is deferred until SRv6 IS-IS lands.
+        (None, None, false)
+    }
+
+    fn build_repair(
+        top: &mut IsisTop,
+        level: Level,
+        repair: &spf::RepairPath,
+    ) -> Option<RepairPathSrv6> {
+        build_repair_path_srv6(top, level, repair)
+    }
+
+    fn trunc_prefix(p: Ipv6Net) -> Ipv6Net {
+        p.trunc()
     }
 }
 
@@ -644,18 +798,27 @@ fn build_adjacency_ilm(
 }
 
 /// Build RIB from SPF calculation results
-fn build_rib_from_spf(
+/// Generic SPF → RIB builder.  Handles both address families through the
+/// `IsisRibFamily` trait.
+///
+/// `capability_set` gates path/node eligibility in the V6 legacy mode
+/// (RFC 1195 §5 strict NLPID check).  Pass an empty set for V4 and for
+/// V6 in MT 2 mode — an empty set disables all gating.
+///
+/// `mt2_mode` selects which reach map V6 reads (`mt2_reach_map_v6` vs
+/// `reach_map_v6`).  Ignored by V4.
+fn build_rib_from_spf<F: IsisRibFamily>(
     top: &mut IsisTop,
     level: Level,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
     tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
-) -> PrefixMap<Ipv4Net, SpfRoute<V4>> {
-    let mut rib = PrefixMap::<Ipv4Net, SpfRoute<V4>>::new();
+    capability_set: &BTreeSet<IsisSysId>,
+    mt2_mode: bool,
+) -> PrefixMap<F::Prefix, SpfRoute<F>> {
+    let mut rib: PrefixMap<F::Prefix, SpfRoute<F>> = PrefixMap::new();
 
-    // Process each node in the SPF result
     for (node, nhops) in spf_result {
-        // Skip self node
         if *node == source {
             continue;
         }
@@ -666,280 +829,34 @@ fn build_rib_from_spf(
             continue;
         }
 
-        // Resolve node to system ID
         let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
             continue;
         };
 
-        // Build nexthop map. SPF runs in full-path mode (see
-        // compute_spf), so each `p` is the full path
-        // [first_hop, ..., destination]. With pseudonodes in the graph,
-        // p[0] may be a PN whose sys-id resolves to the DIS — skip
-        // leading PN hops to land on the actual nexthop *router* before
-        // looking up neighbours.
-        //
-        // SPF stamps the chosen first-hop link's ifindex into
-        // `Path::first_hop_links` during relaxation (see spf::Link::link_id).
-        // For each path, we look up all (first_hop_vertex, link_id) entries
-        // that match p[0] — usually one, but parallel equal-cost links to
-        // the same neighbour (case P1) produce multiple, and parallel
-        // ECMP-via-different-neighbours produces one per path. This
-        // replaces the old "iterate every top.links entry and match by
-        // sys-id" loop, which silently misrouted in cases P2/P3 (parallel
-        // asymmetric metrics and P2P+LAN mix).
-        let mut spf_nhops = BTreeMap::new();
-        for p in &nhops.paths {
-            let Some(nhop_id) = first_router_hop_id(top.lsp_map.get(&level), p) else {
-                continue;
-            };
-
-            let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(nhop_id) else {
-                continue;
-            };
-            let nhop_sys_id = *nhop_sys_id;
-
-            // p[0] could be pseudonode.
-            for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
-                if *link_id == 0 {
-                    continue;
-                }
-                let Some(link) = top.links.get(link_id) else {
-                    continue;
-                };
-                let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
-                    continue;
-                };
-                for (addr, _) in nbr.addr4.iter() {
-                    let nhop = SpfNexthop::<V4> {
-                        ifindex: *link_id,
-                        adjacency: *node == nhop_id,
-                        sys_id: Some(nhop_sys_id),
-                        backup: None,
-                    };
-                    spf_nhops.insert(*addr, nhop);
-                }
-            }
-        }
-
-        // TI-LFA backup stamping is deferred to a second pass after
-        // the per-destination loop completes — see the post-loop
-        // block below. Per-destination stamping was racy with the
-        // equal-metric merge: a prefix advertised by multiple
-        // destinations would end up with primary nexthops from all
-        // of them but a backup attached to only one, and that
-        // backup is useless for the multi-primary case (the remaining
-        // ECMP legs already provide protection).
-
-        // Process reachability entries for this node.
-        if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(sys_id) {
-            for entry in entries.iter() {
-                let sid = if let Some(prefix_sid) = entry.prefix_sid() {
-                    match prefix_sid.sid {
-                        // Prefix SID label.
-                        SidLabelValue::Index(index) => top
-                            .label_map
-                            .get(&level)
-                            .get(sys_id)
-                            .map(|block| block.global.start + index),
-                        SidLabelValue::Label(label) => Some(label),
-                    }
-                } else {
-                    None
-                };
-
-                let prefix_sid = if let Some(prefix_sid) = entry.prefix_sid()
-                    && let Some(block) = top.label_map.get(&level).get(sys_id)
-                {
-                    Some((prefix_sid.sid.clone(), block.clone()))
-                } else {
-                    None
-                };
-
-                // RFC 8667 §2.1.1 P (no-PHP): when the origin asked us
-                // not to pop, the penultimate-hop ILM swaps instead.
-                let no_php = entry
-                    .prefix_sid()
-                    .map(|ps| ps.flags.p_flag())
-                    .unwrap_or(false);
-
-                let route = SpfRoute {
-                    metric: nhops.cost + entry.metric,
-                    nhops: spf_nhops.clone(),
-                    sid,
-                    prefix_sid,
-                    no_php,
-                    dest_vertex: Some(*node),
-                    backup_as_primary: top.config.fast_reroute_backup_as_primary,
-                };
-
-                if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
-                    if curr.metric > route.metric {
-                        // New route has better metric, replace the existing one
-                        *curr = route;
-                    } else if curr.metric == route.metric {
-                        // Equal metric: the same prefix is advertised
-                        // by multiple destinations at equal SPF cost —
-                        // anycast / shared loopback / sibling routes.
-                        // Merging their primaries here makes this an
-                        // ECMP route at the RIB / prefix level —
-                        // distinct from intra-route ECMP within one
-                        // destination, which `spf_nhops` already
-                        // collapsed above.
-                        //
-                        // The post-loop TI-LFA backup pass skips
-                        // routes with multi-primary nhops (the typical
-                        // anycast outcome), so a backup attached to
-                        // only one sibling can't leak into the merged
-                        // RIB entry the way it did before deferral.
-                        //
-                        // Remaining metadata-merge limitations:
-                        //   - sid / prefix_sid first-wins. Index-
-                        //     encoded SIDs resolve against the
-                        //     advertising router's SRGB (see line
-                        //     ~2595); siblings with divergent SRGBs
-                        //     end up with different absolute labels
-                        //     and the subsequent labels are silently
-                        //     dropped. RFC 8667 §4 recommends anycast
-                        //     SR groups share an Index, but SRGBs
-                        //     aren't required to match across
-                        //     siblings.
-                        //   - `dest_vertex` stays at the first-merged
-                        //     node. The post-loop backup pass uses it
-                        //     to look up the repair; this is only
-                        //     load-bearing when an RIB route ends up
-                        //     single-primary (siblings whose nhops
-                        //     collapsed to one peer address via a
-                        //     shared first-hop neighbor), in which
-                        //     case every collapsed sibling protects
-                        //     against the same primary so picking
-                        //     the first sibling's repair is fine.
-                        for (addr, nhop) in route.nhops {
-                            curr.nhops.insert(addr, nhop);
-                        }
-                        if curr.sid.is_none() && route.sid.is_some() {
-                            curr.sid = route.sid;
-                        }
-                        if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
-                            curr.prefix_sid = route.prefix_sid;
-                            // Keep no_php aligned with the Prefix-SID we adopt.
-                            curr.no_php = route.no_php;
-                        }
-                    }
-                    // If curr.metric < route.metric, do nothing (keep better route)
-                } else {
-                    // No existing route, insert the new one
-                    rib.insert(entry.prefix.trunc(), route);
-                }
-            }
-        }
-    }
-
-    // Second pass: TI-LFA backup stamping.
-    //
-    // Defer until the equal-metric merge has stabilized. A prefix
-    // with multiple primary nexthops (ECMP at the RIB level)
-    // shouldn't carry a backup — the remaining ECMP legs already
-    // provide protection, and a metric-offset backup at one leg's
-    // repair address just wastes a FIB entry without adding value
-    // (the typical backup steers around the same link the surviving
-    // ECMP leg already avoids).
-    //
-    // For single-primary routes we look up the repair by
-    // `dest_vertex`. tilfa_repair_path already skips destinations
-    // with SPF-level ECMP, so the lookup either returns a repair
-    // built against a single protected first-hop (the only valid
-    // case for stamping) or nothing.
-    for (_, route) in rib.iter_mut() {
-        if route.nhops.len() != 1 {
-            continue;
-        }
-        let Some(dest) = route.dest_vertex else {
-            continue;
-        };
-        let Some(repair_paths) = tilfa_result.get(&dest) else {
-            continue;
-        };
-        let Some(repair) = repair_paths.first() else {
-            continue;
-        };
-        let Some(backup) = build_repair_path_mpls(top, level, repair) else {
-            continue;
-        };
-        if let Some(nhop) = route.nhops.values_mut().next() {
-            nhop.backup = Some(backup);
-        }
-    }
-
-    rib
-}
-
-// IPv6 RIB builder. Walks the chosen SPF tree and joins each reached
-// node's IPv6 reach entries to a nexthop map keyed by the first-hop
-// neighbor's link-local IPv6 (Neighbor::addr6l).
-//
-// `mt2_mode` controls which inputs to consume:
-//   - false (legacy / single-topology): SPF over the legacy graph,
-//     prefixes from `top.reach_map_v6` (TLV 236), with strict NLPID
-//     gating per RFC 1195 §5 — every transit node must advertise the
-//     IPv6 NLPID or its Ipv6Reach is unreachable.
-//   - true (MT 2 / RFC 5120 §3.4): SPF over the MT 2 graph
-//     (already filtered to MT-2-capable peers at graph-build time),
-//     prefixes from `top.mt2_reach_map_v6` (TLV 237). NLPID gating
-//     is redundant here — TLV 229 with MT 2 is the stricter signal —
-//     so we skip it.
-//
-// Prefix-SID / SR plumbing for IPv6 is intentionally deferred — sid
-// and prefix_sid are left None for now and can be added when SRv6
-// IS-IS support lands as a follow-up.
-fn build_rib_from_spf_v6(
-    top: &mut IsisTop,
-    level: Level,
-    source: usize,
-    spf_result: &BTreeMap<usize, spf::Path>,
-    tilfa_result: &BTreeMap<usize, Vec<spf::RepairPath>>,
-    mt2_mode: bool,
-) -> PrefixMap<Ipv6Net, SpfRoute<V6>> {
-    let mut rib = PrefixMap::<Ipv6Net, SpfRoute<V6>>::new();
-
-    // NLPID gate set — only used in legacy mode.
-    let ipv6_capable = if mt2_mode {
-        BTreeSet::new()
-    } else {
-        ipv6_capable_set(top.lsdb.get(&level))
-    };
-
-    for (node, nhops) in spf_result {
-        if *node == source {
+        // NLPID gating (V6 legacy mode only; set is empty for V4 and V6 MT2).
+        if !capability_set.is_empty() && !capability_set.contains(sys_id) {
             continue;
         }
 
-        // Skip pseudonode entries — transit-only, no IPv6 prefixes.
-        if top.lsp_map.get(&level).is_pseudo(*node) {
-            continue;
-        }
-
-        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node) else {
-            continue;
-        };
-
-        // Strict NLPID gating per RFC 1195 §5 — only in legacy mode.
-        if !mt2_mode && !ipv6_capable.contains(sys_id) {
-            continue;
-        }
         // Capture SysId so later borrows of top.lsp_map don't conflict.
         let dest_sys_id = *sys_id;
 
-        // Build nexthop map keyed by the first-hop neighbor's link-local IPv6.
-        // Iterate `paths` (full path from first-hop to destination) so we can
-        // strict-gate every transit node, not just the first hop.
+        // Build nexthop map keyed by the family's first-hop address type.
+        //
+        // SPF runs in full-path mode, so each `p` is the full path
+        // [first_hop, ..., destination].  With pseudonodes in the graph,
+        // p[0] may be a PN — skip leading PN hops to land on the actual
+        // nexthop router.  SPF stamps the chosen first-hop link's ifindex
+        // into `Path::first_hop_links` during relaxation; we look up all
+        // (first_hop_vertex, link_id) entries matching p[0].
+        //
+        // In V6 legacy mode every transit node must advertise the IPv6
+        // NLPID (RFC 1195 §5).  An empty `capability_set` disables the
+        // check (V4 and V6 MT2 always pass an empty set).
         let mut spf_nhops = BTreeMap::new();
         'next_path: for p in &nhops.paths {
-            // In legacy mode, every node on the path must advertise IPv6.
-            // In MT 2 mode the graph itself is pre-filtered, so we skip.
-            // Pseudonode hops bypass the IPv6 NLPID check — they don't
-            // advertise capabilities of their own; the gating is on the
-            // attached routers.
-            if !mt2_mode {
+            // Per-path NLPID gating (V6 legacy mode only).
+            if !capability_set.is_empty() {
                 for &hop in p {
                     if top.lsp_map.get(&level).is_pseudo(hop) {
                         continue;
@@ -947,14 +864,12 @@ fn build_rib_from_spf_v6(
                     let Some(hop_sys_id) = top.lsp_map.get(&level).resolve(hop) else {
                         continue 'next_path;
                     };
-                    if !ipv6_capable.contains(hop_sys_id) {
+                    if !capability_set.contains(hop_sys_id) {
                         continue 'next_path;
                     }
                 }
             }
 
-            // Skip leading pseudonode hops to land on the actual nexthop
-            // router whose adjacency carries the link-local v6 address.
             let Some(nhop_id) = first_router_hop_id(top.lsp_map.get(&level), p) else {
                 continue;
             };
@@ -963,8 +878,7 @@ fn build_rib_from_spf_v6(
             };
             let nhop_sys_id = *nhop_sys_id;
             let is_adjacency = nhop_id == *node;
-            // Same first_hop_links-driven resolution as the IPv4 builder.
-            // See build_rib_from_spf for the design rationale.
+
             for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
                 if *link_id == 0 {
                     continue;
@@ -975,63 +889,75 @@ fn build_rib_from_spf_v6(
                 let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
                     continue;
                 };
-                for addr in nbr.addr6l.iter() {
-                    let nhop = SpfNexthop::<V6> {
-                        ifindex: *link_id,
-                        adjacency: is_adjacency,
-                        sys_id: Some(nhop_sys_id),
-                        backup: None,
-                    };
-                    spf_nhops.insert(*addr, nhop);
+                for addr in F::nhop_addrs(nbr) {
+                    spf_nhops.insert(
+                        addr,
+                        SpfNexthop::<F> {
+                            ifindex: *link_id,
+                            adjacency: is_adjacency,
+                            sys_id: Some(nhop_sys_id),
+                            backup: None,
+                        },
+                    );
                 }
             }
         }
 
-        // No surviving paths after gating → don't install anything for this dest.
+        // No surviving paths after gating — skip this destination.
         if spf_nhops.is_empty() {
             continue;
         }
 
-        // TI-LFA SRv6 backup stamping is deferred to a second pass
-        // after the per-destination loop — see the post-loop block
-        // below, and `build_rib_from_spf`'s sibling comment for the
-        // rationale.
-
-        let reach = if mt2_mode {
-            top.mt2_reach_map_v6.get(&level).get(&dest_sys_id)
-        } else {
-            top.reach_map_v6.get(&level).get(&dest_sys_id)
-        };
-        if let Some(entries) = reach {
+        // TI-LFA backup stamping is deferred to the second pass below
+        // so it sees the stabilised equal-metric merge.
+        if let Some(entries) = F::reach_entries(top, &level, &dest_sys_id, mt2_mode) {
             for entry in entries.iter() {
-                let route = SpfRoute::<V6> {
-                    metric: nhops.cost + entry.metric,
+                let prefix = F::entry_prefix(entry);
+                let (sid, prefix_sid, no_php) = F::resolve_sid(top, &level, &dest_sys_id, entry);
+                let route = SpfRoute::<F> {
+                    metric: nhops.cost + F::entry_metric(entry),
                     nhops: spf_nhops.clone(),
-                    sid: None,
-                    prefix_sid: None,
-                    no_php: false,
+                    sid,
+                    prefix_sid,
+                    no_php,
                     dest_vertex: Some(*node),
                     backup_as_primary: top.config.fast_reroute_backup_as_primary,
                 };
 
-                if let Some(curr) = rib.get_mut(&entry.prefix.trunc()) {
+                let tprefix = F::trunc_prefix(prefix);
+                if let Some(curr) = rib.get_mut(&tprefix) {
                     if curr.metric > route.metric {
                         *curr = route;
                     } else if curr.metric == route.metric {
+                        // Equal metric: anycast / shared loopback / sibling
+                        // routes.  Merge primaries for ECMP at the RIB level.
+                        // The post-loop backup pass skips multi-primary routes
+                        // so a stamped backup can't leak across the merge.
+                        //
+                        // sid / prefix_sid: first-wins (see original V4
+                        // comment for the anycast SR caveats).
                         for (addr, nhop) in route.nhops {
                             curr.nhops.insert(addr, nhop);
                         }
+                        if curr.sid.is_none() && route.sid.is_some() {
+                            curr.sid = route.sid;
+                        }
+                        if curr.prefix_sid.is_none() && route.prefix_sid.is_some() {
+                            curr.prefix_sid = route.prefix_sid;
+                            curr.no_php = route.no_php;
+                        }
                     }
                 } else {
-                    rib.insert(entry.prefix.trunc(), route);
+                    rib.insert(tprefix, route);
                 }
             }
         }
     }
 
-    // Second pass: TI-LFA SRv6 backup stamping. Mirror of the v4
-    // post-loop pass — skip ECMP-at-prefix routes, stamp the
-    // dest_vertex's repair on single-primary routes.
+    // Second pass: TI-LFA backup stamping.
+    //
+    // Deferred until the equal-metric merge has stabilised.  Skip ECMP
+    // routes (the surviving legs already provide protection).
     for (_, route) in rib.iter_mut() {
         if route.nhops.len() != 1 {
             continue;
@@ -1045,7 +971,7 @@ fn build_rib_from_spf_v6(
         let Some(repair) = repair_paths.first() else {
             continue;
         };
-        let Some(backup) = build_repair_path_srv6(top, level, repair) else {
+        let Some(backup) = F::build_repair(top, level, repair) else {
             continue;
         };
         if let Some(nhop) = route.nhops.values_mut().next() {
@@ -1387,7 +1313,15 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let srgb = top.sr_block.as_ref().and_then(|b| b.global.as_ref());
 
     // IPv4 RIB.
-    let rib = build_rib_from_spf(top, level, source, &spf_result, &tilfa_result);
+    let rib = build_rib_from_spf::<V4>(
+        top,
+        level,
+        source,
+        &spf_result,
+        &tilfa_result,
+        &BTreeSet::new(),
+        false,
+    );
 
     // IPv6 RIB — either MT 2 (when enabled) or the legacy single-topology path.
     let rib_v6 = match mt2 {
@@ -1396,19 +1330,36 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
             spf: Some(mt2_spf),
             tilfa: mt2_tilfa,
         }) => {
-            let rib_v6 = build_rib_from_spf_v6(top, level, mt2_src, &mt2_spf, &mt2_tilfa, true);
+            let rib_v6 = build_rib_from_spf::<V6>(
+                top,
+                level,
+                mt2_src,
+                &mt2_spf,
+                &mt2_tilfa,
+                &BTreeSet::new(),
+                true,
+            );
             *top.mt2_spf_result.get_mut(&level) = Some(mt2_spf);
             rib_v6
         }
         Some(_) => {
             // MT 2 enabled but no source — clear and install nothing.
             *top.mt2_spf_result.get_mut(&level) = None;
-            PrefixMap::new()
+            PrefixMap::<Ipv6Net, SpfRoute<V6>>::new()
         }
         None => {
             // No MT 2: fall back to legacy graph + reach_map_v6 (and
             // the legacy TI-LFA result) for IPv6.
-            build_rib_from_spf_v6(top, level, source, &spf_result, &tilfa_result, false)
+            let cap_set = ipv6_capable_set(top.lsdb.get(&level));
+            build_rib_from_spf::<V6>(
+                top,
+                level,
+                source,
+                &spf_result,
+                &tilfa_result,
+                &cap_set,
+                false,
+            )
         }
     };
 
