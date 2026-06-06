@@ -2449,18 +2449,49 @@ impl Isis {
         // prior hold-down pin, so set the pin afterwards.
         nbr_hold_timer_expire(&mut link, level, sys_id, false);
         link.state.bfd_holddown.get_mut(&level).insert(sys_id);
+        // Record the reverse mapping so process_bfd_up can clear the pin even
+        // if the neighbour entry is absent from `nbrs` at that point (race:
+        // BFD Up fires before the next IIH re-creates the entry).
+        link.state.bfd_holddown_nbr.insert(*key, (level, sys_id));
     }
 
     /// BFD session came Up: lift any hold-down pin for the neighbour so the
     /// next received IIH promotes its adjacency back to Up. A no-op when the
     /// neighbour was not held (e.g. the normal first-Up after adjacency form).
     fn process_bfd_up(&mut self, key: &crate::bfd::session::SessionKey) {
-        let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, false) else {
-            return;
+        // Primary path: resolve via the live neighbour entry in `nbrs`.
+        let resolved = self.bfd_resolve_neighbor(key, false);
+
+        // Fallback: if the neighbour entry was removed from `nbrs` by
+        // nbr_hold_timer_expire (BFD Down → teardown) but BFD came back Up
+        // before the next IIH re-created the entry, use the reverse map that
+        // process_bfd_down recorded.
+        let (level, sys_id) = match resolved {
+            Some(pair) => pair,
+            None => {
+                let Some(link) = self.links.get_mut(&key.ifindex) else {
+                    return;
+                };
+                match link.state.bfd_holddown_nbr.remove(key) {
+                    Some(pair) => {
+                        tracing::info!(
+                            peer = %key.remote,
+                            ifindex = key.ifindex,
+                            "isis: bfd recovered via fallback map (nbr not yet re-created)",
+                        );
+                        pair
+                    }
+                    None => return,
+                }
+            }
         };
+
         let Some(link) = self.links.get_mut(&key.ifindex) else {
             return;
         };
+        // Also clean up the fallback map entry for this key (may already be
+        // gone if the fallback path above consumed it).
+        link.state.bfd_holddown_nbr.remove(key);
         if link.state.bfd_holddown.get_mut(&level).remove(&sys_id) {
             tracing::info!(
                 peer = %key.remote,
