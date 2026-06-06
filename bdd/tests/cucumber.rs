@@ -712,17 +712,18 @@ async fn show_command_eventually_not_contains(
 ) {
     let scoped = world.ns(&namespace);
     // Poll until the output no longer contains the needle. This is needed
-    // when the check spans multiple layers (e.g. IS-IS RIB withdrawal must
+    // when the check spans multiple layers (e.g. an IS-IS withdrawal must
     // propagate through the zebra-rs RIB task and into the kernel FIB before
     // a subsequent ping-should-fail can pass). The common case (already gone)
     // exits on the first attempt with no added delay.
     const ATTEMPTS: u32 = 60;
     let mut still_contains = true;
+    let mut last_output = String::new();
     for i in 0..ATTEMPTS {
-        let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+        last_output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
             .await
             .expect("Failed to run show command");
-        if !output.contains(&needle) {
+        if !last_output.contains(&needle) {
             still_contains = false;
             break;
         }
@@ -732,8 +733,8 @@ async fn show_command_eventually_not_contains(
     }
     assert!(
         !still_contains,
-        "show '{}' in namespace {} still contained '{}' after {} attempts",
-        show_cmd, scoped, needle, ATTEMPTS
+        "show '{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}",
+        show_cmd, scoped, needle, ATTEMPTS, last_output
     );
     println!(
         "✓ show '{}' in namespace {} does not contain '{}'",
