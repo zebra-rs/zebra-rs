@@ -867,6 +867,10 @@ async fn isis_neighbor_up(scoped: &str, level: u64, interface: &str) -> (bool, S
 
 /// Assert an IS-IS adjacency at the given level on the given interface is
 /// Up — e.g. the area-independent Level-2 backbone adjacency.
+///
+/// Polls for up to 30 seconds: after BFD recovers the hold-down pin is cleared
+/// immediately, but the adjacency only promotes Init→Up on the next inbound IIH
+/// (default 3 s interval), so a single-shot check races that window.
 #[then(
     expr = "isis neighbor in namespace {string} at level {int} on interface {string} should be up"
 )]
@@ -877,7 +881,20 @@ async fn isis_neighbor_should_be_up(
     interface: String,
 ) {
     let scoped = world.ns(&namespace);
-    let (up, output) = isis_neighbor_up(&scoped, level, &interface).await;
+    const ATTEMPTS: u32 = 30;
+    let mut up = false;
+    let mut output = String::new();
+    for i in 0..ATTEMPTS {
+        let (u, o) = isis_neighbor_up(&scoped, level, &interface).await;
+        up = u;
+        output = o;
+        if up {
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
     assert!(
         up,
         "no Up L{} IS-IS adjacency on {} in {}:\n{}",
