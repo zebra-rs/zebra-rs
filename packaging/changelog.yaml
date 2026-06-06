@@ -7,7 +7,7 @@
   date: 2026-05-21T18:00:00+09:00
   distribution: unstable
   urgency: medium
-  packager: Kunihiro Ishiguro <kunihiro@zebra.dev>
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
   changes:
     - note: |
         ### Added
