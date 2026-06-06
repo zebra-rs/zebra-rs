@@ -508,6 +508,11 @@ module config {
             leaf priority {
               type uint8;
             }
+            leaf cost {
+              // RFC 2328 §C.3 interface output cost (Router-LSA link
+              // metric / SPF edge weight). 16-bit; default 10.
+              type uint16;
+            }
             leaf hello-interval {
               type uint16;
             }
