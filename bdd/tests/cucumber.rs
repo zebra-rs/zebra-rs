@@ -699,6 +699,41 @@ async fn show_command_contains(
     );
 }
 
+/// Best-effort diagnostic snapshot for debugging a route that fails to
+/// withdraw. Gathers the IS-IS adjacency / LSDB / route views, the
+/// zebra-rs RIB, and the kernel FIB for the namespace, concatenated into
+/// one string so a failing route assertion can embed it in its panic
+/// message — which the per-feature cucumber log (`logs/<feature>.cucumber.log`
+/// under concurrent runs) captures verbatim. Each probe is best-effort;
+/// a failed command is recorded inline rather than aborting the dump.
+async fn route_failure_diagnostics(scoped: &str) -> String {
+    let mut buf = String::from("---- route-withdrawal diagnostics ----");
+    for cmd in [
+        "show isis neighbor",
+        "show isis database detail",
+        "show isis route",
+        "show ip route",
+        "show ipv6 route",
+    ] {
+        let out = match netns::exec_in_netns(scoped, "vtyctl", &["show", cmd]).await {
+            Ok(s) => s,
+            Err(e) => format!("<failed: {e}>"),
+        };
+        buf.push_str(&format!("\n===== vtyctl {cmd} =====\n{}", out.trim_end()));
+    }
+    for (label, args) in [
+        ("kernel ip route", &["route"][..]),
+        ("kernel ip -6 route", &["-6", "route"][..]),
+    ] {
+        let out = match netns::exec_in_netns(scoped, "ip", args).await {
+            Ok(s) => s,
+            Err(e) => format!("<failed: {e}>"),
+        };
+        buf.push_str(&format!("\n===== {label} =====\n{}", out.trim_end()));
+    }
+    buf
+}
+
 /// Negative sibling of `show_command_contains`: assert the `vtyctl show`
 /// output does NOT contain the given substring. Used to verify a
 /// suppressed entry is absent (e.g. the local Prefix-SID label withdrawn
@@ -731,11 +766,13 @@ async fn show_command_eventually_not_contains(
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }
-    assert!(
-        !still_contains,
-        "show '{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}",
-        show_cmd, scoped, needle, ATTEMPTS, last_output
-    );
+    if still_contains {
+        let diag = route_failure_diagnostics(&scoped).await;
+        panic!(
+            "show '{}' in namespace {} still contained '{}' after {} attempts\nlast output:\n{}\n{}",
+            show_cmd, scoped, needle, ATTEMPTS, last_output, diag
+        );
+    }
     println!(
         "✓ show '{}' in namespace {} does not contain '{}'",
         show_cmd, scoped, needle
