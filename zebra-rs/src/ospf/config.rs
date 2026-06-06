@@ -75,6 +75,16 @@ impl Ospf {
             "/area/interface/bfd/echo-receive-interval",
             config_ospf_interface_bfd_echo_receive_interval,
         );
+        // Instance-level `router ospf { redistribute connected ... }`.
+        self.ospf_add("/redistribute/connected", config_ospf_redist_connected);
+        self.ospf_add(
+            "/redistribute/connected/metric",
+            config_ospf_redist_connected_metric,
+        );
+        self.ospf_add(
+            "/redistribute/connected/metric-type",
+            config_ospf_redist_connected_metric_type,
+        );
         // Instance-level `router ospf { bfd { ... } }` defaults.
         self.ospf_add("/bfd/enable", config_ospf_bfd_enable);
         self.ospf_add("/bfd/profile", config_ospf_bfd_profile);
@@ -435,7 +445,8 @@ fn ospf_send_redist_connected(ospf: &Ospf, first_time: bool) {
     let any_enabled = ospf
         .areas
         .iter()
-        .any(|(_, area)| area.redistribute.connected.is_some());
+        .any(|(_, area)| area.redistribute.connected.is_some())
+        || ospf.redist_connected.is_some();
 
     let msg = if !any_enabled {
         RibMsg::RedistDel { proto, afi, rtype }
@@ -1513,5 +1524,65 @@ fn config_ospf_gr_helper_strict_lsa_checking(
 fn config_ospf_gr_drain_time_ms(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
     let value = if op.is_set() { args.u32()? } else { 200 };
     ospf.gr_config.drain_time_ms = value.clamp(50, 2000);
+    Some(())
+}
+
+/// `/router/ospf/redistribute/connected` — instance-level presence
+/// container. On Set: enable Type-5 AS-External origination for every
+/// connected route. On Delete: flush all self-originated Type-5s.
+fn config_ospf_redist_connected(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
+    let first_time = !ospf
+        .areas
+        .iter()
+        .any(|(_, area)| area.redistribute.connected.is_some())
+        && ospf.redist_connected.is_none();
+
+    if op.is_set() {
+        ospf.redist_connected = Some(RedistEntry {
+            metric: RedistEntry::DEFAULT_METRIC,
+            ..Default::default()
+        });
+    } else {
+        ospf.redist_connected = None;
+    }
+
+    ospf_send_redist_connected(ospf, first_time && op.is_set());
+    ospf.as_external_redist_connected_resync();
+    Some(())
+}
+
+/// `/router/ospf/redistribute/connected/metric`.
+fn config_ospf_redist_connected_metric(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let metric = if op.is_set() {
+        args.u32()?
+    } else {
+        RedistEntry::DEFAULT_METRIC
+    };
+    ospf.redist_connected
+        .get_or_insert_with(Default::default)
+        .metric = metric;
+    ospf.as_external_redist_connected_resync();
+    Some(())
+}
+
+/// `/router/ospf/redistribute/connected/metric-type`.
+fn config_ospf_redist_connected_metric_type(
+    ospf: &mut Ospf,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let mtype = if op.is_set() {
+        ExternalMetricType::from_yang(&args.string()?)?
+    } else {
+        ExternalMetricType::default()
+    };
+    ospf.redist_connected
+        .get_or_insert_with(Default::default)
+        .metric_type = mtype;
+    ospf.as_external_redist_connected_resync();
     Some(())
 }

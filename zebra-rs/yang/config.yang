@@ -404,6 +404,27 @@ module config {
         leaf router-id {
           type inet:ipv4-address;
         }
+        // Instance-level redistribute into Type-5 AS-External LSAs
+        // (RFC 2328 §12.4.5). Flooded AS-wide into all normal areas.
+        // Per-area NSSA redistribution is under list area / redistribute.
+        container redistribute {
+          container connected {
+            presence "Redistribute connected routes as Type-5 AS-External LSAs";
+            leaf metric {
+              type uint32 {
+                range "0..16777214";
+              }
+              default 20;
+            }
+            leaf metric-type {
+              type enumeration {
+                enum type-1;
+                enum type-2;
+              }
+              default type-2;
+            }
+          }
+        }
         list area {
           // Area key accepts either a plain decimal (`area 0`) or a
           // dotted-quad (`area 0.0.0.1`). Both normalize to a 32-bit

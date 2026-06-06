@@ -216,6 +216,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// consumed by `nssa_redist_connected_resync` when origination
     /// state needs to be rebuilt (config change, area-type flip).
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
+    /// Instance-level `redistribute connected` — originates Type-5
+    /// AS-External LSAs (FA=0) for every connected route from
+    /// `redist_v4`. `Some(entry)` enables origination; `None` stops it.
+    pub redist_connected: Option<crate::ospf::area::RedistEntry>,
+    /// Prefixes of Type-5 LSAs we self-originated from instance-level
+    /// `redistribute connected`. Flushed when the knob is removed.
+    pub redist_connected_originated: BTreeSet<Ipv4Net>,
     /// Staged Flexible Algorithm definitions for this instance
     /// (`/router/ospf{,v3}/flex-algo`, RFC 9350). Shared staging engine
     /// keyed by the version's `FLEX_ALGO_PREFIX`; origination from the
@@ -961,6 +968,8 @@ impl Ospf<Ospfv2> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            redist_connected: None,
+            redist_connected_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
@@ -1210,6 +1219,9 @@ impl Ospf<Ospfv2> {
         // the NSSA-translator work.
         if self.is_abr() {
             router_lsa.flags |= 0x0001;
+        }
+        if self.is_asbr() {
+            router_lsa.flags |= 0x0002;
         }
 
         for link in self.links.values() {
@@ -1917,6 +1929,111 @@ impl Ospf<Ospfv2> {
         }
     }
 
+    /// Originate a single Type-5 AS-External LSA for `prefix` and
+    /// install it in `lsdb_as`. `metric_type_2 = true` sets the E-bit
+    /// (E2); clear = E1. Forwarding address is always 0.0.0.0 (FA=0 →
+    /// consumers use the SPF path to this ASBR). Floods AS-wide.
+    fn as_external_lsa_originate_for_prefix(
+        &mut self,
+        prefix: Ipv4Net,
+        metric: u32,
+        metric_type_2: bool,
+    ) {
+        use ospf_packet::OspfOptions;
+
+        let ls_id = prefix.network();
+        let mut header = OspfLsaHeader::new(OspfLsType::AsExternal, ls_id, self.router_id);
+        let mut options = OspfOptions::default();
+        options.set_external(true);
+        options.set_o(true);
+        header.options = u8::from(options);
+
+        let body = AsExternalLsa {
+            netmask: prefix.netmask(),
+            ext_and_resvd: if metric_type_2 { 0x80 } else { 0x00 },
+            metric,
+            forwarding_address: Ipv4Addr::UNSPECIFIED,
+            external_route_tag: 0,
+            tos_list: vec![],
+        };
+        let mut lsa = OspfLsa::from(header, OspfLsp::AsExternal(body));
+
+        if let Some(existing) =
+            self.lsdb_as
+                .lookup_by_id(OspfLsType::AsExternal, ls_id, self.router_id)
+        {
+            lsa.h.ls_seq_number = seq_max(
+                lsa.h.ls_seq_number,
+                existing.h.ls_seq_number.saturating_add(1),
+            );
+        }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        self.lsdb_as.insert_self_originated(lsa, &self.tx, None);
+        self.flood_lsa_through_as(&flood_lsa, None);
+    }
+
+    /// Flush our self-originated Type-5 AS-External LSA for `prefix`
+    /// from `lsdb_as`. No-op if no such LSA exists.
+    fn as_external_lsa_flush_for_prefix(&mut self, prefix: Ipv4Net) {
+        let ls_id = prefix.network();
+        if let Some(flushed) = self.lsdb_as.flush_lsa(
+            OspfLsType::AsExternal,
+            ls_id,
+            self.router_id,
+            &self.tx,
+            None,
+        ) {
+            self.flood_lsa_through_as(&flushed, None);
+        }
+    }
+
+    /// Rebuild self-originated Type-5 AS-External LSAs from the
+    /// instance-level `redistribute connected` knob and `redist_v4`.
+    /// Idempotent: originates missing, refreshes changed, flushes stale.
+    pub fn as_external_redist_connected_resync(&mut self) {
+        use crate::rib::RibType;
+
+        let (entry, prev_originated) = {
+            let entry = self.redist_connected;
+            let prev = self.redist_connected_originated.clone();
+            (entry, prev)
+        };
+
+        let desired: BTreeSet<Ipv4Net> = if entry.is_some() {
+            self.redist_v4
+                .iter()
+                .filter(|((rtype, _), _)| *rtype == RibType::Connected)
+                .map(|((_, prefix), _)| *prefix)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
+        for prefix in prev_originated
+            .difference(&desired)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.as_external_lsa_flush_for_prefix(prefix);
+            self.redist_connected_originated.remove(&prefix);
+        }
+
+        if let Some(redist_entry) = entry {
+            for prefix in &desired {
+                self.as_external_lsa_originate_for_prefix(
+                    *prefix,
+                    redist_entry.metric,
+                    redist_entry.metric_type.is_type_2(),
+                );
+                self.redist_connected_originated.insert(*prefix);
+            }
+        }
+
+        self.router_lsa_originate();
+    }
+
     /// RFC 3101 §2.3 NSSA default-LSA origination. Thin wrapper
     /// around `nssa_lsa_originate_for_prefix` that gates on area
     /// type + `nssa_default_originate` knob and calls the generic
@@ -2032,6 +2149,13 @@ impl Ospf<Ospfv2> {
             .filter(|(_, area)| !area.links.is_empty())
             .count()
             >= 2
+    }
+
+    /// True when this router originates Type-5 AS-External LSAs
+    /// (RFC 2328 §3.3 ASBR definition). Today this requires the
+    /// instance-level `redistribute connected` knob to be set.
+    pub fn is_asbr(&self) -> bool {
+        self.redist_connected.is_some()
     }
 
     /// True when this router should translate Type-7 → Type-5 for
@@ -2317,6 +2441,7 @@ impl Ospf<Ospfv2> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
         }
+        self.as_external_redist_connected_resync();
     }
 
     /// `RibRx::RouteDel` handler. Mirror of `route_redist_add`.
@@ -2331,6 +2456,7 @@ impl Ospf<Ospfv2> {
         for area_id in area_ids {
             self.nssa_redist_connected_resync(area_id);
         }
+        self.as_external_redist_connected_resync();
     }
 
     fn process_lsdb(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
@@ -2587,34 +2713,57 @@ impl Ospf<Ospfv2> {
                 }
             }
             OspfLsType::AsExternal => {
-                // The only Type-5s we self-originate today are NSSA
-                // Type-7→Type-5 translations. If `ls_id` matches an
-                // entry in any NSSA area's `nssa_translated`, that
-                // area's resync re-translates (bumps seq# in the
-                // process). Otherwise flush.
-                let owning_area = self
-                    .areas
-                    .iter()
-                    .find(|(_, area)| area.nssa_translated.contains(&ls_id))
-                    .map(|(&id, _)| id);
-                if let Some(area_id) = owning_area {
+                // Type-5s can be self-originated via two paths:
+                //   1. instance-level `redistribute connected` → `redist_connected_originated`
+                //   2. NSSA Type-7→Type-5 translation → `nssa_translated`
+                // Check the redistribute set first, then NSSA, then flush.
+                let network = {
+                    let prefix_len = self
+                        .lsdb_as
+                        .lookup_by_id(OspfLsType::AsExternal, ls_id, adv_router)
+                        .and_then(|lsa| {
+                            if let OspfLsp::AsExternal(ref ext) = lsa.lsp {
+                                Some(u32::from(ext.netmask).leading_ones() as u8)
+                            } else {
+                                None
+                            }
+                        });
+                    prefix_len
+                        .and_then(|plen| Ipv4Net::new(ls_id, plen).ok())
+                        .map(|p| p.trunc())
+                };
+                if network.is_some_and(|p| self.redist_connected_originated.contains(&p)) {
                     tracing::info!(
-                        "[Self-Originated] Re-translating Type-5 from NSSA area {} id={} seq={:#x}",
-                        area_id,
+                        "[Self-Originated] Re-originating redistribute Type-5 id={} seq={:#x}",
                         ls_id,
                         received_seq
                     );
-                    self.nssa_translate_resync(area_id);
+                    self.as_external_redist_connected_resync();
                 } else {
-                    tracing::info!(
-                        "[Self-Originated] Flushing AS-External LSA id={} (no owner)",
-                        ls_id
-                    );
-                    let flushed = self
-                        .lsdb_as
-                        .flush_lsa(ls_type, ls_id, adv_router, &self.tx, None);
-                    if let Some(lsa) = flushed {
-                        self.flood_lsa_through_as(&lsa, None);
+                    let owning_area = self
+                        .areas
+                        .iter()
+                        .find(|(_, area)| area.nssa_translated.contains(&ls_id))
+                        .map(|(&id, _)| id);
+                    if let Some(area_id) = owning_area {
+                        tracing::info!(
+                            "[Self-Originated] Re-translating Type-5 from NSSA area {} id={} seq={:#x}",
+                            area_id,
+                            ls_id,
+                            received_seq
+                        );
+                        self.nssa_translate_resync(area_id);
+                    } else {
+                        tracing::info!(
+                            "[Self-Originated] Flushing AS-External LSA id={} (no owner)",
+                            ls_id
+                        );
+                        let flushed = self
+                            .lsdb_as
+                            .flush_lsa(ls_type, ls_id, adv_router, &self.tx, None);
+                        if let Some(lsa) = flushed {
+                            self.flood_lsa_through_as(&lsa, None);
+                        }
                     }
                 }
             }
@@ -4554,6 +4703,8 @@ impl Ospf<Ospfv3> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            redist_connected: None,
+            redist_connected_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
