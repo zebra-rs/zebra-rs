@@ -222,7 +222,6 @@ pub struct OspfLinkBfdConfig {
     /// interface; per-interface it overrides (so `Some(false)` opts out).
     /// `None` ⇒ inherit; off if unset everywhere.
     pub enable: Option<bool>,
-    pub profile: Option<String>,
     /// Neighbor state at which the session starts/stops. `None` ⇒ inherit
     /// (hard default `TwoWay`).
     pub min_neighbor_state: Option<NbrStateThreshold>,
@@ -689,7 +688,6 @@ mod bfd_resolve_tests {
             echo_mode: Some(EchoMode::Receive),
             echo_transmit_ms: Some(100),
             echo_receive_ms: None, // → hard default 50
-            ..OspfLinkBfdConfig::default()
         };
 
         // Interface that sets nothing → inherits everything from the default.

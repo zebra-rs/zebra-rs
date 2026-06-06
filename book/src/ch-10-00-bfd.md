@@ -145,11 +145,9 @@ runs with the FRR-aligned defaults (300 ms / ×3 ⇒ ~900 ms detection).
 Earlier revisions accepted a top-level `bfd { profile … }` block plus a
 per-neighbour / per-interface `profile <name>` reference, but the
 profile parameters were never resolved into the live session, so they
-had no effect on timers. The top-level block has been removed. A
-per-protocol `bfd { … profile <name>; }` leaf may still parse for
-backward compatibility, but there is nowhere to define a profile and it
-changes nothing. Configurable timers (per-protocol or via a reinstated
-profile mechanism) are a possible future addition.
+had no effect on timers. Both the top-level block and the per-protocol
+`profile` leaf have been removed. Configurable timers (per-protocol or
+via a reinstated profile mechanism) are a possible future addition.
 
 ## Verifying sessions
 
@@ -251,4 +249,4 @@ native timers would allow.
   no Echo).
 - **Not yet:** configurable control-packet timers (the intervals are
   fixed at the defaults); BFD for **static routes**; per-VRF OSPF BFD;
-  BFD `profile` resolution (stored, not yet applied).
+  a BFD `profile` mechanism.

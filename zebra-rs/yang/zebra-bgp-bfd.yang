@@ -40,7 +40,6 @@ module zebra-bgp-bfd {
            remote-as 65501;
            bfd {
              enable true;
-             profile FAST;
              multihop true;       // eBGP-over-loopback; iBGP infers this
              minimum-ttl 250;
              echo-mode both;      // override (single-hop neighbors only)
@@ -88,12 +87,6 @@ module zebra-bgp-bfd {
         "Activate BFD. At the instance level, `true` blanket-enables BFD
          on every neighbor; per neighbor it overrides that default, so
          `false` opts a single neighbor out. Absent at both levels ⇒ off.";
-    }
-    leaf profile {
-      type string;
-      description
-        "Name of a `/bfd/profile` entry whose parameters apply to the
-         session. Stored; profile resolution is a shared follow-up.";
     }
     leaf echo-mode {
       ext:help "BFD Echo role (transmit | receive | both)";

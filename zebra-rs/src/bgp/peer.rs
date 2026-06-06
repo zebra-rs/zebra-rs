@@ -192,7 +192,7 @@ pub struct PeerTransportConfig {
 
 /// Per-neighbor BFD attachment recorded from
 /// `set router bgp neighbor <addr> bfd { enable | multihop |
-/// minimum-ttl | profile }` (zebra-bgp-bfd.yang). The configuration is
+/// minimum-ttl }` (zebra-bgp-bfd.yang). The configuration is
 /// stored here; `enable` flips translate into subscribe / unsubscribe
 /// calls on the BFD instance via `bfd::inst::Bfd::client_req_tx`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -201,7 +201,6 @@ pub struct PeerBfdConfig {
     /// `router bgp { bfd { enable } }`; `Some(false)` opts this neighbor out
     /// of a blanket instance enable. Off if unset everywhere.
     pub enable: Option<bool>,
-    pub profile: Option<String>,
     /// Hop-mode override. `None` (the default) means "infer": the
     /// session is multihop iff the BGP session is iBGP, mirroring FRR's
     /// `PEER_IS_MULTIHOP`. `Some(true)`/`Some(false)` force it — used
@@ -2037,27 +2036,25 @@ mod bfd_config_tests {
     use super::*;
 
     /// PeerBfdConfig default mirrors the YANG defaults (all unset ⇒
-    /// inherit; off if unset everywhere, no profile).
+    /// inherit; off if unset everywhere).
     #[test]
     fn default_bfd_is_disabled() {
         let bfd = PeerBfdConfig::default();
         assert!(bfd.enable.is_none());
         assert!(!bfd.resolve(&PeerBfdConfig::default()).enable);
-        assert!(bfd.profile.is_none());
 
         // Lives on PeerConfig with the same default.
         let pc = PeerConfig::default();
         assert_eq!(pc.bfd, bfd);
     }
 
-    /// Round-trip: setting enable + profile + multihop mirrors the CLI
-    /// flow (`bfd enable true; bfd profile FAST; bfd multihop true`)
+    /// Round-trip: setting enable + multihop + minimum-ttl mirrors the CLI
+    /// flow (`bfd enable true; bfd multihop true; bfd minimum-ttl 250`)
     /// producing the recorded state the BFD subscribe path reads.
     #[test]
-    fn enable_and_profile_round_trip() {
+    fn enable_and_multihop_round_trip() {
         let mut pc = PeerConfig::default();
         pc.bfd.enable = Some(true);
-        pc.bfd.profile = Some("FAST".to_string());
         pc.bfd.multihop = Some(true);
         pc.bfd.minimum_ttl = Some(250);
 
@@ -2065,7 +2062,6 @@ mod bfd_config_tests {
             pc.bfd,
             PeerBfdConfig {
                 enable: Some(true),
-                profile: Some("FAST".to_string()),
                 multihop: Some(true),
                 minimum_ttl: Some(250),
                 ..PeerBfdConfig::default()

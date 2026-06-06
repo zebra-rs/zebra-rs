@@ -252,9 +252,9 @@ pub struct LinkConfig {
     pub mt_metrics: BTreeMap<MtId, u32>,
 
     /// Per-interface BFD attachment recorded from
-    /// `/router/isis/interface/<name>/bfd/{enable,profile}`. The
-    /// adjacency FSM subscribe path (on Up) and the
-    /// `BfdEvent::Down` → adjacency teardown path consume this.
+    /// `/router/isis/interface/<name>/bfd/enable`. The adjacency FSM
+    /// subscribe path (on Up) and the `BfdEvent::Down` → adjacency
+    /// teardown path consume this.
     pub bfd: LinkBfdConfig,
 
     /// SRLG group names this link belongs to (from the leaf-list at
@@ -314,7 +314,6 @@ pub struct LinkBfdConfig {
     /// interface; per-interface overrides it (`Some(false)` opts out). `None` ⇒
     /// inherit; off if unset everywhere.
     pub enable: Option<bool>,
-    pub profile: Option<String>,
     /// BFD Echo role for adjacencies on this interface
     /// (`transmit` / `receive` / `both`); `None` ⇒ inherit (off if unset
     /// everywhere). Single-hop IPv4 only — inert on IPv6-only adjacencies.
@@ -899,18 +898,6 @@ pub fn config_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
-/// `set router isis interface X bfd profile NAME` — records the
-/// BFD profile to apply when this interface's adjacencies form a
-/// BFD session. Stored verbatim; resolution against
-/// `/bfd/profile/<name>` is the runtime subscribe path's job.
-pub fn config_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let name = args.string()?;
-    let profile = args.string()?;
-    let link = isis.links.get_mut_by_name(&name)?;
-    link.config.bfd.profile = op.is_set().then_some(profile);
-    Some(())
-}
-
 /// Parse the `{transmit|receive|both}` echo-mode enum (set) → `Some(mode)`, or
 /// `None` on delete. Shared by the per-interface and instance-level handlers.
 fn parse_echo_mode(value: &str, op: ConfigOp) -> Option<Option<EchoMode>> {
@@ -971,13 +958,6 @@ pub fn config_isis_bfd_enable(isis: &mut Isis, mut args: Args, op: ConfigOp) -> 
     let enable = args.boolean()?;
     isis.config.bfd.enable = op.is_set().then_some(enable);
     isis.bfd_reconcile_all();
-    Some(())
-}
-
-/// `router isis bfd profile <name>` — instance-default profile (stored only).
-pub fn config_isis_bfd_profile(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let profile = args.string()?;
-    isis.config.bfd.profile = op.is_set().then_some(profile);
     Some(())
 }
 
@@ -2237,33 +2217,32 @@ mod bfd_config_tests {
     use super::*;
 
     /// LinkBfdConfig default mirrors the YANG defaults (all unset ⇒
-    /// inherit; off if unset everywhere, no profile).
+    /// inherit; off if unset everywhere).
     #[test]
     fn default_bfd_is_disabled() {
         let bfd = LinkBfdConfig::default();
         assert!(bfd.enable.is_none());
         assert!(!bfd.resolve(&LinkBfdConfig::default()).enable);
-        assert!(bfd.profile.is_none());
 
         // Lives on LinkConfig with the same default.
         let lc = LinkConfig::default();
         assert_eq!(lc.bfd, bfd);
     }
 
-    /// Round-trip: setting enable + profile mirrors the CLI flow
-    /// (`bfd enable true; bfd profile FAST`) producing the state
+    /// Round-trip: setting enable + echo-mode mirrors the CLI flow
+    /// (`bfd enable true; bfd echo-mode both`) producing the state
     /// the adjacency-FSM subscribe path reads.
     #[test]
-    fn enable_and_profile_round_trip() {
+    fn enable_round_trip() {
         let mut lc = LinkConfig::default();
         lc.bfd.enable = Some(true);
-        lc.bfd.profile = Some("FAST".to_string());
+        lc.bfd.echo_mode = Some(EchoMode::Both);
 
         assert_eq!(
             lc.bfd,
             LinkBfdConfig {
                 enable: Some(true),
-                profile: Some("FAST".to_string()),
+                echo_mode: Some(EchoMode::Both),
                 ..LinkBfdConfig::default()
             },
         );

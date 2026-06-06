@@ -110,10 +110,9 @@ pub struct SessionParams {
 
 impl Default for SessionParams {
     fn default() -> Self {
-        // Match the FRR-aligned profile constants in [`super::config`]
-        // (300 ms intervals, ×3 ⇒ 900 ms detection). A session created
-        // without a resolved `bfd profile` must not negotiate slower
-        // than the configured default would: at 1 s our `required-min-rx`
+        // Match the FRR-aligned default constants in [`super::config`]
+        // (300 ms intervals, ×3 ⇒ 900 ms detection). A session must not
+        // negotiate slower than this default: at 1 s our `required-min-rx`
         // dragged FRR's transmit up to 1 s and the detection time to 3 s
         // on both ends. Sub-second rates comply with RFC 5880 §6.8.1.
         // `min_ttl` is the single-hop GTSM floor (RFC 5881 §5); multihop
