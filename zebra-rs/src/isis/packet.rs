@@ -61,11 +61,27 @@ pub(super) fn bfd_session_key(
     })
 }
 
-/// Dispatch a BFD `Subscribe` or `Unsubscribe` based on an NFSM
-/// transition, called once per Hello *after* the mutable `nbr`
-/// borrow has been released. `peer_v4` / `peer_v6ll` are snapshots taken
-/// before the nbr-mutating block so we don't need to reach back into
+/// Dispatch a BFD `Subscribe` on the Up edge of an NFSM transition.
+/// Called once per Hello *after* the mutable `nbr` borrow has been
+/// released. `peer_v4` / `peer_v6ll` are snapshots taken before the
+/// nbr-mutating block so we don't need to reach back into
 /// `link.state.nbrs` while `link.state.v4addr` is also borrowed.
+///
+/// **Why no Unsubscribe here?** When a BFD-enabled adjacency steps
+/// Up→Init via the P2P 3-way rule (peer's IIH stops reporting our
+/// sys-id), the BFD session MUST stay alive so it can detect the
+/// peer's Down event and set the RFC 5882 hold-down pin. Sending
+/// Unsubscribe here races: z2's IIH (triggered immediately by
+/// `process_bfd_down`) reaches z1 before z2's slow-TX Down control
+/// (RFC 5880 §6.8.3 clamps TX to ≥1 s while not Up). If Unsubscribe
+/// is processed first, IS-IS is removed from BFD's subscriber list
+/// and the subsequent Down event is silently dropped — no hold-down
+/// pin is set and the adjacency re-forms while BFD is still Down.
+///
+/// Unsubscription is handled solely by
+/// `nfsm::nbr_hold_timer_expire(release_bfd=true)`, which fires only
+/// when the hold timer expires for a neighbour that *was* Up, and by
+/// `bfd_reconcile_all` on a config-change disable.
 fn bfd_nfsm_dispatch(
     link: &super::link::LinkTop<'_>,
     peer_v4: Option<Ipv4Addr>,
@@ -81,11 +97,8 @@ fn bfd_nfsm_dispatch(
     let Some(key) = bfd_session_key(link, peer_v4, peer_v6ll) else {
         return;
     };
-    let is_up = state == NfsmState::Up;
-    if !was_up && is_up {
+    if !was_up && state == NfsmState::Up {
         let _ = link.tx.send(Message::BfdSubscribe(key));
-    } else if was_up && !is_up {
-        let _ = link.tx.send(Message::BfdUnsubscribe(key));
     }
 }
 
