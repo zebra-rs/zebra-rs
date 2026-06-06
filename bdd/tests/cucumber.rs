@@ -87,12 +87,8 @@ async fn clean_test_environment(world: &mut World) {
 
     // 2. Sweep stale namespaces from a crashed prior run of THIS feature.
     // Note: `ip netns del` returns in-namespace interfaces to the host
-    // namespace rather than destroying them, so host-side veths may linger.
-    // The normal-path cleanup in `delete_namespace` deletes the host veth
-    // explicitly (which also destroys the ns-side peer); for a crash-recovery
-    // sweep we accept that orphaned veths may remain — they do not block the
-    // namespace creation path since the namespace itself is gone and the
-    // per-scenario setup creates veths with unique names per-run.
+    // namespace rather than destroying them, so host-side veths may linger;
+    // step 4 below sweeps those separately.
     if let Ok(stale) = netns::list_netns_with_prefix(&ns_prefix).await {
         for ns in stale {
             let _ = netns::delete_netns(&ns).await;
@@ -104,6 +100,19 @@ async fn clean_test_environment(world: &mut World) {
     if let Ok(stale) = netns::list_bridges_with_prefix(&bridge_name).await {
         for br in stale {
             let _ = netns::delete_bridge(&br).await;
+        }
+    }
+
+    // 4. Sweep orphaned host-side veths from bridge topologies. These are
+    // named `{logical}_{short_id}` — a `_{short_id}` suffix uniquely
+    // identifies this feature's veths. A crashed prior scenario may leave
+    // them behind even after the namespace and bridge are gone, because
+    // `ip netns del` moves the ns-side veth to the host namespace rather than
+    // deleting it, and neither end is auto-removed when the bridge is deleted.
+    let veth_suffix = format!("_{}", world.short_id());
+    if let Ok(stale) = netns::list_veths_with_suffix(&veth_suffix).await {
+        for veth in stale {
+            let _ = netns::delete_veth(&veth).await;
         }
     }
 
