@@ -4,10 +4,6 @@ module zebra-bgp-interface-neighbor {
   namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-interface-neighbor";
   prefix "zbin";
 
-  import ietf-inet-types {
-    prefix inet;
-  }
-
   import config {
     prefix config;
   }
@@ -63,31 +59,6 @@ module zebra-bgp-interface-neighbor {
           codec is already in tree (#618); wiring it on for
           interface peers is a follow-up.";
 
-  typedef remote-as-type {
-    type union {
-      type inet:as-number;
-      type enumeration {
-        enum external {
-          description
-            "FRR-style shorthand — the remote AS is anything other
-             than the local one. Resolved at session-establishment
-             time; the session is eBGP if the OPEN's AS matches the
-             local ASN this is treated as a config error.";
-        }
-        enum internal {
-          description
-            "FRR-style shorthand — the remote AS equals the local
-             ASN. iBGP session.";
-        }
-      }
-    }
-    description
-      "Remote AS specification. Accepts either a numeric AS (matching
-       the regular `neighbor X remote-as N` form) or the FRR shorthand
-       `external` / `internal`. Unnumbered configs are noisier without
-       the shorthand.";
-  }
-
   grouping bgp-interface-neighbor-extension {
     description
       "Container hung off `router bgp`.";
@@ -118,12 +89,23 @@ module zebra-bgp-interface-neighbor {
            zebra-bgp-* augments.";
       }
       leaf remote-as {
-        type remote-as-type;
+        type string;
         description
-          "Remote AS. May be omitted if the referenced
-           `neighbor-group` carries one; otherwise mandatory at
-           session-establishment time (an unset value silently
-           prevents materialization).";
+          "Remote AS. Accepts either a numeric AS number (matching the
+           regular `neighbor X remote-as N` form) or the FRR-style
+           shorthand `external` / `internal`; the per-leaf callback
+           (`config_interface_neighbor_remote_as`) validates and
+           interprets the three forms. A plain `string` rather than a
+           `union { inet:as-number; enumeration … }` because the YANG
+           engine's union validation matches only the enumeration arm
+           and rejects the numeric arm, so the union form makes a
+           numeric `remote-as` unconfigurable.
+
+           `external` resolves the remote AS from the peer's OPEN (it
+           materializes a dormant placeholder until OPEN-side backfill
+           lands); `internal` resolves to the local ASN (iBGP). May be
+           omitted if the referenced `neighbor-group` carries one;
+           otherwise an unset value silently prevents materialization.";
       }
     }
   }
