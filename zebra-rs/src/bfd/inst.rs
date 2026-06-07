@@ -143,8 +143,10 @@ pub enum Message {
         ttl: u8,
         multihop: bool,
     },
-    /// Periodic transmission timer fired for `key`.
-    TxTick { key: SessionKey },
+    /// Periodic transmission timer fired for `key`. `actual_tx_us` is the
+    /// jittered interval (RFC 5880 §6.8.7) the timer just scheduled, stored on
+    /// the session for `show bfd peers` ("actual with jitter").
+    TxTick { key: SessionKey, actual_tx_us: u32 },
     /// Detection timer fired for `key`.
     DetectExpired { key: SessionKey },
     /// The per-interface helper reported that our originated Echo for the
@@ -462,7 +464,7 @@ impl Bfd {
                 Some(msg) = self.rx.recv() => match msg {
                     Message::Recv { packet, src, dst, ifindex, ttl, multihop } =>
                         self.on_recv(packet, src, dst, ifindex, ttl, multihop),
-                    Message::TxTick { key } => self.on_tx_tick(key),
+                    Message::TxTick { key, actual_tx_us } => self.on_tx_tick(key, actual_tx_us),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
                 },
@@ -627,7 +629,13 @@ impl Bfd {
         })
     }
 
-    fn on_tx_tick(&self, key: SessionKey) {
+    fn on_tx_tick(&mut self, key: SessionKey, actual_tx_us: u32) {
+        // Record the jittered interval the timer just scheduled so `show bfd
+        // peers` can report it ("actual with jitter"). Separate lookups keep
+        // the mutable borrow from overlapping the `&self` send below.
+        if let Some(session) = self.sessions.get_by_key_mut(&key) {
+            session.actual_tx_us = actual_tx_us;
+        }
         if let Some(session) = self.sessions.get_by_key(&key) {
             self.send_control(session, false);
         }
