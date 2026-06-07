@@ -1218,39 +1218,48 @@ async fn bfd_session_should_have_echo(
 /// flowing, so the peer's BFD session times out while the adjacency would
 /// otherwise stay up — isolating BFD as the cause of the teardown (vs. carrier
 /// loss or the much slower IS-IS hold timer). RFC 5882 hold-down then keeps the
-/// adjacency down until the drop is removed. Per-netns ip6tables rules vanish
+/// adjacency down until the drop is removed. Per-netns iptables rules vanish
 /// when the namespace is deleted, so no explicit cleanup step is needed.
 ///
-/// Fallback trigger (no new IS-IS state required) if ip6tables is unavailable:
+/// The rule is installed for both address families (iptables for IPv4, ip6tables
+/// for IPv6) so the same step serves the IPv4 and IPv6 BFD features — a single-hop
+/// session runs over whichever family carries the link, and a rule in the family
+/// that isn't in use is simply inert.
+///
+/// Fallback trigger (no new IS-IS state required) if [ip6]tables is unavailable:
 /// `tc qdisc add dev <peer-if> root netem loss 100%` on the peer's egress.
 #[when(expr = "I drop bfd control packets in namespace {string}")]
 async fn drop_bfd_control_packets(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
-    netns::exec_in_netns(
-        &scoped,
-        "ip6tables",
-        &["-I", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
-    )
-    .await
-    .expect("Failed to install ip6tables BFD drop rule");
+    for tool in ["iptables", "ip6tables"] {
+        netns::exec_in_netns(
+            &scoped,
+            tool,
+            &["-I", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Failed to install {} BFD drop rule: {}", tool, e));
+    }
     println!(
         "✓ Dropping inbound BFD control packets (UDP/3784) in {}",
         scoped
     );
 }
 
-/// Remove the BFD-control drop rule installed by the step above, letting the
-/// session re-establish and IS-IS lift the hold-down.
+/// Remove the BFD-control drop rules installed by the step above (both address
+/// families), letting the session re-establish and IS-IS lift the hold-down.
 #[when(expr = "I restore bfd control packets in namespace {string}")]
 async fn restore_bfd_control_packets(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
-    netns::exec_in_netns(
-        &scoped,
-        "ip6tables",
-        &["-D", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
-    )
-    .await
-    .expect("Failed to remove ip6tables BFD drop rule");
+    for tool in ["iptables", "ip6tables"] {
+        netns::exec_in_netns(
+            &scoped,
+            tool,
+            &["-D", "INPUT", "-p", "udp", "--dport", "3784", "-j", "DROP"],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Failed to remove {} BFD drop rule: {}", tool, e));
+    }
     println!("✓ Restored BFD control packets (UDP/3784) in {}", scoped);
 }
 
