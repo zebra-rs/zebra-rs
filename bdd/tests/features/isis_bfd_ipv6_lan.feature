@@ -1,5 +1,6 @@
 @isis_bfd_ipv6_lan
 @isis
+@bfd
 Feature: IS-IS BFD over an IPv6-only LAN (broadcast) link
   As a network operator running IS-IS over IPv6-only broadcast segments
   I want BFD to protect each LAN adjacency

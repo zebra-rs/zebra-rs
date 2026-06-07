@@ -1,5 +1,6 @@
 @isis_bfd_ipv6_p2p
 @isis
+@bfd
 Feature: IS-IS BFD over an IPv6-only point-to-point link
   As a network operator running IS-IS over IPv6-only links
   I want BFD to protect the point-to-point adjacency
