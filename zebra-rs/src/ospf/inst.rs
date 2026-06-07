@@ -2055,11 +2055,18 @@ impl Ospf<Ospfv2> {
     ) {
         let ls_id = prefix.network();
         let mut lsa_header = OspfLsaHeader::new(OspfLsType::NssaAsExternal, ls_id, self.router_id);
-        // RFC 3101 §2.4 LSA header Options on Type-7: E bit MUST be
-        // clear (NSSA areas can't accept Type-5); N bit set; P bit
-        // clear for ABR-originated LSAs.
+        // RFC 3101 §2.4 LSA-header Options on a Type-7: the E-bit MUST
+        // be clear (NSSA areas can't carry Type-5) and the O-bit is
+        // set. The N/P-bit (mask 0x08) is the *Propagate* bit in a
+        // Type-7 header — the very same wire bit the Hello/DBD options
+        // field calls "N". Set, it asks an NSSA ABR to translate this
+        // LSA into a Type-5; a pure NSSA ASBR sets it. An ABR clears
+        // it on its *own* Type-7s so that a peer ABR in the same NSSA
+        // never re-translates them (RFC 3101 §3.2) — which also keeps
+        // an ABR-originated default-LSA from leaking into the backbone.
+        let propagate = !self.is_abr();
         let mut options = OspfOptions::default();
-        options.set_nssa(true);
+        options.set_nssa(propagate);
         options.set_o(true);
         lsa_header.options = u8::from(options);
 
@@ -2422,10 +2429,14 @@ impl Ospf<Ospfv2> {
     /// - not self-originated — re-translating our own Type-7 would
     ///   double state for no gain
     /// - P-bit set in the source — RFC 3101 §3.2.1
-    /// - forwarding-address non-zero — FA=0 receive semantics
-    ///   aren't wired yet (the SPF receive path also skips FA!=0);
-    ///   defer FA resolution to a later cleanup that covers both
-    ///   paths together
+    ///
+    /// The forwarding address is copied verbatim into the Type-5
+    /// (RFC 3101 §3.2). A zero FA is permitted: the translated
+    /// Type-5 then also carries FA=0, so receivers reach the prefix
+    /// via the path to *this* ABR (the Type-5's advertising router),
+    /// which itself installs the Type-7 route into the NSSA — the
+    /// same FA=0 semantics `add_as_external_routes` /
+    /// `add_nssa_routes` already implement on the receive side.
     fn nssa_translate_one(&mut self, type7: &OspfLsa) -> bool {
         use crate::ospf::lsdb::OSPF_MAX_AGE;
         const P_BIT: u8 = 0x08;
@@ -2440,9 +2451,6 @@ impl Ospf<Ospfv2> {
             return false;
         }
         if (type7.h.options & P_BIT) == 0 {
-            return false;
-        }
-        if body.forwarding_address.is_unspecified() {
             return false;
         }
 
@@ -2508,12 +2516,11 @@ impl Ospf<Ospfv2> {
             if (d.h.options & P_BIT) == 0 {
                 continue;
             }
-            let OspfLsp::NssaAsExternal(ref body) = d.lsp else {
+            // Body shape is the only remaining gate; FA may be zero
+            // (see `nssa_translate_one` for the FA=0 rationale).
+            let OspfLsp::NssaAsExternal(_) = d.lsp else {
                 continue;
             };
-            if body.forwarding_address.is_unspecified() {
-                continue;
-            }
             out.insert(d.h.ls_id);
         }
         out

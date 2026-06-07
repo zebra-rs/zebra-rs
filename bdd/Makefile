@@ -87,9 +87,32 @@ isis_bfd_ipv6_lan_echo:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv6_lan and @bfd_echo"
 
+# IS-IS BFD over IPv4. The `_echo` targets exercise the Echo scenarios, which
+# require the `xdp-bfd-echo` dataplane helper (built out-of-workspace) and
+# XDP-capable namespaces; the plain targets run only the no-echo scenario.
+isis_bfd_ipv4_p2p:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_p2p and not @bfd_echo"
+
+isis_bfd_ipv4_p2p_echo:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_p2p and @bfd_echo"
+
+isis_bfd_ipv4_lan:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_lan and not @bfd_echo"
+
+isis_bfd_ipv4_lan_echo:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@isis_bfd_ipv4_lan and @bfd_echo"
+
 ospf_clear_neighbor:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@ospf_clear_neighbor"
+
+ospfv2_nssa:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@ospfv2_nssa"
 
 bgp_evpn_capability:
 	mkdir -p allure-results
@@ -138,4 +161,4 @@ docs/%.md: tests/features/%.feature docs/feature2md.sh FORCE
 
 FORCE:
 
-.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 isis_fragmentation_ipv6 isis_fragmentation_ipv4 isis_l1p2p isis_tilfa isis_l1l2 isis_redist isis_hello_auth_keychain isis_bfd_ipv6_p2p isis_bfd_ipv6_p2p_echo isis_bfd_ipv6_lan isis_bfd_ipv6_lan_echo ospf_clear_neighbor bgp_evpn_capability bgp_vrf_evpn_type5 bgp_route_map_match bgp_policy_dynamic_update bgp_community_no_export_advertise bgp_neighbor_group bgp_unnumbered_neighbor generate open docs FORCE
+.PHONY: all run ibgp ebgp rr rib_static_ipv6 isis_ipv6 isis_srv6 isis_fragmentation_ipv6 isis_fragmentation_ipv4 isis_l1p2p isis_tilfa isis_l1l2 isis_redist isis_hello_auth_keychain isis_bfd_ipv6_p2p isis_bfd_ipv6_p2p_echo isis_bfd_ipv6_lan isis_bfd_ipv6_lan_echo isis_bfd_ipv4_p2p isis_bfd_ipv4_p2p_echo isis_bfd_ipv4_lan isis_bfd_ipv4_lan_echo ospf_clear_neighbor ospfv2_nssa bgp_evpn_capability bgp_vrf_evpn_type5 bgp_route_map_match bgp_policy_dynamic_update bgp_community_no_export_advertise bgp_neighbor_group bgp_unnumbered_neighbor generate open docs FORCE

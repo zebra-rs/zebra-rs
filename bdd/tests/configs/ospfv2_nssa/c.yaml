@@ -1,0 +1,29 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: etha
+  ipv4:
+    address: 10.0.13.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    # c is an internal NSSA router AND the area's ASBR: it injects a
+    # connected route into the NSSA as a Type-7 (NSSA-AS-External)
+    # LSA. Being a pure ASBR (not an ABR) it sets the Type-7 P-bit,
+    # asking the ABR to translate. metric 20 / type-2 (E2) mirror the
+    # AS-External test so the installed metric is a flat [20]
+    # everywhere.
+    - area-id: 0.0.0.1
+      area-type: nssa
+      redistribute:
+        connected:
+          metric: 20
+          metric-type: type-2
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
