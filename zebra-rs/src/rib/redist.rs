@@ -97,9 +97,12 @@ pub fn walk_v4(
         if !deliverable(proto, entry.rtype) {
             continue;
         }
-        let Some(nh4) = first_v4_nexthop(&entry.nexthop) else {
-            continue;
-        };
+        // Connected (directly-attached) routes carry an interface-only
+        // nexthop with no gateway IP, so `first_v4_nexthop` yields None.
+        // Redistribution still wants the prefix — the consumer
+        // re-originates it with its own nexthop / forwarding address —
+        // so deliver with a 0.0.0.0 placeholder instead of dropping.
+        let nh4 = first_v4_nexthop(&entry.nexthop).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         buf.push(RouteEntryV4 {
             prefix,
             nexthop: nh4,
@@ -134,9 +137,9 @@ pub fn walk_v6(
         if !deliverable(proto, entry.rtype) {
             continue;
         }
-        let Some(nh6) = first_v6_nexthop(&entry.nexthop) else {
-            continue;
-        };
+        // See `walk_v4`: connected routes have no gateway IP; deliver
+        // them with a :: placeholder rather than dropping the prefix.
+        let nh6 = first_v6_nexthop(&entry.nexthop).unwrap_or(std::net::Ipv6Addr::UNSPECIFIED);
         buf.push(RouteEntryV6 {
             prefix,
             nexthop: nh6,
@@ -276,7 +279,9 @@ fn flush_v6(
 // RouteAdd / RouteDel messages for each filter row that's affected.
 
 fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
-    let nh = first_v4_nexthop(&e.nexthop)?;
+    // Connected routes have no gateway IP (see `walk_v4`): deliver them
+    // with a 0.0.0.0 placeholder rather than dropping the prefix.
+    let nh = first_v4_nexthop(&e.nexthop).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
     Some(RouteEntryV4 {
         prefix: *prefix,
         nexthop: nh,
@@ -288,7 +293,9 @@ fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
 }
 
 fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
-    let nh = first_v6_nexthop(&e.nexthop)?;
+    // Connected routes have no gateway IP (see `walk_v4`): deliver them
+    // with a :: placeholder rather than dropping the prefix.
+    let nh = first_v6_nexthop(&e.nexthop).unwrap_or(std::net::Ipv6Addr::UNSPECIFIED);
     Some(RouteEntryV6 {
         prefix: *prefix,
         nexthop: nh,
@@ -591,12 +598,24 @@ mod tests {
     }
 
     #[test]
-    fn link_only_nexthop_never_delivered() {
-        // A Link-only (non-deliverable) selected entry projects to None;
-        // gaining or losing it produces no redistribute delta.
-        let mut link = RibEntry::new(RibType::Static);
-        link.nexthop = Nexthop::Link(7);
-        assert!(!selected_changed_v4(&p(), Some(&link), None));
-        assert!(!selected_changed_v4(&p(), None, Some(&link)));
+    fn connected_link_nexthop_is_delivered_with_unspecified() {
+        // A directly-attached route (a connected route, or a static
+        // pointing out an interface) carries a Link nexthop with no
+        // gateway IP. Redistribution must still deliver the prefix —
+        // with a 0.0.0.0 placeholder nexthop — so a consumer can
+        // re-originate it. Regression guard: these routes used to be
+        // dropped, which is why `redistribute connected` produced no
+        // external LSAs (OSPF Type-5 / NSSA Type-7).
+        let mut conn = RibEntry::new(RibType::Connected);
+        conn.nexthop = Nexthop::Link(7);
+        conn.ifindex = 7;
+
+        let built = build_v4_entry(&p(), &conn).expect("connected route must be delivered");
+        assert_eq!(built.nexthop, std::net::Ipv4Addr::UNSPECIFIED);
+        assert_eq!(built.ifindex, 7);
+
+        // Gaining or losing it is therefore a redistribute change.
+        assert!(selected_changed_v4(&p(), Some(&conn), None));
+        assert!(selected_changed_v4(&p(), None, Some(&conn)));
     }
 }
