@@ -45,6 +45,8 @@ pub enum SocketError {
     Create(io::Error),
     #[error("set IPV6_MULTICAST_HOPS=255 failed: {0}")]
     MulticastHops(io::Error),
+    #[error("set IPV6_MULTICAST_LOOP=0 failed: {0}")]
+    MulticastLoop(io::Error),
     #[error("set IPV6_UNICAST_HOPS=255 failed: {0}")]
     UnicastHops(io::Error),
     #[error("set IPV6_RECVHOPLIMIT failed: {0}")]
@@ -68,6 +70,17 @@ pub fn nd_socket() -> Result<AsyncFd<Socket>, SocketError> {
     socket.set_nonblocking(true).map_err(SocketError::Create)?;
 
     set_multicast_hops_255(&socket).map_err(SocketError::MulticastHops)?;
+    // Disable loopback of our own multicast sends. The ND engine uses
+    // this single raw socket for both RA transmit and receive; with the
+    // kernel default (loop ON) every unsolicited RA we multicast to
+    // ff02::1 is delivered straight back to us, and the receive path
+    // then emits a `NeighborDiscovered` for our *own* link-local. For
+    // BGP unnumbered that materializes a bogus peer pointing at
+    // ourselves (and, since the peer address is refreshed on each RA,
+    // the real peer races the self-RA non-deterministically) — so the
+    // session never reliably establishes. A router must not consume its
+    // own RAs; turn the loopback off.
+    set_multicast_loop_off(&socket).map_err(SocketError::MulticastLoop)?;
     set_unicast_hops_255(&socket).map_err(SocketError::UnicastHops)?;
     set_recv_hop_limit(&socket).map_err(SocketError::RecvHopLimit)?;
     set_recv_pkt_info(&socket).map_err(SocketError::RecvPktInfo)?;
@@ -87,6 +100,18 @@ fn set_multicast_hops_255(s: &Socket) -> io::Result<()> {
             s.as_raw_fd(),
             libc::IPPROTO_IPV6,
             libc::IPV6_MULTICAST_HOPS,
+            v,
+        )
+    }
+}
+
+fn set_multicast_loop_off(s: &Socket) -> io::Result<()> {
+    let v: c_int = 0;
+    unsafe {
+        setsockopt_int(
+            s.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_MULTICAST_LOOP,
             v,
         )
     }
