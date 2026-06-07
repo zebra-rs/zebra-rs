@@ -46,6 +46,66 @@ BFD Echo は本質的に「ローカルが送出 → リモートのフォワー
   破棄する。したがって reflector は **TTL を 1 減算し IPv4 ヘッダチェックサムを再計算（RFC 1141:
   チェックサム += 0x0100 / 桁上げ畳み込み）する必要がある**（UDP チェックサムは TTL を含まないため
   不変）。zebra-rs の XDP reflector は実装済み・FRR `echo-mode` と相互接続検証済み。
+
+  **[2026-06-07 update — FRR Echo addressing is asymmetric across IPv4/IPv6; the
+  reflector must treat each differently. Found via a real-world IPv6 loop against
+  FRR.]** Reading the FRR source, the Echo transmit dispatch
+  (`ptm_bfd_echo_xmt_TO`, `bfdd/bfd.c:583-590`) hardcodes an `if IPv6 … else`
+  split:
+  - **IPv4 Echo** (`ptm_bfd_echo_fp_snd`) is **self-addressed**
+    (`src == dst == local`, TTL 255) and looped by the peer's **forwarding
+    plane** — the RFC 5881 model. The reflector never touches the dst (already
+    the originator), so a **MAC swap + TTL decrement** suffices. This is the path
+    already lab-validated against FRR `echo-mode` (see the 2026-06-01 note).
+  - **IPv6 Echo** (`ptm_bfd_echo_snd`, `bfd_packet.c:326`) is **peer-addressed**
+    (`src = local, dst = bfd->key.peer`, hlim 255) and looped by the peer's
+    **bfdd in software** (`bp_bfd_echo_in`): an IPv6 link-local Echo cannot be
+    forwarding-plane looped. FRR's reflect sends the frame back to the source at
+    `hlim - 1` (= 254); the originator IDs its own return by `hlim != 255`
+    (255 → re-reflect, otherwise → match by `my_discr`). That hlim distinction is
+    what stops a mutual-reflection loop.
+  - **Bug + fix:** the XDP reflector's IPv6 path must therefore swap the IPv6
+    src/dst too, not just the MACs. Without it the reflected frame keeps
+    `dst = us`, FRR's forwarding plane bounces it back, and it ping-pongs until
+    hlim 0 (observed 2026-06-07 on IS-IS IPv6 BFD vs FRR: tcpdump shows src/dst
+    unchanged, hlim decrementing, MAC flipping between the two boxes). Fix:
+    `swap_ip6` in `try_reflect_v6` (16-byte ×2 volatile byte-swap, same shape as
+    `swap_macs` to dodge the verifier's memcpy rejection). **No checksum fix-up**
+    (the UDP pseudo-header sum `src + dst` is invariant under the swap). The hlim
+    255→254 decrement stays mandatory (FRR reflects only hlim 255). A
+    self-addressed Echo (e.g. our own originator) has `src == dst`, so the swap is
+    a no-op and its return is still caught by the `OUR_LOCAL_IPS_V6` branch.
+  - **IPv4 path left unchanged (minimal):** FRR IPv4 Echo is self-addressed, so
+    `try_reflect_v4` (MAC swap + TTL decrement, no IP swap) is correct. The only
+    way IPv4 Echo is peer-addressed is the non-Linux FRR branch
+    (`#else → ptm_bfd_echo_snd`, dst = peer) or another implementation; the same
+    swap would fix that harmlessly (the swap is commutative, so neither the IPv4
+    header checksum nor the UDP pseudo-header checksum changes) but is unnecessary
+    for Linux / RFC-compliant peers.
+
+  **Cross-vendor / RFC check — is FRR's IPv6 model an industry convention? No,
+  it's FRR-specific (and contrary to RFC 5881):**
+  - **RFC 5881 §5**: Echo is **self-addressed** — the destination MUST be chosen
+    so the remote *forwards* it back ("a system implementing the Echo function
+    MUST be capable of sending packets to its own address … bypassing the normal
+    forwarding lookup"), and the source SHOULD NOT be an IPv6 link-local address.
+    FRR's IPv6 Echo violates all three (dst = peer, link-local src, software
+    reflection).
+  - **Cisco (IOS-XR)**: no IPv6 Echo at all — Echo is IPv4-only ("echo packets
+    transmitted over UDP/IPv4, port 3785"); IPv6 liveness uses async BFD. Nothing
+    to be consistent with.
+  - **Juniper (Junos 22.4R1+)**: `echo` / `echo-lite`; `echo-lite` works "without
+    requiring BFD configuration on the neighbor" = forwarding-plane (RFC
+    self-addressed), the **opposite** of FRR's "peer must run a reflector".
+  - **FRR's own docs**: "echo mode works only when the peer is also FRR" unless
+    distributed BFD — confirming the IPv6 model is a both-ends-FRR feature.
+  - **Implication**: the reflector's v4/v6 asymmetry intentionally mirrors FRR's.
+    `swap_ip6` is robust to **both** addressing models — a no-op for
+    self-addressed (RFC / Juniper echo-lite / our own originator) and a retarget
+    for peer-addressed (FRR) — so making zebra-rs an FRR-compatible IPv6 reflector
+    does not break standards-compliant peers. The old code/README premise "IPv6
+    Echo is self-addressed, so no swap needed" held only for our own originator;
+    FRR originators are peer-addressed.
 - 「unaffiliated BFD echo」のリフレクタ概念に一致（BFD スタックを持たない機器の前段に小さな XDP リフレクタを置く構成が可能）。
 
 ### Originator 側 = XDP 単体では不可
