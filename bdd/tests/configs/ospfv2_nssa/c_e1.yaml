@@ -1,0 +1,27 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: etha
+  ipv4:
+    address: 10.0.13.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    # Same internal NSSA ASBR as c.yaml, but redistributes with
+    # metric-type type-1 (E1): the installed metric is the SPF cost to
+    # the originator plus the LSA metric, so it grows with distance —
+    # unlike the flat E2 metric.
+    - area-id: 0.0.0.1
+      area-type: nssa
+      redistribute:
+        connected:
+          metric: 20
+          metric-type: type-1
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
