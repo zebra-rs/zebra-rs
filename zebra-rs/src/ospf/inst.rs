@@ -222,6 +222,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// consumed by `nssa_redist_connected_resync` when origination
     /// state needs to be rebuilt (config change, area-type flip).
     pub redist_v4: BTreeMap<(crate::rib::RibType, Ipv4Net), crate::rib::RouteEntryV4>,
+    /// v6 sibling of `redist_v4`, populated by an OSPFv3 instance from
+    /// `RedistAfi::Ipv6` `RouteAdd`/`RouteDel` and consumed by
+    /// `nssa_redist_connected_resync_v3`. The generic `Ospf<V>` carries
+    /// both maps; a v2 instance leaves this empty.
+    pub redist_v6: BTreeMap<(crate::rib::RibType, ipnet::Ipv6Net), crate::rib::RouteEntryV6>,
     /// Instance-level `redistribute connected` — originates Type-5
     /// AS-External LSAs (FA=0) for every connected route from
     /// `redist_v4`. `Some(entry)` enables origination; `None` stops it.
@@ -975,6 +980,7 @@ impl Ospf<Ospfv2> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            redist_v6: BTreeMap::new(),
             redist_connected: None,
             redist_connected_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
@@ -4911,6 +4917,7 @@ impl Ospf<Ospfv3> {
             spf_last: None,
             spf_duration: None,
             redist_v4: BTreeMap::new(),
+            redist_v6: BTreeMap::new(),
             redist_connected: None,
             redist_connected_originated: BTreeSet::new(),
             flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv3::FLEX_ALGO_PREFIX),
@@ -5053,7 +5060,42 @@ impl Ospf<Ospfv3> {
                 ifindex,
             } => self.vrf_add(name, table_id, ifindex),
             RibRx::VrfDel { name } => self.vrf_del(name),
+            // Redistribute delivery. Only `Connected` is subscribed
+            // (per-area NSSA redistribute connected); the handler
+            // updates the `redist_v6` cache and resyncs Type-7 LSAs in
+            // every NSSA area whose `redistribute connected` knob is set.
+            RibRx::RouteAdd { rtype, routes, .. } => self.route_redist_add(rtype, routes),
+            RibRx::RouteDel { rtype, routes, .. } => self.route_redist_del(rtype, routes),
             _ => {}
+        }
+    }
+
+    /// `RibRx::RouteAdd` handler (v3): cache the delivered IPv6
+    /// connected routes in `redist_v6`, then resync every NSSA area's
+    /// Type-7 redistribution. v4 batches never arrive for a v3
+    /// subscription.
+    fn route_redist_add(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V6(entries) = batch {
+            for e in entries {
+                self.redist_v6.insert((rtype, e.prefix), e);
+            }
+        }
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
+        for area_id in area_ids {
+            self.nssa_redist_connected_resync_v3(area_id);
+        }
+    }
+
+    /// `RibRx::RouteDel` handler (v3). Mirror of `route_redist_add`.
+    fn route_redist_del(&mut self, rtype: crate::rib::RibType, batch: crate::rib::RouteBatch) {
+        if let crate::rib::RouteBatch::V6(entries) = batch {
+            for e in entries {
+                self.redist_v6.remove(&(rtype, e.prefix));
+            }
+        }
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(&id, _)| id).collect();
+        for area_id in area_ids {
+            self.nssa_redist_connected_resync_v3(area_id);
         }
     }
 
@@ -5415,7 +5457,7 @@ impl Ospf<Ospfv3> {
     /// Returns an `Ospfv3Lsa` with checksum + length stamped via
     /// `Ospfv3Lsa::update`. Ready to install through
     /// `Lsdb::install_originated`.
-    pub fn build_router_lsa(&self) -> ospf_packet::Ospfv3Lsa {
+    pub fn build_router_lsa(&self, area_id: Ipv4Addr) -> ospf_packet::Ospfv3Lsa {
         use ospf_packet::{
             OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E, OSPFV3_ROUTER_LSA_TYPE,
             Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3RouterLsa,
@@ -5425,6 +5467,11 @@ impl Ospf<Ospfv3> {
         let mut links = Vec::new();
         for link in self.links.values() {
             if !link.enabled {
+                continue;
+            }
+            // Router-LSAs are area-scoped (RFC 5340 §3.4.3): include
+            // only the links that belong to `area_id`.
+            if link.area_id != area_id {
                 continue;
             }
             let cost = link.output_cost as u16;
@@ -5536,11 +5583,31 @@ impl Ospf<Ospfv3> {
     /// - After install, flood the LSA to every Exchange-or-later
     ///   neighbor in the area via `flood_self_originated_lsa`.
     pub fn router_lsa_originate(&mut self) {
+        // Router-LSAs are area-scoped (RFC 5340 §3.4.3): originate one
+        // per area this router has enabled links in, each carrying only
+        // that area's links. Previously hardcoded to AREA0, which left
+        // every non-backbone area without a topology LSA — so its SPF
+        // never ran and the area's routers got no routes.
+        let area_ids: BTreeSet<Ipv4Addr> = self
+            .links
+            .values()
+            .filter(|l| l.enabled)
+            .map(|l| l.area_id)
+            .collect();
+        for area_id in area_ids {
+            self.router_lsa_originate_for_area(area_id);
+        }
+    }
+
+    /// Originate this router's Router-LSA for a single `area_id` (only
+    /// that area's links) into the area's LSDB, then flood + reschedule
+    /// the area's SPF.
+    fn router_lsa_originate_for_area(&mut self, area_id: Ipv4Addr) {
         use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
-        let mut lsa = self.build_router_lsa();
+        let mut lsa = self.build_router_lsa(area_id);
 
         let key: super::lsdb::OspfLsaKey = (OSPFV3_ROUTER_LSA_TYPE, 0, self.router_id);
-        if let Some(area) = self.areas.get(AREA0) {
+        if let Some(area) = self.areas.get(area_id) {
             let current_seq = area
                 .lsdb
                 .lookup_by_raw_key(key)
@@ -5552,12 +5619,12 @@ impl Ospf<Ospfv3> {
         lsa.update();
 
         let flood_lsa = lsa.clone();
-        if let Some(area) = self.areas.get_mut(AREA0) {
-            area.lsdb.install_originated(lsa, &self.tx, Some(AREA0));
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
             Self::ospf_spf_schedule_generic(&self.tx, area);
         }
 
-        self.flood_self_originated_lsa(AREA0, &flood_lsa);
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
     /// v3 generic Type-7 NSSA-LSA originator. Builds an
@@ -5589,20 +5656,17 @@ impl Ospf<Ospfv3> {
             ospfv3_prefix_wire_len,
         };
 
+        // RFC 5340 §A.4.9 / RFC 3101 §2.4: the P-bit (Propagate) lives
+        // in the NSSA-LSA's prefix-options. A pure NSSA ASBR sets it to
+        // ask the ABR to translate; an ABR clears it on its own Type-7s
+        // (default-LSA, ABR redistribute) so a peer ABR never
+        // re-translates them. Same `!is_abr()` rule as the v2 N/P-bit.
+        let propagate = !self.is_abr();
+
         // v3 LSA header: link_state_id is a 32-bit opaque value
-        // selected by the originator; for the NSSA default-LSA we
-        // use 0 (matches v2 ls_id == 0.0.0.0). For redistributed
-        // prefixes a future caller will pick something stable per
-        // RFC 5340 §A.4.7 conventions.
-        let link_state_id: u32 = if prefix.prefix_len() == 0 {
-            0
-        } else {
-            // Hash-style stable per-prefix LS-ID picker is a phase
-            // 6e concern; for now reuse the high 4 bytes of the
-            // prefix. Collisions are tolerated in this phase since
-            // only the default originator (ls_id=0) is wired here.
-            u32::from_be_bytes(prefix.network().octets()[0..4].try_into().unwrap_or([0; 4]))
-        };
+        // selected by the originator (ls-id 0 for the NSSA default-LSA,
+        // a full-prefix hash otherwise — see `nssa_v3_ls_id`).
+        let link_state_id = nssa_v3_ls_id(&prefix);
 
         let mut flags = 0u8;
         if metric_type_2 {
@@ -5621,11 +5685,13 @@ impl Ospf<Ospfv3> {
         let copy_len = wire_len.min(net_bytes.len());
         address_prefix[..copy_len].copy_from_slice(&net_bytes[..copy_len]);
 
+        let mut prefix_options = Ospfv3PrefixOptions::new();
+        prefix_options.set_p(propagate);
         let body = Ospfv3AsExternalLsa {
             flags,
             metric,
             prefix_length: prefix.prefix_len(),
-            prefix_options: Ospfv3PrefixOptions::new(),
+            prefix_options,
             referenced_ls_type: 0,
             address_prefix,
             forwarding_address: fwd_addr,
@@ -5671,11 +5737,7 @@ impl Ospf<Ospfv3> {
     /// `area_id` keyed by the prefix-derived ls-id (0 for default).
     fn nssa_lsa_flush_for_prefix_v3(&mut self, area_id: Ipv4Addr, prefix: ipnet::Ipv6Net) {
         use ospf_packet::OSPFV3_NSSA_LSA_TYPE;
-        let link_state_id: u32 = if prefix.prefix_len() == 0 {
-            0
-        } else {
-            u32::from_be_bytes(prefix.network().octets()[0..4].try_into().unwrap_or([0; 4]))
-        };
+        let link_state_id = nssa_v3_ls_id(&prefix);
         let key: super::lsdb::OspfLsaKey = (OSPFV3_NSSA_LSA_TYPE, link_state_id, self.router_id);
         let flushed = if let Some(area) = self.areas.get_mut(area_id) {
             area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
@@ -5684,6 +5746,65 @@ impl Ospf<Ospfv3> {
         };
         if let Some(lsa) = flushed {
             self.flood_self_originated_lsa(area_id, &lsa);
+        }
+    }
+
+    /// v3 sibling of `nssa_redist_connected_resync`: rebuild this
+    /// area's self-originated Type-7 (NSSA-LSA) set for redistribute-
+    /// connected from the cached RIB-known v6 connected routes
+    /// (`redist_v6`). Idempotent; originates with FA=None (the
+    /// translator and `add_nssa_routes_v3` resolve via the originator /
+    /// the translating ABR) and metric / E-bit from config.
+    pub fn nssa_redist_connected_resync_v3(&mut self, area_id: Ipv4Addr) {
+        use crate::rib::RibType;
+
+        let (entry, area_type, prev_originated) = {
+            let Some(area) = self.areas.get(area_id) else {
+                return;
+            };
+            (
+                area.redistribute.connected,
+                area.area_type,
+                area.redist_connected_originated_v6.clone(),
+            )
+        };
+
+        let desired: BTreeSet<ipnet::Ipv6Net> = if area_type.is_nssa() && entry.is_some() {
+            self.redist_v6
+                .iter()
+                .filter(|((rtype, _prefix), _entry)| *rtype == RibType::Connected)
+                .map(|((_, prefix), _)| *prefix)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
+        for prefix in prev_originated
+            .difference(&desired)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.nssa_lsa_flush_for_prefix_v3(area_id, prefix);
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.redist_connected_originated_v6.remove(&prefix);
+            }
+        }
+
+        if let Some(redist_entry) = entry
+            && area_type.is_nssa()
+        {
+            for prefix in &desired {
+                self.nssa_lsa_originate_for_prefix_v3(
+                    area_id,
+                    *prefix,
+                    redist_entry.metric,
+                    redist_entry.metric_type.is_type_2(),
+                    None,
+                );
+                if let Some(area) = self.areas.get_mut(area_id) {
+                    area.redist_connected_originated_v6.insert(*prefix);
+                }
+            }
         }
     }
 
@@ -5808,9 +5929,11 @@ impl Ospf<Ospfv3> {
         if !body.prefix_options.p() {
             return false;
         }
-        if body.forwarding_address.is_none() {
-            return false;
-        }
+        // FA=None (forwarding address absent) is permitted: the
+        // translated Type-5 also carries no FA, so receivers reach the
+        // prefix via the path to this ABR, which itself installs the
+        // Type-7 route. Mirrors the v2 `nssa_translate_one` FA=0
+        // handling.
 
         let link_state_id = type7.h.link_state_id;
         // Build a Type-5 wrapping the same body — RFC 5340 §A.4.9
@@ -5875,9 +5998,7 @@ impl Ospf<Ospfv3> {
             if !body.prefix_options.p() {
                 continue;
             }
-            if body.forwarding_address.is_none() {
-                continue;
-            }
+            // FA=None is translatable (see `nssa_translate_one_v3`).
             out.insert(Ipv4Addr::from(d.h.link_state_id));
         }
         out
@@ -9960,6 +10081,13 @@ fn build_rib6_from_spf(
         }
     }
 
+    // AS-External: walk Type-5 LSAs (incl. those translated from a
+    // Type-7 by an NSSA ABR) and install via the SPF nexthop to the
+    // originating ASBR. `lsdb_as` is empty for stub / NSSA-internal
+    // routers (Type-5 isn't flooded into those areas), so this is a
+    // no-op there.
+    add_as_external_routes_v3(top, area_id, spf_result, &mut rib);
+
     // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs flood with
     // area scope, so the walk reads from `area.lsdb` and resolves
     // the originator via this area's SPF. Gated on area being NSSA;
@@ -9996,6 +10124,131 @@ fn build_rib6_from_spf(
     }
 
     rib
+}
+
+/// Walk v3 Type-5 (AS-External, 0x4005) entries in `lsdb_as` and
+/// install routes — v3 sibling of v2's `add_as_external_routes`,
+/// modelled on `add_nssa_routes_v3`. Resolves the originating ASBR
+/// (the LSA's advertising-router — for a translated Type-5, the NSSA
+/// ABR) via this area's SPF.
+///
+/// Deferred (same incremental build-out as the v2 walker): non-zero
+/// forwarding-address resolution, and the cross-area Type-4
+/// Inter-Area-Router-LSA fallback for an ASBR reachable only through
+/// another area. A backbone observer reaches a backbone ABR directly,
+/// which is the translation case this enables.
+/// Pick a stable, collision-resistant 32-bit Link-State ID for a v3
+/// NSSA / AS-External LSA covering `prefix`. RFC 5340 §A.4.7 leaves the
+/// ls-id opaque to the originator; the only requirement is per-LSA
+/// uniqueness. A high-32-bit slice of the address collides for every
+/// prefix under a common /32 (e.g. all `2001:db8::/32` networks), so
+/// hash all 16 network octets plus the prefix length (FNV-1a). ls-id 0
+/// is reserved for the NSSA default-LSA, so a zero result (and the
+/// `::/0` default) map there; any non-default prefix that hashes to 0
+/// is nudged to 1. Residual hash collisions are vanishingly unlikely
+/// for a handful of redistributed prefixes; a per-prefix counter
+/// allocator is the robust follow-up if dense collisions ever bite.
+fn nssa_v3_ls_id(prefix: &ipnet::Ipv6Net) -> u32 {
+    if prefix.prefix_len() == 0 {
+        return 0;
+    }
+    let mut h: u32 = 0x811c_9dc5;
+    for b in prefix.network().octets() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h ^= prefix.prefix_len() as u32;
+    h = h.wrapping_mul(0x0100_0193);
+    if h == 0 { 1 } else { h }
+}
+
+fn add_as_external_routes_v3(
+    top: &Ospf<Ospfv3>,
+    _area_id: Ipv4Addr,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{
+        OSPFV3_AS_EXTERNAL_FLAG_E, OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_LS_INFINITY, Ospfv3LsBody,
+    };
+
+    for (_key, lsa) in top.lsdb_as.iter_by_raw_type(OSPFV3_AS_EXTERNAL_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        if lsa.data.h.advertising_router == top.router_id {
+            continue;
+        }
+        let Ospfv3LsBody::AsExternal(ref ext) = lsa.data.body else {
+            continue;
+        };
+        if ext.metric >= OSPFV3_LS_INFINITY {
+            continue;
+        }
+        if ext.forwarding_address.is_some() {
+            continue;
+        }
+
+        let Some(asbr_vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
+            continue;
+        };
+        let Some(asbr_path) = spf_result.get(&asbr_vertex) else {
+            continue;
+        };
+
+        let is_e2 = (ext.flags & OSPFV3_AS_EXTERNAL_FLAG_E) != 0;
+        let metric = if is_e2 {
+            ext.metric
+        } else {
+            asbr_path.cost.saturating_add(ext.metric)
+        };
+
+        let Some(net) = ospfv3_prefix_to_ipv6net(ext.prefix_length, &ext.address_prefix) else {
+            continue;
+        };
+
+        let nhops = collect_v3_nexthops(top, asbr_path);
+        if nhops.is_empty() {
+            continue;
+        }
+        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+            .into_iter()
+            .map(|(addr, ifindex)| {
+                (
+                    addr,
+                    SpfNexthopV3 {
+                        ifindex,
+                        adjacency: false,
+                        backup: None,
+                    },
+                )
+            })
+            .collect();
+
+        let entry = SpfRouteV3 {
+            metric,
+            nhops: nhops_map,
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: Some(asbr_vertex),
+            backup_as_primary: top.fast_reroute_backup_as_primary,
+        };
+        match rib.get_mut(&net) {
+            None => {
+                rib.insert(net, entry);
+            }
+            Some(curr) => {
+                if curr.metric > entry.metric {
+                    *curr = entry;
+                } else if curr.metric == entry.metric {
+                    for (addr, nhop) in entry.nhops {
+                        curr.nhops.insert(addr, nhop);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Walk v3 Type-7 (NSSA-LSA, 0x2007) entries in the area LSDB and

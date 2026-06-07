@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 
 use super::Lsdb;
 use super::version::{OspfVersion, Ospfv2};
@@ -243,6 +243,13 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     /// in `inst.rs`.
     pub redist_connected_originated: BTreeSet<Ipv4Net>,
 
+    /// v6 sibling of `redist_connected_originated`: prefixes of
+    /// redistributed connected routes this router has originated as
+    /// OSPFv3 NSSA-LSAs (Type-7) into this area. The generic
+    /// `OspfArea<V>` carries both the v4 and v6 sets; a v2 instance
+    /// only touches the v4 one and a v3 instance only the v6 one.
+    pub redist_connected_originated_v6: BTreeSet<Ipv6Net>,
+
     /// RFC 3101 §3 NSSA Type-7→Type-5 translator state. ls_ids of
     /// Type-7 LSAs in this area for which we have translated a
     /// Type-5 into `lsdb_as`. The translated Type-5's adv_router is
@@ -269,6 +276,7 @@ impl<V: OspfVersion> OspfArea<V> {
             spf_pending: false,
             redistribute: AreaRedistribute::default(),
             redist_connected_originated: BTreeSet::new(),
+            redist_connected_originated_v6: BTreeSet::new(),
             nssa_translated: BTreeSet::new(),
             asbr_summaries_originated: BTreeSet::new(),
         }
