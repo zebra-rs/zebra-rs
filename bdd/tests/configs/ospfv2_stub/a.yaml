@@ -1,0 +1,30 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ethb
+  ipv4:
+    address: 10.0.12.1/30
+- if-name: ethc
+  ipv4:
+    address: 10.0.13.1/30
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    # Backbone — a is the ABR between area 0 and the stub area.
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+    # Stub (0.0.0.1): drops Type-5 AS-External (E-bit clear in
+    # Hello/DBD) but still floods inter-area Type-3 summaries inward.
+    - area-id: 0.0.0.1
+      area-type: stub
+      interface:
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point

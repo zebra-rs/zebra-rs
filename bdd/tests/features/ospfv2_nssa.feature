@@ -122,3 +122,140 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I delete namespace "c"
     And I delete namespace "d"
     Then the test environment should be clean
+
+  # Totally-NSSA: the ABR's `no-summary` knob suppresses every Type-3
+  # Summary into the area, so internal routers hold no inter-area
+  # specifics — only the default Type-7 the ABR injects. Type-7
+  # origination and Type-7->Type-5 translation are unaffected, proving
+  # `no-summary` narrows only the inbound-summary path.
+  Scenario: Totally-NSSA suppresses Type-3 summaries but keeps the default and translation
+    Given a clean test environment
+    When I create namespace "a"
+    And I create namespace "b"
+    And I create namespace "c"
+    And I create namespace "d"
+    And I connect namespace "a" interface "ethb" to namespace "b" interface "etha"
+    And I connect namespace "a" interface "ethc" to namespace "c" interface "etha"
+    And I connect namespace "a" interface "ethd" to namespace "d" interface "etha"
+    And I start zebra-rs in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I start zebra-rs in namespace "c"
+    And I start zebra-rs in namespace "d"
+    # Only a differs from the first scenario: it adds `no-summary`.
+    And I apply config "a_totally.yaml" to namespace "a"
+    And I apply config "b.yaml" to namespace "b"
+    And I apply config "c.yaml" to namespace "c"
+    And I apply config "d.yaml" to namespace "d"
+    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I wait 60 seconds
+
+    # --- The default Type-7 is still injected, so d holds a 0.0.0.0/0. ---
+    Then show command "show ip ospf route" in namespace "d" should contain "0.0.0.0/0"
+    # --- But the Type-3 summary for the backbone loopback is gone: in a
+    #     totally-NSSA the ABR originates no summaries into the area. ---
+    And show command "show ip ospf route" in namespace "d" should not contain "10.0.0.2/32"
+    # --- Type-7 still floods in-area, and translation still reaches the
+    #     backbone — `no-summary` touches only the inbound Type-3 path. ---
+    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.1/32"
+    # --- d reaches the backbone loopback purely via the default route. ---
+    And ping from "d" to "10.0.0.2" should succeed
+
+    When I stop zebra-rs in namespace "a"
+    And I stop zebra-rs in namespace "b"
+    And I stop zebra-rs in namespace "c"
+    And I stop zebra-rs in namespace "d"
+    And I delete namespace "a"
+    And I delete namespace "b"
+    And I delete namespace "c"
+    And I delete namespace "d"
+    Then the test environment should be clean
+
+  # Translator-role `never`: the ABR refuses to translate (RFC 3101
+  # §2.2). The Type-7 still floods the NSSA and internal routers install
+  # it, but with no translator the prefix never becomes a Type-5, so the
+  # backbone-only router never learns it. This is the negative control
+  # for the first scenario's translation result.
+  Scenario: Translator-role never keeps the Type-7 in-area and out of the backbone
+    Given a clean test environment
+    When I create namespace "a"
+    And I create namespace "b"
+    And I create namespace "c"
+    And I create namespace "d"
+    And I connect namespace "a" interface "ethb" to namespace "b" interface "etha"
+    And I connect namespace "a" interface "ethc" to namespace "c" interface "etha"
+    And I connect namespace "a" interface "ethd" to namespace "d" interface "etha"
+    And I start zebra-rs in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I start zebra-rs in namespace "c"
+    And I start zebra-rs in namespace "d"
+    # Only a differs: nssa-translator-role = never.
+    And I apply config "a_never.yaml" to namespace "a"
+    And I apply config "b.yaml" to namespace "b"
+    And I apply config "c.yaml" to namespace "c"
+    And I apply config "d.yaml" to namespace "d"
+    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I wait 60 seconds
+
+    # --- Intra-NSSA Type-7 install is unchanged: d still learns it. ---
+    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    # --- But with translation disabled the prefix never reaches the
+    #     backbone: b has no Type-5 for it and externals are not
+    #     summarized as Type-3, so b must NOT contain the prefix. ---
+    And show command "show ip ospf route" in namespace "b" should not contain "192.168.1.1/32"
+
+    When I stop zebra-rs in namespace "a"
+    And I stop zebra-rs in namespace "b"
+    And I stop zebra-rs in namespace "c"
+    And I stop zebra-rs in namespace "d"
+    And I delete namespace "a"
+    And I delete namespace "b"
+    And I delete namespace "c"
+    And I delete namespace "d"
+    Then the test environment should be clean
+
+  # E1 (type-1) metric through the NSSA and across translation. Unlike
+  # the flat E2 metric, E1 adds the SPF cost to the originator, so the
+  # installed metric grows with distance and differs by observer:
+  #   - d (intra-NSSA): cost d->c is 20 (d-a-c, 10+10), so [40] (20+20).
+  #   - b (translated Type-5, advertised by the ABR a): cost b->a is 10,
+  #     so [30] (10+20).
+  Scenario: E1 metric grows with SPF distance to the originating ASBR and the translator
+    Given a clean test environment
+    When I create namespace "a"
+    And I create namespace "b"
+    And I create namespace "c"
+    And I create namespace "d"
+    And I connect namespace "a" interface "ethb" to namespace "b" interface "etha"
+    And I connect namespace "a" interface "ethc" to namespace "c" interface "etha"
+    And I connect namespace "a" interface "ethd" to namespace "d" interface "etha"
+    And I start zebra-rs in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I start zebra-rs in namespace "c"
+    And I start zebra-rs in namespace "d"
+    # Only c differs: redistribute metric-type type-1 (E1).
+    And I apply config "a.yaml" to namespace "a"
+    And I apply config "b.yaml" to namespace "b"
+    And I apply config "c_e1.yaml" to namespace "c"
+    And I apply config "d.yaml" to namespace "d"
+    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I wait 60 seconds
+
+    # --- d: intra-NSSA Type-7, E1 metric = cost(d->c) 20 + ext 20 = 40. ---
+    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "d" should contain "[40]"
+    # --- b: translated Type-5 advertised by ABR a, E1 metric =
+    #     cost(b->a) 10 + ext 20 = 30. The differing metric (30 vs 40)
+    #     is the proof E1's distance term survives translation. ---
+    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "b" should contain "[30]"
+
+    When I stop zebra-rs in namespace "a"
+    And I stop zebra-rs in namespace "b"
+    And I stop zebra-rs in namespace "c"
+    And I stop zebra-rs in namespace "d"
+    And I delete namespace "a"
+    And I delete namespace "b"
+    And I delete namespace "c"
+    And I delete namespace "d"
+    Then the test environment should be clean
