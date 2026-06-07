@@ -221,6 +221,14 @@ pub struct Session {
     pub demand: bool,
     pub remote_demand: bool,
 
+    /// The most recently scheduled control-packet transmission interval
+    /// (microseconds) *with* RFC 5880 §6.8.7 jitter applied — the actual gap
+    /// the per-session timer is currently counting down, reported back from the
+    /// timer task on each `TxTick`. Zero until the first tick (or while
+    /// transmission is suspended). Surfaced as "Transmission interval (actual
+    /// with jitter)" in `show bfd peers`, mirroring FRR.
+    pub actual_tx_us: u32,
+
     pub stats: Stats,
     pub created_at: Instant,
     pub last_up: Option<Instant>,
@@ -263,6 +271,7 @@ impl Session {
             remote_min_echo_rx_us: 0,
             demand: false,
             remote_demand: false,
+            actual_tx_us: 0,
             stats: Stats::default(),
             created_at: Instant::now(),
             last_up: None,

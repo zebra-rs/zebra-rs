@@ -214,6 +214,9 @@ struct BfdPeerDetailJson {
     receive_interval_us: u32,
     transmit_interval_us: u32,
     negotiated_transmit_interval_us: u32,
+    /// The most recent jittered transmit interval (RFC 5880 §6.8.7) the timer
+    /// scheduled; 0 until the first tick or while transmission is suspended.
+    actual_transmit_interval_us: u32,
     detection_time_us: u32,
     /// `Required Min Echo RX Interval` we advertise (0 = disabled). Non-zero
     /// only while the XDP reflector is up on a single-hop session.
@@ -264,6 +267,7 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         receive_interval_us: s.required_min_rx_us,
         transmit_interval_us: s.desired_min_tx_us,
         negotiated_transmit_interval_us: s.tx_interval_us(),
+        actual_transmit_interval_us: s.actual_tx_us,
         detection_time_us: s.detection_time_us(),
         echo_receive_interval_us: s.advertised_echo_rx_us(),
         echo_transmission_interval_us: s.echo_transmit_interval_us(),
@@ -341,6 +345,18 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
         buf,
         "            Transmission interval (negotiated): {}",
         nego_tx
+    )?;
+    // The actual jittered gap the timer is currently counting down (RFC 5880
+    // §6.8.7). Zero until the first TxTick, or while transmission is suspended.
+    let actual_tx = if s.actual_tx_us == 0 {
+        "-".to_string()
+    } else {
+        ms(s.actual_tx_us)
+    };
+    writeln!(
+        buf,
+        "            Transmission interval (actual with jitter): {}",
+        actual_tx
     )?;
     let detect = s.detection_time_us();
     let detect = if detect == 0 {
@@ -589,6 +605,9 @@ mod tests {
         // detection = remote-mult * max(req-rx, remote-tx) = 3000ms.
         assert!(out.contains("Transmission interval (negotiated): 1000ms"));
         assert!(out.contains("Detection timeout: 3000ms"));
+        // No timer task runs in this unit test, so no TxTick has populated the
+        // jittered value yet — the line is present and renders the "-" placeholder.
+        assert!(out.contains("Transmission interval (actual with jitter): -"));
     }
 
     #[tokio::test]

@@ -65,7 +65,7 @@ pub async fn session_timer(
     let mut detect_us = initial.detection_time_us;
     let mut detect_mult = initial.detect_mult.max(1);
 
-    let mut next_tx = arm_tx(tx_us, detect_mult);
+    let (mut next_tx, _) = arm_tx(tx_us, detect_mult);
     let mut detect_at = arm_detect(detect_us);
 
     loop {
@@ -79,10 +79,14 @@ pub async fn session_timer(
 
         tokio::select! {
             _ = &mut tx_sleep, if next_tx.is_some() => {
-                if event_tx.send(Message::TxTick { key }).is_err() {
+                // Re-arm first so the tick carries the jitter of the interval
+                // we are now counting down — that is the value `show bfd peers`
+                // reports as "actual with jitter" (matches FRR).
+                let (deadline, actual_tx_us) = arm_tx(tx_us, detect_mult);
+                next_tx = deadline;
+                if event_tx.send(Message::TxTick { key, actual_tx_us }).is_err() {
                     return; // event loop gone
                 }
-                next_tx = arm_tx(tx_us, detect_mult);
             }
             _ = &mut det_sleep, if detect_at.is_some() => {
                 if event_tx.send(Message::DetectExpired { key }).is_err() {
@@ -117,7 +121,8 @@ pub async fn session_timer(
                     // (0 ⇄ non-zero), since `arm_tx(0)` yields `None`.
                     if tx_interval_us != tx_us {
                         tx_us = tx_interval_us;
-                        next_tx = arm_tx(tx_us, detect_mult);
+                        // Jitter for the new interval is reported on the next tick.
+                        next_tx = arm_tx(tx_us, detect_mult).0;
                     }
                 }
                 Some(TimerCmd::ResetDetect) => {
@@ -128,14 +133,20 @@ pub async fn session_timer(
     }
 }
 
-/// Pick the next TX deadline, applying RFC 5880 §6.8.7 jitter. Zero
-/// transmission interval means the peer has suspended async transmit
-/// (`Required Min RX Interval = 0`) and we mustn't send.
-fn arm_tx(tx_us: u32, detect_mult: u8) -> Option<Instant> {
+/// Pick the next TX deadline, applying RFC 5880 §6.8.7 jitter. Returns the
+/// deadline together with the jittered interval in microseconds (so the caller
+/// can report it as "actual with jitter"). Zero transmission interval means the
+/// peer has suspended async transmit (`Required Min RX Interval = 0`) and we
+/// mustn't send — yielding `(None, 0)`.
+fn arm_tx(tx_us: u32, detect_mult: u8) -> (Option<Instant>, u32) {
     if tx_us == 0 {
-        return None;
+        return (None, 0);
     }
-    Some(Instant::now() + Duration::from_micros(jittered_tx_us(tx_us, detect_mult) as u64))
+    let jitter_us = jittered_tx_us(tx_us, detect_mult);
+    (
+        Some(Instant::now() + Duration::from_micros(jitter_us as u64)),
+        jitter_us,
+    )
 }
 
 /// Pick the next detection-time deadline. Zero means we haven't
@@ -191,8 +202,14 @@ mod tests {
     /// (peer's Required Min RX Interval = 0).
     #[test]
     fn zero_tx_disables_arm() {
-        assert!(arm_tx(0, 3).is_none());
-        assert!(arm_tx(50_000, 3).is_some());
+        // Suspended transmit yields no deadline and zero reported jitter.
+        let (deadline, jitter) = arm_tx(0, 3);
+        assert!(deadline.is_none());
+        assert_eq!(jitter, 0);
+        // A live interval yields a deadline and an in-envelope jitter.
+        let (deadline, jitter) = arm_tx(50_000, 3);
+        assert!(deadline.is_some());
+        assert!((37_500..=50_000).contains(&jitter), "jitter={jitter}");
     }
 
     /// Zero detection time leaves the detect arm un-set (no peer
