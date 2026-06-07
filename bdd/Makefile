@@ -26,6 +26,12 @@ isis:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=20 --tags "@isis"
 
+# Run all BFD tests.
+bfd:
+	rm -rf allure-results
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=20 --tags "@bfd"
+
 isis_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@isis_ipv6"
