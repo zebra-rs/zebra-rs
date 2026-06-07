@@ -1,0 +1,25 @@
+# Phase 2: enable Router Advertisements on i1 and declare the
+# interface-keyed (IPv6 unnumbered) neighbor. The peer is materialized
+# only when an RA is received on i1 (the peer's link-local is learned
+# from it), so RA send must be on at BOTH ends. `remote-as` is numeric
+# (not `external`) because the `external` placeholder leaves the peer
+# dormant until OPEN-side AS backfill lands. The IPv4 network is
+# advertised over the link-local session via RFC 8950 ENHE, which is
+# auto-negotiated for interface-keyed peers.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 1.1.1.1
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

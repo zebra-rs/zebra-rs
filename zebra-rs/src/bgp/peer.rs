@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use bgp_packet::*;
 
-use super::peer_key::PeerOrigin;
+use super::peer_key::{PeerKey, PeerOrigin};
 use super::peer_map::PeerMap;
 
 use caps::CapAs4;
@@ -1720,13 +1720,34 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     let _ = packet_tx.send(bytes);
 }
 
-/// Handle incoming connection for a peer based on current BGP state
+/// Handle incoming connection for a peer based on current BGP state.
+///
+/// `scope_id` is the IPv6 scope of the accepted socket — for a
+/// link-local source it is the arrival ifindex, which is how an
+/// IPv6-unnumbered (`interface-neighbor`) peer is keyed. The lookup
+/// prefers an address-keyed peer (numbered + dynamic peers, which is
+/// every non-unnumbered case) and only falls back to the
+/// interface-keyed peer when the source has no address-keyed match —
+/// an unnumbered peer's remote link-local is never written into the
+/// address map, so an inbound connection from it would otherwise be
+/// dropped, and the session (both ends connect actively *and* accept
+/// passively) could never resolve a collision into Established.
 fn handle_peer_connection(
     bgp: &mut Bgp,
     peer_addr: IpAddr,
+    scope_id: Option<u32>,
     stream: TcpStream,
 ) -> Option<TcpStream> {
-    if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
+    let key = if bgp.peers.get(&peer_addr).is_some() {
+        PeerKey::Addr(peer_addr)
+    } else if let Some(ifindex) = scope_id
+        && bgp.peers.get_by_key(&PeerKey::Interface(ifindex)).is_some()
+    {
+        PeerKey::Interface(ifindex)
+    } else {
+        return Some(stream);
+    };
+    if let Some(peer) = bgp.peers.get_mut_by_key(&key) {
         match peer.state {
             State::Idle => {
                 // No session established yet - just drop (sends TCP RST/FIN)
@@ -1776,7 +1797,16 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
         SocketAddr::V4(addr) => IpAddr::V4(*addr.ip()),
         SocketAddr::V6(addr) => IpAddr::V6(*addr.ip()),
     };
-    let mut remaining_stream = handle_peer_connection(bgp, peer_addr, stream);
+    // For an IPv6-unnumbered (`interface-neighbor`) peer the inbound
+    // connection is matched by the arrival interface, not the source
+    // address (a link-local we never recorded). The accepted socket's
+    // IPv6 sockaddr carries that ifindex as its scope_id; a non
+    // link-local source has scope_id 0 and is matched by address only.
+    let scope_id = match sockaddr {
+        SocketAddr::V6(addr) if addr.scope_id() != 0 => Some(addr.scope_id()),
+        _ => None,
+    };
+    let mut remaining_stream = handle_peer_connection(bgp, peer_addr, scope_id, stream);
 
     // Static lookup missed — try a configured listen-range. If LPM
     // hits and the per-range neighbor-group resolves to a usable
@@ -1833,7 +1863,9 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     bgp.peers.insert(peer_addr, peer);
     bgp.dynamic_peer_count += 1;
 
-    handle_peer_connection(bgp, peer_addr, stream)
+    // Dynamic (listen-range) peers are always address-keyed, so no
+    // interface scope is needed here.
+    handle_peer_connection(bgp, peer_addr, None, stream)
 }
 
 /// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,
