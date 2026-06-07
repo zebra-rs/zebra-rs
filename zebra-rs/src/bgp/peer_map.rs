@@ -96,6 +96,17 @@ impl PeerMap {
             })
     }
 
+    /// Iterate every peer regardless of key variant. Unlike
+    /// [`Self::iter`], this includes `PeerKey::Interface` (IPv6
+    /// unnumbered) peers — `show ip bgp neighbors` needs them so an
+    /// operator can observe an interface-keyed session whose remote
+    /// link-local address isn't something they can name.
+    pub fn iter_all(&self) -> impl Iterator<Item = (&PeerKey, &Peer)> {
+        self.map
+            .iter()
+            .filter_map(move |(key, &idx)| self.peers[idx].as_ref().map(|peer| (key, peer)))
+    }
+
     /// Iterate every peer regardless of key variant, mutable.
     pub fn iter_mut_all(&mut self) -> impl Iterator<Item = (&PeerKey, &mut Peer)> {
         let map = &self.map;
@@ -170,6 +181,7 @@ mod tests {
         );
 
         assert_eq!(m.iter().count(), 1, "addr-only iter skips interface peer");
+        assert_eq!(m.iter_all().count(), 2, "iter_all includes interface peer");
         assert_eq!(m.iter_mut_all().count(), 2, "iter_mut_all includes both");
         assert_eq!(m.len(), 2);
     }

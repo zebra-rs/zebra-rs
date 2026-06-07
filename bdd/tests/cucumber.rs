@@ -546,6 +546,82 @@ async fn verify_bgp_session_not(
     );
 }
 
+/// Poll `show ip bgp neighbors` (all peers, JSON) until some peer's
+/// `state` matches `expected` (`want_match = true`) or no peer matches
+/// it (`want_match = false`). Returns `(satisfied, last_output)`.
+///
+/// Unlike [`verify_bgp_session`], this matches on state across whatever
+/// peers exist instead of by remote address — IPv6-unnumbered
+/// (`interface-neighbor`) peers are keyed by interface and their remote
+/// link-local is a kernel-assigned address the scenario can't name. The
+/// topologies that use this step have exactly one peer, so "some peer"
+/// is unambiguous. Polling (rather than a fixed wait) absorbs the RA
+/// discovery delay, which is bounded but not instant.
+async fn poll_unnumbered_session_state(
+    scoped: &str,
+    expected: &str,
+    want_match: bool,
+) -> (bool, String) {
+    const ATTEMPTS: u32 = 60;
+    let mut last = String::new();
+    for i in 0..ATTEMPTS {
+        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show ip bgp neighbors"])
+            .await
+            .expect("Failed to get BGP neighbors");
+        let matched = serde_json::from_str::<Value>(&last)
+            .ok()
+            .and_then(|v| {
+                v.as_array().map(|peers| {
+                    peers.iter().any(|peer| {
+                        peer.get("state")
+                            .and_then(|s| s.as_str())
+                            .is_some_and(|s| s.eq_ignore_ascii_case(expected))
+                    })
+                })
+            })
+            .unwrap_or(false);
+        if matched == want_match {
+            return (true, last);
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    (false, last)
+}
+
+#[then(expr = "BGP session in namespace {string} should eventually be {string}")]
+async fn verify_unnumbered_session_eventually(
+    world: &mut World,
+    namespace: String,
+    expected_state: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_unnumbered_session_state(&scoped, &expected_state, true).await;
+    assert!(
+        ok,
+        "no BGP peer in {} reached state {}; last neighbors output:\n{}",
+        scoped, expected_state, last
+    );
+    println!("✓ BGP session in {} reached {}", scoped, expected_state);
+}
+
+#[then(expr = "BGP session in namespace {string} should eventually not be {string}")]
+async fn verify_unnumbered_session_eventually_not(
+    world: &mut World,
+    namespace: String,
+    unexpected_state: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_unnumbered_session_state(&scoped, &unexpected_state, false).await;
+    assert!(
+        ok,
+        "a BGP peer in {} stayed in state {}; last neighbors output:\n{}",
+        scoped, unexpected_state, last
+    );
+    println!("✓ no BGP session in {} is {}", scoped, unexpected_state);
+}
+
 #[then(expr = "BGP route in {string} has {string}")]
 async fn verify_bgp_route(world: &mut World, namespace: String, expected_prefix: String) {
     let scoped = world.ns(&namespace);

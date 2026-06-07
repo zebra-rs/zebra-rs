@@ -2014,7 +2014,10 @@ fn show_bgp_neighbor<V: BgpShowView>(
 
     if args.is_empty() {
         let mut neighbors = Vec::<Neighbor>::new();
-        for (_, peer) in bgp.peers().iter() {
+        // `iter_all` (not `iter`) so IPv6-unnumbered, interface-keyed
+        // peers are listed too — they're invisible to the address-keyed
+        // `iter`, and an operator has no remote address to query them by.
+        for (_, peer) in bgp.peers().iter_all() {
             neighbors.push(fetch(peer));
         }
         if json {
