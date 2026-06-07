@@ -1,0 +1,24 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+- if-name: etha
+  ipv4:
+    address: 10.0.14.2/30
+router:
+  ospf:
+    router-id: 10.0.0.4
+    # d is a plain internal NSSA router. It learns the external prefix
+    # straight from c's Type-7 (area-scoped flood), the default route
+    # from the ABR's Type-7, and backbone prefixes as Type-3 summaries
+    # (NSSA still accepts inter-area summaries — it is not totally
+    # stubby here).
+    area:
+    - area-id: 0.0.0.1
+      area-type: nssa
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
