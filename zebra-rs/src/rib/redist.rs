@@ -97,6 +97,9 @@ pub fn walk_v4(
         if !deliverable(proto, entry.rtype) {
             continue;
         }
+        if !redistributable_v4(&prefix) {
+            continue;
+        }
         // Connected (directly-attached) routes carry an interface-only
         // nexthop with no gateway IP, so `first_v4_nexthop` yields None.
         // Redistribution still wants the prefix — the consumer
@@ -137,6 +140,9 @@ pub fn walk_v6(
         if !deliverable(proto, entry.rtype) {
             continue;
         }
+        if !redistributable_v6(&prefix) {
+            continue;
+        }
         // See `walk_v4`: connected routes have no gateway IP; deliver
         // them with a :: placeholder rather than dropping the prefix.
         let nh6 = first_v6_nexthop(&entry.nexthop).unwrap_or(std::net::Ipv6Addr::UNSPECIFIED);
@@ -166,6 +172,28 @@ fn pick_entry<'a>(
     entries.iter().find(|e| {
         e.is_selected() && e.rtype == rtype && subtype_matches(subtype_filter, &e.rsubtype)
     })
+}
+
+/// True when a prefix is eligible for redistribution into a routing
+/// protocol. Loopback (127.0.0.0/8) and link-local (169.254.0.0/16)
+/// addresses appear as connected routes but must never be advertised —
+/// they're not routable beyond the local host. Mirrors the Router-LSA
+/// builder's 127.x skip, but here it also guards Type-5 / NSSA Type-7
+/// origination and every other redistribute consumer.
+fn redistributable_v4(prefix: &Ipv4Net) -> bool {
+    let a = prefix.addr();
+    !a.is_loopback() && !a.is_link_local()
+}
+
+/// IPv6 sibling of [`redistributable_v4`]: excludes loopback (::1/128)
+/// and link-local (fe80::/10). Every interface carries an fe80::/64
+/// connected route, so skipping link-local also keeps a flood of
+/// per-interface junk out of redistribution.
+fn redistributable_v6(prefix: &Ipv6Net) -> bool {
+    let a = prefix.addr();
+    let o = a.octets();
+    let link_local = o[0] == 0xfe && (o[1] & 0xc0) == 0x80;
+    !a.is_loopback() && !link_local
 }
 
 /// Resolve the first IPv4 nexthop address from a Nexthop. Returns
@@ -279,6 +307,9 @@ fn flush_v6(
 // RouteAdd / RouteDel messages for each filter row that's affected.
 
 fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
+    if !redistributable_v4(prefix) {
+        return None;
+    }
     // Connected routes have no gateway IP (see `walk_v4`): deliver them
     // with a 0.0.0.0 placeholder rather than dropping the prefix.
     let nh = first_v4_nexthop(&e.nexthop).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
@@ -293,6 +324,9 @@ fn build_v4_entry(prefix: &Ipv4Net, e: &RibEntry) -> Option<RouteEntryV4> {
 }
 
 fn build_v6_entry(prefix: &Ipv6Net, e: &RibEntry) -> Option<RouteEntryV6> {
+    if !redistributable_v6(prefix) {
+        return None;
+    }
     // Connected routes have no gateway IP (see `walk_v4`): deliver them
     // with a :: placeholder rather than dropping the prefix.
     let nh = first_v6_nexthop(&e.nexthop).unwrap_or(std::net::Ipv6Addr::UNSPECIFIED);
@@ -617,5 +651,32 @@ mod tests {
         // Gaining or losing it is therefore a redistribute change.
         assert!(selected_changed_v4(&p(), Some(&conn), None));
         assert!(selected_changed_v4(&p(), None, Some(&conn)));
+    }
+
+    #[test]
+    fn loopback_and_link_local_are_not_redistributed() {
+        // Loopback (127/8) and link-local (169.254/16) appear as
+        // connected routes but must never be redistributed — they are
+        // not routable beyond the local host.
+        let mut conn = RibEntry::new(RibType::Connected);
+        conn.nexthop = Nexthop::Link(1);
+        conn.ifindex = 1;
+
+        let lo: Ipv4Net = "127.0.0.0/8".parse().unwrap();
+        let ll: Ipv4Net = "169.254.0.0/16".parse().unwrap();
+        assert!(build_v4_entry(&lo, &conn).is_none());
+        assert!(build_v4_entry(&ll, &conn).is_none());
+        assert!(!selected_changed_v4(&lo, None, Some(&conn)));
+
+        // A normal connected prefix is still delivered.
+        let ok: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        assert!(build_v4_entry(&ok, &conn).is_some());
+    }
+
+    #[test]
+    fn v6_loopback_and_link_local_are_not_redistributed() {
+        assert!(!redistributable_v6(&"::1/128".parse().unwrap()));
+        assert!(!redistributable_v6(&"fe80::/64".parse().unwrap()));
+        assert!(redistributable_v6(&"2001:db8::/64".parse().unwrap()));
     }
 }
