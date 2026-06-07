@@ -226,10 +226,20 @@ Beyond reflecting, the helper also *originates* Echo when zebra-rs asks it to
 
 ## Limitations / follow-ups
 
-- IPv4 (EtherType 0x0800) and IPv6 (0x86DD) are both reflected/originated. The
-  IPv6 path needs no checksum fix-up on reflect (no header checksum, and the
-  self-addressed Echo's symmetric src/dst leave the UDP checksum valid); it
-  decrements the Hop Limit just as the IPv4 path decrements the TTL.
+- IPv4 (EtherType 0x0800) and IPv6 (0x86DD) are both reflected/originated, but
+  the IPv6 reflect is not a pure analogue of IPv4. IPv4 Echo is self-addressed
+  (`src == dst`) and looped by the peer's forwarding plane, so a MAC swap
+  suffices. FRR's IPv6 Echo (`ptm_bfd_echo_snd`) is **peer-addressed**
+  (`src = originator, dst = us`) and looped by FRR's bfdd in software
+  (`bp_bfd_echo_in`), so the IPv6 reflect also **swaps the IPv6 src/dst** to
+  retarget the frame at the originator — otherwise it keeps `dst = us`, the
+  originator re-forwards it, and it ping-pongs until the Hop Limit reaches 0.
+  The swap needs no checksum fix-up (no IPv6 header checksum; the UDP
+  pseudo-header sum `src + dst` is invariant under the swap; Hop Limit isn't in
+  it). The Hop Limit is decremented (255 → 254) just as the IPv4 path decrements
+  the TTL — and here that decrement is what stops the loop, since FRR reflects
+  only Hop Limit 255 and *processes* anything else as a return. A self-addressed
+  Echo (e.g. our own originator) is unaffected: the address swap is a no-op.
 - Option-less IPv4 only (IHL=5) and base IPv6 headers only (no extension
   headers); BFD Echo frames carry neither.
 - `bpf_timer` detection needs a kernel that supports it (≥ 5.15) and `CAP_BPF`;

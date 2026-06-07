@@ -28,11 +28,23 @@
 //! helper polls that flag and reports `echo-down` to zebra-rs. This is the Echo
 //! *sender*'s detection offload — no userspace packet RX in steady state.
 //!
-//! Both IPv4 (EtherType 0x0800) and IPv6 (0x86DD) Echo frames are handled. The
-//! IPv6 path is the exact analogue: a 40-byte fixed header, Hop Limit in place
-//! of TTL, and — because IPv6 has no header checksum and the Echo is
-//! self-addressed (src == dst) — no checksum fix-up at all on reflect (the UDP
-//! pseudo-header is symmetric in src/dst, and Hop Limit isn't in it).
+//! Both IPv4 (EtherType 0x0800) and IPv6 (0x86DD) Echo frames are handled, but
+//! the IPv6 reflect path is NOT a pure analogue of IPv4. IPv4 Echo is
+//! *self-addressed* (src == dst == originator) and looped by the peer's
+//! forwarding plane, so reflecting it needs only a MAC swap. FRR's IPv6 Echo
+//! (`ptm_bfd_echo_snd`) is instead *peer-addressed* — src = originator, dst = us
+//! — and FRR loops the return in software (`bp_bfd_echo_in`): a link-local Echo
+//! can't be self-addressed through a forwarding hop. So on IPv6 reflect we must
+//! also swap the IPv6 source/destination, retargeting the frame at the
+//! originator (dst = originator). Without that the frame keeps dst = us, the
+//! originator's own forwarding plane bounces it back, and it ping-pongs until
+//! the Hop Limit reaches 0 (exactly the symptom seen against FRR). The swap
+//! needs no checksum fix-up: IPv6 has no header checksum, the UDP pseudo-header
+//! sum (src + dst) is invariant under the swap, and Hop Limit isn't in it. The
+//! Hop Limit is still decremented (255 -> 254) so the originator *processes* the
+//! return rather than re-reflecting it (FRR reflects only Hop Limit 255) — that
+//! decrement is what breaks the mutual-reflection loop. For our own
+//! self-addressed Echo the address swap is a harmless no-op.
 
 use aya_ebpf::{
     bindings::{bpf_timer, xdp_action},
@@ -133,6 +145,7 @@ const IP6_OFF: usize = ETH_HLEN;
 const IP6_NEXTHDR_OFF: usize = IP6_OFF + 6; // u8 Next Header
 const IP6_HOPLIMIT_OFF: usize = IP6_OFF + 7; // u8 Hop Limit
 const IP6_SRC_OFF: usize = IP6_OFF + 8; // [u8; 16] source address
+const IP6_DST_OFF: usize = IP6_OFF + 24; // [u8; 16] destination address
 const IP6_HLEN: usize = 40;
 
 /// UDP header after a 40-byte IPv6 header, and the Echo payload after it.
@@ -265,8 +278,7 @@ unsafe fn decrement_ttl(ctx: &XdpContext) -> Result<(), ()> {
 
 /// Decrement the IPv6 Hop Limit by one. Unlike IPv4 there is no header checksum
 /// to patch, and the UDP checksum is unaffected (Hop Limit is not in the
-/// pseudo-header, and the self-addressed Echo has src == dst). Returns Err on a
-/// truncated header or Hop Limit 0.
+/// pseudo-header). Returns Err on a truncated header or Hop Limit 0.
 #[inline(always)]
 unsafe fn decrement_hop_limit(ctx: &XdpContext) -> Result<(), ()> {
     let start = ctx.data();
@@ -361,6 +373,44 @@ unsafe fn swap_macs(ctx: &XdpContext) -> Result<(), ()> {
     Ok(())
 }
 
+/// Prove both 16-byte IPv6 addresses are in bounds, then swap the source and
+/// destination in place so a reflected Echo returns to its originator. Required
+/// for FRR-style *peer-addressed* IPv6 Echo (dst = us, not self-addressed):
+/// without retargeting, the reflected frame keeps dst = us and the originator's
+/// forwarding plane bounces it back, looping until the Hop Limit hits 0. The UDP
+/// checksum needs no fix-up — its IPv6 pseudo-header sum is src + dst, invariant
+/// under the swap. For a self-addressed Echo (src == dst) the swap is a no-op.
+/// Byte-by-byte at constant offsets (see [`swap_byte`]) so the copy is never
+/// lowered to a verifier-rejected memcpy.
+#[inline(always)]
+unsafe fn swap_ip6(ctx: &XdpContext) -> Result<(), ()> {
+    let start = ctx.data();
+    if start + IP6_DST_OFF + 16 > ctx.data_end() {
+        return Err(());
+    }
+    unsafe {
+        let src = (start + IP6_SRC_OFF) as *mut u8;
+        let dst = (start + IP6_DST_OFF) as *mut u8;
+        swap_byte(src, dst);
+        swap_byte(src.add(1), dst.add(1));
+        swap_byte(src.add(2), dst.add(2));
+        swap_byte(src.add(3), dst.add(3));
+        swap_byte(src.add(4), dst.add(4));
+        swap_byte(src.add(5), dst.add(5));
+        swap_byte(src.add(6), dst.add(6));
+        swap_byte(src.add(7), dst.add(7));
+        swap_byte(src.add(8), dst.add(8));
+        swap_byte(src.add(9), dst.add(9));
+        swap_byte(src.add(10), dst.add(10));
+        swap_byte(src.add(11), dst.add(11));
+        swap_byte(src.add(12), dst.add(12));
+        swap_byte(src.add(13), dst.add(13));
+        swap_byte(src.add(14), dst.add(14));
+        swap_byte(src.add(15), dst.add(15));
+    }
+    Ok(())
+}
+
 #[xdp]
 pub fn bfd_echo_reflect(ctx: XdpContext) -> u32 {
     match try_reflect(&ctx) {
@@ -430,9 +480,16 @@ fn try_reflect_v6(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // Forwarding-hop loopback: decrement the Hop Limit (no header/UDP checksum
-    // fix-up needed — see decrement_hop_limit), swap MACs, bounce out.
+    // Reflect a peer's Echo back to its originator. FRR sends IPv6 Echo
+    // peer-addressed (dst = us) and loops the return in bfdd, so we retarget the
+    // frame: swap the IPv6 src/dst (no checksum fix-up — commutative in the UDP
+    // pseudo-header; see swap_ip6) AND swap MACs. The Hop Limit decrement
+    // (255 -> 254) makes the originator process the return instead of
+    // re-reflecting it (FRR reflects only Hop Limit 255) — this is what stops
+    // the ping-pong. A self-addressed Echo (src == dst) is unaffected: the
+    // address swap is a no-op.
     unsafe { decrement_hop_limit(ctx)? };
+    unsafe { swap_ip6(ctx)? };
     unsafe { swap_macs(ctx)? };
     Ok(xdp_action::XDP_TX)
 }
