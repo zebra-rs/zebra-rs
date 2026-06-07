@@ -1549,6 +1549,29 @@ async fn add_address_to_interface(
     );
 }
 
+/// Create a standalone dummy interface (not wired into any OSPF/IS-IS
+/// area) and give it an address. The resulting connected route is a
+/// genuine *external* prefix for redistribution tests — unlike an
+/// address added to an OSPF-enabled interface, which OSPF advertises as
+/// an intra-area stub and would mask the redistributed external LSA.
+#[when(expr = "I create dummy interface {string} with address {string} in namespace {string}")]
+async fn create_dummy_interface(world: &mut World, iface: String, addr: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "ip", &["link", "add", &iface, "type", "dummy"])
+        .await
+        .expect("Failed to create dummy interface");
+    netns::exec_in_netns(&scoped, "ip", &["link", "set", &iface, "up"])
+        .await
+        .expect("Failed to set dummy interface up");
+    netns::exec_in_netns(&scoped, "ip", &["addr", "add", &addr, "dev", &iface])
+        .await
+        .expect("Failed to add address to dummy interface");
+    println!(
+        "✓ Created dummy interface {} ({}) in namespace {}",
+        iface, addr, scoped
+    );
+}
+
 #[then("the test environment should be clean")]
 async fn verify_clean_environment(world: &mut World) {
     if keep_topology() {

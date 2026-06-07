@@ -31,12 +31,16 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     loopbacks: a .1  b .2  c .3  d .4  (10.0.0.X/32).
   ```
 
-  The external prefix is a secondary loopback (192.168.1.1/32) added to
-  c's lo AFTER zebra-rs starts; it is not registered under any OSPF
-  area, so it enters OSPF only via c's per-area `redistribute connected`
-  as a Type-7. c is a pure ASBR (not an ABR), so it sets the Type-7
-  P-bit. The flood is area-scoped: d installs it directly, and the ABR
-  a — the elected (sole-ABR, default `candidate` role) NSSA translator —
+  The external prefix is a connected network (192.168.1.0/24) on a
+  standalone dummy interface "cust0" added to c AFTER zebra-rs starts.
+  It is NOT on any OSPF-enabled interface, so it is a genuine external
+  route — it enters OSPF only via c's per-area `redistribute connected`
+  as a Type-7. (An address on an OSPF-enabled interface would instead be
+  advertised as an intra-area stub and summarized as a Type-3, masking
+  the Type-7 path entirely.) c is a pure ASBR (not an ABR), so it sets
+  the Type-7 P-bit. The flood is area-scoped: d installs it directly,
+  and the ABR a — the elected (sole-ABR, default `candidate` role)
+  NSSA translator —
   re-originates it as a Type-5 AS-External into the backbone, where b
   installs it. b carries no NSSA link, so a Type-5 is the only way the
   prefix can reach it: its presence on b is the proof the translator ran.
@@ -66,7 +70,7 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     # Secondary loopback on c: the external prefix redistributed into
     # the NSSA as a Type-7. Not under any OSPF area, so it can only
     # enter via `redistribute connected`.
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "c"
     # Allow Hellos + DBD on every link (N-bit must match on the NSSA
     # links), then Type-7 origination + flood, the ABR's Type-7->Type-5
     # translation + AS-wide flood, and SPF/route install everywhere.
@@ -83,14 +87,14 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
 
     # --- Type-7 inside the NSSA: d (plain internal router) installs the
     #     external prefix straight from c's Type-7, E2 metric [20]. ---
-    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "d" should contain "[20]"
 
     # --- The headline: Type-7 -> Type-5 translation at the ABR. b is in
-    #     the backbone only, so it can learn 192.168.1.1/32 ONLY as a
+    #     the backbone only, so it can learn 192.168.1.0/24 ONLY as a
     #     translated Type-5 (the Type-7 never leaves the NSSA). Same E2
     #     metric [20], carried verbatim across the translation. ---
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "b" should contain "[20]"
 
     # --- ABR default-originate: a injects a default Type-7 into the
@@ -146,7 +150,7 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I apply config "b.yaml" to namespace "b"
     And I apply config "c.yaml" to namespace "c"
     And I apply config "d.yaml" to namespace "d"
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "c"
     And I wait 60 seconds
 
     # --- The default Type-7 is still injected, so d holds a 0.0.0.0/0. ---
@@ -156,8 +160,8 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And show command "show ip ospf route" in namespace "d" should not contain "10.0.0.2/32"
     # --- Type-7 still floods in-area, and translation still reaches the
     #     backbone — `no-summary` touches only the inbound Type-3 path. ---
-    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
+    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
     # --- d reaches the backbone loopback purely via the default route. ---
     And ping from "d" to "10.0.0.2" should succeed
 
@@ -194,15 +198,15 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I apply config "b.yaml" to namespace "b"
     And I apply config "c.yaml" to namespace "c"
     And I apply config "d.yaml" to namespace "d"
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "c"
     And I wait 60 seconds
 
     # --- Intra-NSSA Type-7 install is unchanged: d still learns it. ---
-    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
     # --- But with translation disabled the prefix never reaches the
     #     backbone: b has no Type-5 for it and externals are not
     #     summarized as Type-3, so b must NOT contain the prefix. ---
-    And show command "show ip ospf route" in namespace "b" should not contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "b" should not contain "192.168.1.0/24"
 
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
@@ -238,16 +242,16 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I apply config "b.yaml" to namespace "b"
     And I apply config "c_e1.yaml" to namespace "c"
     And I apply config "d.yaml" to namespace "d"
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "c"
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "c"
     And I wait 60 seconds
 
     # --- d: intra-NSSA Type-7, E1 metric = cost(d->c) 20 + ext 20 = 40. ---
-    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.1/32"
+    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "d" should contain "[40]"
     # --- b: translated Type-5 advertised by ABR a, E1 metric =
     #     cost(b->a) 10 + ext 20 = 30. The differing metric (30 vs 40)
     #     is the proof E1's distance term survives translation. ---
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "b" should contain "[30]"
 
     When I stop zebra-rs in namespace "a"
