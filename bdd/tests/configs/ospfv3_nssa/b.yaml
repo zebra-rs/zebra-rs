@@ -1,0 +1,21 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: etha
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    # b sits in the backbone only. It can learn the NSSA-internal
+    # external prefix only as a translated Type-5 — a Type-7 never
+    # leaves its NSSA — so b is the witness for the translator.
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point

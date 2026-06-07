@@ -1,0 +1,38 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: ethb
+  ipv6:
+    address: 2001:db8:12::1/64
+- if-name: ethc
+  ipv6:
+    address: 2001:db8:13::1/64
+- if-name: ethd
+  ipv6:
+    address: 2001:db8:14::1/64
+router:
+  ospfv3:
+    router-id: 10.0.0.1
+    area:
+    # Backbone — a is the ABR gluing the NSSA to area 0.
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: ethb
+        enable: true
+        network-type: point-to-point
+    # NSSA (0.0.0.1). a is the sole ABR, so it elects itself the
+    # RFC 5340 / RFC 3101 Type-7->Type-5 translator under the default
+    # `candidate` role, and originates a default Type-7 into the area.
+    - area-id: 0.0.0.1
+      area-type: nssa
+      nssa-default-originate: true
+      interface:
+      - if-name: ethc
+        enable: true
+        network-type: point-to-point
+      - if-name: ethd
+        enable: true
+        network-type: point-to-point
