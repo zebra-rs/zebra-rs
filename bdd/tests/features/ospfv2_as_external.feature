@@ -12,10 +12,14 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
   Area 0.0.0.1: a (ABR), e (internal).
   Area 0.0.0.2: c (ABR), f (internal).
 
-  Router b is the ASBR in backbone area 0.  A secondary loopback address
-  (192.168.1.1/32) is added to b's lo after zebra-rs starts; it is NOT
-  registered under any OSPF area, so it enters the OSPF domain exclusively
-  via `redistribute connected` as a Type-5 AS-External LSA.
+  Router b is the ASBR in backbone area 0.  A connected network
+  (192.168.1.0/24) on a standalone dummy interface "cust0" is added to b
+  after zebra-rs starts.  It is NOT on any OSPF-enabled interface, so it
+  is a genuine external route — it enters the OSPF domain exclusively via
+  `redistribute connected` as a Type-5 AS-External LSA.  (An address on
+  an OSPF-enabled interface would instead be advertised as an intra-area
+  stub and summarized as a Type-3, which would win over the Type-5 and
+  mask the AS-External path being tested.)
 
   E2 metric (type 2): the installed metric equals the LSA's external metric
   (20) regardless of the observer's distance to the ASBR — the same [20]
@@ -56,24 +60,24 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
     And I apply config "d.yaml" to namespace "d"
     And I apply config "e.yaml" to namespace "e"
     And I apply config "f.yaml" to namespace "f"
-    # Add a secondary loopback address that is not in the OSPF area config.
-    # This connected route becomes the external prefix redistributed as Type-5.
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "b"
+    # A connected network on a non-OSPF dummy interface: a genuine
+    # external prefix redistributed as a Type-5 (not an intra-area stub).
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "b"
     # Allow time for OSPF to converge, originate Type-3/4/5 LSAs, and install
     # external routes in all areas via flooding + SPF.
     And I wait 60 seconds
 
     # --- All areas install the external prefix with the E2 metric (20). ---
     # Same metric on every observer proves type-2: external-metric only.
-    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.1/32"
+    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "a" should contain "[20]"
-    And show command "show ip ospf route" in namespace "c" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "c" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "c" should contain "[20]"
     # e is in area 0.0.0.1 — needs Type-4 from ABR a to find ASBR b.
-    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "e" should contain "[20]"
     # f is in area 0.0.0.2 — needs Type-4 from ABR c to find ASBR b.
-    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "f" should contain "[20]"
 
     # Teardown.
@@ -118,23 +122,23 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
     And I apply config "d.yaml" to namespace "d"
     And I apply config "e.yaml" to namespace "e"
     And I apply config "f.yaml" to namespace "f"
-    And I add address "192.168.1.1/32" to interface "lo" in namespace "b"
+    And I create dummy interface "cust0" with address "192.168.1.1/24" in namespace "b"
     And I wait 60 seconds
 
     # --- E1 metric varies by observer distance to ASBR b. ---
     # b is in area 0. a-b and c-b and d-b all cost 10, so cost-to-b = 10.
     # E1 metric from backbone routers = 10 (intra-cost) + 20 (ext-metric) = 30.
-    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.1/32"
+    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "a" should contain "[30]"
     And show command "show ip ospf route" in namespace "c" should contain "[30]"
     And show command "show ip ospf route" in namespace "d" should contain "[30]"
     # e reaches b via a (cost 10) + Type-4 from a (a's SPF cost to b = 10) = 20.
     # E1 metric from e = 20 + 20 = 40.
-    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "e" should contain "[40]"
     # f reaches b via c (cost 10) + Type-4 from c (c's SPF cost to b = 10) = 20.
     # E1 metric from f = 20 + 20 = 40.
-    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.1/32"
+    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.0/24"
     And show command "show ip ospf route" in namespace "f" should contain "[40]"
 
     # Teardown.
