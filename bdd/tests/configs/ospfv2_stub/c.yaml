@@ -1,0 +1,22 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: etha
+  ipv4:
+    address: 10.0.13.2/30
+router:
+  ospf:
+    router-id: 10.0.0.3
+    # c is a plain internal stub router. It learns backbone prefixes as
+    # Type-3 summaries but never sees the Type-5 external — that is the
+    # defining stub behavior.
+    area:
+    - area-id: 0.0.0.1
+      area-type: stub
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: etha
+        enable: true
+        network-type: point-to-point
