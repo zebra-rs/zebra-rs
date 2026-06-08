@@ -31,9 +31,9 @@ module zebra-isis-tracing {
      consulted by gated log macros, so categories can be turned on at
      runtime without a rebuild) with the IS-IS-specific category set: the
      four PDU types, the neighbor state machine, LSP origination / purge,
-     and the link-state database. The IS-IS-specific addition over the
-     OSPF model is a functional `level` filter (level-1 / level-2) on the
-     packet and event categories.
+     the link-state database, and the BFD interaction (RFC 5882). The
+     IS-IS-specific addition over the OSPF model is a functional `level`
+     filter (level-1 / level-2) on the packet and event categories.
 
      Example:
 
@@ -52,6 +52,16 @@ module zebra-isis-tracing {
      to disable; absence means the category is silent. Enabling by
      presence (rather than a `true` value) matches OSPF / BGP `tracing`:
      the config dispatch keys off set vs delete and never reads a value.";
+
+  revision 2026-06-07 {
+    description
+      "Add the `bfd` presence container — gates IS-IS↔BFD interaction
+       traces (RFC 5882 session state changes, subscribe / adjacency
+       teardown / hold-down recovery). A bare presence flag with no
+       level refinement: a BFD session is keyed per interface and
+       neighbor address, not per IS-IS level, so a `level` filter would
+       be a no-op knob.";
+  }
 
   revision 2026-06-05 {
     description
@@ -206,6 +216,12 @@ module zebra-isis-tracing {
         ext:help "Trace the link-state database";
         presence "Trace LSDB install / flooding decisions";
         uses isis-tracing-level-options;
+      }
+      container bfd {
+        ext:help "Trace BFD interaction (RFC 5882)";
+        presence
+          "Trace IS-IS↔BFD interaction — session state changes,
+           subscribe, adjacency teardown and hold-down recovery";
       }
     }
   }

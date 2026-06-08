@@ -98,3 +98,41 @@ local side is transmitting but nothing is coming back — confirm the
 neighbour also has `bfd enable` on its side of the link and that UDP
 3784 is not filtered. See the
 [overview](ch-10-00-bfd.md#verifying-sessions) for the full command set.
+
+## Tracing BFD events
+
+The IS-IS↔BFD interaction is silent by default. The `bfd` category under
+`router isis tracing` turns on its traces at runtime — no rebuild, no
+global log-level change:
+
+```
+router isis {
+  tracing {
+    bfd;
+  }
+}
+```
+
+It covers the whole BFD-driven adjacency path:
+
+- the `Subscribe` issued when an adjacency comes **Up** (and the no-op when
+  the BFD subsystem isn't wired),
+- every session **state change** reported back to IS-IS,
+- the RFC 5882 §5 adjacency **teardown** on a `Down` event,
+- the **hold-down recovery** when the session returns and the next IIH may
+  re-promote the neighbour.
+
+`bfd` is a presence flag — name it to enable, delete it to disable — and
+is part of the shared `router isis tracing` block (the same model as
+[BGP conditional tracing](ch-02-10-bgp-tracing.md)), so the master `all`
+switch enables it alongside every other category. Unlike the per-PDU
+`packet` categories there is no `level` refinement: a BFD session is keyed
+per interface and neighbour address, not per IS-IS level.
+
+Every traced line is stamped `proto="isis"`, so the
+[Protocol-Specific Logging](ch-03-03-protocol-logging.md) recipes apply —
+e.g. `jq 'select(.proto=="isis" and (.message | contains("bfd")))'`.
+
+> **Note.** This category also gates the adjacency-teardown message (the
+> RFC 5882 §5 `warn`). Enable `tracing bfd` when diagnosing why an
+> adjacency dropped on a BFD `Down`.

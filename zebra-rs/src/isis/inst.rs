@@ -1862,7 +1862,9 @@ impl Isis {
 
     fn process_bfd_subscribe(&self, key: crate::bfd::session::SessionKey) {
         let Some(tx) = self.bfd_client_tx.as_ref() else {
-            tracing::debug!(?key, "isis: bfd not configured; skipping subscribe");
+            if self.tracing.should_trace_bfd() {
+                tracing::debug!(?key, "isis: bfd not configured; skipping subscribe");
+            }
             return;
         };
         // Resolve the interface's effective Echo config (per-interface `bfd {}`
@@ -2394,13 +2396,15 @@ impl Isis {
     /// transition and are ignored.
     pub fn process_bfd_event(&mut self, event: crate::bfd::inst::BfdEvent) {
         let crate::bfd::inst::BfdEvent::StateChange { key, change } = event;
-        tracing::info!(
-            ?key,
-            from = %change.from,
-            to = %change.to,
-            diag = %change.diag,
-            "isis: bfd session state change",
-        );
+        if self.tracing.should_trace_bfd() {
+            tracing::info!(
+                ?key,
+                from = %change.from,
+                to = %change.to,
+                diag = %change.diag,
+                "isis: bfd session state change",
+            );
+        }
 
         if change.from == change.to {
             return;
@@ -2430,20 +2434,27 @@ impl Isis {
         change: &crate::bfd::session::StateChange,
     ) {
         let Some((level, sys_id)) = self.bfd_resolve_neighbor(key, false) else {
-            tracing::debug!(?key, "isis: bfd-down for unknown neighbor; ignoring");
+            if self.tracing.should_trace_bfd() {
+                tracing::debug!(?key, "isis: bfd-down for unknown neighbor; ignoring");
+            }
             return;
         };
         let ifindex = key.ifindex;
+        // Capture the toggle before borrowing the link — `link_top` takes
+        // `&mut self`, so `self.tracing` is unreachable while `link` is held.
+        let trace_bfd = self.tracing.should_trace_bfd();
         let Some(mut link) = self.link_top(ifindex) else {
             return;
         };
-        tracing::warn!(
-            peer = %key.remote,
-            ifindex,
-            ?level,
-            diag = %change.diag,
-            "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
-        );
+        if trace_bfd {
+            tracing::warn!(
+                peer = %key.remote,
+                ifindex,
+                ?level,
+                diag = %change.diag,
+                "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
+            );
+        }
         // Tear the adjacency but keep the BFD session probing. This clears any
         // prior hold-down pin, so set the pin afterwards.
         nbr_hold_timer_expire(&mut link, level, sys_id, false);
@@ -2473,11 +2484,13 @@ impl Isis {
                 };
                 match link.state.bfd_holddown_nbr.remove(key) {
                     Some(pair) => {
-                        tracing::info!(
-                            peer = %key.remote,
-                            ifindex = key.ifindex,
-                            "isis: bfd recovered via fallback map (nbr not yet re-created)",
-                        );
+                        if self.tracing.should_trace_bfd() {
+                            tracing::info!(
+                                peer = %key.remote,
+                                ifindex = key.ifindex,
+                                "isis: bfd recovered via fallback map (nbr not yet re-created)",
+                            );
+                        }
                         pair
                     }
                     None => return,
@@ -2491,14 +2504,16 @@ impl Isis {
         // Also clean up the fallback map entry for this key (may already be
         // gone if the fallback path above consumed it).
         link.state.bfd_holddown_nbr.remove(key);
-        if link.state.bfd_holddown.get_mut(&level).remove(&sys_id) {
+        // Lift the hold-down pin (the `remove` side-effect always runs); the
+        // next received IIH re-promotes the held (Init) neighbour.
+        let lifted = link.state.bfd_holddown.get_mut(&level).remove(&sys_id);
+        if lifted && self.tracing.should_trace_bfd() {
             tracing::info!(
                 peer = %key.remote,
                 ifindex = key.ifindex,
                 ?level,
                 "isis: bfd recovered; lifting adjacency hold-down",
             );
-            // The next received IIH re-promotes the held (Init) neighbour.
         }
     }
     pub fn top(&mut self) -> IsisTop<'_> {

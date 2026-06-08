@@ -172,6 +172,11 @@ pub struct IsisTracing {
     pub lsp_originate: EventConfig,
     pub lsp_purge: EventConfig,
     pub lsdb: EventConfig,
+    /// IS-IS↔BFD interaction (RFC 5882): session state changes, subscribe,
+    /// adjacency teardown and hold-down recovery. A bare toggle — a BFD
+    /// session is keyed per interface and neighbor address, not per IS-IS
+    /// level, so there is no `level` refinement.
+    pub bfd: bool,
 }
 
 impl IsisTracing {
@@ -228,6 +233,13 @@ impl IsisTracing {
             DatabaseType::Lsdb => &self.lsdb,
         };
         cfg.enabled && cfg.level.matches(level)
+    }
+
+    /// Whether IS-IS↔BFD interaction (RFC 5882 session events, subscribe /
+    /// adjacency teardown / hold-down recovery) should be traced. The `all`
+    /// master switch applies on top of the `bfd` toggle.
+    pub fn should_trace_bfd(&self) -> bool {
+        self.all || self.bfd
     }
 }
 
@@ -316,11 +328,15 @@ fn event_set_level(ec: &mut EventConfig, args: &mut Args, op: ConfigOp) {
 /// `IsisTracing`. `rest` is the path tail after the `tracing` node
 /// (e.g. `/all`, `/packet/hello`, `/packet/hello/direction`,
 /// `/packet/lsp/level`, `/fsm/nfsm`, `/lsp-originate`,
-/// `/lsdb/level`); for the direction / level cases `args` still holds the
-/// trailing value.
+/// `/lsdb/level`, `/bfd`); for the direction / level cases `args` still
+/// holds the trailing value.
 fn apply_tracing(t: &mut IsisTracing, rest: &str, args: &mut Args, op: ConfigOp) -> Option<()> {
     match rest {
         "/all" => t.all = op.is_set(),
+        // `bfd` is a bare presence toggle (no level — a BFD session is not
+        // IS-IS-level-scoped), so handle it here rather than via the
+        // level-bearing event branch below.
+        "/bfd" => t.bfd = op.is_set(),
         other => {
             if let Some(pkt) = other.strip_prefix("/packet/") {
                 let (typ, sub) = match pkt.split_once('/') {
@@ -535,10 +551,26 @@ mod tests {
         assert!(t.should_trace_fsm());
         assert!(t.should_trace_event(EventType::LspOriginate, &Level::L2));
         assert!(t.should_trace_database(DatabaseType::Lsdb, &Level::L1));
+        assert!(t.should_trace_bfd());
 
         apply_tracing(&mut t, "/all", &mut args(&[]), ConfigOp::Delete);
         assert!(!t.all);
         assert!(!t.should_trace_packet(PacketType::Hello, PacketDirection::Send, &Level::L1));
+        assert!(!t.should_trace_bfd());
+    }
+
+    #[test]
+    fn bfd_toggle() {
+        let mut t = IsisTracing::default();
+        assert!(!t.should_trace_bfd());
+        apply_tracing(&mut t, "/bfd", &mut args(&[]), ConfigOp::Set);
+        assert!(t.bfd);
+        assert!(t.should_trace_bfd());
+        // bfd is independent of the other categories.
+        assert!(!t.should_trace_fsm());
+        apply_tracing(&mut t, "/bfd", &mut args(&[]), ConfigOp::Delete);
+        assert!(!t.bfd);
+        assert!(!t.should_trace_bfd());
     }
 
     #[test]
