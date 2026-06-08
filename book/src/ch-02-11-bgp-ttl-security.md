@@ -61,8 +61,10 @@ set router bgp neighbor 10.0.0.2 ebgp-multihop 5
 
 `ebgp-multihop` only raises the egress TTL; it does **not** add an
 ingress check. It is mutually exclusive with `ttl-security` (which pins
-the TTL to 255 and *does* filter the received TTL); if both are set,
-`ttl-security` wins. It has no effect on an iBGP session.
+the TTL to 255 and *does* filter the received TTL): configuring both on
+one neighbor is **rejected** — the daemon refuses the second with a
+warning, and the first-configured one wins, so remove one before adding
+the other. `ebgp-multihop` has no effect on an iBGP session.
 
 ## TTL Security (GTSM)
 

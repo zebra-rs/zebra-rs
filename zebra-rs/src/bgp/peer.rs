@@ -742,9 +742,12 @@ impl Peer {
     ///   - eBGP, directly connected (the default) ⇒ 1 (the peer must be
     ///     a single hop away — a router in the path drops the packet).
     ///
-    /// Precedence is ttl-security, then iBGP, then ebgp-multihop, so
     /// `ebgp-multihop` is silently ignored on an iBGP peer (which already
-    /// uses 255), mirroring FRR.
+    /// uses 255), mirroring FRR. ttl-security and ebgp-multihop cannot
+    /// both be configured on one neighbor — the config callbacks reject
+    /// the second (see `config_ttl_security` / `config_ebgp_multihop`) —
+    /// so the ttl-security-before-ebgp-multihop ordering here is only a
+    /// defensive fallback.
     pub fn session_ttl(&self) -> u8 {
         if self.config.transport.ttl_security || self.is_ibgp() {
             return super::ttl::MAX_TTL;

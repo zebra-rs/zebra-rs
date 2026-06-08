@@ -96,8 +96,9 @@ module zebra-bgp-transport {
          supported policy is the directly-connected case (expected hop
          count 0, TTL 255). A configurable number of hops, as in
          `neighbor X ttl-security hops <N>`, is intentionally not
-         supported. Mutually exclusive with ebgp-multihop, which
-         permits the TTL to be decremented between peers.";
+         supported. Mutually exclusive with ebgp-multihop, which permits
+         the TTL to be decremented between peers: configuring both on one
+         neighbor is rejected (the second is refused with a warning).";
       reference
         "RFC 3682: The Generalized TTL Security Mechanism (GTSM).
          RFC 5082: GTSM (obsoletes RFC 3682).
@@ -119,7 +120,10 @@ module zebra-bgp-transport {
 
          Ignored for iBGP, which already uses 255. Mutually exclusive
          with ttl-security, which pins the TTL to 255 and additionally
-         filters the received TTL; if both are set, ttl-security wins.
+         filters the received TTL: configuring both on one neighbor is
+         rejected — the config callback refuses the second with a warning
+         and the first-configured one wins, so remove one before adding
+         the other.
 
          Equivalent to `neighbor X ebgp-multihop <N>` in FRR / Cisco
          IOS, and to `neighbor/transport/ebgp-multihop/multihop-ttl` in
