@@ -1314,4 +1314,39 @@ mod yang_load_tests {
             );
         }
     }
+
+    /// A new BGP-neighbor YANG knob must be a *settable* path, not just a
+    /// loadable module. Naming it the same as a leaf already present via
+    /// `uses ietf-bgp:bgp` makes the augment silently dropped (RFC 7950
+    /// §7.17), so the path parses as `Nomatch` — which `load_mode` above
+    /// would not catch. Parse the concrete `set` line and assert success.
+    #[test]
+    fn bgp_neighbor_disable_connected_check_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp neighbor 10.0.0.1 disable-connected-check",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set router bgp neighbor <addr> disable-connected-check` must be a valid path — \
+             a silent name collision with an ietf-bgp leaf would show up here as a parse failure",
+        );
+    }
 }

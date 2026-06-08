@@ -1,0 +1,36 @@
+# z1 with `disable-connected-check` added: the eBGP connected check is
+# skipped, so the loopback-to-loopback session comes up at TTL 1 (the peer
+# is one L2 hop away, so TTL 1 still reaches it). `vtyctl apply` is
+# additive, so applying this over z1-base just sets the new flag.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.1/32
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.255.0.2/32
+        nexthop:
+        - address: 10.0.0.2
+  bgp:
+    global:
+      as: 65001
+      identifier: 10.255.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.255.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      update-source: 10.255.0.1
+      disable-connected-check: null
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.1.1.1/32

@@ -54,8 +54,12 @@ module zebra-bgp-transport {
 
   revision 2026-06-08 {
     description
-      "Add `tcp-mss <1-65535>` per-neighbor leaf (TCP_MAXSEG clamp).";
-    reference "FRR `neighbor X tcp-mss <N>`; Cisco IOS equivalent.";
+      "Add `tcp-mss <1-65535>` per-neighbor leaf (TCP_MAXSEG clamp), and
+       `disable-connected-check`: let a single-hop eBGP session reach a
+       peer that is not on a directly-connected subnet (e.g. loopback
+       peering across one L2 hop) without raising the TTL.";
+    reference
+      "FRR `neighbor X tcp-mss <N>`; FRR `neighbor X disable-connected-check`.";
   }
 
   revision 2026-05-05 {
@@ -172,6 +176,39 @@ module zebra-bgp-transport {
       reference
         "RFC 879: The TCP Maximum Segment Size and Related Topics.
          RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
+    }
+
+    leaf disable-connected-check {
+      ext:help "Allow a single-hop eBGP peer that is not on a connected subnet";
+      type empty;
+      description
+        "When present, skip the directly-connected-network check for this
+         eBGP neighbor.
+
+         By default a single-hop eBGP session (egress TTL 1, i.e. no
+         ebgp-multihop and no ttl-security) is only brought up when the
+         neighbor's address sits on one of the router's directly-connected
+         subnets. This is the standard safety behaviour: an eBGP peer is
+         expected to be one hop away. A session toward an address reachable
+         only through a static or learned route — most commonly a peer's
+         loopback — is therefore held down.
+
+         `disable-connected-check` removes that requirement while leaving
+         the egress TTL at 1. The intended topology is two routers that are
+         directly connected at layer 2 but peer using addresses (typically
+         loopbacks) that are not on the shared subnet: a TTL-1 packet still
+         reaches the neighbor because no router decrements it, so raising
+         the TTL with ebgp-multihop is unnecessary and would only weaken
+         the single-hop guarantee.
+
+         Enable it on the end(s) that dial the non-connected address. The
+         check applies to eBGP only; iBGP, ebgp-multihop and ttl-security
+         sessions are never gated by it, so the leaf is a no-op there.
+
+         Equivalent to `neighbor X disable-connected-check` in FRR / Cisco
+         IOS (FRR also accepts the legacy spelling `enforce-multihop`).";
+      reference
+        "RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
     }
   }
 

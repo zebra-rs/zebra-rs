@@ -102,6 +102,11 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // `propagate_instance_tracing`.
         peer.tracing_instance = bgp.tracing.clone();
         bgp.peers.insert(addr, peer);
+        // Seed `shared_network` from interface addresses learned so far so
+        // the eBGP connected check is accurate on this peer's first dial
+        // (interfaces are dumped at startup, before config). No peer is
+        // dialing yet, so no kick fires here.
+        bgp.refresh_connected();
     } else {
         let peer_idx = match bgp.peers.get(&addr) {
             Some(peer) => peer.ident,
@@ -1745,6 +1750,43 @@ pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
     }
 }
 
+/// `[no] router bgp neighbor <addr> disable-connected-check` — exempt a
+/// single-hop eBGP neighbor from the directly-connected-network check, so
+/// a session toward a non-connected address (typically a loopback one L2
+/// hop away) is dialed while the egress TTL stays at 1. No-op for iBGP and
+/// for multihop / GTSM sessions (the check never applies there). The flag
+/// is consulted by [`super::peer::Peer::connected_check_ok`] at
+/// connect-initiation time. Like the sibling TTL knobs, a change on a live
+/// session bounces it (`Event::Stop`, as `clear bgp ... hard` does): on
+/// enable a peer held by the check reconnects on the next start; on
+/// disable an established but non-connected session is reset (FRR's
+/// `peer_change_reset`). An Idle peer just picks it up on its first connect.
+fn config_disable_connected_check(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let want = op.is_set();
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if peer.config.transport.disable_connected_check == want {
+            // No actual change — don't disturb a live session.
+            return Some(());
+        }
+        peer.config.transport.disable_connected_check = want;
+        peer.start();
+        // Only an established / in-progress session needs an explicit
+        // bounce; bouncing an Idle peer here could race the idle-hold
+        // timer `start()` just armed and strand it. A held (Active) peer
+        // is bounced too, so it leaves Active and re-dials on the next
+        // idle-hold rather than waiting out the connect-retry backstop.
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -2227,6 +2269,10 @@ impl Bgp {
         // by Peer::session_ttl and applied at connect / fsm_connected.
         self.callback_peer("/ebgp-multihop", config_ebgp_multihop);
         self.callback_peer("/tcp-mss", config_tcp_mss);
+        // FRR-style `neighbor X disable-connected-check` from
+        // zebra-bgp-transport.yang. Exempts a single-hop eBGP neighbor from
+        // the directly-connected-network check (Peer::connected_check_ok).
+        self.callback_peer("/disable-connected-check", config_disable_connected_check);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -3219,6 +3265,157 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).is_empty(),
             "an Idle peer must not be bounced",
+        );
+    }
+
+    /// Build a `LinkAddr` for an interface prefix (e.g. `"10.0.0.1/24"`).
+    fn link_addr(cidr: &str) -> crate::rib::link::LinkAddr {
+        crate::rib::link::LinkAddr {
+            addr: cidr.parse().unwrap(),
+            ifindex: 2,
+            secondary: false,
+            config: false,
+            fib: true,
+        }
+    }
+
+    /// `disable-connected-check` is a `type empty` flag: Set/Delete toggle
+    /// it and a change to a live session is bounced (FRR resets the peer
+    /// on this flag); a no-op set does not bounce, an Idle peer is not
+    /// bounced.
+    #[tokio::test]
+    async fn disable_connected_check_toggles_field_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_disable_connected_check(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .disable_connected_check,
+            "set must enable the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "enabling on a live session must bounce it",
+        );
+
+        config_disable_connected_check(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        config_disable_connected_check(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(
+            !bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .disable_connected_check,
+            "delete must clear the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "disabling on a live session must bounce it",
+        );
+    }
+
+    /// A single-hop eBGP peer whose address is not on a connected subnet
+    /// is gated by the connected check; learning the link does not help
+    /// (the peer's loopback is off-subnet) but `disable-connected-check`
+    /// lifts the gate. With no interface knowledge the check fails open.
+    #[tokio::test]
+    async fn connected_check_gates_unconnected_single_hop_ebgp() {
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65000;
+        // eBGP peer reachable only via its loopback (10.255.0.2).
+        let loop_peer = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2));
+        config_peer(&mut bgp, arg_words(&["10.255.0.2"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.255.0.2", "65001"]), ConfigOp::Set).unwrap();
+
+        // No interface knowledge yet → fail open.
+        assert!(
+            bgp.peers.get(&loop_peer).unwrap().connected_check_ok(),
+            "with no connected-subnet knowledge the check fails open",
+        );
+
+        // Learn the directly-connected /24; the loopback peer is not in it.
+        bgp.connected_subnets.record(&link_addr("10.0.0.1/24"));
+        bgp.refresh_connected();
+        let peer = bgp.peers.get(&loop_peer).unwrap();
+        assert!(peer.is_ebgp());
+        assert!(
+            !peer.shared_network,
+            "loopback peer is not on the connected /24"
+        );
+        assert!(
+            !peer.connected_check_ok(),
+            "a single-hop eBGP peer off every connected subnet must be gated",
+        );
+
+        // The override lifts the gate.
+        config_disable_connected_check(&mut bgp, arg_words(&["10.255.0.2"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            bgp.peers.get(&loop_peer).unwrap().connected_check_ok(),
+            "disable-connected-check exempts the peer",
+        );
+
+        // So does learning a subnet that actually covers the peer.
+        config_disable_connected_check(&mut bgp, arg_words(&["10.255.0.2"]), ConfigOp::Delete)
+            .unwrap();
+        bgp.connected_subnets.record(&link_addr("10.255.0.1/24"));
+        bgp.refresh_connected();
+        assert!(
+            bgp.peers.get(&loop_peer).unwrap().connected_check_ok(),
+            "once the peer is on a connected subnet the check passes",
+        );
+    }
+
+    /// The connected check never applies to iBGP, multihop or GTSM peers,
+    /// even when they are off every connected subnet.
+    #[tokio::test]
+    async fn connected_check_never_gates_ibgp_or_multihop() {
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65000;
+        // Only a /24 link is connected; both peers below are off-subnet.
+        bgp.connected_subnets.record(&link_addr("10.0.0.1/24"));
+
+        // iBGP peer (remote-as == local) — never gated.
+        let ibgp = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 9));
+        config_peer(&mut bgp, arg_words(&["10.255.0.9"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.255.0.9", "65000"]), ConfigOp::Set).unwrap();
+
+        // eBGP peer with ebgp-multihop — never gated.
+        let mh = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 8));
+        config_peer(&mut bgp, arg_words(&["10.255.0.8"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.255.0.8", "65001"]), ConfigOp::Set).unwrap();
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.255.0.8", "5"]), ConfigOp::Set).unwrap();
+
+        bgp.refresh_connected();
+        assert!(
+            !bgp.peers.get(&ibgp).unwrap().shared_network,
+            "iBGP peer is off-subnet",
+        );
+        assert!(
+            bgp.peers.get(&ibgp).unwrap().connected_check_ok(),
+            "iBGP is never subject to the connected check",
+        );
+        assert!(
+            bgp.peers.get(&mh).unwrap().connected_check_ok(),
+            "a multihop eBGP peer is never subject to the connected check",
         );
     }
 

@@ -1,0 +1,34 @@
+# z2 with `disable-connected-check` added (mirror of z1-disable). With both
+# ends exempt, the loopback-to-loopback eBGP session establishes at TTL 1.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.2/32
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.255.0.1/32
+        nexthop:
+        - address: 10.0.0.1
+  bgp:
+    global:
+      as: 65002
+      identifier: 10.255.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.255.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      update-source: 10.255.0.2
+      disable-connected-check: null
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.2.2.2/32
