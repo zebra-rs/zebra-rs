@@ -41,7 +41,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 2;
+pub const SIGNATURE_VERSION: u32 = 3;
 
 /// Address families the v1 grouping logic considers. The advertise
 /// pipeline today only fans out to these three.
@@ -87,6 +87,23 @@ impl std::fmt::Display for UpdateGroupId {
     }
 }
 
+/// Per-neighbor `remove-private-as` egress key
+/// (zebra-bgp-remove-private-as.yang). Folded into the update-group
+/// signature because the feature rewrites the egress AS_PATH and its
+/// output depends on per-peer state: the two FRR modifiers (`all`,
+/// `replace_as`) and the neighbor's own AS (`keep_as` = remote_as),
+/// which the strip preserves for loop prevention. Two eBGP peers may
+/// therefore share canonical UPDATE bytes only when they strip the same
+/// way *and* keep the same AS — otherwise the canonical-member transform
+/// would leak one peer's stripped path to the others. `None` (the common
+/// case) means the feature is off, with no effect on the transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemovePrivateAsKey {
+    pub all: bool,
+    pub replace_as: bool,
+    pub keep_as: u32,
+}
+
 /// What makes two peers eligible to share Adj-RIB-Out work.
 ///
 /// All fields here either drive the attribute transform / outbound
@@ -113,6 +130,10 @@ pub struct UpdateGroupSig {
     /// AS_PATH — the canonical-member transform assumes its output
     /// depends only on signature fields.
     pub as_override_target: Option<u32>,
+    /// Per-neighbor `remove-private-as` key (eBGP only). `None` when off
+    /// (the common case). See [`RemovePrivateAsKey`] for why the mode
+    /// and the kept AS must shard the group.
+    pub remove_private_as: Option<RemovePrivateAsKey>,
     // Negotiated wire-format capabilities (intersection of cap_send
     // and cap_recv on the peer). Anything that changes encoded
     // UPDATE bytes belongs here.
@@ -230,6 +251,19 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         // no-op there and must not split iBGP groups).
         as_override_target: if peer.is_ebgp() && peer.config.as_override {
             Some(peer.remote_as)
+        } else {
+            None
+        },
+        // remove-private-as strips/rewrites the egress AS_PATH; its
+        // result depends on the mode and on the kept AS (this peer's
+        // remote-as), so fold both into the key (eBGP only — iBGP never
+        // prepends, so the strip is a no-op and must not split groups).
+        remove_private_as: if peer.is_ebgp() {
+            peer.config.remove_private_as.map(|rpa| RemovePrivateAsKey {
+                all: rpa.all,
+                replace_as: rpa.replace_as,
+                keep_as: peer.remote_as,
+            })
         } else {
             None
         },
@@ -956,6 +990,7 @@ mod tests {
             policy_out_name: None,
             prefix_set_out_name: None,
             as_override_target: None,
+            remove_private_as: None,
             as4_negotiated: true,
             extended_message: true,
             addpath_send: false,
@@ -1004,6 +1039,31 @@ mod tests {
         let mut a = base.clone();
         a.as_override_target = Some(65002);
         assert_ne!(base, a);
+
+        let mut a = base.clone();
+        a.remove_private_as = Some(RemovePrivateAsKey {
+            all: false,
+            replace_as: false,
+            keep_as: 65002,
+        });
+        assert_ne!(base, a);
+
+        // Same on/off state but a different mode or kept AS is still a
+        // distinct group — the egress AS_PATH would differ.
+        let mut b = a.clone();
+        b.remove_private_as = Some(RemovePrivateAsKey {
+            all: true,
+            replace_as: false,
+            keep_as: 65002,
+        });
+        assert_ne!(a, b);
+        let mut c = a.clone();
+        c.remove_private_as = Some(RemovePrivateAsKey {
+            all: false,
+            replace_as: false,
+            keep_as: 65003,
+        });
+        assert_ne!(a, c);
 
         let mut a = base.clone();
         a.as4_negotiated = false;

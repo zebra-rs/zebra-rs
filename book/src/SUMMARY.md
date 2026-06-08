@@ -19,6 +19,7 @@
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
   - [AS Override](ch-02-12-bgp-as-override.md)
   - [allowas-in (Inbound AS_PATH Loop Relaxation)](ch-02-13-bgp-allowas-in.md)
+  - [Remove Private AS](ch-02-14-bgp-remove-private-as.md)
   - [Timer Configuration](ch-02-03-bgp-timers.md)
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)

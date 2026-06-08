@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{AllowAsIn, Peer, PeerCounter, PeerParam, State};
+use super::peer::{AllowAsIn, Peer, PeerCounter, PeerParam, RemovePrivateAs, State};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use super::vrf::inst::BgpVrf;
@@ -1391,6 +1391,12 @@ struct Neighbor<'a> {
     /// replaced with the local AS in the AS_PATH of outbound eBGP
     /// UPDATEs (before the local-AS prepend).
     as_override: bool,
+    /// FRR-style `neighbor X remove-private-as`
+    /// (zebra-bgp-remove-private-as.yang), if configured. `None` leaves
+    /// the egress AS_PATH untouched; `Some` strips (or, with
+    /// `replace_as`, rewrites) private ASNs on outbound eBGP UPDATEs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove_private_as: Option<RemovePrivateAs>,
     /// GTSM / `ttl-security` (RFC 5082): the session only accepts a
     /// directly-connected peer (received TTL 255). Mirrors
     /// `peer.config.transport.ttl_security`.
@@ -1540,6 +1546,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         soft_reconfig_in: peer.config.soft_reconfig_in,
         allowas_in: peer.config.allowas_in,
         as_override: peer.config.as_override,
+        remove_private_as: peer.config.remove_private_as,
         ttl_security: peer.config.transport.ttl_security,
         ebgp_multihop: peer.config.transport.ebgp_multihop,
         neighbor_group: peer.config.neighbor_group.clone(),
@@ -1639,6 +1646,18 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
     if neighbor.as_override {
         writeln!(out, "  AS-Override enabled (outbound AS_PATH replacement)")?;
+    }
+
+    if let Some(rpa) = neighbor.remove_private_as {
+        // Echo the configured form, e.g. "remove-private-AS all replace-AS".
+        let mut form = String::from("remove-private-AS");
+        if rpa.all {
+            form.push_str(" all");
+        }
+        if rpa.replace_as {
+            form.push_str(" replace-AS");
+        }
+        writeln!(out, "  Private AS removal: {form} (outbound)")?;
     }
 
     if neighbor.ttl_security {

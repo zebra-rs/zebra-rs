@@ -1,0 +1,128 @@
+module zebra-bgp-remove-private-as {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-remove-private-as";
+  prefix "zbrpa";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor `remove-private-as` knob.
+
+     On the egress path toward an eBGP neighbor, BGP normally prepends
+     the local AS to the AS_PATH and advertises every AS already in the
+     path. `remove-private-as` strips the private ASNs (RFC 6996:
+     64512-65535 and 4200000000-4294967294) from that path first, so the
+     receiver never learns the private internal AS structure of the
+     advertising network:
+
+       router bgp {
+         neighbor 192.168.1.3 {
+           remote-as 65001;
+           remove-private-as;                  // bare form
+         }
+         neighbor 192.168.1.4 {
+           remote-as 65002;
+           remove-private-as { all; }          // act on mixed paths too
+         }
+         neighbor 192.168.1.5 {
+           remote-as 65003;
+           remove-private-as { replace-as; }   // rewrite to local AS
+         }
+         neighbor 192.168.1.6 {
+           remote-as 65004;
+           remove-private-as { all; replace-as; }
+         }
+       }
+
+     Two orthogonal modifiers (matching FRR's four CLI forms):
+
+       - `all`: by default the strip runs only when the *entire*
+         AS_PATH is private; with `all` it runs on any path that
+         contains a private AS, keeping the public ASNs.
+
+       - `replace-as`: by default each private AS is removed from the
+         path; with `replace-as` it is rewritten to the local AS
+         instead, preserving the AS_PATH length.
+
+     In every form the neighbor's own AS is preserved in the path, so
+     its RFC 4271 loop check still works. `remove-private-as` only
+     affects eBGP sessions (iBGP never prepends).";
+
+  revision 2026-06-08 {
+    description "Initial revision.";
+    reference "FRR `neighbor X remove-private-AS [all] [replace-AS]`.";
+  }
+
+  grouping bgp-neighbor-remove-private-as-extension {
+    description
+      "FRR-style `remove-private-as` presence container on a BGP
+       neighbor, with optional `all` / `replace-as` modifiers.";
+
+    container remove-private-as {
+      ext:help "Remove private ASNs from the outbound AS_PATH";
+      presence "Enable remove-private-as on the egress path toward this neighbor";
+      description
+        "When present, strip private ASNs from the AS_PATH of outbound
+         eBGP UPDATEs toward this neighbor, before the local-AS prepend.
+         The bare form acts only on an all-private path.";
+
+      leaf all {
+        ext:help "Remove private ASNs even from a mixed public/private AS_PATH";
+        type empty;
+        description
+          "Act on any AS_PATH containing a private AS, not only one
+           that is entirely private.";
+      }
+
+      leaf replace-as {
+        ext:help "Replace each private ASN with the local AS instead of removing it";
+        type empty;
+        description
+          "Rewrite each stripped private AS to the local AS rather than
+           dropping it, keeping the AS_PATH length unchanged.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach remove-private-as to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-remove-private-as-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X remove-private-as [...]` is
+       path-valid.";
+    uses bgp-neighbor-remove-private-as-extension;
+  }
+}
