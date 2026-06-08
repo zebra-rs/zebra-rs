@@ -20,25 +20,11 @@ xdp-bfd-echo:
 	@echo '[built offload/xdp-bfd-echo/target/release/xdp-bfd-echo]'
 
 install:
-	mkdir -p ${HOME}/.zebra/bin
-	mkdir -p ${HOME}/.zebra/yang
-	cp target/release/zebra ${HOME}/.zebra/bin
-	cp target/release/vtyhelper ${HOME}/.zebra/bin
-	cp target/release/vtyctl ${HOME}/.zebra/bin
-ifneq ("$(wildcard target/release/vtypam)","")
-	cp target/release/vtypam ${HOME}/.zebra/bin
-	@echo '[vtypam installed to $${HOME}/.zebra/bin/vtypam — grant caps with: sudo setcap cap_dac_read_search,cap_audit_write=ep $${HOME}/.zebra/bin/vtypam]'
-endif
-ifneq ("$(wildcard vty/vty)","")
-	cp vty/vty ${HOME}/.zebra/bin
-endif
-ifneq ("$(wildcard offload/xdp-bfd-echo/target/release/xdp-bfd-echo)","")
-	cp offload/xdp-bfd-echo/target/release/xdp-bfd-echo ${HOME}/.zebra/bin
-	@echo '[xdp-bfd-echo installed — grant caps with: sudo setcap cap_net_admin,cap_bpf,cap_net_raw=ep $${HOME}/.zebra/bin/xdp-bfd-echo]'
-endif
-	cp zebra/yang/* ${HOME}/.zebra/yang
-	touch ${HOME}/.zebra/zebra.conf
-	@echo '[Please add $${HOME}/.zebra/bin to your PATH]'
+	cargo build --release
+	sudo cp target/release/zebra-rs /usr/bin/zebra-rs
+	sudo cp target/release/vtyctl /usr/bin/vtyctl
+	sudo cp target/release/vtyhelper /usr/bin/vtyhelper
+	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' /usr/bin/zebra-rs
 
 # System-wide installation of vtypam to /usr/sbin with file caps.
 # Use this on production hosts; the per-user `install` target above
