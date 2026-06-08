@@ -4,6 +4,13 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_bgp(config: &ConfigManager) {
+    // Idempotent — see `spawn_ospfv3`. `commit_config` calls this on
+    // every commit whose diff touches `router bgp`; re-spawning would
+    // replace the live task and tear down every BGP session + Loc-RIB.
+    // Config reaches the running instance via its `cm` subscription.
+    if config.protocol_tasks.borrow().contains_key("bgp") {
+        return;
+    }
     // Capture BFD / ND client handles so per-neighbor `bfd { enable }`
     // and IPv6 unnumbered RA hand-off can submit requests later. Both
     // are guaranteed to be populated when BGP is spawned via
