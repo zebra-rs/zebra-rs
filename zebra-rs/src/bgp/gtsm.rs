@@ -106,4 +106,31 @@ mod tests {
         );
         drop(server);
     }
+
+    /// `apply_gtsm` must succeed on an IPv6 socket and the kernel must
+    /// read the egress hop limit and the ingress minimum hop count back
+    /// as 255. An unbound AF_INET6 socket is enough — both options are
+    /// settable before connect — so the test needs no IPv6 reachability.
+    #[test]
+    fn apply_gtsm_v6_pins_hops_and_minhopcount_to_255() {
+        use socket2::{Domain, Socket, Type};
+        let sock = Socket::new(Domain::IPV6, Type::STREAM, None).unwrap();
+
+        apply_gtsm(sock.as_raw_fd(), false).unwrap();
+
+        assert_eq!(
+            getsockopt_int(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_UNICAST_HOPS
+            ),
+            GTSM_TTL,
+            "egress hop limit must be pinned to 255",
+        );
+        assert_eq!(
+            getsockopt_int(sock.as_raw_fd(), libc::IPPROTO_IPV6, libc::IPV6_MINHOPCOUNT),
+            GTSM_TTL,
+            "ingress minimum hop count must be floored at 255",
+        );
+    }
 }
