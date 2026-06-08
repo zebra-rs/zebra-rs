@@ -1307,43 +1307,47 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer, conn: ConnTag) -> State {
     }
 }
 
+/// Apply this session's TTL policy to a freshly-connected socket, once
+/// the TCP handshake is complete and before OPEN is sent. eBGP is pinned
+/// to TTL 1 (directly connected) unless `ebgp-multihop` raises it; iBGP
+/// and `ttl-security` use 255. For a `ttl-security` neighbor the accepted
+/// ingress TTL is additionally floored at 255 (GTSM, RFC 5082) — done
+/// here, post-handshake, so it never drops the peer's default-TTL
+/// SYN-ACK. setsockopt failures are logged, not fatal.
+///
+/// Called from **every** path that turns a `TcpStream` into a live BGP
+/// connection: the active Connected event and passive accept (both via
+/// [`fsm_connected`]) **and** the RFC 4271 §6.8 collision connection
+/// ([`start_collision_conn`]). The collision path is easy to miss — a
+/// promoted collision conn that skipped this would carry the OS-default
+/// TTL and no ingress floor, silently defeating GTSM / ebgp-multihop.
+fn apply_session_ttl(peer: &Peer, stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let is_v4 = peer.address.is_ipv4();
+    if let Err(e) = super::ttl::set_egress_ttl(fd, is_v4, peer.session_ttl()) {
+        tracing::warn!(
+            peer = %peer.address,
+            error = %e,
+            "bgp: failed to set egress TTL on session socket",
+        );
+    }
+    if peer.config.transport.ttl_security
+        && let Err(e) = super::ttl::set_min_ttl(fd, is_v4, super::ttl::MAX_TTL)
+    {
+        tracing::warn!(
+            peer = %peer.address,
+            error = %e,
+            "bgp: failed to set GTSM ingress TTL floor on session socket; continuing without it",
+        );
+    }
+}
+
 pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
-    // Apply this session's TTL policy now that the TCP handshake is
-    // complete and before OPEN is sent — the common point both the
-    // active (Connected event) and passive (accept) paths pass through.
-    // eBGP is pinned to TTL 1 (directly connected) unless `ebgp-multihop`
-    // raises it; iBGP and `ttl-security` use 255. The active side has
-    // already set the egress TTL before connect; re-applying it here is
-    // idempotent and is what covers the passive side. For a
-    // `ttl-security` neighbor we additionally floor the accepted ingress
-    // TTL at 255 (GTSM, RFC 5082) — done here, post-handshake, so it
-    // never drops the peer's default-TTL SYN-ACK. setsockopt failures
-    // are logged, not fatal: the session continues without the
-    // best-effort hardening rather than being torn down.
-    {
-        use std::os::fd::AsRawFd;
-        let fd = stream.as_raw_fd();
-        let is_v4 = peer.address.is_ipv4();
-        if let Err(e) = super::ttl::set_egress_ttl(fd, is_v4, peer.session_ttl()) {
-            tracing::warn!(
-                peer = %peer.address,
-                error = %e,
-                "bgp: failed to set egress TTL on session socket",
-            );
-        }
-        if peer.config.transport.ttl_security
-            && let Err(e) = super::ttl::set_min_ttl(fd, is_v4, super::ttl::MAX_TTL)
-        {
-            tracing::warn!(
-                peer = %peer.address,
-                error = %e,
-                "bgp: failed to set GTSM ingress TTL floor on session socket; continuing without it",
-            );
-        }
-    }
+    apply_session_ttl(peer, &stream);
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
@@ -1824,6 +1828,10 @@ fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
 /// sending our OPEN over it. The §6.8 resolution is deferred until an
 /// OPEN arrives on either connection.
 fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
+    // Same TTL policy as the primary connection: if this collision conn
+    // wins §6.8 resolution it is promoted to primary, so it must carry
+    // the egress TTL and (for ttl-security) the ingress floor too.
+    apply_session_ttl(peer, &stream);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
     let reader = peer_start_reader(peer, ConnTag::Collision, read_half);
