@@ -151,12 +151,13 @@ fn srv6_l3_service_prefix_sid(
     bgp_packet::PrefixSid {
         tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
             bgp_packet::Srv6ServiceTlv {
-                sids: vec![bgp_packet::Srv6SidInfo {
+                sids: vec![bgp_packet::Srv6SidInfo::new(
                     sid,
-                    flags: 0,
-                    behavior: bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                    0,
+                    bgp_packet::SRV6_BEHAVIOR_END_DT46,
                     structure,
-                }],
+                )],
+                ..Default::default()
             },
         )],
     }

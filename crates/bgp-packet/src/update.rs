@@ -42,6 +42,12 @@ pub struct UpdatePacket {
     pub mp_update: Option<MpReachAttr>,
     #[nom(Ignore)]
     pub mp_withdraw: Option<MpUnreachAttr>,
+    /// RFC 7606 treat-as-withdraw: a recoverable malformed attribute
+    /// (e.g. a malformed BGP Prefix-SID, RFC 9252 §7) was discarded
+    /// during parse, so this UPDATE's reachable NLRI must be withdrawn
+    /// rather than installed. Not a wire field.
+    #[nom(Ignore)]
+    pub treat_as_withdraw: bool,
     #[nom(Ignore)]
     max_packet_size: usize,
 }
@@ -68,6 +74,7 @@ impl Default for UpdatePacket {
             ipv4_withdraw: Vec::new(),
             mp_update: None,
             mp_withdraw: None,
+            treat_as_withdraw: false,
             max_packet_size: BGP_PACKET_LEN,
         }
     }
@@ -573,14 +580,15 @@ impl UpdatePacket {
         let (input, mut withdrawal) = parse_bgp_nlri_ipv4(input, withdraw_len, add_path)?;
         packet.ipv4_withdraw.append(&mut withdrawal);
         let (input, attr_len) = be_u16(input)?;
-        let (input, bgp_attr, mp_update, mp_withdraw) = if attr_len > 0 {
+        let (input, bgp_attr, mp_update, mp_withdraw, treat_as_withdraw) = if attr_len > 0 {
             parse_bgp_update_attribute(input, attr_len, as4, opt)?
         } else {
-            (input, None, None, None)
+            (input, None, None, None, false)
         };
         packet.bgp_attr = bgp_attr;
         packet.mp_update = mp_update;
         packet.mp_withdraw = mp_withdraw;
+        packet.treat_as_withdraw = treat_as_withdraw;
         let nlri_len = packet
             .header
             .length

@@ -228,12 +228,19 @@ impl fmt::Debug for Attr {
 }
 
 impl Attr {
-    pub fn parse_attr<'a>(
-        input: &'a [u8],
-        as4: bool,
-        opt: &'a Option<ParseOption>,
-    ) -> Result<(&'a [u8], Attr), BgpParseError> {
-        // Parse the attribute flags and type code
+    /// Parse one attribute's framing — flags, type code, and length — and
+    /// split its Value off the front of `input`, returning the Value
+    /// slice plus the remaining input positioned at the next attribute.
+    ///
+    /// A framing error (truncated header, or a length that overruns the
+    /// attribute block) is unrecoverable and propagates: per RFC 7606 §4
+    /// an attribute-length error prevents parsing the rest of the
+    /// attributes and forces a session reset. Errors parsing the Value
+    /// itself are handled separately by `parse_attr_value`, which lets
+    /// the caller recover (treat-as-withdraw) where the RFC allows it.
+    fn parse_attr_header(
+        input: &[u8],
+    ) -> Result<(&[u8], AttrType, AttributeFlags, &[u8]), BgpParseError> {
         let (input, flags_byte) = be_u8(input)?;
         let flags = AttributeFlags::from_bits_truncate(flags_byte);
         let (input, attr_type_byte) = be_u8(input)?;
@@ -251,43 +258,74 @@ impl Attr {
             [0, length_bytes[0]]
         });
 
-        // Only AS_PATH or AGGREGATOR care about as4 extension
-        let as4_opt = matches!(attr_type, AttrType::AsPath | AttrType::Aggregator).then_some(as4);
-
         // Split out the payload for this attribute
         let (input, attr_payload) =
             packet_utils::safe_split_at(input, attr_len as usize).map_err(BgpParseError::from)?;
+        Ok((input, attr_type, flags, attr_payload))
+    }
+
+    /// Parse the Value of one attribute given its already-decoded framing.
+    /// A failure here is recoverable by the caller for attributes whose
+    /// RFC 7606 error action is treat-as-withdraw (see
+    /// [`attr_malformation_is_withdraw`]).
+    fn parse_attr_value(
+        attr_type: AttrType,
+        attr_payload: &[u8],
+        as4: bool,
+        opt: &Option<ParseOption>,
+    ) -> Result<Attr, BgpParseError> {
+        // Only AS_PATH or AGGREGATOR care about as4 extension
+        let as4_opt = matches!(attr_type, AttrType::AsPath | AttrType::Aggregator).then_some(as4);
 
         // Parse the attribute using the appropriate selector with error context
-        let (_, attr) = match attr_type {
+        let attr = match attr_type {
             AttrType::MpReachNlri => {
-                let (remaining, mp_reach) = MpReachAttr::parse_nlri_opt(attr_payload, opt.clone())
+                let (_, mp_reach) = MpReachAttr::parse_nlri_opt(attr_payload, opt.clone())
                     .map_err(|e| BgpParseError::AttributeParseError {
                         attr_type,
                         source: Box::new(BgpParseError::from(e)),
                     })?;
-                (remaining, Attr::MpReachNlri(mp_reach))
+                Attr::MpReachNlri(mp_reach)
             }
             AttrType::MpUnreachNlri => {
-                let (remaining, mp_unreach) =
-                    MpUnreachAttr::parse_nlri_opt(attr_payload, opt.clone()).map_err(|e| {
-                        BgpParseError::AttributeParseError {
-                            attr_type,
-                            source: Box::new(BgpParseError::from(e)),
-                        }
+                let (_, mp_unreach) = MpUnreachAttr::parse_nlri_opt(attr_payload, opt.clone())
+                    .map_err(|e| BgpParseError::AttributeParseError {
+                        attr_type,
+                        source: Box::new(BgpParseError::from(e)),
                     })?;
-                (remaining, Attr::MpUnreachNlri(mp_unreach))
+                Attr::MpUnreachNlri(mp_unreach)
             }
-            _ => Attr::parse_be(attr_payload, AttrSelector(attr_type, as4_opt)).map_err(|e| {
-                BgpParseError::AttributeParseError {
-                    attr_type,
-                    source: Box::new(BgpParseError::from(e)),
-                }
-            })?,
+            _ => {
+                Attr::parse_be(attr_payload, AttrSelector(attr_type, as4_opt))
+                    .map_err(|e| BgpParseError::AttributeParseError {
+                        attr_type,
+                        source: Box::new(BgpParseError::from(e)),
+                    })?
+                    .1
+            }
         };
+        Ok(attr)
+    }
 
+    pub fn parse_attr<'a>(
+        input: &'a [u8],
+        as4: bool,
+        opt: &'a Option<ParseOption>,
+    ) -> Result<(&'a [u8], Attr), BgpParseError> {
+        let (input, attr_type, _flags, attr_payload) = Attr::parse_attr_header(input)?;
+        let attr = Attr::parse_attr_value(attr_type, attr_payload, as4, opt)?;
         Ok((input, attr))
     }
+}
+
+/// Whether a malformed instance of `attr_type` should be handled by the
+/// RFC 7606 "treat-as-withdraw" action rather than by resetting the BGP
+/// session. The BGP Prefix-SID attribute uses treat-as-withdraw per
+/// RFC 8669 §5 and RFC 9252 §7 (a malformed SRv6 Service TLV must not
+/// tear the session down). Other attributes keep their existing
+/// (session-reset) handling.
+fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
+    matches!(attr_type, AttrType::PrefixSid)
 }
 
 type ParsedAttributes<'a> = Result<
@@ -296,6 +334,10 @@ type ParsedAttributes<'a> = Result<
         Option<BgpAttr>,
         Option<MpReachAttr>,
         Option<MpUnreachAttr>,
+        // RFC 7606 treat-as-withdraw: set when a recoverable attribute
+        // (e.g. a malformed BGP Prefix-SID) was discarded, so the caller
+        // withdraws the UPDATE's reachable NLRI instead of installing.
+        bool,
     ),
     BgpParseError,
 >;
@@ -312,9 +354,26 @@ pub fn parse_bgp_update_attribute(
     let mut bgp_attr = BgpAttr::default();
     let mut mp_update: Option<MpReachAttr> = None;
     let mut mp_withdraw: Option<MpUnreachAttr> = None;
+    let mut treat_as_withdraw = false;
 
     while !remaining.is_empty() {
-        let (new_remaining, attr) = Attr::parse_attr(remaining, as4, &opt)?;
+        // Parse the framing first so a Value-parse error stays recoverable:
+        // `new_remaining` already points at the next attribute.
+        let (new_remaining, attr_type, _flags, attr_payload) = Attr::parse_attr_header(remaining)?;
+        let attr = match Attr::parse_attr_value(attr_type, attr_payload, as4, &opt) {
+            Ok(attr) => attr,
+            Err(e) => {
+                if attr_malformation_is_withdraw(attr_type) {
+                    // RFC 7606 / RFC 9252 §7: discard the malformed
+                    // attribute and treat the UPDATE's reachable NLRI as
+                    // withdrawn, keeping the session up.
+                    treat_as_withdraw = true;
+                    remaining = new_remaining;
+                    continue;
+                }
+                return Err(e);
+            }
+        };
         match attr {
             Attr::Origin(v) => {
                 bgp_attr.origin = Some(v);
@@ -419,7 +478,13 @@ pub fn parse_bgp_update_attribute(
         remaining = new_remaining;
     }
 
-    Ok((input, Some(bgp_attr), mp_update, mp_withdraw))
+    Ok((
+        input,
+        Some(bgp_attr),
+        mp_update,
+        mp_withdraw,
+        treat_as_withdraw,
+    ))
 }
 
 #[cfg(test)]
@@ -435,5 +500,41 @@ mod tests {
             BgpParseError::IncompleteData { needed } => assert_eq!(needed, 4),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn malformed_prefix_sid_triggers_treat_as_withdraw_not_session_reset() {
+        // A valid ORIGIN attribute followed by a BGP Prefix-SID (type 40)
+        // whose SRv6 L3 Service TLV carries an under-length (5 < 21) SID
+        // Information sub-TLV. Per RFC 9252 §7 / RFC 8669 §5 the malformed
+        // Prefix-SID must be discarded and the UPDATE treated-as-withdraw
+        // — NOT reset the session. So the parse succeeds, ORIGIN survives,
+        // the Prefix-SID is gone, and the withdraw flag is set.
+        let mut block = vec![0x40, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        let service_value = [0x00, 0x01, 0x00, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let mut psid_value = vec![5u8, 0x00, service_value.len() as u8]; // SRv6 L3 Service TLV
+        psid_value.extend_from_slice(&service_value);
+        block.push(0xC0); // optional + transitive
+        block.push(40); // type = PrefixSid
+        block.push(psid_value.len() as u8);
+        block.extend_from_slice(&psid_value);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, mp_update, mp_withdraw, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("must not reset session");
+        assert!(
+            treat_as_withdraw,
+            "malformed Prefix-SID must treat-as-withdraw"
+        );
+        let bgp_attr = bgp_attr.expect("attrs parsed");
+        assert!(
+            bgp_attr.origin.is_some(),
+            "ORIGIN must survive the recovery"
+        );
+        assert!(
+            bgp_attr.prefix_sid.is_none(),
+            "malformed Prefix-SID must be discarded"
+        );
+        assert!(mp_update.is_none() && mp_withdraw.is_none());
     }
 }
