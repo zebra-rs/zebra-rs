@@ -10,6 +10,14 @@ use super::ConfigManager;
 /// channel so committed `/bfd/*` leaves reach the callback
 /// dispatcher.
 pub fn spawn_bfd(config: &ConfigManager) {
+    // Idempotent — see `spawn_ospfv3`. BFD is eager-spawned by the
+    // OSPF / IS-IS / BGP arms in `commit_config`, so it can be invoked on
+    // many commits; re-spawning would replace the live task and drop
+    // every BFD session. The published `bfd_client_tx` from the first
+    // spawn stays valid, so later protocol spawns still attach.
+    if config.protocol_tasks.borrow().contains_key("bfd") {
+        return;
+    }
     // BFD doesn't subscribe to RIB today — the `default_table_no_rib`
     // constructor builds a parked `RibClient` so the ctx still has
     // a `rib` field for uniformity with the other protocols.
