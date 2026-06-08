@@ -932,6 +932,14 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
                 bgp.route_del(network);
             }
         }
+        (Afi::Ip6, Safi::Unicast) => {
+            let network = args.v6net()?;
+            if op.is_set() {
+                bgp.route_add_v6(network);
+            } else {
+                bgp.route_del_v6(network);
+            }
+        }
         (Afi::Ip, Safi::MplsLabel) => {
             let network = args.v4net()?;
             if op.is_set() {

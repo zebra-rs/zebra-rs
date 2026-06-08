@@ -7161,6 +7161,51 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     send_eor_ipv4_unicast(peer);
 }
 
+/// Dump the global IPv6-unicast Loc-RIB to a newly-established peer —
+/// the v6 counterpart of [`route_sync_ipv4`]. Outbound policy is not
+/// applied on the v6-unicast path yet (consistent with the event-driven
+/// `route_advertise_to_peers_v6`); next-hop-self and eBGP AS_PATH
+/// prepend happen inside `route_update_ipv6`.
+pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
+    let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::Unicast);
+
+    // Collect first to avoid borrowing `bgp.local_rib` across the loop.
+    let routes: Vec<(Ipv6Net, BgpRib)> = if add_path {
+        bgp.local_rib
+            .v6
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.local_rib
+            .v6
+            .1
+            .iter()
+            .map(|(prefix, rib)| (prefix, rib.clone()))
+            .collect()
+    };
+
+    // Single-peer dump (see `send_ipv6_direct`): accumulate per shared
+    // attr-set and emit straight to this peer rather than through the
+    // group cache. No Adj-RIB-Out registration — v6-unicast `adj_out`
+    // tracking isn't wired (the event-driven `route_advertise_to_peers_v6`
+    // skips it too); revisit when `show bgp neighbors <X> advertised-routes`
+    // grows v6 support.
+    let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
+    for (prefix, rib) in routes {
+        let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
+            continue;
+        };
+        let arc_attr = bgp.attr_store.intern(attr);
+        entries.push((arc_attr, nlri));
+    }
+    super::update_group::send_ipv6_direct(peer, entries);
+
+    // End-of-RIB marker for IPv6 Unicast.
+    send_eor_ipv6_unicast(peer);
+}
+
 pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
 
@@ -7232,6 +7277,14 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
 // Send End-of-RIB marker for IPv4 Unicast.
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
     let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    peer.send_packet(update.into());
+}
+
+// Send End-of-RIB marker for IPv6 Unicast: an empty MP_UNREACH(AFI=2,
+// SAFI=1), per RFC 4724 §2 (only IPv4 unicast uses the bare empty UPDATE).
+fn send_eor_ipv6_unicast(peer: &mut Peer) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Ipv6Eor);
     peer.send_packet(update.into());
 }
 
@@ -7426,6 +7479,9 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
         route_sync_ipv4(peer, bgp);
     }
+    if peer.is_afi_safi(Afi::Ip6, Safi::Unicast) {
+        route_sync_ipv6(peer, bgp);
+    }
     if peer.is_afi_safi(Afi::Ip, Safi::MplsVpn) {
         let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
         if !peer.eor.contains_key(&key) {
@@ -7535,6 +7591,81 @@ impl Bgp {
                 &mut bgp_ref,
                 &mut self.peers,
             );
+        }
+    }
+
+    /// Originate an IPv6 prefix into the global v6 unicast Loc-RIB from
+    /// a `network` statement under `afi-safi ipv6`. The v6 counterpart
+    /// of [`Self::route_add`]: weight 32768, no NEXT_HOP, so when it
+    /// wins best `fib_install_v6` cedes the FIB entry to the underlying
+    /// source (Connected / Static / IGP) rather than shadowing it.
+    pub fn route_add_v6(&mut self, prefix: Ipv6Net) {
+        let attr = BgpAttr::new();
+        let rib = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let (_replaced, selected, _next_id) = self.local_rib.update_v6(prefix, rib);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            lu_labels: None,
+        };
+
+        fib_install_v6(&bgp_ref, prefix, &selected);
+
+        if !selected.is_empty() {
+            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    pub fn route_del_v6(&mut self, prefix: Ipv6Net) {
+        let ident = ORIGINATED_PEER;
+        let removed = self.local_rib.remove_v6(prefix, 0, ident);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            lu_labels: None,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path_v6(prefix);
+        fib_install_v6(&bgp_ref, prefix, &selected);
+
+        if !selected.is_empty() || !removed.is_empty() {
+            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
         }
     }
 

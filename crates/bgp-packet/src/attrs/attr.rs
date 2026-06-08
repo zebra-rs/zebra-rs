@@ -445,6 +445,20 @@ pub fn parse_bgp_update_attribute(
                             updates,
                         });
                     }
+                    MpReachAttr::Ipv6 {
+                        snpa,
+                        nhop,
+                        updates,
+                    } => {
+                        // Native IPv6 unicast. The v6 next-hop rides on the
+                        // MP_REACH and is stamped into the attr by the
+                        // consumer in `bgp/route.rs`; just surface the NLRI.
+                        mp_update = Some(MpReachAttr::Ipv6 {
+                            snpa,
+                            nhop,
+                            updates,
+                        });
+                    }
                     _ => {
                         //
                     }
