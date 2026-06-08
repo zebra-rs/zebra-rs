@@ -46,8 +46,9 @@ and installs the route. The replacement happens **before** the prepend;
 doing it the other way around would leave the neighbor's AS in the path
 and re-introduce the loop.
 
-This is the send-side counterpart to `allowas-in`, which relaxes the
-same loop check on the **receiving** side. `as-override` keeps the
+This is the send-side counterpart to
+[`allowas-in`](ch-02-13-bgp-allowas-in.md), which relaxes the same loop
+check on the **receiving** side. `as-override` keeps the
 neighbor's loop check strict and instead removes the offending AS before
 it ever reaches the neighbor — the originator's AS is hidden from that
 neighbor, which is exactly the intent in a shared-AS VPN/customer design.
@@ -138,7 +139,8 @@ The usual mistake is configuring `as-override` on the **wrong end**. It
 belongs on the side that *advertises* into the shared-AS neighbor — the
 provider in the example above — not on the customer that needs to
 *accept* the route. If you control only the receiving side, the
-equivalent receive-side relaxation is `allowas-in`.
+equivalent receive-side relaxation is
+[`allowas-in`](ch-02-13-bgp-allowas-in.md).
 
 If the route still does not appear after enabling `as-override`, check
 that:
