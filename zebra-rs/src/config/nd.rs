@@ -29,6 +29,13 @@ use super::ConfigManager;
 /// failure doesn't leave a dead `RibRx` receiver queued in RIB's
 /// inbox — RIB would panic on the link-dump send in that case.
 pub fn spawn_nd(config: &ConfigManager) {
+    // Idempotent — see `spawn_ospfv3`. Eager-spawned by the BGP arm in
+    // `commit_config`; re-spawning would replace the live task and drop
+    // ND / RA state. A socket failure below returns early without
+    // inserting the task, so a later commit retries.
+    if config.protocol_tasks.borrow().contains_key("nd") {
+        return;
+    }
     let socket = match nd_socket() {
         Ok(s) => s,
         Err(e) => {
