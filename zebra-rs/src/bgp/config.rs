@@ -2649,6 +2649,67 @@ mod bfd_wiring_tests {
         ));
         assert!(bgp.rx.try_recv().is_err());
     }
+
+    fn peer_allowas_in(bgp: &Bgp, addr: &str) -> Option<AllowAsIn> {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .allowas_in
+    }
+
+    /// Bare `allowas-in` (presence container, no child) enables the
+    /// relaxation with the default occurrence budget of 3.
+    #[tokio::test]
+    async fn allowas_in_bare_defaults_to_three() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_allowas_in(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Count(3)));
+    }
+
+    /// `allowas-in count <n>` overrides the budget; `delete` reverts to
+    /// the default while the container stays enabled.
+    #[tokio::test]
+    async fn allowas_in_count_sets_and_reverts() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_allowas_in_count(&mut bgp, arg_words(&["10.0.0.2", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Count(5)));
+        config_allowas_in_count(&mut bgp, arg_words(&["10.0.0.2", "5"]), ConfigOp::Delete).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Count(3)));
+    }
+
+    /// `allowas-in origin` selects origin-only mode.
+    #[tokio::test]
+    async fn allowas_in_origin_mode() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_allowas_in_origin(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Origin));
+    }
+
+    /// Deleting the presence container disables allowas-in entirely.
+    #[tokio::test]
+    async fn allowas_in_delete_disables() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_allowas_in(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_allowas_in(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), None);
+    }
+
+    /// The presence callback must not clobber a `count`/`origin` that
+    /// landed first in the same commit (callbacks are order-independent).
+    #[tokio::test]
+    async fn allowas_in_presence_does_not_clobber_count() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        // Child leaf fires before the presence container.
+        config_allowas_in_count(&mut bgp, arg_words(&["10.0.0.2", "7"]), ConfigOp::Set).unwrap();
+        config_allowas_in(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Count(7)));
+    }
 }
 
 #[cfg(test)]

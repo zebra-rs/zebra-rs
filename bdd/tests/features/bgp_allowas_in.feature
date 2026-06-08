@@ -54,15 +54,20 @@ Feature: BGP allowas-in relaxes the inbound AS_PATH loop check
   Scenario: allowas-in lets z3 accept the looped route
     Given the test topology exists
     When I apply config "z3-allowas.yaml" to namespace "z3"
-    And I clear namespace "z3" neighbor "192.168.1.2"
-    And I wait 15 seconds for BGP to operate
-    Then BGP route in "z3" has "10.0.0.1/32"
+    # Hard-reset the session so z2 re-advertises 10.0.0.1/32; the loop
+    # check drops the route before it is stored, so it must be re-pulled
+    # to be re-evaluated under the new allowas-in setting.
+    And I run "clear bgp ipv4 neighbor 192.168.1.2" in namespace "z3"
+    And I wait 30 seconds for BGP to operate
+    Then BGP session in "z3" to "192.168.1.2" should be "Established"
+    And BGP route in "z3" has "10.0.0.1/32"
     And show command "show ip bgp neighbors" in namespace "z3" should contain "Allowas-in: 3 occurrence(s)"
 
   Scenario: allowas-in origin mode accepts the route and shows in neighbor output
     Given the test topology exists
     When I apply config "z3-origin.yaml" to namespace "z3"
-    And I clear namespace "z3" neighbor "192.168.1.2"
-    And I wait 15 seconds for BGP to operate
-    Then BGP route in "z3" has "10.0.0.1/32"
+    And I run "clear bgp ipv4 neighbor 192.168.1.2" in namespace "z3"
+    And I wait 30 seconds for BGP to operate
+    Then BGP session in "z3" to "192.168.1.2" should be "Established"
+    And BGP route in "z3" has "10.0.0.1/32"
     And show command "show ip bgp neighbors" in namespace "z3" should contain "Allowas-in: origin"
