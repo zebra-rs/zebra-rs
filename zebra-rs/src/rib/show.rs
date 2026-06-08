@@ -1793,7 +1793,7 @@ fn sid_show_text(sids: &std::collections::BTreeMap<std::net::Ipv6Addr, super::Si
         sid = "SID",
         behavior = "Behavior",
         context = "Context",
-        owner = "Daemon/Instance",
+        owner = "Protocol",
         loc = "Locator",
         alloc = "AllocationType",
         sid_w = SID_COL,
@@ -2026,7 +2026,9 @@ mod tests {
             body[1]
         );
         for line in &body {
-            assert!(line.contains("isis(0)"));
+            // Protocol name only — no `isis(0)` instance suffix.
+            assert!(line.contains("isis"));
+            assert!(!line.contains("isis(0)"));
             assert!(line.contains("LOC_N1"));
             assert!(line.contains("dynamic"));
         }
