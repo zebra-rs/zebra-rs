@@ -264,12 +264,16 @@ submodule ietf-bgp-common {
          this differs from the global BGP router autonomous system
          number.";
     }
-    leaf remove-private-as {
-      type bt:remove-private-as-option;
-      description
-        "When this leaf is specified, remove private AS numbers from
-         updates sent to peers.";
-    }
+    // remove-private-as: removed from the vendored IETF model so
+    // zebra-rs can own the name as an FRR-style presence container
+    // (zebra-bgp-remove-private-as.yang). The IANA identityref typedef
+    // (bt:remove-private-as-option) uses an unprefixed `base`, which this
+    // libyang build cannot resolve to its value set, and an augment can't
+    // add a same-named node over this leaf (RFC 7950 §7.17). zebra-rs does
+    // not implement the IANA identityref form. See the zebra module.
+    //  leaf remove-private-as {
+    //    type bt:remove-private-as-option;
+    //  }
     container route-flap-damping {
       if-feature "bt:damping";
       leaf enable {

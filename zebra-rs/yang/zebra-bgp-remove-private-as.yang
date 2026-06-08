@@ -67,7 +67,15 @@ module zebra-bgp-remove-private-as {
 
      In every form the neighbor's own AS is preserved in the path, so
      its RFC 4271 loop check still works. `remove-private-as` only
-     affects eBGP sessions (iBGP never prepends).";
+     affects eBGP sessions (iBGP never prepends).
+
+     NOTE: the IETF model (ietf-bgp) ships a `remove-private-as`
+     identityref leaf on the neighbor. zebra-rs removes that leaf from
+     its vendored copy (it carries the IANA `all`-only options via an
+     unprefixed identityref base this libyang can't resolve, and a
+     same-named augment is forbidden by RFC 7950 §7.17) and owns the
+     name with this presence container instead, which expresses all four
+     FRR forms including the bare one.";
 
   revision 2026-06-08 {
     description "Initial revision.";

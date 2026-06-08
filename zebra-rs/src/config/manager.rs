@@ -1274,4 +1274,44 @@ mod yang_load_tests {
     fn exec_mode_loads() {
         load_mode("exec");
     }
+
+    /// Regression guard for `remove-private-as`. The IETF model
+    /// (`ietf-bgp`) shipped a `remove-private-as` identityref leaf on the
+    /// neighbor whose IANA base this libyang can't resolve to a value
+    /// set, and over which a same-named augment is forbidden (RFC 7950
+    /// §7.17). zebra-rs removes that leaf from its vendored copy and owns
+    /// the name with an FRR-style presence container (all four forms:
+    /// bare, `all`, `replace-as`, `all replace-as`). This checks the
+    /// source schema directly so a regression — the IETF leaf creeping
+    /// back, a broken augment — is caught in the unit suite, not only in
+    /// the BDD.
+    #[test]
+    fn bgp_neighbor_remove_private_as_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        // The bare presence container and both modifier leaves must each
+        // be a valid settable path on the neighbor.
+        for cmd in [
+            "set router bgp neighbor 192.168.1.3 remove-private-as",
+            "set router bgp neighbor 192.168.1.3 remove-private-as all",
+            "set router bgp neighbor 192.168.1.3 remove-private-as replace-as",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
 }
