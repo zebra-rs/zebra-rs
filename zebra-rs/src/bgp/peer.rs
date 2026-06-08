@@ -370,6 +370,13 @@ pub struct PeerConfig {
     /// `replace_as`, rewrites) private ASNs from every outbound eBGP
     /// UPDATE before the local-AS prepend. Ignored for iBGP peers.
     pub remove_private_as: Option<RemovePrivateAs>,
+    /// Per-neighbor `enforce-first-as` (zebra-bgp-enforce-first-as.yang).
+    /// When `true`, an inbound UPDATE from this eBGP neighbor is dropped
+    /// unless the left-most AS_PATH segment is an AS_SEQUENCE beginning
+    /// with the neighbor's own AS (its `remote_as`). Guards against a peer
+    /// that forwards routes without prepending its AS. Ignored for iBGP
+    /// peers (which never prepend). Default `false`.
+    pub enforce_first_as: bool,
 }
 
 impl Default for PeerConfig {
@@ -393,6 +400,7 @@ impl Default for PeerConfig {
             allowas_in: None,
             as_override: false,
             remove_private_as: None,
+            enforce_first_as: false,
         }
     }
 }

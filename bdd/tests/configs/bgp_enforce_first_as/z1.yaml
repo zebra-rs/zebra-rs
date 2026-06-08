@@ -1,0 +1,47 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+# Outbound policy toward z2 that prepends a *foreign* AS (65099) in front
+# of z1's own AS. zebra-rs applies the mandatory eBGP local-AS prepend
+# first (AS_PATH "65001"), then the outbound route-map prepend lands
+# 65099 left-most, so z2 receives AS_PATH "65099 65001". The left-most AS
+# is therefore NOT z1's AS — exactly the condition `enforce-first-as`
+# guards against.
+prefix-set:
+- name: ALL-V4
+  prefixes:
+  - prefix: 0.0.0.0/0
+    le: 32
+policy:
+- name: PREPEND-FOREIGN
+  entry:
+  - number: 10
+    action: permit
+    match:
+      prefix: ALL-V4
+    set:
+      as-path-prepend:
+        asn: 65099
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      policy:
+        out: PREPEND-FOREIGN
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

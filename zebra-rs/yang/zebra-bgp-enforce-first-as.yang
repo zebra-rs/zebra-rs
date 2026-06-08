@@ -1,0 +1,96 @@
+module zebra-bgp-enforce-first-as {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-enforce-first-as";
+  prefix "zbef";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor `enforce-first-as` knob.
+
+     A well-behaved eBGP speaker prepends its own AS to the AS_PATH of
+     every UPDATE it sends, so the left-most AS a receiver sees is always
+     the directly-connected peer's AS. `enforce-first-as` makes that
+     guarantee mandatory: an inbound UPDATE from this eBGP neighbor is
+     discarded unless the first AS_PATH segment is an AS_SEQUENCE whose
+     left-most AS is the neighbor's own AS.
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           enforce-first-as;        // drop updates not starting with 65501
+         }
+       }
+
+     This guards against a misconfigured or malicious peer that forwards
+     routes without prepending its AS (the AS_PATH then starts with some
+     other AS), which would otherwise let it inject routes that bypass the
+     normal path-vector accounting. The check applies to eBGP sessions
+     only — iBGP never prepends, so the knob is a no-op there and is
+     ignored.
+
+     Do NOT enable `enforce-first-as` on a session toward a transparent
+     route server (RFC 7947): a route server deliberately does not prepend
+     its own AS, so every UPDATE would fail the check and be dropped.";
+
+  revision 2026-06-08 {
+    description "Initial revision.";
+    reference "FRR `neighbor X enforce-first-as`.";
+  }
+
+  grouping bgp-neighbor-enforce-first-as-extension {
+    description
+      "FRR-style `enforce-first-as` presence container on a BGP
+       neighbor.";
+
+    container enforce-first-as {
+      ext:help "Discard updates whose AS_PATH does not start with this neighbor's AS";
+      presence "Enable the first-AS check on inbound updates from this neighbor";
+      description
+        "When present, drop an inbound eBGP UPDATE from this neighbor
+         unless the left-most AS_PATH segment is an AS_SEQUENCE that
+         begins with the neighbor's own AS. No-op for iBGP peers.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach enforce-first-as to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-enforce-first-as-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X enforce-first-as` is path-valid.";
+    uses bgp-neighbor-enforce-first-as-extension;
+  }
+}
