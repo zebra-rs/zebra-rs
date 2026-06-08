@@ -6549,10 +6549,21 @@ impl Ospf<Ospfv3> {
                 }
             }
             Message::SpfSchedule(area_id) => {
-                if let Some(area_id) = area_id
-                    && let Some(area) = self.areas.get_mut(area_id)
-                {
-                    Self::ospf_spf_schedule_generic(&self.tx, area);
+                if let Some(area_id) = area_id {
+                    if let Some(area) = self.areas.get_mut(area_id) {
+                        Self::ospf_spf_schedule_generic(&self.tx, area);
+                    }
+                } else {
+                    // None = AS-scope event (Type-5 AS-External install /
+                    // MaxAge): recompute every attached area so each
+                    // area's RIB re-runs `add_as_external_routes_v3` and
+                    // installs or drops the external. Mirrors v2.
+                    let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+                    for id in area_ids {
+                        if let Some(area) = self.areas.get_mut(id) {
+                            Self::ospf_spf_schedule_generic(&self.tx, area);
+                        }
+                    }
                 }
             }
             Message::SpfCalc(area_id) => {

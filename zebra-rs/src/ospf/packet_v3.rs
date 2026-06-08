@@ -1405,6 +1405,7 @@ fn ospfv3_ls_upd_proc(
         }
         let cloned = lsa.clone();
         let mut area_lsa_installed = false;
+        let mut as_lsa_installed = false;
         match scope {
             Ospfv3LsaScope::Area => {
                 // Go through `insert_received_v3` so RFC 8666 §3 SR
@@ -1416,6 +1417,7 @@ fn ospfv3_ls_upd_proc(
             }
             Ospfv3LsaScope::As => {
                 oi.lsdb_as.install_lsa(cloned, oi.tx, None);
+                as_lsa_installed = true;
             }
             Ospfv3LsaScope::Link => {
                 oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
@@ -1426,6 +1428,15 @@ fn ospfv3_ls_upd_proc(
         }
         if area_lsa_installed {
             let _ = oi.tx.send(Message::SpfSchedule(Some(area_id)));
+        }
+        if as_lsa_installed {
+            // AS-scoped (Type-5 AS-External, including a MaxAge
+            // withdrawal): recompute every area's RIB so the external
+            // route is installed or dropped. `None` fans out to all
+            // areas (mirrors v2's AS-external flood hook). Without this
+            // a lone Type-5 change — e.g. a translated route being
+            // withdrawn — never triggers SPF on the receiver.
+            let _ = oi.tx.send(Message::SpfSchedule(None));
         }
 
         // RFC 3101 §3 (v3 mirror of v2's phase 4a/4b hook):
