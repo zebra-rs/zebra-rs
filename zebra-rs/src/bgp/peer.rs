@@ -191,6 +191,18 @@ pub struct PeerTransportConfig {
     /// [`Peer::session_ttl`] and applied in [`fsm_connected`] /
     /// `peer_connect`. See `zebra-bgp-transport.yang`.
     pub ebgp_multihop: Option<u8>,
+    /// `tcp-mss <1-65535>`: cap the TCP Maximum Segment Size on this
+    /// neighbor's connection. `Some(n)` is installed on the active
+    /// connect socket before `connect(2)` (`peer_connect`) and folded
+    /// into the listener's minimum (`config::apply_tcp_mss_refresh_all`)
+    /// so a passively-accepted child inherits it; both must precede the
+    /// TCP handshake because `getsockopt(TCP_MAXSEG)` on an established
+    /// socket returns the already-negotiated MSS. `None` leaves the
+    /// kernel default (path-MTU derived). A change does not bounce a live
+    /// session — like FRR, the new value takes effect on the next
+    /// connect, so a `clear` is needed to apply it now. See `super::mss`
+    /// and `zebra-bgp-transport.yang`.
+    pub tcp_mss: Option<u16>,
     // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
     // listening socket (for the peer's address) and on the active
     // TcpSocket before connect(). The encoding determines how the
@@ -631,6 +643,16 @@ pub struct Peer {
     /// two — a peer with no per-neighbor config still gets instance
     /// tracing. Mirrors the `adv_interval` snapshot pattern.
     pub tracing_instance: super::tracing::BgpTracing,
+
+    /// Negotiated TCP MSS read back from the session socket
+    /// (`getsockopt(TCP_MAXSEG)`) at [`fsm_connected`] — the "synced"
+    /// value `show bgp neighbor` reports next to the configured
+    /// `tcp-mss`. Runtime bookkeeping, not config: captured once per
+    /// connection (it is the kernel's cached `mss_cache`, fixed for the
+    /// life of the socket) and only meaningful while Established, so the
+    /// show path gates on state rather than clearing this on teardown.
+    /// `None` until the first session comes up. See [`super::mss`].
+    pub tcp_mss_synced: Option<u16>,
 }
 
 impl Peer {
@@ -701,6 +723,7 @@ impl Peer {
             bfd_session_key: None,
             tracing: super::tracing::BgpTracing::default(),
             tracing_instance: super::tracing::BgpTracing::default(),
+            tcp_mss_synced: None,
         };
         peer.config
             .mp
@@ -1386,11 +1409,33 @@ fn apply_session_ttl(peer: &Peer, stream: &TcpStream) {
     }
 }
 
+/// Read back the kernel's negotiated TCP MSS (`getsockopt(TCP_MAXSEG)`)
+/// on the freshly established `stream` and record it on the peer as the
+/// "synced" MSS shown by `show bgp neighbor`. The connection's MSS was
+/// fixed during the TCP handshake (the configured `tcp-mss` is applied
+/// pre-connect / on the listener), so one read per connection captures
+/// it for the socket's life. Best-effort: a failure leaves the previous
+/// value untouched (logged at debug).
+fn record_session_mss(peer: &mut Peer, stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    match super::mss::get_tcp_mss(stream.as_raw_fd()) {
+        Ok(mss) => peer.tcp_mss_synced = Some(mss),
+        Err(e) => {
+            tracing::debug!(
+                peer = %peer.address,
+                error = %e,
+                "bgp: failed to read synced TCP MSS on session socket",
+            );
+        }
+    }
+}
+
 pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
     apply_session_ttl(peer, &stream);
+    record_session_mss(peer, &stream);
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
@@ -1581,6 +1626,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     // 255 for iBGP / ttl-security. Set on the socket before connect so
     // the SYN carries it (see `peer_connect`).
     let ttl = peer.session_ttl();
+    // `tcp-mss <1-65535>`, likewise set before connect so our SYN
+    // advertises the clamp and the kernel caches the reduced MSS.
+    let tcp_mss = peer.config.transport.tcp_mss;
     let ctx = peer.ctx.clone();
     Task::spawn(async move {
         let tx = tx.clone();
@@ -1606,6 +1654,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
             md5_password.as_deref(),
             ao_key,
             ttl,
+            tcp_mss,
         )
         .await;
         match result {
@@ -1628,6 +1677,7 @@ async fn peer_connect(
     md5_password: Option<&str>,
     ao_key: Option<super::auth::ResolvedAoKey>,
     ttl: u8,
+    tcp_mss: Option<u16>,
 ) -> std::io::Result<TcpStream> {
     // Address family of the source must match the remote when specified.
     if let Some(src) = update_source
@@ -1681,6 +1731,22 @@ async fn peer_connect(
             peer = %remote.ip(),
             error = %e,
             "bgp: failed to set egress TTL before connect; using OS default",
+        );
+    }
+
+    // Set the TCP MSS before connect so our SYN advertises the clamp and
+    // the kernel caches the reduced MSS on this socket — a later set on
+    // the established socket no longer changes `getsockopt(TCP_MAXSEG)`.
+    // Best-effort: a failure is logged and the connect proceeds at the
+    // path-MTU-derived default.
+    if let Some(mss) = tcp_mss
+        && let Err(e) = super::mss::set_tcp_mss(socket.as_raw_fd(), mss)
+    {
+        tracing::warn!(
+            peer = %remote.ip(),
+            error = %e,
+            mss,
+            "bgp: failed to set TCP MSS before connect; using path-MTU default",
         );
     }
 
@@ -1873,8 +1939,12 @@ fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
 fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     // Same TTL policy as the primary connection: if this collision conn
     // wins §6.8 resolution it is promoted to primary, so it must carry
-    // the egress TTL and (for ttl-security) the ingress floor too.
+    // the egress TTL and (for ttl-security) the ingress floor too. Record
+    // its negotiated MSS for the same reason — it negotiated the same
+    // clamp as the primary (same config, same path), so capturing here
+    // keeps the synced value correct whichever connection survives.
     apply_session_ttl(peer, &stream);
+    record_session_mss(peer, &stream);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
     let reader = peer_start_reader(peer, ConnTag::Collision, read_half);

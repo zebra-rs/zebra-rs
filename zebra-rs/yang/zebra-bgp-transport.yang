@@ -52,6 +52,12 @@ module zebra-bgp-transport {
      site in `peer_connect`. Operators using the FRR vocabulary get
      the flat form without giving up the IETF tree.";
 
+  revision 2026-06-08 {
+    description
+      "Add `tcp-mss <1-65535>` per-neighbor leaf (TCP_MAXSEG clamp).";
+    reference "FRR `neighbor X tcp-mss <N>`; Cisco IOS equivalent.";
+  }
+
   revision 2026-05-05 {
     description "Initial revision.";
     reference "FRR `neighbor X update-source`; Cisco IOS equivalent.";
@@ -130,6 +136,42 @@ module zebra-bgp-transport {
          ietf-bgp-common.";
       reference
         "RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
+    }
+
+    leaf tcp-mss {
+      ext:help "Cap the TCP Maximum Segment Size for this neighbor (1-65535)";
+      type uint16 {
+        range "1..65535";
+      }
+      description
+        "TCP Maximum Segment Size (`setsockopt(TCP_MAXSEG)`) for this
+         neighbor's session, in bytes. Bounds the size of every BGP
+         segment so the session stays under a path MTU smaller than the
+         interface MTU — a tunnel, an MPLS core, or a link that cannot
+         carry full-size frames — avoiding a stall on a black-holed
+         large UPDATE.
+
+         The value is applied to the socket *before* the TCP handshake:
+         on the active connect socket (so the SYN advertises the clamp)
+         and on the listening socket (so a passively-accepted connection
+         inherits it). Because a listening socket carries a single value
+         for all peers, the daemon installs the minimum `tcp-mss` across
+         the configured peers of each address family on the listener,
+         matching FRR; the active path applies each peer's own value
+         exactly.
+
+         Changing `tcp-mss` does not bounce a live session: the new value
+         takes effect on the next connect, so reset the session
+         (`clear bgp <peer>`) to apply it immediately. `show bgp neighbor`
+         reports both the configured value and the MSS the kernel actually
+         negotiated (the *synced* value), which the kernel may set a little
+         below the configured one (it subtracts per-segment TCP options).
+
+         Equivalent to `neighbor X tcp-mss <N>` in FRR / Cisco IOS, and to
+         `neighbor/transport/tcp-mss` in ietf-bgp-common.";
+      reference
+        "RFC 879: The TCP Maximum Segment Size and Related Topics.
+         RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
     }
   }
 
