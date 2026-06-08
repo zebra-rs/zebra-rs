@@ -1527,6 +1527,36 @@ fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
+/// `[no] router bgp neighbor <addr> ebgp-multihop <1-255>` — raise the
+/// egress TTL for an eBGP session so a peer up to N hops away is
+/// reachable (RFC 4271 operational practice). The value is resolved
+/// into the session TTL by [`super::peer::Peer::session_ttl`] (ignored
+/// for iBGP, overridden by ttl-security) and applied at connect /
+/// `fsm_connected`. A change to a live session is bounced (`Event::Stop`,
+/// like `clear bgp ... hard`) so the new TTL takes effect on reconnect;
+/// an Idle peer picks it up on its first connect.
+fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    // On delete the value (if echoed in the path) is irrelevant — clear
+    // unconditionally. On set, read the 1..255 hop count.
+    let want = if op.is_set() { Some(args.u8()?) } else { None };
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if peer.config.transport.ebgp_multihop == want {
+            return Some(());
+        }
+        peer.config.transport.ebgp_multihop = want;
+        peer.start();
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -2004,6 +2034,10 @@ impl Bgp {
         // connected only, TTL pinned to 255. Lowered onto the session
         // socket in `fsm_connected`.
         self.callback_peer("/ttl-security", config_ttl_security);
+        // FRR-style `neighbor X ebgp-multihop <1-255>` from
+        // zebra-bgp-transport.yang. Raises the eBGP egress TTL; resolved
+        // by Peer::session_ttl and applied at connect / fsm_connected.
+        self.callback_peer("/ebgp-multihop", config_ebgp_multihop);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -2782,6 +2816,126 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).is_empty(),
             "an Idle peer must not be bounced",
+        );
+    }
+
+    /// `Peer::session_ttl` resolution: a directly-connected eBGP peer
+    /// defaults to TTL 1, `ebgp-multihop N` raises it to N, and
+    /// `ttl-security` overrides both with 255.
+    #[tokio::test]
+    async fn session_ttl_ebgp_default_multihop_and_ttl_security() {
+        let mut bgp = fresh_bgp(); // local asn 0
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // remote-as 65001 != local 0 ⇒ eBGP.
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            1,
+            "directly-connected eBGP must default to TTL 1",
+        );
+
+        // ebgp-multihop raises the egress TTL.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "10"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            10,
+            "ebgp-multihop N must set the egress TTL to N",
+        );
+
+        // ttl-security wins over ebgp-multihop.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "ttl-security must override ebgp-multihop with 255",
+        );
+
+        // Clearing ebgp-multihop while ttl-security stays returns 255;
+        // clearing ttl-security too returns to the eBGP default of 1.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "10"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            1,
+            "with neither option an eBGP peer is back to TTL 1",
+        );
+    }
+
+    /// An iBGP peer always uses TTL 255, and `ebgp-multihop` is ignored
+    /// on it (mirroring FRR).
+    #[tokio::test]
+    async fn session_ttl_ibgp_is_255_and_ignores_multihop() {
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65000;
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // remote-as == local asn ⇒ iBGP.
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65000"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "iBGP must use TTL 255",
+        );
+
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "ebgp-multihop must be ignored on an iBGP peer",
+        );
+    }
+
+    /// `ebgp-multihop` stores the hop count, is idempotent on a no-op
+    /// set, bounces an established session on change, and clears on
+    /// delete.
+    #[tokio::test]
+    async fn ebgp_multihop_sets_value_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // Set 5 → stored + one bounce.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ebgp_multihop,
+            Some(5),
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "changing ebgp-multihop on a live session must bounce it",
+        );
+
+        // Same value again → no-op, no bounce.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "re-setting the same hop count must not bounce",
+        );
+
+        // Delete → cleared + bounce.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ebgp_multihop,
+            None,
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "deleting ebgp-multihop on a live session must bounce it",
         );
     }
 

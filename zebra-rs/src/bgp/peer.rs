@@ -182,6 +182,15 @@ pub struct PeerTransportConfig {
     /// configurable hop count (the YANG leaf is `type empty`). Mutually
     /// exclusive with ebgp-multihop. See `zebra-bgp-transport.yang`.
     pub ttl_security: bool,
+    /// eBGP multihop TTL (`ebgp-multihop N`, RFC 4271 operational
+    /// practice). `Some(n)` raises this eBGP session's egress IP TTL /
+    /// IPv6 Hop Limit to `n` so a peer up to `n` hops away is reachable;
+    /// `None` (the default) leaves a directly-connected eBGP peer at the
+    /// `DEFAULT_EBGP_TTL` of 1. Ignored for iBGP (always 255) and
+    /// overridden by `ttl_security` (255). Resolved by
+    /// [`Peer::session_ttl`] and applied in [`fsm_connected`] /
+    /// `peer_connect`. See `zebra-bgp-transport.yang`.
+    pub ebgp_multihop: Option<u8>,
     // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
     // listening socket (for the peer's address) and on the active
     // TcpSocket before connect(). The encoding determines how the
@@ -722,6 +731,28 @@ impl Peer {
 
     pub fn is_ibgp(&self) -> bool {
         self.peer_type.is_ibgp()
+    }
+
+    /// Egress IP TTL / IPv6 Hop Limit for this session, per the BGP TTL
+    /// convention (matches FRR):
+    ///   - `ttl-security` (GTSM) ⇒ 255 (also floors the ingress TTL —
+    ///     see [`super::ttl`]);
+    ///   - iBGP ⇒ 255 (peers are typically several IGP hops away);
+    ///   - eBGP with `ebgp-multihop N` ⇒ N (peer up to N hops away);
+    ///   - eBGP, directly connected (the default) ⇒ 1 (the peer must be
+    ///     a single hop away — a router in the path drops the packet).
+    ///
+    /// Precedence is ttl-security, then iBGP, then ebgp-multihop, so
+    /// `ebgp-multihop` is silently ignored on an iBGP peer (which already
+    /// uses 255), mirroring FRR.
+    pub fn session_ttl(&self) -> u8 {
+        if self.config.transport.ttl_security || self.is_ibgp() {
+            return super::ttl::MAX_TTL;
+        }
+        self.config
+            .transport
+            .ebgp_multihop
+            .unwrap_or(super::ttl::DEFAULT_EBGP_TTL)
     }
 
     /// Effective BFD hop mode for this neighbour: the explicit
@@ -1277,22 +1308,36 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
-    // GTSM (RFC 5082) for a `ttl-security` neighbor. Install the TTL
-    // floor on this connection's socket now that the TCP handshake is
-    // complete and before OPEN is sent, so every BGP message we send
-    // leaves at TTL 255 and anything arriving below 255 is dropped by
-    // the kernel. This is the single point both the active (Connected
-    // event) and passive (accept) paths pass through, so one call
-    // covers both roles. A setsockopt failure is logged but not fatal —
-    // the session continues without the (best-effort) hardening rather
-    // than being torn down.
-    if peer.config.transport.ttl_security {
+    // Apply this session's TTL policy now that the TCP handshake is
+    // complete and before OPEN is sent — the common point both the
+    // active (Connected event) and passive (accept) paths pass through.
+    // eBGP is pinned to TTL 1 (directly connected) unless `ebgp-multihop`
+    // raises it; iBGP and `ttl-security` use 255. The active side has
+    // already set the egress TTL before connect; re-applying it here is
+    // idempotent and is what covers the passive side. For a
+    // `ttl-security` neighbor we additionally floor the accepted ingress
+    // TTL at 255 (GTSM, RFC 5082) — done here, post-handshake, so it
+    // never drops the peer's default-TTL SYN-ACK. setsockopt failures
+    // are logged, not fatal: the session continues without the
+    // best-effort hardening rather than being torn down.
+    {
         use std::os::fd::AsRawFd;
-        if let Err(e) = super::gtsm::apply_gtsm(stream.as_raw_fd(), peer.address.is_ipv4()) {
+        let fd = stream.as_raw_fd();
+        let is_v4 = peer.address.is_ipv4();
+        if let Err(e) = super::ttl::set_egress_ttl(fd, is_v4, peer.session_ttl()) {
             tracing::warn!(
                 peer = %peer.address,
                 error = %e,
-                "bgp: failed to install GTSM (ttl-security) on session socket; continuing without TTL enforcement",
+                "bgp: failed to set egress TTL on session socket",
+            );
+        }
+        if peer.config.transport.ttl_security
+            && let Err(e) = super::ttl::set_min_ttl(fd, is_v4, super::ttl::MAX_TTL)
+        {
+            tracing::warn!(
+                peer = %peer.address,
+                error = %e,
+                "bgp: failed to set GTSM ingress TTL floor on session socket; continuing without it",
             );
         }
     }
@@ -1482,6 +1527,10 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     let update_source = peer.config.transport.update_source;
     let md5_password = peer.config.transport.md5_password.clone();
     let ao_key = peer.config.transport.resolved_ao_key.clone();
+    // eBGP egress TTL (1 directly connected / N for ebgp-multihop), or
+    // 255 for iBGP / ttl-security. Set on the socket before connect so
+    // the SYN carries it (see `peer_connect`).
+    let ttl = peer.session_ttl();
     let ctx = peer.ctx.clone();
     Task::spawn(async move {
         let tx = tx.clone();
@@ -1500,8 +1549,15 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
                 scope_id.unwrap_or(0),
             )),
         };
-        let result =
-            peer_connect(&ctx, remote, update_source, md5_password.as_deref(), ao_key).await;
+        let result = peer_connect(
+            &ctx,
+            remote,
+            update_source,
+            md5_password.as_deref(),
+            ao_key,
+            ttl,
+        )
+        .await;
         match result {
             Ok(stream) => {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
@@ -1521,6 +1577,7 @@ async fn peer_connect(
     update_source: Option<IpAddr>,
     md5_password: Option<&str>,
     ao_key: Option<super::auth::ResolvedAoKey>,
+    ttl: u8,
 ) -> std::io::Result<TcpStream> {
     // Address family of the source must match the remote when specified.
     if let Some(src) = update_source
@@ -1560,6 +1617,21 @@ async fn peer_connect(
 
     if let Some(src) = update_source {
         socket.bind(SocketAddr::new(src, 0))?;
+    }
+
+    // Set the egress TTL before connect so the SYN already carries it:
+    // a directly-connected eBGP peer uses TTL 1 (a router in the path
+    // drops the SYN — multihop needs explicit `ebgp-multihop`), while
+    // iBGP / ttl-security use 255. The GTSM ingress floor is NOT set
+    // here — it would drop the peer's default-TTL SYN-ACK — it is
+    // applied post-handshake in `fsm_connected`. Best-effort: a failure
+    // is logged, the connect proceeds at the OS default TTL.
+    if let Err(e) = super::ttl::set_egress_ttl(socket.as_raw_fd(), remote.is_ipv4(), ttl) {
+        tracing::warn!(
+            peer = %remote.ip(),
+            error = %e,
+            "bgp: failed to set egress TTL before connect; using OS default",
+        );
     }
 
     socket.connect(remote).await
