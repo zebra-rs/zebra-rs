@@ -8,7 +8,6 @@ use crate::isis::link::DisStatus;
 use crate::isis::network::P2P_ISS;
 use crate::isis_pdu_trace;
 use crate::rib::MacAddr;
-use crate::rib::link_ext::LinkFlagsExt;
 
 use super::auth;
 use super::config::IsisAuthType;
@@ -331,6 +330,15 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         return Ok(());
     }
 
+    // Passive circuit (operator-set `passive`, or any loopback): never
+    // emit Hellos. This is the single choke point for Hello transmission,
+    // so guarding here suppresses both the immediate send in
+    // `hello_originate` and the periodic `HelloTimerExpire` path, no
+    // matter which config callback armed them.
+    if link.is_passive() {
+        return Ok(());
+    }
+
     let hello = if link.config.network_type() == NetworkType::P2p {
         IsisPdu::P2pHello(hello_p2p_generate(link, level))
     } else {
@@ -411,6 +419,14 @@ pub fn has_level(is_level: IsLevel, level: Level) -> bool {
 }
 
 pub fn hello_originate(link: &mut LinkTop, level: Level) {
+    // Passive circuits (incl. loopbacks) run no Hello protocol: don't
+    // send, and make sure no periodic timer survives a transition into
+    // passive. `hello_send` guards too, but clearing the timer here
+    // avoids arming a no-op repeat.
+    if link.is_passive() {
+        *link.timer.hello.get_mut(&level) = None;
+        return;
+    }
     if has_level(link.state.level(), level) {
         // hello_send regenerates the PDU itself; we only send one
         // immediately and (re-)arm the periodic timer here.
@@ -420,7 +436,10 @@ pub fn hello_originate(link: &mut LinkTop, level: Level) {
 }
 
 pub fn start(link: &mut LinkTop) {
-    if link.flags.is_loopback() {
+    // Passive circuits (operator-set `passive`, or any loopback) run no
+    // Hello protocol, so there is nothing to start. Non-passive links
+    // arm Hellos per level below.
+    if link.is_passive() {
         return;
     }
     for level in [Level::L1, Level::L2] {

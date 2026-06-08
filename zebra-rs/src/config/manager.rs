@@ -1349,4 +1349,37 @@ mod yang_load_tests {
              a silent name collision with an ietf-bgp leaf would show up here as a parse failure",
         );
     }
+
+    /// The IS-IS per-interface `passive` leaf must be a settable path.
+    /// It is hand-added to `config.yang` (no YANG generator), so a typo in
+    /// the leaf or its placement would otherwise only surface at runtime —
+    /// `load_mode` above loads the module but does not exercise the path.
+    #[test]
+    fn isis_interface_passive_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router isis interface eth0 passive true",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set router isis interface <name> passive true` must be a valid settable path",
+        );
+    }
 }

@@ -323,6 +323,24 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         return;
     }
 
+    // Passive circuit (operator-set `passive`, or any loopback): run no
+    // Hello protocol, so ignore inbound IIHs too — a passive interface
+    // forms no adjacency in either direction.
+    if link.is_passive() {
+        isis_pdu_trace!(link, &level, "[Hello:Recv] passive interface — ignored");
+        return;
+    }
+
+    // Self-sourced IIH guard. If the IIH's source system-id is our own,
+    // the Hello looped back to us (a loopback reflects its own frames; an
+    // L2 loop or a duplicate system-id misconfig can do the same). Never
+    // form an adjacency with ourselves — drop it before touching the
+    // neighbor table.
+    if pdu.source_id == link.up_config.net.sys_id() {
+        isis_pdu_trace!(link, &level, "[Hello:Recv] self-sourced IIH — ignored");
+        return;
+    }
+
     // Check link type.
     if !link.is_lan() {
         isis_pdu_trace!(
@@ -584,6 +602,30 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
 
     // Our manual area, for the per-level Level-1 area gate below.
     let our_area = link.up_config.net.area_id();
+
+    // Passive circuit (operator-set `passive`, or any loopback): run no
+    // Hello protocol, so ignore inbound IIHs too. Level-independent, so
+    // check once before the per-level loop.
+    if link.is_passive() {
+        isis_pdu_trace!(
+            link,
+            &Level::L2,
+            "[Hello P2P:Recv] passive interface — ignored"
+        );
+        return;
+    }
+
+    // Self-sourced IIH guard — see `hello_recv`. If the IIH's source
+    // system-id is our own, the Hello looped back to us; never form an
+    // adjacency with ourselves. Level-independent.
+    if pdu.source_id == link.up_config.net.sys_id() {
+        isis_pdu_trace!(
+            link,
+            &Level::L2,
+            "[Hello P2P:Recv] self-sourced IIH — ignored"
+        );
+        return;
+    }
 
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
