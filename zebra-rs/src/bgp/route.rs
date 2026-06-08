@@ -14,7 +14,7 @@ use crate::rib::{self, MacAddr, api::FdbEntry};
 use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 
 use super::cap::CapAfiMap;
-use super::peer::{BgpTop, Event, Peer, PeerType};
+use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
 use super::{Bgp, InOut, Message};
@@ -32,6 +32,52 @@ impl BgpRibType {
     pub fn is_originated(&self) -> bool {
         *self == BgpRibType::Originated
     }
+}
+
+/// RFC 4271 inbound AS_PATH loop check, relaxed per-neighbor by
+/// `allowas-in` (zebra-bgp-allowas-in.yang). Returns `true` when the
+/// update must be dropped because the local AS appears in the AS_PATH
+/// more often than the neighbor's `allowas-in` setting permits.
+///
+/// * `None` — strict RFC 4271: any occurrence is a loop.
+/// * `Count(n)` — accept while the local AS appears at most `n` times.
+/// * `Origin` — accept only when every occurrence of the local AS is the
+///   originating (right-most) AS; a local AS in any transit position is
+///   still a loop.
+fn aspath_local_as_loop(aspath: &As4Path, local_as: u32, allow: Option<AllowAsIn>) -> bool {
+    let occurrences = aspath
+        .segs
+        .iter()
+        .flat_map(|seg| seg.asn.iter())
+        .filter(|asn| **asn == local_as)
+        .count();
+    if occurrences == 0 {
+        return false;
+    }
+    match allow {
+        None => true,
+        Some(AllowAsIn::Count(max)) => occurrences > max as usize,
+        Some(AllowAsIn::Origin) => !local_as_only_at_origin(aspath, local_as),
+    }
+}
+
+/// True when every occurrence of `local_as` is the trailing originating
+/// AS (prepends at the origin are allowed) — i.e. it never appears as a
+/// transit AS. Used by [`AllowAsIn::Origin`].
+fn local_as_only_at_origin(aspath: &As4Path, local_as: u32) -> bool {
+    let flat: Vec<u32> = aspath
+        .segs
+        .iter()
+        .flat_map(|seg| seg.asn.iter().copied())
+        .collect();
+    // The origin is the right-most ASN; it must be the local AS.
+    if flat.last() != Some(&local_as) {
+        return false;
+    }
+    // Skip the trailing run of local-AS prepends; the remaining prefix
+    // must not contain the local AS anywhere else.
+    let trailing = flat.iter().rev().take_while(|&&a| a == local_as).count();
+    !flat[..flat.len() - trailing].contains(&local_as)
 }
 
 /// Build a `rib::entry::RibEntry` from the BGP best-path winner for an
@@ -1836,16 +1882,14 @@ pub fn route_ipv4_update(
 
         // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
         // This prevents routing loops by detecting if the route has already passed through this AS
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    eprintln!(
-                        "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
-                        nlri.prefix, peer.address, peer.local_as
-                    );
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            eprintln!(
+                "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
+                nlri.prefix, peer.address, peer.local_as
+            );
+            return;
         }
 
         // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
@@ -3086,12 +3130,10 @@ pub fn route_ipv6_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         // RFC 4271 / 4456 loop detection — identical to the v4 path.
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -3326,12 +3368,10 @@ pub fn route_labelv4_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         // RFC 4271 / 4456 loop detection — identical to the unicast path.
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -3422,12 +3462,10 @@ pub fn route_labelv6_update(
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -3930,12 +3968,10 @@ pub fn route_evpn_update(
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -4073,12 +4109,10 @@ pub fn route_flowspec_update(
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -4178,12 +4212,10 @@ pub fn route_srpolicy_update(
     // or consuming it.
     {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -4369,12 +4401,10 @@ pub fn route_bgpls_update(
     let (peer_ident, peer_router_id, typ) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath {
-            for segment in &aspath.segs {
-                if segment.asn.contains(&peer.local_as) {
-                    return;
-                }
-            }
+        if let Some(ref aspath) = attr.aspath
+            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+        {
+            return;
         }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
@@ -10147,5 +10177,64 @@ mod tests {
         }
         // Unresolved underlay → nothing to install.
         assert!(super::build_srv6_vpn_fib_entry(sid, &[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod allowas_in_tests {
+    use std::str::FromStr;
+
+    use bgp_packet::As4Path;
+
+    use super::{AllowAsIn, aspath_local_as_loop};
+
+    const LOCAL: u32 = 65001;
+
+    fn loops(path: &str, allow: Option<AllowAsIn>) -> bool {
+        let aspath = As4Path::from_str(path).unwrap();
+        aspath_local_as_loop(&aspath, LOCAL, allow)
+    }
+
+    #[test]
+    fn strict_check_drops_any_occurrence() {
+        // No allowas-in: any appearance of the local AS is a loop.
+        assert!(!loops("65002 65003", None), "no local AS ⇒ no loop");
+        assert!(loops("65002 65001 65003", None), "transit local AS ⇒ loop");
+        assert!(loops("65002 65001", None), "origin local AS ⇒ loop");
+    }
+
+    #[test]
+    fn count_caps_occurrences() {
+        // Default budget is 3: accept ≤3, drop the 4th.
+        assert!(
+            !loops("65001 65001 65001 65002", Some(AllowAsIn::Count(3))),
+            "3 occurrences within budget 3"
+        );
+        assert!(
+            loops("65001 65001 65001 65001", Some(AllowAsIn::Count(3))),
+            "4 occurrences exceed budget 3"
+        );
+        // A tighter budget of 1.
+        assert!(!loops("65001 65002", Some(AllowAsIn::Count(1))), "1 ≤ 1");
+        assert!(
+            loops("65001 65001 65002", Some(AllowAsIn::Count(1))),
+            "2 > 1"
+        );
+        // Zero occurrences never loop, whatever the budget.
+        assert!(!loops("65002 65003", Some(AllowAsIn::Count(1))));
+    }
+
+    #[test]
+    fn origin_allows_only_at_origin() {
+        // Local AS solely as the (right-most) origin ⇒ accept.
+        assert!(!loops("65002 65003 65001", Some(AllowAsIn::Origin)));
+        // Prepends at the origin are still origin-only ⇒ accept.
+        assert!(!loops("65002 65001 65001", Some(AllowAsIn::Origin)));
+        // Local AS as a transit hop ⇒ loop.
+        assert!(loops("65001 65002 65003", Some(AllowAsIn::Origin)));
+        // Local AS at origin AND transit ⇒ loop.
+        assert!(loops("65001 65002 65001", Some(AllowAsIn::Origin)));
+        // No local AS at all ⇒ no loop.
+        assert!(!loops("65002 65003", Some(AllowAsIn::Origin)));
     }
 }

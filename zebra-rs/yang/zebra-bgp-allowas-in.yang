@@ -1,0 +1,127 @@
+module zebra-bgp-allowas-in {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-allowas-in";
+  prefix "zbai";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor `allowas-in` knob.
+
+     BGP normally rejects an inbound route whose AS_PATH already
+     contains the local AS (RFC 4271 loop prevention). `allowas-in`
+     relaxes that check per neighbor:
+
+       router bgp {
+         neighbor 10.0.0.5 {
+           remote-as 65501;
+           allowas-in;              // accept up to 3 occurrences
+         }
+         neighbor 10.0.0.6 {
+           remote-as 65502;
+           allowas-in { count 5; }  // accept up to 5 occurrences
+         }
+         neighbor 10.0.0.7 {
+           remote-as 65503;
+           allowas-in { origin; }   // accept only at the origin
+         }
+       }
+
+     `count` and `origin` are mutually exclusive (`choice`). The bare
+     `allowas-in` form enables the relaxation with the default
+     occurrence budget of 3, matching FRR.
+
+     The `default 3` on the `count` leaf is documentation only: a bare
+     presence container never instantiates `count`, and libyang does
+     not carry leaf defaults into the entry tree, so the default-3
+     behaviour is applied by the BGP handler.";
+
+  revision 2026-06-07 {
+    description "Initial revision.";
+    reference "FRR `neighbor X allowas-in [(1-10)|origin]`.";
+  }
+
+  grouping bgp-neighbor-allowas-in-extension {
+    description
+      "FRR-style `allowas-in` presence container on a BGP neighbor.";
+
+    container allowas-in {
+      ext:help "Accept routes containing our own AS in the AS_PATH";
+      presence "Enable allowas-in (default occurrence count 3)";
+      description
+        "Relax the RFC 4271 inbound AS_PATH loop check for this
+         neighbor. The bare form accepts up to 3 occurrences of the
+         local AS; use `count` or `origin` to refine.";
+
+      choice mode {
+        description
+          "Occurrence budget, or origin-only mode. Mutually
+           exclusive — selecting one clears the other.";
+
+        case count {
+          leaf count {
+            ext:help "Max times our AS may appear in AS_PATH (default 3)";
+            type uint8 {
+              range "1..10";
+            }
+            default "3";
+            description
+              "Accept the route while the local AS appears at most
+               this many times in the AS_PATH. Default 3.";
+          }
+        }
+        case origin {
+          leaf origin {
+            ext:help "Accept the local AS only at the route origin";
+            type empty;
+            description
+              "Accept the route only when the local AS appears solely
+               as the originating (right-most) AS. A local AS seen in
+               any transit position is still treated as a loop.";
+          }
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach allowas-in to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-allowas-in-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X allowas-in [...]` is path-valid.";
+    uses bgp-neighbor-allowas-in-extension;
+  }
+}

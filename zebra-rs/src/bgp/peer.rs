@@ -257,6 +257,26 @@ impl PeerBfdConfig {
     }
 }
 
+/// Default occurrence budget for a bare `allowas-in` (FRR parity).
+pub const ALLOWAS_IN_DEFAULT_COUNT: u8 = 3;
+
+/// Per-neighbor `allowas-in` mode (zebra-bgp-allowas-in.yang). Relaxes
+/// the RFC 4271 inbound AS_PATH loop check so routes carrying the local
+/// AS are accepted. `None` on [`PeerConfig`] means the strict check
+/// applies (the default).
+/// Serializes as `{"mode":"count","count":N}` or `{"mode":"origin"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", content = "count", rename_all = "lowercase")]
+pub enum AllowAsIn {
+    /// Accept while the local AS appears at most this many times in the
+    /// AS_PATH (CLI `allowas-in` / `allowas-in count <1-10>`, default
+    /// [`ALLOWAS_IN_DEFAULT_COUNT`]).
+    Count(u8),
+    /// Accept only when the local AS appears solely as the originating
+    /// (right-most) AS (CLI `allowas-in origin`).
+    Origin,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
@@ -295,6 +315,9 @@ pub struct PeerConfig {
     pub remote_as_inherited: bool,
     /// BFD attachment for this neighbor.
     pub bfd: PeerBfdConfig,
+    /// Per-neighbor `allowas-in` (zebra-bgp-allowas-in.yang). `None`
+    /// keeps the strict RFC 4271 inbound AS_PATH loop check.
+    pub allowas_in: Option<AllowAsIn>,
 }
 
 impl Default for PeerConfig {
@@ -315,6 +338,7 @@ impl Default for PeerConfig {
             neighbor_group: None,
             remote_as_inherited: false,
             bfd: PeerBfdConfig::default(),
+            allowas_in: None,
         }
     }
 }

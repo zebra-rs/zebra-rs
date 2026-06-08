@@ -1,0 +1,24 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.1.3/24
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 192.168.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.1.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      # origin mode → accept only when our AS is the route's origin.
+      # (`origin:` is a `type empty` leaf → `set ... allowas-in origin`.)
+      allowas-in:
+        origin:

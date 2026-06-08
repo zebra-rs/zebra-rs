@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{Peer, PeerCounter, PeerParam, State};
+use super::peer::{AllowAsIn, Peer, PeerCounter, PeerParam, State};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use super::vrf::inst::BgpVrf;
@@ -1381,6 +1381,11 @@ struct Neighbor<'a> {
     // pre-policy Adj-RIB-In is retained so `clear ... soft in` can
     // replay it locally without sending Route Refresh.
     soft_reconfig_in: bool,
+    /// FRR-style `neighbor X allowas-in` setting
+    /// (zebra-bgp-allowas-in.yang), if configured. `None` keeps the
+    /// strict RFC 4271 inbound AS_PATH loop check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowas_in: Option<AllowAsIn>,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -1520,6 +1525,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         count: HashMap::default(),
         reflector_client: peer.reflector_client,
         soft_reconfig_in: peer.config.soft_reconfig_in,
+        allowas_in: peer.config.allowas_in,
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
     };
@@ -1603,6 +1609,16 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
     if neighbor.soft_reconfig_in {
         writeln!(out, "  Inbound soft reconfiguration allowed")?;
+    }
+
+    match neighbor.allowas_in {
+        Some(AllowAsIn::Count(n)) => {
+            writeln!(out, "  Allowas-in: {n} occurrence(s)")?;
+        }
+        Some(AllowAsIn::Origin) => {
+            writeln!(out, "  Allowas-in: origin")?;
+        }
+        None => {}
     }
 
     if let Some(ref group) = neighbor.neighbor_group {
