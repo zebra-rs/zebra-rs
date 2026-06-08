@@ -55,14 +55,19 @@ Feature: BGP TTL Security / GTSM (RFC 5082)
   Scenario: Enabling ttl-security on both ends establishes the session
     Given the test topology exists
     When I apply config "z2-2.yaml" to namespace "z2"
-    # Enabling ttl-security bounces z2's session so it reconnects with the
-    # new egress TTL. z1 (unchanged) may still hold the stale connection
-    # from the asymmetric phase, on which z2 was sending below 255. Clear
-    # both so each reconnects cleanly with GTSM rather than waiting out a
-    # hold timer, then allow for the post-bounce idle-hold (~5s) plus
-    # session setup before checking.
-    And I clear namespace "z1" neighbor "192.168.0.2"
-    And I clear namespace "z2" neighbor "192.168.0.1"
+    # Enabling ttl-security bounces z2 so it reconnects with egress TTL 255,
+    # while z1 still holds the stale connection from the asymmetric phase.
+    # Hard-reset both ends so each tears down cleanly and reconnects with
+    # GTSM, rather than waiting out a multi-minute hold timer.
+    #
+    # Use `clear bgp ipv4 neighbor <X>` (the real clear grammar) via the
+    # generic run step — NOT `I clear namespace ... neighbor`, whose
+    # `clear ip bgp neighbors <X>` does not match the grammar and is a
+    # silent no-op (see PR #1264). A clean GTSM reconnect reaches
+    # Established in ~6s once collision-teardown packets carry TTL 255
+    # (peer.rs handle_peer_connection); 15s is margin for CI.
+    And I run "clear bgp ipv4 neighbor 192.168.0.2" in namespace "z1"
+    And I run "clear bgp ipv4 neighbor 192.168.0.1" in namespace "z2"
     And I wait 15 seconds for BGP to operate
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
