@@ -18,7 +18,7 @@ use super::route_clean;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{PasswordEncoding, Peer, PeerType},
+    peer::{ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, PasswordEncoding, Peer, PeerType},
     timer,
 };
 
@@ -469,6 +469,62 @@ fn config_flowspec_validation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     let peer = bgp.peers.get_mut(&addr)?;
 
     peer.config.flowspec_validation = if op.is_set() { flag } else { true };
+    Some(())
+}
+
+/// `set router bgp neighbor X allowas-in` — the presence container
+/// (zebra-bgp-allowas-in.yang). The bare form enables loop relaxation
+/// with the default occurrence budget; `delete` disables it.
+///
+/// `count` / `origin` ride their own callbacks. All three are
+/// order-independent within a commit: this handler uses `get_or_insert`
+/// so it never clobbers a `count`/`origin` that landed first, and the
+/// child handlers overwrite the default this one seeds.
+fn config_allowas_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        peer.config
+            .allowas_in
+            .get_or_insert(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+    } else {
+        peer.config.allowas_in = None;
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor X allowas-in count <1-10>`. Deleting just
+/// the count reverts to the default budget while the container stays
+/// enabled; full removal goes through [`config_allowas_in`].
+fn config_allowas_in_count(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+
+    if op.is_set() {
+        let count = args.u8()?;
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.allowas_in = Some(AllowAsIn::Count(count));
+    } else {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if matches!(peer.config.allowas_in, Some(AllowAsIn::Count(_))) {
+            peer.config.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        }
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor X allowas-in origin`. Deleting `origin`
+/// reverts to the default count budget while the container stays
+/// enabled; full removal goes through [`config_allowas_in`].
+fn config_allowas_in_origin(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        peer.config.allowas_in = Some(AllowAsIn::Origin);
+    } else if matches!(peer.config.allowas_in, Some(AllowAsIn::Origin)) {
+        peer.config.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+    }
     Some(())
 }
 
@@ -2086,6 +2142,15 @@ impl Bgp {
 
         // Per-neighbor Flowspec validation toggle (zebra-bgp-flowspec.yang).
         self.callback_peer("/flowspec/validation", config_flowspec_validation);
+
+        // Per-neighbor allowas-in (zebra-bgp-allowas-in.yang). The
+        // presence container relaxes the inbound AS_PATH loop check;
+        // `count` caps occurrences (default 3) and `origin` accepts the
+        // local AS only at the origin. `count`/`origin` are mutually
+        // exclusive via the YANG `choice`.
+        self.callback_peer("/allowas-in", config_allowas_in);
+        self.callback_peer("/allowas-in/count", config_allowas_in_count);
+        self.callback_peer("/allowas-in/origin", config_allowas_in_origin);
     }
 }
 

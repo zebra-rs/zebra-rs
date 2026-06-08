@@ -80,6 +80,10 @@ module config {
     prefix zbsr;
   }
 
+  import zebra-bgp-allowas-in {
+    prefix zbai;
+  }
+
   import zebra-bgp-timer {
     prefix zbtm;
   }
