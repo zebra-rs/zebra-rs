@@ -459,8 +459,15 @@ pub fn parse_bgp_update_attribute(
                             updates,
                         });
                     }
-                    _ => {
-                        //
+                    // Every remaining MP family — VPNv6, IPv4/IPv6
+                    // Labeled-Unicast, Flowspec, SR-Policy, Route-Target
+                    // Constraint, BGP-LS, MUP — is dispatched by
+                    // `route_from_peer`. Surface it so the UPDATE reaches the
+                    // RIB instead of being silently dropped here; the
+                    // per-family next-hop travels on the variant and is read
+                    // by the consumer (these do not stamp `bgp_attr.nexthop`).
+                    other => {
+                        mp_update = Some(other);
                     }
                 }
             }
@@ -550,5 +557,46 @@ mod tests {
             "malformed Prefix-SID must be discarded"
         );
         assert!(mp_update.is_none() && mp_withdraw.is_none());
+    }
+
+    /// Regression: every MP family beyond Vpnv4/Evpn/Ipv4/Ipv6 (here a
+    /// Flowspec MP_REACH) used to fall into the `MpReachNlri` `_ => {}`
+    /// arm and never set `mp_update`, so the UPDATE was silently dropped
+    /// before reaching the RIB. They must now surface for dispatch.
+    #[test]
+    fn mp_reach_other_family_surfaces_as_mp_update() {
+        use crate::attrs::mp_reach::flowspec_attr_emit;
+        use crate::{Afi, FlowspecComponent, FlowspecNlri, FlowspecPrefix, MpReachAttr};
+        use bytes::BytesMut;
+
+        let updates = vec![FlowspecNlri::new(
+            Afi::Ip6,
+            vec![FlowspecComponent::DestinationPrefix(FlowspecPrefix::V6 {
+                length: 64,
+                offset: 0,
+                pattern: "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap().octets()[..8].to_vec(),
+            })],
+        )];
+
+        let mut block = vec![0x40, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        let mut attr = BytesMut::new();
+        flowspec_attr_emit(Afi::Ip6, &updates, &mut attr);
+        block.extend_from_slice(&attr);
+
+        let len = block.len() as u16;
+        let (_, bgp_attr, mp_update, _mp_withdraw, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, len, false, None).expect("attrs must parse");
+        assert!(!treat_as_withdraw);
+        assert!(bgp_attr.is_some());
+        match mp_update {
+            Some(MpReachAttr::Flowspec {
+                afi,
+                updates: parsed,
+            }) => {
+                assert_eq!(afi, Afi::Ip6);
+                assert_eq!(parsed, updates);
+            }
+            other => panic!("Flowspec MP_REACH must surface as mp_update, got {other:?}"),
+        }
     }
 }
