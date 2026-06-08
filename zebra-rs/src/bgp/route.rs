@@ -5037,6 +5037,80 @@ pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &m
     }
 }
 
+/// Withdraw every reachable NLRI carried in an MP_REACH attribute — the
+/// RFC 7606 / RFC 9252 §7 treat-as-withdraw action taken when the
+/// UPDATE's BGP Prefix-SID attribute is malformed. Mirrors the install
+/// match in [`route_from_peer`], routing each AFI/SAFI through its
+/// `*_withdraw` path so any previously-installed copy from this peer is
+/// removed. RTC and any other family that cannot carry a Prefix-SID
+/// attribute fall through the catch-all as a no-op.
+fn withdraw_mp_reach(peer_id: usize, mp: MpReachAttr, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    match mp {
+        MpReachAttr::Vpnv4(nlri) => {
+            for update in nlri.updates.iter() {
+                route_ipv4_withdraw(
+                    peer_id,
+                    &update.nlri,
+                    Some(update.rd),
+                    Some(update.label),
+                    bgp,
+                    peers,
+                    true,
+                );
+            }
+        }
+        MpReachAttr::Vpnv6(nlri) => {
+            for update in nlri.updates.iter() {
+                route_ipv6_withdraw(peer_id, &update.nlri, Some(update.rd), bgp, peers, true);
+            }
+        }
+        MpReachAttr::Evpn { updates, .. } => {
+            for route in updates.iter() {
+                route_evpn_withdraw(peer_id, route, bgp, peers);
+            }
+        }
+        MpReachAttr::Ipv4 { updates, .. } => {
+            for update in updates.iter() {
+                route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, true);
+            }
+        }
+        MpReachAttr::Ipv6 { updates, .. } => {
+            for update in updates.iter() {
+                route_ipv6_withdraw(peer_id, update, None, bgp, peers, true);
+            }
+        }
+        MpReachAttr::Labelv4 { updates, .. } => {
+            for lu in updates.iter() {
+                route_labelv4_withdraw(peer_id, &lu.nlri, bgp, peers, true);
+            }
+        }
+        MpReachAttr::Labelv6 { updates, .. } => {
+            for lu in updates.iter() {
+                route_labelv6_withdraw(peer_id, &lu.nlri, bgp, peers, true);
+            }
+        }
+        MpReachAttr::Flowspec { afi, updates } => {
+            for nlri in updates.iter() {
+                route_flowspec_withdraw(peer_id, nlri, afi, bgp, peers);
+            }
+        }
+        MpReachAttr::SrPolicy { updates, .. } => {
+            for nlri in updates.iter() {
+                route_srpolicy_withdraw(peer_id, nlri, bgp, peers);
+            }
+        }
+        MpReachAttr::LinkState { updates, .. } => {
+            for nlri in updates.iter() {
+                route_bgpls_withdraw(peer_id, nlri, bgp, peers);
+            }
+        }
+        _ => {
+            // Rtcv4 / Rtcv6 and any other family that cannot carry a
+            // Prefix-SID attribute — nothing to withdraw.
+        }
+    }
+}
+
 pub fn route_from_peer(
     peer_id: usize,
     packet: UpdatePacket,
@@ -5056,7 +5130,18 @@ pub fn route_from_peer(
 
     // Convert UpdatePacket to BgpNlri.
     // let nlri = BgpNlriAttr::from(&packet);
-    if let Some(bgp_attr) = &packet.bgp_attr {
+    // RFC 7606 / RFC 9252 §7: when the UPDATE carried a malformed
+    // Prefix-SID attribute, its reachable NLRI are treat-as-withdraw —
+    // remove any installed copy from this peer instead of installing —
+    // while the UPDATE's explicit withdrawals are still honoured and the
+    // session stays up.
+    let treat_as_withdraw = packet.treat_as_withdraw;
+
+    if treat_as_withdraw {
+        for update in packet.ipv4_update.iter() {
+            route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, true);
+        }
+    } else if let Some(bgp_attr) = &packet.bgp_attr {
         for update in packet.ipv4_update.iter() {
             route_ipv4_update(
                 peer_id, update, None, None, bgp_attr, None, None, bgp, peers, false,
@@ -5067,173 +5152,175 @@ pub fn route_from_peer(
     for withdraw in packet.ipv4_withdraw.iter() {
         route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
     }
-    if let Some(mp_updates) = packet.mp_update
-        && let Some(bgp_attr) = &packet.bgp_attr
-    {
-        match mp_updates {
-            MpReachAttr::Vpnv4(nlri) => {
-                for update in nlri.updates.iter() {
-                    route_ipv4_update(
-                        peer_id,
-                        &update.nlri,
-                        Some(update.rd),
-                        Some(update.label),
-                        bgp_attr,
-                        Some(VpnNexthop::V4(nlri.nhop.clone())),
-                        None,
-                        bgp,
-                        peers,
-                        false,
-                    )
-                }
-            }
-            MpReachAttr::Rtcv4(nlri) => {
-                for update in nlri.updates.iter() {
-                    route_ipv4_rtc_update(peer_id, update, peers);
-                }
-            }
-            MpReachAttr::Rtcv6(nlri) => {
-                for update in nlri.updates.iter() {
-                    route_ipv6_rtc_update(peer_id, update, peers);
-                }
-            }
-            MpReachAttr::Evpn {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                for route in updates.iter() {
-                    route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
-                }
-            }
-            MpReachAttr::Ipv4 {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                // RFC 8950 IPv4-over-IPv6: install the prefix into
-                // Loc-RIB and the FIB. The v6 next-hop in `nhop` is
-                // the remote's link-local; the receiver doesn't need
-                // it for forwarding (kernel uses the v6 onlink already
-                // discovered via ND), so we route the install via the
-                // egress ifindex of the peer that delivered the
-                // UPDATE. ENHE on a non-interface peer is unexpected —
-                // ENHE is currently only negotiated by unnumbered
-                // peers; log and drop in that case rather than fall
-                // back to a bogus install.
-                let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
-                if let Some(ifindex) = egress_ifindex {
-                    for update in updates.iter() {
+    if let Some(mp_updates) = packet.mp_update {
+        if treat_as_withdraw {
+            withdraw_mp_reach(peer_id, mp_updates, bgp, peers);
+        } else if let Some(bgp_attr) = &packet.bgp_attr {
+            match mp_updates {
+                MpReachAttr::Vpnv4(nlri) => {
+                    for update in nlri.updates.iter() {
                         route_ipv4_update(
                             peer_id,
-                            update,
-                            None,
-                            None,
+                            &update.nlri,
+                            Some(update.rd),
+                            Some(update.label),
                             bgp_attr,
+                            Some(VpnNexthop::V4(nlri.nhop.clone())),
                             None,
-                            Some(ifindex),
+                            bgp,
+                            peers,
+                            false,
+                        )
+                    }
+                }
+                MpReachAttr::Rtcv4(nlri) => {
+                    for update in nlri.updates.iter() {
+                        route_ipv4_rtc_update(peer_id, update, peers);
+                    }
+                }
+                MpReachAttr::Rtcv6(nlri) => {
+                    for update in nlri.updates.iter() {
+                        route_ipv6_rtc_update(peer_id, update, peers);
+                    }
+                }
+                MpReachAttr::Evpn {
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    for route in updates.iter() {
+                        route_evpn_update(peer_id, route, nhop, bgp_attr, bgp, peers, false);
+                    }
+                }
+                MpReachAttr::Ipv4 {
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    // RFC 8950 IPv4-over-IPv6: install the prefix into
+                    // Loc-RIB and the FIB. The v6 next-hop in `nhop` is
+                    // the remote's link-local; the receiver doesn't need
+                    // it for forwarding (kernel uses the v6 onlink already
+                    // discovered via ND), so we route the install via the
+                    // egress ifindex of the peer that delivered the
+                    // UPDATE. ENHE on a non-interface peer is unexpected —
+                    // ENHE is currently only negotiated by unnumbered
+                    // peers; log and drop in that case rather than fall
+                    // back to a bogus install.
+                    let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
+                    if let Some(ifindex) = egress_ifindex {
+                        for update in updates.iter() {
+                            route_ipv4_update(
+                                peer_id,
+                                update,
+                                None,
+                                None,
+                                bgp_attr,
+                                None,
+                                Some(ifindex),
+                                bgp,
+                                peers,
+                                false,
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "RFC 8950: dropping IPv4 routes from peer {} via v6 next-hop {} — peer has no egress ifindex",
+                            peer_id,
+                            nhop,
+                        );
+                    }
+                }
+                MpReachAttr::Ipv6 {
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    // Native IPv6 unicast: the MP_REACH next-hop replaces
+                    // the (unused) v4 NEXT_HOP attribute. Stamp it into the
+                    // attr so best-path / FIB read a v6 next-hop.
+                    if let IpAddr::V6(nh6) = nhop {
+                        let mut attr_v6 = bgp_attr.clone();
+                        attr_v6.nexthop = Some(BgpNexthop::Ipv6(nh6));
+                        for update in updates.iter() {
+                            route_ipv6_update(
+                                peer_id, update, None, None, &attr_v6, None, bgp, peers, false,
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "IPv6 unicast MP_REACH from peer {} carried a non-v6 next-hop {} — dropping",
+                            peer_id,
+                            nhop,
+                        );
+                    }
+                }
+                MpReachAttr::Vpnv6(nlri) => {
+                    // VPNv6: store each route under its RD in the global
+                    // v6vpn Loc-RIB, carrying the route's Vpnv6 next-hop.
+                    for update in nlri.updates.iter() {
+                        route_ipv6_update(
+                            peer_id,
+                            &update.nlri,
+                            Some(update.rd),
+                            Some(update.label),
+                            bgp_attr,
+                            Some(VpnNexthop::V6(nlri.nhop.clone())),
                             bgp,
                             peers,
                             false,
                         );
                     }
-                } else {
-                    tracing::warn!(
-                        "RFC 8950: dropping IPv4 routes from peer {} via v6 next-hop {} — peer has no egress ifindex",
-                        peer_id,
-                        nhop,
-                    );
                 }
-            }
-            MpReachAttr::Ipv6 {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                // Native IPv6 unicast: the MP_REACH next-hop replaces
-                // the (unused) v4 NEXT_HOP attribute. Stamp it into the
-                // attr so best-path / FIB read a v6 next-hop.
-                if let IpAddr::V6(nh6) = nhop {
-                    let mut attr_v6 = bgp_attr.clone();
-                    attr_v6.nexthop = Some(BgpNexthop::Ipv6(nh6));
-                    for update in updates.iter() {
-                        route_ipv6_update(
-                            peer_id, update, None, None, &attr_v6, None, bgp, peers, false,
-                        );
+                MpReachAttr::Flowspec { afi, updates } => {
+                    for nlri in updates.iter() {
+                        route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
                     }
-                } else {
-                    tracing::warn!(
-                        "IPv6 unicast MP_REACH from peer {} carried a non-v6 next-hop {} — dropping",
-                        peer_id,
-                        nhop,
-                    );
                 }
-            }
-            MpReachAttr::Vpnv6(nlri) => {
-                // VPNv6: store each route under its RD in the global
-                // v6vpn Loc-RIB, carrying the route's Vpnv6 next-hop.
-                for update in nlri.updates.iter() {
-                    route_ipv6_update(
-                        peer_id,
-                        &update.nlri,
-                        Some(update.rd),
-                        Some(update.label),
-                        bgp_attr,
-                        Some(VpnNexthop::V6(nlri.nhop.clone())),
-                        bgp,
-                        peers,
-                        false,
-                    );
+                MpReachAttr::SrPolicy { nhop, updates, .. } => {
+                    // SAFI 73: candidate-path content rides in the Tunnel
+                    // Encapsulation attribute; the NLRI endpoint carries the
+                    // AFI, so v4/v6 share one path.
+                    for nlri in updates.iter() {
+                        route_srpolicy_update(peer_id, nlri, bgp_attr, nhop, bgp, peers);
+                    }
                 }
-            }
-            MpReachAttr::Flowspec { afi, updates } => {
-                for nlri in updates.iter() {
-                    route_flowspec_update(peer_id, nlri, afi, bgp_attr, bgp, peers, false);
+                MpReachAttr::LinkState { updates, .. } => {
+                    // AFI 16388 / SAFI 71: Node/Link/Prefix objects. The
+                    // companion attributes ride in the BGP-LS Attribute
+                    // (type 29), already captured in `bgp_attr.bgp_ls`. The
+                    // MP_REACH next-hop is informational here; re-advertisement
+                    // is a later phase. The v4/v6 split lives inside the NLRI,
+                    // so a single Loc-RIB table holds every object.
+                    for nlri in updates.iter() {
+                        route_bgpls_update(peer_id, nlri, bgp_attr, bgp, peers, false);
+                    }
                 }
-            }
-            MpReachAttr::SrPolicy { nhop, updates, .. } => {
-                // SAFI 73: candidate-path content rides in the Tunnel
-                // Encapsulation attribute; the NLRI endpoint carries the
-                // AFI, so v4/v6 share one path.
-                for nlri in updates.iter() {
-                    route_srpolicy_update(peer_id, nlri, bgp_attr, nhop, bgp, peers);
+                MpReachAttr::Labelv4 {
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    // IPv4 Labeled-Unicast (SAFI 4): store each route in the
+                    // v4lu Loc-RIB with its per-prefix label. The MP_REACH
+                    // next-hop is authoritative.
+                    for update in updates.iter() {
+                        route_labelv4_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
+                    }
                 }
-            }
-            MpReachAttr::LinkState { updates, .. } => {
-                // AFI 16388 / SAFI 71: Node/Link/Prefix objects. The
-                // companion attributes ride in the BGP-LS Attribute
-                // (type 29), already captured in `bgp_attr.bgp_ls`. The
-                // MP_REACH next-hop is informational here; re-advertisement
-                // is a later phase. The v4/v6 split lives inside the NLRI,
-                // so a single Loc-RIB table holds every object.
-                for nlri in updates.iter() {
-                    route_bgpls_update(peer_id, nlri, bgp_attr, bgp, peers, false);
+                MpReachAttr::Labelv6 {
+                    snpa: _,
+                    nhop,
+                    updates,
+                } => {
+                    // IPv6 Labeled-Unicast (SAFI 4), including 6PE.
+                    for update in updates.iter() {
+                        route_labelv6_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
+                    }
                 }
-            }
-            MpReachAttr::Labelv4 {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                // IPv4 Labeled-Unicast (SAFI 4): store each route in the
-                // v4lu Loc-RIB with its per-prefix label. The MP_REACH
-                // next-hop is authoritative.
-                for update in updates.iter() {
-                    route_labelv4_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
+                _ => {
+                    //
                 }
-            }
-            MpReachAttr::Labelv6 {
-                snpa: _,
-                nhop,
-                updates,
-            } => {
-                // IPv6 Labeled-Unicast (SAFI 4), including 6PE.
-                for update in updates.iter() {
-                    route_labelv6_update(peer_id, update, nhop, bgp_attr, bgp, peers, false);
-                }
-            }
-            _ => {
-                //
             }
         }
     }
@@ -9910,12 +9997,13 @@ mod tests {
             prefix_sid: Some(bgp_packet::PrefixSid {
                 tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
                     bgp_packet::Srv6ServiceTlv {
-                        sids: vec![bgp_packet::Srv6SidInfo {
+                        sids: vec![bgp_packet::Srv6SidInfo::new(
                             sid,
-                            flags: 0,
-                            behavior: bgp_packet::SRV6_BEHAVIOR_END_DT46,
-                            structure: None,
-                        }],
+                            0,
+                            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                            None,
+                        )],
+                        ..Default::default()
                     },
                 )],
             }),
