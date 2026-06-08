@@ -17,6 +17,7 @@
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
+  - [TCP MSS](ch-02-14-bgp-tcp-mss.md)
   - [AS Override](ch-02-12-bgp-as-override.md)
   - [allowas-in (Inbound AS_PATH Loop Relaxation)](ch-02-13-bgp-allowas-in.md)
   - [Timer Configuration](ch-02-03-bgp-timers.md)

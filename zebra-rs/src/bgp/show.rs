@@ -1399,6 +1399,17 @@ struct Neighbor<'a> {
     /// session. Mirrors `peer.config.transport.ebgp_multihop`.
     #[serde(skip_serializing_if = "Option::is_none")]
     ebgp_multihop: Option<u8>,
+    /// `tcp-mss N`: configured TCP Maximum Segment Size for this
+    /// neighbor. Mirrors `peer.config.transport.tcp_mss`; `None` when
+    /// unset (the kernel default applies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tcp_mss: Option<u16>,
+    /// Negotiated TCP MSS read back from the live socket (the "synced"
+    /// value). `Some` only while Established — `peer.tcp_mss_synced`
+    /// gated on session state — and serialized as 0 by the renderer
+    /// otherwise, mirroring FRR's `getsockopt`-on-a-dead-fd output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tcp_mss_synced: Option<u16>,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -1542,6 +1553,15 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         as_override: peer.config.as_override,
         ttl_security: peer.config.transport.ttl_security,
         ebgp_multihop: peer.config.transport.ebgp_multihop,
+        tcp_mss: peer.config.transport.tcp_mss,
+        // The synced MSS is only meaningful on a live socket; gate it on
+        // Established so a stale capture from a previous session isn't
+        // shown (the renderer falls back to 0, as FRR does for a dead fd).
+        tcp_mss_synced: if peer.state.to_str() == "Established" {
+            peer.tcp_mss_synced
+        } else {
+            None
+        },
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
     };
@@ -1653,6 +1673,19 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             out,
             "  External BGP neighbor may be up to {} hops away (ebgp-multihop)",
             hops
+        )?;
+    }
+
+    // Configured `tcp-mss` plus the MSS the kernel actually negotiated on
+    // the live socket. The two can differ — a config change only takes
+    // effect on the next connect — and the synced value is 0 until the
+    // session is up. Mirrors FRR's `show ip bgp neighbor` line.
+    if let Some(mss) = neighbor.tcp_mss {
+        writeln!(
+            out,
+            "  Configured tcp-mss is {}, synced tcp-mss is {}",
+            mss,
+            neighbor.tcp_mss_synced.unwrap_or(0),
         )?;
     }
 

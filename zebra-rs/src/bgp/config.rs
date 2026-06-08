@@ -132,6 +132,11 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
         bgp.peers.remove(&addr);
     }
+    // Keep the shared listener's TCP MSS minimum in step with the peer
+    // set: a whole-neighbor delete may drop the peer that owned the
+    // current minimum without the per-leaf `/tcp-mss` delete firing (the
+    // same gap `clear_peer_listener_auth` covers for MD5/AO).
+    apply_tcp_mss_refresh_all(bgp);
     Some(())
 }
 
@@ -1592,6 +1597,76 @@ fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     Some(())
 }
 
+/// `[no] router bgp neighbor <addr> tcp-mss <1-65535>` — cap the TCP
+/// Maximum Segment Size for this neighbor's connection. Stored on the
+/// peer (read at connect time by `peer_connect` for the active socket)
+/// and reconciled onto the shared listener via
+/// [`apply_tcp_mss_refresh_all`] so passively-accepted connections
+/// inherit the clamp. Both apply before the TCP handshake — see
+/// [`super::mss`].
+///
+/// Unlike ttl-security / ebgp-multihop, a change does **not** bounce a
+/// live session: matching FRR, the new MSS takes effect on the next
+/// connect, so `show bgp neighbor` may report a configured value that
+/// differs from the synced one until the operator resets the session
+/// (`clear bgp <peer>`). `peer.start()` covers the first-config case
+/// (a freshly created, still-Idle peer begins connecting).
+fn config_tcp_mss(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    // On delete the echoed value (if any) is irrelevant — clear it.
+    let want = if op.is_set() { Some(args.u16()?) } else { None };
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if peer.config.transport.tcp_mss == want {
+            // No actual change — leave the live session and listener alone.
+            return Some(());
+        }
+        peer.config.transport.tcp_mss = want;
+        peer.start();
+    }
+    apply_tcp_mss_refresh_all(bgp);
+    Some(())
+}
+
+/// Reconcile the shared BGP listener's TCP MSS. A listening socket
+/// carries a single `TCP_MAXSEG` that every passively-accepted child
+/// inherits on its SYN-ACK, so — like FRR's `bgp_tcp_mss_set` — install
+/// the **minimum** configured `tcp-mss` across this address family's
+/// peers; `0` clears it back to the kernel (path-MTU) default when no
+/// peer of that family sets one. The active connect path applies each
+/// peer's own value precisely in `peer_connect`, so only the passive
+/// path needs this shared approximation. Safe to call repeatedly; silent
+/// when a listener fd is not bound yet — `listen()` re-runs it once the
+/// bind completes.
+pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
+    let mut min_v4: Option<u16> = None;
+    let mut min_v6: Option<u16> = None;
+    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
+    for addr in &addrs {
+        let Some(mss) = bgp.peers.get(addr).and_then(|p| p.config.transport.tcp_mss) else {
+            continue;
+        };
+        let slot = if addr.is_ipv4() {
+            &mut min_v4
+        } else {
+            &mut min_v6
+        };
+        *slot = Some(slot.map_or(mss, |cur| cur.min(mss)));
+    }
+    for (fd, min) in [(bgp.listen_fd_v4, min_v4), (bgp.listen_fd_v6, min_v6)] {
+        let Some(fd) = fd else { continue };
+        // 0 resets the user MSS to the kernel default.
+        let value = min.unwrap_or(0);
+        if let Err(e) = super::mss::set_tcp_mss(fd, value) {
+            tracing::warn!(
+                error = %e,
+                mss = value,
+                "bgp: failed to set TCP MSS on BGP listener",
+            );
+        }
+    }
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -2073,6 +2148,7 @@ impl Bgp {
         // zebra-bgp-transport.yang. Raises the eBGP egress TTL; resolved
         // by Peer::session_ttl and applied at connect / fsm_connected.
         self.callback_peer("/ebgp-multihop", config_ebgp_multihop);
+        self.callback_peer("/tcp-mss", config_tcp_mss);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same

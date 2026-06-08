@@ -1528,6 +1528,11 @@ impl Bgp {
         // because the kernel drops the incoming SYN.
         super::config::apply_md5_refresh_all(self);
         super::config::apply_ao_refresh_all(self);
+        // Reconcile the listener TCP MSS too: a `tcp-mss` callback that
+        // ran before the bind observed `listen_fd_v4/v6 = None` and could
+        // not clamp the listener, so a passively-accepted peer would
+        // otherwise negotiate the default MSS.
+        super::config::apply_tcp_mss_refresh_all(self);
 
         Ok(())
     }
