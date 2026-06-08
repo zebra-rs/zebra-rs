@@ -404,6 +404,23 @@ impl As4Path {
         self.update_length();
     }
 
+    /// Replace every occurrence of `from` with `to` across all segments
+    /// (sequences, sets, confederation segments). Mirrors FRR's
+    /// `aspath_replace_specific_asn`: a 1:1 substitution, so the
+    /// RFC 4271 / RFC 5065 hop count is unchanged and `length` stays
+    /// valid without recomputation. Used by per-neighbor `as-override`
+    /// on the egress path, where the AS being advertised to has its own
+    /// AS swapped out for ours so its loop check accepts the route.
+    pub fn replace_as_mut(&mut self, from: u32, to: u32) {
+        for seg in self.segs.iter_mut() {
+            for asn in seg.asn.iter_mut() {
+                if *asn == from {
+                    *asn = to;
+                }
+            }
+        }
+    }
+
     /// Try to merge two single-segment AS_SEQ paths into one segment.
     fn try_merge_single_seq(&self, other: &Self) -> Option<Self> {
         if self.segs.len() != 1 || other.segs.len() != 1 {
@@ -731,5 +748,55 @@ mod tests {
         aspath.prepend_mut(prepend);
         assert_eq!(aspath.to_string(), "2 {3} 4 5 1 {2}");
         assert_eq!(aspath.length(), 6);
+    }
+
+    #[test]
+    fn replace_as_mut_single() {
+        // The canonical `as-override` case: a one-AS path equal to the
+        // peer's remote-as is rewritten to the local AS, length intact.
+        let mut aspath: As4Path = As4Path::from_str("65001").unwrap();
+        aspath.replace_as_mut(65001, 65002);
+        assert_eq!(aspath.to_string(), "65002");
+        assert_eq!(aspath.length(), 1);
+    }
+
+    #[test]
+    fn replace_as_mut_multiple_occurrences() {
+        // Every occurrence is swapped, in every position.
+        let mut aspath: As4Path = As4Path::from_str("65001 100 65001 200 65001").unwrap();
+        aspath.replace_as_mut(65001, 65002);
+        assert_eq!(aspath.to_string(), "65002 100 65002 200 65002");
+        assert_eq!(aspath.length(), 5);
+    }
+
+    #[test]
+    fn replace_as_mut_across_segments() {
+        // Substitution reaches into AS_SET segments too; the set still
+        // counts as a single hop, so length is unchanged.
+        let mut aspath: As4Path = As4Path::from_str("65001 {65001 300}").unwrap();
+        aspath.replace_as_mut(65001, 65002);
+        assert_eq!(aspath.to_string(), "65002 {65002 300}");
+        assert_eq!(aspath.length(), 2);
+    }
+
+    #[test]
+    fn replace_as_mut_absent_is_noop() {
+        let mut aspath: As4Path = As4Path::from_str("100 200 300").unwrap();
+        aspath.replace_as_mut(65001, 65002);
+        assert_eq!(aspath.to_string(), "100 200 300");
+        assert_eq!(aspath.length(), 3);
+    }
+
+    #[test]
+    fn as_override_egress_sequence_is_replace_then_prepend() {
+        // The full egress transform applied to a route bound for a peer
+        // in AS 65001 from a local AS of 65002: replace the peer's AS
+        // first, *then* prepend the local AS. Order matters — prepending
+        // first would leave the peer's AS in the path and re-introduce
+        // the loop the override exists to avoid.
+        let mut aspath: As4Path = As4Path::from_str("65001").unwrap();
+        aspath.replace_as_mut(65001, 65002);
+        aspath.prepend_mut(As4Path::from(vec![65002]));
+        assert_eq!(aspath.to_string(), "65002 65002");
     }
 }

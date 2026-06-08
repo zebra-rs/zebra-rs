@@ -1386,6 +1386,11 @@ struct Neighbor<'a> {
     /// strict RFC 4271 inbound AS_PATH loop check.
     #[serde(skip_serializing_if = "Option::is_none")]
     allowas_in: Option<AllowAsIn>,
+    /// FRR-style `neighbor X as-override` flag
+    /// (zebra-bgp-as-override.yang). When true, the peer's own AS is
+    /// replaced with the local AS in the AS_PATH of outbound eBGP
+    /// UPDATEs (before the local-AS prepend).
+    as_override: bool,
     /// GTSM / `ttl-security` (RFC 5082): the session only accepts a
     /// directly-connected peer (received TTL 255). Mirrors
     /// `peer.config.transport.ttl_security`.
@@ -1534,6 +1539,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         reflector_client: peer.reflector_client,
         soft_reconfig_in: peer.config.soft_reconfig_in,
         allowas_in: peer.config.allowas_in,
+        as_override: peer.config.as_override,
         ttl_security: peer.config.transport.ttl_security,
         ebgp_multihop: peer.config.transport.ebgp_multihop,
         neighbor_group: peer.config.neighbor_group.clone(),
@@ -1629,6 +1635,10 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             writeln!(out, "  Allowas-in: origin")?;
         }
         None => {}
+    }
+
+    if neighbor.as_override {
+        writeln!(out, "  AS-Override enabled (outbound AS_PATH replacement)")?;
     }
 
     if neighbor.ttl_security {

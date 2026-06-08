@@ -80,6 +80,28 @@ fn local_as_only_at_origin(aspath: &As4Path, local_as: u32) -> bool {
     !flat[..flat.len() - trailing].contains(&local_as)
 }
 
+/// Apply the egress AS_PATH transformation for an eBGP announcement to
+/// `peer`: an optional per-neighbor `as-override` (replace the peer's
+/// own AS with the local AS so its RFC 4271 loop check accepts a route
+/// that transited its AS), followed by the mandatory local-AS prepend.
+/// iBGP peers and routes without an AS_PATH are left untouched. The
+/// override runs *before* the prepend, mirroring FRR's
+/// `bgp_peer_as_override` (announce-check) and the later packet-build
+/// prepend. Call this at every eBGP egress site instead of prepending
+/// inline, so `as-override` is applied uniformly across address families.
+fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
+    if !peer.is_ebgp() {
+        return;
+    }
+    let Some(aspath) = attrs.aspath.as_mut() else {
+        return;
+    };
+    if peer.config.as_override {
+        aspath.replace_as_mut(peer.remote_as, peer.local_as);
+    }
+    aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
+}
+
 /// Build a `rib::entry::RibEntry` from the BGP best-path winner for an
 /// IPv4 unicast prefix. Returns `None` when the BGP route has no
 /// installable next-hop — VPNv4 / EVPN have their own install paths,
@@ -2448,12 +2470,7 @@ pub fn route_update_evpn(
 
     let mut attrs = (*rib.attr).clone();
 
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        let local_as_path = As4Path::from(vec![peer.local_as]);
-        aspath.prepend_mut(local_as_path);
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
 
     if peer.is_ebgp() || rib.is_originated() {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
@@ -4838,12 +4855,7 @@ pub fn route_update_flowspec(
     out.id = if add_path { rib.local_id } else { 0 };
 
     let mut attrs = (*rib.attr).clone();
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        let local_as_path = As4Path::from(vec![peer.local_as]);
-        aspath.prepend_mut(local_as_path);
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
@@ -5660,12 +5672,7 @@ pub fn route_update_ipv4(
     // 1. Origin.  Pass through
 
     // 2. AS_PATH
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        let local_as_path = As4Path::from(vec![peer.local_as]);
-        aspath.prepend_mut(local_as_path.clone());
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
 
     // 3. NEXT_HOP
     //
@@ -5792,12 +5799,7 @@ pub fn route_update_ipv6(
     let mut attrs = (*rib.attr).clone();
 
     // AS_PATH prepend for eBGP.
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        let local_as_path = As4Path::from(vec![peer.local_as]);
-        aspath.prepend_mut(local_as_path.clone());
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
 
     // NEXT_HOP: next-hop-self for eBGP / locally-originated routes. The
     // address is the local end of this peer's (i)BGP session when it's
@@ -6049,11 +6051,7 @@ fn route_update_labelv4(
     };
     let mut attrs = (*rib.attr).clone();
 
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
 
     // Next-hop-self for eBGP / locally-originated; otherwise keep the
     // received next-hop (next-hop-unchanged). Captured before clearing
@@ -6125,11 +6123,7 @@ fn route_update_labelv6(
     };
     let mut attrs = (*rib.attr).clone();
 
-    if peer.is_ebgp()
-        && let Some(ref mut aspath) = attrs.aspath
-    {
-        aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
-    }
+    ebgp_egress_aspath(peer, &mut attrs);
 
     let needs_self = peer.is_ebgp() || rib.is_originated();
     let nhop: IpAddr = if needs_self {

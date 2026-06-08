@@ -85,6 +85,7 @@ Two peers belong to the same update-group for a given `(afi, safi)` iff
 | `param.local_addr` (or fallback to `bgp.router_id`) | NEXT_HOP value for eBGP / originated. |
 | `policy_list.output.name` | Outbound policy identity. |
 | `prefix_set.output.name` | Outbound prefix filter identity. |
+| `config.as_override` + `remote_as` (eBGP only) | `as-override` rewrites the peer's remote-AS to `local_as` in the egress AS_PATH; the result depends on `remote_as`, so it joins the key as `as_override_target: Some(remote_as)` (else `None`). |
 | `is_afi_safi(afi, safi)` membership | Implicit — only members of the AFI/SAFI participate in that group. |
 | `addpath_send` for `(afi, safi)` | Different framing → different group. |
 
@@ -123,10 +124,10 @@ UPDATE wire format, or are informational):
 
 Knobs that don't yet exist in zebra-rs but will join the signature when
 they land: `next-hop-self`, `next-hop-unchanged`, `send-community`
-flags (standard / extended / large), `as-override`,
-`remove-private-as`, outbound `route-map` (when separate from
-policy-list), per-peer `update-source` distinct from
-`transport.local-address`.
+flags (standard / extended / large), `remove-private-as`, outbound
+`route-map` (when separate from policy-list), per-peer `update-source`
+distinct from `transport.local-address`. (`as-override` landed and is
+now modeled as `as_override_target` — see the signature table above.)
 
 **Conservatism rule**: any outbound-affecting setting that the
 signature does not yet model forces the peer into a singleton group.
@@ -185,6 +186,7 @@ pub struct UpdateGroupSig {
     pub local_addr: Option<IpAddr>,
     pub policy_out_name: Option<String>,
     pub prefix_set_out_name: Option<String>,
+    pub as_override_target: Option<u32>, // Some(remote_as) iff as-override (eBGP)
     // Negotiated wire-format capabilities (intersection of
     // cap_send and cap_recv on Peer). Anything that changes
     // encoded UPDATE bytes belongs here:
