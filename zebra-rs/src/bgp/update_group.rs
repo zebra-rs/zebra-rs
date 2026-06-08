@@ -959,6 +959,34 @@ fn encode_ipv6_update(
     out
 }
 
+/// Single-peer IPv6-unicast send, the v6 counterpart of
+/// [`send_ipv4_direct`]. Used by `route_sync_ipv6` on session establish:
+/// the per-group cache would fan out to every member and double-send to
+/// peers that already hold these routes, so the sync accumulates per
+/// shared attr-set and emits straight to the one new peer. The next-hop
+/// rides on the bucket-key attr (set to next-hop-self by
+/// `route_update_ipv6`), so there is no ENHE step.
+pub(super) fn send_ipv6_direct(peer: &Peer, entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)>) {
+    if entries.is_empty() {
+        return;
+    }
+    let mut buckets: HashMap<Arc<BgpAttr>, Vec<Ipv6Nlri>> = HashMap::new();
+    for (attr, nlri) in entries {
+        buckets.entry(attr).or_default().push(nlri);
+    }
+    let max_packet_size = if peer.opt.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    for (attr, nlris) in buckets {
+        let bytes_list = encode_ipv6_update(&attr, &nlris, max_packet_size);
+        for buf in bytes_list {
+            peer.send_packet(buf);
+        }
+    }
+}
+
 /// Build the `Ipv4MpReachNextHop` to advertise to `peer` for an
 /// RFC 8950 IPv4-over-IPv6 UPDATE. Returns `None` when the peer
 /// has no link-local on its egress interface — without a link-local

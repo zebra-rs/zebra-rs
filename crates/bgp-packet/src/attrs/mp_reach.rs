@@ -328,11 +328,25 @@ impl MpReachAttr {
             return Ok((input, mp_nlri));
         }
         if header.afi == Afi::Ip6 && header.safi == Safi::Unicast {
-            if header.nhop_len != 16 {
-                return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
-            }
-            let (input, nhop) = be_u128(input)?;
-            let nhop = IpAddr::V6(Ipv6Addr::from(nhop));
+            // RFC 2545 §3: the next-hop is either a 16-octet global
+            // address, or a 32-octet (global || link-local) pair. FRR and
+            // most stacks send the 32-octet form on a shared link, so
+            // accept both; the global address is used for best-path / FIB
+            // (the link-local is ignored until v6 next-hop resolution
+            // needs it).
+            let (input, nhop) = match header.nhop_len {
+                16 => {
+                    let (input, global) = be_u128(input)?;
+                    (input, Ipv6Addr::from(global))
+                }
+                32 => {
+                    let (input, global) = be_u128(input)?;
+                    let (input, _link_local) = be_u128(input)?;
+                    (input, Ipv6Addr::from(global))
+                }
+                _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
+            };
+            let nhop = IpAddr::V6(nhop);
             let (input, snpa) = be_u8(input)?;
             let (_, updates) =
                 many0_complete(|i| Ipv6Nlri::parse_nlri(i, add_path)).parse(input)?;
@@ -1410,6 +1424,37 @@ mod tests {
                 assert_eq!(parsed, updates);
             }
             other => panic!("expected Flowspec, got {other:?}"),
+        }
+    }
+
+    /// RFC 2545 §3: an IPv6-unicast MP_REACH may carry a 32-octet
+    /// (global || link-local) next-hop. FRR sends this form by default;
+    /// the decoder must accept it (not just the 16-octet global-only
+    /// form) and surface the global address as the next-hop.
+    #[test]
+    fn ipv6_unicast_accepts_32_octet_next_hop() {
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let prefix: ipnet::Ipv6Net = "2001:db8:ff00:2::/64".parse().unwrap();
+
+        let mut value = BytesMut::new();
+        value.put_u16(u16::from(Afi::Ip6));
+        value.put_u8(u8::from(Safi::Unicast));
+        value.put_u8(32); // next-hop length: global || link-local
+        value.put(&global.octets()[..]);
+        value.put(&link_local.octets()[..]);
+        value.put_u8(0); // SNPA
+        crate::Ipv6Nlri { id: 0, prefix }.nlri_emit(&mut value);
+
+        let (_rest, mp) = MpReachAttr::parse_nlri_opt(&value, None)
+            .expect("32-octet IPv6 unicast next-hop must parse");
+        match mp {
+            MpReachAttr::Ipv6 { nhop, updates, .. } => {
+                assert_eq!(nhop, IpAddr::V6(global), "global address used as next-hop");
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix, prefix);
+            }
+            other => panic!("expected Ipv6, got {other:?}"),
         }
     }
 
