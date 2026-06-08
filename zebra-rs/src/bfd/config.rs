@@ -1,11 +1,13 @@
 //! BFD session defaults.
 //!
-//! BFD has no configuration of its own: sessions are configured per-protocol
-//! (`neighbor X bfd`, `ip ospf bfd`, `isis bfd`) and created / torn down by
-//! those modules through [`super::inst::ClientReq::Subscribe`] /
+//! BFD has almost no configuration of its own: sessions are configured
+//! per-protocol (`neighbor X bfd`, `ip ospf bfd`, `isis bfd`) and created /
+//! torn down by those modules through [`super::inst::ClientReq::Subscribe`] /
 //! `Unsubscribe`. The BFD task is spawned eagerly by the first such protocol
-//! (see [`crate::config::manager`]); there is no top-level `bfd { … }` block and
-//! no `/bfd/*` config leaves, so the instance registers no config callbacks.
+//! (see [`crate::config::manager`]). The one top-level leaf it owns is
+//! `bfd { tracing }` (the conditional-tracing toggle, see [`super::trace`]),
+//! handled directly in [`super::inst::Bfd::process_cm_msg`] rather than through
+//! a callback table.
 //!
 //! The constants here are the FRR-aligned defaults every protocol-driven
 //! session starts with — see [`super::session::SessionParams::default`].

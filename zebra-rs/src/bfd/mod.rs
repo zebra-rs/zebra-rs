@@ -17,6 +17,7 @@ pub mod session;
 pub mod show;
 pub mod socket;
 pub mod timer;
+pub(crate) mod trace;
 
 #[cfg(test)]
 mod integration;

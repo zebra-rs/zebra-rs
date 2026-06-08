@@ -11,6 +11,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::inst::Message;
+use super::trace::bfd_debug;
 
 /// Egress request consumed by [`write_packet`] (v4) / [`write_packet_v6`]
 /// (v6). The event loop pushes these whenever a
@@ -85,7 +86,7 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message
                 let packet = match bfd_packet::ControlPacket::parse(payload) {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::debug!(?src, error = %e, "bfd: invalid control packet");
+                        bfd_debug!(?src, error = %e, "bfd: invalid control packet");
                         return Ok(());
                     }
                 };
@@ -221,7 +222,7 @@ pub async fn read_packet_v6(
                 let packet = match bfd_packet::ControlPacket::parse(payload) {
                     Ok(p) => p,
                     Err(e) => {
-                        tracing::debug!(?src, error = %e, "bfd: invalid control packet");
+                        bfd_debug!(?src, error = %e, "bfd: invalid control packet");
                         return Ok(());
                     }
                 };

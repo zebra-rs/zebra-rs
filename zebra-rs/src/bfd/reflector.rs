@@ -27,6 +27,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::context::Task;
 
 use super::inst::Message;
+use super::trace::{bfd_debug, bfd_info, bfd_warn};
 
 /// Env override for the reflector binary path (mirrors vtypam's
 /// `ZEBRA_VTYPAM_BIN`). Falls back to the install locations.
@@ -60,7 +61,7 @@ impl Reflector {
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGTERM);
             }
-            tracing::info!("bfd echo: stopping reflector on {}", self.ifname);
+            bfd_info!("bfd echo: stopping reflector on {}", self.ifname);
         }
     }
 
@@ -152,7 +153,7 @@ impl EchoReflectors {
 
     fn spawn(&self, ifindex: u32) -> Reflector {
         let Some(ifname) = if_indextoname(ifindex) else {
-            tracing::warn!("bfd echo: no interface name for ifindex {ifindex}; reflector off");
+            bfd_warn!("bfd echo: no interface name for ifindex {ifindex}; reflector off");
             return Reflector {
                 refcount: 1,
                 child: None,
@@ -172,7 +173,7 @@ impl EchoReflectors {
             .spawn()
         {
             Ok(mut child) => {
-                tracing::info!(
+                bfd_info!(
                     "bfd echo: spawned reflector on {ifname} (ifindex {ifindex}, mode {})",
                     self.mode
                 );
@@ -201,7 +202,7 @@ impl EchoReflectors {
                 }
             }
             Err(e) => {
-                tracing::warn!(
+                bfd_warn!(
                     "bfd echo: failed to spawn {} on {ifname}: {e}",
                     self.bin.display()
                 );
@@ -252,7 +253,7 @@ async fn child_io(
             },
         }
     }
-    tracing::debug!("bfd echo: IPC task for {ifname} ended");
+    bfd_debug!("bfd echo: IPC task for {ifname} ended");
 }
 
 /// Parse a `echo-down <discr>` event line from the helper.
