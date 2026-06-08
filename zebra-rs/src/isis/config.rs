@@ -254,6 +254,7 @@ impl Isis {
             "/router/isis/interface/network-type",
             link::config_network_type,
         );
+        self.callback_add("/router/isis/interface/passive", link::config_passive);
         self.callback_add(
             "/router/isis/interface/hello/interval",
             link::config_hello_interval,

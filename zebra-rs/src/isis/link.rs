@@ -194,6 +194,19 @@ impl<'a> LinkTop<'a> {
         !self.is_p2p()
     }
 
+    /// A passive circuit runs no Hello protocol: it advertises its
+    /// prefixes into the LSP but never sends or processes Hellos, so it
+    /// forms no adjacency. True when the operator set `passive`, and
+    /// always true for loopback interfaces (a loopback reflects its own
+    /// Hellos straight back, so running the protocol on it would form a
+    /// spurious adjacency with this router itself). The Hello send path
+    /// (`ifsm::hello_send` / `hello_originate` / `start`) and the Hello
+    /// receive path (`packet::hello_recv` / `hello_p2p_recv`) both gate
+    /// on this.
+    pub fn is_passive(&self) -> bool {
+        self.config.passive || self.flags.is_loopback()
+    }
+
     pub fn dest(&self, level: Level) -> Option<MacAddr> {
         if self.is_p2p() {
             if let Some((_, mac)) = self.state.adj.get(&level) {
@@ -223,6 +236,13 @@ pub struct LinkConfig {
 
     /// Link type one of LAN or Point-to-point.
     pub network_type: Option<NetworkType>,
+
+    /// Passive circuit (`/router/isis/interface/<name>/passive`). When
+    /// set, the interface's prefixes are still advertised into the LSP
+    /// but no Hello PDUs are sent or processed, so no adjacency forms.
+    /// `LinkTop::is_passive()` also folds in loopback interfaces, which
+    /// are implicitly passive regardless of this flag.
+    pub passive: bool,
 
     // Metric of this Link.
     pub metric: Option<u32>,
@@ -1061,27 +1081,27 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
     // Currently IS-IS is enabled on this interface.
     let enabled = link.config.enabled();
 
-    // Capture the global per-AFI count before mutation so we can detect a
-    // zero ↔ non-zero transition, which is what flips the AFI's NLPID in
-    // the Protocols Supported TLV (RFC 1195) of our self-originated LSP.
-    let count_before = *isis.config.enable.get(&afi);
-
+    // The global per-AFI interface count drives the AFI's NLPID in the
+    // Protocols Supported TLV (RFC 1195) of our self-originated LSP, so
+    // keep it in step with each interface's enable. `link_afi_changed`
+    // records whether THIS interface's participation actually flipped — it
+    // gates the LSP re-origination below.
+    let mut link_afi_changed = false;
     if op.is_set() && enable {
         // Set Enable.
         if !*link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = true;
             *isis.config.enable.get_mut(&afi) += 1;
+            link_afi_changed = true;
         }
     } else {
         // Set Disable.
         if *link.config.enable.get(&afi) {
             *link.config.enable.get_mut(&afi) = false;
             *isis.config.enable.get_mut(&afi) -= 1;
+            link_afi_changed = true;
         }
     }
-
-    let count_after = *isis.config.enable.get(&afi);
-    let support_changed = (count_before == 0) != (count_after == 0);
 
     if !enabled {
         if link.config.enabled() {
@@ -1097,14 +1117,25 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
         }
     }
 
-    if support_changed {
+    // Re-originate the self-LSP whenever this interface's participation in
+    // the AFI flips. The prefixes carried in the IP / IPv6 Reachability
+    // TLVs depend on which interfaces have the AFI enabled (and, on a
+    // 0<->non-zero *global* transition, so does the Protocols Supported /
+    // NLPID TLV). Gating only on the global transition missed the common
+    // case — e.g. `set router isis interface lo ipv6 enable true` while
+    // another interface already carries IPv6 — leaving the loopback's IPv6
+    // prefix out of the LSP until the next periodic refresh. The per-level
+    // guard skips a level whose self-LSP hasn't been originated yet (e.g.
+    // L1 on a level-2-only instance, or before the first origination);
+    // at runtime the relevant level always exists.
+    if link_afi_changed {
         let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
         if isis.lsdb.get(&Level::L1).get(&key).is_some() {
             isis_event_trace!(
                 isis.tracing,
                 LspOriginate,
                 &Level::L1,
-                "LSP Originate L1 due to protocols-supported change"
+                "LSP Originate L1 due to interface address-family change"
             );
             isis.tx
                 .send(Message::LspOriginate(Level::L1, None))
@@ -1115,7 +1146,7 @@ fn config_afi_enable(isis: &mut Isis, mut args: Args, op: ConfigOp, afi: Afi) ->
                 isis.tracing,
                 LspOriginate,
                 &Level::L2,
-                "LSP Originate L2 due to protocols-supported change"
+                "LSP Originate L2 due to interface address-family change"
             );
             isis.tx
                 .send(Message::LspOriginate(Level::L2, None))
@@ -1420,6 +1451,37 @@ pub fn config_network_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     if let Some(mut top) = isis.link_top(ifindex) {
         ifsm::hello_originate(&mut top, Level::L1);
         ifsm::hello_originate(&mut top, Level::L2);
+    }
+
+    Some(())
+}
+
+/// `set router isis interface <name> passive <bool>` — toggle a passive
+/// circuit. A passive interface keeps advertising its prefixes (the LSP
+/// build gates on `enable.v4`/`enable.v6` + level, not on any adjacency)
+/// but the Hello send/receive paths gate on `LinkTop::is_passive()`, so
+/// no Hello flows and no adjacency forms.
+///
+/// Toggling bounces the link (`link_state_down` + `link_state_up`): that
+/// drops any adjacency formed while the circuit was active — including
+/// the spurious self-adjacency a non-passive loopback creates when its
+/// own Hellos loop back — re-originates the self-LSP, and reschedules
+/// SPF. Unsetting it lets the normal Start path re-arm Hellos and rebuild
+/// adjacencies.
+pub fn config_passive(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let passive = args.boolean()?;
+
+    let (ifindex, changed) = {
+        let link = isis.links.get_mut_by_name(&name)?;
+        let old = link.config.passive;
+        link.config.passive = op.is_set() && passive;
+        (link.ifindex, old != link.config.passive)
+    };
+
+    if changed {
+        isis.link_state_down(ifindex);
+        isis.link_state_up(ifindex);
     }
 
     Some(())

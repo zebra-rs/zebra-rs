@@ -1797,6 +1797,18 @@ module config {
             }
           }
 
+          leaf passive {
+            type boolean;
+            description
+              "Run this interface as a passive IS-IS circuit: its
+               IPv4/IPv6 prefixes are still advertised into the LSP,
+               but no Hello PDUs are sent or processed, so no
+               adjacency forms (not even with this router itself when
+               its own Hellos loop back). Typically set on loopbacks
+               and stub links. Loopback interfaces are implicitly
+               passive even when this leaf is unset.";
+          }
+
           leaf priority {
             type uint8;
           }
@@ -2228,6 +2240,14 @@ module config {
                 enum lan;
                 enum point-to-point;
               }
+            }
+            leaf passive {
+              type boolean;
+              description
+                "Passive IS-IS circuit: advertise the interface's
+                 prefixes but send/process no Hello PDUs (no
+                 adjacency). See the top-level interface's `passive`
+                 leaf.";
             }
             leaf priority {
               type uint8;
