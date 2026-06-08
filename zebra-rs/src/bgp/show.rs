@@ -1386,6 +1386,14 @@ struct Neighbor<'a> {
     /// strict RFC 4271 inbound AS_PATH loop check.
     #[serde(skip_serializing_if = "Option::is_none")]
     allowas_in: Option<AllowAsIn>,
+    /// GTSM / `ttl-security` (RFC 5082): the session only accepts a
+    /// directly-connected peer (received TTL 255). Mirrors
+    /// `peer.config.transport.ttl_security`.
+    ttl_security: bool,
+    /// `ebgp-multihop N`: configured max hops (egress TTL) for an eBGP
+    /// session. Mirrors `peer.config.transport.ebgp_multihop`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ebgp_multihop: Option<u8>,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -1526,6 +1534,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         reflector_client: peer.reflector_client,
         soft_reconfig_in: peer.config.soft_reconfig_in,
         allowas_in: peer.config.allowas_in,
+        ttl_security: peer.config.transport.ttl_security,
+        ebgp_multihop: peer.config.transport.ebgp_multihop,
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
     };
@@ -1619,6 +1629,21 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             writeln!(out, "  Allowas-in: origin")?;
         }
         None => {}
+    }
+
+    if neighbor.ttl_security {
+        writeln!(
+            out,
+            "  TTL security (GTSM) enabled, minimum received TTL 255"
+        )?;
+    }
+
+    if let Some(hops) = neighbor.ebgp_multihop {
+        writeln!(
+            out,
+            "  External BGP neighbor may be up to {} hops away (ebgp-multihop)",
+            hops
+        )?;
     }
 
     if let Some(ref group) = neighbor.neighbor_group {

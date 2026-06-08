@@ -77,6 +77,60 @@ module zebra-bgp-transport {
          IOS, and to `neighbor/transport/local-address` in
          ietf-bgp-common.";
     }
+
+    leaf ttl-security {
+      ext:help "Enable GTSM: accept this peer only when directly connected (TTL 255)";
+      type empty;
+      description
+        "When present, enable the Generalized TTL Security Mechanism
+         (GTSM) for this neighbor. The peer is treated as directly
+         connected (single hop): every BGP packet is sent with IP TTL
+         / IPv6 Hop Limit = 255, and inbound packets are accepted only
+         when their received TTL / Hop Limit is 255 (enforced by the
+         kernel via IP_MINTTL / IPV6_MINHOPCOUNT). A packet that has
+         crossed at least one router arrives with TTL < 255 and is
+         dropped before it reaches BGP, which protects the session
+         from off-path spoofing.
+
+         This leaf is a flag (`type empty`), not a hop count: the only
+         supported policy is the directly-connected case (expected hop
+         count 0, TTL 255). A configurable number of hops, as in
+         `neighbor X ttl-security hops <N>`, is intentionally not
+         supported. Mutually exclusive with ebgp-multihop, which permits
+         the TTL to be decremented between peers: configuring both on one
+         neighbor is rejected (the second is refused with a warning).";
+      reference
+        "RFC 3682: The Generalized TTL Security Mechanism (GTSM).
+         RFC 5082: GTSM (obsoletes RFC 3682).
+         RFC 7454: BGP Operations and Security, Section 6.";
+    }
+
+    leaf ebgp-multihop {
+      ext:help "Allow an eBGP peer up to N hops away; sets the BGP TTL (1-255)";
+      type uint8 {
+        range "1..255";
+      }
+      description
+        "Maximum number of hops to an eBGP neighbor — the egress IP TTL
+         / IPv6 Hop Limit used for the session. A directly-connected
+         eBGP peer uses TTL 1 by default and is unreachable through a
+         router; setting `ebgp-multihop N` raises the egress TTL to N so
+         a peer up to N hops away (for example peering on loopbacks
+         across one or more routers) can be reached.
+
+         Ignored for iBGP, which already uses 255. Mutually exclusive
+         with ttl-security, which pins the TTL to 255 and additionally
+         filters the received TTL: configuring both on one neighbor is
+         rejected — the config callback refuses the second with a warning
+         and the first-configured one wins, so remove one before adding
+         the other.
+
+         Equivalent to `neighbor X ebgp-multihop <N>` in FRR / Cisco
+         IOS, and to `neighbor/transport/ebgp-multihop/multihop-ttl` in
+         ietf-bgp-common.";
+      reference
+        "RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
+    }
   }
 
   /* =========================================================

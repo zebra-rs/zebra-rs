@@ -1494,6 +1494,92 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     bfd_apply(bgp, peer_addr)
 }
 
+/// `[no] router bgp neighbor <addr> ttl-security` — enable GTSM (RFC
+/// 5082) for a directly-connected peer. The leaf is `type empty`, so
+/// presence (Set) turns it on and Delete turns it off; no value is
+/// read. The socket options themselves are installed when the TCP
+/// session is set up (`fsm_connected`), so a change to an already
+/// running session is bounced with `Event::Stop` — the same teardown
+/// `clear bgp ... hard` uses — to force a reconnect under the new TTL
+/// policy. A peer still Idle is left to pick the option up on its first
+/// connect.
+fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let want = op.is_set();
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        // Mutually exclusive with ebgp-multihop: GTSM pins the TTL to 255
+        // and filters the received TTL, while ebgp-multihop permits a
+        // decremented TTL. Refuse to enable GTSM on a peer that already
+        // has ebgp-multihop — the existing setting wins; the operator
+        // must remove ebgp-multihop first.
+        if want && peer.config.transport.ebgp_multihop.is_some() {
+            tracing::warn!(
+                peer = %addr,
+                "bgp: ttl-security and ebgp-multihop are mutually exclusive; ignoring ttl-security (remove ebgp-multihop on this neighbor first)",
+            );
+            return Some(());
+        }
+        if peer.config.transport.ttl_security == want {
+            // No actual change — don't disturb a live session.
+            return Some(());
+        }
+        peer.config.transport.ttl_security = want;
+        peer.start();
+        // Only an established / in-progress session needs an explicit
+        // bounce; bouncing an Idle peer here could race the idle-hold
+        // timer `start()` just armed and strand it.
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// `[no] router bgp neighbor <addr> ebgp-multihop <1-255>` — raise the
+/// egress TTL for an eBGP session so a peer up to N hops away is
+/// reachable (RFC 4271 operational practice). The value is resolved
+/// into the session TTL by [`super::peer::Peer::session_ttl`] (ignored
+/// for iBGP) and applied at connect / `fsm_connected`. Mutually
+/// exclusive with ttl-security: setting it on a GTSM peer is refused
+/// with a warning. A change to a live session is bounced (`Event::Stop`,
+/// like `clear bgp ... hard`) so the new TTL takes effect on reconnect;
+/// an Idle peer picks it up on its first connect.
+fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    // On delete the value (if echoed in the path) is irrelevant — clear
+    // unconditionally. On set, read the 1..255 hop count.
+    let want = if op.is_set() { Some(args.u8()?) } else { None };
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        // Mutually exclusive with ttl-security (see `config_ttl_security`).
+        // Refuse to set ebgp-multihop on a peer that already has GTSM —
+        // the existing setting wins; remove ttl-security first.
+        if want.is_some() && peer.config.transport.ttl_security {
+            tracing::warn!(
+                peer = %addr,
+                "bgp: ebgp-multihop and ttl-security are mutually exclusive; ignoring ebgp-multihop (remove ttl-security on this neighbor first)",
+            );
+            return Some(());
+        }
+        if peer.config.transport.ebgp_multihop == want {
+            return Some(());
+        }
+        peer.config.transport.ebgp_multihop = want;
+        peer.start();
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -1966,6 +2052,15 @@ impl Bgp {
         // path above; either CLI form is accepted, both lower onto
         // the same runtime state.
         self.callback_peer("/update-source", config_transport_local_address);
+        // FRR-style `neighbor X ttl-security` (GTSM, RFC 5082) from
+        // zebra-bgp-transport.yang. `type empty` flag — directly
+        // connected only, TTL pinned to 255. Lowered onto the session
+        // socket in `fsm_connected`.
+        self.callback_peer("/ttl-security", config_ttl_security);
+        // FRR-style `neighbor X ebgp-multihop <1-255>` from
+        // zebra-bgp-transport.yang. Raises the eBGP egress TTL; resolved
+        // by Peer::session_ttl and applied at connect / fsm_connected.
+        self.callback_peer("/ebgp-multihop", config_ebgp_multihop);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -2660,6 +2755,280 @@ mod neighbor_group_wiring_tests {
         assert_eq!(peer.remote_as, 65000);
         assert!(peer.config.remote_as_inherited);
         assert!(peer.active, "peer.start() must have fired");
+    }
+
+    /// `ttl-security` is a `type empty` flag: Set turns it on, Delete
+    /// turns it off, and a change to an already-established session is
+    /// bounced (`Event::Stop`) so the new TTL policy applies on the
+    /// reconnect. A no-op Set must not bounce.
+    #[tokio::test]
+    async fn ttl_security_toggles_field_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        // Pretend the session is established so a toggle must bounce.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // Enable: field set + one Event::Stop queued.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "set must enable the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "enabling on a live session must bounce it",
+        );
+
+        // The bounce is modeled only as a queued event in the unit
+        // harness, so the state is still Established. Idempotent set:
+        // no change, no bounce.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        // Disable: field cleared + one Event::Stop queued.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "delete must clear the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "disabling on a live session must bounce it",
+        );
+    }
+
+    /// A peer still Idle (never connected) must not be bounced when
+    /// ttl-security is set during initial config — the flag is stored
+    /// and the first connect picks it up.
+    #[tokio::test]
+    async fn ttl_security_on_idle_peer_does_not_bounce() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "flag must still be stored on an Idle peer",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle peer must not be bounced",
+        );
+    }
+
+    /// `Peer::session_ttl` resolution: a directly-connected eBGP peer
+    /// defaults to TTL 1, `ebgp-multihop N` raises it to N, and
+    /// `ttl-security` overrides both with 255.
+    #[tokio::test]
+    async fn session_ttl_ebgp_default_multihop_and_ttl_security() {
+        let mut bgp = fresh_bgp(); // local asn 0
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // remote-as 65001 != local 0 ⇒ eBGP.
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            1,
+            "directly-connected eBGP must default to TTL 1",
+        );
+
+        // ebgp-multihop raises the egress TTL.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "10"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            10,
+            "ebgp-multihop N must set the egress TTL to N",
+        );
+
+        // Clearing ebgp-multihop returns to the eBGP default.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "10"]), ConfigOp::Delete).unwrap();
+        assert_eq!(bgp.peers.get(&peer_addr()).unwrap().session_ttl(), 1);
+
+        // ttl-security alone ⇒ 255 (the two options are mutually
+        // exclusive at config time, so they are set separately here).
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "ttl-security ⇒ 255",
+        );
+
+        // Defensive precedence inside session_ttl: even if both fields
+        // somehow coexisted (the callbacks reject this — see the
+        // mutual-exclusion tests), ttl-security wins. Set the field
+        // directly to exercise that fallback branch.
+        bgp.peers
+            .get_mut(&peer_addr())
+            .unwrap()
+            .config
+            .transport
+            .ebgp_multihop = Some(10);
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "ttl-security must win over a coexisting ebgp-multihop",
+        );
+    }
+
+    /// An iBGP peer always uses TTL 255, and `ebgp-multihop` is ignored
+    /// on it (mirroring FRR).
+    #[tokio::test]
+    async fn session_ttl_ibgp_is_255_and_ignores_multihop() {
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65000;
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        // remote-as == local asn ⇒ iBGP.
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65000"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "iBGP must use TTL 255",
+        );
+
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().session_ttl(),
+            255,
+            "ebgp-multihop must be ignored on an iBGP peer",
+        );
+    }
+
+    /// `ebgp-multihop` stores the hop count, is idempotent on a no-op
+    /// set, bounces an established session on change, and clears on
+    /// delete.
+    #[tokio::test]
+    async fn ebgp_multihop_sets_value_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // Set 5 → stored + one bounce.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ebgp_multihop,
+            Some(5),
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "changing ebgp-multihop on a live session must bounce it",
+        );
+
+        // Same value again → no-op, no bounce.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "re-setting the same hop count must not bounce",
+        );
+
+        // Delete → cleared + bounce.
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ebgp_multihop,
+            None,
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "deleting ebgp-multihop on a live session must bounce it",
+        );
+    }
+
+    /// ttl-security and ebgp-multihop are mutually exclusive: with
+    /// ebgp-multihop already set, a `set ... ttl-security` is refused
+    /// (the existing setting wins) and does not bounce the session.
+    #[tokio::test]
+    async fn ttl_security_refused_when_ebgp_multihop_set() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = crate::bgp::peer::State::Established;
+        let _ = drain_stop_events(&mut bgp);
+
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let p = bgp.peers.get(&peer_addr()).unwrap();
+        assert!(
+            !p.config.transport.ttl_security,
+            "ttl-security must be refused while ebgp-multihop is set",
+        );
+        assert_eq!(
+            p.config.transport.ebgp_multihop,
+            Some(5),
+            "the existing ebgp-multihop must be left untouched",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a refused config must not bounce the session",
+        );
+    }
+
+    /// The symmetric direction: with ttl-security already set, a
+    /// `set ... ebgp-multihop N` is refused.
+    #[tokio::test]
+    async fn ebgp_multihop_refused_when_ttl_security_set() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = crate::bgp::peer::State::Established;
+        let _ = drain_stop_events(&mut bgp);
+
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+
+        let p = bgp.peers.get(&peer_addr()).unwrap();
+        assert_eq!(
+            p.config.transport.ebgp_multihop, None,
+            "ebgp-multihop must be refused while ttl-security is set",
+        );
+        assert!(
+            p.config.transport.ttl_security,
+            "the existing ttl-security must be left untouched",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a refused config must not bounce the session",
+        );
     }
 
     /// Peer references the group before any remote-as is configured
