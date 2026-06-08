@@ -1,0 +1,37 @@
+# z1 (AS 65001): peers with z2 over loopbacks across the shared L2 link.
+# The link is 10.0.0.0/24 (step-assigned to the veth); the peering
+# addresses are loopbacks (10.255.0.1, 10.255.0.2) reachable only via a
+# static route, so neither sits on a directly-connected subnet. With no
+# `disable-connected-check`, the single-hop eBGP connected check holds the
+# session down even though TTL 1 would reach the L2-adjacent peer.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.255.0.1/32
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.255.0.2/32
+        nexthop:
+        - address: 10.0.0.2
+  bgp:
+    global:
+      as: 65001
+      identifier: 10.255.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.255.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      update-source: 10.255.0.1
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.1.1.1/32

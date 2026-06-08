@@ -519,6 +519,11 @@ pub struct Bgp {
     /// in MP_REACH for IPv4-unicast advertisements on interface peers
     /// (RFC 8950). See [`super::interface_addrs`].
     pub interface_addrs: super::interface_addrs::InterfaceAddrs,
+    /// Directly-connected subnets, populated from `RibRx::AddrAdd`/`AddrDel`.
+    /// Backs the eBGP connected check: a single-hop eBGP peer whose address
+    /// is not covered here is held down unless it has `disable-connected-check`
+    /// (see [`super::connected`] and [`Self::refresh_connected`]).
+    pub connected_subnets: super::connected::ConnectedSubnets,
     /// IOS-XR-style update-groups, keyed by `(AfiSafi, signature)`.
     /// Signature + membership tracking only — the advertise pipeline
     /// does not yet share work across members. See
@@ -679,6 +684,7 @@ impl Bgp {
             vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
+            connected_subnets: super::connected::ConnectedSubnets::new(),
             update_groups: super::update_group::empty_map(),
             tracing: super::tracing::BgpTracing::default(),
             policy_tx,
@@ -1537,6 +1543,37 @@ impl Bgp {
         Ok(())
     }
 
+    /// Recompute every peer's cached `shared_network` against the current
+    /// [`Self::connected_subnets`] and re-kick any single-hop eBGP peer
+    /// that was held by the connected check and is now on a connected
+    /// subnet. Called whenever an interface address appears or disappears
+    /// (and once per neighbor at config time). A peer that gains
+    /// connectivity while parked in Idle/Active is sent Event::Start so it
+    /// dials immediately instead of waiting out the connect-retry backstop;
+    /// established sessions are never bounced on a connectivity change.
+    pub fn refresh_connected(&mut self) {
+        use super::peer::State;
+        // Disjoint field borrows: the subnet table is read while the peer
+        // map is mutated.
+        let subnets = &self.connected_subnets;
+        let mut kicks: Vec<usize> = Vec::new();
+        for (_key, peer) in self.peers.iter_mut_all() {
+            let was = peer.shared_network;
+            peer.shared_network = subnets.is_empty() || subnets.covers(peer.address);
+            if !was
+                && peer.shared_network
+                && peer.active
+                && peer.connected_check_applies()
+                && matches!(peer.state, State::Idle | State::Active)
+            {
+                kicks.push(peer.ident);
+            }
+        }
+        for ident in kicks {
+            let _ = self.tx.try_send(Message::Event(ident, Event::Start));
+        }
+    }
+
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
@@ -1550,9 +1587,13 @@ impl Bgp {
             }
             RibRx::AddrAdd(addr) => {
                 self.interface_addrs.record(&addr);
+                self.connected_subnets.record(&addr);
+                self.refresh_connected();
             }
             RibRx::AddrDel(addr) => {
                 self.interface_addrs.forget(&addr);
+                self.connected_subnets.forget(&addr);
+                self.refresh_connected();
             }
             RibRx::RouterIdUpdate(router_id) => {
                 // RIB auto-derived a router-id from interface IPv4

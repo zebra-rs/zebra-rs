@@ -203,6 +203,16 @@ pub struct PeerTransportConfig {
     /// connect, so a `clear` is needed to apply it now. See `super::mss`
     /// and `zebra-bgp-transport.yang`.
     pub tcp_mss: Option<u16>,
+    /// `disable-connected-check` (RFC 4271 operational practice). When
+    /// `false` (the default), a single-hop eBGP session — egress TTL 1,
+    /// i.e. neither `ebgp_multihop` nor `ttl_security` set — is only
+    /// dialed when the neighbor's address is on a directly-connected
+    /// subnet (FRR `shared_network`). When `true`, that requirement is
+    /// dropped so the session can reach a non-connected address (e.g. a
+    /// loopback one L2 hop away) while keeping TTL 1. Ignored for iBGP and
+    /// for multihop / GTSM sessions (they are never gated). Consulted by
+    /// [`Peer::connected_check_ok`]. See `zebra-bgp-transport.yang`.
+    pub disable_connected_check: bool,
     // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
     // listening socket (for the peer's address) and on the active
     // TcpSocket before connect(). The encoding determines how the
@@ -552,6 +562,15 @@ pub struct Peer {
     /// do today).
     pub ctx: crate::context::ProtoContext,
     pub active: bool,
+    /// Cached "the neighbor's address is on one of our directly-connected
+    /// subnets" (FRR `shared_network`). Maintained by the owning instance
+    /// from interface-address events (`Bgp::refresh_connected`) rather
+    /// than recomputed in the FSM, because the active-connect decision in
+    /// [`fsm_start`] only has `&mut Peer`. Reads `true` while the instance
+    /// has no interface-address knowledge yet, so the connected check
+    /// fails open (see [`super::connected::ConnectedSubnets`]). Consulted
+    /// only by [`Peer::connected_check_ok`].
+    pub shared_network: bool,
     pub peer_type: PeerType,
     pub state: State,
     pub task: PeerTask,
@@ -677,6 +696,9 @@ impl Peer {
             origin: PeerOrigin::Static,
             scope_id: None,
             active: false,
+            // Fail open until the instance computes connectedness from
+            // interface-address events (see `shared_network`).
+            shared_network: true,
             peer_type: PeerType::IBGP,
             state: State::Idle,
             task: PeerTask::default(),
@@ -822,6 +844,33 @@ impl Peer {
             .transport
             .ebgp_multihop
             .unwrap_or(super::ttl::DEFAULT_EBGP_TTL)
+    }
+
+    /// Whether the eBGP directly-connected-network check governs this
+    /// peer. It governs exactly a single-hop eBGP session — eBGP with an
+    /// egress TTL of 1, i.e. neither `ebgp-multihop` nor `ttl-security`
+    /// (both raise the TTL and signal an intentionally non-adjacent peer)
+    /// — that the operator has not exempted with `disable-connected-check`.
+    /// iBGP, multihop/GTSM, unresolved (`0.0.0.0`/`::`) and link-local /
+    /// unnumbered peers are never governed: the last two are on-link by
+    /// construction. Mirrors FRR's `peer->sort == BGP_PEER_EBGP &&
+    /// peer->ttl == BGP_DEFAULT_TTL && !PEER_FLAG_DISABLE_CONNECTED_CHECK`.
+    pub fn connected_check_applies(&self) -> bool {
+        self.is_ebgp()
+            && self.session_ttl() == super::ttl::DEFAULT_EBGP_TTL
+            && !self.config.transport.disable_connected_check
+            && !self.address.is_unspecified()
+            && !addr_is_v6_link_local(&self.address)
+    }
+
+    /// True when the directly-connected-network check is satisfied: either
+    /// it does not apply to this peer (see [`Self::connected_check_applies`])
+    /// or the neighbor sits on one of our connected subnets
+    /// ([`Self::shared_network`], which also reads `true` when the instance
+    /// has no interface-address knowledge yet — the check fails open).
+    /// Consulted by [`fsm_start`] before dialing the peer.
+    pub fn connected_check_ok(&self) -> bool {
+        !self.connected_check_applies() || self.shared_network
     }
 
     /// Effective BFD hop mode for this neighbour: the explicit
@@ -1136,8 +1185,34 @@ pub fn fsm_adv_timer_evpn_expires(peer: &mut Peer) -> State {
     State::Established
 }
 
+/// `fe80::/10` test (RFC 4291 §2.5.6). `Ipv6Addr::is_unicast_link_local`
+/// is still unstable, so open-code it. A link-local / unnumbered peer is
+/// directly attached by construction and is never subject to the eBGP
+/// connected check.
+fn addr_is_v6_link_local(addr: &IpAddr) -> bool {
+    matches!(addr, IpAddr::V6(a) if (a.segments()[0] & 0xffc0) == 0xfe80)
+}
+
 pub fn fsm_start(peer: &mut Peer) -> State {
     peer.first_start = false;
+    // eBGP directly-connected-network check: a single-hop eBGP peer that
+    // is not on a connected subnet must not be dialed unless the operator
+    // set `disable-connected-check`. FRR gates the same case through NHT;
+    // we hold the active connection in Active and re-evaluate on the
+    // connect-retry timer. The instance also re-kicks us with Event::Start
+    // the moment a connected route to the peer appears
+    // (`Bgp::refresh_connected`), and a relevant config change bounces the
+    // peer through its callback — so the 120s retry is only a backstop.
+    if !peer.connected_check_ok() {
+        if peer.trace_fsm() {
+            tracing::info!(
+                peer = %peer.address,
+                "bgp: holding eBGP session — neighbor is not on a connected network and disable-connected-check is off",
+            );
+        }
+        peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
+        return State::Active;
+    }
     peer.task.connect = Some(peer_start_connection(peer));
     State::Connect
 }

@@ -1421,6 +1421,11 @@ struct Neighbor<'a> {
     /// otherwise, mirroring FRR's `getsockopt`-on-a-dead-fd output.
     #[serde(skip_serializing_if = "Option::is_none")]
     tcp_mss_synced: Option<u16>,
+    /// `disable-connected-check`: when true, this eBGP neighbor is exempt
+    /// from the directly-connected-network check (a non-connected address,
+    /// e.g. a loopback, may be dialed at TTL 1). Mirrors
+    /// `peer.config.transport.disable_connected_check`.
+    disable_connected_check: bool,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -1575,6 +1580,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         } else {
             None
         },
+        disable_connected_check: peer.config.transport.disable_connected_check,
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
     };
@@ -1718,6 +1724,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             "  Configured tcp-mss is {}, synced tcp-mss is {}",
             mss,
             neighbor.tcp_mss_synced.unwrap_or(0),
+        )?;
+    }
+
+    if neighbor.disable_connected_check {
+        writeln!(
+            out,
+            "  Connected-network check disabled (eBGP peer may be unconnected at TTL 1)"
         )?;
     }
 
