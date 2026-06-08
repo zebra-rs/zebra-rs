@@ -41,7 +41,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 1;
+pub const SIGNATURE_VERSION: u32 = 2;
 
 /// Address families the v1 grouping logic considers. The advertise
 /// pipeline today only fans out to these three.
@@ -103,6 +103,16 @@ pub struct UpdateGroupSig {
     pub local_addr: Option<IpAddr>,
     pub policy_out_name: Option<String>,
     pub prefix_set_out_name: Option<String>,
+    /// Per-neighbor `as-override` target (zebra-bgp-as-override.yang).
+    /// `None` when off (the common case — no effect on the egress
+    /// transform). `Some(remote_as)` when on: the egress AS_PATH has
+    /// `remote_as` rewritten to `local_as` before the prepend, so two
+    /// peers may only share canonical bytes when they override the
+    /// *same* remote AS. Without this, two eBGP peers with distinct
+    /// remote-AS in one group would share a single (wrongly-overridden)
+    /// AS_PATH — the canonical-member transform assumes its output
+    /// depends only on signature fields.
+    pub as_override_target: Option<u32>,
     // Negotiated wire-format capabilities (intersection of cap_send
     // and cap_recv on the peer). Anything that changes encoded
     // UPDATE bytes belongs here.
@@ -214,6 +224,15 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         local_addr: peer.param.local_addr.map(|s| s.ip()),
         policy_out_name,
         prefix_set_out_name,
+        // as-override rewrites the peer's own AS to ours on egress; the
+        // result depends on the peer's remote-as, so fold it into the
+        // key (eBGP only — iBGP never prepends, so the override is a
+        // no-op there and must not split iBGP groups).
+        as_override_target: if peer.is_ebgp() && peer.config.as_override {
+            Some(peer.remote_as)
+        } else {
+            None
+        },
         as4_negotiated: peer.as4,
         extended_message: peer.opt.extended_message,
         addpath_send: peer.opt.is_add_path_send(afi, safi),
@@ -936,6 +955,7 @@ mod tests {
             local_addr: None,
             policy_out_name: None,
             prefix_set_out_name: None,
+            as_override_target: None,
             as4_negotiated: true,
             extended_message: true,
             addpath_send: false,
@@ -979,6 +999,10 @@ mod tests {
 
         let mut a = base.clone();
         a.prefix_set_out_name = Some("denylist".into());
+        assert_ne!(base, a);
+
+        let mut a = base.clone();
+        a.as_override_target = Some(65002);
         assert_ne!(base, a);
 
         let mut a = base.clone();

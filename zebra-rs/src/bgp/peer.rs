@@ -337,6 +337,13 @@ pub struct PeerConfig {
     /// Per-neighbor `allowas-in` (zebra-bgp-allowas-in.yang). `None`
     /// keeps the strict RFC 4271 inbound AS_PATH loop check.
     pub allowas_in: Option<AllowAsIn>,
+    /// Per-neighbor `as-override` (zebra-bgp-as-override.yang). When
+    /// `true`, the peer's own AS is replaced with the local AS in the
+    /// AS_PATH of every outbound eBGP UPDATE (before the local-AS
+    /// prepend), so the receiver's RFC 4271 loop check accepts routes
+    /// that have transited its own AS. Ignored for iBGP peers (which do
+    /// not prepend). Default `false`.
+    pub as_override: bool,
 }
 
 impl Default for PeerConfig {
@@ -358,6 +365,7 @@ impl Default for PeerConfig {
             remote_as_inherited: false,
             bfd: PeerBfdConfig::default(),
             allowas_in: None,
+            as_override: false,
         }
     }
 }

@@ -17,6 +17,7 @@
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
+  - [AS Override](ch-02-12-bgp-as-override.md)
   - [Timer Configuration](ch-02-03-bgp-timers.md)
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)

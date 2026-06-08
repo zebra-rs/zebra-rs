@@ -1,0 +1,90 @@
+module zebra-bgp-as-override {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-as-override";
+  prefix "zbao";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor `as-override` knob.
+
+     On the egress path toward an eBGP neighbor, BGP normally prepends
+     the local AS to the AS_PATH. If that neighbor's own AS already
+     appears in the path (e.g. two CE sites that share one AS behind a
+     common provider), the neighbor's RFC 4271 loop check drops the
+     route. `as-override` relaxes this on the *sending* side: every
+     occurrence of the neighbor's AS in the AS_PATH is replaced with the
+     local AS before the prepend, so the neighbor no longer sees its own
+     AS and accepts the route.
+
+       router bgp {
+         neighbor 192.168.1.3 {
+           remote-as 65001;
+           as-override;           // rewrite 65001 -> local AS on egress
+         }
+       }
+
+     This is the send-side counterpart to `allowas-in`, which relaxes
+     the same loop check on the *receiving* side. `as-override` only
+     affects eBGP sessions (iBGP never prepends).";
+
+  revision 2026-06-08 {
+    description "Initial revision.";
+    reference "FRR `neighbor X as-override`.";
+  }
+
+  grouping bgp-neighbor-as-override-extension {
+    description
+      "FRR-style `as-override` presence container on a BGP neighbor.";
+
+    container as-override {
+      ext:help "Override the neighbor's AS in outbound AS_PATH with the local AS";
+      presence "Enable as-override on the egress path toward this neighbor";
+      description
+        "When present, replace every occurrence of this neighbor's AS in
+         the AS_PATH with the local AS on outbound eBGP UPDATEs, before
+         the local-AS prepend.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach as-override to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-as-override-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X as-override` is path-valid.";
+    uses bgp-neighbor-as-override-extension;
+  }
+}

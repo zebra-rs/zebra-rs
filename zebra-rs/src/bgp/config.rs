@@ -528,6 +528,18 @@ fn config_allowas_in_origin(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// `set router bgp neighbor X as-override` — the presence container
+/// (zebra-bgp-as-override.yang). Enables egress AS_PATH override toward
+/// this neighbor (the peer's own AS is swapped for the local AS before
+/// the local-AS prepend, on every outbound eBGP UPDATE); `delete`
+/// disables it. The flag is a no-op for iBGP peers, which never prepend.
+fn config_as_override(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.as_override = op.is_set();
+    Some(())
+}
+
 /// `set router bgp neighbor X bfd enable true|false` — flips the
 /// Reconcile this neighbor's live BFD subscription with its current
 /// `peer.config.bfd` state. Idempotent and order-independent: every
@@ -2246,6 +2258,12 @@ impl Bgp {
         self.callback_peer("/allowas-in", config_allowas_in);
         self.callback_peer("/allowas-in/count", config_allowas_in_count);
         self.callback_peer("/allowas-in/origin", config_allowas_in_origin);
+
+        // Per-neighbor as-override (zebra-bgp-as-override.yang). On the
+        // egress path toward this neighbor, replace its own AS with the
+        // local AS in the AS_PATH so its RFC 4271 loop check accepts
+        // routes that transited its AS (eBGP only).
+        self.callback_peer("/as-override", config_as_override);
     }
 }
 
@@ -2709,6 +2727,34 @@ mod bfd_wiring_tests {
         config_allowas_in_count(&mut bgp, arg_words(&["10.0.0.2", "7"]), ConfigOp::Set).unwrap();
         config_allowas_in(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
         assert_eq!(peer_allowas_in(&bgp, "10.0.0.2"), Some(AllowAsIn::Count(7)));
+    }
+
+    fn peer_as_override(bgp: &Bgp, addr: &str) -> bool {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .as_override
+    }
+
+    /// `as-override` defaults off and the presence container turns it on.
+    #[tokio::test]
+    async fn as_override_set_enables() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(!peer_as_override(&bgp, "10.0.0.2"));
+        config_as_override(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(peer_as_override(&bgp, "10.0.0.2"));
+    }
+
+    /// Deleting the presence container turns `as-override` back off.
+    #[tokio::test]
+    async fn as_override_delete_disables() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_as_override(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_as_override(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert!(!peer_as_override(&bgp, "10.0.0.2"));
     }
 }
 

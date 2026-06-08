@@ -26,9 +26,11 @@ explicitly opts into `ebgp-multihop`. This is the standard safety
 behavior; without it, an eBGP peer could silently be many hops away.
 
 The egress TTL is set on the socket **before connect** on the active
-side (so the SYN already carries it) and re-affirmed after the handshake
-for the passive side. `ttl-security` precedes `ebgp-multihop`, which is
-ignored on an iBGP session (already 255).
+side (so the SYN already carries it), then re-applied after the handshake
+in `fsm_connected` — the path both roles share, which is what covers a
+passively-accepted session (it has no pre-connect step). `ttl-security`
+precedes `ebgp-multihop`, which is ignored on an iBGP session (already
+255).
 
 ## eBGP multihop
 

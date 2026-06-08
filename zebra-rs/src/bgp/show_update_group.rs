@@ -38,6 +38,10 @@ struct SigView {
     local_addr: Option<String>,
     policy_out: Option<String>,
     prefix_set_out: Option<String>,
+    /// `Some(remote_as)` when `as-override` is set on the members
+    /// (eBGP only); the egress AS_PATH has that AS rewritten to the
+    /// local AS. `None` (the common case) means no override.
+    as_override_target: Option<u32>,
     capabilities: CapsView,
     signature_version: u32,
 }
@@ -121,6 +125,7 @@ fn build_view(bgp: &Bgp, afi_safi: AfiSafi, group: &UpdateGroup) -> GroupView {
             local_addr: group.sig.local_addr.map(|a| a.to_string()),
             policy_out: group.sig.policy_out_name.clone(),
             prefix_set_out: group.sig.prefix_set_out_name.clone(),
+            as_override_target: group.sig.as_override_target,
             capabilities: CapsView {
                 as4_negotiated: group.sig.as4_negotiated,
                 extended_message: group.sig.extended_message,
@@ -249,6 +254,14 @@ fn render_detail_text(view: &GroupView) -> Result<String, std::fmt::Error> {
         out,
         "    Outbound prefix-set:        {}",
         view.signature.prefix_set_out.as_deref().unwrap_or("—")
+    )?;
+    writeln!(
+        out,
+        "    AS-override target:         {}",
+        view.signature
+            .as_override_target
+            .map(|asn| asn.to_string())
+            .unwrap_or_else(|| "—".to_string())
     )?;
     writeln!(out, "    Negotiated capabilities:")?;
     writeln!(
