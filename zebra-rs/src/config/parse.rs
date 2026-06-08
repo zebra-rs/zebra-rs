@@ -450,6 +450,24 @@ fn entry_match_key_matched(entry: &Rc<Entry>, str: &str, m: &mut Match) {
     }
 }
 
+/// Resolve a container's `ext:default-child` to the child entry it
+/// names. That child's key may be supplied positionally — without
+/// typing the child's own keyword (see [`parse`]).
+fn default_child_entry(entry: &Rc<Entry>) -> Option<Rc<Entry>> {
+    let name = entry.extension.get("ext:default-child")?;
+    entry.dir.borrow().iter().find(|e| &e.name == name).cloned()
+}
+
+/// Type-match `input` against the first key of `child` (the
+/// `ext:default-child`), recording the match and its completion hints
+/// in `m`. Used both to decide a positional descent and to surface the
+/// key's hints (`<A.B.C.D>`, …) during completion.
+fn entry_match_default_key(child: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State) {
+    if let Some(key_leaf) = entry_key(child, 0) {
+        entry_match_type(&key_leaf, input, m, s);
+    }
+}
+
 fn ymatch_next(entry: &Rc<Entry>, ymatch: YangMatch) -> YangMatch {
     match ymatch {
         YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched => {
@@ -551,6 +569,39 @@ pub fn parse(
         YangMatch::LeafMatched => {
             // Nothing to do.
         }
+    }
+
+    // `ext:default-child` positional value. A container may name a
+    // child whose key can be typed without the child's own keyword
+    // (`show bgp 10.0.0.1` == `show bgp ipv4 10.0.0.1`). Probe that
+    // child's key in a side `Match` so the normal transition below is
+    // left untouched, then either descend into the child (the value is
+    // the winner) or fold the key's completion hints into `mx` (so
+    // `show bgp <tab>` still advertises <A.B.C.D> / <A.B.C.D/M>). IP
+    // literals never collide with the sibling keywords, so this can
+    // only fire on the value branch — no existing command regresses.
+    if !s.set
+        && !s.delete
+        && matches!(s.ymatch, YangMatch::Dir | YangMatch::DirMatched)
+        && let Some(child) = default_child_entry(&entry)
+    {
+        let mut pmx = Match::default();
+        entry_match_default_key(&child, input, &mut pmx, &mut s);
+        if pmx.matched_type >= MatchType::Partial && pmx.matched_type > mx.matched_type {
+            // Inject a zero-width synthetic step for the child name (no
+            // input consumed) and re-parse the same token as the child's
+            // key. The resulting path/args are identical to the explicit
+            // `... <child> <value>` form.
+            s.paths.push(CommandPath {
+                name: child.name.clone(),
+                ymatch: YangMatch::Key.into(),
+                ..Default::default()
+            });
+            s.ymatch = YangMatch::Key;
+            s.index = 0;
+            return parse(input, child, config, s);
+        }
+        comps_append(&mut pmx.comps, &mut mx.comps);
     }
 
     // "delete" overwrite entry completion with config completion.
@@ -800,5 +851,91 @@ mod tests {
         let pat = r"[a-fA-F0-9]{2}(\.[a-fA-F0-9]{4}){3,9}\.[a-fA-F0-9]{2}";
         let (m, _) = match_regexp("not-an-nsap", pat);
         assert_eq!(m, MatchType::None);
+    }
+
+    /// Build the operational-mode (`exec`) entry tree from the real
+    /// YANG so the positional `show bgp …` grammar is exercised end to
+    /// end — the `ext:default-child` matcher feature plus the schema.
+    fn exec_entry() -> Rc<Entry> {
+        use libyang::{YangStore, to_entry};
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("exec").expect("exec mode loads");
+        yang.identity_resolve();
+        let module = yang.find_module("exec").expect("exec module present");
+        to_entry(&yang, module)
+    }
+
+    /// `ext:default-child "ipv4"` lets an address/prefix be typed right
+    /// after `show bgp`; the explicit `show bgp ipv4 …` form parses to
+    /// the very same path + args. `longer-prefix` rides along as a
+    /// trailing keyword, and keyword children (`update-group`) are not
+    /// swallowed by the positional fallback.
+    #[test]
+    fn show_bgp_positional_default_child() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show bgp", "/show/bgp", vec![]),
+            ("show bgp ipv4", "/show/bgp/ipv4", vec![]),
+            ("show bgp ipv4 10.0.0.1", "/show/bgp/ipv4", vec!["10.0.0.1"]),
+            ("show bgp 10.0.0.1", "/show/bgp/ipv4", vec!["10.0.0.1"]),
+            (
+                "show bgp 10.0.0.0/24",
+                "/show/bgp/ipv4",
+                vec!["10.0.0.0/24"],
+            ),
+            (
+                "show bgp 10.0.0.0/24 longer-prefix",
+                "/show/bgp/ipv4/longer-prefix",
+                vec!["10.0.0.0/24"],
+            ),
+            (
+                "show bgp ipv6 2001:db8::1",
+                "/show/bgp/ipv6",
+                vec!["2001:db8::1"],
+            ),
+            (
+                "show bgp ipv6 2001:db8::/48 longer-prefix",
+                "/show/bgp/ipv6/longer-prefix",
+                vec!["2001:db8::/48"],
+            ),
+            ("show bgp update-group", "/show/bgp/update-group", vec![]),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
+    /// The positional shortcut is IPv4-only (`ext:default-child
+    /// "ipv4"`): a bare IPv6 literal after `show bgp` is not a command —
+    /// IPv6 must be reached through the explicit `ipv6` keyword.
+    #[test]
+    fn show_bgp_positional_is_ipv4_only() {
+        let entry = exec_entry();
+        for cmd in ["show bgp 2001:db8::1", "show bgp 2001:db8::/48"] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+    }
+
+    /// `show bgp <tab>` advertises both the AFI keywords and the
+    /// positional value hints contributed by `ext:default-child`.
+    #[test]
+    fn show_bgp_completion_offers_positional_hint() {
+        let entry = exec_entry();
+        let (_code, comps, _state) = parse("show bgp ", entry, None, State::new());
+        let names: Vec<&str> = comps.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"ipv4"), "comps: {names:?}");
+        assert!(names.contains(&"ipv6"), "comps: {names:?}");
+        assert!(names.contains(&"<A.B.C.D>"), "comps: {names:?}");
+        assert!(names.contains(&"<A.B.C.D/M>"), "comps: {names:?}");
     }
 }

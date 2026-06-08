@@ -30,4 +30,15 @@ module extension {
     description "dyanamic completion";
     argument "dynamic";
   }
+
+  extension default-child {
+    description
+      "Names a child of this container whose key may be supplied
+       positionally — without typing the child's own keyword. When no
+       sibling keyword matches the input but it type-matches the named
+       child's key, the CLI matcher descends into that child as if its
+       keyword had been typed (e.g. `show bgp A.B.C.D` is rewritten to
+       `show bgp ipv4 A.B.C.D`). The argument is the child node name.";
+    argument "default-child";
+  }
 }
