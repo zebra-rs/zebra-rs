@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use super::Bgp;
 use super::peer::PeerType;
-use super::update_group::UpdateGroup;
+use super::update_group::{RemovePrivateAsKey, UpdateGroup};
 use crate::config::Args;
 
 /// Snapshot of a single update-group used by all renderers. Built up
@@ -42,8 +42,31 @@ struct SigView {
     /// (eBGP only); the egress AS_PATH has that AS rewritten to the
     /// local AS. `None` (the common case) means no override.
     as_override_target: Option<u32>,
+    /// `Some` when `remove-private-as` is set on the members (eBGP
+    /// only): the modifiers in force and the AS kept for loop
+    /// prevention. `None` (the common case) means no stripping.
+    remove_private_as: Option<RemovePrivateAsView>,
     capabilities: CapsView,
     signature_version: u32,
+}
+
+/// Serializable view of [`RemovePrivateAsKey`] for `show bgp
+/// update-group`.
+#[derive(Debug, Serialize)]
+struct RemovePrivateAsView {
+    all: bool,
+    replace_as: bool,
+    keep_as: u32,
+}
+
+impl From<RemovePrivateAsKey> for RemovePrivateAsView {
+    fn from(k: RemovePrivateAsKey) -> Self {
+        Self {
+            all: k.all,
+            replace_as: k.replace_as,
+            keep_as: k.keep_as,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +149,7 @@ fn build_view(bgp: &Bgp, afi_safi: AfiSafi, group: &UpdateGroup) -> GroupView {
             policy_out: group.sig.policy_out_name.clone(),
             prefix_set_out: group.sig.prefix_set_out_name.clone(),
             as_override_target: group.sig.as_override_target,
+            remove_private_as: group.sig.remove_private_as.map(Into::into),
             capabilities: CapsView {
                 as4_negotiated: group.sig.as4_negotiated,
                 extended_message: group.sig.extended_message,
@@ -261,6 +285,24 @@ fn render_detail_text(view: &GroupView) -> Result<String, std::fmt::Error> {
         view.signature
             .as_override_target
             .map(|asn| asn.to_string())
+            .unwrap_or_else(|| "—".to_string())
+    )?;
+    writeln!(
+        out,
+        "    Remove-private-AS:          {}",
+        view.signature
+            .remove_private_as
+            .as_ref()
+            .map(|rpa| {
+                let mut s = String::from("on");
+                if rpa.all {
+                    s.push_str(" all");
+                }
+                if rpa.replace_as {
+                    s.push_str(" replace-AS");
+                }
+                format!("{s} (keep {})", rpa.keep_as)
+            })
             .unwrap_or_else(|| "—".to_string())
     )?;
     writeln!(out, "    Negotiated capabilities:")?;

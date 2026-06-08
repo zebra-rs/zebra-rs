@@ -296,6 +296,27 @@ pub enum AllowAsIn {
     Origin,
 }
 
+/// Per-neighbor `remove-private-as` mode (zebra-bgp-remove-private-as.yang).
+/// FRR exposes four CLI forms; they collapse to two orthogonal
+/// modifiers on the egress AS_PATH transform (eBGP only):
+///
+/// - `all` (`false` by default): when `false` the strip only runs if the
+///   *entire* AS_PATH is private (FRR's bare `remove-private-AS`); when
+///   `true` it runs even on a mixed public/private path
+///   (`remove-private-AS all`).
+/// - `replace_as` (`false` by default): when `false` each private AS is
+///   dropped from the path; when `true` it is rewritten to the local AS
+///   instead (`remove-private-AS [all] replace-AS`).
+///
+/// In every form the neighbor's own AS is preserved so its RFC 4271 loop
+/// check still works. `None` on [`PeerConfig`] disables the feature.
+/// Serializes flat as `{"all":bool,"replace_as":bool}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct RemovePrivateAs {
+    pub all: bool,
+    pub replace_as: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
@@ -344,6 +365,11 @@ pub struct PeerConfig {
     /// that have transited its own AS. Ignored for iBGP peers (which do
     /// not prepend). Default `false`.
     pub as_override: bool,
+    /// Per-neighbor `remove-private-as` (zebra-bgp-remove-private-as.yang).
+    /// `None` leaves the AS_PATH untouched; `Some` strips (or, with
+    /// `replace_as`, rewrites) private ASNs from every outbound eBGP
+    /// UPDATE before the local-AS prepend. Ignored for iBGP peers.
+    pub remove_private_as: Option<RemovePrivateAs>,
 }
 
 impl Default for PeerConfig {
@@ -366,6 +392,7 @@ impl Default for PeerConfig {
             bfd: PeerBfdConfig::default(),
             allowas_in: None,
             as_override: false,
+            remove_private_as: None,
         }
     }
 }

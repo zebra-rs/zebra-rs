@@ -81,14 +81,22 @@ fn local_as_only_at_origin(aspath: &As4Path, local_as: u32) -> bool {
 }
 
 /// Apply the egress AS_PATH transformation for an eBGP announcement to
-/// `peer`: an optional per-neighbor `as-override` (replace the peer's
-/// own AS with the local AS so its RFC 4271 loop check accepts a route
-/// that transited its AS), followed by the mandatory local-AS prepend.
-/// iBGP peers and routes without an AS_PATH are left untouched. The
-/// override runs *before* the prepend, mirroring FRR's
-/// `bgp_peer_as_override` (announce-check) and the later packet-build
-/// prepend. Call this at every eBGP egress site instead of prepending
-/// inline, so `as-override` is applied uniformly across address families.
+/// `peer`. Three stages run in FRR's order, all *before* the local-AS
+/// prepend (iBGP peers and routes without an AS_PATH are left
+/// untouched):
+///
+/// 1. `remove-private-as`: strip (or, with `replace-as`, rewrite to the
+///    local AS) private ASNs. The bare form only fires when the whole
+///    path is private; `all` fires on any path. The neighbor's own AS is
+///    always kept for loop prevention. Mirrors FRR's
+///    `bgp_peer_remove_private_as`.
+/// 2. `as-override`: replace the peer's own AS with the local AS so its
+///    RFC 4271 loop check accepts a route that transited its AS. Mirrors
+///    FRR's `bgp_peer_as_override`, which runs after remove-private-as.
+/// 3. the mandatory local-AS prepend.
+///
+/// Call this at every eBGP egress site instead of prepending inline, so
+/// the transforms apply uniformly across address families.
 fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
     if !peer.is_ebgp() {
         return;
@@ -96,6 +104,16 @@ fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
     let Some(aspath) = attrs.aspath.as_mut() else {
         return;
     };
+    if let Some(rpa) = peer.config.remove_private_as {
+        // Bare form acts only on an all-private path; `all` acts on any.
+        if rpa.all || aspath.is_all_private() {
+            if rpa.replace_as {
+                aspath.replace_private_as_mut(peer.local_as, peer.remote_as);
+            } else {
+                aspath.remove_private_as_mut(peer.remote_as);
+            }
+        }
+    }
     if peer.config.as_override {
         aspath.replace_as_mut(peer.remote_as, peer.local_as);
     }

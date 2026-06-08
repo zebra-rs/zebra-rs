@@ -18,7 +18,9 @@ use super::route_clean;
 use super::{
     Bgp,
     inst::Callback,
-    peer::{ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, PasswordEncoding, Peer, PeerType},
+    peer::{
+        ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, PasswordEncoding, Peer, PeerType, RemovePrivateAs,
+    },
     timer,
 };
 
@@ -537,6 +539,70 @@ fn config_as_override(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()>
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
     peer.config.as_override = op.is_set();
+    Some(())
+}
+
+/// `set router bgp neighbor X remove-private-as` — the presence
+/// container (zebra-bgp-remove-private-as.yang). Enables egress
+/// private-AS stripping toward this neighbor with both modifiers off
+/// (FRR's bare form: strip only when the whole AS_PATH is private);
+/// `delete` disables the feature entirely.
+///
+/// The `all` / `replace-as` modifiers ride their own callbacks. All
+/// three are order-independent within a commit: this handler uses
+/// `get_or_insert_with` so it never clobbers a modifier that landed
+/// first, and the child handlers seed the container if they arrive
+/// first.
+fn config_remove_private_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        peer.config
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default);
+    } else {
+        peer.config.remove_private_as = None;
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor X remove-private-as all`. Act on a mixed
+/// public/private AS_PATH, not only an all-private one. Deleting just
+/// `all` reverts to the conditional (all-private-only) behaviour while
+/// the container stays enabled; full removal goes through
+/// [`config_remove_private_as`].
+fn config_remove_private_as_all(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        peer.config
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default)
+            .all = true;
+    } else if let Some(rpa) = peer.config.remove_private_as.as_mut() {
+        rpa.all = false;
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor X remove-private-as replace-as`. Rewrite
+/// each stripped private AS to the local AS instead of dropping it.
+/// Deleting just `replace-as` reverts to dropping while the container
+/// stays enabled; full removal goes through [`config_remove_private_as`].
+fn config_remove_private_as_replace_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        peer.config
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default)
+            .replace_as = true;
+    } else if let Some(rpa) = peer.config.remove_private_as.as_mut() {
+        rpa.replace_as = false;
+    }
     Some(())
 }
 
@@ -2264,6 +2330,17 @@ impl Bgp {
         // local AS in the AS_PATH so its RFC 4271 loop check accepts
         // routes that transited its AS (eBGP only).
         self.callback_peer("/as-override", config_as_override);
+
+        // Per-neighbor remove-private-as (zebra-bgp-remove-private-as.yang).
+        // Strip (or, with `replace-as`, rewrite to the local AS) private
+        // ASNs from the egress AS_PATH toward this neighbor; the `all`
+        // modifier widens it from all-private-only to any path (eBGP only).
+        self.callback_peer("/remove-private-as", config_remove_private_as);
+        self.callback_peer("/remove-private-as/all", config_remove_private_as_all);
+        self.callback_peer(
+            "/remove-private-as/replace-as",
+            config_remove_private_as_replace_as,
+        );
     }
 }
 
@@ -2755,6 +2832,79 @@ mod bfd_wiring_tests {
         config_as_override(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
         config_as_override(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
         assert!(!peer_as_override(&bgp, "10.0.0.2"));
+    }
+
+    fn peer_remove_private_as(bgp: &Bgp, addr: &str) -> Option<RemovePrivateAs> {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .remove_private_as
+    }
+
+    /// The bare presence container enables the feature with both
+    /// modifiers off (FRR's plain `remove-private-AS`).
+    #[tokio::test]
+    async fn remove_private_as_set_enables_bare() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_remove_private_as(&bgp, "10.0.0.2"), None);
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            peer_remove_private_as(&bgp, "10.0.0.2"),
+            Some(RemovePrivateAs {
+                all: false,
+                replace_as: false
+            })
+        );
+    }
+
+    /// `all` and `replace-as` arriving in either order both land, and
+    /// neither child clobbers the other or the container. Mirrors the
+    /// order-independence the BGP commit pipeline relies on.
+    #[tokio::test]
+    async fn remove_private_as_modifiers_compose_order_independent() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        // Child callbacks arrive before the container set — `get_or_insert`
+        // must seed it rather than no-op.
+        config_remove_private_as_replace_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set)
+            .unwrap();
+        config_remove_private_as_all(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            peer_remove_private_as(&bgp, "10.0.0.2"),
+            Some(RemovePrivateAs {
+                all: true,
+                replace_as: true
+            })
+        );
+    }
+
+    /// Deleting a single modifier reverts just that modifier; deleting
+    /// the container disables the whole feature.
+    #[tokio::test]
+    async fn remove_private_as_partial_then_full_delete() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_remove_private_as_all(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_remove_private_as_replace_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set)
+            .unwrap();
+
+        // Drop just `all`; the container and `replace-as` stay.
+        config_remove_private_as_all(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            peer_remove_private_as(&bgp, "10.0.0.2"),
+            Some(RemovePrivateAs {
+                all: false,
+                replace_as: true
+            })
+        );
+
+        // Drop the whole container.
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert_eq!(peer_remove_private_as(&bgp, "10.0.0.2"), None);
     }
 }
 

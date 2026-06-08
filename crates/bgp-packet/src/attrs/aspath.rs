@@ -20,6 +20,22 @@ pub const AS_CONFED_SET: u8 = 4;
 #[allow(dead_code)]
 pub const AS_TRANS: u16 = 23456;
 
+/// Inclusive bounds of the 16-bit private AS range (RFC 6996).
+pub const PRIVATE_AS_MIN: u32 = 64512;
+pub const PRIVATE_AS_MAX: u32 = 65535;
+
+/// Inclusive bounds of the 32-bit private AS range (RFC 6996 / IANA
+/// reserved-for-private-use; FRR's `BGP_PRIVATE_AS4_*`).
+pub const PRIVATE_AS4_MIN: u32 = 4200000000;
+pub const PRIVATE_AS4_MAX: u32 = 4294967294;
+
+/// True if `asn` falls in either the 16-bit or 32-bit private AS range.
+/// Mirrors FRR's `BGP_AS_IS_PRIVATE`. Drives `remove-private-as`.
+pub fn is_private_as(asn: u32) -> bool {
+    (PRIVATE_AS_MIN..=PRIVATE_AS_MAX).contains(&asn)
+        || (PRIVATE_AS4_MIN..=PRIVATE_AS4_MAX).contains(&asn)
+}
+
 /// Calculate AS Path segment length according to RFC 4271 and RFC 5065.
 /// - AS_SEQUENCE: Each AS number counts as 1
 /// - AS_SET: The entire set counts as 1 (regardless of size)
@@ -421,6 +437,55 @@ impl As4Path {
         }
     }
 
+    /// True iff every AS in the path is a private AS (RFC 6996 / 32-bit
+    /// IANA reserved ranges). Mirrors FRR's `aspath_private_as_check`,
+    /// including its treatment of an empty path as *not* all-private
+    /// (returns `false`). The bare `remove-private-as` form (without
+    /// `all`) only acts when this holds.
+    pub fn is_all_private(&self) -> bool {
+        let mut seen_any = false;
+        for seg in &self.segs {
+            for &asn in &seg.asn {
+                seen_any = true;
+                if !is_private_as(asn) {
+                    return false;
+                }
+            }
+        }
+        seen_any
+    }
+
+    /// Strip every private AS from all segments, except occurrences
+    /// equal to `keep` — the eBGP neighbor's own AS, retained so the
+    /// neighbor's RFC 4271 loop check still works (mirrors FRR's
+    /// `aspath_remove_private_asns`, which preserves `peer_asn`).
+    /// Segments left empty are dropped and the hop count (`length`) is
+    /// recomputed, since removing ASNs changes it. Used by
+    /// `remove-private-as` on the egress path.
+    pub fn remove_private_as_mut(&mut self, keep: u32) {
+        for seg in self.segs.iter_mut() {
+            seg.asn.retain(|&asn| !is_private_as(asn) || asn == keep);
+        }
+        self.segs.retain(|seg| !seg.asn.is_empty());
+        self.update_length();
+    }
+
+    /// Replace every private AS with `replacement` (the local AS),
+    /// except occurrences equal to `keep` — the neighbor's own AS,
+    /// preserved for loop prevention. A 1:1 substitution (mirrors FRR's
+    /// `aspath_replace_private_asns`), so the hop count is unchanged and
+    /// `length` stays valid without recomputation. Used by
+    /// `remove-private-as replace-as` on the egress path.
+    pub fn replace_private_as_mut(&mut self, replacement: u32, keep: u32) {
+        for seg in self.segs.iter_mut() {
+            for asn in seg.asn.iter_mut() {
+                if is_private_as(*asn) && *asn != keep {
+                    *asn = replacement;
+                }
+            }
+        }
+    }
+
     /// Try to merge two single-segment AS_SEQ paths into one segment.
     fn try_merge_single_seq(&self, other: &Self) -> Option<Self> {
         if self.segs.len() != 1 || other.segs.len() != 1 {
@@ -798,5 +863,100 @@ mod tests {
         aspath.replace_as_mut(65001, 65002);
         aspath.prepend_mut(As4Path::from(vec![65002]));
         assert_eq!(aspath.to_string(), "65002 65002");
+    }
+
+    #[test]
+    fn is_private_as_ranges() {
+        // 16-bit private band (RFC 6996).
+        assert!(!is_private_as(64511));
+        assert!(is_private_as(64512));
+        assert!(is_private_as(65001));
+        assert!(is_private_as(65535));
+        assert!(!is_private_as(65536));
+        // Public ASNs (65000 sits *inside* the private band, so the
+        // public sample is well clear of it).
+        assert!(!is_private_as(100));
+        assert!(!is_private_as(13335));
+        // 32-bit private band; 4294967295 (AS_TRANS-adjacent reserved) is
+        // excluded, matching FRR's upper bound of 4294967294.
+        assert!(!is_private_as(4199999999));
+        assert!(is_private_as(4200000000));
+        assert!(is_private_as(4294967294));
+        assert!(!is_private_as(4294967295));
+    }
+
+    #[test]
+    fn is_all_private_mixed_and_empty() {
+        assert!(As4Path::from_str("65001 65002").unwrap().is_all_private());
+        // A single public AS makes the path not all-private.
+        assert!(!As4Path::from_str("65001 100").unwrap().is_all_private());
+        // An empty path is not all-private (matches FRR).
+        assert!(!As4Path::new().is_all_private());
+    }
+
+    #[test]
+    fn remove_private_as_strips_and_keeps_peer() {
+        // "100 65001 200 65002" toward a peer in AS 200: both private
+        // ASNs are stripped, the public 100/200 stay, and the hop count
+        // drops from 4 to 2.
+        let mut aspath: As4Path = As4Path::from_str("100 65001 200 65002").unwrap();
+        aspath.remove_private_as_mut(200);
+        assert_eq!(aspath.to_string(), "100 200");
+        assert_eq!(aspath.length(), 2);
+
+        // The peer's own AS is preserved even though it is private, so
+        // the neighbor's loop check still fires.
+        let mut aspath: As4Path = As4Path::from_str("100 65001 65002").unwrap();
+        aspath.remove_private_as_mut(65002);
+        assert_eq!(aspath.to_string(), "100 65002");
+        assert_eq!(aspath.length(), 2);
+    }
+
+    #[test]
+    fn remove_private_as_drops_empty_segments() {
+        // An all-private path with no kept AS collapses to empty; the
+        // now-empty segment is dropped rather than emitted zero-length.
+        let mut aspath: As4Path = As4Path::from_str("65001 65002").unwrap();
+        aspath.remove_private_as_mut(100);
+        assert_eq!(aspath.to_string(), "");
+        assert_eq!(aspath.length(), 0);
+        assert!(aspath.segs.is_empty());
+    }
+
+    #[test]
+    fn remove_private_as_reaches_into_sets() {
+        // Private ASNs inside an AS_SET are stripped; a set that still
+        // has a member survives as one hop, an emptied one is dropped.
+        let mut aspath: As4Path = As4Path::from_str("100 {65001 300} 65002").unwrap();
+        aspath.remove_private_as_mut(400);
+        assert_eq!(aspath.to_string(), "100 {300}");
+        assert_eq!(aspath.length(), 2);
+    }
+
+    #[test]
+    fn replace_private_as_substitutes_keeping_peer() {
+        // "100 65001 200 65002" toward AS 200 from local AS 500: each
+        // private AS becomes 500, length is unchanged (1:1 swap).
+        let mut aspath: As4Path = As4Path::from_str("100 65001 200 65002").unwrap();
+        aspath.replace_private_as_mut(500, 200);
+        assert_eq!(aspath.to_string(), "100 500 200 500");
+        assert_eq!(aspath.length(), 4);
+
+        // The peer's own (private) AS is left as-is.
+        let mut aspath: As4Path = As4Path::from_str("65001 65002").unwrap();
+        aspath.replace_private_as_mut(500, 65002);
+        assert_eq!(aspath.to_string(), "500 65002");
+    }
+
+    #[test]
+    fn remove_private_as_egress_sequence_is_strip_then_prepend() {
+        // Full egress transform for bare `remove-private-as` toward a
+        // peer in public AS 200 from local AS 200: the all-private path
+        // "65001" is stripped to empty, then 200 is prepended, so the
+        // neighbor receives just "200" instead of "200 65001".
+        let mut aspath: As4Path = As4Path::from_str("65001").unwrap();
+        aspath.remove_private_as_mut(200);
+        aspath.prepend_mut(As4Path::from(vec![200]));
+        assert_eq!(aspath.to_string(), "200");
     }
 }

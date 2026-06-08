@@ -88,6 +88,10 @@ module config {
     prefix zbao;
   }
 
+  import zebra-bgp-remove-private-as {
+    prefix zbrpa;
+  }
+
   import zebra-bgp-timer {
     prefix zbtm;
   }
