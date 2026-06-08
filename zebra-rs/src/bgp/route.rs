@@ -80,6 +80,35 @@ fn local_as_only_at_origin(aspath: &As4Path, local_as: u32) -> bool {
     !flat[..flat.len() - trailing].contains(&local_as)
 }
 
+/// FRR-style `enforce-first-as` (zebra-bgp-enforce-first-as.yang) inbound
+/// check. Returns `true` when the UPDATE must be dropped because the
+/// neighbor is eBGP, has `enforce-first-as` enabled, and the left-most
+/// AS_PATH segment is not an `AS_SEQUENCE` whose first ASN is the
+/// neighbor's own AS (`peer.remote_as`).
+///
+/// Always `false` for iBGP peers and when the knob is off — iBGP never
+/// prepends, so it has no first-AS guarantee to enforce.
+fn aspath_enforce_first_as_violation(peer: &Peer, aspath: Option<&As4Path>) -> bool {
+    if !peer.config.enforce_first_as || !peer.is_ebgp() {
+        return false;
+    }
+    aspath_first_as_mismatch(aspath, peer.remote_as)
+}
+
+/// True when `aspath`'s left-most segment is not an `AS_SEQUENCE` whose
+/// first ASN is `expected_as`. The pure core of
+/// [`aspath_enforce_first_as_violation`], mirroring FRR's
+/// `aspath_firstas_check`: an absent/empty AS_PATH, a leading `AS_SET`
+/// (or confederation segment), or a leading `AS_SEQUENCE` whose first ASN
+/// is not `expected_as` all count as a mismatch. Unit-tested directly,
+/// independent of `Peer` construction.
+fn aspath_first_as_mismatch(aspath: Option<&As4Path>, expected_as: u32) -> bool {
+    match aspath.and_then(|path| path.segs.front()) {
+        Some(seg) => seg.typ != AS_SEQ || seg.asn.first() != Some(&expected_as),
+        None => true,
+    }
+}
+
 /// Apply the egress AS_PATH transformation for an eBGP announcement to
 /// `peer`. Three stages run in FRR's order, all *before* the local-AS
 /// prepend (iBGP peers and routes without an AS_PATH are left
@@ -1932,6 +1961,16 @@ pub fn route_ipv4_update(
             return;
         }
 
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            eprintln!(
+                "Dropping update for {} from peer {} - enforce-first-as: AS_PATH does not start with {}",
+                nlri.prefix, peer.address, peer.remote_as
+            );
+            return;
+        }
+
         // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
         // prevents routing loops in route reflection scenarios. This happens before
         // the route store in AdjRibIn.
@@ -3170,6 +3209,11 @@ pub fn route_ipv6_update(
         {
             return;
         }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            return;
+        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -3408,6 +3452,11 @@ pub fn route_labelv4_update(
         {
             return;
         }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            return;
+        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -3500,6 +3549,11 @@ pub fn route_labelv6_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
         {
+            return;
+        }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -4008,6 +4062,11 @@ pub fn route_evpn_update(
         {
             return;
         }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            return;
+        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -4149,6 +4208,11 @@ pub fn route_flowspec_update(
         {
             return;
         }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+            return;
+        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -4250,6 +4314,11 @@ pub fn route_srpolicy_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
         {
+            return;
+        }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -4439,6 +4508,11 @@ pub fn route_bgpls_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
         {
+            return;
+        }
+        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
+        // does not begin with this neighbor's own AS (eBGP only).
+        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -10248,5 +10322,60 @@ mod allowas_in_tests {
         assert!(loops("65001 65002 65001", Some(AllowAsIn::Origin)));
         // No local AS at all ⇒ no loop.
         assert!(!loops("65002 65003", Some(AllowAsIn::Origin)));
+    }
+}
+
+#[cfg(test)]
+mod enforce_first_as_tests {
+    use std::str::FromStr;
+
+    use bgp_packet::As4Path;
+
+    use super::aspath_first_as_mismatch;
+
+    // The directly-connected eBGP peer's AS that must be left-most.
+    const PEER_AS: u32 = 65001;
+
+    fn mismatch(path: &str) -> bool {
+        let aspath = As4Path::from_str(path).unwrap();
+        aspath_first_as_mismatch(Some(&aspath), PEER_AS)
+    }
+
+    #[test]
+    fn first_as_matches_peer_as() {
+        // Left-most AS is the peer's AS ⇒ no violation.
+        assert!(!mismatch("65001"));
+        assert!(!mismatch("65001 65002 65003"));
+        // The peer prepended its own AS several times ⇒ still left-most.
+        assert!(!mismatch("65001 65001 65002"));
+    }
+
+    #[test]
+    fn first_as_differs_from_peer_as() {
+        // A foreign left-most AS ⇒ violation (the peer did not prepend
+        // its own AS first).
+        assert!(mismatch("65099 65001"));
+        assert!(mismatch("65002 65001"));
+        // The peer's AS is present but not left-most ⇒ still a violation.
+        assert!(mismatch("65003 65001 65002"));
+    }
+
+    #[test]
+    fn leading_non_sequence_segment_violates() {
+        // A leading AS_SET (`{}`) is not an AS_SEQUENCE ⇒ violation even
+        // though the set contains the peer's AS (mirrors FRR's
+        // `aspath_firstas_check`, which requires AS_SEQUENCE).
+        assert!(mismatch("{65001} 65002"));
+        // A leading confederation sequence (`[]`) likewise violates.
+        assert!(mismatch("[65001] 65002"));
+    }
+
+    #[test]
+    fn absent_or_empty_aspath_violates() {
+        // No AS_PATH at all ⇒ violation (an eBGP update must carry one).
+        assert!(aspath_first_as_mismatch(None, PEER_AS));
+        // A path whose left-most segment carries no AS ⇒ violation.
+        let empty_seq = As4Path::from(vec![]);
+        assert!(aspath_first_as_mismatch(Some(&empty_seq), PEER_AS));
     }
 }

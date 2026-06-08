@@ -1397,6 +1397,11 @@ struct Neighbor<'a> {
     /// `replace_as`, rewrites) private ASNs on outbound eBGP UPDATEs.
     #[serde(skip_serializing_if = "Option::is_none")]
     remove_private_as: Option<RemovePrivateAs>,
+    /// FRR-style `neighbor X enforce-first-as` flag
+    /// (zebra-bgp-enforce-first-as.yang). When true, an inbound eBGP
+    /// UPDATE is dropped unless its AS_PATH begins with this neighbor's
+    /// own AS.
+    enforce_first_as: bool,
     /// GTSM / `ttl-security` (RFC 5082): the session only accepts a
     /// directly-connected peer (received TTL 255). Mirrors
     /// `peer.config.transport.ttl_security`.
@@ -1547,6 +1552,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         allowas_in: peer.config.allowas_in,
         as_override: peer.config.as_override,
         remove_private_as: peer.config.remove_private_as,
+        enforce_first_as: peer.config.enforce_first_as,
         ttl_security: peer.config.transport.ttl_security,
         ebgp_multihop: peer.config.transport.ebgp_multihop,
         neighbor_group: peer.config.neighbor_group.clone(),
@@ -1658,6 +1664,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             form.push_str(" replace-AS");
         }
         writeln!(out, "  Private AS removal: {form} (outbound)")?;
+    }
+
+    if neighbor.enforce_first_as {
+        writeln!(
+            out,
+            "  Enforce-first-AS enabled (drop inbound updates not starting with peer AS)"
+        )?;
     }
 
     if neighbor.ttl_security {

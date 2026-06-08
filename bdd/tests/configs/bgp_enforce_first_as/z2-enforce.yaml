@@ -1,0 +1,25 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      identifier: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      # Presence container -> bare `set ... enforce-first-as`. After the
+      # session is bounced, z2 re-receives 10.0.0.1/32 with AS_PATH
+      # "65099 65001"; the left-most AS (65099) is not z1's AS (65001), so
+      # the inbound first-AS check drops the update.
+      enforce-first-as:

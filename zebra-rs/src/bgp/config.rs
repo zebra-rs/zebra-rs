@@ -606,6 +606,18 @@ fn config_remove_private_as_replace_as(bgp: &mut Bgp, mut args: Args, op: Config
     Some(())
 }
 
+/// `set router bgp neighbor X enforce-first-as` — the presence container
+/// (zebra-bgp-enforce-first-as.yang). Enables the inbound first-AS check
+/// for this neighbor (drop an eBGP UPDATE whose AS_PATH does not begin
+/// with the neighbor's own AS); `delete` disables it. The flag is a no-op
+/// for iBGP peers, which never prepend.
+fn config_enforce_first_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+    peer.config.enforce_first_as = op.is_set();
+    Some(())
+}
+
 /// `set router bgp neighbor X bfd enable true|false` — flips the
 /// Reconcile this neighbor's live BFD subscription with its current
 /// `peer.config.bfd` state. Idempotent and order-independent: every
@@ -2341,6 +2353,12 @@ impl Bgp {
             "/remove-private-as/replace-as",
             config_remove_private_as_replace_as,
         );
+
+        // Per-neighbor enforce-first-as (zebra-bgp-enforce-first-as.yang).
+        // The presence container drops an inbound eBGP UPDATE unless the
+        // left-most AS_PATH segment begins with the neighbor's own AS
+        // (eBGP only).
+        self.callback_peer("/enforce-first-as", config_enforce_first_as);
     }
 }
 
@@ -2905,6 +2923,35 @@ mod bfd_wiring_tests {
         // Drop the whole container.
         config_remove_private_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
         assert_eq!(peer_remove_private_as(&bgp, "10.0.0.2"), None);
+    }
+
+    fn peer_enforce_first_as(bgp: &Bgp, addr: &str) -> bool {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .enforce_first_as
+    }
+
+    /// `enforce-first-as` defaults off and the presence container turns
+    /// it on.
+    #[tokio::test]
+    async fn enforce_first_as_set_enables() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(!peer_enforce_first_as(&bgp, "10.0.0.2"));
+        config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(peer_enforce_first_as(&bgp, "10.0.0.2"));
+    }
+
+    /// Deleting the presence container turns `enforce-first-as` back off.
+    #[tokio::test]
+    async fn enforce_first_as_delete_disables() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert!(!peer_enforce_first_as(&bgp, "10.0.0.2"));
     }
 }
 

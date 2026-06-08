@@ -92,6 +92,10 @@ module config {
     prefix zbrpa;
   }
 
+  import zebra-bgp-enforce-first-as {
+    prefix zbef;
+  }
+
   import zebra-bgp-timer {
     prefix zbtm;
   }
