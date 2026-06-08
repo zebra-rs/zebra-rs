@@ -55,7 +55,15 @@ Feature: BGP TTL Security / GTSM (RFC 5082)
   Scenario: Enabling ttl-security on both ends establishes the session
     Given the test topology exists
     When I apply config "z2-2.yaml" to namespace "z2"
-    And I wait 5 seconds for BGP to operate
+    # Enabling ttl-security bounces z2's session so it reconnects with the
+    # new egress TTL. z1 (unchanged) may still hold the stale connection
+    # from the asymmetric phase, on which z2 was sending below 255. Clear
+    # both so each reconnects cleanly with GTSM rather than waiting out a
+    # hold timer, then allow for the post-bounce idle-hold (~5s) plus
+    # session setup before checking.
+    And I clear namespace "z1" neighbor "192.168.0.2"
+    And I clear namespace "z2" neighbor "192.168.0.1"
+    And I wait 15 seconds for BGP to operate
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
 
