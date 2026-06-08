@@ -462,7 +462,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     if helper_entered {
         nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
     }
-    nbr.ensure_endx_sid(
+    nbr.reconcile_endx_sid(
         &ifname,
         link.sr_locator,
         link.watched_locator,
@@ -719,7 +719,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         if helper_entered {
             nbr.event(Message::Ifsm(HelloOriginate, nbr.ifindex, Some(level)));
         }
-        nbr.ensure_endx_sid(
+        nbr.reconcile_endx_sid(
             &ifname,
             link.sr_locator,
             link.watched_locator,

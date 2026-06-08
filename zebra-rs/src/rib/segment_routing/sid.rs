@@ -146,10 +146,11 @@ impl fmt::Display for SidAllocationType {
     }
 }
 
-/// Owner of a SID, rendered as "isis(0)" / "bgp(0)" in the show table.
-/// The instance number gives operators a hook for future multi-instance
-/// support (separate L1 / L2 IS-IS instances, multiple BGP VRFs, ...);
-/// today every protocol passes 0.
+/// Owner of a SID, rendered by the protocol name alone ("isis" / "bgp")
+/// in the show table. The instance number is retained as a hook for
+/// future multi-instance support (separate L1 / L2 IS-IS instances,
+/// multiple BGP VRFs, ...) but is not displayed today — every protocol
+/// passes 0 and there is no protocol-instance support yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidOwner {
     pub proto: String,
@@ -167,7 +168,10 @@ impl SidOwner {
 
 impl fmt::Display for SidOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})", self.proto, self.instance)
+        // Protocol name only. zebra-rs has no protocol-instance support
+        // (`instance` is always 0), so an `isis(0)`-style suffix would be
+        // noise in `show segment-routing srv6 sid` and the install logs.
+        write!(f, "{}", self.proto)
     }
 }
 
@@ -304,9 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn owner_renders_with_instance_in_parens() {
-        assert_eq!(SidOwner::new("isis", 0).to_string(), "isis(0)");
-        assert_eq!(SidOwner::new("bgp", 1).to_string(), "bgp(1)");
+    fn owner_renders_protocol_name_only() {
+        // No protocol-instance support, so the instance is not shown.
+        assert_eq!(SidOwner::new("isis", 0).to_string(), "isis");
+        assert_eq!(SidOwner::new("bgp", 1).to_string(), "bgp");
     }
 
     #[test]

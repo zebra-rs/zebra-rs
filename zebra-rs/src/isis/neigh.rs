@@ -101,14 +101,57 @@ impl Neighbor {
         self.tx.send(message).unwrap();
     }
 
-    /// Make sure this neighbor has an End.X SID allocated and
-    /// registered with the RIB. Idempotent — if a SID is already
-    /// recorded, returns immediately.
+    /// Does this neighbor advertise the IPv6 NLPID (0x8E) in its
+    /// Protocols Supported TLV (RFC 1195)? An End.X SID forwards over
+    /// IPv6, so a neighbor that doesn't speak IPv6 must not get one.
+    fn advertises_ipv6(&self) -> bool {
+        let ipv6: u8 = IsisProto::Ipv6.into();
+        self.proto
+            .as_ref()
+            .is_some_and(|p| p.nlpids.contains(&ipv6))
+    }
+
+    /// Eligible for an SRv6 End.X (adjacency) SID: the neighbor both
+    /// advertises IPv6 (Protocols Supported TLV) AND has given us an
+    /// IPv6 link-local (its IPv6 IIH address TLV, TLV 232) to use as the
+    /// forwarding nexthop. Either can appear or disappear across Hellos —
+    /// an IPv4-only neighbor that later enables IPv6, or vice versa — so
+    /// `reconcile_endx_sid` re-checks this on every Hello.
+    fn endx_eligible(&self) -> bool {
+        self.advertises_ipv6() && !self.addr6l.is_empty()
+    }
+
+    /// Re-originate the self-LSP (both levels; the per-level guard in
+    /// `process_lsp_originate` drops the one this instance doesn't run)
+    /// when the adjacency is already Up, so an End.X SID allocated or
+    /// released *after* the adjacency came up reaches the LSP without
+    /// waiting for the periodic refresh. While the adjacency is still
+    /// coming up the normal Up-transition (DIS election / AdjacencyUp)
+    /// re-originates for us, so we skip the redundant emit here.
+    fn reoriginate_endx_if_up(&self) {
+        if self.state == NfsmState::Up {
+            let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+            let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+        }
+    }
+
+    /// Reconcile this neighbor's End.X (adjacency) SID against its
+    /// current eligibility ([`Neighbor::endx_eligible`]).
     ///
-    /// Skipped silently when the locator isn't resolved (no prefix to
-    /// derive a SID from) or when ELIB is exhausted; the next Hello
-    /// re-tries with whatever state has changed since.
-    pub fn ensure_endx_sid(
+    /// - Eligible but no SID yet → allocate one and register it with the
+    ///   RIB. Skipped silently when the locator isn't resolved (no prefix
+    ///   to derive a SID from) or when ELIB is exhausted; the next Hello
+    ///   retries with whatever state changed since.
+    /// - Not eligible but a SID is held (the neighbor stopped advertising
+    ///   IPv6, or withdrew its IPv6 link-local) → release it so our LSP
+    ///   stops advertising an End.X we have no IPv6 nexthop to forward
+    ///   over.
+    ///
+    /// Called on every Hello (after `nbr_hello_interpret` refreshes the
+    /// neighbor's protocols / addresses), so a change in the neighbor's
+    /// IPv6 capability is picked up at the next Hello and, if the
+    /// adjacency is Up, the LSP re-originated immediately.
+    pub fn reconcile_endx_sid(
         &mut self,
         ifname: &str,
         sr_locator: &Option<Locator>,
@@ -116,6 +159,17 @@ impl Neighbor {
         elib: &mut ElibPool,
         rib_client: &crate::rib::client::RibClient,
     ) {
+        if !self.endx_eligible() {
+            // No IPv6 forwarding path to this neighbor (no IPv6 in its
+            // Protocols Supported TLV, or no IPv6 link-local in its
+            // Hello). Drop any SID we previously allocated.
+            if self.endx_sid.is_some() {
+                self.release_endx_sid(elib, rib_client);
+                self.reoriginate_endx_if_up();
+            }
+            return;
+        }
+
         if self.endx_sid.is_some() {
             return;
         }
@@ -137,12 +191,9 @@ impl Neighbor {
             elib.release(function);
             return;
         };
-        // End.X needs an IPv6 nexthop — by convention the neighbor's
-        // link-local from its IPv6 IIH address TLV. If we haven't
-        // heard one yet (IPv4-only deployment, or Hellos arrived
-        // before the IPv6 addr exchange), the SID still registers so
-        // the LSP advertises the capability, but `nh6: None` will
-        // tell the FIB to skip the seg6local install.
+        // End.X forwards to the neighbor's IPv6 link-local (from its
+        // IPv6 IIH address TLV). `endx_eligible` guarantees `addr6l` is
+        // non-empty, so this nexthop is always present here.
         let nh6 = self.addr6l.first().copied();
         let (behavior, structure) = match locator.behavior {
             Some(crate::rib::LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
@@ -164,6 +215,7 @@ impl Neighbor {
         };
         let _ = rib_client.send(rib::Message::SidAdd { sid });
         self.endx_sid = Some((function, addr));
+        self.reoriginate_endx_if_up();
     }
 
     /// Release the neighbor's End.X SID, sending a SidDel and freeing
@@ -450,4 +502,50 @@ pub fn show_detail(
     }
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_neighbor() -> Neighbor {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        Neighbor::new(tx, 1, NetworkType::P2p, IsisSysId::default(), None)
+    }
+
+    // SRv6 End.X eligibility: a neighbor needs BOTH the IPv6 NLPID in its
+    // Protocols Supported TLV AND an IPv6 link-local (the forwarding
+    // nexthop) before we carve it an End.X SID.
+    #[test]
+    fn endx_eligible_requires_ipv6_proto_and_linklocal() {
+        let v4: u8 = IsisProto::Ipv4.into();
+        let v6: u8 = IsisProto::Ipv6.into();
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+
+        // Nothing learned yet.
+        let mut nbr = test_neighbor();
+        assert!(!nbr.endx_eligible());
+
+        // IPv6 in protocols but no link-local nexthop → not eligible.
+        nbr.proto = Some(IsisTlvProtoSupported {
+            nlpids: vec![v4, v6],
+        });
+        assert!(!nbr.endx_eligible());
+
+        // Link-local present but protocols are IPv4-only → not eligible.
+        nbr.proto = Some(IsisTlvProtoSupported { nlpids: vec![v4] });
+        nbr.addr6l = vec![ll];
+        assert!(!nbr.endx_eligible());
+
+        // Both present → eligible.
+        nbr.proto = Some(IsisTlvProtoSupported {
+            nlpids: vec![v4, v6],
+        });
+        assert!(nbr.endx_eligible());
+
+        // Losing IPv6 from the protocols (peer disabled IPv6) drops
+        // eligibility again — the re-evaluation path that releases a SID.
+        nbr.proto = Some(IsisTlvProtoSupported { nlpids: vec![v4] });
+        assert!(!nbr.endx_eligible());
+    }
 }
