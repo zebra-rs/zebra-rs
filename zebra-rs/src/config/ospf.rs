@@ -5,6 +5,13 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_ospf(config: &ConfigManager) {
+    // Idempotent — see `spawn_ospfv3`. `commit_config` calls this on
+    // every commit whose diff touches `router ospf`; re-spawning would
+    // replace the live task and discard its LSDB / translator state.
+    // Config reaches the running instance via its `cm` subscription.
+    if config.protocol_tasks.borrow().contains_key("ospf") {
+        return;
+    }
     let (rib_client, rib_rx) = config.subscribe_to_rib("ospf");
     let ctx = ProtoContext::default_table(rib_client);
     // `"ospf"` is the default-instance proto label; per-VRF children

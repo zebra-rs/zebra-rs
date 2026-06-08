@@ -5,6 +5,13 @@ use crate::rib;
 use super::ConfigManager;
 
 pub fn spawn_isis(config: &ConfigManager) {
+    // Idempotent — see `spawn_ospfv3`. `commit_config` calls this on
+    // every commit whose diff touches `router isis`; re-spawning would
+    // replace the live task and discard its LSDB / adjacencies. Config
+    // reaches the running instance via its `cm` subscription.
+    if config.protocol_tasks.borrow().contains_key("isis") {
+        return;
+    }
     // Capture BFD's client handle so per-interface `isis bfd` can later
     // submit Subscribe / Unsubscribe. `commit_config` spawns BFD
     // eagerly before IS-IS, so the handle is always live here —
