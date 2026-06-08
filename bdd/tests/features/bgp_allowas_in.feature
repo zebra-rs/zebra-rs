@@ -71,3 +71,15 @@ Feature: BGP allowas-in relaxes the inbound AS_PATH loop check
     Then BGP session in "z3" to "192.168.1.2" should be "Established"
     And BGP route in "z3" has "10.0.0.1/32"
     And show command "show ip bgp neighbors" in namespace "z3" should contain "Allowas-in: origin"
+
+  # Pure P2P topology (no bridge): deleting each namespace destroys the veth
+  # pair ends it holds, so only the daemons and namespaces need teardown.
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I stop zebra-rs in namespace "z3"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    And I delete namespace "z3"
+    Then the test environment should be clean
