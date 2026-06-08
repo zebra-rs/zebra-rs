@@ -25,6 +25,13 @@ install:
 	sudo cp target/release/vtyctl /usr/bin/vtyctl
 	sudo cp target/release/vtyhelper /usr/bin/vtyhelper
 	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' /usr/bin/zebra-rs
+	# Refresh the system-wide YANG schema the daemon loads at runtime.
+	# A daemon started without --yang-path and under sudo (HOME=/root)
+	# resolves to /etc/zebra-rs/yang, so a stale copy here silently
+	# rejects newly-added config (e.g. a new neighbor knob) even though
+	# the binary supports it. Keep this in lockstep with the binaries.
+	sudo mkdir -p /etc/zebra-rs/yang
+	sudo cp zebra-rs/yang/*.yang /etc/zebra-rs/yang/
 
 # System-wide installation of vtypam to /usr/sbin with file caps.
 # Use this on production hosts; the per-user `install` target above
