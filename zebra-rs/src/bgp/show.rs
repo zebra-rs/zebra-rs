@@ -325,6 +325,19 @@ fn show_ecom(attr: &BgpAttr) -> String {
     }
 }
 
+/// Human-readable name for an SRv6 endpoint-behavior codepoint (IANA
+/// "SRv6 Endpoint Behaviors", RFC 8986). Only the L3-service decap
+/// behaviors that ride a BGP Prefix-SID SRv6 L3 Service TLV are named;
+/// any other codepoint renders as its hex value.
+fn srv6_behavior_name(behavior: u16) -> String {
+    match behavior {
+        SRV6_BEHAVIOR_END_DT6 => "End.DT6".to_string(),
+        SRV6_BEHAVIOR_END_DT4 => "End.DT4".to_string(),
+        SRV6_BEHAVIOR_END_DT46 => "End.DT46".to_string(),
+        other => format!("0x{:04x}", other),
+    }
+}
+
 #[derive(Serialize)]
 struct BgpSummaryJson {
     router_id: String,
@@ -1066,7 +1079,9 @@ fn write_bgp_entry_detail<V: BgpShowView>(
             "incomplete"
         };
 
-        // Build attribute line
+        // Primary attribute line. Origin is always present; MED and
+        // localpref appear only when carried; weight is computed locally
+        // for every path, so it is always shown (matching the table view).
         let mut attr_parts = vec![format!("Origin {}", origin_str)];
 
         if let Some(med) = &rib.attr.med {
@@ -1077,6 +1092,8 @@ fn write_bgp_entry_detail<V: BgpShowView>(
             attr_parts.push(format!("localpref {}", local_pref.local_pref));
         }
 
+        attr_parts.push(format!("weight {}", rib.weight));
+
         writeln!(out, "    {}", attr_parts.join(", "))?;
 
         // Display AS path if present
@@ -1084,6 +1101,28 @@ fn write_bgp_entry_detail<V: BgpShowView>(
             && !aspath.segs.is_empty()
         {
             writeln!(out, "    AS path: {}", aspath)?;
+        }
+
+        // Communities (RFC 1997), extended communities (RFC 4360), and
+        // large communities (RFC 8092) — one line each, only when the
+        // attribute is carried and decodes to a non-empty list.
+        if let Some(com) = &rib.attr.com {
+            let s = com.to_string();
+            if !s.is_empty() {
+                writeln!(out, "    Community: {}", s)?;
+            }
+        }
+        if let Some(ecom) = &rib.attr.ecom {
+            let s = ecom.to_string();
+            if !s.is_empty() {
+                writeln!(out, "    Extended community: {}", s)?;
+            }
+        }
+        if let Some(lcom) = &rib.attr.lcom {
+            let s = lcom.to_string();
+            if !s.is_empty() {
+                writeln!(out, "    Large community: {}", s)?;
+            }
         }
 
         // Display route reflection attributes if present (RFC 4456)
@@ -1105,11 +1144,22 @@ fn write_bgp_entry_detail<V: BgpShowView>(
             writeln!(out, "{}", cluster_ids.join(" "))?;
         }
 
-        // Surface BGP Color extended communities (RFC 9012 §4.3)
-        // and the BGP Prefix-SID Label-Index (RFC 8669 §3.1).
-        // The future color-aware nexthop resolver consumes these;
-        // surfacing here gives operators visibility before the
-        // resolver lands.
+        // Aggregation (RFC 4271 §5.1.6/§5.1.7).
+        if rib.attr.atomic_aggregate.is_some() {
+            writeln!(out, "    Atomic aggregate")?;
+        }
+        if let Some(agg) = &rib.attr.aggregator {
+            writeln!(out, "    Aggregator: AS {} {}", agg.asn, agg.ip)?;
+        }
+
+        // Accumulated IGP metric (RFC 7311).
+        if let Some(aigp) = &rib.attr.aigp {
+            writeln!(out, "    AIGP metric: {}", aigp.aigp)?;
+        }
+
+        // Surface BGP Color extended communities (RFC 9012 §4.3). The
+        // color-aware nexthop resolver consumes these; surfacing here
+        // gives operators visibility into the CO bits.
         let colors: Vec<String> = rib
             .attr
             .colors()
@@ -1118,8 +1168,36 @@ fn write_bgp_entry_detail<V: BgpShowView>(
         if !colors.is_empty() {
             writeln!(out, "    Color: {}", colors.join(", "))?;
         }
+
+        // MPLS labels: the received service/transport label and, for
+        // BGP-LU rows, the label we allocated locally for this prefix.
+        if let Some(label) = &rib.label {
+            writeln!(out, "    Received label: {}", label.label)?;
+        }
+        if let Some(local_label) = rib.local_label {
+            writeln!(out, "    Local label: {}", local_label)?;
+        }
+
+        // BGP Prefix-SID (RFC 8669 §3.1 Label-Index for SR-MPLS; RFC 9252
+        // SRv6 L3 Service SID + endpoint behavior). The SID is labelled
+        // "Local SID" when we originated the route (the SID is ours) and
+        // "Remote SID" when it was learned from a peer.
         if let Some(li) = rib.attr.prefix_sid_label_index() {
             writeln!(out, "    Prefix-SID Label-Index: {}", li)?;
+        }
+        if let Some((sid, behavior)) = rib.attr.srv6_l3_sid() {
+            let kind = if rib.is_originated() {
+                "Local SID"
+            } else {
+                "Remote SID"
+            };
+            writeln!(
+                out,
+                "    {}: {} ({})",
+                kind,
+                sid,
+                srv6_behavior_name(behavior)
+            )?;
         }
 
         writeln!(out)?;
@@ -2863,6 +2941,124 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         assert_eq!(
             afi_safi_summary_label(Afi::Ip, Safi::MplsVpn),
             "VPNv4 Unicast"
+        );
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Minimal `BgpShowView` for exercising [`write_bgp_entry_detail`] —
+    /// the renderer only consults `peers().addr_of(...)`, so an empty
+    /// `PeerMap` is enough (unknown idents resolve to "self").
+    struct TestView {
+        rib: LocalRib,
+        peers: PeerMap,
+    }
+    impl BgpShowView for TestView {
+        fn local_rib(&self) -> &LocalRib {
+            &self.rib
+        }
+        fn peers(&self) -> &PeerMap {
+            &self.peers
+        }
+        fn router_id(&self) -> Ipv4Addr {
+            Ipv4Addr::new(10, 0, 0, 1)
+        }
+        fn asn(&self) -> u32 {
+            65001
+        }
+    }
+
+    fn test_view() -> TestView {
+        TestView {
+            rib: LocalRib::default(),
+            peers: PeerMap::new(),
+        }
+    }
+
+    /// Build a `BgpRib` carrying an SRv6 End.DT46 Prefix-SID, of the
+    /// given route type and weight.
+    fn srv6_rib(typ: BgpRibType, weight: u32) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.prefix_sid = Some(PrefixSid {
+            tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                sids: vec![Srv6SidInfo::new(
+                    "2001:dead:8:0:2::".parse::<Ipv6Addr>().unwrap(),
+                    0,
+                    SRV6_BEHAVIOR_END_DT46,
+                    None,
+                )],
+                ..Default::default()
+            })],
+        });
+        attr.aigp = Some(Aigp::new(50));
+        BgpRib::new(
+            0,
+            Ipv4Addr::new(10, 0, 0, 1),
+            typ,
+            0,
+            weight,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn srv6_behavior_names() {
+        assert_eq!(srv6_behavior_name(SRV6_BEHAVIOR_END_DT46), "End.DT46");
+        assert_eq!(srv6_behavior_name(SRV6_BEHAVIOR_END_DT6), "End.DT6");
+        assert_eq!(srv6_behavior_name(SRV6_BEHAVIOR_END_DT4), "End.DT4");
+        assert_eq!(srv6_behavior_name(0x1234), "0x1234");
+    }
+
+    /// A self-originated route shows its weight, the AIGP metric, and the
+    /// SRv6 SID labelled "Local SID" with the decoded endpoint behavior.
+    #[test]
+    fn detail_originated_shows_local_sid_weight_and_aigp() {
+        let view = test_view();
+        let mut out = String::new();
+        write_bgp_entry_detail(
+            &mut out,
+            &view,
+            "2001:db8:ff00:2::/64",
+            &[srv6_rib(BgpRibType::Originated, 32768)],
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("BGP routing table entry for 2001:db8:ff00:2::/64"),
+            "header missing:\n{out}"
+        );
+        assert!(out.contains("weight 32768"), "weight missing:\n{out}");
+        assert!(out.contains("AIGP metric: 50"), "AIGP missing:\n{out}");
+        assert!(
+            out.contains("Local SID: 2001:dead:8:0:2:: (End.DT46)"),
+            "Local SID missing:\n{out}"
+        );
+    }
+
+    /// A learned route labels the same SID "Remote SID" (it belongs to
+    /// the originating PE, not us).
+    #[test]
+    fn detail_received_shows_remote_sid() {
+        let view = test_view();
+        let mut out = String::new();
+        write_bgp_entry_detail(
+            &mut out,
+            &view,
+            "2001:db8:ff00:2::/64",
+            &[srv6_rib(BgpRibType::IBGP, 0)],
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("Remote SID: 2001:dead:8:0:2:: (End.DT46)"),
+            "Remote SID missing:\n{out}"
         );
     }
 }
