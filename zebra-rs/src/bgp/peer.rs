@@ -1884,6 +1884,28 @@ fn handle_peer_connection(
         return Some(stream);
     };
     if let Some(peer) = bgp.peers.get_mut_by_key(&key) {
+        // Pin the egress TTL on the freshly accepted socket *before* we
+        // decide its fate. For a `ttl-security` (GTSM) peer this is what
+        // lets a rejected or dropped inbound connection be torn down
+        // cleanly: the NOTIFICATION and the kernel FIN/RST that close the
+        // socket must leave at TTL 255, or the peer's `IP_MINTTL` = 255
+        // floor silently drops them and the peer never learns the
+        // connection is gone — it keeps retransmitting its OPEN into a
+        // black hole and stays wedged in OpenSent until its hold timer
+        // (minutes) expires. This bites whenever two GTSM speakers connect
+        // at once (a collision after a simultaneous restart / clear): the
+        // loser's teardown is invisible to the winner. The keep paths
+        // (`fsm_connected` / `start_collision_conn`) re-apply this together
+        // with the ingress floor, so the early set is harmless redundancy
+        // for them.
+        {
+            use std::os::fd::AsRawFd;
+            let _ = super::ttl::set_egress_ttl(
+                stream.as_raw_fd(),
+                peer.address.is_ipv4(),
+                peer.session_ttl(),
+            );
+        }
         match peer.state {
             State::Idle => {
                 // No session established yet - just drop (sends TCP RST/FIN)
