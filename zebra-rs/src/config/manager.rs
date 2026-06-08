@@ -1382,4 +1382,31 @@ mod yang_load_tests {
             "`set router isis interface <name> passive true` must be a valid settable path",
         );
     }
+
+    /// The top-level `bfd { tracing }` flag (conditional-tracing toggle) must
+    /// be a settable path. It's a hand-added top-level container in
+    /// `config.yang`; the BFD task reads it off the config broadcast.
+    #[test]
+    fn bfd_tracing_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse("set bfd tracing true", entry, None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set bfd tracing true` must be a valid settable path",
+        );
+    }
 }

@@ -182,6 +182,34 @@ receive path is alive).
 
 Each command also accepts a trailing `json` for machine-readable output.
 
+## Tracing
+
+The BFD task is quiet by default. A single runtime flag turns on its
+diagnostic traces — session FSM transitions, control-packet handling, and
+the Echo reflector (`xdp-bfd-echo`) lifecycle:
+
+```
+set bfd tracing true     # enable
+set bfd tracing false    # disable (or: delete bfd tracing)
+```
+
+It is a runtime toggle — no restart, and no rebuild — backed by a single
+global flag, so it also covers the parts of BFD that run outside the main
+task (the socket read/write tasks and the per-interface Echo reflector
+IPC). It is not per-session or per-interface; it is on or off for the
+whole BFD task.
+
+The info- and warn-level traces appear at the **default** log level once
+the flag is on, so `set bfd tracing true` is usually enough. The more
+verbose per-packet, debug-level traces additionally need the log level
+raised (e.g. `RUST_LOG=debug`), matching their original verbosity. With
+the flag off, every BFD trace is suppressed regardless of `RUST_LOG`.
+
+This is distinct from the per-protocol BFD tracing under
+`router bgp tracing { bfd }`, `router isis tracing { bfd }`, etc., which
+trace how *that protocol* reacts to BFD events; `set bfd tracing` traces
+the BFD task itself.
+
 ## Echo function
 
 The BFD **Echo function** (RFC 5880 §6.4 / RFC 5881 §6) is a forwarding-plane

@@ -346,6 +346,19 @@ module config {
       uses "vty:vty";
     }
 
+    container bfd {
+      ext:help "BFD (Bidirectional Forwarding Detection) configuration";
+      leaf tracing {
+        type boolean;
+        description
+          "Enable conditional tracing for the BFD task. When true, the
+           BFD task emits its info / warn / debug traces (session FSM,
+           packet handling, Echo reflector lifecycle); when false
+           (the default) they are suppressed. Runtime toggle, no
+           restart needed: `set bfd tracing true`.";
+      }
+    }
+
     container affinity-map {
       ext:help "Named affinity (admin-group) table";
       // Global named affinity table (RFC 7308 Extended Admin Group).

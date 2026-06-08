@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::{Args, ConfigChannel, DisplayRequest, ShowChannel, path_from_command};
+use crate::config::{
+    Args, ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
+};
 use crate::context::{ProtoContext, Task};
 
 use super::fsm::Event;
@@ -13,6 +15,7 @@ use super::network::{WriteRequest, read_packet, read_packet_v6, write_packet, wr
 use super::session::{Session, SessionKey, SessionParams, SessionTable, StateChange};
 use super::socket::{BFD_MULTI_HOP_PORT, BFD_SINGLE_HOP_PORT, bfd_socket_ipv4, bfd_socket_ipv6};
 use super::timer::{InitialParams, TimerCmd, session_timer};
+use super::trace::{bfd_debug, bfd_info, bfd_warn};
 
 /// Identifier for a BFD subscriber. Conventionally the proto name
 /// ("bgp", "ospf", "isis", "static"), plus an optional disambiguator
@@ -29,8 +32,9 @@ pub type ShowCallback = fn(&Bfd, Args, bool) -> Result<String, std::fmt::Error>;
 /// session table, a per-session timer handle map, and the
 /// client-subscription registry. Read and write tasks are tokio-spawned
 /// at construction and feed the event loop via `main_tx` / `write_tx`.
-/// BFD has no config of its own; the config-manager subscription is just
-/// drained through `cm.rx`, and external clients (BGP / OSPF / IS-IS /
+/// BFD's only own config is the top-level `bfd { tracing }` flag (handled
+/// via `cm.rx` in [`Self::process_cm_msg`]); every other config-manager
+/// broadcast is drained, and external clients (BGP / OSPF / IS-IS /
 /// static) submit subscribe/unsubscribe requests through `client_req.rx`.
 pub struct Bfd {
     pub rx: UnboundedReceiver<Message>,
@@ -39,10 +43,11 @@ pub struct Bfd {
     /// that bind to ephemeral ports — `local_addr.port()` reveals the
     /// kernel-chosen value so the peer can be told where to send.
     pub local_addr: SocketAddrV4,
-    /// Config-manager subscription endpoints. BFD has no config of its own,
-    /// but it registers as a config client (so the manager can tell it is
-    /// already running and avoid a double-spawn); the receive half is just
-    /// drained in the event loop.
+    /// Config-manager subscription endpoints. BFD's only own config is the
+    /// `bfd { tracing }` flag; the receive half is processed in the event
+    /// loop ([`Self::process_cm_msg`]) and every other commit is drained.
+    /// Registering as a config client also lets the manager see BFD is
+    /// already running and avoid a double-spawn.
     pub cm: ConfigChannel,
     /// `show bfd ...` subscription endpoints. The receive half drains
     /// in the event loop and dispatches through [`Self::show_cb`].
@@ -226,7 +231,7 @@ impl Bfd {
                         read_packet(mh_sock, mh_tx, true).await;
                     });
                 }
-                Err(e) => tracing::warn!(
+                Err(e) => bfd_warn!(
                     "bfd: multihop listener on {BFD_MULTI_HOP_PORT} unavailable, \
                      single-hop only: {e}"
                 ),
@@ -257,7 +262,7 @@ impl Bfd {
                         write_packet_v6(sock6, write_rx_v6).await;
                     });
                 }
-                Err(e) => tracing::warn!(
+                Err(e) => bfd_warn!(
                     "bfd: IPv6 single-hop listener on {BFD_SINGLE_HOP_PORT} unavailable, \
                      IPv4 only: {e}"
                 ),
@@ -275,7 +280,7 @@ impl Bfd {
                         read_packet_v6(mh6, mh_tx, true).await;
                     });
                 }
-                Err(e) => tracing::warn!(
+                Err(e) => bfd_warn!(
                     "bfd: IPv6 multihop listener on {BFD_MULTI_HOP_PORT} unavailable: {e}"
                 ),
             }
@@ -447,6 +452,21 @@ impl Bfd {
 
     /// Look up the show handler for `msg.paths` and invoke it. Mirrors
     /// [`crate::ospf`]/[`crate::isis`]'s `process_show_msg`.
+    /// BFD's only own config is the top-level `bfd { tracing }` flag, which
+    /// toggles the conditional-tracing gate (see [`super::trace`]). Every
+    /// other broadcast config line is ignored. The flag is a process-global
+    /// atomic so it reaches the spawned socket / reflector tasks too.
+    fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        if !matches!(msg.op, ConfigOp::Set | ConfigOp::Delete) {
+            return;
+        }
+        let (path, mut args) = path_from_command(&msg.paths);
+        if path == "/bfd/tracing" {
+            let enabled = msg.op.is_set() && args.boolean().unwrap_or(false);
+            super::trace::set(enabled);
+        }
+    }
+
     async fn process_show_msg(&self, msg: DisplayRequest) {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.show_cb.get(&path) {
@@ -468,10 +488,10 @@ impl Bfd {
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
                 },
-                // BFD has no config of its own — just drain the commit
-                // broadcasts so the channel doesn't back up (we register as a
-                // config client only so the manager knows BFD is running).
-                Some(_) = self.cm.rx.recv() => {}
+                // BFD's only config is the top-level `bfd { tracing }` flag;
+                // every other commit broadcast is drained here (we register as
+                // a config client so the manager knows BFD is running).
+                Some(msg) = self.cm.rx.recv() => self.process_cm_msg(msg),
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
@@ -497,7 +517,7 @@ impl Bfd {
             self.bootstrap_lookup(src, ifindex, multihop)
         };
         let Some(key) = lookup else {
-            tracing::debug!(
+            bfd_debug!(
                 ?src,
                 ?dst,
                 ifindex,
@@ -521,7 +541,7 @@ impl Bfd {
             if let Some(session) = self.sessions.get_by_key_mut(&key) {
                 session.stats.rx_invalid_count += 1;
             }
-            tracing::debug!(
+            bfd_debug!(
                 ?src,
                 ?dst,
                 ifindex,
@@ -544,7 +564,7 @@ impl Bfd {
                 .expect("just looked up by key");
             if ttl < session.min_ttl {
                 session.stats.rx_invalid_count += 1;
-                tracing::debug!(
+                bfd_debug!(
                     ?src,
                     ?dst,
                     ttl,
@@ -770,7 +790,7 @@ impl Bfd {
     }
 
     fn notify_state_change(&self, key: SessionKey, change: StateChange) {
-        tracing::info!(
+        bfd_info!(
             ?key,
             from = %change.from,
             to = %change.to,
