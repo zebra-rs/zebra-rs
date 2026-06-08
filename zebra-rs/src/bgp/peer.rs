@@ -172,6 +172,16 @@ pub enum PasswordEncoding {
 pub struct PeerTransportConfig {
     pub passive: bool,
     pub update_source: Option<IpAddr>,
+    /// GTSM / `ttl-security` (RFC 5082, originally RFC 3682): when set,
+    /// this neighbor is treated as directly connected. Every BGP packet
+    /// leaves with IP TTL / IPv6 Hop Limit 255 and inbound packets are
+    /// accepted only at 255 (kernel `IP_MINTTL` / `IPV6_MINHOPCOUNT`).
+    /// The options are installed on the session socket in
+    /// [`fsm_connected`], the common active/passive convergence point,
+    /// so one site covers both roles. Always 255 — there is no
+    /// configurable hop count (the YANG leaf is `type empty`). Mutually
+    /// exclusive with ebgp-multihop. See `zebra-bgp-transport.yang`.
+    pub ttl_security: bool,
     // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
     // listening socket (for the peer's address) and on the active
     // TcpSocket before connect(). The encoding determines how the
@@ -1266,6 +1276,25 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer, conn: ConnTag) -> State {
 pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
+    }
+    // GTSM (RFC 5082) for a `ttl-security` neighbor. Install the TTL
+    // floor on this connection's socket now that the TCP handshake is
+    // complete and before OPEN is sent, so every BGP message we send
+    // leaves at TTL 255 and anything arriving below 255 is dropped by
+    // the kernel. This is the single point both the active (Connected
+    // event) and passive (accept) paths pass through, so one call
+    // covers both roles. A setsockopt failure is logged but not fatal —
+    // the session continues without the (best-effort) hardening rather
+    // than being torn down.
+    if peer.config.transport.ttl_security {
+        use std::os::fd::AsRawFd;
+        if let Err(e) = super::gtsm::apply_gtsm(stream.as_raw_fd(), peer.address.is_ipv4()) {
+            tracing::warn!(
+                peer = %peer.address,
+                error = %e,
+                "bgp: failed to install GTSM (ttl-security) on session socket; continuing without TTL enforcement",
+            );
+        }
     }
     peer.task.connect = None;
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();

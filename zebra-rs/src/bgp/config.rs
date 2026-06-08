@@ -1494,6 +1494,39 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     bfd_apply(bgp, peer_addr)
 }
 
+/// `[no] router bgp neighbor <addr> ttl-security` — enable GTSM (RFC
+/// 5082) for a directly-connected peer. The leaf is `type empty`, so
+/// presence (Set) turns it on and Delete turns it off; no value is
+/// read. The socket options themselves are installed when the TCP
+/// session is set up (`fsm_connected`), so a change to an already
+/// running session is bounced with `Event::Stop` — the same teardown
+/// `clear bgp ... hard` uses — to force a reconnect under the new TTL
+/// policy. A peer still Idle is left to pick the option up on its first
+/// connect.
+fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let want = op.is_set();
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if peer.config.transport.ttl_security == want {
+            // No actual change — don't disturb a live session.
+            return Some(());
+        }
+        peer.config.transport.ttl_security = want;
+        peer.start();
+        // Only an established / in-progress session needs an explicit
+        // bounce; bouncing an Idle peer here could race the idle-hold
+        // timer `start()` just armed and strand it.
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -1966,6 +1999,11 @@ impl Bgp {
         // path above; either CLI form is accepted, both lower onto
         // the same runtime state.
         self.callback_peer("/update-source", config_transport_local_address);
+        // FRR-style `neighbor X ttl-security` (GTSM, RFC 5082) from
+        // zebra-bgp-transport.yang. `type empty` flag — directly
+        // connected only, TTL pinned to 255. Lowered onto the session
+        // socket in `fsm_connected`.
+        self.callback_peer("/ttl-security", config_ttl_security);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -2660,6 +2698,91 @@ mod neighbor_group_wiring_tests {
         assert_eq!(peer.remote_as, 65000);
         assert!(peer.config.remote_as_inherited);
         assert!(peer.active, "peer.start() must have fired");
+    }
+
+    /// `ttl-security` is a `type empty` flag: Set turns it on, Delete
+    /// turns it off, and a change to an already-established session is
+    /// bounced (`Event::Stop`) so the new TTL policy applies on the
+    /// reconnect. A no-op Set must not bounce.
+    #[tokio::test]
+    async fn ttl_security_toggles_field_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        // Pretend the session is established so a toggle must bounce.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // Enable: field set + one Event::Stop queued.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "set must enable the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "enabling on a live session must bounce it",
+        );
+
+        // The bounce is modeled only as a queued event in the unit
+        // harness, so the state is still Established. Idempotent set:
+        // no change, no bounce.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        // Disable: field cleared + one Event::Stop queued.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "delete must clear the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "disabling on a live session must bounce it",
+        );
+    }
+
+    /// A peer still Idle (never connected) must not be bounced when
+    /// ttl-security is set during initial config — the flag is stored
+    /// and the first connect picks it up.
+    #[tokio::test]
+    async fn ttl_security_on_idle_peer_does_not_bounce() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ttl_security,
+            "flag must still be stored on an Idle peer",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle peer must not be bounced",
+        );
     }
 
     /// Peer references the group before any remote-as is configured
