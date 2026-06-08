@@ -195,6 +195,40 @@ fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
     comps.push(comps_as_key(entry));
 }
 
+/// Emit the positional completion hints contributed by a container's
+/// `ext:default-child`. The named child's key may be typed without the
+/// child's own keyword (`show bgp <tab>` -> `<A.B.C.D>` / `<A.B.C.D/M>`),
+/// so surface that key's type hint(s) next to the child keywords. A
+/// union key contributes one hint per arm.
+fn comps_default_child_key(comps: &mut Vec<Completion>, parent: &Rc<Entry>) {
+    let Some(name) = parent.extension.get("ext:default-child") else {
+        return;
+    };
+    let dir = parent.dir.borrow();
+    let Some(child) = dir.iter().find(|e| &e.name == name) else {
+        return;
+    };
+    let Some(key) = child.key.first() else {
+        return;
+    };
+    let child_dir = child.dir.borrow();
+    let Some(key_leaf) = child_dir.iter().find(|e| &e.name == key) else {
+        return;
+    };
+    let Some(node) = &key_leaf.type_node else {
+        return;
+    };
+    if node.kind == YangType::Union {
+        for n in node.union.iter() {
+            let kind = ytype_from_typedef(&n.typedef).unwrap_or(n.kind);
+            comps.push(Completion::new_name(ytype_str(&kind)));
+        }
+    } else {
+        let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
+        comps.push(Completion::new_name(ytype_str(&kind)));
+    }
+}
+
 pub fn comps_add_all(
     comps: &mut Vec<Completion>,
     ymatch: YangMatch,
@@ -211,6 +245,7 @@ pub fn comps_add_all(
             for entry in entry.dir.borrow().iter() {
                 comps.push(centry(entry));
             }
+            comps_default_child_key(comps, entry);
         }
         YangMatch::KeyMatched => {
             for e in entry.dir.borrow().iter() {

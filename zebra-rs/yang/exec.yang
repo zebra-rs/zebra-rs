@@ -161,6 +161,46 @@ module exec {
     }
     container bgp {
       ext:help "BGP information";
+      // `show bgp` with no AFI keyword is IPv4 unicast. A bare address
+      // or prefix typed straight after `bgp` (`show bgp A.B.C.D`) is
+      // routed into `ipv4` by the matcher via `ext:default-child`.
+      ext:default-child "ipv4";
+      presence "BGP IPv4 unicast RIB (same as `show bgp ipv4`)";
+      list ipv4 {
+        ext:help "BGP IPv4 unicast RIB";
+        ext:presence "BGP IPv4 unicast RIB (all prefixes)";
+        key value;
+        leaf value {
+          ext:help "Address (routes containing it) or prefix (exact match)";
+          // A bare address does a longest-match lookup (routes that
+          // contain it); a prefix matches exactly. The handler tells
+          // them apart by the presence of `/M`.
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv4-prefix;
+          }
+        }
+        leaf longer-prefix {
+          ext:help "Prefixes equal to or more specific than the given prefix";
+          type empty;
+        }
+      }
+      list ipv6 {
+        ext:help "BGP IPv6 unicast RIB";
+        ext:presence "BGP IPv6 unicast RIB (all prefixes)";
+        key value;
+        leaf value {
+          ext:help "Address (routes containing it) or prefix (exact match)";
+          type union {
+            type inet:ipv6-address;
+            type inet:ipv6-prefix;
+          }
+        }
+        leaf longer-prefix {
+          ext:help "Prefixes equal to or more specific than the given prefix";
+          type empty;
+        }
+      }
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
         ext:presence "BGP update-group summary";

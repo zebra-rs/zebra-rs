@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bgp_packet::*;
+use ipnet::{Ipv4Net, Ipv6Net};
+use prefix_trie::{Prefix, PrefixMap};
 use serde::Serialize;
 
 use super::cap::CapAfiMap;
@@ -386,19 +388,53 @@ struct BgpVpnv4RouteJson {
     label: u32,
 }
 
-fn show_bgp<V: BgpShowView>(
-    bgp: &V,
-    _args: Args,
+/// One Loc-RIB row in `show bgp` table format. Shared by the full
+/// table dump and the `longer-prefix` filter so both render identically.
+fn write_bgp_route_line(
+    buf: &mut String,
+    prefix: &str,
+    rib: &BgpRib,
+) -> std::result::Result<(), std::fmt::Error> {
+    let stale = if rib.stale { "S" } else { " " };
+    let valid = "*";
+    let best = if rib.best_path { ">" } else { " " };
+    let internal = if rib.typ == BgpRibType::IBGP {
+        "i"
+    } else {
+        " "
+    };
+    let nexthop = show_nexthop(&rib.attr);
+    let med = show_med(&rib.attr);
+    let local_pref = show_local_pref(&rib.attr);
+    let weight = rib.weight;
+    let mut aspath = show_aspath(&rib.attr);
+    if !aspath.is_empty() {
+        aspath.push(' ');
+    }
+    let origin = show_origin(&rib.attr);
+    writeln!(
+        buf,
+        "{stale}{valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
+        prefix, nexthop, med, local_pref, weight, aspath, origin,
+    )
+}
+
+/// Render a unicast Loc-RIB (IPv4 or IPv6) in `show bgp` table format,
+/// or as a JSON array when `json` is set. Family-agnostic: keyed only
+/// on the prefix's `Display` and the family-neutral `BgpRib`/`BgpAttr`.
+fn render_unicast_table<P>(
+    table: &PrefixMap<P, Vec<BgpRib>>,
     json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
+) -> std::result::Result<String, std::fmt::Error>
+where
+    P: Prefix + std::fmt::Display,
+{
     if json {
         let mut routes: Vec<BgpRouteJson> = Vec::new();
-
-        for (key, value) in bgp.local_rib().v4.0.iter() {
+        for (key, value) in table.iter() {
             for rib in value.iter() {
                 let aspath_str = show_aspath(&rib.attr);
                 let origin_str = show_origin(&rib.attr);
-
                 routes.push(BgpRouteJson {
                     prefix: key.to_string(),
                     valid: true,
@@ -432,42 +468,24 @@ fn show_bgp<V: BgpShowView>(
     }
 
     let mut buf = String::new();
-
     buf.push_str(SHOW_BGP_HEADER);
-
-    for (key, value) in bgp.local_rib().v4.0.iter() {
+    for (key, value) in table.iter() {
         for rib in value.iter() {
-            let stale = if rib.stale { "S" } else { " " };
-            let valid = "*";
-            let best = if rib.best_path { ">" } else { " " };
-            let internal = if rib.typ == BgpRibType::IBGP {
-                "i"
-            } else {
-                " "
-            };
-            let nexthop = show_nexthop(&rib.attr);
-            let med = show_med(&rib.attr);
-            let local_pref = show_local_pref(&rib.attr);
-            let weight = rib.weight;
-            let mut aspath = show_aspath(&rib.attr);
-            if !aspath.is_empty() {
-                aspath.push(' ');
-            }
-            let origin = show_origin(&rib.attr);
-            writeln!(
-                buf,
-                "{stale}{valid}{best}{internal} {:18} {:18} {:>7} {:>6} {:>6} {}{}",
-                key.to_string(),
-                nexthop,
-                med,
-                local_pref,
-                weight,
-                aspath,
-                origin,
-            )?;
+            write_bgp_route_line(&mut buf, &key.to_string(), rib)?;
         }
     }
     Ok(buf)
+}
+
+/// `show ip bgp` — IPv4 unicast Loc-RIB (legacy tree). The new
+/// `show bgp [ipv4]` tree shares the same renderer via
+/// [`render_unicast_table`].
+fn show_bgp<V: BgpShowView>(
+    bgp: &V,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    render_unicast_table(&bgp.local_rib().v4.0, json)
 }
 
 /// `show ip bgp labeled-unicast` — render the IPv4 and IPv6
@@ -1001,116 +1019,255 @@ fn show_bgp_vpnv4_route(
     Ok(out)
 }
 
+/// IOS-XR-style detail block for one prefix's path set. Shared by the
+/// address (longest-match) and exact-prefix lookups across both
+/// families — family-neutral, keyed only on the prefix `Display` and
+/// the family-agnostic `BgpRib`/`BgpAttr`.
+fn write_bgp_entry_detail<V: BgpShowView>(
+    out: &mut String,
+    bgp: &V,
+    prefix: &str,
+    ribs: &[BgpRib],
+) -> std::result::Result<(), std::fmt::Error> {
+    writeln!(out, "BGP routing table entry for {}", prefix)?;
+    writeln!(out, "Paths: ({} available)", ribs.len())?;
+    for rib in ribs.iter() {
+        // Display path identifier and router ID
+        let best_marker = if rib.best_path { " best" } else { "" };
+        let internal_marker = if rib.typ == BgpRibType::IBGP {
+            "internal"
+        } else {
+            "external"
+        };
+
+        let from_addr = bgp
+            .peers()
+            .addr_of(rib.ident)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "self".to_string());
+        writeln!(
+            out,
+            "  {} ({}), ({}{}) from {}",
+            show_nexthop(&rib.attr),
+            rib.router_id,
+            internal_marker,
+            best_marker,
+            from_addr
+        )?;
+
+        // Display origin
+        let origin_str = if let Some(origin) = &rib.attr.origin {
+            match origin {
+                Origin::Igp => "IGP",
+                Origin::Egp => "EGP",
+                Origin::Incomplete => "incomplete",
+            }
+        } else {
+            "incomplete"
+        };
+
+        // Build attribute line
+        let mut attr_parts = vec![format!("Origin {}", origin_str)];
+
+        if let Some(med) = &rib.attr.med {
+            attr_parts.push(format!("metric {}", med.med));
+        }
+
+        if let Some(local_pref) = &rib.attr.local_pref {
+            attr_parts.push(format!("localpref {}", local_pref.local_pref));
+        }
+
+        writeln!(out, "    {}", attr_parts.join(", "))?;
+
+        // Display AS path if present
+        if let Some(aspath) = &rib.attr.aspath
+            && !aspath.segs.is_empty()
+        {
+            writeln!(out, "    AS path: {}", aspath)?;
+        }
+
+        // Display route reflection attributes if present (RFC 4456)
+        if let Some(originator_id) = &rib.attr.originator_id {
+            write!(out, "    Originator: {}", originator_id.id)?;
+
+            if let Some(cluster_list) = &rib.attr.cluster_list {
+                write!(out, ", Cluster list: ")?;
+                let cluster_ids: Vec<String> =
+                    cluster_list.list.iter().map(|id| id.to_string()).collect();
+                write!(out, "{}", cluster_ids.join(" "))?;
+            }
+            writeln!(out)?;
+        } else if let Some(cluster_list) = &rib.attr.cluster_list {
+            // Cluster list without originator (shouldn't normally happen, but handle it)
+            write!(out, "    Cluster list: ")?;
+            let cluster_ids: Vec<String> =
+                cluster_list.list.iter().map(|id| id.to_string()).collect();
+            writeln!(out, "{}", cluster_ids.join(" "))?;
+        }
+
+        // Surface BGP Color extended communities (RFC 9012 §4.3)
+        // and the BGP Prefix-SID Label-Index (RFC 8669 §3.1).
+        // The future color-aware nexthop resolver consumes these;
+        // surfacing here gives operators visibility before the
+        // resolver lands.
+        let colors: Vec<String> = rib
+            .attr
+            .colors()
+            .map(|c| format!("{} (CO={})", c.color, c.co_bits()))
+            .collect();
+        if !colors.is_empty() {
+            writeln!(out, "    Color: {}", colors.join(", "))?;
+        }
+        if let Some(li) = rib.attr.prefix_sid_label_index() {
+            writeln!(out, "    Prefix-SID Label-Index: {}", li)?;
+        }
+
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// `show ip bgp <A.B.C.D>` (legacy tree) — longest-match detail for one
+/// IPv4 address. The new `show bgp [ipv4] …` tree reuses
+/// [`write_bgp_entry_detail`] via [`show_bgp_ipv4`].
 fn show_bgp_route_entry(
     bgp: &Bgp,
     mut args: Args,
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
-
     let addr = match args.v4addr() {
         Some(addr) => addr,
         None => return Ok(String::from("% No BGP route exists")),
     };
-    let host = addr.to_host_prefix();
-    if let Some(ribs) = bgp.local_rib.v4.0.get_lpm(&host) {
-        writeln!(out, "BGP routing table entry for {}", ribs.0)?;
-        writeln!(out, "Paths: ({} available)", ribs.1.len())?;
-        for rib in ribs.1.iter() {
-            // Display path identifier and router ID
-            let best_marker = if rib.best_path { " best" } else { "" };
-            let internal_marker = if rib.typ == BgpRibType::IBGP {
-                "internal"
-            } else {
-                "external"
-            };
+    if let Some((prefix, ribs)) = bgp.local_rib.v4.0.get_lpm(&addr.to_host_prefix()) {
+        write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
+    }
+    Ok(out)
+}
 
-            let from_addr = bgp
-                .peers
-                .addr_of(rib.ident)
-                .map(|a| a.to_string())
-                .unwrap_or_else(|| "self".to_string());
-            writeln!(
-                out,
-                "  {} ({}), ({}{}) from {}",
-                show_nexthop(&rib.attr),
-                rib.router_id,
-                internal_marker,
-                best_marker,
-                from_addr
-            )?;
-
-            // Display origin
-            let origin_str = if let Some(origin) = &rib.attr.origin {
-                match origin {
-                    Origin::Igp => "IGP",
-                    Origin::Egp => "EGP",
-                    Origin::Incomplete => "incomplete",
+/// `show bgp` / `show bgp ipv4 [A.B.C.D | A.B.C.D/M]` — IPv4 unicast.
+/// No value dumps the whole Loc-RIB; an address shows the longest
+/// match (the routes that contain it); a prefix shows that exact entry.
+fn show_bgp_ipv4<V: BgpShowView>(
+    bgp: &V,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(tok) = args.string() else {
+        return render_unicast_table(&bgp.local_rib().v4.0, json);
+    };
+    let mut out = String::new();
+    if tok.contains('/') {
+        match tok.parse::<Ipv4Net>() {
+            Ok(net) => {
+                if let Some(ribs) = bgp.local_rib().v4.0.get(&net) {
+                    write_bgp_entry_detail(&mut out, bgp, &net.to_string(), ribs)?;
                 }
-            } else {
-                "incomplete"
-            };
-
-            // Build attribute line
-            let mut attr_parts = vec![format!("Origin {}", origin_str)];
-
-            if let Some(med) = &rib.attr.med {
-                attr_parts.push(format!("metric {}", med.med));
             }
-
-            if let Some(local_pref) = &rib.attr.local_pref {
-                attr_parts.push(format!("localpref {}", local_pref.local_pref));
-            }
-
-            writeln!(out, "    {}", attr_parts.join(", "))?;
-
-            // Display AS path if present
-            if let Some(aspath) = &rib.attr.aspath
-                && !aspath.segs.is_empty()
-            {
-                writeln!(out, "    AS path: {}", aspath)?;
-            }
-
-            // Display route reflection attributes if present (RFC 4456)
-            if let Some(originator_id) = &rib.attr.originator_id {
-                write!(out, "    Originator: {}", originator_id.id)?;
-
-                if let Some(cluster_list) = &rib.attr.cluster_list {
-                    write!(out, ", Cluster list: ")?;
-                    let cluster_ids: Vec<String> =
-                        cluster_list.list.iter().map(|id| id.to_string()).collect();
-                    write!(out, "{}", cluster_ids.join(" "))?;
+            Err(_) => writeln!(out, "% Malformed IPv4 prefix: {tok}")?,
+        }
+    } else {
+        match tok.parse::<Ipv4Addr>() {
+            Ok(addr) => {
+                if let Some((prefix, ribs)) = bgp.local_rib().v4.0.get_lpm(&addr.to_host_prefix()) {
+                    write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
                 }
-                writeln!(out)?;
-            } else if let Some(cluster_list) = &rib.attr.cluster_list {
-                // Cluster list without originator (shouldn't normally happen, but handle it)
-                write!(out, "    Cluster list: ")?;
-                let cluster_ids: Vec<String> =
-                    cluster_list.list.iter().map(|id| id.to_string()).collect();
-                writeln!(out, "{}", cluster_ids.join(" "))?;
             }
-
-            // Surface BGP Color extended communities (RFC 9012 §4.3)
-            // and the BGP Prefix-SID Label-Index (RFC 8669 §3.1).
-            // The future color-aware nexthop resolver consumes these;
-            // surfacing here gives operators visibility before the
-            // resolver lands.
-            let colors: Vec<String> = rib
-                .attr
-                .colors()
-                .map(|c| format!("{} (CO={})", c.color, c.co_bits()))
-                .collect();
-            if !colors.is_empty() {
-                writeln!(out, "    Color: {}", colors.join(", "))?;
-            }
-            if let Some(li) = rib.attr.prefix_sid_label_index() {
-                writeln!(out, "    Prefix-SID Label-Index: {}", li)?;
-            }
-
-            writeln!(out)?;
+            Err(_) => writeln!(out, "% Malformed IPv4 address: {tok}")?,
         }
     }
+    Ok(out)
+}
 
+/// `show bgp ipv4 A.B.C.D/M longer-prefix` — the prefix and every more
+/// specific entry (equal-or-longer), in table format.
+fn show_bgp_ipv4_longer<V: BgpShowView>(
+    bgp: &V,
+    mut args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+    let Some(tok) = args.string() else {
+        return Ok(String::from("% Specify an IPv4 prefix\n"));
+    };
+    let net = if tok.contains('/') {
+        tok.parse::<Ipv4Net>().ok()
+    } else {
+        tok.parse::<Ipv4Addr>().ok().map(|a| a.to_host_prefix())
+    };
+    let Some(net) = net else {
+        writeln!(out, "% Malformed IPv4 prefix: {tok}")?;
+        return Ok(out);
+    };
+    out.push_str(SHOW_BGP_HEADER);
+    for (prefix, ribs) in bgp.local_rib().v4.0.children(&net) {
+        for rib in ribs.iter() {
+            write_bgp_route_line(&mut out, &prefix.to_string(), rib)?;
+        }
+    }
+    Ok(out)
+}
+
+/// `show bgp ipv6 [X:X::X:X | X:X::X:X/M]` — IPv6 unicast sibling of
+/// [`show_bgp_ipv4`].
+fn show_bgp_ipv6<V: BgpShowView>(
+    bgp: &V,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let Some(tok) = args.string() else {
+        return render_unicast_table(&bgp.local_rib().v6.0, json);
+    };
+    let mut out = String::new();
+    if tok.contains('/') {
+        match tok.parse::<Ipv6Net>() {
+            Ok(net) => {
+                if let Some(ribs) = bgp.local_rib().v6.0.get(&net) {
+                    write_bgp_entry_detail(&mut out, bgp, &net.to_string(), ribs)?;
+                }
+            }
+            Err(_) => writeln!(out, "% Malformed IPv6 prefix: {tok}")?,
+        }
+    } else {
+        match tok.parse::<Ipv6Addr>() {
+            Ok(addr) => {
+                if let Some((prefix, ribs)) = bgp.local_rib().v6.0.get_lpm(&addr.to_host_prefix()) {
+                    write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
+                }
+            }
+            Err(_) => writeln!(out, "% Malformed IPv6 address: {tok}")?,
+        }
+    }
+    Ok(out)
+}
+
+/// `show bgp ipv6 X:X::X:X/M longer-prefix` — IPv6 sibling of
+/// [`show_bgp_ipv4_longer`].
+fn show_bgp_ipv6_longer<V: BgpShowView>(
+    bgp: &V,
+    mut args: Args,
+    _json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+    let Some(tok) = args.string() else {
+        return Ok(String::from("% Specify an IPv6 prefix\n"));
+    };
+    let net = if tok.contains('/') {
+        tok.parse::<Ipv6Net>().ok()
+    } else {
+        tok.parse::<Ipv6Addr>().ok().map(|a| a.to_host_prefix())
+    };
+    let Some(net) = net else {
+        writeln!(out, "% Malformed IPv6 prefix: {tok}")?;
+        return Ok(out);
+    };
+    out.push_str(SHOW_BGP_HEADER);
+    for (prefix, ribs) in bgp.local_rib().v6.0.children(&net) {
+        for rib in ribs.iter() {
+            write_bgp_route_line(&mut out, &prefix.to_string(), rib)?;
+        }
+    }
     Ok(out)
 }
 
@@ -3214,5 +3371,16 @@ impl Bgp {
             "/show/bgp/update-group",
             super::show_update_group::show_bgp_update_group,
         );
+
+        // New `show bgp [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
+        // tree. `show bgp` with no AFI is IPv4 unicast; a bare address
+        // or prefix after `bgp` is routed here by the `ext:default-child
+        // "ipv4"` matcher, so `/show/bgp` and `/show/bgp/ipv4` share one
+        // handler.
+        self.show_add("/show/bgp", show_bgp_ipv4::<Bgp>);
+        self.show_add("/show/bgp/ipv4", show_bgp_ipv4::<Bgp>);
+        self.show_add("/show/bgp/ipv4/longer-prefix", show_bgp_ipv4_longer::<Bgp>);
+        self.show_add("/show/bgp/ipv6", show_bgp_ipv6::<Bgp>);
+        self.show_add("/show/bgp/ipv6/longer-prefix", show_bgp_ipv6_longer::<Bgp>);
     }
 }
