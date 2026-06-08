@@ -47,6 +47,17 @@ pub fn despawn_ospf(config: &ConfigManager) {
 /// manager / protocol-tasks tables so it doesn't collide with a
 /// concurrent OSPFv2 instance.
 pub fn spawn_ospfv3(config: &ConfigManager) {
+    // Idempotent: `commit_config` calls this on every commit whose diff
+    // touches `router ospfv3` (a leaf change emits a `router ospfv3 …`
+    // line), but the instance must be spawned only once. Re-spawning
+    // would replace the live task — discarding its LSDB and translator
+    // state, and orphaning self-originated AS-scoped LSAs on neighbors
+    // (a translated Type-5 never gets a MaxAge). Config changes reach
+    // the running instance through its `cm` subscription, so a respawn
+    // is never needed to apply them.
+    if config.protocol_tasks.borrow().contains_key("ospfv3") {
+        return;
+    }
     let (rib_client, rib_rx) = config.subscribe_to_rib("ospfv3");
     let ctx = ProtoContext::default_table(rib_client);
     // `"ospfv3"` default label; per-VRF children get
