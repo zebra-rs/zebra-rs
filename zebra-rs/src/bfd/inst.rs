@@ -482,10 +482,11 @@ impl Bfd {
                 s.echo_originating = false;
             }
         }
-        // Re-evaluate the §6.8.9 originate gate under the new params. This
-        // emits the `echo-del` for a dropped transmit role (helper still
-        // referenced), or the `echo-add` for a gained / restarted one. The
-        // new advertised echo-rx goes out on the next periodic control Tx.
+        // Re-evaluate the §6.8.9 originate gate under the new params: emits
+        // the `echo-add` for a gained or restarted transmit role (a dropped
+        // one was already stopped above — originating implies the old mode
+        // transmitted, so a role drop always sets `restart`). The new
+        // advertised echo-rx goes out on the next periodic control Tx.
         self.echo_originate_reconcile(*key);
         // Release last: if this was the interface's final Echo session the
         // helper is torn down, so any `echo-del` had to precede it.
