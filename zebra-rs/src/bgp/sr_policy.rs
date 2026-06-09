@@ -612,8 +612,8 @@ impl LocalSrPolicy {
         // RFC 9830 §4.1: a Route Target identifies the intended
         // headend(s); without one, NO_ADVERTISE keeps the policy local.
         match self.route_target {
-            Some(rt) => attr.ecom = Some(ExtCommunity(vec![ipv4_route_target(rt)])),
-            None => attr.com = Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+            Some(rt) => attr.ecom = Some(ExtCommunity::from([ipv4_route_target(rt)])),
+            None => attr.com = Some(Community::from([CommunityValue::NO_ADVERTISE.value()])),
         }
         Some((nlri, attr))
     }
@@ -1258,9 +1258,10 @@ mod tests {
         assert!(attr.com.is_none());
         let ecom = attr.ecom.expect("ext-comm");
         assert_eq!(ecom.0.len(), 1);
-        assert_eq!(ecom.0[0].high_type, 0x01);
-        assert_eq!(ecom.0[0].low_type, ExtCommunitySubType::RouteTarget as u8);
-        assert_eq!(&ecom.0[0].val[0..4], &[10, 0, 0, 1]);
+        let entry = ecom.0.first().unwrap();
+        assert_eq!(entry.high_type, 0x01);
+        assert_eq!(entry.low_type, ExtCommunitySubType::RouteTarget as u8);
+        assert_eq!(&entry.val[0..4], &[10, 0, 0, 1]);
     }
 
     #[test]
@@ -1297,7 +1298,7 @@ mod tests {
     #[test]
     fn reflect_attr_suppresses_no_advertise() {
         let attr = BgpAttr {
-            com: Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+            com: Some(Community::from([CommunityValue::NO_ADVERTISE.value()])),
             ..Default::default()
         };
         // NO_ADVERTISE → never reflected, regardless of peer roles.

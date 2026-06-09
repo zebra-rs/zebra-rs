@@ -711,9 +711,9 @@ pub(super) fn fib_install_labelv6(
     reconcile_swap_ilm(rib_client, cache, selected.first());
 }
 
-/// Walk the route's Color extcomms in order, look each up in
-/// `color_policy`, LPM the next-hop against the matching per-algo
-/// shadow, return the first hit's outer label.
+/// Walk the route's Color extcomms (ascending color order), look each
+/// up in `color_policy`, LPM the next-hop against the matching
+/// per-algo shadow, return the first hit's outer label.
 fn resolve_flex_algo_label(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: Ipv4Addr) -> Option<u32> {
     resolve_flex_algo_label_inner(bgp.color_policy?, bgp.flex_algo_routes?, attr, nh)
 }
@@ -722,8 +722,8 @@ fn resolve_flex_algo_label(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: Ipv4Ad
 /// service route: if one of the route's Color extended communities maps
 /// to an active SR-MPLS policy for `<color, next-hop>` (honouring the
 /// CO-bit endpoint fallback), return that policy's SID list to impose on
-/// the packet. Colors are tried in attribute order; the first SR Policy
-/// match wins and takes precedence over any Flex-Algo binding.
+/// the packet. Colors are tried in ascending color order; the first SR
+/// Policy match wins and takes precedence over any Flex-Algo binding.
 fn sr_policy_steer_mpls(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: IpAddr) -> Option<Vec<u32>> {
     for color in attr.colors() {
         if let Some(stack) = bgp
@@ -739,8 +739,8 @@ fn sr_policy_steer_mpls(bgp: &super::peer::BgpTop, attr: &BgpAttr, nh: IpAddr) -
 
 /// Pure-function inner for `resolve_flex_algo_label` — testable
 /// without a full `BgpTop`. Same algorithm: walk the Color extcomms
-/// in attribute order, return the first one bound to an algo whose
-/// per-algo shadow has a covering route for `nh`.
+/// in ascending color order, return the first one bound to an algo
+/// whose per-algo shadow has a covering route for `nh`.
 fn resolve_flex_algo_label_inner(
     color_policy: &super::color_policy::ColorPolicy,
     flex_algo_routes: &std::collections::BTreeMap<
@@ -5640,11 +5640,11 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                     let mut new_attr = (*rib.attr).clone();
                     match &mut new_attr.com {
                         Some(com) => {
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                         }
                         None => {
                             let mut com = Community::new();
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                             new_attr.com = Some(com);
                         }
                     }
@@ -5768,11 +5768,11 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                     let mut new_attr = (*rib.attr).clone();
                     match &mut new_attr.com {
                         Some(com) => {
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                         }
                         None => {
                             let mut com = Community::new();
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                             new_attr.com = Some(com);
                         }
                     }
@@ -7069,7 +7069,7 @@ fn matches_color(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -> bool
 fn apply_color_and_prefix_sid(attr: &mut BgpAttr, entry: &crate::policy::PolicyEntry) {
     if let Some(color) = entry.set_color {
         let ecom = attr.ecom.get_or_insert_with(ExtCommunity::default);
-        ecom.0.push(ExtCommunityValue::from_color(0, color));
+        ecom.0.insert(ExtCommunityValue::from_color(0, color));
     }
     if let Some(idx) = entry.set_prefix_sid_label_index {
         attr.prefix_sid = Some(PrefixSid {
@@ -7286,19 +7286,13 @@ fn apply_set_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetCommunity
                 bgp_attr.com = None;
                 return;
             }
-            let mut com = Community::new();
-            for v in new_vals {
-                com.push(v);
-            }
-            com.sort_uniq();
-            bgp_attr.com = Some(com);
+            bgp_attr.com = Some(new_vals.into_iter().collect());
         }
         SetCommunityMode::Additive => {
             let mut com = bgp_attr.com.clone().unwrap_or_default();
             for v in new_vals {
-                com.push(v);
+                com.insert(v);
             }
-            com.sort_uniq();
             bgp_attr.com = Some(com);
         }
         SetCommunityMode::Delete => {
@@ -8661,7 +8655,7 @@ impl Bgp {
         // 16-byte nexthop). Per-peer NEXT_HOP rewrite for eBGP
         // still happens inside `route_update_evpn`.
         let mut attr = BgpAttr::new();
-        attr.ecom = Some(ExtCommunity(vec![
+        attr.ecom = Some(ExtCommunity::from([
             evpn_route_target(self.asn, entry.vni),
             evpn_encap_vxlan(),
         ]));
@@ -8886,7 +8880,7 @@ impl Bgp {
             orig: vtep_local,
         };
         let mut attr = BgpAttr::new();
-        attr.ecom = Some(ExtCommunity(vec![
+        attr.ecom = Some(ExtCommunity::from([
             evpn_route_target(self.asn, vni),
             evpn_encap_vxlan(),
         ]));
@@ -9421,7 +9415,7 @@ mod policy_apply_tests {
         list.entry(10).match_color = Some(100);
 
         let mut attr = attr_with("1", None, None);
-        attr.ecom = Some(ExtCommunity(vec![ExtCommunityValue::from_color(0, 100)]));
+        attr.ecom = Some(ExtCommunity::from([ExtCommunityValue::from_color(0, 100)]));
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_some());
     }
 
@@ -9431,7 +9425,7 @@ mod policy_apply_tests {
         list.entry(10).match_color = Some(100);
 
         let mut attr = attr_with("1", None, None);
-        attr.ecom = Some(ExtCommunity(vec![ExtCommunityValue::from_color(0, 200)]));
+        attr.ecom = Some(ExtCommunity::from([ExtCommunityValue::from_color(0, 200)]));
         assert!(policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).is_none());
     }
 
@@ -9452,7 +9446,7 @@ mod policy_apply_tests {
         let mut list = PolicyList::default();
         list.entry(10).match_color = Some(200);
         let mut attr = attr_with("1", None, None);
-        attr.ecom = Some(ExtCommunity(vec![
+        attr.ecom = Some(ExtCommunity::from([
             ExtCommunityValue::from_color(0, 100),
             ExtCommunityValue::from_color(0, 200),
         ]));
@@ -9468,7 +9462,7 @@ mod policy_apply_tests {
         let out = policy_list_apply(&list, &nlri("10.0.0.0/8"), attr).expect("permit");
         let ecom = out.ecom.expect("ecom appended");
         assert_eq!(ecom.0.len(), 1);
-        let c = ecom.0[0].as_color().expect("Color extcomm");
+        let c = ecom.0.first().unwrap().as_color().expect("Color extcomm");
         assert_eq!(c.color, 128);
         assert_eq!(c.co_bits(), 0);
     }
@@ -9633,7 +9627,7 @@ mod policy_apply_tests {
     /// Type-3 peer advertises VNI per RFC 8365 §5.1.2.4.
     fn attr_with_rt_vni(asn: u32, vni: u32) -> BgpAttr {
         let mut attr = attr_with("1", None, None);
-        attr.ecom = Some(ExtCommunity(vec![evpn_route_target(asn, vni)]));
+        attr.ecom = Some(ExtCommunity::from([evpn_route_target(asn, vni)]));
         attr
     }
 
@@ -9740,12 +9734,12 @@ mod color_aware_nht_tests {
     use crate::rib::api::FlexAlgoNexthop;
 
     fn attr_with_colors(colors: &[u32]) -> BgpAttr {
-        let entries: Vec<ExtCommunityValue> = colors
+        let entries: ExtCommunity = colors
             .iter()
             .map(|c| ExtCommunityValue::from_color(0, *c))
             .collect();
         BgpAttr {
-            ecom: Some(ExtCommunity(entries)),
+            ecom: Some(entries),
             ..Default::default()
         }
     }
@@ -9819,12 +9813,13 @@ mod color_aware_nht_tests {
 
     #[test]
     fn unbound_color_then_bound_color_resolves_bound_one() {
-        // First Color (200) is unbound; second (100) is bound and has
-        // a route — the second one must win, not abort on the first.
+        // Colors iterate in ascending order: 100 (unbound) is tried
+        // first, 200 is bound and has a route — the bound one must
+        // win, not abort on the unbound one.
         let mut cp = ColorPolicy::new();
-        cp.bindings.insert(100, 128);
+        cp.bindings.insert(200, 128);
         let shadow = shadow_with(128, "10.0.0.0/24", 17128);
-        let attr = attr_with_colors(&[200, 100]);
+        let attr = attr_with_colors(&[100, 200]);
         assert_eq!(
             resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
             Some(17128)
@@ -9833,8 +9828,8 @@ mod color_aware_nht_tests {
 
     #[test]
     fn first_bound_color_wins() {
-        // Two bound colours, both with covering routes — attribute
-        // order decides (no preference/fallback semantics yet).
+        // Two bound colours, both with covering routes — ascending
+        // color order decides (no preference/fallback semantics yet).
         let mut cp = ColorPolicy::new();
         cp.bindings.insert(100, 128);
         cp.bindings.insert(200, 129);
@@ -10095,7 +10090,7 @@ mod tests {
 
         // Existing community 999:999 must be wiped on replace.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("999:999")])),
+            com: Some(Community::from([com_val("999:999")])),
             ..Default::default()
         };
 
@@ -10114,7 +10109,7 @@ mod tests {
         entry.set_community = Some(set_community_cfg(&["100:200"], SetCommunityMode::Additive));
 
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("999:999")])),
+            com: Some(Community::from([com_val("999:999")])),
             ..Default::default()
         };
 
@@ -10133,13 +10128,13 @@ mod tests {
 
         // 100:200 already present — additive should not duplicate.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("100:200")])),
+            com: Some(Community::from([com_val("100:200")])),
             ..Default::default()
         };
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         let com = out.com.expect("community attribute set");
-        assert_eq!(com.0, vec![com_val("100:200")]);
+        assert_eq!(com, Community::from([com_val("100:200")]));
     }
 
     #[test]
@@ -10154,7 +10149,7 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         let com = out.com.expect("community attribute set");
-        assert_eq!(com.0, vec![com_val("100:200")]);
+        assert_eq!(com, Community::from([com_val("100:200")]));
     }
 
     #[test]
@@ -10169,7 +10164,7 @@ mod tests {
         // Existing has both targets and a non-target — only the
         // targets are removed; non-target survives.
         let attr = BgpAttr {
-            com: Some(Community(vec![
+            com: Some(Community::from([
                 com_val("100:200"),
                 com_val("999:999"),
                 CommunityValue::NO_EXPORT.value(),
@@ -10179,7 +10174,7 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         let com = out.com.expect("community attribute survives");
-        assert_eq!(com.0, vec![com_val("999:999")]);
+        assert_eq!(com, Community::from([com_val("999:999")]));
     }
 
     #[test]
@@ -10191,7 +10186,7 @@ mod tests {
         // Single value matches the deletion → attribute should be
         // None rather than an empty Community vec.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("100:200")])),
+            com: Some(Community::from([com_val("100:200")])),
             ..Default::default()
         };
 

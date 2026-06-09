@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 use bytes::{BufMut, BytesMut};
-use nom_derive::NomBE;
+use nom::IResult;
+use nom_derive::{NomBE, Parse};
 
 use crate::{
     AttrEmitter, AttrFlags, AttrType, ExtCommunitySubType, ExtCommunityType, MupExtComSubType,
@@ -12,8 +14,38 @@ use crate::{
 
 use super::ext_com_token::{Token, tokenizer};
 
-#[derive(Clone, Default, NomBE, PartialEq, Eq, Hash)]
-pub struct ExtCommunity(pub Vec<ExtCommunityValue>);
+// Extended Communities are an unordered set on the wire (RFC 4360);
+// BTreeSet keeps the values deduplicated and canonically sorted (the
+// derived ExtCommunityValue Ord is wire-byte order: type bytes first,
+// then value) so equal sets compare/hash equal regardless of received
+// order.
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
+pub struct ExtCommunity(pub BTreeSet<ExtCommunityValue>);
+
+impl FromIterator<ExtCommunityValue> for ExtCommunity {
+    fn from_iter<I: IntoIterator<Item = ExtCommunityValue>>(iter: I) -> Self {
+        ExtCommunity(iter.into_iter().collect())
+    }
+}
+
+impl<const N: usize> From<[ExtCommunityValue; N]> for ExtCommunity {
+    fn from(values: [ExtCommunityValue; N]) -> Self {
+        ExtCommunity(BTreeSet::from(values))
+    }
+}
+
+// nom_derive has no Parse impl for BTreeSet, so the wire decode is
+// hand-written: parse the attribute payload as consecutive 8-octet
+// values (`Vec`'s blanket impl) and collect into the set.
+impl<'a> Parse<&'a [u8]> for ExtCommunity {
+    fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        Self::parse_be(input)
+    }
+    fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (input, values) = <Vec<ExtCommunityValue>>::parse_be(input)?;
+        Ok((input, values.into_iter().collect()))
+    }
+}
 
 #[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtCommunityValue {
@@ -259,7 +291,7 @@ impl FromStr for ExtCommunity {
                             val.low_type = 0x03;
                         }
                     }
-                    ecom.0.push(val);
+                    ecom.0.insert(val);
                 }
                 Token::Rt => {
                     state = State::Rt;
@@ -304,8 +336,11 @@ mod tests {
         let ecom: ExtCommunity = ExtCommunity::from_str("soo:1.2.3.4:200").unwrap();
         assert_eq!(ecom.to_string(), "soo:1.2.3.4:200");
 
+        // Values render in canonical sorted order (type bytes first):
+        // the ASN-form soo (high_type 0x00) sorts before the IPv4-form
+        // rt (high_type 0x01), regardless of input order.
         let ecom: ExtCommunity = ExtCommunity::from_str("rt:1.2.3.4:100 soo:10:100").unwrap();
-        assert_eq!(ecom.to_string(), "rt:1.2.3.4:100 soo:10:100");
+        assert_eq!(ecom.to_string(), "soo:10:100 rt:1.2.3.4:100");
 
         // Test backward compatibility with old space-separated format
         let ecom: ExtCommunity = ExtCommunity::from_str("rt 100:200").unwrap();
@@ -350,10 +385,12 @@ mod tests {
     fn is_color_false_for_rt_and_soo() {
         let rt: ExtCommunity = ExtCommunity::from_str("rt:100:200").unwrap();
         let soo: ExtCommunity = ExtCommunity::from_str("soo:1.2.3.4:200").unwrap();
-        assert!(!rt.0[0].is_color());
-        assert!(!soo.0[0].is_color());
-        assert!(rt.0[0].as_color().is_none());
-        assert!(soo.0[0].as_color().is_none());
+        let rt = rt.0.first().unwrap();
+        let soo = soo.0.first().unwrap();
+        assert!(!rt.is_color());
+        assert!(!soo.is_color());
+        assert!(rt.as_color().is_none());
+        assert!(soo.as_color().is_none());
     }
 
     #[test]
@@ -368,7 +405,7 @@ mod tests {
         // round-trip the wire bytes through emit, parse the raw 8
         // octets back, and assert decode matches.
         let original = ExtCommunityValue::from_color(0b10, 128);
-        let ecom = ExtCommunity(vec![original.clone()]);
+        let ecom = ExtCommunity::from([original.clone()]);
         let mut buf = BytesMut::new();
         ecom.emit(&mut buf);
         let bytes: Vec<u8> = buf.to_vec();
@@ -458,7 +495,7 @@ mod tests {
             low_type: 0x03,
             val: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
         };
-        let ecom = ExtCommunity(vec![original.clone()]);
+        let ecom = ExtCommunity::from([original.clone()]);
         let mut buf = BytesMut::new();
         ecom.emit(&mut buf);
         let bytes: Vec<u8> = buf.to_vec();
