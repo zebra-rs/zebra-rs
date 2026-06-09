@@ -1934,15 +1934,27 @@ impl FibHandle {
                     msg.attributes.push(attr);
                 }
 
-                for &label in uni.mpls_label.iter() {
-                    let label = MplsLabel {
-                        label,
-                        traffic_class: 0,
-                        bottom_of_stack: true,
-                        ttl: 0,
-                    };
-                    let attr = RouteAttribute::NewDestination(vec![label]);
-                    msg.attributes.push(attr);
+                // The outgoing label stack rides a single RTA_NEWDST:
+                // one attribute carrying every label (outermost first),
+                // BoS set only on the bottom label. Emitting one
+                // NewDestination per label would leave the kernel with
+                // just the last (duplicate RTA_NEWDST overwrites), which
+                // drops the transport label under a swap-and-push — e.g.
+                // an Inter-AS Option B VPNv4 transit `local → [SR, VPN]`.
+                if !uni.mpls_label.is_empty() {
+                    let last = uni.mpls_label.len() - 1;
+                    let stack: Vec<MplsLabel> = uni
+                        .mpls_label
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &label)| MplsLabel {
+                            label,
+                            traffic_class: 0,
+                            bottom_of_stack: i == last,
+                            ttl: 0,
+                        })
+                        .collect();
+                    msg.attributes.push(RouteAttribute::NewDestination(stack));
                 }
             }
             Nexthop::Multi(ref multi) => {
@@ -1961,15 +1973,21 @@ impl FibHandle {
                         nhop.attributes.push(attr);
                     }
 
-                    for &label in uni.mpls_label.iter() {
-                        let label = MplsLabel {
-                            label,
-                            traffic_class: 0,
-                            bottom_of_stack: true,
-                            ttl: 0,
-                        };
-                        let attr = RouteAttribute::NewDestination(vec![label]);
-                        nhop.attributes.push(attr);
+                    // Full label stack in one RTA_NEWDST (see the Uni arm).
+                    if !uni.mpls_label.is_empty() {
+                        let last = uni.mpls_label.len() - 1;
+                        let stack: Vec<MplsLabel> = uni
+                            .mpls_label
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &label)| MplsLabel {
+                                label,
+                                traffic_class: 0,
+                                bottom_of_stack: i == last,
+                                ttl: 0,
+                            })
+                            .collect();
+                        nhop.attributes.push(RouteAttribute::NewDestination(stack));
                     }
 
                     mpath.push(nhop);

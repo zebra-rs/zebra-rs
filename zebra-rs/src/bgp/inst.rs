@@ -485,6 +485,12 @@ pub struct Bgp {
     /// the NLRI and swap-programmed via an ILM (`local → received`).
     pub lu_label_v4: std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
     pub lu_label_v6: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
+    /// Per-`(RD, prefix)` local labels for received VPNv4 (SAFI 128)
+    /// routes we re-advertise with next-hop-self — the Inter-AS Option B
+    /// transit case. Same dynamic pool; the label is advertised in the
+    /// VPNv4 NLRI and swap-programmed via an ILM (`local → received`).
+    pub vpn_label_v4:
+        std::collections::BTreeMap<(bgp_packet::RouteDistinguisher, ipnet::Ipv4Net), u32>,
     /// Configured SRv6 locator name (`router bgp segment-routing
     /// srv6 locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
@@ -710,6 +716,7 @@ impl Bgp {
             vrf_label_request_pending: false,
             lu_label_v4: BTreeMap::new(),
             lu_label_v6: BTreeMap::new(),
+            vpn_label_v4: BTreeMap::new(),
             srv6_locator_name: None,
             srv6_locator_rx,
             srv6_locator: None,
@@ -1253,6 +1260,7 @@ impl Bgp {
                         alloc: &mut self.vrf_label_alloc,
                         v4: &mut self.lu_label_v4,
                         v6: &mut self.lu_label_v6,
+                        vpn_v4: &mut self.vpn_label_v4,
                     }),
                 };
 
@@ -2165,6 +2173,13 @@ impl Bgp {
                         None,
                     );
                 }
+                // Inter-AS Option B transit: re-program the swap ILM for our
+                // advertised local label toward the rerouted transport.
+                super::route::reconcile_swap_ilm(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    selected.first(),
+                );
             }
             NhtDep::V6vpn(rd, p) => {
                 let selected = self.local_rib.select_best_path_vpn_v6(&rd, p);
@@ -2405,6 +2420,14 @@ impl Bgp {
                 {
                     super::vrf::dispatch_withdraw_import_v4(&dispatcher, *rd, *p, &attr, None);
                 }
+                // Inter-AS Option B transit: (re-)install the swap ILM for
+                // our advertised local label now that the next-hop's
+                // transport resolved, or tear it down if it went away.
+                super::route::reconcile_swap_ilm(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    selected.first(),
+                );
             }
             NhtDep::V6vpn(rd, p) => {
                 super::route::route_advertise_to_peers_vpnv6(

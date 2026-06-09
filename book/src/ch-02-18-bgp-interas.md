@@ -21,12 +21,14 @@ boundary:
 The options trade off ASBR scaling against operational coupling. Option
 A needs no MPLS on the inter-AS link but burns a (sub)interface and a
 VRF per VPN. Option B keeps the ASBRs in the VPN control plane (and the
-VPN data plane). **Option C** pushes both out: the ASBRs only need to
-make the remote PE loopbacks reachable — and labeled — so a single LSP
-runs end to end and the VPN routes pass over the top, transparent to the
-ASBRs. It scales best and is the focus of this section.
+VPN data plane) but needs no per-VPN VRF — the ASBRs hold every VPN route
+in their global VPNv4 table and label-swap it across the boundary.
+**Option C** pushes both out: the ASBRs only need to make the remote PE
+loopbacks reachable — and labeled — so a single LSP runs end to end and
+the VPN routes pass over the top, transparent to the ASBRs.
 
-> **Implemented today:** Option A
-> ([back-to-back VRFs](ch-02-20-bgp-interas-option-a.md)) and Option C
-> ([over SR-MPLS](ch-02-19-bgp-interas-option-c.md)), each with an
-> SR-MPLS transport inside the AS. Option B is future work.
+> **Implemented today:** all three —
+> [Option A](ch-02-20-bgp-interas-option-a.md) (back-to-back VRFs),
+> [Option B](ch-02-21-bgp-interas-option-b.md) (VPNv4 between ASBRs), and
+> [Option C](ch-02-19-bgp-interas-option-c.md) (BGP-LU between ASBRs) —
+> each with an SR-MPLS transport inside the AS.

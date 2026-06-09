@@ -1,0 +1,12 @@
+# CE2 (AS 65001 customer site). Plain host, default route to PE2.
+interface:
+- if-name: pe2
+  ipv4:
+    address: 10.2.0.2/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.2.0.1
