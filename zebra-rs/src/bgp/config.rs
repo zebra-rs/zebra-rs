@@ -34,14 +34,20 @@ fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
 
 fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        let router_id = args.v4addr()?;
-        // Go through `set_router_id` so the new value is also
-        // propagated to every existing peer's `router_id` snapshot
-        // — peers created before the operator typed this line would
-        // otherwise keep their stale (often 0.0.0.0) value and emit
-        // OPEN with the wrong BGP Identifier.
-        bgp.set_router_id(router_id);
+        bgp.router_id_config = Some(args.v4addr()?);
+    } else {
+        // Delete falls back to the RIB-derived value (or 0.0.0.0 if
+        // none was ever learned) instead of silently keeping the old
+        // identifier.
+        bgp.router_id_config = None;
     }
+    // `refresh_router_id` resolves configured-vs-RIB precedence and
+    // goes through `set_router_id`, so the result is also propagated
+    // to every existing peer's `router_id` snapshot — peers created
+    // before the operator typed this line would otherwise keep their
+    // stale (often 0.0.0.0) value and emit OPEN with the wrong BGP
+    // Identifier.
+    bgp.refresh_router_id();
     Some(())
 }
 
@@ -1595,19 +1601,23 @@ fn config_llgr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 }
 
 fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    if op == ConfigOp::Set {
-        let addr = if let Some(addr) = args.v4addr() {
-            IpAddr::V4(addr)
-        } else if let Some(addr) = args.v6addr() {
-            IpAddr::V6(addr)
-        } else {
-            return None;
-        };
-        let identifier: Ipv4Addr = args.v4addr()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.local_identifier = Some(identifier);
-            peer.start();
-        }
+    let addr = if let Some(addr) = args.v4addr() {
+        IpAddr::V4(addr)
+    } else if let Some(addr) = args.v6addr() {
+        IpAddr::V6(addr)
+    } else {
+        return None;
+    };
+    let identifier = if op == ConfigOp::Set {
+        Some(args.v4addr()?)
+    } else {
+        // Delete reverts the peer to the instance identifier instead
+        // of keeping the per-peer override forever.
+        None
+    };
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        peer.local_identifier = identifier;
+        peer.start();
     }
     Some(())
 }
