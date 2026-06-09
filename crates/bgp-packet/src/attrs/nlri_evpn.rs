@@ -113,7 +113,7 @@ impl Evpn {
 ///
 /// Variant declaration order matches RFC 7432 Route Type ordering so that
 /// the derived `Ord` impl yields Type 2 → Type 3 in iteration (and thus in
-/// `show ip bgp evpn` output).
+/// `show bgp evpn` output).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum EvpnPrefix {
     /// Route Type 2 — MAC/IP Advertisement Route.

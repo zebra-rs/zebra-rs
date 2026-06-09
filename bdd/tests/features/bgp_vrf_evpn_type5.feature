@@ -54,15 +54,15 @@ Feature: BGP per-VRF EVPN Type-5 (IP Prefix) advertise to a remote PE
 
   Scenario: z1 advertises the self-originated network as an EVPN Type-5 route
     Given the test topology exists
-    Then show command "ip bgp evpn" in namespace "z1" should contain "[5]:"
-    And show command "ip bgp evpn" in namespace "z1" should contain "10.1.0.0"
-    And show command "ip bgp evpn" in namespace "z1" should contain "65001:100"
+    Then show command "show bgp evpn" in namespace "z1" should contain "[5]:"
+    And show command "show bgp evpn" in namespace "z1" should contain "10.1.0.0"
+    And show command "show bgp evpn" in namespace "z1" should contain "65001:100"
 
   Scenario: z2 receives the EVPN Type-5 route under the originating RD
     Given the test topology exists
-    Then show command "ip bgp evpn" in namespace "z2" should contain "[5]:"
-    And show command "ip bgp evpn" in namespace "z2" should contain "10.1.0.0"
-    And show command "ip bgp evpn" in namespace "z2" should contain "65001:100"
+    Then show command "show bgp evpn" in namespace "z2" should contain "[5]:"
+    And show command "show bgp evpn" in namespace "z2" should contain "10.1.0.0"
+    And show command "show bgp evpn" in namespace "z2" should contain "65001:100"
 
   Scenario: Teardown topology
     Given the test topology exists

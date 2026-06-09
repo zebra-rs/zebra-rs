@@ -106,6 +106,13 @@ fn daemonize() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     Daemonize::new()
         .working_directory(cwd)
+        // The daemonize crate defaults to umask 0o027, which makes a
+        // root daemon's pid file (and log files) mode 0640 — unreadable
+        // by unprivileged tooling. The BDD harness reads the pid file as
+        // the test user to stop the daemon at teardown, so 0o027 made
+        // every teardown silently skip the kill and leak the daemon.
+        // Use the conventional 0o022 to match foreground behavior.
+        .umask(0o022)
         .start()
         .map_err(|e| anyhow::anyhow!("Failed to daemonize: {}", e))
 }

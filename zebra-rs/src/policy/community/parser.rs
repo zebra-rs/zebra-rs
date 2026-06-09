@@ -383,7 +383,7 @@ mod tests {
     fn test_match_standard_community_exact() {
         // Create a BGP attribute with standard community
         let mut bgp_attr = BgpAttr::new();
-        bgp_attr.com = Some(Community(vec![
+        bgp_attr.com = Some(Community::from([
             CommunityValue::from_readable_str("100:200").unwrap().0,
             CommunityValue::from_readable_str("300:400").unwrap().0,
         ]));
@@ -403,7 +403,7 @@ mod tests {
         // Test with no-export
         let matcher = CommunityMatcher::from_str("no-export").unwrap();
         let mut bgp_attr_export = BgpAttr::new();
-        bgp_attr_export.com = Some(Community(vec![CommunityValue::NO_EXPORT.0]));
+        bgp_attr_export.com = Some(Community::from([CommunityValue::NO_EXPORT.0]));
         assert!(match_community_set(&matcher, &bgp_attr_export));
 
         // Test no match
@@ -414,7 +414,7 @@ mod tests {
     fn test_match_standard_community_regex() {
         // Create a BGP attribute with standard communities
         let mut bgp_attr = BgpAttr::new();
-        bgp_attr.com = Some(Community(vec![
+        bgp_attr.com = Some(Community::from([
             CommunityValue::from_readable_str("100:200").unwrap().0,
             CommunityValue::from_readable_str("100:300").unwrap().0,
             CommunityValue::from_readable_str("200:400").unwrap().0,

@@ -209,6 +209,26 @@ module exec {
       ext:default-child "ipv4";
       presence "BGP IPv4 unicast RIB (same as `show bgp ipv4`)";
       uses bgp-show-afi-rib;
+      // VPNv4 (SAFI 128) Loc-RIB across every route distinguisher.
+      // Mirrors the `ipv4` list above: a bare address after `vpnv4`
+      // does a longest-match lookup inside each RD's table; a prefix
+      // matches exactly.
+      list vpnv4 {
+        ext:help "BGP VPNv4 RIB";
+        ext:presence "BGP VPNv4 RIB (all route distinguishers)";
+        key value;
+        leaf value {
+          ext:help "Address (routes containing it) or prefix (exact match)";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv4-prefix;
+          }
+        }
+      }
+      leaf evpn {
+        ext:help "BGP EVPN RIB";
+        type empty;
+      }
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
         ext:presence "BGP update-group summary";
@@ -280,18 +300,8 @@ module exec {
           ext:help "BGP RIB";
           type inet:ipv4-address;
         }
-        container vpnv4 {
-          presence "BGP VPNv4 RIB";
-          leaf route {
-            type inet:ipv4-address;
-          }
-        }
         leaf labeled-unicast {
           ext:help "BGP Labeled-Unicast (SAFI 4) RIB";
-          type empty;
-        }
-        leaf evpn {
-          ext:help "BGP EVPN RIB";
           type empty;
         }
         container flowspec {

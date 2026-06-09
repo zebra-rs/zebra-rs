@@ -45,13 +45,18 @@ Feature: BGP per-VRF VPNv4 export to a remote PE
 
   Scenario: z1 advertises the self-originated network as VPNv4
     Given the test topology exists
-    Then show command "ip bgp vpnv4" in namespace "z1" should contain "10.1.0.0/24"
-    And show command "ip bgp vpnv4" in namespace "z1" should contain "65001:100"
+    Then show command "show bgp vpnv4" in namespace "z1" should contain "10.1.0.0/24"
+    And show command "show bgp vpnv4" in namespace "z1" should contain "65001:100"
 
   Scenario: z2 receives the VPNv4 NLRI under the same RD
     Given the test topology exists
-    Then show command "ip bgp vpnv4" in namespace "z2" should contain "10.1.0.0/24"
-    And show command "ip bgp vpnv4" in namespace "z2" should contain "65001:100"
+    Then show command "show bgp vpnv4" in namespace "z2" should contain "10.1.0.0/24"
+    And show command "show bgp vpnv4" in namespace "z2" should contain "65001:100"
+
+  Scenario: VPNv4 route detail by address and by exact prefix
+    Given the test topology exists
+    Then show command "show bgp vpnv4 10.1.0.1" in namespace "z2" should contain "BGP routing table entry for 10.1.0.0/24"
+    And show command "show bgp vpnv4 10.1.0.0/24" in namespace "z2" should contain "Route Distinguisher: 65001:100"
 
   Scenario: Teardown topology
     Given the test topology exists

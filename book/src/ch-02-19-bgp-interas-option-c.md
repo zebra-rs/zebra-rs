@@ -258,7 +258,7 @@ customer prefix appears under the remote PE's RD, tagged with the shared
 route-target, and the multihop session is up:
 
 ```
-$ show ip bgp vpnv4
+$ show bgp vpnv4
 Route Distinguisher: 65001:1
  *>  10.2.0.0/30        2.2.2.1   ...   # rt:65000:100
 

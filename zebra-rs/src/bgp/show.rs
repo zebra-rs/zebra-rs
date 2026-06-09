@@ -577,11 +577,23 @@ fn show_labeled_row(
     )
 }
 
+/// `show bgp vpnv4 [A.B.C.D | A.B.C.D/M]` — VPNv4 (SAFI 128) Loc-RIB.
+/// No value dumps every RD's table; an address shows the longest match
+/// inside each RD (the routes that contain it); a prefix shows that
+/// exact entry. Mirrors [`show_bgp_ipv4`] on the unicast tree.
 fn show_bgp_vpnv4(
     bgp: &Bgp,
-    _args: Args,
+    mut args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    match args.string() {
+        None => show_bgp_vpnv4_table(bgp, json),
+        Some(tok) => show_bgp_vpnv4_entry(bgp, &tok),
+    }
+}
+
+/// The all-RD VPNv4 table — `show bgp vpnv4` with no value.
+fn show_bgp_vpnv4_table(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let mut routes: Vec<BgpVpnv4RouteJson> = Vec::new();
 
@@ -942,106 +954,129 @@ fn show_bgp_received_vpnv4(
 
 use crate::rib::util::IpAddrExt;
 
-fn show_bgp_vpnv4_route(
-    bgp: &Bgp,
-    mut args: Args,
-    _json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
+/// The keyed form of [`show_bgp_vpnv4`]: per-RD "BGP routing table
+/// entry" detail for one value. An address picks the longest match
+/// inside each RD's table; a prefix must match exactly.
+fn show_bgp_vpnv4_entry(bgp: &Bgp, tok: &str) -> std::result::Result<String, std::fmt::Error> {
     let mut out = String::new();
-
-    let addr = match args.v4addr() {
-        Some(addr) => addr,
-        None => return Ok(String::from("% No BGP route exists")),
-    };
-    let host = addr.to_host_prefix();
-
-    for (rd, table) in bgp.local_rib.v4vpn.iter() {
-        if let Some(ribs) = table.0.get_lpm(&host) {
-            writeln!(out, "BGP routing table entry for {}", ribs.0)?;
-            writeln!(out, "Paths: ({} available)", ribs.1.len())?;
-            let _ = writeln!(out, "Route Distinguisher: {}", rd);
-            for rib in ribs.1.iter() {
-                // Display path identifier and router ID
-                let best_marker = if rib.best_path { " best" } else { "" };
-                let internal_marker = if rib.typ == BgpRibType::IBGP {
-                    "internal"
-                } else {
-                    "external"
-                };
-
-                let from_addr = bgp
-                    .peers
-                    .addr_of(rib.ident)
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "self".to_string());
-                writeln!(
-                    out,
-                    "  {} ({}), ({}{}) from {}",
-                    show_nexthop(&rib.attr),
-                    rib.router_id,
-                    internal_marker,
-                    best_marker,
-                    from_addr
-                )?;
-
-                // Display origin
-                let origin_str = if let Some(origin) = &rib.attr.origin {
-                    match origin {
-                        Origin::Igp => "IGP",
-                        Origin::Egp => "EGP",
-                        Origin::Incomplete => "incomplete",
+    if tok.contains('/') {
+        match tok.parse::<Ipv4Net>() {
+            Ok(net) => {
+                for (rd, table) in bgp.local_rib.v4vpn.iter() {
+                    if let Some(ribs) = table.0.get(&net) {
+                        write_vpnv4_entry_detail(&mut out, bgp, rd, &net.to_string(), ribs)?;
                     }
-                } else {
-                    "incomplete"
-                };
-
-                // Build attribute line
-                let mut attr_parts = vec![format!("Origin {}", origin_str)];
-
-                if let Some(med) = &rib.attr.med {
-                    attr_parts.push(format!("metric {}", med.med));
                 }
-
-                if let Some(local_pref) = &rib.attr.local_pref {
-                    attr_parts.push(format!("localpref {}", local_pref.local_pref));
-                }
-
-                writeln!(out, "    {}", attr_parts.join(", "))?;
-
-                // Display AS path if present
-                if let Some(aspath) = &rib.attr.aspath
-                    && !aspath.segs.is_empty()
-                {
-                    writeln!(out, "    AS path: {}", aspath)?;
-                }
-
-                // Display route reflection attributes if present (RFC 4456)
-                if let Some(originator_id) = &rib.attr.originator_id {
-                    write!(out, "    Originator: {}", originator_id.id)?;
-
-                    if let Some(cluster_list) = &rib.attr.cluster_list {
-                        write!(out, ", Cluster list: ")?;
-                        let cluster_ids: Vec<String> =
-                            cluster_list.list.iter().map(|id| id.to_string()).collect();
-                        write!(out, "{}", cluster_ids.join(" "))?;
-                    }
-                    writeln!(out)?;
-                } else if let Some(cluster_list) = &rib.attr.cluster_list {
-                    // Cluster list without originator (shouldn't normally happen, but handle it)
-                    write!(out, "    Cluster list: ")?;
-                    let cluster_ids: Vec<String> =
-                        cluster_list.list.iter().map(|id| id.to_string()).collect();
-                    writeln!(out, "{}", cluster_ids.join(" "))?;
-                }
-
-                let _ = writeln!(out, "    Reason: {}", rib.best_reason);
-
-                writeln!(out)?;
             }
+            Err(_) => writeln!(out, "% Malformed IPv4 prefix: {tok}")?,
+        }
+    } else {
+        match tok.parse::<Ipv4Addr>() {
+            Ok(addr) => {
+                let host = addr.to_host_prefix();
+                for (rd, table) in bgp.local_rib.v4vpn.iter() {
+                    if let Some((prefix, ribs)) = table.0.get_lpm(&host) {
+                        write_vpnv4_entry_detail(&mut out, bgp, rd, &prefix.to_string(), ribs)?;
+                    }
+                }
+            }
+            Err(_) => writeln!(out, "% Malformed IPv4 address: {tok}")?,
         }
     }
-
     Ok(out)
+}
+
+/// One RD's detail block — header lines plus the per-path breakdown.
+/// Layout carried over from the legacy `show ip bgp vpnv4 route`.
+fn write_vpnv4_entry_detail(
+    out: &mut String,
+    bgp: &Bgp,
+    rd: &RouteDistinguisher,
+    prefix: &str,
+    ribs: &[BgpRib],
+) -> std::result::Result<(), std::fmt::Error> {
+    writeln!(out, "BGP routing table entry for {}", prefix)?;
+    writeln!(out, "Paths: ({} available)", ribs.len())?;
+    writeln!(out, "Route Distinguisher: {}", rd)?;
+    for rib in ribs.iter() {
+        // Display path identifier and router ID
+        let best_marker = if rib.best_path { " best" } else { "" };
+        let internal_marker = if rib.typ == BgpRibType::IBGP {
+            "internal"
+        } else {
+            "external"
+        };
+
+        let from_addr = bgp
+            .peers
+            .addr_of(rib.ident)
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "self".to_string());
+        writeln!(
+            out,
+            "  {} ({}), ({}{}) from {}",
+            show_nexthop(&rib.attr),
+            rib.router_id,
+            internal_marker,
+            best_marker,
+            from_addr
+        )?;
+
+        // Display origin
+        let origin_str = if let Some(origin) = &rib.attr.origin {
+            match origin {
+                Origin::Igp => "IGP",
+                Origin::Egp => "EGP",
+                Origin::Incomplete => "incomplete",
+            }
+        } else {
+            "incomplete"
+        };
+
+        // Build attribute line
+        let mut attr_parts = vec![format!("Origin {}", origin_str)];
+
+        if let Some(med) = &rib.attr.med {
+            attr_parts.push(format!("metric {}", med.med));
+        }
+
+        if let Some(local_pref) = &rib.attr.local_pref {
+            attr_parts.push(format!("localpref {}", local_pref.local_pref));
+        }
+
+        writeln!(out, "    {}", attr_parts.join(", "))?;
+
+        // Display AS path if present
+        if let Some(aspath) = &rib.attr.aspath
+            && !aspath.segs.is_empty()
+        {
+            writeln!(out, "    AS path: {}", aspath)?;
+        }
+
+        // Display route reflection attributes if present (RFC 4456)
+        if let Some(originator_id) = &rib.attr.originator_id {
+            write!(out, "    Originator: {}", originator_id.id)?;
+
+            if let Some(cluster_list) = &rib.attr.cluster_list {
+                write!(out, ", Cluster list: ")?;
+                let cluster_ids: Vec<String> =
+                    cluster_list.list.iter().map(|id| id.to_string()).collect();
+                write!(out, "{}", cluster_ids.join(" "))?;
+            }
+            writeln!(out)?;
+        } else if let Some(cluster_list) = &rib.attr.cluster_list {
+            // Cluster list without originator (shouldn't normally happen, but handle it)
+            write!(out, "    Cluster list: ")?;
+            let cluster_ids: Vec<String> =
+                cluster_list.list.iter().map(|id| id.to_string()).collect();
+            writeln!(out, "{}", cluster_ids.join(" "))?;
+        }
+
+        writeln!(out, "    Reason: {}", rib.best_reason)?;
+
+        writeln!(out)?;
+    }
+    Ok(())
 }
 
 /// IOS-XR-style detail block for one prefix's path set. Shared by the
@@ -2455,7 +2490,7 @@ fn show_bgp_neighbor<V: BgpShowView>(
     Ok(out)
 }
 
-/// Format one extended community value the way `show ip bgp evpn` expects.
+/// Format one extended community value the way `show bgp evpn` expects.
 ///
 /// Decodes the well-known EVPN-relevant subtypes:
 /// - Two-octet AS Route Target (high=0x00, low=0x02) -> `RT:<asn>:<u32>`
@@ -2882,7 +2917,7 @@ mod flowspec_show_tests {
     #[test]
     fn actions_render_discard_and_marking() {
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(vec![
+            ecom: Some(ExtCommunity::from([
                 FlowspecAction::TrafficRateBytes { asn: 0, rate: 0.0 }.into(),
                 FlowspecAction::TrafficMarking { dscp: 46 }.into(),
             ])),
@@ -2902,7 +2937,7 @@ mod flowspec_show_tests {
         // A Route-Target (0x00/0x02) is not a flow-spec action and must
         // not appear in the rendered action list.
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(vec![ExtCommunityValue {
+            ecom: Some(ExtCommunity::from([ExtCommunityValue {
                 high_type: 0x00,
                 low_type: 0x02,
                 val: [0, 100, 0, 0, 0, 200],
@@ -3559,8 +3594,6 @@ impl Bgp {
     pub fn show_build(&mut self) {
         self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
         self.show_add("/show/ip/bgp/labeled-unicast", show_bgp_labeled);
-        self.show_add("/show/ip/bgp/vpnv4", show_bgp_vpnv4);
-        self.show_add("/show/ip/bgp/vpnv4/route", show_bgp_vpnv4_route);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
         self.show_add("/show/ip/bgp/summary", show_bgp_summary::<Bgp>);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor::<Bgp>);
@@ -3586,7 +3619,6 @@ impl Bgp {
             show_bgp_received_evpn,
         );
         self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
-        self.show_add("/show/ip/bgp/evpn", show_bgp_evpn);
         self.show_add("/show/ip/bgp/flowspec", show_bgp_flowspec_v4);
         self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
         self.show_add("/show/ip/bgp/sr-policy", show_bgp_sr_policy_v4);
@@ -3616,6 +3648,10 @@ impl Bgp {
         self.show_add("/show/bgp/ipv4/longer-prefix", show_bgp_ipv4_longer::<Bgp>);
         self.show_add("/show/bgp/ipv6", show_bgp_ipv6::<Bgp>);
         self.show_add("/show/bgp/ipv6/longer-prefix", show_bgp_ipv6_longer::<Bgp>);
+        // VPNv4 / EVPN moved here from the legacy `show ip bgp` tree:
+        // `show bgp vpnv4 [<addr>|<prefix>]` and `show bgp evpn`.
+        self.show_add("/show/bgp/vpnv4", show_bgp_vpnv4);
+        self.show_add("/show/bgp/evpn", show_bgp_evpn);
 
         // `show bgp vrf <name> …` is normally intercepted by the manager
         // and redirected into the per-VRF task (see `process_vrf_show`).
