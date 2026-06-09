@@ -544,7 +544,16 @@ pub struct Rib {
     /// overlapping label blocks to protocols (BGP L3VPN today).
     pub label_manager: super::label_manager::LabelManager,
     pub nmap: NexthopMap,
+    /// Effective global Router ID — what subscribers receive via
+    /// `RibRx::RouterIdUpdate` and what the subscribe-time replay
+    /// sends. Either the configured override (`router_id_config`) or
+    /// the automatic pick from interface addresses; sticky once set
+    /// (never reverts to 0.0.0.0 while running).
     pub router_id: Ipv4Addr,
+    /// Operator-configured global Router ID (top-level
+    /// `router-id A.B.C.D`). Takes precedence over the automatic
+    /// pick; `None` falls back to it.
+    pub router_id_config: Option<Ipv4Addr>,
 
     /// Single-shot timer that fires Message::Resolve after a debounce when
     /// the FIB has changed. None when no resolve is pending. Set by
@@ -644,6 +653,7 @@ impl Rib {
             label_manager: super::label_manager::LabelManager::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
+            router_id_config: None,
             rib_sync_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
@@ -2179,7 +2189,9 @@ impl Rib {
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                if path.as_str().starts_with("/router/static/ipv4/route") {
+                if path.as_str() == "/router-id" {
+                    let _ = self.router_id_config_exec(args, msg.op);
+                } else if path.as_str().starts_with("/router/static/ipv4/route") {
                     let _ = self.static_v4.exec(path, args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv6/route") {
                     let _ = self.static_v6.exec(path, args, msg.op);

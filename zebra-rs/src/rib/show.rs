@@ -1678,7 +1678,32 @@ impl Rib {
         self.show_add("/show/segment-routing/srv6/sid", sid_show);
         self.show_add("/show/vrf", vrf_show);
         self.show_add("/show/hostname", hostname_show);
+        self.show_add("/show/router-id", router_id_show);
     }
+}
+
+pub fn router_id_show(rib: &Rib, _args: Args, json: bool) -> String {
+    let selected = !rib.router_id.is_unspecified();
+    let source = if rib.router_id_config.is_some() {
+        "configured"
+    } else {
+        "automatic"
+    };
+    if json {
+        let value = if selected {
+            serde_json::json!({
+                "routerId": rib.router_id.to_string(),
+                "source": source,
+            })
+        } else {
+            serde_json::json!({ "routerId": Value::Null })
+        };
+        return value.to_string();
+    }
+    if !selected {
+        return "Router ID is not yet selected\n".to_string();
+    }
+    format!("Router ID: {} ({})\n", rib.router_id, source)
 }
 
 pub fn hostname_show(_rib: &Rib, _args: Args, _json: bool) -> String {
