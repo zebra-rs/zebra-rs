@@ -187,6 +187,34 @@ submodule ietf-bgp-neighbor {
           enum send-receive;
         }
       }
+      leaf encapsulation-type {
+        when "../name = 'ipv6'" {
+          description
+            "SRv6 encapsulation only applies to the IPv6 unicast
+             family.";
+        }
+        ext:sort "20";
+        type enumeration {
+          enum srv6 {
+            description
+              "SRv6-only peer. Only routes carrying an SRv6 service SID
+               (BGP Prefix-SID attribute, RFC 9252) are advertised to /
+               accepted from this neighbor; routes without a SID are
+               filtered out on the session.";
+          }
+          enum srv6-relax {
+            description
+              "Mixed session. Routes with or without an SRv6 service SID
+               may be advertised to / accepted from this neighbor.";
+          }
+        }
+        description
+          "Per-neighbor SRv6 encapsulation mode for the IPv6 unicast
+           family. `srv6` makes the session SRv6-strict (SID-less routes
+           filtered), `srv6-relax` SRv6-relaxed (SID-less routes still
+           exchanged). Absent = no SRv6 encapsulation filtering for the
+           family.";
+      }
     }
   }
 }

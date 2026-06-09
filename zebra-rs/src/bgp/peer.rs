@@ -427,10 +427,55 @@ impl Default for PeerConfig {
     }
 }
 
+/// Per-neighbor, per-AFI/SAFI SRv6 encapsulation mode for the IPv6
+/// unicast family (`afi-safi ipv6 encapsulation-type` in
+/// ietf-bgp-neighbor). Selects how SRv6-SID-bearing routes are
+/// exchanged on the session:
+///
+/// * [`Srv6`](Self::Srv6) — SRv6-only peer: only routes carrying an
+///   SRv6 service SID (BGP Prefix-SID, RFC 9252) are advertised/accepted;
+///   SID-less routes are filtered out on the session.
+/// * [`Srv6Relax`](Self::Srv6Relax) — mixed session: routes with or
+///   without an SRv6 SID may be exchanged with this peer.
+///
+/// Currently a recorded-intent knob — the value is parsed and stored,
+/// but the advertise/accept SID filtering is not yet enforced (the
+/// follow-up wires it into `route_update_ipv6` / `route_ipv6_update`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AfiSafiEncapType {
+    Srv6,
+    Srv6Relax,
+}
+
+impl AfiSafiEncapType {
+    /// Parse the `encapsulation-type` enum value as it appears in the
+    /// YANG / CLI (`srv6`, `srv6-relax`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "srv6" => Some(Self::Srv6),
+            "srv6-relax" => Some(Self::Srv6Relax),
+            _ => None,
+        }
+    }
+
+    /// The CLI / YANG string form, for show output and round-tripping.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Srv6 => "srv6",
+            Self::Srv6Relax => "srv6-relax",
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PeerSubConfig {
     pub graceful_restart: Option<u32>,
     pub llgr: Option<u32>,
+    /// `afi-safi <name> encapsulation-type` (ietf-bgp-neighbor). Only
+    /// settable under `afi-safi ipv6` (YANG `when name = 'ipv6'`).
+    /// `None` = no SRv6 encapsulation mode configured for this AF.
+    pub encapsulation_type: Option<AfiSafiEncapType>,
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Clone, Copy)]

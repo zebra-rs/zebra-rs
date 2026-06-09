@@ -1,0 +1,103 @@
+# BGP SRv6 Encapsulation Type (per-neighbor)
+
+In an SRv6 network, an IPv6 unicast route can carry an **SRv6 service
+SID** in the BGP Prefix-SID attribute (RFC 9252 / RFC 8669) — the SID a
+remote PE programs to deliver traffic for that prefix. `encapsulation-type`
+is a per-neighbor, per-address-family knob that declares how strict the
+session is about that SID for the **IPv6 unicast** family:
+
+- **`srv6`** — *SRv6-only* peer. Only routes carrying an SRv6 service SID
+  are exchanged with the neighbor; a route without a SID is filtered out
+  on the session.
+- **`srv6-relax`** — *mixed* session. Routes with or without an SRv6 SID
+  may be exchanged with the neighbor.
+
+It is the BGP-session counterpart to the data-plane SRv6 encapsulation
+configured elsewhere (see [SRv6](ch-04-00-srv6.md) and
+[L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)): those chapters
+cover *how* a SID is programmed into the forwarding plane, while this knob
+governs *which* IPv6 unicast routes are allowed to ride a given session
+based on whether they carry a SID.
+
+## When you need it
+
+Use `srv6` on a session that must stay SRv6-pure — for example a fabric
+where every IPv6 prefix is expected to resolve to an SRv6 SID and a
+SID-less route would represent a misconfiguration or a non-SRv6 leak that
+should not be propagated. Use `srv6-relax` on a boundary session that
+carries a mix of SRv6 and plain IPv6 unicast routes to the same peer and
+must not drop the SID-less ones.
+
+When the knob is **absent** the family behaves as ordinary IPv6 unicast:
+no SID-based filtering is applied in either direction.
+
+## Modes at a glance
+
+| Mode         | SID-bearing routes | SID-less routes |
+|--------------|--------------------|-----------------|
+| *(unset)*    | exchanged          | exchanged       |
+| `srv6`       | exchanged          | **filtered**    |
+| `srv6-relax` | exchanged          | exchanged       |
+
+`srv6-relax` differs from the unset default in *intent*: it marks the
+session as SRv6-aware (so SID-bearing routes are treated as first-class)
+while explicitly tolerating SID-less routes, whereas the unset default is
+simply SRv6-agnostic.
+
+## Configuration
+
+`encapsulation-type` lives under the neighbor's IPv6 `afi-safi` entry. The
+schema restricts it to the `ipv6` family (`when name = 'ipv6'`), so it is
+only valid there.
+
+```yaml
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 10.255.0.1
+    neighbor:
+    - remote-address: 2001:db8::8
+      remote-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6
+```
+
+The equivalent CLI form is the same path:
+
+```
+set router bgp neighbor 2001:db8::8 afi-safi ipv6 encapsulation-type srv6
+```
+
+Replace `srv6` with `srv6-relax` for the mixed-session variant. Delete the
+leaf to return the family to the SRv6-agnostic default:
+
+```
+delete router bgp neighbor 2001:db8::8 afi-safi ipv6 encapsulation-type
+```
+
+## Verification
+
+`show ip bgp neighbor <addr>` echoes the configured mode for the IPv6
+unicast family:
+
+```
+  IPv6 Unicast encapsulation-type: srv6
+```
+
+The line is omitted when the knob is unset.
+
+## Status
+
+This release wires the **configuration**: the mode is parsed, validated,
+stored on the neighbor, and reported by `show`. The advertise- and
+accept-side SID filtering it describes is **not yet enforced** — the knob
+currently records intent. Enforcement (dropping SID-less IPv6 unicast
+routes on a `srv6` session, on both the receive and re-advertise paths)
+is a planned follow-up; note that the advertise side additionally depends
+on SRv6-SID origination for plain IPv6 unicast, which today exists only
+for the VPNv4 / VPNv6 families described in
+[L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md).

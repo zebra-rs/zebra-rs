@@ -23,6 +23,7 @@
   - [Remove Private AS](ch-02-14-bgp-remove-private-as.md)
   - [Enforce First AS](ch-02-15-bgp-enforce-first-as.md)
   - [disable-connected-check](ch-02-16-bgp-disable-connected-check.md)
+  - [SRv6 Encapsulation Type (per-neighbor)](ch-02-17-bgp-srv6-encapsulation-type.md)
   - [Timer Configuration](ch-02-03-bgp-timers.md)
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)
