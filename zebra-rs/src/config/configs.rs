@@ -371,9 +371,12 @@ impl Config {
             self.marshal_key_value(out);
             self.marshal_configs(out);
 
-            // Handle presence containers (empty objects)
-            if !has_keys && !has_configs && self.presence {
-                out.push_str("{}");
+            // A `type empty` leaf or a childless presence container has
+            // emitted only a dangling `"name":` so far. Close it with an
+            // explicit null: json_to_list() maps null back to the bare
+            // `set <path>` on load, whereas `{}` is silently dropped.
+            if !has_configs && self.value.borrow().is_empty() && self.list.borrow().is_empty() {
+                out.push_str("null");
             }
         }
     }
@@ -406,9 +409,15 @@ impl Config {
     pub fn yaml(&self, out: &mut String) {
         let mut json = String::new();
         self.json(&mut json);
-        let json_value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let yaml_str = serde_yaml::to_string(&json_value).unwrap();
-        out.push_str(&yaml_str);
+        // A marshaling bug must degrade to an error message in the show
+        // output, not a panic — this runs inside the config manager loop.
+        match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(json_value) => match serde_yaml::to_string(&json_value) {
+                Ok(yaml_str) => out.push_str(&yaml_str),
+                Err(err) => out.push_str(&format!("% YAML serialization failed: {}\n", err)),
+            },
+            Err(err) => out.push_str(&format!("% JSON marshaling failed: {}\n", err)),
+        }
     }
 
     pub fn list_command(&self) -> Vec<String> {
@@ -1092,5 +1101,86 @@ mod tests {
             serde_json::from_str(&json_output).expect("JSON output should be valid");
 
         assert_eq!(parsed["bgp"]["as"], 65000);
+    }
+
+    #[test]
+    fn test_empty_leaf_json_yaml() {
+        // `set router bgp neighbor 2001:db8::8 disable-connected-check` —
+        // a `type empty` leaf ends the path at YangMatch::Leaf with no
+        // value. The marshaled JSON used to stop at a dangling `"name":`,
+        // and `show running-config yaml` panicked the daemon on it.
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        let paths = vec![
+            CommandPath {
+                name: "router".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "bgp".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "neighbor".to_string(),
+                ymatch: YangMatch::Key as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "2001:db8::8".to_string(),
+                ymatch: YangMatch::KeyMatched as i32,
+                key: "address".to_string(),
+                ..Default::default()
+            },
+            CommandPath {
+                name: "disable-connected-check".to_string(),
+                ymatch: YangMatch::Leaf as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths, root.clone());
+
+        let mut json_output = String::new();
+        root.json(&mut json_output);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_output).expect("JSON output should be valid");
+        let neighbor = &parsed["router"]["bgp"]["neighbor"][0];
+        assert_eq!(neighbor["address"], "2001:db8::8");
+        assert_eq!(neighbor["disable-connected-check"], serde_json::Value::Null);
+
+        let mut yaml_output = String::new();
+        root.yaml(&mut yaml_output);
+        assert!(yaml_output.contains("disable-connected-check: null"));
+        assert!(!yaml_output.contains("% "));
+    }
+
+    #[test]
+    fn test_presence_container_json_null() {
+        // A childless presence container (e.g. `set router bgp
+        // segment-routing srv6 ipv6-unicast`) marshals as null, not `{}`:
+        // json_to_list() restores null as the bare `set <path>` but
+        // silently drops an empty object, losing the node on re-apply.
+        let root = Rc::new(Config::new("".to_string(), None));
+
+        let paths = vec![
+            CommandPath {
+                name: "srv6".to_string(),
+                ymatch: YangMatch::Dir as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "ipv6-unicast".to_string(),
+                ymatch: YangMatch::DirMatched as i32,
+                ..Default::default()
+            },
+        ];
+        set(paths, root.clone());
+
+        let mut json_output = String::new();
+        root.json(&mut json_output);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_output).expect("JSON output should be valid");
+        assert_eq!(parsed["srv6"]["ipv6-unicast"], serde_json::Value::Null);
     }
 }
