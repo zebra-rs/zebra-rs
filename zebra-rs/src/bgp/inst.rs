@@ -520,6 +520,11 @@ pub struct Bgp {
     /// locally-originated IPv6 routes without re-deriving it per route.
     /// Kept in lock-step with `srv6_ipv6_sid`.
     pub srv6_ipv6_export: Option<Srv6Ipv6Export>,
+    /// Locally-originated IPv6 unicast `network` prefixes, so they can be
+    /// re-originated (SRv6 End.DT6 SID re-stamped) when the locator
+    /// resolves after the `network` was configured. Redistributed
+    /// prefixes are tracked separately in `redist_v6`.
+    pub networks_v6: std::collections::BTreeSet<ipnet::Ipv6Net>,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -712,6 +717,7 @@ impl Bgp {
             srv6_ipv6_unicast: false,
             srv6_ipv6_sid: None,
             srv6_ipv6_export: None,
+            networks_v6: std::collections::BTreeSet::new(),
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -838,6 +844,9 @@ impl Bgp {
                 // without releasing (mirrors resid_vrf), then re-install.
                 self.withdraw_srv6_ipv6_sid(false);
                 self.install_srv6_ipv6_sid();
+                // Re-stamp originated IPv6 routes now the SID exists (the
+                // route delivery may have raced ahead of locator resolution).
+                self.reoriginate_srv6_ipv6();
             }
             crate::rib::RibSrRx::Block { .. } => {}
         }
@@ -924,6 +933,7 @@ impl Bgp {
         self.srv6_ipv6_unicast = enabled;
         self.withdraw_srv6_ipv6_sid(true);
         self.install_srv6_ipv6_sid();
+        self.reoriginate_srv6_ipv6();
     }
 
     /// Withdraw the instance global-IPv6 End.DT6 SID, if installed, and
@@ -1004,6 +1014,37 @@ impl Bgp {
             sid = %addr,
             "bgp: global IPv6 unicast End.DT6 SID installed"
         );
+    }
+
+    /// Re-originate every locally-originated IPv6 unicast route (both
+    /// `network` and redistribute) so its Loc-RIB attr picks up — or
+    /// drops — the global End.DT6 Prefix-SID after a locator or
+    /// `ipv6-unicast` change.
+    /// The connected/static route delivery and the locator resolution
+    /// race, so re-stamping after the fact keeps the SID consistent
+    /// regardless of arrival order.
+    fn reoriginate_srv6_ipv6(&mut self) {
+        let networks: Vec<ipnet::Ipv6Net> = self.networks_v6.iter().copied().collect();
+        for prefix in networks {
+            self.route_add_v6(prefix);
+        }
+        let redist: Vec<(crate::rib::RibType, ipnet::Ipv6Net, u32)> = self
+            .redist_v6
+            .iter()
+            .filter_map(|((rtype, prefix), e)| {
+                let source = Self::redist_source(*rtype)?;
+                let uni = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip6, bgp_packet::Safi::Unicast);
+                if self.redistribute.contains_key(&(uni, source)) {
+                    let metric = self.redist_metric_override(uni, source).unwrap_or(e.metric);
+                    Some((*rtype, *prefix, metric))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (rtype, prefix, metric) in redist {
+            self.route_redist_inject_v6(rtype, prefix, metric);
+        }
     }
 
     /// Respawn `name`'s per-VRF task with a freshly-allocated End.DT46
@@ -2432,8 +2473,17 @@ impl Bgp {
                     let rib_metric = e.metric;
                     self.redist_v6.insert((rtype, prefix), e);
                     let Some(source) = source else { continue };
-                    // IPv6 labeled-unicast. (IPv6 *unicast* redistribute
-                    // delivery is still storage-only — a separate gap.)
+                    // Plain IPv6 unicast. With `segment-routing srv6
+                    // ipv6-unicast` on, `route_redist_inject_v6` stamps the
+                    // End.DT6 Prefix-SID at origination.
+                    let uni = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+                    if self.redistribute.contains_key(&(uni, source)) {
+                        let metric = self
+                            .redist_metric_override(uni, source)
+                            .unwrap_or(rib_metric);
+                        self.route_redist_inject_v6(rtype, prefix, metric);
+                    }
+                    // IPv6 labeled-unicast.
                     let lu = AfiSafi::new(Afi::Ip6, Safi::MplsLabel);
                     if self.redistribute.contains_key(&(lu, source)) {
                         let metric = self
@@ -2465,6 +2515,9 @@ impl Bgp {
                 for e in entries {
                     let prefix = e.prefix;
                     self.redist_v6.remove(&(rtype, prefix));
+                    // Withdraw from both v6 targets unconditionally (the
+                    // config row may already be gone), mirroring the v4 path.
+                    self.route_redist_withdraw_v6(prefix);
                     self.route_redist_withdraw_labelv6(rtype, prefix);
                 }
             }
