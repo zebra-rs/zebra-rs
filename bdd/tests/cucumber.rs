@@ -332,6 +332,12 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
         &[("ZEBRA_XDP_BFD_ECHO_MODE", "skb")],
         "zebra-rs",
         &[
+            // --daemon double-forks + setsid so the daemon leaves the cargo-test
+            // session. Without it the daemon runs in the harness's session and is
+            // reaped by the end-of-run hangup, which killed BDD_KEEP=1 daemons a
+            // couple of minutes after the run finished. The pid file is written
+            // post-fork, so it holds the real daemonized pid for kill_pidfile.
+            "--daemon",
             "--log-output=file",
             &format!("--log-file={}", log_file),
             &format!("--pid-file={}", pid_file),
