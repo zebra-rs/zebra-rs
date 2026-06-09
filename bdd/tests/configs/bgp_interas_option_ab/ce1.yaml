@@ -1,0 +1,14 @@
+# CE1 (AS 65000 customer site). A plain host: one link to PE1 and a
+# default route pointing at PE1's VRF interface. No IGP/BGP — the CE is
+# the traffic source/sink for the end-to-end L3VPN ping (CE1 -> CE2).
+interface:
+- if-name: pe1
+  ipv4:
+    address: 10.1.0.2/30
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 0.0.0.0/0
+        nexthop:
+        - address: 10.1.0.1
