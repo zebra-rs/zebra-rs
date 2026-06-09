@@ -49,13 +49,20 @@ module exec {
       ext:presence "BGP IPv4 unicast RIB (all prefixes)";
       key value;
       leaf value {
-        ext:help "Address (routes containing it) or prefix (exact match)";
+        ext:help "Address (routes containing it), prefix (exact match) or summary";
         // A bare address does a longest-match lookup (routes that
         // contain it); a prefix matches exactly. The handler tells
-        // them apart by the presence of `/M`.
+        // them apart by the presence of `/M`. `summary` rides the key
+        // union as an inline enumeration arm because the parser's
+        // list position only matches the key — an enum arm is how a
+        // keyword lives at the key position (`show bgp ipv4
+        // summary`); the handler dispatches on the literal value.
         type union {
           type inet:ipv4-address;
           type inet:ipv4-prefix;
+          type enumeration {
+            enum summary;
+          }
         }
       }
       leaf longer-prefix {
@@ -68,10 +75,13 @@ module exec {
       ext:presence "BGP IPv6 unicast RIB (all prefixes)";
       key value;
       leaf value {
-        ext:help "Address (routes containing it) or prefix (exact match)";
+        ext:help "Address (routes containing it), prefix (exact match) or summary";
         type union {
           type inet:ipv6-address;
           type inet:ipv6-prefix;
+          type enumeration {
+            enum summary;
+          }
         }
       }
       leaf longer-prefix {
@@ -208,6 +218,14 @@ module exec {
       // routed into `ipv4` by the matcher via `ext:default-child`.
       ext:default-child "ipv4";
       presence "BGP IPv4 unicast RIB (same as `show bgp ipv4`)";
+      // Neighbor summary, one section per AFI/SAFI configured on at
+      // least one neighbor. The per-AFI forms (`show bgp ipv4
+      // summary`, `show bgp vpnv4 summary`, …) render one section
+      // with only the neighbors that have that AFI/SAFI enabled.
+      leaf summary {
+        ext:help "Summary of BGP neighbor status per AFI/SAFI";
+        type empty;
+      }
       uses bgp-show-afi-rib;
       // VPNv4 (SAFI 128) Loc-RIB across every route distinguisher.
       // Mirrors the `ipv4` list above: a bare address after `vpnv4`
@@ -218,16 +236,23 @@ module exec {
         ext:presence "BGP VPNv4 RIB (all route distinguishers)";
         key value;
         leaf value {
-          ext:help "Address (routes containing it) or prefix (exact match)";
+          ext:help "Address (routes containing it), prefix (exact match) or summary";
           type union {
             type inet:ipv4-address;
             type inet:ipv4-prefix;
+            type enumeration {
+              enum summary;
+            }
           }
         }
       }
-      leaf evpn {
+      container evpn {
         ext:help "BGP EVPN RIB";
-        type empty;
+        presence "BGP EVPN RIB";
+        leaf summary {
+          ext:help "Summary of EVPN-enabled neighbors";
+          type empty;
+        }
       }
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
@@ -253,6 +278,10 @@ module exec {
           ext:help "VRF name";
           ext:dynamic "rib:vrf";
           type string;
+        }
+        leaf summary {
+          ext:help "Summary of this VRF's BGP neighbor status";
+          type empty;
         }
         uses bgp-show-afi-rib;
       }
@@ -319,10 +348,6 @@ module exec {
             ext:help "BGP IPv6 SR Policy (SAFI 73) RIB";
             type empty;
           }
-        }
-        leaf summary {
-          ext:help "BGP summary information";
-          type empty;
         }
         list neighbors {
           ext:help "BGP neighbor information";

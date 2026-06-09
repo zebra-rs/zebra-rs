@@ -67,12 +67,14 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
     let (path, args) = path_from_command(&msg.paths);
     let out = match path.as_str() {
         "/show/ip/bgp" => show_bgp(vrf, args, msg.json),
-        "/show/ip/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
+        "/show/ip/bgp/summary" | "/show/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
         "/show/ip/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
         // `show bgp vrf <name> [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
         // — the manager strips the `vrf <name>` selector, so a per-VRF
         // task sees the same `/show/bgp/…` paths as the default VRF and
-        // renders against its own Loc-RIB via [`BgpShowView`].
+        // renders against its own Loc-RIB via [`BgpShowView`]. The
+        // `summary` key-union arm rides along (`show bgp vrf X ipv4
+        // summary` → `/show/bgp/ipv4` with a "summary" arg).
         "/show/bgp" | "/show/bgp/ipv4" => show_bgp_ipv4(vrf, args, msg.json),
         "/show/bgp/ipv4/longer-prefix" => show_bgp_ipv4_longer(vrf, args, msg.json),
         "/show/bgp/ipv6" => show_bgp_ipv6(vrf, args, msg.json),
@@ -84,7 +86,7 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
 }
 
 /// Human-readable label for an (AFI, SAFI) pair, used as the "<label>
-/// Summary:" header in `show ip bgp summary`.
+/// Summary:" header in `show bgp summary`.
 fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
     match (afi, safi) {
         (Afi::Ip, Safi::Unicast) => "IPv4 Unicast",
@@ -98,6 +100,7 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
         (Afi::L2vpn, Safi::Evpn) => "L2VPN EVPN",
         (Afi::Ip, Safi::Flowspec) => "IPv4 Flowspec",
         (Afi::Ip6, Safi::Flowspec) => "IPv6 Flowspec",
+        (Afi::LinkState, Safi::LinkState) => "Link-State",
         _ => "Unknown AFI/SAFI",
     }
 }
@@ -213,18 +216,22 @@ fn write_summary_section<V: BgpShowView>(
     afi_safi: AfiSafi,
 ) -> std::fmt::Result {
     let label = afi_safi_summary_label(afi_safi.afi, afi_safi.safi);
-    let router_id = if bgp.router_id().is_unspecified() {
-        "Not Configured".to_string()
-    } else {
-        bgp.router_id().to_string()
-    };
+    let router_id = summary_router_id(bgp);
     let asn = if bgp.asn() == 0 {
         "Not Configured".to_string()
     } else {
         bgp.asn().to_string()
     };
     let rib_entries = rib_entries_count(bgp, &afi_safi);
-    let peer_count = bgp.peers().iter().count();
+    // Only the neighbors with this AFI/SAFI enabled appear in the
+    // section, so `show bgp summary` reads as the concatenation of
+    // the per-AFI commands (`show bgp ipv4 summary`, …).
+    let peers: Vec<&Peer> = bgp
+        .peers()
+        .iter()
+        .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
+        .map(|(_, peer)| peer)
+        .collect();
 
     writeln!(buf, "{} Summary:", label)?;
     writeln!(
@@ -233,16 +240,21 @@ fn write_summary_section<V: BgpShowView>(
         router_id, asn
     )?;
     writeln!(buf, "RIB entries {}", rib_entries)?;
-    writeln!(buf, "Peers {}", peer_count)?;
+    writeln!(buf, "Peers {}", peers.len())?;
     writeln!(buf)?;
 
+    if peers.is_empty() {
+        writeln!(buf, "No {} neighbor is configured", label)?;
+        return Ok(());
+    }
+
     write_summary_header_row(buf)?;
-    for (_, peer) in bgp.peers().iter() {
+    for peer in peers.iter() {
         write_summary_peer_row(buf, peer, afi_safi.afi, afi_safi.safi)?;
     }
 
     writeln!(buf)?;
-    writeln!(buf, "Total number of neighbors {}", peer_count)?;
+    writeln!(buf, "Total number of neighbors {}", peers.len())?;
     Ok(())
 }
 
@@ -352,6 +364,15 @@ fn srv6_behavior_name(behavior: u16) -> String {
 struct BgpSummaryJson {
     router_id: String,
     local_as: u32,
+    afi_safis: Vec<BgpAfiSafiSummaryJson>,
+}
+
+/// One AFI/SAFI section of `show bgp summary --json`, mirroring the
+/// text output: only the neighbors with the AFI/SAFI enabled, with
+/// the prefix counters taken from that family's Adj-RIBs.
+#[derive(Serialize)]
+struct BgpAfiSafiSummaryJson {
+    afi_safi: String,
     peers: Vec<BgpPeerSummaryJson>,
 }
 
@@ -577,10 +598,11 @@ fn show_labeled_row(
     )
 }
 
-/// `show bgp vpnv4 [A.B.C.D | A.B.C.D/M]` — VPNv4 (SAFI 128) Loc-RIB.
-/// No value dumps every RD's table; an address shows the longest match
-/// inside each RD (the routes that contain it); a prefix shows that
-/// exact entry. Mirrors [`show_bgp_ipv4`] on the unicast tree.
+/// `show bgp vpnv4 [A.B.C.D | A.B.C.D/M | summary]` — VPNv4 (SAFI
+/// 128) Loc-RIB. No value dumps every RD's table; an address shows the
+/// longest match inside each RD (the routes that contain it); a prefix
+/// shows that exact entry; `summary` shows the VPNv4-enabled
+/// neighbors. Mirrors [`show_bgp_ipv4`] on the unicast tree.
 fn show_bgp_vpnv4(
     bgp: &Bgp,
     mut args: Args,
@@ -588,6 +610,9 @@ fn show_bgp_vpnv4(
 ) -> std::result::Result<String, std::fmt::Error> {
     match args.string() {
         None => show_bgp_vpnv4_table(bgp, json),
+        Some(tok) if tok == "summary" => {
+            show_bgp_summary_one(bgp, AfiSafi::new(Afi::Ip, Safi::MplsVpn), json)
+        }
         Some(tok) => show_bgp_vpnv4_entry(bgp, &tok),
     }
 }
@@ -1282,6 +1307,11 @@ fn show_bgp_ipv4<V: BgpShowView>(
     let Some(tok) = args.string() else {
         return render_unicast_table(&bgp.local_rib().v4.0, json);
     };
+    // `summary` arrives as the list-key value (an enum arm of the key
+    // union — see exec.yang), not as a separate path element.
+    if tok == "summary" {
+        return show_bgp_summary_one(bgp, AfiSafi::new(Afi::Ip, Safi::Unicast), json);
+    }
     let mut out = String::new();
     if tok.contains('/') {
         match tok.parse::<Ipv4Net>() {
@@ -1344,6 +1374,9 @@ fn show_bgp_ipv6<V: BgpShowView>(
     let Some(tok) = args.string() else {
         return render_unicast_table(&bgp.local_rib().v6.0, json);
     };
+    if tok == "summary" {
+        return show_bgp_summary_one(bgp, AfiSafi::new(Afi::Ip6, Safi::Unicast), json);
+    }
     let mut out = String::new();
     if tok.contains('/') {
         match tok.parse::<Ipv6Net>() {
@@ -1542,66 +1575,84 @@ fn show_bgp_received(
     show_adj_rib_routes(&peer.adj_in.v4.0, bgp.router_id, json)
 }
 
+/// The "BGP router identifier" field of the summary headers.
+fn summary_router_id<V: BgpShowView>(bgp: &V) -> String {
+    if bgp.router_id().is_unspecified() {
+        "Not Configured".to_string()
+    } else {
+        bgp.router_id().to_string()
+    }
+}
+
+fn summary_peer_row_json(peer: &Peer, afi: Afi, safi: Safi) -> BgpPeerSummaryJson {
+    let mut msg_sent: u64 = 0;
+    let mut msg_rcvd: u64 = 0;
+    for counter in peer.counter.iter() {
+        msg_sent += counter.sent;
+        msg_rcvd += counter.rcvd;
+    }
+
+    let pfx_rcvd = peer.adj_in.count(afi, safi) as u64;
+    let pfx_sent = peer.adj_out.count(afi, safi) as u64;
+
+    // FRR-style State/PfxRcd column: an Established session shows its
+    // received-prefix count in place of the state word.
+    let state = if peer.state != State::Established {
+        peer.state.to_str().to_string()
+    } else {
+        pfx_rcvd.to_string()
+    };
+
+    BgpPeerSummaryJson {
+        neighbor: peer.address.to_string(),
+        remote_as: peer.remote_as,
+        msg_rcvd,
+        msg_sent,
+        up_down: uptime(&peer.instant),
+        state,
+        pfx_rcvd,
+        pfx_sent,
+    }
+}
+
+fn summary_section_json<V: BgpShowView>(bgp: &V, afi_safi: AfiSafi) -> BgpAfiSafiSummaryJson {
+    BgpAfiSafiSummaryJson {
+        afi_safi: afi_safi_summary_label(afi_safi.afi, afi_safi.safi).to_string(),
+        peers: bgp
+            .peers()
+            .iter()
+            .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
+            .map(|(_, peer)| summary_peer_row_json(peer, afi_safi.afi, afi_safi.safi))
+            .collect(),
+    }
+}
+
+fn summary_json_render(summary: &BgpSummaryJson) -> String {
+    serde_json::to_string_pretty(summary)
+        .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize summary: {}\"}}", e))
+}
+
 fn show_bgp_summary<V: BgpShowView>(
     bgp: &V,
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     if json {
-        let router_id = if bgp.router_id().is_unspecified() {
-            "Not Configured".to_string()
-        } else {
-            bgp.router_id().to_string()
-        };
-
-        let mut peers = Vec::new();
-        for (_, peer) in bgp.peers().iter() {
-            let mut msg_sent: u64 = 0;
-            let mut msg_rcvd: u64 = 0;
-            for counter in peer.counter.iter() {
-                msg_sent += counter.sent;
-                msg_rcvd += counter.rcvd;
-            }
-
-            let pfx_rcvd = peer.adj_in.count(Afi::Ip, Safi::MplsVpn) as u64;
-            let pfx_sent = peer.adj_out.count(Afi::Ip, Safi::MplsVpn) as u64;
-
-            let state = if peer.state != State::Established {
-                peer.state.to_str().to_string()
-            } else {
-                pfx_rcvd.to_string()
-            };
-
-            peers.push(BgpPeerSummaryJson {
-                neighbor: peer.address.to_string(),
-                remote_as: peer.remote_as,
-                msg_rcvd,
-                msg_sent,
-                up_down: uptime(&peer.instant),
-                state,
-                pfx_rcvd,
-                pfx_sent,
-            });
-        }
-
         let summary = BgpSummaryJson {
-            router_id,
+            router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
-            peers,
+            afi_safis: configured_afi_safis(bgp)
+                .into_iter()
+                .map(|afi_safi| summary_section_json(bgp, afi_safi))
+                .collect(),
         };
-
-        return Ok(serde_json::to_string_pretty(&summary)
-            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize summary: {}\"}}", e)));
+        return Ok(summary_json_render(&summary));
     }
 
     let mut buf = String::new();
 
     if bgp.peers().is_empty() {
-        let router_id = if bgp.router_id().is_unspecified() {
-            "Not Configured".to_string()
-        } else {
-            bgp.router_id().to_string()
-        };
+        let router_id = summary_router_id(bgp);
         let asn = if bgp.asn() == 0 {
             "Not Configured".to_string()
         } else {
@@ -1628,6 +1679,36 @@ fn show_bgp_summary<V: BgpShowView>(
     }
 
     Ok(buf)
+}
+
+/// One-section summary for a single AFI/SAFI — `show bgp
+/// {ipv4,ipv6,vpnv4,evpn} summary`. Lists only the neighbors that
+/// have that AFI/SAFI enabled.
+fn show_bgp_summary_one<V: BgpShowView>(
+    bgp: &V,
+    afi_safi: AfiSafi,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let summary = BgpSummaryJson {
+            router_id: summary_router_id(bgp),
+            local_as: bgp.asn(),
+            afi_safis: vec![summary_section_json(bgp, afi_safi)],
+        };
+        return Ok(summary_json_render(&summary));
+    }
+    let mut buf = String::new();
+    write_summary_section(&mut buf, bgp, afi_safi)?;
+    Ok(buf)
+}
+
+/// `show bgp evpn summary` — the L2VPN/EVPN section only.
+fn show_bgp_evpn_summary(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    show_bgp_summary_one(bgp, AfiSafi::new(Afi::L2vpn, Safi::Evpn), json)
 }
 
 #[derive(Serialize, Debug)]
@@ -3608,7 +3689,6 @@ impl Bgp {
         self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
         self.show_add("/show/ip/bgp/labeled-unicast", show_bgp_labeled);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
-        self.show_add("/show/ip/bgp/summary", show_bgp_summary::<Bgp>);
         self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor::<Bgp>);
         self.show_add(
             "/show/ip/bgp/neighbors/advertised-routes",
@@ -3665,6 +3745,14 @@ impl Bgp {
         // `show bgp vpnv4 [<addr>|<prefix>]` and `show bgp evpn`.
         self.show_add("/show/bgp/vpnv4", show_bgp_vpnv4);
         self.show_add("/show/bgp/evpn", show_bgp_evpn);
+        // Neighbor summaries, moved here from the legacy `show ip bgp
+        // summary`: the bare form sections every configured AFI/SAFI;
+        // ipv4/ipv6/vpnv4 reach their one-section form through the
+        // key-union `summary` arm handled inside the RIB handlers
+        // above; EVPN has its own path (the `evpn` node is a presence
+        // container, not a keyed list).
+        self.show_add("/show/bgp/summary", show_bgp_summary::<Bgp>);
+        self.show_add("/show/bgp/evpn/summary", show_bgp_evpn_summary);
 
         // `show bgp vrf <name> …` is normally intercepted by the manager
         // and redirected into the per-VRF task (see `process_vrf_show`).
@@ -3673,6 +3761,7 @@ impl Bgp {
         // and a named-but-not-running VRF reports the miss instead of
         // leaving the request unanswered.
         self.show_add("/show/bgp/vrf", show_bgp_vrf);
+        self.show_add("/show/bgp/vrf/summary", show_bgp_vrf_not_running);
         self.show_add("/show/bgp/vrf/ipv4", show_bgp_vrf_not_running);
         self.show_add("/show/bgp/vrf/ipv4/longer-prefix", show_bgp_vrf_not_running);
         self.show_add("/show/bgp/vrf/ipv6", show_bgp_vrf_not_running);
