@@ -153,6 +153,9 @@ pub struct UpdateGroupCounters {
     pub messages_replicated: u64,
     pub bytes_formatted: u64,
     pub split_horizon_excluded: u64,
+    /// Member sends skipped because the bucket carried LLGR_STALE and
+    /// the member never advertised the LLGR capability (RFC 9494 §4.3).
+    pub llgr_excluded: u64,
     pub last_format_us: Option<u64>,
     pub last_replicate_us: Option<u64>,
 }
@@ -536,6 +539,11 @@ pub fn flush_ipv4(
         ident: usize,
         tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
         enhe_v6: Option<Ipv4MpReachNextHop>,
+        /// Member advertised the LLGR capability for this AFI/SAFI —
+        /// only such members may receive LLGR_STALE-tagged buckets
+        /// (RFC 9494 §4.3). Per-peer state, hence resolved here and
+        /// not part of the group signature.
+        llgr_ok: bool,
     }
     let members: Vec<MemberCtx> = member_idents
         .iter()
@@ -547,10 +555,12 @@ pub fn flush_ipv4(
             } else {
                 None
             };
+            let llgr_ok = peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi));
             MemberCtx {
                 ident: *ident,
                 tx,
                 enhe_v6,
+                llgr_ok,
             }
         })
         .collect();
@@ -567,12 +577,25 @@ pub fn flush_ipv4(
             .filter(|m| source_idents.contains(m))
             .collect();
 
+        // RFC 9494 §4.3: an LLGR_STALE-tagged bucket reaches only the
+        // members that advertised the LLGR capability. The advertise
+        // path gates per-peer too, but the cache fans out per-GROUP,
+        // so a bucket enqueued for capable members must be filtered
+        // here for the rest.
+        let llgr_stale_bucket = super::route::attr_has_llgr_stale(&attr);
+
         if enhe {
             // Per-member encode: each member's v6 next-hop is its own
             // interface link-local; canonical-bytes sharing across
             // members would force every member onto the same LL,
             // which would break ENHE for everyone but one peer.
             for ctx in &members {
+                if llgr_stale_bucket && !ctx.llgr_ok {
+                    if let Some(group) = af.group_by_id_mut(id) {
+                        group.counters.llgr_excluded += 1;
+                    }
+                    continue;
+                }
                 let Some(tx) = ctx.tx.as_ref() else { continue };
                 let Some(nh) = ctx.enhe_v6 else {
                     // ND hasn't observed any link-local on this
@@ -630,6 +653,12 @@ pub fn flush_ipv4(
             if pruned_members.contains(&ctx.ident) {
                 continue;
             }
+            if llgr_stale_bucket && !ctx.llgr_ok {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.llgr_excluded += 1;
+                }
+                continue;
+            }
             if let Some(tx) = ctx.tx.as_ref() {
                 for bytes in &canonical_bytes {
                     let _ = tx.send(bytes.clone());
@@ -643,6 +672,17 @@ pub fn flush_ipv4(
         // Per pruned member: encode bucket minus its sourced
         // NLRIs, then send.
         for prune_ident in pruned_members {
+            if llgr_stale_bucket
+                && !members
+                    .iter()
+                    .find(|c| c.ident == prune_ident)
+                    .is_some_and(|c| c.llgr_ok)
+            {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.llgr_excluded += 1;
+                }
+                continue;
+            }
             let nlris: Vec<Ipv4Nlri> = entries
                 .iter()
                 .filter(|(_, src)| *src != prune_ident)
@@ -842,12 +882,18 @@ pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &
     struct MemberCtx {
         ident: usize,
         tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
+        /// RFC 9494 §4.3 — see the `flush_ipv4` twin.
+        llgr_ok: bool,
     }
     let members: Vec<MemberCtx> = member_idents
         .iter()
-        .map(|ident| MemberCtx {
-            ident: *ident,
-            tx: peers.get_by_idx(*ident).and_then(|p| p.packet_tx.clone()),
+        .map(|ident| {
+            let peer = peers.get_by_idx(*ident);
+            MemberCtx {
+                ident: *ident,
+                tx: peer.and_then(|p| p.packet_tx.clone()),
+                llgr_ok: peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi)),
+            }
         })
         .collect();
 
@@ -858,6 +904,9 @@ pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &
             .copied()
             .filter(|m| source_idents.contains(m))
             .collect();
+
+        // RFC 9494 §4.3 — see the `flush_ipv4` twin.
+        let llgr_stale_bucket = super::route::attr_has_llgr_stale(&attr);
 
         // Canonical UPDATE: every NLRI in the bucket, sent to members
         // that did not source any of them.
@@ -872,6 +921,12 @@ pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &
             if pruned_members.contains(&ctx.ident) {
                 continue;
             }
+            if llgr_stale_bucket && !ctx.llgr_ok {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.llgr_excluded += 1;
+                }
+                continue;
+            }
             if let Some(tx) = ctx.tx.as_ref() {
                 for bytes in &canonical_bytes {
                     let _ = tx.send(bytes.clone());
@@ -884,6 +939,17 @@ pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &
 
         // Per pruned member: the bucket minus its own sourced NLRIs.
         for prune_ident in pruned_members {
+            if llgr_stale_bucket
+                && !members
+                    .iter()
+                    .find(|c| c.ident == prune_ident)
+                    .is_some_and(|c| c.llgr_ok)
+            {
+                if let Some(group) = af.group_by_id_mut(id) {
+                    group.counters.llgr_excluded += 1;
+                }
+                continue;
+            }
             let nlris: Vec<Ipv6Nlri> = entries
                 .iter()
                 .filter(|(_, src)| *src != prune_ident)

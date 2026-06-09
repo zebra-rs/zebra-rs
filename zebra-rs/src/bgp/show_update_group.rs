@@ -86,6 +86,7 @@ struct CountersView {
     messages_replicated: u64,
     bytes_formatted: u64,
     split_horizon_excluded: u64,
+    llgr_excluded: u64,
     last_format_us: Option<u64>,
     last_replicate_us: Option<u64>,
 }
@@ -166,6 +167,7 @@ fn build_view(bgp: &Bgp, afi_safi: AfiSafi, group: &UpdateGroup) -> GroupView {
             messages_replicated: group.counters.messages_replicated,
             bytes_formatted: group.counters.bytes_formatted,
             split_horizon_excluded: group.counters.split_horizon_excluded,
+            llgr_excluded: group.counters.llgr_excluded,
             last_format_us: group.counters.last_format_us,
             last_replicate_us: group.counters.last_replicate_us,
         },
@@ -387,6 +389,11 @@ fn render_detail_text(view: &GroupView) -> Result<String, std::fmt::Error> {
         out,
         "    Split-horizon-excluded:     {}",
         view.counters.split_horizon_excluded
+    )?;
+    writeln!(
+        out,
+        "    LLGR-excluded:              {}",
+        view.counters.llgr_excluded
     )?;
     if let Some(us) = view.counters.last_format_us {
         writeln!(out, "    Last format wall:           {}µs", us)?;

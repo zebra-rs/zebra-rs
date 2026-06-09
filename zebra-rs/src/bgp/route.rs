@@ -2268,6 +2268,10 @@ fn route_advertise_to_addpath(
     for peer_addr in peer_addrs {
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
 
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
         if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true)
             && let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight)
         {
@@ -2466,6 +2470,12 @@ pub(super) fn route_advertise_to_peers(
                 // outcome — fall through directly.
                 AdvertiseOutcome::Withdraw
             }
+            Some(best) if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) => {
+                // RFC 9494 §4.3: a stale route only goes to peers that
+                // sent the LLGR capability. Per-peer state — like
+                // split-horizon, this must not poison the group memo.
+                AdvertiseOutcome::Withdraw
+            }
             Some(best) => match group_id.as_ref() {
                 Some(gid) => {
                     if let Some(cached) = memo.get(gid) {
@@ -2542,12 +2552,18 @@ pub(super) fn route_advertise_to_peers(
                 if let Some(ref rd) = rd {
                     peer.cache_remove_vpnv4(*rd, prefix, 0);
                 } else {
-                    // Group cache cleanup. Skipped for split-horizon
-                    // Withdraws: the source peer never contributed
-                    // an entry, but other group members may have.
-                    // Removing here would clobber theirs.
-                    let is_split_horizon = new_best.map(|b| b.ident == peer.ident).unwrap_or(false);
-                    if !is_split_horizon
+                    // Group cache cleanup. Skipped for per-PEER
+                    // Withdraws (split-horizon, LLGR capability gate):
+                    // this peer doesn't receive the route, but other
+                    // group members may — removing here would clobber
+                    // their pending entry.
+                    let per_peer_suppress = new_best
+                        .map(|b| {
+                            b.ident == peer.ident
+                                || llgr_blocks_advertisement(b.stale, &peer.cap_recv, afi, safi)
+                        })
+                        .unwrap_or(false);
+                    if !per_peer_suppress
                         && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
                         && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                         && let Some(group) = af.group_by_id_mut(&gid)
@@ -2787,6 +2803,10 @@ pub fn route_advertise_evpn_to_peers(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
 
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(new_best.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
+            continue;
+        }
         let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, new_best, bgp, add_path)
         else {
             continue;
@@ -2937,6 +2957,12 @@ fn route_soft_out_peer_table(
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(afi, safi);
 
+        // RFC 9494 §4.3: stale routes only go to LLGR peers. A
+        // previously-advertised route that went stale falls out of
+        // `newly_advertised` here and is withdrawn by the diff below.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
         let Some((nlri, attr)) = route_update_ipv4(peer, prefix, rib, bgp, add_path) else {
             continue;
         };
@@ -3051,6 +3077,11 @@ fn route_soft_out_peer_table_evpn(
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
 
+        // RFC 9494 §4.3: stale routes only go to LLGR peers; falls out
+        // of `newly_advertised`, so the diff below withdraws it.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
+            continue;
+        }
         let Some((route, attr)) = route_update_evpn(peer, &rd, prefix, rib, bgp, add_path) else {
             continue;
         };
@@ -6033,7 +6064,7 @@ fn community_suppresses_advertisement(attr: &BgpAttr, peer_type: PeerType) -> bo
 /// itself stays on the attr, so further advertisement keeps it
 /// (§4.3: "MUST NOT be removed") and the per-peer LLGR egress gate
 /// applies to it transitively.
-fn attr_has_llgr_stale(attr: &BgpAttr) -> bool {
+pub(super) fn attr_has_llgr_stale(attr: &BgpAttr) -> bool {
     attr.com
         .as_ref()
         .is_some_and(|c| c.contains(&CommunityValue::LLGR_STALE.value()))
@@ -6394,6 +6425,10 @@ pub(super) fn route_advertise_to_peers_v6(
 
         match new_best {
             Some(best) if best.ident != peer.ident => {
+                // RFC 9494 §4.3: stale routes only go to LLGR peers.
+                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
+                    continue;
+                }
                 let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
                 else {
                     continue;
@@ -6469,6 +6504,10 @@ pub(super) fn route_advertise_to_peers_vpnv6(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
+                // RFC 9494 §4.3: stale routes only go to LLGR peers.
+                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
+                    continue;
+                }
                 let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
                 else {
@@ -6693,6 +6732,10 @@ pub(super) fn route_advertise_to_peers_labelv4(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
+                // RFC 9494 §4.3: stale routes only go to LLGR peers.
+                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
+                    continue;
+                }
                 let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr, nhop, label)) =
                     route_update_labelv4(peer, &prefix, best, bgp, add_path)
@@ -6745,6 +6788,10 @@ pub(super) fn route_advertise_to_peers_labelv6(
         let peer = peers.get_mut(&peer_addr).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
+                // RFC 9494 §4.3: stale routes only go to LLGR peers.
+                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
+                    continue;
+                }
                 let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr, nhop, label)) =
                     route_update_labelv6(peer, &prefix, best, bgp, add_path)
@@ -7447,6 +7494,10 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     // (one MP_REACH UPDATE per shared attr-set).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
+            continue;
+        }
         let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
             continue;
         };
@@ -7506,6 +7557,10 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
     // grows v6 support.
     let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
     for (prefix, rib) in routes {
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::Unicast) {
+            continue;
+        }
         let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
             continue;
         };
@@ -7553,6 +7608,10 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
     // Advertise all best paths to the peer
     for (rd, routes) in all_routes {
         for (prefix, mut rib) in routes {
+            // RFC 9494 §4.3: stale routes only go to LLGR peers.
+            if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::MplsVpn) {
+                continue;
+            }
             let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
                 continue;
             };
@@ -7739,6 +7798,10 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
         .collect();
 
     for (rd, prefix, rib) in snapshot {
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
+            continue;
+        }
         let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, &rib, bgp, add_path) else {
             continue;
         };
@@ -7789,6 +7852,10 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         }
     }
     for (prefix, best) in routes {
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(best.stale, &peer.cap_recv, Afi::Ip, Safi::MplsLabel) {
+            continue;
+        }
         let Some((nlri, attr, nhop, label)) =
             route_update_labelv4(peer, &prefix, &best, bgp, add_path)
         else {
@@ -7818,6 +7885,10 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
         }
     }
     for (prefix, best) in routes {
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(best.stale, &peer.cap_recv, Afi::Ip6, Safi::MplsLabel) {
+            continue;
+        }
         let Some((nlri, attr, nhop, label)) =
             route_update_labelv6(peer, &prefix, &best, bgp, add_path)
         else {
