@@ -39,6 +39,48 @@ module exec {
   }
   */
 
+  // IPv4/IPv6 unicast Loc-RIB selectors shared by the default-VRF
+  // `show bgp …` tree and the per-VRF `show bgp vrf <name> …` tree. A
+  // bare address does a longest-match lookup; a prefix matches exactly;
+  // `longer-prefix` widens it to equal-or-more-specific.
+  grouping bgp-show-afi-rib {
+    list ipv4 {
+      ext:help "BGP IPv4 unicast RIB";
+      ext:presence "BGP IPv4 unicast RIB (all prefixes)";
+      key value;
+      leaf value {
+        ext:help "Address (routes containing it) or prefix (exact match)";
+        // A bare address does a longest-match lookup (routes that
+        // contain it); a prefix matches exactly. The handler tells
+        // them apart by the presence of `/M`.
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv4-prefix;
+        }
+      }
+      leaf longer-prefix {
+        ext:help "Prefixes equal to or more specific than the given prefix";
+        type empty;
+      }
+    }
+    list ipv6 {
+      ext:help "BGP IPv6 unicast RIB";
+      ext:presence "BGP IPv6 unicast RIB (all prefixes)";
+      key value;
+      leaf value {
+        ext:help "Address (routes containing it) or prefix (exact match)";
+        type union {
+          type inet:ipv6-address;
+          type inet:ipv6-prefix;
+        }
+      }
+      leaf longer-prefix {
+        ext:help "Prefixes equal to or more specific than the given prefix";
+        type empty;
+      }
+    }
+  }
+
   container show {
     ext:help "Show command";
     presence "Show command";
@@ -166,41 +208,7 @@ module exec {
       // routed into `ipv4` by the matcher via `ext:default-child`.
       ext:default-child "ipv4";
       presence "BGP IPv4 unicast RIB (same as `show bgp ipv4`)";
-      list ipv4 {
-        ext:help "BGP IPv4 unicast RIB";
-        ext:presence "BGP IPv4 unicast RIB (all prefixes)";
-        key value;
-        leaf value {
-          ext:help "Address (routes containing it) or prefix (exact match)";
-          // A bare address does a longest-match lookup (routes that
-          // contain it); a prefix matches exactly. The handler tells
-          // them apart by the presence of `/M`.
-          type union {
-            type inet:ipv4-address;
-            type inet:ipv4-prefix;
-          }
-        }
-        leaf longer-prefix {
-          ext:help "Prefixes equal to or more specific than the given prefix";
-          type empty;
-        }
-      }
-      list ipv6 {
-        ext:help "BGP IPv6 unicast RIB";
-        ext:presence "BGP IPv6 unicast RIB (all prefixes)";
-        key value;
-        leaf value {
-          ext:help "Address (routes containing it) or prefix (exact match)";
-          type union {
-            type inet:ipv6-address;
-            type inet:ipv6-prefix;
-          }
-        }
-        leaf longer-prefix {
-          ext:help "Prefixes equal to or more specific than the given prefix";
-          type empty;
-        }
-      }
+      uses bgp-show-afi-rib;
       list update-group {
         ext:help "BGP update-groups (IOS-XR style)";
         ext:presence "BGP update-group summary";
@@ -210,6 +218,23 @@ module exec {
           ext:dynamic "bgp:update-group";
           type string;
         }
+      }
+      list vrf {
+        ext:help "Per-VRF BGP RIB";
+        ext:presence "BGP per-VRF summary table";
+        // Same positional shortcut as the parent `bgp` container: a
+        // bare address/prefix after the VRF name (`show bgp vrf X
+        // A.B.C.D`) is routed into this list's `ipv4` child. The
+        // matcher applies `ext:default-child` after a list key is
+        // matched as well as on a plain container.
+        ext:default-child "ipv4";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
+        uses bgp-show-afi-rib;
       }
     }
     container ip {
