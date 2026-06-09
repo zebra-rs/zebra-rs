@@ -312,6 +312,25 @@ pub enum CeaseError {
     Unknown(u8),
 }
 
+impl From<CeaseError> for u8 {
+    fn from(error: CeaseError) -> Self {
+        use CeaseError::*;
+        match error {
+            MaximumNumberOfPrefixReached => 1,
+            AdministrativeShutdown => 2,
+            PeerDeConfigured => 3,
+            AdministrativeReset => 4,
+            ConnectionRejected => 5,
+            OtherConfigChange => 6,
+            ConnectionCollisionResolution => 7,
+            OutOfResources => 8,
+            HardReset => 9,
+            BfdDown => 10,
+            Unknown(v) => v,
+        }
+    }
+}
+
 impl From<u8> for CeaseError {
     fn from(sub_code: u8) -> Self {
         use CeaseError::*;
@@ -411,5 +430,22 @@ impl NotificationPacket {
             .saturating_sub(2);
         let (input, _data) = take(len as usize).parse(input)?;
         Ok((input, packet))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CeaseError;
+
+    /// Every Cease sub-code round-trips u8 → CeaseError → u8, including
+    /// the Unknown passthrough.
+    #[test]
+    fn cease_error_subcode_round_trip() {
+        for raw in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 42, 255] {
+            let err = CeaseError::from(raw);
+            assert_eq!(u8::from(err), raw);
+        }
+        assert_eq!(u8::from(CeaseError::ConnectionRejected), 5);
+        assert_eq!(u8::from(CeaseError::ConnectionCollisionResolution), 7);
     }
 }
