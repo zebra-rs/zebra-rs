@@ -10,7 +10,9 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
-use super::peer::{AllowAsIn, Peer, PeerCounter, PeerParam, RemovePrivateAs, State};
+use super::peer::{
+    AfiSafiEncapType, AllowAsIn, Peer, PeerCounter, PeerParam, RemovePrivateAs, State,
+};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use super::vrf::inst::BgpVrf;
@@ -1645,6 +1647,11 @@ struct Neighbor<'a> {
     /// UPDATE is dropped unless its AS_PATH begins with this neighbor's
     /// own AS.
     enforce_first_as: bool,
+    /// `afi-safi ipv6 encapsulation-type` (ietf-bgp-neighbor): the SRv6
+    /// encapsulation mode configured for the IPv6 unicast family on this
+    /// neighbor. `None` = unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encapsulation_type_ipv6: Option<AfiSafiEncapType>,
     /// GTSM / `ttl-security` (RFC 5082): the session only accepts a
     /// directly-connected peer (received TTL 255). Mirrors
     /// `peer.config.transport.ttl_security`.
@@ -1812,6 +1819,11 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         as_override: peer.config.as_override,
         remove_private_as: peer.config.remove_private_as,
         enforce_first_as: peer.config.enforce_first_as,
+        encapsulation_type_ipv6: peer
+            .config
+            .sub
+            .get(&AfiSafi::new(Afi::Ip6, Safi::Unicast))
+            .and_then(|s| s.encapsulation_type),
         ttl_security: peer.config.transport.ttl_security,
         ebgp_multihop: peer.config.transport.ebgp_multihop,
         tcp_mss: peer.config.transport.tcp_mss,
@@ -1940,6 +1952,10 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             out,
             "  Enforce-first-AS enabled (drop inbound updates not starting with peer AS)"
         )?;
+    }
+
+    if let Some(encap) = neighbor.encapsulation_type_ipv6 {
+        writeln!(out, "  IPv6 Unicast encapsulation-type: {}", encap.as_str())?;
     }
 
     if neighbor.ttl_security {

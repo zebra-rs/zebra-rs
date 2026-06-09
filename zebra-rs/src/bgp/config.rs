@@ -13,7 +13,7 @@ use crate::policy::com_list::*;
 use crate::rib::api::FdbEntry;
 
 use super::auth::AoConfig;
-use super::peer::BgpTop;
+use super::peer::{AfiSafiEncapType, BgpTop};
 use super::route_clean;
 use super::{
     Bgp,
@@ -1493,6 +1493,28 @@ fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+/// `set/delete router bgp neighbor <addr> afi-safi <name> encapsulation-type
+/// <srv6|srv6-relax>`. Records the per-neighbor, per-AFI/SAFI SRv6
+/// encapsulation mode on the peer's [`PeerSubConfig`]. The YANG `when`
+/// guard restricts the leaf to `afi-safi ipv6`, so in practice `afi_safi`
+/// is always IPv6 unicast here. Config-only for now — see
+/// [`AfiSafiEncapType`] for the deferred advertise/accept filtering.
+fn config_encapsulation_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    if op.is_set() {
+        let encap = AfiSafiEncapType::parse(&args.string()?)?;
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.encapsulation_type = Some(encap);
+    } else {
+        let config = peer.config.sub.entry(afi_safi).or_default();
+        config.encapsulation_type = None;
+    }
+    Some(())
+}
+
 fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -2320,6 +2342,7 @@ impl Bgp {
 
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
+        self.callback_peer("/afi-safi/encapsulation-type", config_encapsulation_type);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);
         self.callback_peer("/afi-safi/long-lived-graceful-restart/enabled", config_llgr);
         self.callback_peer(

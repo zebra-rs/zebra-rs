@@ -1350,6 +1350,35 @@ mod yang_load_tests {
         );
     }
 
+    /// The per-neighbor `afi-safi ipv6 encapsulation-type` knob is a
+    /// hand-added leaf on the vendored `ietf-bgp-neighbor` afi-safi list.
+    /// `load_mode` proves the module loads but not that the concrete path
+    /// is settable, so parse the `set` line for both enum values.
+    #[test]
+    fn bgp_neighbor_afi_safi_encapsulation_type_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 2001:db8::8 afi-safi ipv6 encapsulation-type srv6",
+            "set router bgp neighbor 2001:db8::8 afi-safi ipv6 encapsulation-type srv6-relax",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a settable path");
+        }
+    }
+
     /// The IS-IS per-interface `passive` leaf must be a settable path.
     /// It is hand-added to `config.yang` (no YANG generator), so a typo in
     /// the leaf or its placement would otherwise only surface at runtime —
