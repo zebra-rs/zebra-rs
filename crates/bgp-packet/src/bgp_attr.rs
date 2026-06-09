@@ -246,9 +246,11 @@ mod tests {
         let mut bgp_attr = BgpAttr::new();
         bgp_attr.nexthop = Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 168, 1, 1)));
         bgp_attr.local_pref = Some(LocalPref { local_pref: 100 });
-        bgp_attr.com = Some(Community(vec![
-            CommunityValue::from_readable_str("100:200").unwrap().0,
-        ]));
+        bgp_attr.com = Some(Community::from([CommunityValue::from_readable_str(
+            "100:200",
+        )
+        .unwrap()
+        .0]));
     }
 
     #[test]

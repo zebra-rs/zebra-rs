@@ -5640,11 +5640,11 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                     let mut new_attr = (*rib.attr).clone();
                     match &mut new_attr.com {
                         Some(com) => {
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                         }
                         None => {
                             let mut com = Community::new();
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                             new_attr.com = Some(com);
                         }
                     }
@@ -5768,11 +5768,11 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                     let mut new_attr = (*rib.attr).clone();
                     match &mut new_attr.com {
                         Some(com) => {
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                         }
                         None => {
                             let mut com = Community::new();
-                            com.push(CommunityValue::LLGR_STALE.value());
+                            com.insert(CommunityValue::LLGR_STALE.value());
                             new_attr.com = Some(com);
                         }
                     }
@@ -7286,19 +7286,13 @@ fn apply_set_community(bgp_attr: &mut BgpAttr, cfg: &crate::policy::SetCommunity
                 bgp_attr.com = None;
                 return;
             }
-            let mut com = Community::new();
-            for v in new_vals {
-                com.push(v);
-            }
-            com.sort_uniq();
-            bgp_attr.com = Some(com);
+            bgp_attr.com = Some(new_vals.into_iter().collect());
         }
         SetCommunityMode::Additive => {
             let mut com = bgp_attr.com.clone().unwrap_or_default();
             for v in new_vals {
-                com.push(v);
+                com.insert(v);
             }
-            com.sort_uniq();
             bgp_attr.com = Some(com);
         }
         SetCommunityMode::Delete => {
@@ -10095,7 +10089,7 @@ mod tests {
 
         // Existing community 999:999 must be wiped on replace.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("999:999")])),
+            com: Some(Community::from([com_val("999:999")])),
             ..Default::default()
         };
 
@@ -10114,7 +10108,7 @@ mod tests {
         entry.set_community = Some(set_community_cfg(&["100:200"], SetCommunityMode::Additive));
 
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("999:999")])),
+            com: Some(Community::from([com_val("999:999")])),
             ..Default::default()
         };
 
@@ -10133,13 +10127,13 @@ mod tests {
 
         // 100:200 already present — additive should not duplicate.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("100:200")])),
+            com: Some(Community::from([com_val("100:200")])),
             ..Default::default()
         };
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         let com = out.com.expect("community attribute set");
-        assert_eq!(com.0, vec![com_val("100:200")]);
+        assert_eq!(com, Community::from([com_val("100:200")]));
     }
 
     #[test]
@@ -10154,7 +10148,7 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), BgpAttr::default()).unwrap();
         let com = out.com.expect("community attribute set");
-        assert_eq!(com.0, vec![com_val("100:200")]);
+        assert_eq!(com, Community::from([com_val("100:200")]));
     }
 
     #[test]
@@ -10169,7 +10163,7 @@ mod tests {
         // Existing has both targets and a non-target — only the
         // targets are removed; non-target survives.
         let attr = BgpAttr {
-            com: Some(Community(vec![
+            com: Some(Community::from([
                 com_val("100:200"),
                 com_val("999:999"),
                 CommunityValue::NO_EXPORT.value(),
@@ -10179,7 +10173,7 @@ mod tests {
 
         let out = policy_list_apply(&list, &nlri("10.0.0.0/24"), attr).unwrap();
         let com = out.com.expect("community attribute survives");
-        assert_eq!(com.0, vec![com_val("999:999")]);
+        assert_eq!(com, Community::from([com_val("999:999")]));
     }
 
     #[test]
@@ -10191,7 +10185,7 @@ mod tests {
         // Single value matches the deletion → attribute should be
         // None rather than an empty Community vec.
         let attr = BgpAttr {
-            com: Some(Community(vec![com_val("100:200")])),
+            com: Some(Community::from([com_val("100:200")])),
             ..Default::default()
         };
 

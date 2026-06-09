@@ -1,5 +1,6 @@
 use bytes::{BufMut, BytesMut};
-use nom_derive::NomBE;
+use nom::IResult;
+use nom_derive::Parse;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
@@ -7,29 +8,55 @@ use std::sync::LazyLock; // If using Rust 1.70+, otherwise use once_cell::sync::
 
 use crate::{AttrEmitter, AttrFlags, AttrType};
 
-#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, Hash)]
-pub struct Community(pub Vec<u32>);
+// Communities are an unordered set on the wire (RFC 1997); BTreeSet
+// keeps the values deduplicated and canonically sorted so equal sets
+// compare/hash equal regardless of received order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Community(pub BTreeSet<u32>);
 
 impl Community {
     pub fn new() -> Self {
-        Community(Vec::<u32>::new())
+        Community(BTreeSet::new())
     }
-    pub fn push(&mut self, value: u32) {
-        self.0.push(value)
-    }
-    pub fn sort_uniq(&mut self) {
-        let coms: BTreeSet<u32> = self.0.iter().cloned().collect();
-        self.0 = coms.into_iter().collect();
+    pub fn insert(&mut self, value: u32) {
+        self.0.insert(value);
     }
     pub fn contains(&self, val: &u32) -> bool {
         self.0.contains(val)
     }
     pub fn append(&mut self, other: &mut Self) {
         self.0.append(&mut other.0);
-        self.sort_uniq();
     }
     pub fn is_no_export(&self) -> bool {
         self.contains(&CommunityValue::NO_EXPORT.value())
+    }
+}
+
+impl FromIterator<u32> for Community {
+    fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> Self {
+        Community(iter.into_iter().collect())
+    }
+}
+
+impl<const N: usize> From<[u32; N]> for Community {
+    fn from(values: [u32; N]) -> Self {
+        Community(BTreeSet::from(values))
+    }
+}
+
+// nom_derive has no Parse impl for BTreeSet, so the wire decode is
+// hand-written: parse the attribute payload as consecutive u32s
+// (`Vec`'s blanket impl) and collect into the set.
+impl<'a, E> Parse<&'a [u8], E> for Community
+where
+    E: nom::error::ParseError<&'a [u8]>,
+{
+    fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self, E> {
+        Self::parse_be(input)
+    }
+    fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self, E> {
+        let (input, values) = <Vec<u32>>::parse_be(input)?;
+        Ok((input, values.into_iter().collect()))
     }
 }
 
@@ -78,11 +105,10 @@ impl FromStr for Community {
 
         for s in com_strs.iter() {
             match CommunityValue::from_readable_str(s) {
-                Some(c) => coms.push(c.value()),
+                Some(c) => coms.insert(c.value()),
                 None => return Err(()),
             }
         }
-        coms.sort_uniq();
         Ok(coms)
     }
 }
@@ -215,18 +241,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn push() {
+    fn insert() {
         let mut com = Community::new();
-        com.push(1u32);
-        com.push(2u32);
-        com.push(3u32);
+        com.insert(1u32);
+        com.insert(2u32);
+        com.insert(3u32);
         assert_eq!(format!("{}", com), "0:1 0:2 0:3");
 
+        // Display renders in sorted value order, not insertion order.
         let mut com = Community::new();
-        com.push(1u32);
-        com.push(CommunityValue::BLACKHOLE.value());
-        com.push(3u32);
-        assert_eq!(format!("{}", com), "0:1 blackhole 0:3");
+        com.insert(CommunityValue::BLACKHOLE.value());
+        com.insert(3u32);
+        com.insert(1u32);
+        assert_eq!(format!("{}", com), "0:1 0:3 blackhole");
     }
 
     #[test]
@@ -299,16 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn sort_uniq() {
-        let mut com = Community::from_str("100:10 no-export 100:10 100").unwrap();
-        com.sort_uniq();
+    fn dedup_from_str() {
+        let com = Community::from_str("100:10 no-export 100:10 100").unwrap();
         assert_eq!(format!("{}", com), "0:100 100:10 no-export");
     }
 
     #[test]
-    fn sort_uniq_no_export() {
+    fn dedup_insert() {
         let mut com = Community::from_str("no-export no-export no-export").unwrap();
-        com.sort_uniq();
+        com.insert(CommunityValue::NO_EXPORT.value());
         assert_eq!(format!("{}", com), "no-export");
     }
 

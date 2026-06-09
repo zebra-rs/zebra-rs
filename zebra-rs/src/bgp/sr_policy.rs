@@ -613,7 +613,7 @@ impl LocalSrPolicy {
         // headend(s); without one, NO_ADVERTISE keeps the policy local.
         match self.route_target {
             Some(rt) => attr.ecom = Some(ExtCommunity(vec![ipv4_route_target(rt)])),
-            None => attr.com = Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+            None => attr.com = Some(Community::from([CommunityValue::NO_ADVERTISE.value()])),
         }
         Some((nlri, attr))
     }
@@ -1297,7 +1297,7 @@ mod tests {
     #[test]
     fn reflect_attr_suppresses_no_advertise() {
         let attr = BgpAttr {
-            com: Some(Community(vec![CommunityValue::NO_ADVERTISE.value()])),
+            com: Some(Community::from([CommunityValue::NO_ADVERTISE.value()])),
             ..Default::default()
         };
         // NO_ADVERTISE → never reflected, regardless of peer roles.
