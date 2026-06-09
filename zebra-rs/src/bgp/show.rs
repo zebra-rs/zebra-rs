@@ -2882,7 +2882,7 @@ mod flowspec_show_tests {
     #[test]
     fn actions_render_discard_and_marking() {
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(vec![
+            ecom: Some(ExtCommunity::from([
                 FlowspecAction::TrafficRateBytes { asn: 0, rate: 0.0 }.into(),
                 FlowspecAction::TrafficMarking { dscp: 46 }.into(),
             ])),
@@ -2902,7 +2902,7 @@ mod flowspec_show_tests {
         // A Route-Target (0x00/0x02) is not a flow-spec action and must
         // not appear in the rendered action list.
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(vec![ExtCommunityValue {
+            ecom: Some(ExtCommunity::from([ExtCommunityValue {
                 high_type: 0x00,
                 low_type: 0x02,
                 val: [0, 100, 0, 0, 0, 200],

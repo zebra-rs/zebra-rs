@@ -111,7 +111,7 @@ pub(crate) fn tag_attr_with_export_rts(
     mut attr: bgp_packet::BgpAttr,
     export_rts: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
 ) -> bgp_packet::BgpAttr {
-    use bgp_packet::{ExtCommunity, ExtCommunityValue};
+    use bgp_packet::ExtCommunityValue;
 
     if export_rts.is_empty() {
         return attr;
@@ -124,9 +124,9 @@ pub(crate) fn tag_attr_with_export_rts(
         // sub-type at the default 0; flipping it here is what
         // distinguishes RT from Route-Origin (sub-type 0x03).
         val.low_type = 0x02;
-        ecom.0.push(val);
+        ecom.0.insert(val);
     }
-    attr.ecom = Some(ExtCommunity(ecom.0));
+    attr.ecom = Some(ecom);
     attr
 }
 
@@ -3616,7 +3616,7 @@ mod tests {
         fn empty_export_set_returns_attr_unchanged() {
             // No exports configured -> no ExtCommunity added.
             // Critical: tagging an empty set would otherwise
-            // create an empty `Some(ExtCommunity(vec![]))` and
+            // create an empty `Some(ExtCommunity::from([]))` and
             // upset the dedup pool's PartialEq.
             let attr = BgpAttr::default();
             let out = tag_attr_with_export_rts(attr.clone(), &Default::default());
@@ -3631,7 +3631,7 @@ mod tests {
             let out = tag_attr_with_export_rts(BgpAttr::default(), &rts);
             let ecom = out.ecom.expect("ecom populated");
             assert_eq!(ecom.0.len(), 1);
-            let entry = &ecom.0[0];
+            let entry = ecom.0.first().unwrap();
             // Two-byte ASN RD -> high_type 0x00.
             assert_eq!(entry.high_type, 0x00);
             assert_eq!(entry.low_type, 0x02, "RT sub-type per RFC 4360");
@@ -3648,8 +3648,9 @@ mod tests {
             let out = tag_attr_with_export_rts(BgpAttr::default(), &rts);
             let ecom = out.ecom.expect("ecom populated");
             assert_eq!(ecom.0.len(), 1);
-            assert_eq!(ecom.0[0].high_type, 0x01);
-            assert_eq!(ecom.0[0].low_type, 0x02);
+            let entry = ecom.0.first().unwrap();
+            assert_eq!(entry.high_type, 0x01);
+            assert_eq!(entry.low_type, 0x02);
         }
 
         #[test]
@@ -3673,7 +3674,7 @@ mod tests {
             // dropped by the RT tag — append, don't replace.
             let mut attr = BgpAttr::default();
             let preexisting = bgp_packet::ExtCommunityValue::from_color(0, 100);
-            attr.ecom = Some(bgp_packet::ExtCommunity(vec![preexisting.clone()]));
+            attr.ecom = Some(bgp_packet::ExtCommunity::from([preexisting.clone()]));
 
             let mut rts = std::collections::BTreeSet::new();
             rts.insert(rt("65000:1"));
@@ -3681,8 +3682,11 @@ mod tests {
             let out = tag_attr_with_export_rts(attr, &rts);
             let ecom = out.ecom.expect("ecom populated");
             assert_eq!(ecom.0.len(), 2, "colour + RT");
-            assert_eq!(ecom.0[0], preexisting, "colour stays at index 0");
-            assert_eq!(ecom.0[1].low_type, 0x02, "RT appended");
+            assert!(ecom.0.contains(&preexisting), "colour preserved");
+            assert!(
+                ecom.0.iter().any(|v| v.low_type == 0x02),
+                "RT added alongside"
+            );
         }
     }
 
@@ -3764,7 +3768,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
             index.insert("v2".to_string(), vrf_with_imports(&["65000:2"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:1")]));
             assert_eq!(matching_import_vrfs(&index, &ecom), vec!["v1".to_string()]);
         }
 
@@ -3778,7 +3782,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports(&["65000:99"]));
             index.insert("v2".to_string(), vrf_with_imports(&["65000:99"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:99")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:99")]));
             let mut got = matching_import_vrfs(&index, &ecom);
             got.sort();
             assert_eq!(got, vec!["v1".to_string(), "v2".to_string()]);
@@ -3795,7 +3799,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
             index.insert("v2".to_string(), vrf_with_imports(&["65000:1"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:1")]));
 
             let mut got = import_targets(&index, &ecom, Some("v1"));
             got.sort();
@@ -3810,7 +3814,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
             index.insert("v2".to_string(), vrf_with_imports(&["65000:1"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:1")]));
 
             let mut got = import_targets(&index, &ecom, None);
             got.sort();
@@ -3827,7 +3831,7 @@ mod tests {
             origin.low_type = 0x03;
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports(&["65000:1"]));
-            let ecom = Some(ExtCommunity(vec![origin]));
+            let ecom = Some(ExtCommunity::from([origin]));
             assert!(matching_import_vrfs(&index, &ecom).is_empty());
         }
 
@@ -3839,7 +3843,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v4only".to_string(), vrf_with_imports(&["65000:9"]));
             index.insert("v6only".to_string(), vrf_with_imports_v6(&["65000:9"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:9")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:9")]));
 
             assert_eq!(
                 matching_import_vrfs_v6(&index, &ecom),
@@ -3860,7 +3864,7 @@ mod tests {
             let mut index = BTreeMap::new();
             index.insert("v1".to_string(), vrf_with_imports_v6(&["65000:1"]));
             index.insert("v2".to_string(), vrf_with_imports_v6(&["65000:1"]));
-            let ecom = Some(ExtCommunity(vec![rt_extcom("65000:1")]));
+            let ecom = Some(ExtCommunity::from([rt_extcom("65000:1")]));
 
             let mut got = import_targets_v6(&index, &ecom, Some("v1"));
             got.sort();

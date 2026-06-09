@@ -149,12 +149,13 @@ impl BgpAttr {
     }
 
     /// Iterate every Color extended community (RFC 9012 §4.3, type
-    /// 0x03 0x0b) attached to the route, in attribute order. Returns
-    /// an empty iterator when the route has no EXT_COMMUNITIES or
-    /// the attribute carries no Color entries. Multiple Colors are
-    /// allowed (RFC 9256 §2.5 fallback ordering) and are yielded in
-    /// the order the originator placed them — preserving that order
-    /// matters for fallback semantics in the resolver.
+    /// 0x03 0x0b) attached to the route. Returns an empty iterator
+    /// when the route has no EXT_COMMUNITIES or the attribute carries
+    /// no Color entries. Multiple Colors are allowed (RFC 9256 §2.5);
+    /// `ExtCommunity` stores values as a sorted set, so they are
+    /// yielded in ascending (flags, color) order — a deterministic
+    /// fallback order for the resolver regardless of how the
+    /// originator arranged them on the wire.
     pub fn colors(&self) -> impl Iterator<Item = Color> + '_ {
         self.ecom
             .iter()
@@ -328,11 +329,13 @@ mod tests {
     }
 
     #[test]
-    fn colors_yields_color_extcomms_in_attribute_order() {
+    fn colors_yields_color_extcomms_in_sorted_order() {
+        // Inserted high-color-first; the set yields ascending
+        // (flags, color) order.
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(vec![
-                ExtCommunityValue::from_color(0, 100),
+            ecom: Some(ExtCommunity::from([
                 ExtCommunityValue::from_color(0b10, 200),
+                ExtCommunityValue::from_color(0, 100),
             ])),
             ..Default::default()
         };
@@ -346,16 +349,17 @@ mod tests {
 
     #[test]
     fn colors_skips_non_color_extcomms() {
-        // RT + Color + RT — only the Color in the middle should
-        // surface in colors().
-        let rt = ExtCommunity::from_str("rt:65001:100").unwrap().0;
-        let combined = vec![
-            rt[0].clone(),
-            ExtCommunityValue::from_color(0, 42),
-            rt[0].clone(),
-        ];
+        // RTs + Color — only the Color should surface in colors().
+        let rt1 = ExtCommunity::from_str("rt:65001:100").unwrap();
+        let rt2 = ExtCommunity::from_str("rt:65001:200").unwrap();
+        let combined: ExtCommunity = rt1
+            .0
+            .into_iter()
+            .chain(rt2.0)
+            .chain([ExtCommunityValue::from_color(0, 42)])
+            .collect();
         let attr = BgpAttr {
-            ecom: Some(ExtCommunity(combined)),
+            ecom: Some(combined),
             ..Default::default()
         };
         let cols: Vec<Color> = attr.colors().collect();
