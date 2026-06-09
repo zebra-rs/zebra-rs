@@ -1904,7 +1904,9 @@ impl Isis {
     /// changes (notably a blanket `enable`) affect adjacencies that are already
     /// Up. Subscribe / Unsubscribe is idempotent at the BFD instance (keyed by
     /// client+key), so we can re-drive without tracking per-adjacency state;
-    /// Echo-param changes take effect on the next session (re)establishment.
+    /// a re-Subscribe also applies Echo-param changes to the live session
+    /// (`Bfd::update_echo_params`), so flipping `echo-mode` at runtime takes
+    /// effect on commit.
     pub(crate) fn bfd_reconcile_all(&self) {
         if self.bfd_client_tx.is_none() {
             return;

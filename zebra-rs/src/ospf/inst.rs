@@ -383,10 +383,14 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
 impl<V: OspfVersion> Ospf<V> {
     /// Reconcile one neighbor's BFD subscription against the interface
     /// config and the neighbor's current NFSM state. Idempotent and
-    /// order-independent: the desired key is compared to the tracked
-    /// `nbr.bfd_session_key`, unsubscribing a stale key before
-    /// subscribing the new one (so a hop-mode/address change or a
-    /// `min-neighbor-state` flip never leaks or duplicates a session).
+    /// order-independent: the desired (key, params) pair is compared to
+    /// the tracked `nbr.bfd_session_key` / `nbr.bfd_session_params`. A
+    /// *key* change unsubscribes the stale key before subscribing the
+    /// new one (so an address change or a `min-neighbor-state` flip
+    /// never leaks or duplicates a session); a params-only change (e.g.
+    /// `echo-mode`) re-sends `Subscribe`, which the BFD instance applies
+    /// to the live session (`Bfd::update_echo_params`) — no unsubscribe,
+    /// which could tear the session down if we were its last subscriber.
     /// OSPF sessions are single-hop (directly connected neighbors); the
     /// `profile` is stored but not yet applied (the session uses
     /// `SessionParams::default()`, matching BGP / IS-IS).
@@ -433,12 +437,21 @@ impl<V: OspfVersion> Ospf<V> {
             }
         };
 
-        let current = self
+        let params = crate::bfd::session::SessionParams {
+            echo_mode,
+            required_min_echo_rx_us: echo_rx_us,
+            echo_transmit_us: echo_tx_us,
+            ..crate::bfd::session::SessionParams::default()
+        };
+        let desired_params = desired.map(|_| params);
+
+        let (current, current_params) = self
             .links
             .get(&ifindex)
             .and_then(|l| l.nbrs.get(&nbr_addr))
-            .and_then(|n| n.bfd_session_key);
-        if desired == current {
+            .map(|n| (n.bfd_session_key, n.bfd_session_params))
+            .unwrap_or((None, None));
+        if desired == current && desired_params == current_params {
             return;
         }
 
@@ -448,19 +461,15 @@ impl<V: OspfVersion> Ospf<V> {
         let Some(client_tx) = self.bfd_client_tx.as_ref() else {
             return;
         };
-        if let Some(old) = current {
+        if let Some(old) = current
+            && desired != current
+        {
             let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
                 client: V::PROTO.to_string(),
                 key: old,
             });
         }
         if let Some(key) = desired {
-            let params = crate::bfd::session::SessionParams {
-                echo_mode,
-                required_min_echo_rx_us: echo_rx_us,
-                echo_transmit_us: echo_tx_us,
-                ..crate::bfd::session::SessionParams::default()
-            };
             let _ = client_tx.send(crate::bfd::inst::ClientReq::Subscribe {
                 client: V::PROTO.to_string(),
                 key,
@@ -474,6 +483,7 @@ impl<V: OspfVersion> Ospf<V> {
             .and_then(|l| l.nbrs.get_mut(&nbr_addr))
         {
             nbr.bfd_session_key = desired;
+            nbr.bfd_session_params = desired_params;
         }
     }
 
@@ -555,6 +565,7 @@ impl<V: OspfVersion> Ospf<V> {
             .and_then(|l| l.nbrs.get_mut(&nbr_addr))
         {
             nbr.bfd_session_key = None;
+            nbr.bfd_session_params = None;
         }
         let _ = self.tx.send(Message::Nfsm(
             ifindex,

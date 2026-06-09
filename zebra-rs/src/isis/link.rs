@@ -963,6 +963,7 @@ pub fn config_bfd_echo_transmit_interval(
     let interval = args.u32()?;
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    isis.bfd_reconcile_all();
     Some(())
 }
 
@@ -976,6 +977,7 @@ pub fn config_bfd_echo_receive_interval(
     let interval = args.u32()?;
     let link = isis.links.get_mut_by_name(&name)?;
     link.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    isis.bfd_reconcile_all();
     Some(())
 }
 
@@ -1006,6 +1008,7 @@ pub fn config_isis_bfd_echo_transmit_interval(
 ) -> Option<()> {
     let interval = args.u32()?;
     isis.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    isis.bfd_reconcile_all();
     Some(())
 }
 
@@ -1017,6 +1020,7 @@ pub fn config_isis_bfd_echo_receive_interval(
 ) -> Option<()> {
     let interval = args.u32()?;
     isis.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    isis.bfd_reconcile_all();
     Some(())
 }
 

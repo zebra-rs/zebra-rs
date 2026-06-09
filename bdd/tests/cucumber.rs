@@ -416,6 +416,36 @@ async fn apply_config(world: &mut World, config_file: String, namespace: String)
     );
 }
 
+/// Apply raw config lines (`set …` / `delete …`, `\n`-separated) and commit —
+/// the runtime-reconfiguration sibling of `I apply config`. `vtyctl apply`
+/// with a file is additive, so exercising a runtime *removal* needs an
+/// explicit `delete` line; this is how scenarios prove a knob can be turned
+/// off on a live session, not just left out at startup.
+#[when(expr = "I apply command {string} in namespace {string}")]
+async fn apply_config_command(world: &mut World, command: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+
+    let stdout = netns::exec_in_netns(&scoped, "vtyctl", &["apply", "-c", &command])
+        .await
+        .expect("Failed to apply config command");
+
+    // Same rejection check as `apply_config`: `vtyctl apply` exits 0 even
+    // when the server refuses the line, printing `error reply: <command>`.
+    let trimmed = stdout.trim();
+    assert!(
+        !trimmed.contains("error"),
+        "vtyctl apply rejected '{}' in namespace {}: {}",
+        command,
+        scoped,
+        trimmed
+    );
+
+    println!(
+        "✓ Applied '{}' in namespace {} ({})",
+        command, scoped, trimmed
+    );
+}
+
 #[when(expr = "I wait {int} seconds for BGP to operate")]
 async fn wait_for_bgp(_world: &mut World, seconds: u64) {
     tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;

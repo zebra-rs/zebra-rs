@@ -10,8 +10,8 @@ Feature: IS-IS BFD over an IPv4 point-to-point link
 
   The single-hop BFD session is built from the two ends' IPv4 interface
   addresses (learned via TLV 132). Each scenario is self-contained (own setup
-  and teardown) so the Echo scenarios configure echo-mode before the session
-  first comes up (echo is armed at session establishment, not retrofitted).
+  and teardown). Echo params apply to live sessions too — the last scenario
+  toggles echo-mode at runtime and the session must not be re-established.
 
   BFD-down is induced by dropping inbound UDP/3784 in one namespace: the link
   stays up and IIHs (L2 ISO PDUs, not IP/UDP) keep flowing, so a fast teardown
@@ -82,6 +82,36 @@ Feature: IS-IS BFD over an IPv4 point-to-point link
     Then bfd session in namespace "z1" on interface "i1" should be up
     And isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
     And ping from "z1" to "10.255.0.2" should succeed
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    Then the test environment should be clean
+
+  @bfd_echo
+  Scenario: Echo transmit is toggled at runtime on the live session
+    Given a clean test environment
+    When I create namespace "z1"
+    And I create namespace "z2"
+    And I connect namespace "z1" interface "i1" to namespace "z2" interface "i1"
+    And I start zebra-rs in namespace "z1"
+    And I start zebra-rs in namespace "z2"
+    And I apply config "z1-echo-tx.yaml" to namespace "z1"
+    And I apply config "z2-echo-rx.yaml" to namespace "z2"
+    And I wait 10 seconds
+    Then isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
+    And bfd session in namespace "z1" on interface "i1" should be up
+    And bfd session in namespace "z1" on interface "i1" should have echo transmit
+    # Runtime delete: the live session must stop originating Echo without
+    # being re-established (previously the new params were ignored until the
+    # session was torn down and re-created).
+    When I apply command "delete router isis interface i1 bfd echo-mode transmit" in namespace "z1"
+    Then bfd session in namespace "z1" on interface "i1" should have echo off
+    And bfd session in namespace "z1" on interface "i1" should be up
+    # Runtime re-enable: Echo resumes on the same live session.
+    When I apply command "set router isis interface i1 bfd echo-mode transmit" in namespace "z1"
+    Then bfd session in namespace "z1" on interface "i1" should have echo transmit
+    And bfd session in namespace "z1" on interface "i1" should be up
     When I stop zebra-rs in namespace "z1"
     And I stop zebra-rs in namespace "z2"
     And I delete namespace "z1"
