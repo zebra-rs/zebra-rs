@@ -61,8 +61,8 @@ impl BgpVrfLabelMode {
 /// VPN data-plane encapsulation for a VRF — mirrors `encapsulation`
 /// in zebra-bgp-vrf.yang. Default `Mpls` (RFC 4364 service label).
 /// `Srv6` (RFC 9252) binds a per-VRF End.DT46 service SID from the
-/// global `srv6 locator` instead of an MPLS label, and the PE
-/// programs a seg6local decap rather than an AF_MPLS ILM.
+/// `segment-routing srv6 locator` instead of an MPLS label, and the
+/// PE programs a seg6local decap rather than an AF_MPLS ILM.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BgpVrfEncapsulation {
     #[default]

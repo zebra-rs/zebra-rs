@@ -1409,4 +1409,56 @@ mod yang_load_tests {
             "`set bfd tracing true` must be a valid settable path",
         );
     }
+
+    /// The BGP SRv6 service-SID locator lives at `router bgp
+    /// segment-routing srv6 locator <name>` (mirroring `router isis
+    /// segment-routing srv6 locator`; BGP has no SR-MPLS sibling). It is a
+    /// hand-added container on the vendored `ietf-bgp` `container bgp`
+    /// grouping, so a misplacement would only surface at runtime —
+    /// `load_mode` loads the module but does not exercise the path. Assert
+    /// the new path is settable and that the former `global / srv6 /
+    /// locator` location is gone (so a future re-add would be caught).
+    #[test]
+    fn bgp_segment_routing_srv6_locator_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp segment-routing srv6 locator LOC1",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set router bgp segment-routing srv6 locator <name>` must be a valid settable path",
+        );
+
+        // The locator moved out of `global`; the old path must no longer
+        // resolve, or operators would have two redundant ways to set it.
+        let (old_code, _comps, _state) = parse(
+            "set router bgp global srv6 locator LOC1",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            old_code,
+            ExecCode::Success,
+            "`set router bgp global srv6 locator <name>` was relocated to segment-routing \
+             and must no longer parse",
+        );
+    }
 }

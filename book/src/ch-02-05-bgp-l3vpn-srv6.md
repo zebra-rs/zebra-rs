@@ -30,8 +30,9 @@ An SRv6 L3VPN PE on zebra-rs touches three configuration trees:
 * the global **`segment-routing` locator** supplies the IPv6 prefix that
   per-VRF service SIDs are carved from (the same locators IS-IS
   advertises into the SR domain);
-* the global **`router bgp ... srv6 locator`** names which locator BGP
-  draws its service SIDs from;
+* the **`router bgp segment-routing srv6 locator`** names which locator
+  BGP draws its service SIDs from (mirrors `router isis segment-routing
+  srv6 locator`; BGP has no SR-MPLS sibling);
 * the per-VRF **`encapsulation srv6`** opts a VRF into the SRv6 data
   plane (the default is `mpls`).
 
@@ -45,6 +46,8 @@ segment-routing {
 router bgp {
   global {
     as 65000;
+  }
+  segment-routing {
     srv6 {
       locator LOC1;
     }
@@ -74,7 +77,7 @@ vrf vrf1 {
 | Config | Meaning |
 |---|---|
 | `segment-routing locator <name> prefix <p>` | An IPv6 locator prefix SIDs are carved from |
-| `router bgp global srv6 locator <name>` | The locator BGP carves per-VRF End.DT46 SIDs from |
+| `router bgp segment-routing srv6 locator <name>` | The locator BGP carves per-VRF End.DT46 SIDs from |
 | `router bgp vrf <name> encapsulation srv6` | Use the SRv6 data plane for this VRF (default `mpls`) |
 | `router bgp vrf <name> rd <RD>` | Route Distinguisher for this VRF's VPN NLRI |
 | `vrf <name> {ipv4,ipv6} route-target import/export <RT>` | Which VPN routes land in / leave the VRF |

@@ -337,22 +337,6 @@ module ietf-bgp {
              rather than retroactively withdrawing already-installed
              entries.";
         }
-        container srv6 {
-          description
-            "SRv6 parameters for BGP services over an SRv6 underlay
-             (RFC 9252).";
-          leaf locator {
-            type string;
-            description
-              "Name of the SRv6 locator this BGP speaker draws per-VRF
-               End.DT46 service SIDs from for L3VPN over SRv6. Held as
-               a plain string (staging-friendly, like the IS-IS
-               `locator` reference) and resolved against the locators
-               the RIB segment-routing manager publishes; until it
-               resolves, `encapsulation srv6` VRFs run without a
-               service SID.";
-          }
-        }
         container distance {
           description
             "Administrative distances (or preferences) assigned to
@@ -436,6 +420,32 @@ module ietf-bgp {
         }
         uses rt-pol:apply-policy-group;
         uses state;
+      }
+
+      container segment-routing {
+        ext:help "Segment Routing (SRv6) configuration";
+        description
+          "Segment Routing parameters for BGP services. BGP supports
+           only the SRv6 dataplane — there is no SR-MPLS knob here —
+           so this container carries a single `srv6` child, mirroring
+           `router isis / segment-routing` (config.yang) minus the
+           `mpls` sibling.";
+        container srv6 {
+          description
+            "SRv6 parameters for BGP services over an SRv6 underlay
+             (RFC 9252).";
+          leaf locator {
+            type string;
+            description
+              "Name of the SRv6 locator this BGP speaker draws per-VRF
+               End.DT46 service SIDs from for L3VPN over SRv6. Held as
+               a plain string (staging-friendly, like the IS-IS
+               `locator` reference) and resolved against the locators
+               the RIB segment-routing manager publishes; until it
+               resolves, `encapsulation srv6` VRFs run without a
+               service SID.";
+          }
+        }
       }
 
       list neighbor {
