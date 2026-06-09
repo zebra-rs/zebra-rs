@@ -2592,6 +2592,11 @@ pub fn route_update_evpn(
         return None;
     }
 
+    // RFC 1997 well-known communities: NO_ADVERTISE / NO_EXPORT.
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
+        return None;
+    }
+
     let id = if add_path { rib.local_id } else { 0 };
 
     let route = match prefix {
@@ -5985,6 +5990,35 @@ fn vpnv4_service_label(peer: &Peer, rib: &BgpRib) -> Label {
     }
 }
 
+/// RFC 1997 well-known community egress gate, shared by the IPv4 /
+/// IPv6 / EVPN outbound builders. NO_ADVERTISE suppresses
+/// advertisement to every peer; NO_EXPORT — and NO_EXPORT_SUBCONFED,
+/// which is equivalent while BGP confederations are unimplemented —
+/// suppresses advertisement to eBGP peers. SR Policy (SAFI 73) keeps
+/// its own RFC 9830 handling in `sr_policy.rs`.
+///
+/// Runs BEFORE the outbound policy, so a community the policy itself
+/// attaches toward a peer does not self-suppress (FRR behaves the
+/// same); only communities already on the route — received, or set at
+/// origination/ingress — suppress.
+///
+/// Depends only on the route's attr and the peer TYPE — `peer_type`
+/// is part of `UpdateGroupSig`, so the result is identical for every
+/// member of an update-group and safe under the per-group advertise
+/// memo in `route_advertise_to_peers`. Do not add per-peer state here
+/// without moving the check out of the memoized path.
+fn community_suppresses_advertisement(attr: &BgpAttr, peer_type: PeerType) -> bool {
+    let Some(com) = attr.com.as_ref() else {
+        return false;
+    };
+    if com.contains(&CommunityValue::NO_ADVERTISE.value()) {
+        return true;
+    }
+    peer_type == PeerType::EBGP
+        && (com.contains(&CommunityValue::NO_EXPORT.value())
+            || com.contains(&CommunityValue::NO_EXPORT_SUBCONFED.value()))
+}
+
 pub fn route_update_ipv4(
     peer: &mut Peer,
     prefix: &Ipv4Net,
@@ -6010,6 +6044,14 @@ pub fn route_update_ipv4(
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
     {
+        return None;
+    }
+
+    // RFC 1997 well-known communities: NO_ADVERTISE / NO_EXPORT. A
+    // suppressed route flows into `AdvertiseOutcome::Withdraw`, so a
+    // previously-advertised route that gains one of these communities
+    // is withdrawn from the affected peers (adj-out gated).
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
         return None;
     }
 
@@ -6146,6 +6188,15 @@ pub fn route_update_ipv6(
     // Inter-AS Option AB: a VPNv6 route a hybrid VRF imports is relayed
     // only via that VRF's re-export, never transparently (see the v4 path).
     if rib.vrf_transit_only {
+        return None;
+    }
+    // RFC 1997 well-known communities: NO_ADVERTISE / NO_EXPORT. Unlike
+    // the v4 path there is no Adj-RIB-Out for v6 yet, so this filters
+    // steady-state advertisement only — a previously-advertised route
+    // that GAINS one of these communities is not withdrawn until the
+    // session resyncs (same pre-existing limitation as the deferred v6
+    // outbound policy).
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
         return None;
     }
     // iBGP→iBGP: don't re-advertise iBGP-learned routes to iBGP peers
@@ -11017,5 +11068,65 @@ mod enforce_first_as_tests {
         // A path whose left-most segment carries no AS ⇒ violation.
         let empty_seq = As4Path::from(vec![]);
         assert!(aspath_first_as_mismatch(Some(&empty_seq), PEER_AS));
+    }
+}
+
+/// `community_suppresses_advertisement` truth table: NO_ADVERTISE
+/// gates every peer type; NO_EXPORT and NO_EXPORT_SUBCONFED gate eBGP
+/// only (no confederation support, so SUBCONFED ≡ NO_EXPORT).
+#[cfg(test)]
+mod community_suppress_tests {
+    use bgp_packet::{BgpAttr, CommunityValue};
+
+    use super::PeerType;
+    use super::community_suppresses_advertisement;
+
+    fn attr_with_coms(coms: &[u32]) -> BgpAttr {
+        BgpAttr {
+            com: Some(coms.iter().copied().collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_communities_never_suppresses() {
+        let attr = BgpAttr::default();
+        assert!(!community_suppresses_advertisement(&attr, PeerType::IBGP));
+        assert!(!community_suppresses_advertisement(&attr, PeerType::EBGP));
+    }
+
+    #[test]
+    fn ordinary_communities_never_suppress() {
+        let attr = attr_with_coms(&[(100 << 16) | 1]);
+        assert!(!community_suppresses_advertisement(&attr, PeerType::IBGP));
+        assert!(!community_suppresses_advertisement(&attr, PeerType::EBGP));
+    }
+
+    #[test]
+    fn no_advertise_suppresses_all_peer_types() {
+        let attr = attr_with_coms(&[CommunityValue::NO_ADVERTISE.value()]);
+        assert!(community_suppresses_advertisement(&attr, PeerType::IBGP));
+        assert!(community_suppresses_advertisement(&attr, PeerType::EBGP));
+    }
+
+    #[test]
+    fn no_export_suppresses_ebgp_only() {
+        let attr = attr_with_coms(&[CommunityValue::NO_EXPORT.value()]);
+        assert!(!community_suppresses_advertisement(&attr, PeerType::IBGP));
+        assert!(community_suppresses_advertisement(&attr, PeerType::EBGP));
+    }
+
+    #[test]
+    fn no_export_subconfed_suppresses_ebgp_only() {
+        let attr = attr_with_coms(&[CommunityValue::NO_EXPORT_SUBCONFED.value()]);
+        assert!(!community_suppresses_advertisement(&attr, PeerType::IBGP));
+        assert!(community_suppresses_advertisement(&attr, PeerType::EBGP));
+    }
+
+    #[test]
+    fn well_known_mixed_with_ordinary_still_suppresses() {
+        let attr = attr_with_coms(&[(65000 << 16) | 7, CommunityValue::NO_EXPORT.value()]);
+        assert!(community_suppresses_advertisement(&attr, PeerType::EBGP));
+        assert!(!community_suppresses_advertisement(&attr, PeerType::IBGP));
     }
 }
