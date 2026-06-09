@@ -624,7 +624,7 @@ fn show_bgp_vpnv4(
                         },
                         path_id: rib.remote_id,
                         local_path_id: rib.local_id,
-                        label: 0, // TODO: Get actual label from rib.label
+                        label: rib.label.map(|l| l.label).unwrap_or(0),
                     });
                 }
             }
@@ -678,7 +678,8 @@ fn show_bgp_vpnv4(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0, {}", ecom, com)?;
+                let label = rib.label.map(|l| l.label).unwrap_or(0);
+                writeln!(buf, "     {} label={}, {}", ecom, label, com)?;
             }
         }
     }
@@ -732,7 +733,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                         },
                         path_id: rib.remote_id,
                         local_path_id: rib.local_id,
-                        label: 0, // TODO: Get actual label from rib.label
+                        label: rib.label.map(|l| l.label).unwrap_or(0),
                     });
                 }
             }
@@ -786,7 +787,8 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
                     origin,
                 )?;
                 let ecom = show_ecom(&rib.attr);
-                writeln!(buf, "     {} label=0, {}", ecom, com)?;
+                let label = rib.label.map(|l| l.label).unwrap_or(0);
+                writeln!(buf, "     {} label={}, {}", ecom, label, com)?;
             }
         }
     }
