@@ -1,0 +1,26 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.1.3/24
+router:
+  bgp:
+    # Reopen the listener on the default port: 0 -> 179 closes nothing
+    # (there was no listener) and binds a fresh server socket, after
+    # which z2's connect retry can establish the session.
+    port: 179
+    global:
+      as: 65003
+      identifier: 192.168.1.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.1.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      transport:
+        passive-mode: true

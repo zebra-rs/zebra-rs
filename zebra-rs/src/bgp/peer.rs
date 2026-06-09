@@ -79,6 +79,13 @@ pub struct CollisionConn {
     pub reader: Task<()>,
     pub writer: Task<()>,
     pub role: Role,
+    /// Endpoint addresses of this collision conn, written into
+    /// `peer.param` if it wins §6.8 resolution and is promoted —
+    /// `show ip bgp neighbors`' Local/Foreign host lines must
+    /// describe the surviving connection, not the primary it
+    /// replaced.
+    pub local_addr: Option<SocketAddr>,
+    pub remote_addr: Option<SocketAddr>,
 }
 
 impl State {
@@ -172,6 +179,17 @@ pub enum PasswordEncoding {
 pub struct PeerTransportConfig {
     pub passive: bool,
     pub update_source: Option<IpAddr>,
+    /// `port <1-65535>` (FRR `neighbor X port`): TCP destination port
+    /// used when this router actively dials the neighbor. `None` is
+    /// the IANA default [`BGP_PORT`] (179); deleting the leaf returns
+    /// to it. Consulted only by [`peer_start_connection`] — inbound
+    /// connections are matched to their neighbor by source address,
+    /// never by port, so the listener side ignores this (move the
+    /// listener with the instance-level `router bgp port` instead).
+    /// A change bounces a live session (FRR `peer_change_reset`) so
+    /// the new port takes effect immediately. See
+    /// `zebra-bgp-transport.yang`.
+    pub port: Option<u16>,
     /// GTSM / `ttl-security` (RFC 5082, originally RFC 3682): when set,
     /// this neighbor is treated as directly connected. Every BGP packet
     /// leaves with IP TTL / IPv6 Hop Limit 255 and inbound packets are
@@ -515,6 +533,14 @@ pub struct PeerParam {
     pub hold_time: u16,
     pub keepalive: u16,
     pub local_addr: Option<SocketAddr>,
+    /// Remote endpoint of the session's TCP connection, captured with
+    /// [`Self::local_addr`] when the primary conn comes up (and
+    /// refreshed if a §6.8 collision conn is promoted). For a dialed
+    /// session the port is the neighbor's configured `port` (default
+    /// 179); for an accepted one it is the peer's ephemeral source
+    /// port. Rendered as `Foreign host/port` by `show ip bgp neighbors`,
+    /// mirroring FRR's `su_remote`.
+    pub remote_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Default)]
@@ -1403,6 +1429,15 @@ fn promote_collision_to_primary(peer: &mut Peer, collision: CollisionConn) {
     peer.task.reader = Some(collision.reader);
     peer.task.writer = Some(collision.writer);
     peer.primary_role = Some(collision.role);
+    // Show the surviving connection's endpoints, not the dead
+    // primary's (the collision conn is always accepted, so its
+    // local port is the listen port and its remote port ephemeral).
+    if collision.local_addr.is_some() {
+        peer.param.local_addr = collision.local_addr;
+    }
+    if collision.remote_addr.is_some() {
+        peer.param.remote_addr = collision.remote_addr;
+    }
 }
 
 pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State {
@@ -1630,6 +1665,9 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
+    if let Ok(remote_addr) = stream.peer_addr() {
+        peer.param.remote_addr = Some(remote_addr);
+    }
     apply_session_ttl(peer, &stream);
     record_session_mss(peer, &stream);
     peer.task.connect = None;
@@ -1825,11 +1863,14 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     // `tcp-mss <1-65535>`, likewise set before connect so our SYN
     // advertises the clamp and the kernel caches the reduced MSS.
     let tcp_mss = peer.config.transport.tcp_mss;
+    // `neighbor X port <1-65535>` — TCP destination port for the dial;
+    // the IANA 179 unless overridden.
+    let port = peer.config.transport.port.unwrap_or(BGP_PORT);
     let ctx = peer.ctx.clone();
     Task::spawn(async move {
         let tx = tx.clone();
         let remote: SocketAddr = match address {
-            IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), BGP_PORT),
+            IpAddr::V4(addr) => SocketAddr::new(IpAddr::V4(addr), port),
             // Pass `scope_id` through `SocketAddrV6` so a link-local
             // target (fe80::/10) resolves to the right interface — the
             // kernel `connect(2)` returns EINVAL otherwise. For global
@@ -1838,7 +1879,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
             // by interface-neighbor.
             IpAddr::V6(addr) => SocketAddr::V6(std::net::SocketAddrV6::new(
                 addr,
-                BGP_PORT,
+                port,
                 0,
                 scope_id.unwrap_or(0),
             )),
@@ -2141,6 +2182,8 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     // keeps the synced value correct whichever connection survives.
     apply_session_ttl(peer, &stream);
     record_session_mss(peer, &stream);
+    let local_addr = stream.local_addr().ok();
+    let remote_addr = stream.peer_addr().ok();
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
     let reader = peer_start_reader(peer, ConnTag::Collision, read_half);
@@ -2152,6 +2195,8 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
         reader,
         writer,
         role: Role::Passive,
+        local_addr,
+        remote_addr,
     });
     // Mirror peer_send_open but target the collision packet_tx.
     let bytes = build_open_packet(peer);

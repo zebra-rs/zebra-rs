@@ -1350,6 +1350,53 @@ mod yang_load_tests {
         );
     }
 
+    /// `neighbor X port <1-65535>` and the instance-level
+    /// `router bgp port <0-65535>` (zebra-bgp-transport.yang) must both
+    /// be settable paths. The neighbor leaf's range starts at 1, so
+    /// port 0 must be rejected there while the instance leaf accepts it
+    /// (0 = do not listen).
+    #[test]
+    fn bgp_port_paths_are_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 10.0.0.1 port 1790",
+            "set router bgp port 1790",
+            "set router bgp port 0",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        let (code, _comps, _state) = parse(
+            "set router bgp neighbor 10.0.0.1 port 0",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "neighbor port 0 is outside the 1..65535 range and must not parse",
+        );
+    }
+
     /// The per-neighbor `afi-safi ipv6 encapsulation-type` knob is a
     /// hand-added leaf on the vendored `ietf-bgp-neighbor` afi-safi list.
     /// `load_mode` proves the module loads but not that the concrete path

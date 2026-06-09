@@ -182,6 +182,10 @@ bgp_interas_option_ab:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_interas_option_ab"
 
+bgp_port:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_port"
+
 generate:
 	rm -rf allure-report
 	allure generate
