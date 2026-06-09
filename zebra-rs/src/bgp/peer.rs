@@ -20,7 +20,7 @@ use caps::CapAs4;
 use caps::CapRefresh;
 use caps::CapabilityPacket;
 
-use crate::bfd::session::{EchoMode, SessionKey};
+use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::tracing::{Direction, PacketKind};
@@ -703,6 +703,13 @@ pub struct Peer {
     /// duplicate a session.
     pub bfd_session_key: Option<SessionKey>,
 
+    /// The [`SessionParams`] sent with that subscription. Compared by
+    /// `config::bfd_apply` so an Echo-param-only change (same key)
+    /// re-sends `Subscribe`, which the BFD instance applies to the live
+    /// session — without an Unsubscribe, which could tear the session
+    /// down if we were its last subscriber.
+    pub bfd_session_params: Option<SessionParams>,
+
     /// Per-neighbor conditional tracing config (zebra-bgp-tracing.yang
     /// `router bgp neighbor <addr> tracing`). Written by the tracing
     /// config dispatch; read (additively with `tracing_instance`) by
@@ -797,6 +804,7 @@ impl Peer {
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
             bfd_session_key: None,
+            bfd_session_params: None,
             tracing: super::tracing::BgpTracing::default(),
             tracing_instance: super::tracing::BgpTracing::default(),
             tcp_mss_synced: None,

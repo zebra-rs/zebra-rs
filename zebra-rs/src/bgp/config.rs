@@ -713,9 +713,14 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
         (enable, key, params)
     };
 
-    let current = bgp.peers.get(&addr).and_then(|p| p.bfd_session_key);
+    let (current, current_params) = bgp
+        .peers
+        .get(&addr)
+        .map(|p| (p.bfd_session_key, p.bfd_session_params))
+        .unwrap_or((None, None));
     let want = enable.then_some(desired_key);
-    if want == current {
+    let want_params = enable.then_some(params);
+    if want == current && want_params == current_params {
         return Some(()); // Already in the desired state — no churn.
     }
 
@@ -730,9 +735,15 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
         return Some(());
     };
 
-    // Drop a stale subscription (key changed, or BFD turned off) before
-    // adding the new one.
-    if let Some(old) = current {
+    // Drop a stale subscription before adding the new one — only when the
+    // *key* changed (hop-mode flip, update-source change) or BFD turned
+    // off. A params-only change must not unsubscribe: that could tear the
+    // session down if we were its last subscriber. Re-sending `Subscribe`
+    // on the same key applies the new Echo params to the live session
+    // (`Bfd::update_echo_params`).
+    if let Some(old) = current
+        && want != current
+    {
         let _ = client_tx.send(ClientReq::Unsubscribe {
             client: "bgp".to_string(),
             key: old,
@@ -749,6 +760,7 @@ fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
 
     if let Some(peer) = bgp.peers.get_mut(&addr) {
         peer.bfd_session_key = want;
+        peer.bfd_session_params = want_params;
     }
     Some(())
 }

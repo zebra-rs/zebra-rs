@@ -193,6 +193,11 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     /// changes, and avoids duplicate subscribes. Mirrors the BGP
     /// `peer.bfd_session_key` reconcile pattern.
     pub bfd_session_key: Option<crate::bfd::session::SessionKey>,
+    /// The [`SessionParams`](crate::bfd::session::SessionParams) sent
+    /// with that subscription. Compared by `Ospf::bfd_reconcile_nbr` so
+    /// an Echo-param-only change (same key) re-sends `Subscribe`, which
+    /// the BFD instance applies to the live session.
+    pub bfd_session_params: Option<crate::bfd::session::SessionParams>,
 }
 
 #[bitfield(u8, debug = true)]
@@ -285,6 +290,7 @@ where
             gr_helper: None,
             auth_md5_last_seq: 0,
             bfd_session_key: None,
+            bfd_session_params: None,
         };
         nbr.ident.prefix = prefix;
         nbr

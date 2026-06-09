@@ -107,10 +107,12 @@ impl Default for ClientReqChannel {
 #[derive(Debug)]
 pub enum ClientReq {
     /// Register interest in `key`. If no session yet exists for that
-    /// key, BFD creates one using `params`; otherwise `params` is
-    /// ignored and the existing session is reused. State-change
-    /// events for the session are forwarded to `notifier` until the
-    /// matching [`ClientReq::Unsubscribe`] arrives.
+    /// key, BFD creates one using `params`; otherwise the existing
+    /// session is reused and the Echo-affecting fields of `params` are
+    /// applied to it live (`Bfd::update_echo_params`) — so clients
+    /// re-send `Subscribe` to push `bfd { echo-* }` config changes.
+    /// State-change events for the session are forwarded to `notifier`
+    /// until the matching [`ClientReq::Unsubscribe`] arrives.
     Subscribe {
         client: ClientId,
         key: SessionKey,
@@ -330,10 +332,13 @@ impl Bfd {
     }
 
     /// Add `client` as a subscriber on `key`. Creates the underlying
-    /// session if it does not yet exist (otherwise `params` is
-    /// ignored and the existing session is reused). If the session is
-    /// already Up, the new subscriber is informed via an immediate
-    /// synthetic [`BfdEvent::StateChange`].
+    /// session if it does not yet exist; otherwise the session is
+    /// reused and the Echo-affecting fields of `params` are applied to
+    /// it live (see [`Self::update_echo_params`]) — clients re-drive
+    /// `Subscribe` from their `bfd {}` config callbacks, so a commit
+    /// that flips `echo-mode` lands here. If the session is already
+    /// Up, the new subscriber is informed via an immediate synthetic
+    /// [`BfdEvent::StateChange`].
     pub fn subscribe(
         &mut self,
         client: ClientId,
@@ -342,11 +347,13 @@ impl Bfd {
         notifier: UnboundedSender<BfdEvent>,
     ) {
         // Lazy create the session on the first subscriber. Subsequent
-        // subscribers reuse the existing session — their `params` are
-        // ignored on the assumption that the BFD config is the
-        // authoritative source of truth.
+        // Subscribes reuse the existing session, applying only the Echo
+        // params — where several clients share a session the last
+        // writer wins (control-plane timing stays create-time-only).
         if self.sessions.get_by_key(&key).is_none() {
             self.add_session(key, params);
+        } else {
+            self.update_echo_params(&key, &params);
         }
         // Mirror the current state to the new subscriber so it can
         // act on already-Up sessions without waiting for the next
@@ -425,6 +432,68 @@ impl Bfd {
         disc
     }
 
+    /// Apply the Echo-affecting fields of `params` to an existing session —
+    /// the runtime path for `bfd { echo-mode | echo-*-interval }` config
+    /// changes, which clients re-drive via `Subscribe` on commit. Control
+    /// timing (`desired_min_tx_us` / `required_min_rx_us` / `detect_mult`)
+    /// stays create-time-only: a live change would need an RFC 5880 §6.8.3
+    /// Poll Sequence, and every client wires only the Echo fields today.
+    ///
+    /// The reflector-helper refcount tracks "Echo configured on this
+    /// single-hop session" (the `add_session` / `remove_session` predicate),
+    /// so it is adjusted here on every off↔on edge to stay symmetric while
+    /// `echo_mode` mutates.
+    fn update_echo_params(&mut self, key: &SessionKey, params: &SessionParams) {
+        let Some(s) = self.sessions.get_by_key(key) else {
+            return;
+        };
+        if s.echo_mode == params.echo_mode
+            && s.required_min_echo_rx_us == params.required_min_echo_rx_us
+            && s.echo_transmit_us == params.echo_transmit_us
+        {
+            return;
+        }
+        let was_active = !s.echo_mode.is_off() && !key.multihop;
+        let now_active = !params.echo_mode.is_off() && !key.multihop;
+        // A change to the transmit role or rate invalidates a running
+        // originator: stop it now, while the helper is guaranteed alive
+        // (originating ⇒ `was_active` ⇒ we still hold a reflector
+        // reference), and let the reconcile below re-add it under the new
+        // params if it is still wanted.
+        let restart = s.echo_originating
+            && (s.echo_mode.transmits() != params.echo_mode.transmits()
+                || s.echo_transmit_us != params.echo_transmit_us);
+        if restart {
+            self.reflectors
+                .send_command(key.ifindex, format!("echo-del {}", s.local_disc));
+        }
+        if now_active && !was_active {
+            self.reflectors.acquire(key.ifindex);
+        }
+        // Same honesty gate as `add_session`: advertise a non-zero echo-rx
+        // only once the helper is confirmed running.
+        let ready = now_active && self.reflectors.is_ready(key.ifindex);
+        if let Some(s) = self.sessions.get_by_key_mut(key) {
+            s.echo_mode = params.echo_mode;
+            s.required_min_echo_rx_us = params.required_min_echo_rx_us;
+            s.echo_transmit_us = params.echo_transmit_us;
+            s.echo_ready = ready;
+            if restart {
+                s.echo_originating = false;
+            }
+        }
+        // Re-evaluate the §6.8.9 originate gate under the new params. This
+        // emits the `echo-del` for a dropped transmit role (helper still
+        // referenced), or the `echo-add` for a gained / restarted one. The
+        // new advertised echo-rx goes out on the next periodic control Tx.
+        self.echo_originate_reconcile(*key);
+        // Release last: if this was the interface's final Echo session the
+        // helper is torn down, so any `echo-del` had to precede it.
+        if was_active && !now_active {
+            self.reflectors.release(key.ifindex);
+        }
+    }
+
     /// Remove a session and shut down its timer task. Returns the
     /// removed session, if any.
     pub fn remove_session(&mut self, key: &SessionKey) -> Option<Session> {
@@ -432,9 +501,10 @@ impl Bfd {
             let _ = h.cmd_tx.send(TimerCmd::Shutdown);
         }
         let removed = self.sessions.remove(key);
-        // Mirror the `add_session` acquire predicate exactly (the configured
-        // `echo_mode` is never mutated, so this stays symmetric even when the
-        // session ended up advertising 0).
+        // Mirror the `add_session` acquire predicate exactly. `echo_mode` can
+        // mutate at runtime (`update_echo_params`), but that path adjusts the
+        // reflector refcount on every off↔on edge, so releasing on the
+        // *current* mode stays symmetric.
         if let Some(s) = &removed
             && !s.echo_mode.is_off()
             && !s.key.multihop
@@ -1212,5 +1282,216 @@ mod tests {
         assert!(resp.final_bit, "response carries Final");
         assert!(!resp.poll, "response clears Poll");
         assert_eq!(resp.your_disc, 0x5151_5151, "echoes the peer discriminator");
+    }
+
+    // ---- runtime Echo param updates (`Bfd::update_echo_params`) -------------
+
+    /// An ifindex with no backing interface: `acquire` tracks the refcount
+    /// but the helper child never spawns (`if_indextoname` fails), so these
+    /// tests exercise the bookkeeping without launching real XDP processes.
+    const ECHO_TEST_IFINDEX: u32 = 0xfff0;
+
+    fn echo_key(remote_octet: u8) -> SessionKey {
+        SessionKey {
+            ifindex: ECHO_TEST_IFINDEX,
+            ..loopback_key(remote_octet)
+        }
+    }
+
+    fn echo_params(echo_mode: EchoMode, rx_ms: u32, tx_ms: u32) -> SessionParams {
+        SessionParams {
+            echo_mode,
+            required_min_echo_rx_us: rx_ms * 1_000,
+            echo_transmit_us: tx_ms * 1_000,
+            ..SessionParams::default()
+        }
+    }
+
+    /// Force the §6.8.9 originate gate open: session Up with a peer that
+    /// advertises a non-zero Required Min Echo RX Interval.
+    fn force_up_with_peer_echo(bfd: &mut Bfd, key: &SessionKey) {
+        let s = bfd.sessions.get_by_key_mut(key).unwrap();
+        s.local_state = bfd_packet::State::Up;
+        s.remote_min_echo_rx_us = 50_000;
+    }
+
+    /// Re-subscribing with Echo off applies to the live session — the
+    /// `delete … bfd echo-mode` + commit path. The originator stops, the
+    /// advertised echo-rx returns to 0 on the next control Tx, and the
+    /// reflector reference is released. (Previously a re-Subscribe ignored
+    /// `params`, so Echo kept transmitting until the session was
+    /// re-established.)
+    #[tokio::test]
+    async fn resubscribe_turns_echo_off_live() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(8);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, echo_params(EchoMode::Both, 50, 50), tx);
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+        force_up_with_peer_echo(&mut bfd, &key);
+        bfd.echo_originate_reconcile(key);
+        assert!(bfd.sessions.get_by_key(&key).unwrap().echo_originating);
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, echo_params(EchoMode::Off, 0, 0), tx2);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(s.echo_mode, EchoMode::Off);
+        assert!(
+            !s.echo_originating,
+            "originator stopped on the live session"
+        );
+        assert_eq!(s.build_packet().required_min_echo_rx_interval, 0);
+        assert_eq!(
+            s.echo_transmit_interval_us(),
+            0,
+            "show reports Echo disabled"
+        );
+        assert_eq!(
+            bfd.reflectors.refcount(ECHO_TEST_IFINDEX),
+            0,
+            "helper reference released",
+        );
+    }
+
+    /// Re-subscribing with Echo newly enabled acquires the reflector and
+    /// starts originating on a session that is already Up with a
+    /// reflecting peer.
+    #[tokio::test]
+    async fn resubscribe_turns_echo_on_live() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(9);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 0);
+        force_up_with_peer_echo(&mut bfd, &key);
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe(
+            "isis".into(),
+            key,
+            echo_params(EchoMode::Transmit, 0, 50),
+            tx2,
+        );
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(s.echo_mode, EchoMode::Transmit);
+        assert_eq!(s.echo_transmit_us, 50_000);
+        assert!(s.echo_originating, "originator started on the live session");
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+    }
+
+    /// A live transmit-interval change restarts the originator at the new
+    /// rate (del + add toward the helper) without dropping the reflector
+    /// reference.
+    #[tokio::test]
+    async fn resubscribe_retunes_echo_transmit_rate() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(10);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe(
+            "isis".into(),
+            key,
+            echo_params(EchoMode::Transmit, 0, 50),
+            tx,
+        );
+        force_up_with_peer_echo(&mut bfd, &key);
+        bfd.echo_originate_reconcile(key);
+        assert!(bfd.sessions.get_by_key(&key).unwrap().echo_originating);
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe(
+            "isis".into(),
+            key,
+            echo_params(EchoMode::Transmit, 0, 100),
+            tx2,
+        );
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert!(s.echo_originating, "originator restarted, not stopped");
+        assert_eq!(s.echo_transmit_us, 100_000);
+        assert_eq!(s.echo_transmit_interval_us(), 100_000, "live rate retuned");
+        assert_eq!(
+            bfd.reflectors.refcount(ECHO_TEST_IFINDEX),
+            1,
+            "no refcount churn while Echo stays active",
+        );
+    }
+
+    /// Identical Echo params on re-subscribe are a no-op: no refcount
+    /// churn, the originator keeps running undisturbed.
+    #[tokio::test]
+    async fn resubscribe_same_echo_params_is_noop() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(11);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, echo_params(EchoMode::Both, 50, 50), tx);
+        force_up_with_peer_echo(&mut bfd, &key);
+        bfd.echo_originate_reconcile(key);
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, echo_params(EchoMode::Both, 50, 50), tx2);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert!(s.echo_originating, "originator untouched");
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+    }
+
+    /// Control-plane timing stays create-time-only on re-subscribe (a live
+    /// change would need an RFC 5880 §6.8.3 Poll Sequence); only the Echo
+    /// fields are applied.
+    #[tokio::test]
+    async fn resubscribe_keeps_control_timing() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(12);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, SessionParams::default(), tx);
+
+        let retimed = SessionParams {
+            desired_min_tx_us: 1_000_000,
+            required_min_rx_us: 1_000_000,
+            detect_mult: 5,
+            ..echo_params(EchoMode::Receive, 50, 0)
+        };
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe("isis".into(), key, retimed, tx2);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        let defaults = SessionParams::default();
+        assert_eq!(s.desired_min_tx_us, defaults.desired_min_tx_us);
+        assert_eq!(s.required_min_rx_us, defaults.required_min_rx_us);
+        assert_eq!(s.detect_mult, defaults.detect_mult);
+        assert_eq!(s.echo_mode, EchoMode::Receive, "echo fields did apply");
+        assert_eq!(s.required_min_echo_rx_us, 50_000);
+    }
+
+    /// Where several clients share one session the last writer's Echo
+    /// params win — a second subscriber with Echo off silences the first
+    /// subscriber's Echo. (Previously the first writer's params were
+    /// frozen for the session's lifetime.)
+    #[tokio::test]
+    async fn second_subscriber_echo_params_win() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(13);
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        bfd.subscribe(
+            "isis".into(),
+            key,
+            echo_params(EchoMode::Both, 50, 50),
+            tx_a,
+        );
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, SessionParams::default(), tx_b);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(s.echo_mode, EchoMode::Off, "last writer wins");
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 0);
+        assert_eq!(
+            bfd.subscribers.get(&key).map(BTreeMap::len),
+            Some(2),
+            "both clients stay subscribed",
+        );
     }
 }

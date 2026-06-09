@@ -781,8 +781,7 @@ pub(super) fn config_ospf_interface_bfd_enable<V: OspfVersion>(
 /// `interface <if> bfd echo-mode <transmit|receive|both>` — which BFD Echo
 /// role is active on this interface (RFC 5880 §6.4): `transmit` originates,
 /// `receive` advertises + reflects, `both` does both. Single-hop IPv4 only.
-/// Reconciles the link, though the value takes effect when the session is
-/// (re)established (matching how the other BFD params apply).
+/// Reconciles the link; the BFD instance applies the change to live sessions.
 pub(super) fn config_ospf_interface_bfd_echo_mode<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
@@ -812,7 +811,7 @@ pub(super) fn config_ospf_interface_bfd_echo_mode<V: OspfVersion>(
 }
 
 /// `interface <if> bfd echo-transmit-interval <ms>` — the rate we originate
-/// Echo at. Stored; applied when the session is (re)established.
+/// Echo at. Reconciles the link so live sessions pick the new rate up.
 pub(super) fn config_ospf_interface_bfd_echo_transmit_interval<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
@@ -822,13 +821,17 @@ pub(super) fn config_ospf_interface_bfd_echo_transmit_interval<V: OspfVersion>(
     let name = args.string()?;
     let interval = args.u32()?;
 
-    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        link.config.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
     Some(())
 }
 
 /// `interface <if> bfd echo-receive-interval <ms>` — the advertised Required
-/// Min Echo RX Interval. Stored; applied when the session is (re)established.
+/// Min Echo RX Interval. Reconciles the link so live sessions pick it up.
 pub(super) fn config_ospf_interface_bfd_echo_receive_interval<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
@@ -838,8 +841,12 @@ pub(super) fn config_ospf_interface_bfd_echo_receive_interval<V: OspfVersion>(
     let name = args.string()?;
     let interval = args.u32()?;
 
-    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
-    link.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        link.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
     Some(())
 }
 
@@ -927,8 +934,8 @@ pub(super) fn config_ospf_bfd_echo_mode<V: OspfVersion>(
     Some(())
 }
 
-/// `router ospf bfd echo-transmit-interval <ms>` — instance default. Takes
-/// effect when sessions are (re)established, so no reconcile.
+/// `router ospf bfd echo-transmit-interval <ms>` — instance default.
+/// Reconciles so live sessions pick the new rate up.
 pub(super) fn config_ospf_bfd_echo_transmit_interval<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
@@ -936,11 +943,12 @@ pub(super) fn config_ospf_bfd_echo_transmit_interval<V: OspfVersion>(
 ) -> Option<()> {
     let interval = args.u32()?;
     ospf.bfd.echo_transmit_ms = op.is_set().then_some(interval);
+    ospf.bfd_reconcile_all();
     Some(())
 }
 
-/// `router ospf bfd echo-receive-interval <ms>` — instance default. Takes
-/// effect when sessions are (re)established, so no reconcile.
+/// `router ospf bfd echo-receive-interval <ms>` — instance default.
+/// Reconciles so live sessions pick the new advertisement up.
 pub(super) fn config_ospf_bfd_echo_receive_interval<V: OspfVersion>(
     ospf: &mut Ospf<V>,
     mut args: Args,
@@ -948,6 +956,7 @@ pub(super) fn config_ospf_bfd_echo_receive_interval<V: OspfVersion>(
 ) -> Option<()> {
     let interval = args.u32()?;
     ospf.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    ospf.bfd_reconcile_all();
     Some(())
 }
 

@@ -174,8 +174,10 @@ pub struct Session {
     pub detect_mult: u8,
 
     /// Configured Echo roles (off / transmit / receive / both). Set from
-    /// `SessionParams` at creation and never mutated, so it drives both the
-    /// advertise/originate gates and the symmetric reflector acquire/release.
+    /// `SessionParams` at creation and updated live by
+    /// `Bfd::update_echo_params` (which keeps the reflector
+    /// acquire/release symmetric across mutations); drives both the
+    /// advertise and originate gates.
     pub echo_mode: EchoMode,
     /// Configured `bfd.RequiredMinEchoRxInterval` (microseconds) — the value
     /// advertised when [`EchoMode::advertises`]. Zero means "do not send me
