@@ -297,6 +297,22 @@ module zebra-bgp-vrf {
           "VPN data-plane encapsulation for routes originated from /
            imported into this VRF.";
       }
+      leaf inter-as-hybrid {
+        type boolean;
+        default "false";
+        description
+          "RFC 4364 Inter-AS MPLS/VPN Option AB. When true, this VRF
+           re-exports the VPNv4 routes it imports (not only `network`/
+           CE-learned routes) back into the global VPNv4 table. An ASBR
+           configured this way relays a remote AS's VPN routes to its own
+           PEs (and the peer ASBR) over a single MP-eBGP VPNv4 session,
+           while the VPN label still terminates at the ASBR and the
+           packet is forwarded per-VRF (combining the per-VPN control of
+           Option A with the single-session scale of Option B). The
+           re-import loop is broken by excluding the originating VRF from
+           the import fan-out and by eBGP AS-path. Default false leaves an
+           ordinary intra-AS L3VPN VRF unchanged.";
+      }
       container evpn {
         description
           "EVPN (RFC 9136 Type-5 / IP Prefix) service for this VRF.

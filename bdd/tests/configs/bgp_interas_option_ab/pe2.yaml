@@ -1,0 +1,58 @@
+# PE2 (AS 65001 provider edge). Inter-AS Option AB, mirror of PE1: VPNv4
+# iBGP to ASBR2 over the IS-IS/SR core; vrf-cust holds the CE2 link.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.1/32
+- if-name: p2
+  ipv4:
+    address: 10.0.1.6/30
+- if-name: ce2
+  vrf: vrf-cust
+  ipv4:
+    address: 10.2.0.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 4
+    - if-name: p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      identifier: 2.2.2.1
+    neighbor:
+    - remote-address: 2.2.2.3
+      remote-as: 65001
+      update-source: 2.2.2.1
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65001:1
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.2.0.0/30

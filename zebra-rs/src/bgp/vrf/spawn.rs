@@ -161,6 +161,9 @@ pub fn spawn_bgp_vrf(
         label,
         global_tx,
     );
+    // Inter-AS Option AB: re-export imported VPNv4 routes (see the field
+    // doc on `BgpVrf`). Carried from the staged VRF config.
+    vrf.inter_as_hybrid = cfg.inter_as_hybrid;
 
     // Materialise per-VRF peers from the BgpVrfConfig snapshot.
     // `peer.start()`'s timer events get logged at debug and
@@ -380,6 +383,7 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
             egress_ifindex_v6: None,
             stale: false,
             esi: None,
+            vrf_transit_only: false,
         };
 
         let (_, selected, _) = vrf.local_rib.update(None, *prefix, rib);

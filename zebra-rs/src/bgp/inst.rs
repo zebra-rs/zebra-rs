@@ -278,6 +278,36 @@ pub(crate) fn import_targets_v6(
         .collect()
 }
 
+/// Inter-AS Option AB: does the route's RT fall in the import set of any
+/// `inter-as-hybrid` VRF? Such a received route is propagated only by
+/// that VRF's re-export (an `Originated` row with next-hop-self), so the
+/// receive path marks it [`super::route::BgpRib::vrf_transit_only`] and
+/// the advertise path suppresses the transparent relay — otherwise the
+/// same prefix would reach a peer under several RDs and thrash the
+/// prefix-keyed VRF import.
+pub(crate) fn rt_imported_by_hybrid_vrf_v4(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+) -> bool {
+    let route_rts = route_rts_from_ecom(ecom);
+    !route_rts.is_empty()
+        && vrf_index
+            .values()
+            .any(|info| info.inter_as_hybrid && !info.import_rts_v4.is_disjoint(&route_rts))
+}
+
+/// VPNv6 counterpart of [`rt_imported_by_hybrid_vrf_v4`].
+pub(crate) fn rt_imported_by_hybrid_vrf_v6(
+    vrf_index: &BTreeMap<String, RibKnownVrf>,
+    ecom: &Option<bgp_packet::ExtCommunity>,
+) -> bool {
+    let route_rts = route_rts_from_ecom(ecom);
+    !route_rts.is_empty()
+        && vrf_index
+            .values()
+            .any(|info| info.inter_as_hybrid && !info.import_rts_v6.is_disjoint(&route_rts))
+}
+
 /// Kernel VRF master info as observed by `Bgp` via
 /// `RibRx::VrfAdd` and the matching RT sets observed via
 /// `RibRx::VrfRouteTargets`. Used by
@@ -294,6 +324,13 @@ pub struct RibKnownVrf {
     pub export_rts_v4: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub import_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     pub export_rts_v6: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    /// Inter-AS Option AB: copied from the VRF's BGP config
+    /// (`inter_as_hybrid`). Lets the shared VPNv4/VPNv6 receive path
+    /// (which only borrows `rib_known_vrfs`, not the config map) tell
+    /// whether a route's RT is imported by a hybrid VRF — and therefore
+    /// must be propagated only via that VRF's re-export, not transparently
+    /// relayed. See [`super::route::BgpRib::vrf_transit_only`].
+    pub inter_as_hybrid: bool,
 }
 
 pub struct Bgp {
@@ -1913,6 +1950,11 @@ impl Bgp {
                         .as_ref()
                         .map(|p| p.export_rts_v6.clone())
                         .unwrap_or_default(),
+                    inter_as_hybrid: self
+                        .vrfs
+                        .get(&name)
+                        .map(|c| c.inter_as_hybrid)
+                        .unwrap_or(false),
                 };
                 self.rib_known_vrfs.insert(name.clone(), entry);
                 // If the operator already committed `router bgp vrf
@@ -1946,12 +1988,18 @@ impl Bgp {
                 // them as separate messages and a slow
                 // `tokio::select!` could draw the RT message ahead
                 // of the VrfAdd).
+                let hybrid = self
+                    .vrfs
+                    .get(&name)
+                    .map(|c| c.inter_as_hybrid)
+                    .unwrap_or(false);
                 let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
                 let export_v4_changed = entry.export_rts_v4 != ipv4_export_rts;
                 entry.import_rts_v4 = ipv4_import_rts;
                 entry.export_rts_v4 = ipv4_export_rts;
                 entry.import_rts_v6 = ipv6_import_rts;
                 entry.export_rts_v6 = ipv6_export_rts;
+                entry.inter_as_hybrid = hybrid;
                 // Close the export / RT-learning race: a per-VRF route can
                 // be exported into `v4vpn` before this RT policy lands (the
                 // export reads `rib_known_vrfs` at emit time), leaving the
@@ -2910,6 +2958,7 @@ impl Bgp {
                     egress_ifindex_v6: None,
                     stale: false,
                     esi: None,
+                    vrf_transit_only: false,
                 };
 
                 let (_, selected, _gen) = self.local_rib.update(Some(rd), prefix, rib);
@@ -3186,6 +3235,7 @@ impl Bgp {
                     egress_ifindex_v6: None,
                     stale: false,
                     esi: None,
+                    vrf_transit_only: false,
                 };
 
                 let (_, selected, _gen) = self.local_rib.update_v6vpn(rd, prefix, rib);
@@ -3672,6 +3722,7 @@ mod tests {
                 export_rts_v4: BTreeSet::new(),
                 import_rts_v6: BTreeSet::new(),
                 export_rts_v6: BTreeSet::new(),
+                inter_as_hybrid: false,
             }
         }
 
@@ -3687,6 +3738,7 @@ mod tests {
                 export_rts_v4: BTreeSet::new(),
                 import_rts_v6,
                 export_rts_v6: BTreeSet::new(),
+                inter_as_hybrid: false,
             }
         }
 

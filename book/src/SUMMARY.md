@@ -33,6 +33,7 @@
     - [Option A (back-to-back VRFs)](ch-02-20-bgp-interas-option-a.md)
     - [Option B (VPNv4 between ASBRs)](ch-02-21-bgp-interas-option-b.md)
     - [Option C over SR-MPLS](ch-02-19-bgp-interas-option-c.md)
+    - [Option AB (hybrid)](ch-02-22-bgp-interas-option-ab.md)
   - [BFD](ch-02-08-bgp-bfd.md)
   - [Route Reflector](ch-02-09-bgp-route-reflector.md)
   - [Conditional Tracing](ch-02-10-bgp-tracing.md)

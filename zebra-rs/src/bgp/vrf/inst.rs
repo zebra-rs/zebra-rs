@@ -80,6 +80,16 @@ pub struct BgpVrf {
     /// VRF; the matching AF_MPLS ILM pops this label and routes
     /// the inner packet into `vrf_tables[table_id]`.
     pub label: u32,
+    /// Inter-AS MPLS/VPN Option AB (`inter-as-hybrid`). When set, this
+    /// VRF re-exports the VPNv4 routes it *imports* (not just `network`/
+    /// CE-learned routes) back into the global VPNv4 table, so an ASBR
+    /// can relay a remote AS's VPN routes to its own PEs (and the other
+    /// ASBR) over a single MP-eBGP VPNv4 session while still forwarding
+    /// per-VRF (the VPN label terminates at the ASBR → VRF lookup). The
+    /// re-import loop is broken by `dispatch_import_v4`'s `skip_vrf` (the
+    /// originating VRF is excluded) and by eBGP AS-path. Off by default,
+    /// so non-hybrid VRF behaviour is unchanged.
+    pub inter_as_hybrid: bool,
     /// Dedup pool for `BgpAttr` instances seen by this VRF's
     /// peers. Every per-VRF runtime gets its own pool (cheaper
     /// than threading a shared lock across the `!Send` boundary,
@@ -144,6 +154,20 @@ pub struct VrfExporter {
 /// "no per-VRF label allocated" — the global handler treats it as
 /// "skip the per-route install" rather than emit an
 /// explicit-null label.
+/// Drop every Route-Target extended community (RFC 4360 sub-type 0x02)
+/// from a clone of `attr`. Used on the Inter-AS Option AB re-export path:
+/// a route imported into a hybrid VRF carries the RTs it matched on, but
+/// the re-originated route must carry only *this* VRF's export RTs (the
+/// global Export handler re-tags). Without the strip the same RT would
+/// accumulate one copy per inter-AS hop.
+fn attr_without_route_targets(attr: &bgp_packet::BgpAttr) -> bgp_packet::BgpAttr {
+    let mut a = attr.clone();
+    if let Some(ref mut ecom) = a.ecom {
+        ecom.0.retain(|v| v.low_type != 0x02);
+    }
+    a
+}
+
 pub fn vrf_emit_export(exporter: &VrfExporter, prefix: ipnet::Ipv4Net, attr: &bgp_packet::BgpAttr) {
     let _ = exporter.tx.send(BgpGlobalMsg::Export {
         vrf: exporter.name.clone(),
@@ -340,6 +364,8 @@ impl BgpVrf {
             rx,
             asn,
             label,
+            // Default off; `spawn_bgp_vrf` sets it from the VRF config.
+            inter_as_hybrid: false,
             attr_store: BgpAttrStore::new(),
             update_groups: super::super::update_group::empty_map(),
             interface_addrs: InterfaceAddrs::new(),
@@ -543,6 +569,7 @@ impl BgpVrf {
             egress_ifindex_v6: None,
             stale: false,
             esi: None,
+            vrf_transit_only: false,
         };
 
         let (_, selected, _gen) = self.local_rib.update(None, prefix, rib);
@@ -594,6 +621,28 @@ impl BgpVrf {
         // neither. The VRF-bound `ctx.rib` lands it in the VRF table;
         // a placeholder (no-kernel) context's parked client no-ops.
         super::super::route::fib_install_v4(&top, prefix, &selected);
+
+        // Inter-AS Option AB: relay this imported route back into the
+        // global VPNv4 table (toward our PEs and the peer ASBR over the
+        // single MP-eBGP session). Ordinary VRFs leave `inter_as_hybrid`
+        // off and never re-export an import — the explicit hook here is
+        // needed because the import path bypasses `route_update_ipv4`,
+        // where the normal VRF→global export fires. The re-import loop is
+        // broken by `dispatch_import_v4`'s `skip_vrf` (this VRF is
+        // excluded from its own export's fan-out) and by eBGP AS-path.
+        if self.inter_as_hybrid {
+            let exporter = VrfExporter {
+                name: self.name.clone(),
+                tx: self.global_tx.clone(),
+                label: self.label,
+            };
+            match selected.first() {
+                Some(winner) => {
+                    vrf_emit_export(&exporter, prefix, &attr_without_route_targets(&winner.attr))
+                }
+                None => vrf_emit_withdraw(&exporter, prefix),
+            }
+        }
 
         tracing::info!(
             vrf = %self.name,
@@ -655,6 +704,23 @@ impl BgpVrf {
         // no winner left, `fib_install_v4` emits the withdraw. (The old
         // code unconditionally deleted, dropping a now-winning CE route.)
         super::super::route::fib_install_v4(&top, prefix, &selected);
+
+        // Inter-AS Option AB: mirror `handle_import_v4` — re-export the
+        // replacement winner, or withdraw the global VPNv4 row when the
+        // last candidate is gone.
+        if self.inter_as_hybrid {
+            let exporter = VrfExporter {
+                name: self.name.clone(),
+                tx: self.global_tx.clone(),
+                label: self.label,
+            };
+            match selected.first() {
+                Some(winner) => {
+                    vrf_emit_export(&exporter, prefix, &attr_without_route_targets(&winner.attr))
+                }
+                None => vrf_emit_withdraw(&exporter, prefix),
+            }
+        }
 
         tracing::info!(
             vrf = %self.name,
@@ -721,6 +787,7 @@ impl BgpVrf {
             egress_ifindex_v6: None,
             stale: false,
             esi: None,
+            vrf_transit_only: false,
         };
 
         let (_, selected, _gen) = self.local_rib.update_v6(prefix, rib);
@@ -760,6 +827,22 @@ impl BgpVrf {
 
         // Single VRF FIB install path (see `handle_import_v4`).
         super::super::route::fib_install_v6(&top, prefix, &selected);
+
+        // Inter-AS Option AB (VPNv6): re-export the imported route — see
+        // `handle_import_v4`.
+        if self.inter_as_hybrid {
+            let exporter = VrfExporter {
+                name: self.name.clone(),
+                tx: self.global_tx.clone(),
+                label: self.label,
+            };
+            match selected.first() {
+                Some(winner) => {
+                    vrf_emit_export_v6(&exporter, prefix, &attr_without_route_targets(&winner.attr))
+                }
+                None => vrf_emit_withdraw_v6(&exporter, prefix),
+            }
+        }
 
         tracing::info!(
             vrf = %self.name,
@@ -813,6 +896,22 @@ impl BgpVrf {
 
         // Reconcile against the new best-path (see `handle_withdraw_import`).
         super::super::route::fib_install_v6(&top, prefix, &selected);
+
+        // Inter-AS Option AB (VPNv6): re-export the replacement winner or
+        // withdraw the global row — see `handle_withdraw_import`.
+        if self.inter_as_hybrid {
+            let exporter = VrfExporter {
+                name: self.name.clone(),
+                tx: self.global_tx.clone(),
+                label: self.label,
+            };
+            match selected.first() {
+                Some(winner) => {
+                    vrf_emit_export_v6(&exporter, prefix, &attr_without_route_targets(&winner.attr))
+                }
+                None => vrf_emit_withdraw_v6(&exporter, prefix),
+            }
+        }
 
         tracing::info!(
             vrf = %self.name,

@@ -137,6 +137,13 @@ pub struct BgpVrfConfig {
     pub evpn_advertise_v4: bool,
     /// Advertise this VRF's IPv6 routes as EVPN Type-5 (RFC 9136).
     pub evpn_advertise_v6: bool,
+    /// Inter-AS MPLS/VPN Option AB (RFC 4364 hybrid of §10a/§10b).
+    /// Mirrors `inter-as-hybrid` in zebra-bgp-vrf.yang. When set, the
+    /// VRF re-exports the VPNv4 routes it *imports* (not only `network`/
+    /// CE-learned ones), so an ASBR relays a remote AS's VPN routes to
+    /// its own PEs over a single MP-eBGP VPNv4 session while still
+    /// forwarding per-VRF. Default `false` (ordinary L3VPN VRF).
+    pub inter_as_hybrid: bool,
 }
 
 /// Borrow-or-create the per-VRF entry on `Bgp::vrfs`. Used by every
@@ -213,6 +220,20 @@ pub fn config_vrf_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
             cfg.encapsulation = BgpVrfEncapsulation::parse(&raw)?;
         }
         ConfigOp::Delete => cfg.encapsulation = BgpVrfEncapsulation::default(),
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> inter-as-hybrid <BOOL>` — RFC 4364
+/// Inter-AS Option AB. Enables re-export of imported VPNv4 routes for
+/// this VRF (see [`BgpVrfConfig::inter_as_hybrid`]).
+pub fn config_vrf_inter_as_hybrid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let cfg = vrf_entry(bgp, name);
+    match op {
+        ConfigOp::Set => cfg.inter_as_hybrid = args.boolean()?,
+        ConfigOp::Delete => cfg.inter_as_hybrid = false,
         _ => {}
     }
     Some(())

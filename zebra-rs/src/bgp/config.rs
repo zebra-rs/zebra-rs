@@ -2264,6 +2264,10 @@ impl Bgp {
             super::vrf_config::config_vrf_encapsulation,
         );
         self.callback_add(
+            "/router/bgp/vrf/inter-as-hybrid",
+            super::vrf_config::config_vrf_inter_as_hybrid,
+        );
+        self.callback_add(
             "/router/bgp/vrf/neighbor",
             super::vrf_config::config_vrf_neighbor,
         );

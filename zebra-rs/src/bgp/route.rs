@@ -827,6 +827,14 @@ pub struct BgpRib {
     pub stale: bool,
     // EVPN ESI (Ethernet Segment Identifier) for multi-homing.
     pub esi: Option<[u8; 10]>,
+    /// Inter-AS Option AB: a received VPNv4/VPNv6 route whose RT is
+    /// imported by a local `inter-as-hybrid` VRF. Such a route is
+    /// propagated only by that VRF's re-export (an `Originated` row with
+    /// the VRF's RD + next-hop-self), never transparently relayed — so it
+    /// must NOT be advertised to peers directly. Set once at receive
+    /// (`route_ipv4_update` / `route_ipv6_update`); `route_update_ipv4` /
+    /// `…ipv6` suppress the advertise. Default `false` (ordinary route).
+    pub vrf_transit_only: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -891,6 +899,7 @@ impl BgpRib {
             egress_ifindex_v6: None,
             stale,
             esi: None,
+            vrf_transit_only: false,
         }
     }
 
@@ -2125,6 +2134,18 @@ pub fn route_ipv4_update(
             .lu_labels
             .as_mut()
             .and_then(|ll| ll.label_vpn_v4(rd, nlri.prefix));
+    }
+    // Inter-AS Option AB: a received VPNv4 route an `inter-as-hybrid` VRF
+    // imports is relayed only by that VRF's re-export (Originated,
+    // next-hop-self), never transparently — mark it so the advertise path
+    // suppresses it, otherwise the same prefix would reach a peer under
+    // several RDs and thrash the prefix-keyed VRF import.
+    if rd.is_some()
+        && !rib.is_originated()
+        && let Some(disp) = bgp.vrf_import
+        && super::inst::rt_imported_by_hybrid_vrf_v4(disp.rib_known_vrfs, &rib.attr.ecom)
+    {
+        rib.vrf_transit_only = true;
     }
     let (replaced, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
     // If this update changed the path's next-hop, the displaced row's
@@ -3385,6 +3406,15 @@ pub fn route_ipv6_update(
     // Kept for the rd==Some import-dispatch withdraw branch (the rib
     // itself is moved into `update_v6vpn` below); cheap Arc bump.
     let import_attr = rib.attr.clone();
+    // Inter-AS Option AB (VPNv6): mark a route a hybrid VRF imports as
+    // transit-only — relayed only via the VRF re-export (see the v4 path).
+    if rd.is_some()
+        && !rib.is_originated()
+        && let Some(disp) = bgp.vrf_import
+        && super::inst::rt_imported_by_hybrid_vrf_v6(disp.rib_known_vrfs, &rib.attr.ecom)
+    {
+        rib.vrf_transit_only = true;
+    }
     let (replaced, selected, _next_id) = match rd {
         Some(rd) => bgp.local_rib.update_v6vpn(rd, nlri.prefix, rib),
         None => bgp.local_rib.update_v6(nlri.prefix, rib),
@@ -5967,6 +5997,13 @@ pub fn route_update_ipv4(
         return None;
     }
 
+    // Inter-AS Option AB: a received VPNv4 route an `inter-as-hybrid` VRF
+    // imports is relayed only by that VRF's re-export (an Originated row,
+    // built separately), never transparently — suppress the direct relay.
+    if rib.vrf_transit_only {
+        return None;
+    }
+
     // iBGP to iBGP: Don't advertise iBGP-learned routes except the peer is
     // route reflector client.
     if peer.peer_type == PeerType::IBGP
@@ -6104,6 +6141,11 @@ pub fn route_update_ipv6(
 ) -> Option<(Ipv6Nlri, BgpAttr)> {
     // Split-horizon: never send a route back to its source peer.
     if rib.ident == peer.ident {
+        return None;
+    }
+    // Inter-AS Option AB: a VPNv6 route a hybrid VRF imports is relayed
+    // only via that VRF's re-export, never transparently (see the v4 path).
+    if rib.vrf_transit_only {
         return None;
     }
     // iBGP→iBGP: don't re-advertise iBGP-learned routes to iBGP peers
