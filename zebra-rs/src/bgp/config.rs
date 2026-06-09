@@ -903,10 +903,14 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let enabled: bool = args.boolean()?;
 
     let ipv4_unicast = key.afi == Afi::Ip && key.safi == Safi::Unicast;
-    // Enabling a Labeled-Unicast family means we may re-advertise routes
-    // with next-hop-self and need per-prefix local labels; request a
-    // dynamic label block eagerly so one is granted before routes arrive.
-    let lu_enabled = key.safi == Safi::MplsLabel && op.is_set() && enabled;
+    // Enabling a Labeled-Unicast or VPN family means we may re-advertise
+    // routes with next-hop-self and need per-prefix local labels (the
+    // Inter-AS Option B/C transit case); request a dynamic label block
+    // eagerly so one is granted before routes arrive. A PE with a VRF
+    // already requests the block on VRF config — this also covers a
+    // transit ASBR that runs VPNv4 with no VRF of its own.
+    let label_block_needed =
+        matches!(key.safi, Safi::MplsLabel | Safi::MplsVpn) && op.is_set() && enabled;
 
     let peer = bgp.peers.get_mut(&addr)?;
 
@@ -923,7 +927,7 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             peer.config.mp.remove(&key);
         }
     }
-    if lu_enabled {
+    if label_block_needed {
         bgp.request_label_block();
     }
     Some(())
@@ -1529,8 +1533,12 @@ fn config_encapsulation_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
 /// <true|false>`. Records the per-neighbor, per-AFI/SAFI next-hop-self
 /// flag on the peer's [`PeerSubConfig`]. Honored on the Labeled-Unicast
 /// advertise paths ([`route_update_labelv4`](super::route::route_update_labelv4)
-/// / `…v6`): an Inter-AS Option C ASBR sets it on the iBGP-LU session to
-/// its PE so re-advertised eBGP-LU routes carry the ASBR as next-hop.
+/// / `…v6`) and on the VPNv4 advertise path
+/// ([`route_update_ipv4`](super::route::route_update_ipv4)): an Inter-AS
+/// Option C ASBR sets it on the iBGP-LU session to its PE so re-advertised
+/// eBGP-LU routes carry the ASBR as next-hop; an Option B ASBR sets it on
+/// the iBGP-VPNv4 session for the same reason (the re-advertised route also
+/// gets a fresh local label + swap ILM).
 fn config_next_hop_self(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;

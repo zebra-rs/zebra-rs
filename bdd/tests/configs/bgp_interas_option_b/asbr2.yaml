@@ -1,0 +1,60 @@
+# ASBR2 (AS 65001 border — Inter-AS Option B). Mirror of ASBR1.
+#  - VPNv4 iBGP to PE2 (2.2.2.1) over the IS-IS/SR core, with
+#    `next-hop-self` (same reason as ASBR1).
+#  - eBGP VPNv4 to ASBR1 (172.16.0.1, remote-as 65000) over the inter-AS
+#    link. No VRF: received VPNv4 routes are re-advertised with a fresh
+#    local label + swap ILM.
+#  - The inter-AS link (172.16.0.0/30) is in the GLOBAL table, NOT the IGP.
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.3/32
+- if-name: asbr1
+  ipv4:
+    address: 172.16.0.2/30
+- if-name: p2
+  ipv4:
+    address: 10.0.1.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: asbr2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 6
+    - if-name: p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      identifier: 2.2.2.3
+    # Lower the MRAI so the transit VPNv4 route crosses the eBGP boundary
+    # (default 30s) and is re-advertised to PE2 promptly (see ASBR1).
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2.2.2.1
+      remote-as: 65001
+      update-source: 2.2.2.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 172.16.0.1
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true

@@ -574,7 +574,7 @@ fn select_fib_entry_label(
 /// egress) carry no local label. An unresolved next-hop removes the ILM.
 /// AFI-agnostic — the ILM is keyed by the local MPLS label, not the IP
 /// prefix.
-fn reconcile_swap_ilm(
+pub(super) fn reconcile_swap_ilm(
     rib_client: &crate::rib::client::RibClient,
     cache: Option<&super::nht::NexthopCache>,
     best: Option<&BgpRib>,
@@ -2114,6 +2114,18 @@ pub fn route_ipv4_update(
         None => super::nht::NhtDep::V4(nlri.prefix),
     };
     nht_track_received(bgp, &mut rib, dep.clone());
+    // VPNv4 transit (Inter-AS Option B): allocate a per-(RD,prefix) local
+    // label. A received VPNv4 route is never self-originated, so it is
+    // always a transit FEC; if we later re-advertise it with next-hop-self
+    // (eBGP, or iBGP+next-hop-self), the peer sends us this label and the
+    // swap ILM below forwards it down the LSP. `None` until a dynamic block
+    // is granted (advertise the received label as a fallback until then).
+    if let Some(rd) = rd {
+        rib.local_label = bgp
+            .lu_labels
+            .as_mut()
+            .and_then(|ll| ll.label_vpn_v4(rd, nlri.prefix));
+    }
     let (replaced, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
     // If this update changed the path's next-hop, the displaced row's
     // old next-hop is no longer tracked by it; release it (unless
@@ -2170,10 +2182,19 @@ pub fn route_ipv4_update(
     }
 
     // Plain IPv4 unicast best-path winners are installed to the kernel
-    // FIB via RIB. VPNv4 lives in `local_rib.v4vpn` and has its own
-    // (still-deferred) install path, so gate on rd==None.
+    // FIB via RIB. VPNv4 lives in `local_rib.v4vpn`; a transit ASBR with
+    // no importing VRF installs no IP route, but it does program a swap
+    // ILM for the local label it advertises with next-hop-self (Inter-AS
+    // Option B) — `reconcile_swap_ilm` is a no-op when no local label was
+    // allocated or the next-hop hasn't resolved yet.
     if rd.is_none() {
         fib_install_v4(bgp, nlri.prefix, &selected);
+    } else {
+        reconcile_swap_ilm(
+            bgp.rib_client,
+            bgp.nexthop_cache.as_deref(),
+            selected.first(),
+        );
     }
 
     // Advertise to peers if best path changed.
@@ -2243,7 +2264,7 @@ fn route_advertise_to_addpath(
             peer.adj_out.add(rd, nlri.prefix, rib_clone);
             if let Some(ref rd) = rd {
                 let vpnv4_nlri = Vpnv4Nlri {
-                    label: rib.label.unwrap_or_default(),
+                    label: vpnv4_service_label(peer, rib),
                     rd: *rd,
                     nlri,
                 };
@@ -2454,7 +2475,9 @@ pub(super) fn route_advertise_to_peers(
                 }
                 if let Some(ref rd) = rd {
                     let vpnv4_nlri = Vpnv4Nlri {
-                        label: new_best.and_then(|b| b.label).unwrap_or_default(),
+                        label: new_best
+                            .map(|b| vpnv4_service_label(peer, b))
+                            .unwrap_or_default(),
                         rd: *rd,
                         nlri,
                     };
@@ -2905,7 +2928,7 @@ fn route_soft_out_peer_table(
 
         if let Some(rd_val) = rd {
             let vpnv4_nlri = Vpnv4Nlri {
-                label: rib.label.unwrap_or_default(),
+                label: vpnv4_service_label(peer, rib),
                 rd: rd_val,
                 nlri,
             };
@@ -3193,7 +3216,27 @@ pub fn route_ipv4_withdraw(
     // last candidate just disappeared and we should withdraw from
     // the kernel; non-empty means a replacement path is now best
     // and a fresh Ipv4Add carries the new attrs.
-    if rd.is_none() {
+    if let Some(rd) = rd {
+        // VPNv4 transit (Option B): the prefix is fully gone → release
+        // its local label and tear down the swap ILM; a surviving winner
+        // keeps the same per-(RD,prefix) label, whose ILM is reconciled
+        // for the (possibly new) winner's received label / transport.
+        if selected.is_empty() {
+            if let Some(local) = bgp
+                .lu_labels
+                .as_mut()
+                .and_then(|ll| ll.free_vpn_v4(rd, nlri.prefix))
+            {
+                ilm_swap_remove(bgp.rib_client, local);
+            }
+        } else {
+            reconcile_swap_ilm(
+                bgp.rib_client,
+                bgp.nexthop_cache.as_deref(),
+                selected.first(),
+            );
+        }
+    } else {
         fib_install_v4(bgp, nlri.prefix, &selected);
     }
 
@@ -5896,6 +5939,22 @@ pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     }
 }
 
+/// Service label to advertise for a VPNv4 NLRI. A transit ASBR that
+/// rewrites the next-hop to self — eBGP, or iBGP with `next-hop-self`
+/// (Inter-AS Option B) — advertises its own allocated local label, so a
+/// peer's VPN traffic arrives on a label we hold a swap ILM for (`local →
+/// received` + transport). Otherwise (next-hop preserved, or a
+/// self-originated VRF FEC with no local label) the route's own label
+/// passes through unchanged. Mirrors the Labeled-Unicast rule in
+/// [`route_update_labelv4`].
+fn vpnv4_service_label(peer: &Peer, rib: &BgpRib) -> Label {
+    let rewrites_nh = peer.is_ebgp() || peer.next_hop_self(Afi::Ip, Safi::MplsVpn);
+    match (rewrites_nh, rib.local_label) {
+        (true, Some(l)) => Label::new(l, 0, true),
+        _ => rib.label.unwrap_or_default(),
+    }
+}
+
 pub fn route_update_ipv4(
     peer: &mut Peer,
     prefix: &Ipv4Net,
@@ -5942,7 +6001,15 @@ pub fn route_update_ipv4(
     // NEXT_HOP attribute and read the LL from MP_REACH per RFC 8950
     // §4) and necessary for non-ENHE peers (they're the ones who
     // can't decode an MP_REACH with a v6 next-hop in the first place).
-    let needs_v4_rewrite = peer.is_ebgp() || rib.is_originated() || rib.egress_ifindex_v6.is_some();
+    // VPN rows (`rib.nexthop.is_some()`) additionally honor a per-neighbor
+    // `afi-safi vpnv4 next-hop-self` — an Inter-AS Option B ASBR sets it on
+    // the iBGP session to its PE so a re-advertised eBGP-VPNv4 route carries
+    // the ASBR (a resolvable next-hop) instead of the unreachable foreign
+    // PE. eBGP and self-originated routes rewrite unconditionally as before.
+    let needs_v4_rewrite = peer.is_ebgp()
+        || rib.is_originated()
+        || rib.egress_ifindex_v6.is_some()
+        || (rib.nexthop.is_some() && peer.next_hop_self(Afi::Ip, Safi::MplsVpn));
     if needs_v4_rewrite {
         let nexthop = if let Some(ref local_addr) = peer.param.local_addr
             && let IpAddr::V4(local_addr) = local_addr.ip()
@@ -7370,7 +7437,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             // Register to AdjOut.
             rib.attr = bgp.attr_store.intern(attr);
             let arc_attr = rib.attr.clone();
-            let label = rib.label.unwrap_or_default();
+            let label = vpnv4_service_label(peer, &rib);
             peer.adj_out.add(Some(rd), nlri.prefix, rib);
 
             let vpnv4_nlri = Vpnv4Nlri { label, rd, nlri };

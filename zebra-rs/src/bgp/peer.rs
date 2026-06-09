@@ -1112,6 +1112,13 @@ pub struct LuLabels<'a> {
     pub alloc: &'a mut Option<super::vrf::VrfLabelAllocator>,
     pub v4: &'a mut std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
     pub v6: &'a mut std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
+    /// Per-`(RD, prefix)` local labels for received VPNv4 (SAFI 128)
+    /// routes — the Inter-AS Option B transit case. A transit ASBR that
+    /// re-advertises a VPNv4 route with next-hop-self advertises this
+    /// label and swap-programs it (our label → received label) via an
+    /// ILM, so the VPN crosses the AS boundary on MPLS. The RD is part
+    /// of the key because the same IP prefix can live in many VPNs.
+    pub vpn_v4: &'a mut std::collections::BTreeMap<(RouteDistinguisher, ipnet::Ipv4Net), u32>,
 }
 
 impl LuLabels<'_> {
@@ -1124,6 +1131,29 @@ impl LuLabels<'_> {
         }
         let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
         self.v4.insert(prefix, label);
+        Some(label)
+    }
+
+    /// Local label for a received VPNv4 `(RD, prefix)`, allocating one on
+    /// first use. Mirrors [`label_v4`](Self::label_v4); `None` until a
+    /// dynamic block is granted (the caller advertises the received
+    /// label until then).
+    pub fn label_vpn_v4(&mut self, rd: RouteDistinguisher, prefix: ipnet::Ipv4Net) -> Option<u32> {
+        if let Some(l) = self.vpn_v4.get(&(rd, prefix)) {
+            return Some(*l);
+        }
+        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
+        self.vpn_v4.insert((rd, prefix), label);
+        Some(label)
+    }
+
+    /// Release the label for a withdrawn VPNv4 `(RD, prefix)`; returns it
+    /// so the caller can tear down the swap ILM.
+    pub fn free_vpn_v4(&mut self, rd: RouteDistinguisher, prefix: ipnet::Ipv4Net) -> Option<u32> {
+        let label = self.vpn_v4.remove(&(rd, prefix))?;
+        if let Some(a) = self.alloc.as_mut() {
+            a.free(label);
+        }
         Some(label)
     }
 
