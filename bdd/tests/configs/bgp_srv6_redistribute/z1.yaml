@@ -1,0 +1,37 @@
+# z1 — SRv6-enabled eBGP speaker (AS 65001). Advertises locator LOC1 and
+# enables `segment-routing srv6 ipv6-unicast`, so the connected prefix on
+# the dummy `cust0` interface, redistributed into BGP, is originated with
+# an End.DT6 service SID carved from LOC1 (fcbb:bbbb:1::/48).
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      identifier: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: null
+    neighbor:
+    - remote-address: 2001:db8:12::2
+      remote-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: null

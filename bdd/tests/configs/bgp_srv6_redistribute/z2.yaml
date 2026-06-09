@@ -1,0 +1,25 @@
+# z2 — eBGP peer (AS 65002). Sets `encapsulation-type srv6` on the IPv6
+# unicast family toward z1, so it only accepts routes carrying an SRv6
+# service SID. The redistributed connected prefix from z1 arrives with the
+# End.DT6 SID and is installed in the BGP table as a "Remote SID".
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  bgp:
+    global:
+      as: 65002
+      identifier: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:12::1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6

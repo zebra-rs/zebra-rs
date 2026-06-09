@@ -6052,16 +6052,17 @@ pub fn route_update_ipv6(
     let plain_unicast = rib.nexthop.is_none();
 
     // SRv6 (global IPv6 unicast origination): a locally-originated route
-    // carries the instance End.DT6 service SID + the PE locator next-hop
-    // when `segment-routing srv6 ipv6-unicast` is enabled and the locator
-    // has resolved (`srv6_ipv6_export` is `Some`). Mirrors the per-VRF
-    // SRv6 L3VPN export but targets the main table. Received routes keep
-    // whatever SID rode in on the wire and are not re-stamped here.
+    // already carries its End.DT6 Prefix-SID from origination (it's in
+    // `rib.attr`, so `show bgp ipv6` renders a "Local SID"). On the wire
+    // it advertises the PE locator as its next-hop, so a remote PE
+    // H.Encaps to us and our End.DT6 decaps into the main table — mirrors
+    // the per-VRF SRv6 L3VPN export. Received SID-bearing routes keep
+    // their wire next-hop (they are not `is_originated`).
     if plain_unicast
         && rib.is_originated()
+        && attrs.srv6_l3_sid().is_some()
         && let Some(exp) = bgp.srv6_ipv6_export
     {
-        attrs.prefix_sid = Some(exp.prefix_sid.clone());
         attrs.nexthop = Some(BgpNexthop::Ipv6(exp.nexthop));
     }
 
@@ -7646,7 +7647,15 @@ impl Bgp {
     /// wins best `fib_install_v6` cedes the FIB entry to the underlying
     /// source (Connected / Static / IGP) rather than shadowing it.
     pub fn route_add_v6(&mut self, prefix: Ipv6Net) {
-        let attr = BgpAttr::new();
+        // Remember the network so it can be re-originated (SID re-stamped)
+        // when the SRv6 locator resolves after the `network` was added.
+        self.networks_v6.insert(prefix);
+        let mut attr = BgpAttr::new();
+        // SRv6 global IPv6 unicast: stamp the End.DT6 Prefix-SID at
+        // origination so it lands in the Loc-RIB (show "Local SID").
+        if let Some(exp) = &self.srv6_ipv6_export {
+            attr.prefix_sid = Some(exp.prefix_sid.clone());
+        }
         let rib = BgpRib::new(
             ORIGINATED_PEER,
             Ipv4Addr::UNSPECIFIED,
@@ -7687,6 +7696,7 @@ impl Bgp {
     }
 
     pub fn route_del_v6(&mut self, prefix: Ipv6Net) {
+        self.networks_v6.remove(&prefix);
         let ident = ORIGINATED_PEER;
         let removed = self.local_rib.remove_v6(prefix, 0, ident);
 
@@ -8027,6 +8037,106 @@ impl Bgp {
                 &mut bgp_ref,
                 &mut self.peers,
             );
+        }
+    }
+
+    /// Redistribute an IPv6 route into the plain IPv6 unicast Loc-RIB.
+    /// The v6-unicast sibling of [`Bgp::route_redist_inject`]: same
+    /// `redist_remote_id` discriminator and MED-from-metric. When global
+    /// SRv6 IPv6 origination is enabled (`segment-routing srv6
+    /// ipv6-unicast` + a resolved locator) the route is stamped with the
+    /// instance End.DT6 Prefix-SID at origination, so it shows as a
+    /// "Local SID" and rides every advertisement; the locator next-hop is
+    /// applied per-peer in [`route_update_ipv6`]. Like the v4 path an
+    /// originated route has no usable next-hop, so the FIB install
+    /// withdraws any BGP entry and the source protocol's RIB owns
+    /// forwarding.
+    pub fn route_redist_inject_v6(
+        &mut self,
+        rtype: crate::rib::RibType,
+        prefix: Ipv6Net,
+        metric: u32,
+    ) {
+        let ident = ORIGINATED_PEER;
+        let remote_id = Self::redist_remote_id(rtype);
+        let mut attr = BgpAttr::new();
+        attr.med = Some(bgp_packet::Med::new(metric));
+        if let Some(exp) = &self.srv6_ipv6_export {
+            attr.prefix_sid = Some(exp.prefix_sid.clone());
+        }
+        let mut rib = BgpRib::new(
+            ident,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            remote_id,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        let (_replaced, selected, next_id) = self.local_rib.update_v6(prefix, rib.clone());
+        rib.local_id = next_id;
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            lu_labels: None,
+        };
+
+        fib_install_v6(&bgp_ref, prefix, &selected);
+
+        if !selected.is_empty() {
+            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
+        }
+    }
+
+    /// Withdraw a redistributed IPv6 unicast route (the v6 counterpart of
+    /// [`Bgp::route_redist_withdraw`]). The v6 Loc-RIB `remove_v6` keys on
+    /// `(prefix, ident)` rather than the `remote_id` the v4 path uses, so
+    /// a prefix redistributed from more than one source shares one
+    /// originated row — acceptable for the common single-source case.
+    pub fn route_redist_withdraw_v6(&mut self, prefix: Ipv6Net) {
+        let ident = ORIGINATED_PEER;
+        let removed = self.local_rib.remove_v6(prefix, 0, ident);
+
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            lu_labels: None,
+        };
+
+        let selected = bgp_ref.local_rib.select_best_path_v6(prefix);
+        fib_install_v6(&bgp_ref, prefix, &selected);
+
+        if !selected.is_empty() || !removed.is_empty() {
+            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
         }
     }
 

@@ -16,6 +16,10 @@ rr:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_basic_rr"
 
+bgp_srv6_redistribute:
+	mkdir -p allure-results
+	cargo test --test cucumber -- --concurrency=1 --tags "@bgp_srv6_redistribute"
+
 rib_static_ipv6:
 	mkdir -p allure-results
 	cargo test --test cucumber -- --concurrency=1 --tags "@rib_static_ipv6"
