@@ -29,5 +29,6 @@ Route Distinguisher / Route Target / MPLS label.
 |----------|--------|
 | Setup topology | |
 | Configure vrf-blue and observe via show | |
+| Inspect vrf-blue via the `show bgp vrf` tree | |
 | Remove vrf-blue and observe row drops | |
 | Teardown topology | |
