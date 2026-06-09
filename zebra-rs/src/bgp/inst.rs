@@ -472,8 +472,8 @@ pub struct Bgp {
     /// the NLRI and swap-programmed via an ILM (`local → received`).
     pub lu_label_v4: std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
     pub lu_label_v6: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
-    /// Configured global SRv6 locator name (`router bgp global srv6
-    /// locator <name>`). When set, BGP watches this locator on the
+    /// Configured SRv6 locator name (`router bgp segment-routing
+    /// srv6 locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
     /// from it for `encapsulation srv6` VRFs. `None` until configured.
     pub srv6_locator_name: Option<String>,
@@ -632,7 +632,7 @@ impl Bgp {
         // SRv6 locator subscription. Register the SR return channel
         // once up front (mirrors IS-IS); the per-locator interest is
         // expressed later via `SrLocatorWatch` when the operator sets
-        // `router bgp global srv6 locator <name>`.
+        // `router bgp segment-routing srv6 locator <name>`.
         let (srv6_sr_tx, srv6_locator_rx) = mpsc::unbounded_channel();
         let mut bgp = Self {
             asn: 0,

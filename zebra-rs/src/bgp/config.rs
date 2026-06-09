@@ -69,11 +69,13 @@ fn config_global_no_fib_install(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
-/// `set router bgp global srv6 locator <name>` — names the SRv6
-/// locator BGP carves per-VRF End.DT46 service SIDs from for L3VPN
-/// over SRv6 (RFC 9252). Drives the RIB locator watch; SID
-/// allocation off the resolved locator lands in a follow-up.
-fn config_global_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `set router bgp segment-routing srv6 locator <name>` — names the
+/// SRv6 locator BGP carves per-VRF End.DT46 service SIDs from for
+/// L3VPN over SRv6 (RFC 9252). Mirrors `router isis / segment-routing
+/// / srv6 / locator`; BGP has no SR-MPLS knob, so there is no `mpls`
+/// sibling. Drives the RIB locator watch (`set_srv6_locator`), which
+/// in turn reconciles every `encapsulation srv6` VRF's service SID.
+fn config_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         let name = args.string()?;
         bgp.set_srv6_locator(Some(name));
@@ -2095,8 +2097,8 @@ impl Bgp {
             config_global_no_fib_install,
         );
         self.callback_add(
-            "/router/bgp/global/srv6/locator",
-            config_global_srv6_locator,
+            "/router/bgp/segment-routing/srv6/locator",
+            config_srv6_locator,
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);
