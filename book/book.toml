@@ -1,5 +1,5 @@
 [book]
-title = "zebra-rs Routing Software"
+title = "zebra-rs"
 authors = ["Kunihiro Ishiguro"]
 language = "en"
 src = "src"
