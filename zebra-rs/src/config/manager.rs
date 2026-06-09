@@ -1490,4 +1490,37 @@ mod yang_load_tests {
              and must no longer parse",
         );
     }
+
+    /// `segment-routing srv6 ipv6-unicast` is a hand-added presence
+    /// container that enables End.DT6 SID origination for the global
+    /// IPv6 unicast table. `load_mode` loads the module but does not
+    /// prove the concrete path is settable, so parse the `set` line.
+    #[test]
+    fn bgp_segment_routing_srv6_ipv6_unicast_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp segment-routing srv6 ipv6-unicast",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set router bgp segment-routing srv6 ipv6-unicast` must be a valid settable path",
+        );
+    }
 }

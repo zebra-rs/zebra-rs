@@ -438,9 +438,9 @@ impl Default for PeerConfig {
 /// * [`Srv6Relax`](Self::Srv6Relax) — mixed session: routes with or
 ///   without an SRv6 SID may be exchanged with this peer.
 ///
-/// Currently a recorded-intent knob — the value is parsed and stored,
-/// but the advertise/accept SID filtering is not yet enforced (the
-/// follow-up wires it into `route_update_ipv6` / `route_ipv6_update`).
+/// Enforced symmetrically in `route_ipv6_update` (accept: drop a SID-less
+/// route from a `Srv6` peer) and `route_update_ipv6` (advertise: withhold
+/// a SID-less route from a `Srv6` peer). See [`Peer::ipv6_srv6_strict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AfiSafiEncapType {
@@ -942,6 +942,25 @@ impl Peer {
         false
     }
 
+    /// The configured SRv6 `encapsulation-type` for this peer's IPv6
+    /// unicast family (`afi-safi ipv6 encapsulation-type`), or `None`
+    /// when unset. See [`AfiSafiEncapType`].
+    pub fn ipv6_srv6_encap(&self) -> Option<AfiSafiEncapType> {
+        self.config
+            .sub
+            .get(&AfiSafi::new(Afi::Ip6, Safi::Unicast))
+            .and_then(|s| s.encapsulation_type)
+    }
+
+    /// `true` when this peer is SRv6-strict for IPv6 unicast
+    /// (`encapsulation-type srv6`): a plain IPv6 unicast route without
+    /// an SRv6 service SID must not be advertised to / accepted from it.
+    /// `srv6-relax` and the unset default both return `false` (no
+    /// SID-presence filtering).
+    pub fn ipv6_srv6_strict(&self) -> bool {
+        matches!(self.ipv6_srv6_encap(), Some(AfiSafiEncapType::Srv6))
+    }
+
     /// IPv6 link-local next-hop to advertise in MP_REACH for
     /// IPv4-unicast NLRI once RFC 8950 Extended Next Hop is
     /// negotiated on this peer. Returns `None` for any peer that
@@ -1057,6 +1076,13 @@ pub struct BgpTop<'a> {
     /// local label. A received route advertised with next-hop-self gets
     /// a local label here, swap-programmed via an ILM.
     pub lu_labels: Option<LuLabels<'a>>,
+    /// Precomputed global-IPv6 SRv6 export data (`segment-routing srv6
+    /// ipv6-unicast`), borrowed from the owning [`super::inst::Bgp`].
+    /// `Some` only when origination is enabled and the locator has
+    /// resolved; the egress path (`route_update_ipv6`) then stamps
+    /// locally-originated routes with its End.DT6 Prefix-SID + locator
+    /// next-hop. `None` on per-VRF tasks and whenever origination is off.
+    pub srv6_ipv6_export: Option<&'a super::inst::Srv6Ipv6Export>,
 }
 
 /// Per-prefix local-label state for BGP Labeled Unicast, borrowed into
@@ -2288,6 +2314,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
     if soft_in {
         let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
+            srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
             rib_client: &bgp.ctx.rib,
@@ -2325,6 +2352,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
     }
     let mut bgp_ref = BgpTop {
         router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
         local_rib: &mut bgp.local_rib,
         tx: &bgp.tx,
         rib_client: &bgp.ctx.rib,
