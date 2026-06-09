@@ -115,11 +115,11 @@ Feature: Inter-AS MPLS/VPN Option C over SR-MPLS (RFC 4364 §10c)
   Scenario: VPNv4 customer routes are exchanged directly between the PEs
     Given the test topology exists
     # PE1 receives PE2's customer prefix under PE2's RD (65001:1).
-    Then show command "show ip bgp vpnv4" in namespace "pe1" should contain "10.2.0.0/30"
-    And show command "show ip bgp vpnv4" in namespace "pe1" should contain "65001:1"
+    Then show command "show bgp vpnv4" in namespace "pe1" should contain "10.2.0.0/30"
+    And show command "show bgp vpnv4" in namespace "pe1" should contain "65001:1"
     # PE2 receives PE1's customer prefix under PE1's RD (65000:1).
-    And show command "show ip bgp vpnv4" in namespace "pe2" should contain "10.1.0.0/30"
-    And show command "show ip bgp vpnv4" in namespace "pe2" should contain "65000:1"
+    And show command "show bgp vpnv4" in namespace "pe2" should contain "10.1.0.0/30"
+    And show command "show bgp vpnv4" in namespace "pe2" should contain "65000:1"
 
   Scenario: End-to-end customer forwarding across the AS boundary (SR + BGP-LU + VPN)
     Given the test topology exists

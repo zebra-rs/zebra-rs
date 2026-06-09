@@ -910,6 +910,18 @@ mod tests {
                 vec!["2001:db8::/48"],
             ),
             ("show bgp update-group", "/show/bgp/update-group", vec![]),
+            ("show bgp vpnv4", "/show/bgp/vpnv4", vec![]),
+            (
+                "show bgp vpnv4 10.0.0.1",
+                "/show/bgp/vpnv4",
+                vec!["10.0.0.1"],
+            ),
+            (
+                "show bgp vpnv4 10.0.0.0/24",
+                "/show/bgp/vpnv4",
+                vec!["10.0.0.0/24"],
+            ),
+            ("show bgp evpn", "/show/bgp/evpn", vec![]),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {
@@ -919,6 +931,30 @@ mod tests {
             assert_eq!(path, want_path, "path for `{cmd}`");
             let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
             assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
+    /// The VPNv4 / EVPN RIB views moved from the legacy `show ip bgp`
+    /// tree to `show bgp …`; the old spellings must no longer parse.
+    /// The per-neighbor Adj-RIB filters under `show ip bgp neighbors`
+    /// keep their `vpnv4` / `evpn` keywords.
+    #[test]
+    fn show_ip_bgp_vpnv4_evpn_moved() {
+        let entry = exec_entry();
+        for cmd in [
+            "show ip bgp vpnv4",
+            "show ip bgp vpnv4 route 10.0.0.1",
+            "show ip bgp evpn",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+        for cmd in [
+            "show ip bgp neighbors 10.0.0.1 advertised-routes vpnv4",
+            "show ip bgp neighbors 10.0.0.1 received-routes evpn",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
         }
     }
 

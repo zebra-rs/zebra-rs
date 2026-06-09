@@ -2408,7 +2408,7 @@ fn is_seg6local_entry(entry: &RibEntry) -> bool {
 /// came up). Without the fallback, data-plane-learned MACs that the
 /// kernel broadcasts WITHOUT `NDA_MASTER` are silently dropped here
 /// — matched user-visible bug: `bridge fdb show` lists the MAC but
-/// `show ip bgp l2vpn evpn` doesn't, because the operator-added MACs
+/// `show bgp evpn` doesn't, because the operator-added MACs
 /// (which carry NDA_MASTER) succeed and the data-plane-learned ones
 /// don't.
 fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {

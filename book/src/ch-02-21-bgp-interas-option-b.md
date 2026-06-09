@@ -197,7 +197,7 @@ local-AS one learned from its PE, the remote-AS one from the other ASBR
 (note the AS path):
 
 ```
-asbr1$ show ip bgp vpnv4
+asbr1$ show bgp vpnv4
 Route Distinguisher: 65000:1
  *>i 10.1.0.0/30   1.1.1.1      ...   i        # from PE1 (intra-AS VPNv4)
 Route Distinguisher: 65001:1
