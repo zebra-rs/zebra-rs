@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,6 +59,12 @@ use crate::context::{Timer, TimerType};
 /// keep existing v2 callsites resolving unchanged.
 pub type ShowCallback<V = Ospfv2> = fn(&Ospf<V>, Args, bool) -> Result<String, std::fmt::Error>;
 
+/// Constructor-default Router ID, used until a configured or
+/// RIB-derived value arrives (and as the fallback when a configured
+/// one is deleted on an instance that never received a RIB value,
+/// i.e. OSPFv3 today).
+pub const DEFAULT_ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
 /// OSPF protocol instance.
 ///
 /// Parameterized over `V: OspfVersion` (default `Ospfv2`) so the
@@ -88,7 +93,21 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback<V>>,
     pub sock: Arc<AsyncFd<Socket>>,
+    /// Effective Router ID — what packets, LSAs and every link
+    /// `ident` carry. Derived: configured `router-id` wins, then the
+    /// RIB-derived value, then [`DEFAULT_ROUTER_ID`]. Mutate via
+    /// `refresh_router_id`, never directly.
     pub router_id: Ipv4Addr,
+    /// Operator-configured `router ospf{,v3} router-id`. Wins over
+    /// the RIB-derived value; deleting it falls back (the IS-IS
+    /// configured-vs-derived split).
+    pub router_id_config: Option<Ipv4Addr>,
+    /// Last RIB-derived router-id (`RibRx::RouterIdUpdate`), kept
+    /// while a configured router-id overrides it so a later delete
+    /// can fall back immediately. Always `None` on OSPFv3 today —
+    /// its `process_rib_msg` has no `RouterIdUpdate` arm yet — so v3
+    /// falls back to [`DEFAULT_ROUTER_ID`] instead.
+    pub rib_router_id: Option<Ipv4Addr>,
     pub lsdb_as: Lsdb<V>,
     pub lsp_map: LspMap,
     pub spf_result: Option<BTreeMap<usize, Path>>,
@@ -962,7 +981,9 @@ impl Ospf<Ospfv2> {
             areas: OspfAreaMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
+            router_id: DEFAULT_ROUTER_ID,
+            router_id_config: None,
+            rib_router_id: None,
             lsdb_as: Lsdb::new(),
             lsp_map: LspMap::default(),
             spf_result: None,
@@ -4281,6 +4302,23 @@ impl Ospf<Ospfv2> {
         self.router_lsa_originate();
     }
 
+    /// Recompute the effective Router ID from its sources —
+    /// configured `router-id` wins, RIB-derived second, constructor
+    /// default last — and apply it (links + Router-LSA re-origination)
+    /// when it moved. Both the config callback and the
+    /// `RibRx::RouterIdUpdate` arm funnel through here, so a
+    /// configured value can't be stomped by a RIB push and a config
+    /// delete falls back instead of keeping the stale value.
+    pub(super) fn refresh_router_id(&mut self) {
+        let effective = self
+            .router_id_config
+            .or(self.rib_router_id)
+            .unwrap_or(DEFAULT_ROUTER_ID);
+        if self.router_id != effective {
+            self.router_id_update(effective);
+        }
+    }
+
     fn addr_add(&mut self, addr: LinkAddr) {
         // println!("OSPF: AddrAdd {} {}", addr.addr, addr.ifindex);
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
@@ -4693,7 +4731,12 @@ impl Ospf<Ospfv2> {
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
             RibRx::RouterIdUpdate(router_id) => {
-                self.router_id_update(router_id);
+                // Remember the RIB-derived value and refresh: a
+                // configured `router-id` keeps winning (this push
+                // used to stomp it), and a later config delete falls
+                // back to the stored value.
+                self.rib_router_id = (!router_id.is_unspecified()).then_some(router_id);
+                self.refresh_router_id();
             }
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
@@ -4899,7 +4942,9 @@ impl Ospf<Ospfv3> {
             areas: OspfAreaMap::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
-            router_id: Ipv4Addr::from_str("10.0.0.1").unwrap(),
+            router_id: DEFAULT_ROUTER_ID,
+            router_id_config: None,
+            rib_router_id: None,
             lsdb_as: Lsdb::new(),
             lsp_map: LspMap::default(),
             spf_result: None,
@@ -5134,17 +5179,33 @@ impl Ospf<Ospfv3> {
         }
     }
 
-    /// Apply a configured Router-ID to this OSPFv3 instance. Mirror of
-    /// the v2 `router_id_update`; wired from `config_ospfv3_router_id`
-    /// so `router ospfv3 { router-id ... }` is honoured (previously
-    /// v3 had no per-instance Router-ID path at all and every instance
-    /// kept the constructor default 10.0.0.1).
+    /// Apply a Router-ID to this OSPFv3 instance. Mirror of the v2
+    /// `router_id_update`; reached via `refresh_router_id` from
+    /// `config_ospfv3_router_id` so `router ospfv3 { router-id ... }`
+    /// is honoured (previously v3 had no per-instance Router-ID path
+    /// at all and every instance kept the constructor default
+    /// 10.0.0.1).
     pub(super) fn router_id_update(&mut self, router_id: Ipv4Addr) {
         self.router_id = router_id;
         for (_, link) in self.links.iter_mut() {
             link.ident.router_id = router_id;
         }
         self.router_lsa_originate();
+    }
+
+    /// v3 sibling of the v2 `refresh_router_id`: configured value
+    /// wins, then RIB-derived, then the constructor default. v3's
+    /// `process_rib_msg` has no `RouterIdUpdate` arm yet, so
+    /// `rib_router_id` is always `None` here and a config delete
+    /// falls back to [`DEFAULT_ROUTER_ID`].
+    pub(super) fn refresh_router_id(&mut self) {
+        let effective = self
+            .router_id_config
+            .or(self.rib_router_id)
+            .unwrap_or(DEFAULT_ROUTER_ID);
+        if self.router_id != effective {
+            self.router_id_update(effective);
+        }
     }
 
     /// Remove an IPv6 address from the matching link's `addr` list

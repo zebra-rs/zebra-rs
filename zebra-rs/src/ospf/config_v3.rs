@@ -227,15 +227,19 @@ fn config_ospfv3_area_type(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp
 }
 
 /// `router ospfv3 { router-id ... }`. Mirrors v2's
-/// `config_ospf_router_id`: apply the configured Router-ID to the
-/// instance (and every interface's `ident`) and re-originate.
-/// Previously OSPFv3 had no per-instance Router-ID callback at all,
-/// so every v3 instance kept the constructor default 10.0.0.1.
+/// `config_ospf_router_id`: store the configured Router-ID and
+/// refresh — the instance (and every interface's `ident`) picks it
+/// up and re-originates. Delete falls back instead of keeping the
+/// old value. Previously OSPFv3 had no per-instance Router-ID
+/// callback at all, so every v3 instance kept the constructor
+/// default 10.0.0.1.
 fn config_ospfv3_router_id(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
-    let router_id = args.v4addr()?;
     if op.is_set() {
-        ospf.router_id_update(router_id);
+        ospf.router_id_config = Some(args.v4addr()?);
+    } else {
+        ospf.router_id_config = None;
     }
+    ospf.refresh_router_id();
     Some(())
 }
 

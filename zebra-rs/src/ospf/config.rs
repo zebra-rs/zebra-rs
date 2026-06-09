@@ -271,16 +271,21 @@ pub(super) fn apply_link_enable_transition<V: OspfVersion>(
 }
 
 fn config_ospf_router_id(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
-    let router_id = args.v4addr()?;
     if op.is_set() {
-        // Apply the configured Router-ID to the instance, push it into
-        // every interface's `ident`, and re-originate. Previously this
-        // callback parsed the value and dropped it, so every OSPFv2
-        // instance kept the constructor default (10.0.0.1) — making all
-        // routers share one Router-ID, so each treated every neighbour's
-        // Hello as self-originated and no adjacency ever formed.
-        ospf.router_id_update(router_id);
+        // Store the configured Router-ID; `refresh_router_id` pushes
+        // it into the instance and every interface's `ident` and
+        // re-originates. Previously this callback parsed the value
+        // and dropped it, so every OSPFv2 instance kept the
+        // constructor default (10.0.0.1) — making all routers share
+        // one Router-ID, so each treated every neighbour's Hello as
+        // self-originated and no adjacency ever formed.
+        ospf.router_id_config = Some(args.v4addr()?);
+    } else {
+        // Delete falls back to the RIB-derived value (or the
+        // constructor default) instead of keeping the old Router-ID.
+        ospf.router_id_config = None;
     }
+    ospf.refresh_router_id();
     Some(())
 }
 
