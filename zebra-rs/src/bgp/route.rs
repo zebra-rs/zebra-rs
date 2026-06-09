@@ -3225,6 +3225,20 @@ pub fn route_ipv6_update(
             return;
         }
 
+        // encapsulation-type srv6 (accept side): a plain IPv6 unicast
+        // route from an SRv6-only peer must carry an SRv6 service SID;
+        // drop a SID-less route before it reaches the Adj-RIB-In /
+        // Loc-RIB. VPNv6 rows (rd = Some) are unaffected — they carry
+        // their own service SID and have a separate filter contract.
+        if rd.is_none() && peer.ipv6_srv6_strict() && attr.srv6_l3_sid().is_none() {
+            tracing::debug!(
+                peer = %peer.address,
+                prefix = %nlri.prefix,
+                "bgp: drop SID-less IPv6 route from encapsulation-type srv6 peer",
+            );
+            return;
+        }
+
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
         } else {
@@ -6031,6 +6045,36 @@ pub fn route_update_ipv6(
         }
     }
 
+    // The two SRv6 hooks below apply only to plain IPv6 unicast rows.
+    // `route_update_ipv6` is shared with the VPNv6 advertise path, whose
+    // rows carry `Some(VpnNexthop::V6)`; gating on `rib.nexthop.is_none()`
+    // keeps the unicast `encapsulation-type` knob from touching VPNv6.
+    let plain_unicast = rib.nexthop.is_none();
+
+    // SRv6 (global IPv6 unicast origination): a locally-originated route
+    // carries the instance End.DT6 service SID + the PE locator next-hop
+    // when `segment-routing srv6 ipv6-unicast` is enabled and the locator
+    // has resolved (`srv6_ipv6_export` is `Some`). Mirrors the per-VRF
+    // SRv6 L3VPN export but targets the main table. Received routes keep
+    // whatever SID rode in on the wire and are not re-stamped here.
+    if plain_unicast
+        && rib.is_originated()
+        && let Some(exp) = bgp.srv6_ipv6_export
+    {
+        attrs.prefix_sid = Some(exp.prefix_sid.clone());
+        attrs.nexthop = Some(BgpNexthop::Ipv6(exp.nexthop));
+    }
+
+    // encapsulation-type srv6 (advertise side): withhold a SID-less
+    // plain IPv6 unicast route from an SRv6-only peer — it carries no
+    // SRv6 service SID for the peer to forward on. `srv6-relax`/unset
+    // peers are unaffected. Locally-originated routes get the instance
+    // End.DT6 SID attached just above (when `segment-routing srv6
+    // ipv6-unicast` is enabled), so they pass this gate.
+    if plain_unicast && peer.ipv6_srv6_strict() && attrs.srv6_l3_sid().is_none() {
+        return None;
+    }
+
     Some((nlri, attrs))
 }
 
@@ -7517,6 +7561,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7560,6 +7605,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7616,6 +7662,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7645,6 +7692,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7694,6 +7742,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7729,6 +7778,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7783,6 +7833,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7816,6 +7867,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7902,6 +7954,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -7943,6 +7996,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8008,6 +8062,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8044,6 +8099,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8102,6 +8158,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8136,6 +8193,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8271,6 +8329,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8388,6 +8447,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -8492,6 +8552,7 @@ impl Bgp {
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,

@@ -90,14 +90,58 @@ unicast family:
 
 The line is omitted when the knob is unset.
 
-## Status
+## Enforcement
 
-This release wires the **configuration**: the mode is parsed, validated,
-stored on the neighbor, and reported by `show`. The advertise- and
-accept-side SID filtering it describes is **not yet enforced** — the knob
-currently records intent. Enforcement (dropping SID-less IPv6 unicast
-routes on a `srv6` session, on both the receive and re-advertise paths)
-is a planned follow-up; note that the advertise side additionally depends
-on SRv6-SID origination for plain IPv6 unicast, which today exists only
-for the VPNv4 / VPNv6 families described in
-[L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md).
+The filter is applied symmetrically on a `srv6` session:
+
+- **Receive** — a plain IPv6 unicast route that arrives without an SRv6
+  service SID is dropped before it reaches the Adj-RIB-In / Loc-RIB.
+- **Advertise** — a route without an SRv6 service SID is withheld from
+  the peer (no NLRI is emitted for it).
+
+A route's SID rides in the BGP Prefix-SID attribute, so a route learned
+*with* a SID propagates through unchanged and passes the filter at the
+next `srv6` hop. `srv6-relax` and the unset default apply no filtering.
+
+## Originating SRv6 SIDs for the global IPv6 table
+
+For the local router to *advertise* its own IPv6 unicast routes
+(`network`, redistribution) to a `srv6` peer, those routes must carry a
+SID. Enable End.DT6 origination for the global (default-table) IPv6
+unicast family under `segment-routing srv6`:
+
+```yaml
+router:
+  bgp:
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: null    # presence: originate an End.DT6 SID
+```
+
+```
+set router bgp segment-routing srv6 locator LOC1
+set router bgp segment-routing srv6 ipv6-unicast
+```
+
+`ipv6-unicast` is the global-table analogue of a per-VRF `encapsulation
+srv6`. When it is set and the `locator` resolves, the BGP speaker carves a
+single **End.DT6** service SID from the locator, advertises locally-
+originated IPv6 unicast routes with that SID (in the BGP Prefix-SID
+attribute) and the locator as the next-hop, and programs a `seg6local`
+End.DT6 decap into the main table. A remote PE then H.Encaps traffic to
+the locator, and the local End.DT6 decapsulates and forwards via the
+global IPv6 table. Until the `locator` resolves, origination is SID-less
+(and such routes are withheld from `srv6` peers).
+
+Routes *received* with a SID are re-advertised preserving their SID, so a
+transit router needs `ipv6-unicast` only if it also originates routes of
+its own.
+
+> The per-neighbor `encapsulation-type` (the session filter) and the
+> instance `ipv6-unicast` (SID origination) are independent: a route
+> reflector might originate nothing yet still filter, while an edge PE
+> originates SIDs that any downstream `srv6` peer then accepts.
+
+See also [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md), which
+uses the same locator machinery to carve per-VRF End.DT46 SIDs.

@@ -136,9 +136,27 @@ pub(crate) fn tag_attr_with_export_rts(
 /// an optional SID Structure sub-sub-TLV derived from the locator when
 /// known. This is the attribute an `encapsulation srv6` VRF attaches to
 /// every VPNv4 / VPNv6 route it originates.
+/// Precomputed advertise-time SRv6 data for the global IPv6 unicast
+/// table, derived from the resolved locator + the allocated End.DT6 SID.
+/// Held on [`Bgp`] and borrowed into [`super::peer::BgpTop`] so the
+/// egress path (`route_update_ipv6`) can stamp locally-originated routes
+/// with the Prefix-SID + locator next-hop without re-deriving it per
+/// route. `None` whenever `segment-routing srv6 ipv6-unicast` is off or
+/// the locator is unresolved.
+#[derive(Debug, Clone)]
+pub struct Srv6Ipv6Export {
+    /// BGP Prefix-SID attribute (SRv6 L3 Service TLV, End.DT6 SID).
+    pub prefix_sid: bgp_packet::PrefixSid,
+    /// PE locator next-hop advertised alongside the SID (the remote PE
+    /// H.Encaps to this address, then the local End.DT6 decaps into the
+    /// main table).
+    pub nexthop: std::net::Ipv6Addr,
+}
+
 fn srv6_l3_service_prefix_sid(
     sid: std::net::Ipv6Addr,
     structure: Option<crate::rib::SidStructure>,
+    behavior: u16,
 ) -> bgp_packet::PrefixSid {
     let structure = structure.map(|s| bgp_packet::Srv6SidStructure {
         locator_block_len: s.lb_bits,
@@ -151,12 +169,7 @@ fn srv6_l3_service_prefix_sid(
     bgp_packet::PrefixSid {
         tlvs: vec![bgp_packet::PrefixSidTlv::Srv6L3Service(
             bgp_packet::Srv6ServiceTlv {
-                sids: vec![bgp_packet::Srv6SidInfo::new(
-                    sid,
-                    0,
-                    bgp_packet::SRV6_BEHAVIOR_END_DT46,
-                    structure,
-                )],
+                sids: vec![bgp_packet::Srv6SidInfo::new(sid, 0, behavior, structure)],
                 ..Default::default()
             },
         )],
@@ -491,6 +504,22 @@ pub struct Bgp {
     /// SIDs carved from [`Self::srv6_locator`]. Reset when the locator
     /// prefix changes (every prior SID address is then invalid).
     pub srv6_sid_pool: super::vrf::BgpSidPool,
+    /// `segment-routing srv6 ipv6-unicast` — when `true`, the global
+    /// IPv6 unicast table originates routes with an SRv6 End.DT6 service
+    /// SID (the default-table analogue of a per-VRF `encapsulation srv6`).
+    pub srv6_ipv6_unicast: bool,
+    /// The instance End.DT6 SID for the global IPv6 unicast table:
+    /// `(addr, function)`, carved from [`Self::srv6_locator`] when
+    /// [`Self::srv6_ipv6_unicast`] is on and the locator has resolved.
+    /// `None` otherwise. The `function` is borrowed from
+    /// [`Self::srv6_sid_pool`], same as a per-VRF SID.
+    pub srv6_ipv6_sid: Option<(std::net::Ipv6Addr, u16)>,
+    /// Precomputed advertise-time data derived from
+    /// [`Self::srv6_ipv6_sid`] and the locator, borrowed into
+    /// [`super::peer::BgpTop`] so the egress path stamps
+    /// locally-originated IPv6 routes without re-deriving it per route.
+    /// Kept in lock-step with `srv6_ipv6_sid`.
+    pub srv6_ipv6_export: Option<Srv6Ipv6Export>,
     /// Inbound `:179` dispatch index — peer source IP to VRF name.
     /// Populated by [`super::vrf::BgpGlobalMsg::RegisterPeer`]
     /// each per-VRF task emits at spawn / materialise time, and
@@ -680,6 +709,9 @@ impl Bgp {
             srv6_locator_rx,
             srv6_locator: None,
             srv6_sid_pool: super::vrf::BgpSidPool::new(),
+            srv6_ipv6_unicast: false,
+            srv6_ipv6_sid: None,
+            srv6_ipv6_export: None,
             peer_index: BTreeMap::new(),
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
@@ -800,6 +832,12 @@ impl Bgp {
                     }
                 }
                 self.reconcile_srv6_vrfs();
+                // Re-allocate the global IPv6 unicast End.DT6 SID against
+                // the new locator prefix. `reconcile_srv6_vrfs` just
+                // reset the pool, so the old function is gone — withdraw
+                // without releasing (mirrors resid_vrf), then re-install.
+                self.withdraw_srv6_ipv6_sid(false);
+                self.install_srv6_ipv6_sid();
             }
             crate::rib::RibSrRx::Block { .. } => {}
         }
@@ -872,6 +910,100 @@ impl Bgp {
         for name in srv6_vrfs {
             self.resid_vrf(&name);
         }
+    }
+
+    /// `segment-routing srv6 ipv6-unicast` toggle. Enables or disables
+    /// End.DT6 SID origination for the global IPv6 unicast table and
+    /// reconciles the instance SID against the current locator. The pool
+    /// is *not* reset here (unlike a locator change), so a withdrawn
+    /// function is returned to the pool for reuse.
+    pub fn set_srv6_ipv6_unicast(&mut self, enabled: bool) {
+        if self.srv6_ipv6_unicast == enabled {
+            return;
+        }
+        self.srv6_ipv6_unicast = enabled;
+        self.withdraw_srv6_ipv6_sid(true);
+        self.install_srv6_ipv6_sid();
+    }
+
+    /// Withdraw the instance global-IPv6 End.DT6 SID, if installed, and
+    /// clear the precomputed export. `release` returns the function to
+    /// the SID pool — pass `false` on the locator-change path where the
+    /// caller already `reset()` the pool (the old function no longer
+    /// exists in it; releasing would corrupt the free list, same caveat
+    /// as [`Self::resid_vrf`]).
+    fn withdraw_srv6_ipv6_sid(&mut self, release: bool) {
+        if let Some((addr, function)) = self.srv6_ipv6_sid.take() {
+            self.rib_subscriber.send_sid_del(addr);
+            if release {
+                self.srv6_sid_pool.release(function);
+            }
+        }
+        self.srv6_ipv6_export = None;
+    }
+
+    /// Allocate + install the instance global-IPv6 End.DT6 SID when
+    /// `srv6_ipv6_unicast` is on and the locator has resolved, and build
+    /// the [`Srv6Ipv6Export`] the egress path stamps onto locally-
+    /// originated routes. No-op when disabled, unresolved, already
+    /// installed, or the function space is exhausted (origination then
+    /// stays SID-less until the next locator update). Unlike a per-VRF
+    /// End.DT46, the End.DT6 decaps into the main table (`table_id` 0),
+    /// which always exists — so there is no kernel-presence gate.
+    fn install_srv6_ipv6_sid(&mut self) {
+        if !self.srv6_ipv6_unicast || self.srv6_ipv6_sid.is_some() {
+            return;
+        }
+        // Snapshot locator-derived values before the mutable pool /
+        // subscriber calls so the immutable borrow doesn't conflict.
+        let (prefix, nexthop, structure, loc_name) = {
+            let Some(locator) = self.srv6_locator.as_ref() else {
+                return;
+            };
+            let (Some(prefix), Some(nexthop)) = (locator.prefix, locator.node_sid_addr()) else {
+                return;
+            };
+            (
+                prefix,
+                nexthop,
+                locator.sid_structure(),
+                self.srv6_locator_name.clone().unwrap_or_default(),
+            )
+        };
+        let Some(function) = self.srv6_sid_pool.allocate() else {
+            return;
+        };
+        let Some(addr) = crate::isis::srv6::function_addr(prefix, function) else {
+            self.srv6_sid_pool.release(function);
+            return;
+        };
+        self.rib_subscriber.send_sid_add(crate::rib::Sid {
+            addr,
+            behavior: crate::rib::SidBehavior::EndDT6,
+            context: crate::rib::SidContext::None,
+            owner: crate::rib::SidOwner::new("bgp", 0),
+            locator: loc_name,
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: 0,
+            segs: Vec::new(),
+        });
+        self.srv6_ipv6_sid = Some((addr, function));
+        self.srv6_ipv6_export = Some(Srv6Ipv6Export {
+            prefix_sid: srv6_l3_service_prefix_sid(
+                addr,
+                structure,
+                bgp_packet::SRV6_BEHAVIOR_END_DT6,
+            ),
+            nexthop,
+        });
+        bgp_srv6_trace!(
+            self.tracing,
+            sid = %addr,
+            "bgp: global IPv6 unicast End.DT6 SID installed"
+        );
     }
 
     /// Respawn `name`'s per-VRF task with a freshly-allocated End.DT46
@@ -1062,6 +1194,7 @@ impl Bgp {
 
                 let mut bgp_ref = BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -2041,6 +2174,7 @@ impl Bgp {
 
         let mut top = super::peer::BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -2507,7 +2641,11 @@ impl Bgp {
         let (sid, _function) = self.vrf_registry.get(vrf)?.srv6_sid?;
         let locator = self.srv6_locator.as_ref()?;
         let nexthop = locator.node_sid_addr()?;
-        attr.prefix_sid = Some(srv6_l3_service_prefix_sid(sid, locator.sid_structure()));
+        attr.prefix_sid = Some(srv6_l3_service_prefix_sid(
+            sid,
+            locator.sid_structure(),
+            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+        ));
         Some(nexthop)
     }
 
@@ -2642,6 +2780,7 @@ impl Bgp {
                 // loop on the export hook in `route_ipv4_update`.
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -2748,6 +2887,7 @@ impl Bgp {
 
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -2893,6 +3033,7 @@ impl Bgp {
 
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -2977,6 +3118,7 @@ impl Bgp {
 
                 let mut top = super::peer::BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -3136,7 +3278,11 @@ mod tests {
             fun_bits: 16,
             arg_bits: 0,
         };
-        let ps = super::srv6_l3_service_prefix_sid(sid, Some(structure));
+        let ps = super::srv6_l3_service_prefix_sid(
+            sid,
+            Some(structure),
+            bgp_packet::SRV6_BEHAVIOR_END_DT46,
+        );
 
         // Emit the attribute body and parse it back; the SID + behavior
         // must survive so a remote PE reads End.DT46.
@@ -3150,6 +3296,41 @@ mod tests {
         assert_eq!(
             attr.srv6_l3_sid(),
             Some((sid, bgp_packet::SRV6_BEHAVIOR_END_DT46))
+        );
+    }
+
+    /// The global IPv6 unicast origination path builds the Prefix-SID
+    /// with End.DT6 (decap into the main table). Emit + parse it and
+    /// assert `srv6_l3_sid()` — the exact accessor the encapsulation-type
+    /// filter consults — reads back the SID with behavior End.DT6.
+    #[test]
+    fn srv6_l3_service_prefix_sid_round_trips_to_end_dt6() {
+        use bgp_packet::{AttrEmitter, ParseBe};
+        use bytes::BytesMut;
+
+        let sid: std::net::Ipv6Addr = "2001:db8:1:41::".parse().unwrap();
+        let structure = crate::rib::SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 0,
+        };
+        let ps = super::srv6_l3_service_prefix_sid(
+            sid,
+            Some(structure),
+            bgp_packet::SRV6_BEHAVIOR_END_DT6,
+        );
+
+        let mut buf = BytesMut::new();
+        ps.emit(&mut buf);
+        let (_, parsed) = bgp_packet::PrefixSid::parse_be(&buf).expect("parse");
+        let attr = bgp_packet::BgpAttr {
+            prefix_sid: Some(parsed),
+            ..Default::default()
+        };
+        assert_eq!(
+            attr.srv6_l3_sid(),
+            Some((sid, bgp_packet::SRV6_BEHAVIOR_END_DT6))
         );
     }
 

@@ -417,6 +417,7 @@ impl BgpVrf {
                 };
                 let mut top = BgpTop {
                     router_id: &self.router_id,
+                    srv6_ipv6_export: None,
                     local_rib: &mut self.local_rib,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
@@ -551,6 +552,7 @@ impl BgpVrf {
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -613,6 +615,7 @@ impl BgpVrf {
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -714,6 +717,7 @@ impl BgpVrf {
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
@@ -764,6 +768,7 @@ impl BgpVrf {
 
         let mut top = super::super::peer::BgpTop {
             router_id: &self.router_id,
+            srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
             tx: &self.tx,
             rib_client: &self.ctx.rib,

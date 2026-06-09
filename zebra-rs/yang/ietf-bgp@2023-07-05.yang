@@ -445,6 +445,22 @@ module ietf-bgp {
                resolves, `encapsulation srv6` VRFs run without a
                service SID.";
           }
+          container ipv6-unicast {
+            presence
+              "Originate an SRv6 End.DT6 service SID for the global
+               IPv6 unicast table.";
+            description
+              "When present, locally-originated IPv6 unicast routes
+               (`network`, redistribution) are advertised with a BGP
+               Prefix-SID (SRv6 L3 Service TLV, RFC 9252) carrying a
+               single End.DT6 SID carved from the configured `locator`,
+               and the PE programs a seg6local End.DT6 decap into the
+               main table. The global (default-table) analogue of a
+               per-VRF `encapsulation srv6`; pairs with the per-neighbor
+               `afi-safi ipv6 encapsulation-type srv6` session filter.
+               Requires `locator` to resolve — until then origination
+               is SID-less.";
+          }
         }
       }
 

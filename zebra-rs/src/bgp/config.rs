@@ -85,6 +85,15 @@ fn config_srv6_locator(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
     Some(())
 }
 
+/// `set/delete router bgp segment-routing srv6 ipv6-unicast` — the
+/// presence container that enables SRv6 End.DT6 SID origination for the
+/// global IPv6 unicast table. Toggling it (re)allocates or withdraws the
+/// instance End.DT6 SID via `set_srv6_ipv6_unicast`.
+fn config_srv6_ipv6_unicast(bgp: &mut Bgp, _args: Args, op: ConfigOp) -> Option<()> {
+    bgp.set_srv6_ipv6_unicast(op == ConfigOp::Set);
+    Some(())
+}
+
 fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     if op == ConfigOp::Set {
@@ -123,6 +132,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 
         let mut bgp_ref = BgpTop {
             router_id: &bgp.router_id,
+            srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
             local_rib: &mut bgp.local_rib,
             tx: &bgp.tx,
             rib_client: &bgp.ctx.rib,
@@ -1497,8 +1507,8 @@ fn config_restart(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
 /// <srv6|srv6-relax>`. Records the per-neighbor, per-AFI/SAFI SRv6
 /// encapsulation mode on the peer's [`PeerSubConfig`]. The YANG `when`
 /// guard restricts the leaf to `afi-safi ipv6`, so in practice `afi_safi`
-/// is always IPv6 unicast here. Config-only for now — see
-/// [`AfiSafiEncapType`] for the deferred advertise/accept filtering.
+/// is always IPv6 unicast here. The mode is enforced on the advertise /
+/// accept paths — see [`AfiSafiEncapType`].
 fn config_encapsulation_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -2121,6 +2131,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/segment-routing/srv6/locator",
             config_srv6_locator,
+        );
+        self.callback_add(
+            "/router/bgp/segment-routing/srv6/ipv6-unicast",
+            config_srv6_ipv6_unicast,
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);
