@@ -2033,6 +2033,18 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         {
             writeln!(out, "    IPv6 Unicast: {}", cap.desc())?;
         }
+        let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv4 Labeled Unicast: {}", cap.desc())?;
+        }
+        let afi = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsLabel);
+        if let Some(cap) = neighbor.cap_map.entries.get(&afi)
+            && (cap.send || cap.recv)
+        {
+            writeln!(out, "    IPv6 Labeled Unicast: {}", cap.desc())?;
+        }
         let afi = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
         if let Some(cap) = neighbor.cap_map.entries.get(&afi)
             && (cap.send || cap.recv)

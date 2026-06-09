@@ -92,21 +92,36 @@ fn entry_nexthop_addr(entry: &RibEntry) -> Option<IpAddr> {
     }
 }
 
+// Whether `entry`'s nexthop carries an MPLS label stack — i.e. it is a BGP
+// Labeled-Unicast (SAFI 4) transport route rather than plain BGP unicast.
+fn entry_has_mpls(entry: &RibEntry) -> bool {
+    match &entry.nexthop {
+        Nexthop::Uni(uni) => !uni.mpls.is_empty(),
+        Nexthop::Multi(multi) => multi.nexthops.iter().any(|u| !u.mpls.is_empty()),
+        _ => false,
+    }
+}
+
 // Whether an entry is allowed to act as a resolver target during recursive
 // nexthop lookup. Connected and IGP routes are always trusted; static is
-// trusted up to the depth cap; BGP is excluded because BGP next-hops should
-// resolve over the underlay (IGP / connected), not over BGP itself, and
-// allowing it would risk recursive loops. The validity check skips entries
-// that are still in the table but no longer reachable — e.g. an IS-IS
-// route whose group went invalid because its egress link is down. Without
-// this filter a recursive static would resolve through the dead route and
-// look reachable when it isn't.
+// trusted up to the depth cap. Plain BGP unicast is excluded — BGP
+// next-hops should resolve over the underlay (IGP / connected), not over
+// BGP itself, and allowing it would risk recursive loops. The one BGP
+// exception is a *labeled* (BGP Labeled-Unicast, SAFI 4) route: Inter-AS
+// MPLS/VPN Option C (RFC 4364 §10c) resolves a VPN next-hop — the remote
+// PE loopback — over the BGP-LU LSP that carries it across the AS boundary,
+// stacking the LU + transport labels under the VPN service label. The
+// recursion depth cap still bounds any loop. The validity check skips
+// entries that are still in the table but no longer reachable — e.g. an
+// IS-IS route whose group went invalid because its egress link is down.
+// Without this filter a recursive static would resolve through the dead
+// route and look reachable when it isn't.
 pub(crate) fn entry_resolvable(entry: &RibEntry) -> bool {
     entry.is_valid()
-        && matches!(
+        && (matches!(
             entry.rtype,
             RibType::Connected | RibType::Static | RibType::Ospf | RibType::Isis
-        )
+        ) || (entry.rtype == RibType::Bgp && entry_has_mpls(entry)))
 }
 
 pub fn rib_resolve(

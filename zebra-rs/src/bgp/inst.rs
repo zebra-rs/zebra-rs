@@ -1749,6 +1749,84 @@ impl Bgp {
         }
     }
 
+    /// Re-tag and re-advertise a VRF's locally-originated VPNv4 routes
+    /// with the current export route-targets. Called when a VRF's RT
+    /// policy is (re-)learned: the per-VRF route export can race ahead of
+    /// the `VrfRouteTargets` message (the export reads `rib_known_vrfs` at
+    /// emit time), so the `v4vpn` row can be left tagged with no export RT
+    /// and the remote PE cannot import it. Re-tagging here closes the
+    /// race — both an immediate re-advertise to established peers and any
+    /// later `route_sync_vpnv4` dump then carry the RTs. Stale RT
+    /// ecommunities are stripped first so a genuine RT reconfig replaces
+    /// rather than accumulates. IPv4 only today (VPNv6 re-tag is a
+    /// follow-up, consistent with the existing VPNv6-event-driven gaps).
+    fn retag_vrf_exports_v4(&mut self, vrf: &str) {
+        let Some(rd) = self.vrfs.get(vrf).and_then(|c| c.rd) else {
+            return;
+        };
+        let export_rts = self
+            .rib_known_vrfs
+            .get(vrf)
+            .map(|k| k.export_rts_v4.clone())
+            .unwrap_or_default();
+        // Snapshot the originated rows (clone to release the `local_rib`
+        // borrow before mutating it / `peers` below).
+        let rows: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = self
+            .local_rib
+            .v4vpn
+            .get(&rd)
+            .map(|t| {
+                t.0.iter()
+                    .filter_map(|(p, ribs)| {
+                        ribs.iter()
+                            .find(|r| r.ident == super::route::ORIGINATED_PEER)
+                            .map(|r| (p, r.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (prefix, mut rib) in rows {
+            let mut attr = (*rib.attr).clone();
+            // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
+            // so a genuine RT change replaces; the race case has none.
+            if let Some(ref mut ecom) = attr.ecom {
+                ecom.0.retain(|v| v.low_type != 0x02);
+                if ecom.0.is_empty() {
+                    attr.ecom = None;
+                }
+            }
+            let tagged = tag_attr_with_export_rts(attr, &export_rts);
+            rib.attr = self.attr_store.intern(tagged);
+            let (_, selected, _) = self.local_rib.update(Some(rd), prefix, rib);
+            let mut top = super::peer::BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+                local_rib: &mut self.local_rib,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                color_policy: Some(&self.color_policy),
+                flex_algo_routes: Some(&self.flex_algo_routes),
+                vrf_export: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                lu_labels: None,
+            };
+            super::route::route_advertise_to_peers(
+                Some(rd),
+                prefix,
+                &selected,
+                super::route::ORIGINATED_PEER,
+                &mut top,
+                &mut self.peers,
+            );
+        }
+    }
+
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
@@ -1860,11 +1938,20 @@ impl Bgp {
                 // them as separate messages and a slow
                 // `tokio::select!` could draw the RT message ahead
                 // of the VrfAdd).
-                let entry = self.rib_known_vrfs.entry(name).or_default();
+                let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
+                let export_v4_changed = entry.export_rts_v4 != ipv4_export_rts;
                 entry.import_rts_v4 = ipv4_import_rts;
                 entry.export_rts_v4 = ipv4_export_rts;
                 entry.import_rts_v6 = ipv6_import_rts;
                 entry.export_rts_v6 = ipv6_export_rts;
+                // Close the export / RT-learning race: a per-VRF route can
+                // be exported into `v4vpn` before this RT policy lands (the
+                // export reads `rib_known_vrfs` at emit time), leaving the
+                // row with no export RT — unimportable by the remote PE.
+                // Re-tag + re-advertise the VRF's originated rows now.
+                if export_v4_changed {
+                    self.retag_vrf_exports_v4(&name);
+                }
             }
             // Redistribute deliveries from RIB — initial walk
             // (chunks ending in `bulk: Eor`) plus steady-state deltas
@@ -2778,7 +2865,16 @@ impl Bgp {
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,
-                    ident: 0,
+                    // Originated (VRF-exported) routes carry the
+                    // `ORIGINATED_PEER` sentinel, NOT 0: a literal 0
+                    // collides with the PeerMap index of whichever peer
+                    // happens to occupy slot 0, and the advertise-path
+                    // split-horizon (`rib.ident == peer.ident`) would then
+                    // silently suppress this VPN route toward that peer
+                    // (e.g. an Inter-AS Option C multihop VPNv4 PE whose
+                    // session landed on slot 0). `usize::MAX` never matches
+                    // a real peer.
+                    ident: super::route::ORIGINATED_PEER,
                     router_id: self.router_id,
                     weight: 0,
                     typ: super::route::BgpRibType::Originated,
@@ -2893,11 +2989,13 @@ impl Bgp {
                     );
                     return;
                 };
-                // VRF-originated routes always carry `ident == 0`
-                // and `local_id == 0` (the values used in the
-                // matching Export); the remove path uses that
-                // tuple to identify the row.
-                let removed = self.local_rib.remove(Some(rd), prefix, 0, 0);
+                // VRF-originated routes always carry `ident ==
+                // ORIGINATED_PEER` and `local_id == 0` (the values used in
+                // the matching Export); the remove path uses that tuple to
+                // identify the row.
+                let removed =
+                    self.local_rib
+                        .remove(Some(rd), prefix, 0, super::route::ORIGINATED_PEER);
 
                 // Re-run best-path so any remaining candidate at
                 // (rd, prefix) becomes the new selected winner.
@@ -3043,7 +3141,16 @@ impl Bgp {
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,
-                    ident: 0,
+                    // Originated (VRF-exported) routes carry the
+                    // `ORIGINATED_PEER` sentinel, NOT 0: a literal 0
+                    // collides with the PeerMap index of whichever peer
+                    // happens to occupy slot 0, and the advertise-path
+                    // split-horizon (`rib.ident == peer.ident`) would then
+                    // silently suppress this VPN route toward that peer
+                    // (e.g. an Inter-AS Option C multihop VPNv4 PE whose
+                    // session landed on slot 0). `usize::MAX` never matches
+                    // a real peer.
+                    ident: super::route::ORIGINATED_PEER,
                     router_id: self.router_id,
                     weight: 0,
                     typ: super::route::BgpRibType::Originated,
@@ -3136,7 +3243,9 @@ impl Bgp {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
                     return;
                 };
-                let removed = self.local_rib.remove_v6vpn(rd, prefix, 0, 0);
+                let removed =
+                    self.local_rib
+                        .remove_v6vpn(rd, prefix, 0, super::route::ORIGINATED_PEER);
                 let selected = self.local_rib.select_best_path_vpn_v6(&rd, prefix);
 
                 // Local intra-router leak, symmetric with the ExportV6

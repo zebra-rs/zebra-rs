@@ -311,14 +311,14 @@ pub mod config {
 
     pub fn connect_retry_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         let addr = args.addr()?;
-        let hold_time: u16 = args.u16()?;
+        let connect_retry_time: u16 = args.u16()?;
 
         let peer = bgp.peers.get_mut(&addr)?;
 
         if op.is_set() {
-            peer.config.timer.hold_time = Some(hold_time);
+            peer.config.timer.connect_retry_time = Some(connect_retry_time);
         } else {
-            peer.config.timer.hold_time = None;
+            peer.config.timer.connect_retry_time = None;
         }
         Some(())
     }

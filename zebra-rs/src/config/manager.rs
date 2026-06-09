@@ -1379,6 +1379,37 @@ mod yang_load_tests {
         }
     }
 
+    /// The per-neighbor `afi-safi <name> next-hop-self` knob is a hand-added
+    /// boolean leaf on the vendored `ietf-bgp-neighbor` afi-safi list (used
+    /// by Inter-AS MPLS/VPN Option C on the iBGP labeled-unicast session).
+    /// `load_mode` proves the module loads but not that the concrete path is
+    /// settable, so parse the `set` line for both AF and value.
+    #[test]
+    fn bgp_neighbor_afi_safi_next_hop_self_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 10.0.0.2 afi-safi label-v4 next-hop-self true",
+            "set router bgp neighbor 10.0.0.2 afi-safi label-v4 next-hop-self false",
+            "set router bgp neighbor 2001:db8::8 afi-safi label-v6 next-hop-self true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a settable path");
+        }
+    }
+
     /// The IS-IS per-interface `passive` leaf must be a settable path.
     /// It is hand-added to `config.yang` (no YANG generator), so a typo in
     /// the leaf or its placement would otherwise only surface at runtime —

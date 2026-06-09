@@ -476,6 +476,15 @@ pub struct PeerSubConfig {
     /// settable under `afi-safi ipv6` (YANG `when name = 'ipv6'`).
     /// `None` = no SRv6 encapsulation mode configured for this AF.
     pub encapsulation_type: Option<AfiSafiEncapType>,
+    /// `afi-safi <name> next-hop-self` (ietf-bgp-neighbor). When `true`,
+    /// routes re-advertised to this neighbor for this AF carry our own
+    /// address as the next-hop even when they were learned from another
+    /// peer (i.e. not just for eBGP / self-originated). Required on the
+    /// iBGP labeled-unicast session an Inter-AS Option C ASBR runs toward
+    /// its PE: the PE must resolve the ASBR (not the foreign-AS next-hop)
+    /// and forward via the ASBR's swap label. Honored on the labeled-
+    /// unicast advertise paths (`route_update_labelv4` / `…v6`).
+    pub next_hop_self: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -929,6 +938,17 @@ impl Peer {
 
     pub fn is_reflector_client(&self) -> bool {
         self.reflector_client
+    }
+
+    /// Whether `afi-safi <name> next-hop-self` is set for this neighbor in
+    /// the given address family. Forces next-hop-self on forwarded routes
+    /// (not just eBGP / self-originated) — see [`PeerSubConfig::next_hop_self`].
+    pub fn next_hop_self(&self, afi: Afi, safi: Safi) -> bool {
+        self.config
+            .sub
+            .get(&AfiSafi::new(afi, safi))
+            .map(|c| c.next_hop_self)
+            .unwrap_or(false)
     }
 
     pub fn is_afi_safi(&self, afi: Afi, safi: Safi) -> bool {

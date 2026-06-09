@@ -1525,6 +1525,23 @@ fn config_encapsulation_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
+/// `set/delete router bgp neighbor <addr> afi-safi <name> next-hop-self
+/// <true|false>`. Records the per-neighbor, per-AFI/SAFI next-hop-self
+/// flag on the peer's [`PeerSubConfig`]. Honored on the Labeled-Unicast
+/// advertise paths ([`route_update_labelv4`](super::route::route_update_labelv4)
+/// / `…v6`): an Inter-AS Option C ASBR sets it on the iBGP-LU session to
+/// its PE so re-advertised eBGP-LU routes carry the ASBR as next-hop.
+fn config_next_hop_self(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let peer = bgp.peers.get_mut(&addr)?;
+
+    let value = if op.is_set() { args.boolean()? } else { false };
+    let config = peer.config.sub.entry(afi_safi).or_default();
+    config.next_hop_self = value;
+    Some(())
+}
+
 fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -2357,6 +2374,7 @@ impl Bgp {
         self.callback_peer("/afi-safi/enabled", config_afi_safi);
         self.callback_peer("/afi-safi/add-path", config_add_path);
         self.callback_peer("/afi-safi/encapsulation-type", config_encapsulation_type);
+        self.callback_peer("/afi-safi/next-hop-self", config_next_hop_self);
         self.callback_peer("/afi-safi/graceful-restart/enabled", config_restart);
         self.callback_peer("/afi-safi/long-lived-graceful-restart/enabled", config_llgr);
         self.callback_peer(
@@ -3753,6 +3771,115 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).contains(&peer_ident),
             "Event::Stop must have been enqueued",
+        );
+    }
+}
+
+#[cfg(test)]
+mod afi_safi_next_hop_self_tests {
+    //! `afi-safi <name> next-hop-self` per-neighbor callback wiring
+    //! (Inter-AS MPLS/VPN Option C). `yang_load_tests` validates that the
+    //! YANG loads, but not that the callback actually records the flag on
+    //! the peer — that's asserted here. Independent test module with its
+    //! own mock channels, mirroring `bfd_wiring_tests`.
+
+    use std::collections::VecDeque;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    fn fresh_bgp() -> Bgp {
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        Box::leak(Box::new(_inbound_rx));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        )
+    }
+
+    /// `afi-safi label-v4 next-hop-self true` records the flag for that AF
+    /// only; `delete` clears it. This is the knob an Inter-AS Option C ASBR
+    /// sets on its iBGP labeled-unicast session to the PE so re-advertised
+    /// eBGP-LU routes carry the ASBR as next-hop (`route_update_labelv4`),
+    /// not the unreachable foreign-AS next-hop.
+    #[tokio::test]
+    async fn label_v4_next_hop_self_records_per_af() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Default: off for every AF.
+        assert!(
+            !bgp.peers
+                .get(&addr)
+                .unwrap()
+                .next_hop_self(Afi::Ip, Safi::MplsLabel),
+            "next-hop-self defaults off",
+        );
+
+        config_next_hop_self(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "label-v4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let peer = bgp.peers.get(&addr).unwrap();
+        assert!(
+            peer.next_hop_self(Afi::Ip, Safi::MplsLabel),
+            "label-v4 flag recorded",
+        );
+        // Scoped to the AF it was set on — label-v6 is untouched.
+        assert!(
+            !peer.next_hop_self(Afi::Ip6, Safi::MplsLabel),
+            "other AF unaffected",
+        );
+
+        config_next_hop_self(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "label-v4"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            !bgp.peers
+                .get(&addr)
+                .unwrap()
+                .next_hop_self(Afi::Ip, Safi::MplsLabel),
+            "delete clears the flag",
         );
     }
 }
