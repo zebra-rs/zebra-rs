@@ -41,7 +41,7 @@ Feature: BGP IPv6 redistribute connected with SRv6 End.DT6 origination
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     And I create dummy interface "cust0" with address "2001:db8:cafe::1/64" in namespace "z1"
-    And I wait 35 seconds
+    And I wait 40 seconds
     # Originator: the redistributed connected prefix carries the SID it
     # owns, rendered as a "Local SID" with End.DT6 behavior.
     Then show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z1" should contain "Local SID"
@@ -50,6 +50,11 @@ Feature: BGP IPv6 redistribute connected with SRv6 End.DT6 origination
     # it is in the BGP table tagged as a "Remote SID".
     And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z2" should contain "Remote SID"
     And show command "show bgp ipv6 2001:db8:cafe::/64" in namespace "z2" should contain "End.DT6"
+    # Ingress dataplane: the received route is installed with an SRv6
+    # H.Encaps entry toward the SID (not a plain next-hop), so matched
+    # traffic is SRv6-encapsulated to the egress PE.
+    And show command "show ipv6 route 2001:db8:cafe::/64" in namespace "z2" should contain "via seg6"
+    And show command "show ipv6 route 2001:db8:cafe::/64" in namespace "z2" should contain "fcbb:bbbb:1:40::"
 
   Scenario: Teardown topology
     Given the test topology exists
