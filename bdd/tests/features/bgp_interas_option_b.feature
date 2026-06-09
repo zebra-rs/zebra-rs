@@ -89,10 +89,10 @@ Feature: Inter-AS MPLS/VPN Option B over SR-MPLS (RFC 4364 §10b)
     Given the test topology exists
     # ASBR1 learns 10.1.0.0/30 from PE1 (intra-AS VPNv4) and 10.2.0.0/30
     # from ASBR2 (inter-AS eBGP VPNv4); ASBR2 mirrors. Neither runs a VRF.
-    Then show command "show ip bgp vpnv4" in namespace "asbr1" should contain "10.1.0.0/30"
-    And show command "show ip bgp vpnv4" in namespace "asbr1" should contain "10.2.0.0/30"
-    And show command "show ip bgp vpnv4" in namespace "asbr2" should contain "10.1.0.0/30"
-    And show command "show ip bgp vpnv4" in namespace "asbr2" should contain "10.2.0.0/30"
+    Then show command "show bgp vpnv4" in namespace "asbr1" should contain "10.1.0.0/30"
+    And show command "show bgp vpnv4" in namespace "asbr1" should contain "10.2.0.0/30"
+    And show command "show bgp vpnv4" in namespace "asbr2" should contain "10.1.0.0/30"
+    And show command "show bgp vpnv4" in namespace "asbr2" should contain "10.2.0.0/30"
 
   Scenario: Each PE imports the remote-AS customer prefix into its VRF
     Given the test topology exists

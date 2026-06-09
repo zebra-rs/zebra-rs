@@ -8734,7 +8734,7 @@ impl Bgp {
         };
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         // `remove_evpn` only edits `cands`; the per-prefix `selected`
-        // map (the one `show ip bgp l2vpn evpn` iterates) is updated
+        // map (the one `show bgp evpn` iterates) is updated
         // by `select_best_path_evpn`, which evicts the entry when no
         // candidate remains. Without this call the withdrawn route
         // stays visible in `show` and orphan RDs accumulate after

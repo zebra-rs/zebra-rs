@@ -83,7 +83,7 @@ reroutes.
 
 ## Verification
 
-`show ip bgp l2vpn evpn` lists Type-5 routes with the
+`show bgp evpn` lists Type-5 routes with the
 `[5]:[EthTag]:[IPlen]:[IP]` prefix form alongside any Type-2 / Type-3
 routes. On the ingress PE, an imported Type-5 route appears in its VRF
 table as a normal IP route whose next-hop is the MPLS label-push (check
