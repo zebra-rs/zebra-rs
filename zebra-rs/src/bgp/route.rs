@@ -435,6 +435,50 @@ fn make_bgp_rib_entry_v6(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     Some(entry)
 }
 
+/// SRv6 ingress for a *received* plain IPv6 unicast route carrying an
+/// SRv6 L3 service SID (RFC 9252 / RFC 8669). The SRv6 counterpart of
+/// [`make_bgp_rib_entry_v6`]: same BGP next-hop + distance/metric, but the
+/// next-hop gets `segs = [sid]` + an H.Encaps seg6 encap, so matched
+/// traffic is SRv6-encapsulated (outer IPv6 DA = the SID) toward the
+/// egress PE that owns the SID. The BGP next-hop is the underlay egress —
+/// exactly the next-hop a plain entry installs `via`, only with the seg6
+/// encap attached (the kernel forwards the encapped packet on toward the
+/// SID's locator). Returns `None` when the best path lacks a usable v6
+/// next-hop. Self-originated routes never reach here (they carry
+/// `nexthop = None` and install nothing).
+fn make_bgp_srv6_encap_entry_v6(
+    best: &BgpRib,
+    sid: std::net::Ipv6Addr,
+) -> Option<rib::entry::RibEntry> {
+    let distance = match best.typ {
+        BgpRibType::EBGP => 20,
+        BgpRibType::IBGP | BgpRibType::Originated => 200,
+    };
+    let metric = best.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+
+    let nh = match best.attr.nexthop.as_ref()? {
+        BgpNexthop::Ipv6(addr) => *addr,
+        _ => return None,
+    };
+    if nh.is_unspecified() {
+        return None;
+    }
+
+    let mut uni = rib::NexthopUni::new(IpAddr::V6(nh), 0, Vec::new());
+    uni.segs = vec![sid];
+    uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+    uni.metric = metric;
+    uni.weight = 1;
+    uni.valid = true;
+
+    let mut entry = rib::entry::RibEntry::new(rib::RibType::Bgp);
+    entry.distance = distance;
+    entry.metric = metric;
+    entry.valid = true;
+    entry.nexthop = rib::Nexthop::Uni(uni);
+    Some(entry)
+}
+
 /// IPv6 counterpart of [`select_fib_entry_v4`].
 fn select_fib_entry_v6(
     best: &BgpRib,
@@ -450,6 +494,14 @@ fn select_fib_entry_v6(
     }
     if is_vpn_fib_winner(best, transport) {
         build_vpn_fib_entry(best.label.map(|l| l.label).unwrap_or(0), transport.unwrap())
+    } else if let Some((sid, _behavior)) = best.attr.srv6_l3_sid() {
+        // A *received* plain IPv6 unicast route carrying an SRv6 L3
+        // service SID installs an H.Encaps entry toward the SID instead
+        // of a plain next-hop entry, so matched traffic is SRv6-
+        // encapsulated to the egress PE. (The `Originated` + SID case is
+        // VPNv6-over-SRv6, handled above; this is the global-table,
+        // non-VPN ingress.)
+        make_bgp_srv6_encap_entry_v6(best, sid)
     } else {
         make_bgp_rib_entry_v6(best)
     }

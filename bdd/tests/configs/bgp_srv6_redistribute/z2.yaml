@@ -7,6 +7,16 @@ interface:
   ipv6:
     address: 2001:db8:12::2/64
 router:
+  # Reach z1's SRv6 locator so the received route's next-hop (the locator
+  # address) resolves via NHT — the ingress then installs the H.Encaps
+  # entry toward the SID. In a real fabric the locator is carried by the
+  # IGP; a static stand-in keeps this 2-node BGP test self-contained.
+  static:
+    ipv6:
+      route:
+      - prefix: fcbb:bbbb:1::/48
+        nexthop:
+        - address: 2001:db8:12::1
   bgp:
     global:
       as: 65002
