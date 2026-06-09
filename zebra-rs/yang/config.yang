@@ -424,6 +424,18 @@ module config {
       }
     }
 
+    // Global Router ID, FRR/zebra-style `router-id A.B.C.D`. When
+    // set it overrides the automatic pick (first non-localhost IPv4,
+    // loopbacks preferred — see `rib/router_id.rs`) and is pushed to
+    // protocol subscribers via `RibRx::RouterIdUpdate`; deleting it
+    // falls back to the automatic pick. Protocol-local identifiers
+    // (`router bgp global identifier`, `router ospf router-id`, …)
+    // still apply on their own instances.
+    leaf router-id {
+      ext:help "Global router identifier";
+      type inet:ipv4-address;
+    }
+
     container router {
       ext:help "Router configuration";
       uses "ietf-bgp:bgp";
