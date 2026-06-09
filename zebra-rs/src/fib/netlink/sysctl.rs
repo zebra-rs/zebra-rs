@@ -8,6 +8,14 @@ const CTLNAMES: &[(&str, &str)] = &[
     ("net.ipv6.conf.all.keep_addr_on_down", "1"),
     ("net.ipv6.conf.default.keep_addr_on_down", "1"),
     ("net.vrf.strict_mode", "1"),
+    // Let the global unbound `:179` BGP listener accept inbound TCP
+    // connections that arrive on a VRF (l3mdev) interface. Without it the
+    // kernel drops the SYN — there is no listener in the VRF's routing
+    // table — and a per-VRF BGP peer (e.g. a PE-CE session inside a VRF,
+    // as in Inter-AS MPLS/VPN Option A) can never accept and stays stuck
+    // in Active. The accept dispatcher then routes the connection to the
+    // owning VRF task by source IP. Mirrors FRR's `bgp_vrf` enablement.
+    ("net.ipv4.tcp_l3mdev_accept", "1"),
     ("net.mpls.platform_labels", "1048575"),
 ];
 

@@ -26,6 +26,7 @@ make the remote PE loopbacks reachable — and labeled — so a single LSP
 runs end to end and the VPN routes pass over the top, transparent to the
 ASBRs. It scales best and is the focus of this section.
 
-> **Implemented today:** Option C, with an SR-MPLS transport inside each
-> AS — see [Option C over SR-MPLS](ch-02-19-bgp-interas-option-c.md).
-> Options A and B are future work.
+> **Implemented today:** Option A
+> ([back-to-back VRFs](ch-02-20-bgp-interas-option-a.md)) and Option C
+> ([over SR-MPLS](ch-02-19-bgp-interas-option-c.md)), each with an
+> SR-MPLS transport inside the AS. Option B is future work.

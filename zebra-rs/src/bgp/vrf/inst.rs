@@ -519,7 +519,15 @@ impl BgpVrf {
             remote_id: 0,
             local_id: 0,
             attr: interned,
-            ident: 0,
+            // Originated/imported VRF rows carry the ORIGINATED_PEER
+            // sentinel, NOT 0: a literal 0 collides with the PeerMap index
+            // of whatever CE peer occupies slot 0 (a lone PE-CE peer is
+            // index 0), and the advertise-path split-horizon
+            // (`rib.ident == peer.ident`) would then silently drop this
+            // imported route toward that CE — breaking Inter-AS Option A,
+            // where the ASBR must re-advertise VPNv4-imported routes over
+            // its per-VRF PE-CE eBGP session to the other ASBR.
+            ident: super::super::route::ORIGINATED_PEER,
             router_id: self.router_id,
             weight: 0,
             typ: super::super::route::BgpRibType::Originated,
@@ -605,7 +613,9 @@ impl BgpVrf {
         rd: bgp_packet::RouteDistinguisher,
         prefix: ipnet::Ipv4Net,
     ) {
-        let removed = self.local_rib.remove(None, prefix, 0, 0);
+        let removed = self
+            .local_rib
+            .remove(None, prefix, 0, super::super::route::ORIGINATED_PEER);
         let selected = self.local_rib.select_best_path(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
@@ -690,7 +700,15 @@ impl BgpVrf {
             remote_id: 0,
             local_id: 0,
             attr: interned,
-            ident: 0,
+            // Originated/imported VRF rows carry the ORIGINATED_PEER
+            // sentinel, NOT 0: a literal 0 collides with the PeerMap index
+            // of whatever CE peer occupies slot 0 (a lone PE-CE peer is
+            // index 0), and the advertise-path split-horizon
+            // (`rib.ident == peer.ident`) would then silently drop this
+            // imported route toward that CE — breaking Inter-AS Option A,
+            // where the ASBR must re-advertise VPNv4-imported routes over
+            // its per-VRF PE-CE eBGP session to the other ASBR.
+            ident: super::super::route::ORIGINATED_PEER,
             router_id: self.router_id,
             weight: 0,
             typ: super::super::route::BgpRibType::Originated,
@@ -759,7 +777,9 @@ impl BgpVrf {
         rd: bgp_packet::RouteDistinguisher,
         prefix: ipnet::Ipv6Net,
     ) {
-        let removed = self.local_rib.remove_v6(prefix, 0, 0);
+        let removed = self
+            .local_rib
+            .remove_v6(prefix, 0, super::super::route::ORIGINATED_PEER);
         let selected = self.local_rib.select_best_path_v6(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
@@ -808,17 +828,36 @@ impl BgpVrf {
     /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
         match msg {
-            BgpVrfMsg::Accept(_, sockaddr) => {
-                // The global accept dispatcher routes inbound
-                // connections here; the per-VRF FSM driver picks
-                // up the `TcpStream` and continues. Without that
-                // wiring the stream drops at the end of this arm
-                // and the TCP connection closes.
+            BgpVrfMsg::Accept(stream, sockaddr) => {
+                // Passive accept for the per-VRF PE-CE session. The global
+                // accept dispatcher routed this inbound connection here by
+                // source IP; drive the same FSM path the global `accept`
+                // does, but against this VRF's own `peers`. The active
+                // connect path already runs the per-VRF FSM, so adding the
+                // passive side lets two per-VRF speakers (e.g. two Inter-AS
+                // MPLS/VPN Option A ASBRs peering inside a VRF) resolve a
+                // §6.8 collision into Established — without it neither side's
+                // outbound connect is ever accepted and the session is stuck.
                 tracing::debug!(
                     vrf = %self.name,
                     peer = %sockaddr.ip(),
-                    "bgp vrf: received inbound Accept",
+                    "bgp vrf: inbound Accept",
                 );
+                let peer_addr = sockaddr.ip();
+                let scope_id = match sockaddr {
+                    std::net::SocketAddr::V6(addr) if addr.scope_id() != 0 => Some(addr.scope_id()),
+                    _ => None,
+                };
+                if let Some(stream) = super::super::peer::handle_peer_connection(
+                    &mut self.peers,
+                    peer_addr,
+                    scope_id,
+                    stream,
+                ) {
+                    // No matching peer in this VRF (listen-ranges aren't
+                    // supported inside a VRF yet) — drop, closing the TCP.
+                    drop(stream);
+                }
             }
             BgpVrfMsg::ImportV4 {
                 rd,
