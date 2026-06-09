@@ -5676,6 +5676,44 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             start_stale_timer(peer, afi_safi, llgr.stale_time()),
         );
 
+        // RFC 9494 §4.2: routes the peer marked NO_LLGR "MUST NOT be
+        // retained" by the long-lived procedures — remove and withdraw
+        // them per normal RFC 4271 operation; only the rest go stale.
+        let no_llgr: Vec<Vpnv4Nlri> = {
+            let mut out = Vec::new();
+            for (rd, table) in peer.adj_in.v4vpn.iter_mut() {
+                for (prefix, ribs) in table.0.iter_mut() {
+                    ribs.retain(|rib| {
+                        let refuse = attr_refuses_llgr(&rib.attr);
+                        if refuse {
+                            out.push(Vpnv4Nlri {
+                                label: rib.label.unwrap_or_default(),
+                                rd: *rd,
+                                nlri: Ipv4Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            });
+                        }
+                        !refuse
+                    });
+                }
+            }
+            out
+        };
+        for withdraw in no_llgr.iter() {
+            route_ipv4_withdraw(
+                peer_id,
+                &withdraw.nlri,
+                Some(withdraw.rd),
+                Some(withdraw.label),
+                bgp,
+                peers,
+                true,
+            );
+        }
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+
         for (_rd, table) in peer.adj_in.v4vpn.iter_mut() {
             for (_prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
@@ -5804,6 +5842,29 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             afi_safi_evpn,
             start_stale_timer(peer, afi_safi_evpn, stale_time),
         );
+
+        // RFC 9494 §4.2: NO_LLGR routes are not retained — remove and
+        // withdraw them; only the rest are stale-marked below.
+        let no_llgr: Vec<EvpnRoute> = {
+            let mut out = Vec::new();
+            for (rd, table) in peer.adj_in.evpn.iter_mut() {
+                for (prefix, ribs) in table.0.iter_mut() {
+                    ribs.retain(|rib| {
+                        let refuse = attr_refuses_llgr(&rib.attr);
+                        if refuse && let Some(route) = build_evpn_route(rd, prefix, rib) {
+                            out.push(route);
+                        }
+                        !refuse
+                    });
+                }
+            }
+            out
+        };
+        for route in no_llgr.iter() {
+            route_evpn_withdraw(peer_id, route, bgp, peers);
+        }
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+
         for (_rd, table) in peer.adj_in.evpn.iter_mut() {
             for (_prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
