@@ -1,0 +1,37 @@
+# P1 (AS 65000 core / transit LSR). Pure IS-IS + SR-MPLS, no BGP. Sits
+# between PE1 and ASBR1 so the intra-AS transport LSP performs a real SR
+# label swap (and PHP toward the loopbacks) rather than collapsing to a
+# single hop.
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.2/32
+- if-name: pe1
+  ipv4:
+    address: 10.0.0.2/30
+- if-name: asbr1
+  ipv4:
+    address: 10.0.0.5/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: p1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 2
+    - if-name: pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: asbr1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

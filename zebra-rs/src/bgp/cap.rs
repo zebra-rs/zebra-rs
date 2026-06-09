@@ -29,9 +29,11 @@ pub struct CapAfiMap {
 impl CapAfiMap {
     pub fn new() -> Self {
         let mp4uni = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+        let mp4label = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
         let mp4vpn = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsVpn);
         let mp4rtc = CapMultiProtocol::new(&Afi::Ip, &Safi::Rtc);
         let mp6uni = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
+        let mp6label = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsLabel);
         let mp6vpn = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
         let mp6rtc = CapMultiProtocol::new(&Afi::Ip6, &Safi::Rtc);
         let mpevpn = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
@@ -43,9 +45,11 @@ impl CapAfiMap {
 
         let mut cmap = Self::default();
         cmap.entries.insert(mp4uni, SendRecv::default());
+        cmap.entries.insert(mp4label, SendRecv::default());
         cmap.entries.insert(mp4vpn, SendRecv::default());
         cmap.entries.insert(mp4rtc, SendRecv::default());
         cmap.entries.insert(mp6uni, SendRecv::default());
+        cmap.entries.insert(mp6label, SendRecv::default());
         cmap.entries.insert(mp6vpn, SendRecv::default());
         cmap.entries.insert(mp6rtc, SendRecv::default());
         cmap.entries.insert(mpevpn, SendRecv::default());

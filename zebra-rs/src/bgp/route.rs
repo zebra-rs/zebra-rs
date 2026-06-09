@@ -500,7 +500,13 @@ fn select_fib_entry_label(
     if best.typ == BgpRibType::Originated {
         return None;
     }
-    let service_label = best.label.map(|l| l.label).unwrap_or(0);
+    // A received implicit-null (label 3) means the downstream is the egress
+    // FEC and wants the label popped, not carried — forward with only the
+    // transport stack (label 3 must never appear on the wire). This is the
+    // Inter-AS Option C case: a PE originates its loopback into BGP-LU with
+    // implicit-null, and the re-originating ASBR must swap to transport-only,
+    // not transport+3. 0 already means "no service label".
+    let service_label = best.label.map(|l| l.label).filter(|&l| l != 3).unwrap_or(0);
     let transport = match (cache, super::nht::bgp_nexthop_ip(&best.attr)) {
         (Some(c), Some(nh)) => c.transport_for(nh),
         _ => &[][..],
@@ -536,7 +542,13 @@ fn reconcile_swap_ilm(
         ilm_swap_remove(rib_client, local);
         return;
     }
-    let service_label = best.label.map(|l| l.label).unwrap_or(0);
+    // A received implicit-null (label 3) means the downstream is the egress
+    // FEC and wants the label popped, not carried — forward with only the
+    // transport stack (label 3 must never appear on the wire). This is the
+    // Inter-AS Option C case: a PE originates its loopback into BGP-LU with
+    // implicit-null, and the re-originating ASBR must swap to transport-only,
+    // not transport+3. 0 already means "no service label".
+    let service_label = best.label.map(|l| l.label).filter(|&l| l != 3).unwrap_or(0);
     ilm_swap_install(rib_client, local, service_label, transport);
 }
 
@@ -6276,10 +6288,12 @@ fn route_update_labelv4(
 
     ebgp_egress_aspath(peer, &mut attrs);
 
-    // Next-hop-self for eBGP / locally-originated; otherwise keep the
-    // received next-hop (next-hop-unchanged). Captured before clearing
-    // `attrs.nexthop`.
-    let needs_self = peer.is_ebgp() || rib.is_originated();
+    // Next-hop-self for eBGP / locally-originated, or when the neighbor
+    // has `afi-safi label-v4 next-hop-self` (Inter-AS Option C ASBR → PE);
+    // otherwise keep the received next-hop (next-hop-unchanged). Captured
+    // before clearing `attrs.nexthop`.
+    let needs_self =
+        peer.is_ebgp() || rib.is_originated() || peer.next_hop_self(Afi::Ip, Safi::MplsLabel);
     let nhop: IpAddr = if needs_self {
         // v4, or v6 for an RFC 8950 v4-over-v6 session.
         peer.param.local_addr.as_ref().map(|a| a.ip())?
@@ -6348,7 +6362,8 @@ fn route_update_labelv6(
 
     ebgp_egress_aspath(peer, &mut attrs);
 
-    let needs_self = peer.is_ebgp() || rib.is_originated();
+    let needs_self =
+        peer.is_ebgp() || rib.is_originated() || peer.next_hop_self(Afi::Ip6, Safi::MplsLabel);
     let nhop: IpAddr = if needs_self {
         match peer.param.local_addr.as_ref().map(|a| a.ip()) {
             Some(IpAddr::V6(v6)) => IpAddr::V6(v6),
@@ -7497,6 +7512,75 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
 }
 
 // Called when peer has been established.
+/// Dump the IPv4 Labeled-Unicast (SAFI 4) Loc-RIB to a peer that just
+/// reached Established — the labeled-unicast counterpart of
+/// [`route_sync_ipv4`]. Label-v4 is advertised event-driven and is NOT
+/// update-group batched, so its only other advertise path
+/// ([`route_advertise_to_peers_labelv4`]) fires solely on a route change.
+/// Without this establish-time dump, a prefix originated or learned
+/// *before* the peer came up is never sent — exactly the Inter-AS Option C
+/// case, where each PE originates its loopback into BGP-LU before the ASBR
+/// session is up, and each ASBR relays loopbacks it already holds. Dumps
+/// the current Loc-RIB (originated + received), so it is robust to the
+/// order sessions establish in. Best path per prefix (all paths under
+/// add-path); `route_update_labelv4` applies split-horizon / next-hop /
+/// label.
+pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsLabel);
+    let mut routes: Vec<(Ipv4Net, BgpRib)> = Vec::new();
+    for (prefix, ribs) in bgp.local_rib.v4lu.0.iter() {
+        if add_path {
+            routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
+        } else if let Some(best) = ribs.last() {
+            routes.push((prefix, best.clone()));
+        }
+    }
+    for (prefix, best) in routes {
+        let Some((nlri, attr, nhop, label)) =
+            route_update_labelv4(peer, &prefix, &best, bgp, add_path)
+        else {
+            continue;
+        };
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.bgp_attr = Some(attr);
+        update.mp_update = Some(MpReachAttr::Labelv4 {
+            snpa: 0,
+            nhop,
+            updates: vec![Labelv4Nlri { label, nlri }],
+        });
+        peer.send_packet(update.into());
+    }
+}
+
+/// IPv6 Labeled-Unicast (incl. 6PE) establish-time Loc-RIB dump — the v6
+/// counterpart of [`route_sync_labelv4`].
+pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
+    let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsLabel);
+    let mut routes: Vec<(Ipv6Net, BgpRib)> = Vec::new();
+    for (prefix, ribs) in bgp.local_rib.v6lu.0.iter() {
+        if add_path {
+            routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
+        } else if let Some(best) = ribs.last() {
+            routes.push((prefix, best.clone()));
+        }
+    }
+    for (prefix, best) in routes {
+        let Some((nlri, attr, nhop, label)) =
+            route_update_labelv6(peer, &prefix, &best, bgp, add_path)
+        else {
+            continue;
+        };
+        let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+        update.bgp_attr = Some(attr);
+        update.mp_update = Some(MpReachAttr::Labelv6 {
+            snpa: 0,
+            nhop,
+            updates: vec![Labelv6Nlri { label, nlri }],
+        });
+        peer.send_packet(update.into());
+    }
+}
+
 pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     // RFC 4684: advertise our Route Target Constraint membership BEFORE
     // any other AFI/SAFI, so the peer can apply RTC filtering to every
@@ -7534,6 +7618,16 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     }
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);
+    }
+    // SAFI 4 (RFC 3107 / 8277): dump the Labeled-Unicast Loc-RIBs. Needed
+    // because label-v4/v6 are advertised event-driven only — a route that
+    // existed before this peer came up would otherwise never be sent
+    // (e.g. an Inter-AS Option C PE loopback originated at startup).
+    if peer.is_afi_safi(Afi::Ip, Safi::MplsLabel) {
+        route_sync_labelv4(peer, bgp);
+    }
+    if peer.is_afi_safi(Afi::Ip6, Safi::MplsLabel) {
+        route_sync_labelv6(peer, bgp);
     }
     // SAFI 73: dump our locally-originated SR Policies to the new peer.
     if peer.is_afi_safi(Afi::Ip, Safi::SrTePolicy) || peer.is_afi_safi(Afi::Ip6, Safi::SrTePolicy) {

@@ -1,0 +1,52 @@
+# ASBR2 (AS 65001 border). Mirror of ASBR1.
+#  - IS-IS L2 + SR-MPLS toward P2 (intra-AS transport); inter-AS link not
+#    in the IGP.
+#  - eBGP labeled-unicast to ASBR1 (172.16.0.1).
+#  - iBGP labeled-unicast to PE2 (2.2.2.1) with `next-hop-self`.
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.3/32
+- if-name: asbr1
+  ipv4:
+    address: 172.16.0.2/30
+- if-name: p2
+  ipv4:
+    address: 10.0.1.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: asbr2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 6
+    - if-name: p2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65001
+      identifier: 2.2.2.3
+    neighbor:
+    - remote-address: 2.2.2.1
+      remote-as: 65001
+      update-source: 2.2.2.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 172.16.0.1
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true

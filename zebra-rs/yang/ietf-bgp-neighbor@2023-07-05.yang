@@ -215,6 +215,28 @@ submodule ietf-bgp-neighbor {
            exchanged). Absent = no SRv6 encapsulation filtering for the
            family.";
       }
+      leaf next-hop-self {
+        ext:sort "30";
+        type boolean;
+        description
+          "Advertise our own address as the BGP next-hop for routes sent
+           to this neighbor in this address family, even when the route
+           was learned from another peer. Equivalent to `neighbor X
+           next-hop-self` (per address-family) in FRR / Cisco IOS.
+
+           By default the next-hop is rewritten to self only for eBGP and
+           locally-originated routes; a route learned from one iBGP/eBGP
+           peer and reflected/forwarded to another keeps its received
+           next-hop. Setting this forces next-hop-self on those forwarded
+           routes too.
+
+           Required on the iBGP IPv4/IPv6 Labeled-Unicast session an
+           Inter-AS MPLS/VPN Option C ASBR runs toward its PE: the PE must
+           resolve the ASBR's loopback (reachable via the IGP) and push
+           the ASBR's swap label, not the unreachable foreign-AS next-hop
+           carried across the inter-AS eBGP-LU link. Currently honored on
+           the Labeled-Unicast (SAFI 4) advertise paths.";
+      }
     }
   }
 }

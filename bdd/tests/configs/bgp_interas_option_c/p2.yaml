@@ -1,0 +1,34 @@
+# P2 (AS 65001 core / transit LSR). Pure IS-IS + SR-MPLS, no BGP.
+interface:
+- if-name: lo
+  ipv4:
+    address: 2.2.2.2/32
+- if-name: asbr2
+  ipv4:
+    address: 10.0.1.2/30
+- if-name: pe2
+  ipv4:
+    address: 10.0.1.5/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0005.00
+    hostname: p2
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 2.2.2.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 5
+    - if-name: asbr2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+    - if-name: pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true

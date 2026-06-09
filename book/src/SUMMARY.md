@@ -29,6 +29,8 @@
   - [L3VPN over an SRv6 Underlay](ch-02-05-bgp-l3vpn-srv6.md)
   - [EVPN Type-5 (IP Prefix Routes)](ch-02-06-bgp-evpn-type5.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)
+  - [Inter-AS L3VPN](ch-02-18-bgp-interas.md)
+    - [Option C over SR-MPLS](ch-02-19-bgp-interas-option-c.md)
   - [BFD](ch-02-08-bgp-bfd.md)
   - [Route Reflector](ch-02-09-bgp-route-reflector.md)
   - [Conditional Tracing](ch-02-10-bgp-tracing.md)

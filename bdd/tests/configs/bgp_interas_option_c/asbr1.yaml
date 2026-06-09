@@ -1,0 +1,56 @@
+# ASBR1 (AS 65000 border). Inter-AS Option C: NO VPN state here.
+#  - IS-IS L2 + SR-MPLS toward P1 (intra-AS transport); the inter-AS link
+#    to ASBR2 is NOT in the IGP.
+#  - eBGP labeled-unicast to ASBR2 (172.16.0.2) over the inter-AS link:
+#    exchanges PE loopback /32s with labels. MPLS BGP forwarding only.
+#  - iBGP labeled-unicast to PE1 (1.1.1.1) re-advertises the routes
+#    learned from ASBR2 with `next-hop-self` so PE1 resolves ASBR1 (via
+#    the IGP) and pushes ASBR1's swap label, not the foreign-AS next-hop.
+#    This `next-hop-self` is the knob Option C requires on this session.
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: p1
+  ipv4:
+    address: 10.0.0.6/30
+- if-name: asbr2
+  ipv4:
+    address: 172.16.0.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: asbr1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+    - if-name: p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      identifier: 1.1.1.3
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+    - remote-address: 172.16.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
