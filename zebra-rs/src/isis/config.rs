@@ -1783,11 +1783,35 @@ fn config_redistribute_ospf_match_type(isis: &mut Isis, args: Args, op: ConfigOp
 fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let te_router_id = args.v4addr()?;
 
+    // The LSP carries the EFFECTIVE router-id — configured
+    // te-router-id first, RIB-derived second (TLV 134 and the
+    // Router Capability TLV both resolve `te_router_id.or(
+    // rib_router_id)` at build time). Compare that, not the raw
+    // leaf, so configuring the value the RIB already supplies (or
+    // deleting an override that matches it) doesn't churn the LSP.
+    let prev = isis.config.te_router_id.or(isis.config.rib_router_id);
     if op == ConfigOp::Set {
         isis.config.te_router_id = Some(te_router_id);
     } else {
         isis.config.te_router_id = None;
     }
+    let curr = isis.config.te_router_id.or(isis.config.rib_router_id);
+
+    if prev == curr {
+        return Some(());
+    }
+
+    // Re-originate self LSP at any level that has one so the new
+    // router-id (or its fallback) propagates without waiting for the
+    // refresh timer — same pattern as `config_hostname`. Levels with
+    // no self LSP yet pick the value up naturally on first emission.
+    let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+    for level in [Level::L1, Level::L2] {
+        if isis.lsdb.get(&level).get(&key).is_some() {
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
+        }
+    }
+
     Some(())
 }
 
