@@ -40,6 +40,18 @@ Feature: BGP per-VRF show command
     And show command "ip bgp vrf vrf-blue" in namespace "z1" should contain "Import RTs"
     And show command "ip bgp vrf vrf-blue" in namespace "z1" should contain "Export RTs"
 
+  Scenario: Inspect vrf-blue via the `show bgp vrf` tree
+    # The new `show bgp vrf <name> [ipv4|ipv6] …` tree shares the manager
+    # redirect / fall-through plumbing with the legacy `show ip bgp vrf`
+    # tree. No per-VRF BGP task runs in this single namespace, so the
+    # bare-name form falls through to the per-VRF detail (same output as
+    # `show ip bgp vrf vrf-blue`) and the AFI forms report the miss.
+    Given the test topology exists
+    Then show command "bgp vrf" in namespace "z1" should contain "vrf-blue"
+    And show command "bgp vrf vrf-blue" in namespace "z1" should contain "Route Distinguisher: 65001:100"
+    And show command "bgp vrf vrf-blue ipv4" in namespace "z1" should contain "is not running"
+    And show command "bgp vrf vrf-blue ipv6" in namespace "z1" should contain "is not running"
+
   Scenario: Remove vrf-blue and observe row drops
     Given the test topology exists
     When I apply config "z1-1.yaml" to namespace "z1"

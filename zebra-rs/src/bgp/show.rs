@@ -67,6 +67,14 @@ pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
         "/show/ip/bgp" => show_bgp(vrf, args, msg.json),
         "/show/ip/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
         "/show/ip/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
+        // `show bgp vrf <name> [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
+        // — the manager strips the `vrf <name>` selector, so a per-VRF
+        // task sees the same `/show/bgp/…` paths as the default VRF and
+        // renders against its own Loc-RIB via [`BgpShowView`].
+        "/show/bgp" | "/show/bgp/ipv4" => show_bgp_ipv4(vrf, args, msg.json),
+        "/show/bgp/ipv4/longer-prefix" => show_bgp_ipv4_longer(vrf, args, msg.json),
+        "/show/bgp/ipv6" => show_bgp_ipv6(vrf, args, msg.json),
+        "/show/bgp/ipv6/longer-prefix" => show_bgp_ipv6_longer(vrf, args, msg.json),
         other => Ok(format!("% Unsupported per-VRF show command: {other}\n")),
     };
     let out = out.unwrap_or_else(|e| format!("Error formatting output: {e}"));
@@ -3578,5 +3586,17 @@ impl Bgp {
         self.show_add("/show/bgp/ipv4/longer-prefix", show_bgp_ipv4_longer::<Bgp>);
         self.show_add("/show/bgp/ipv6", show_bgp_ipv6::<Bgp>);
         self.show_add("/show/bgp/ipv6/longer-prefix", show_bgp_ipv6_longer::<Bgp>);
+
+        // `show bgp vrf <name> …` is normally intercepted by the manager
+        // and redirected into the per-VRF task (see `process_vrf_show`).
+        // These global handlers are the fall-through when no task is
+        // registered for `<name>`: bare `show bgp vrf` lists every VRF,
+        // and a named-but-not-running VRF reports the miss instead of
+        // leaving the request unanswered.
+        self.show_add("/show/bgp/vrf", show_bgp_vrf);
+        self.show_add("/show/bgp/vrf/ipv4", show_bgp_vrf_not_running);
+        self.show_add("/show/bgp/vrf/ipv4/longer-prefix", show_bgp_vrf_not_running);
+        self.show_add("/show/bgp/vrf/ipv6", show_bgp_vrf_not_running);
+        self.show_add("/show/bgp/vrf/ipv6/longer-prefix", show_bgp_vrf_not_running);
     }
 }

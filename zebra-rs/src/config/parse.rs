@@ -571,18 +571,26 @@ pub fn parse(
         }
     }
 
-    // `ext:default-child` positional value. A container may name a
-    // child whose key can be typed without the child's own keyword
-    // (`show bgp 10.0.0.1` == `show bgp ipv4 10.0.0.1`). Probe that
-    // child's key in a side `Match` so the normal transition below is
-    // left untouched, then either descend into the child (the value is
-    // the winner) or fold the key's completion hints into `mx` (so
-    // `show bgp <tab>` still advertises <A.B.C.D> / <A.B.C.D/M>). IP
-    // literals never collide with the sibling keywords, so this can
-    // only fire on the value branch — no existing command regresses.
+    // `ext:default-child` positional value. A container (or a list
+    // entry, once its key is matched) may name a child whose key can be
+    // typed without the child's own keyword (`show bgp 10.0.0.1` ==
+    // `show bgp ipv4 10.0.0.1`; `show bgp vrf X 10.0.0.1` == `show bgp
+    // vrf X ipv4 10.0.0.1`). Probe that child's key in a side `Match`
+    // so the normal transition below is left untouched, then either
+    // descend into the child (the value is the winner) or fold the
+    // key's completion hints into `mx` (so `show bgp <tab>` still
+    // advertises <A.B.C.D> / <A.B.C.D/M>). `KeyMatched` covers the
+    // list-entry case: after `vrf X` the parser sits on the list node
+    // with the key consumed, so the positional value attaches to the
+    // entry's `ext:default-child`. IP literals never collide with the
+    // sibling keywords, so this can only fire on the value branch — no
+    // existing command regresses.
     if !s.set
         && !s.delete
-        && matches!(s.ymatch, YangMatch::Dir | YangMatch::DirMatched)
+        && matches!(
+            s.ymatch,
+            YangMatch::Dir | YangMatch::DirMatched | YangMatch::KeyMatched
+        )
         && let Some(child) = default_child_entry(&entry)
     {
         let mut pmx = Match::default();
@@ -937,5 +945,108 @@ mod tests {
         assert!(names.contains(&"ipv6"), "comps: {names:?}");
         assert!(names.contains(&"<A.B.C.D>"), "comps: {names:?}");
         assert!(names.contains(&"<A.B.C.D/M>"), "comps: {names:?}");
+    }
+
+    /// `show bgp vrf <name> …` mirrors the default-VRF tree: the `vrf`
+    /// list carries its own `ext:default-child "ipv4"`, so a bare
+    /// address/prefix typed after the VRF name routes into `ipv4` (the
+    /// matcher applies the positional shortcut after a list key as well
+    /// as on a plain container).
+    #[test]
+    fn show_bgp_vrf_positional_default_child() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show bgp vrf", "/show/bgp/vrf", vec![]),
+            ("show bgp vrf blue", "/show/bgp/vrf", vec!["blue"]),
+            ("show bgp vrf blue ipv4", "/show/bgp/vrf/ipv4", vec!["blue"]),
+            (
+                "show bgp vrf blue ipv4 10.0.0.1",
+                "/show/bgp/vrf/ipv4",
+                vec!["blue", "10.0.0.1"],
+            ),
+            (
+                "show bgp vrf blue 10.0.0.1",
+                "/show/bgp/vrf/ipv4",
+                vec!["blue", "10.0.0.1"],
+            ),
+            (
+                "show bgp vrf blue 10.0.0.0/24",
+                "/show/bgp/vrf/ipv4",
+                vec!["blue", "10.0.0.0/24"],
+            ),
+            (
+                "show bgp vrf blue 10.0.0.0/24 longer-prefix",
+                "/show/bgp/vrf/ipv4/longer-prefix",
+                vec!["blue", "10.0.0.0/24"],
+            ),
+            (
+                "show bgp vrf blue ipv4 10.0.0.0/24 longer-prefix",
+                "/show/bgp/vrf/ipv4/longer-prefix",
+                vec!["blue", "10.0.0.0/24"],
+            ),
+            ("show bgp vrf blue ipv6", "/show/bgp/vrf/ipv6", vec!["blue"]),
+            (
+                "show bgp vrf blue ipv6 2001:db8::1",
+                "/show/bgp/vrf/ipv6",
+                vec!["blue", "2001:db8::1"],
+            ),
+            (
+                "show bgp vrf blue ipv6 2001:db8::/48 longer-prefix",
+                "/show/bgp/vrf/ipv6/longer-prefix",
+                vec!["blue", "2001:db8::/48"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
+    /// After the manager strips the `vrf <name>` selector, the per-VRF
+    /// BGP task sees exactly the default-VRF `/show/bgp/…` path + value,
+    /// which is what [`crate::bgp::show::process_vrf_show`] dispatches on.
+    #[test]
+    fn show_bgp_vrf_redirect_strips_selector() {
+        use crate::config::{path_from_command, vrf_redirect_split};
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show bgp vrf blue", "/show/bgp", vec![]),
+            ("show bgp vrf blue ipv4", "/show/bgp/ipv4", vec![]),
+            (
+                "show bgp vrf blue 10.0.0.1",
+                "/show/bgp/ipv4",
+                vec!["10.0.0.1"],
+            ),
+            (
+                "show bgp vrf blue 10.0.0.0/24 longer-prefix",
+                "/show/bgp/ipv4/longer-prefix",
+                vec!["10.0.0.0/24"],
+            ),
+            (
+                "show bgp vrf blue ipv6 2001:db8::/48 longer-prefix",
+                "/show/bgp/ipv6/longer-prefix",
+                vec!["2001:db8::/48"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (name, rewritten) =
+                vrf_redirect_split(&state.paths).expect("vrf selector should split");
+            assert_eq!(name, "blue", "vrf name for `{cmd}`");
+            let (path, args) = path_from_command(&rewritten);
+            assert_eq!(path, want_path, "redirected path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "redirected args for `{cmd}`");
+        }
     }
 }
