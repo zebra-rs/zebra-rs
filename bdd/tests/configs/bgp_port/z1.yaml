@@ -1,0 +1,31 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    # Do not listen at all: z2's dials toward z1:179 are refused, so
+    # the z1-z2 session can only be the one z1 opens toward z2:1790 —
+    # and an outbound dial works fine without any listener.
+    port: 0
+    global:
+      as: 65001
+      identifier: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      # Dial this neighbor on TCP 1790 (z2's non-default listener)
+      # instead of the IANA default 179.
+      port: 1790
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.10.0.1/32

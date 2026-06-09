@@ -499,6 +499,11 @@ impl BgpVrf {
                 // BGP-LS (RFC 9552) is produced and stored only by the
                 // global BGP instance — per-VRF tasks never see it.
             }
+            Message::Relisten => {
+                // `router bgp port` is a global-instance knob; only the
+                // global event loop queues (and handles) Relisten.
+                // Per-VRF tasks keep their default-port listeners.
+            }
         }
     }
 

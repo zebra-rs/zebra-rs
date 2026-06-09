@@ -18,6 +18,7 @@
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
   - [TCP MSS](ch-02-14-bgp-tcp-mss.md)
+  - [TCP Port (listen & per-neighbor)](ch-02-23-bgp-port.md)
   - [AS Override](ch-02-12-bgp-as-override.md)
   - [allowas-in (Inbound AS_PATH Loop Relaxation)](ch-02-13-bgp-allowas-in.md)
   - [Remove Private AS](ch-02-14-bgp-remove-private-as.md)

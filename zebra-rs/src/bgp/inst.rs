@@ -1,7 +1,7 @@
-use super::BgpAttrStore;
 use super::peer::{BgpTop, Event, PeerBfdConfig, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
+use super::{BGP_PORT, BgpAttrStore};
 use crate::bgp::peer::accept;
 use crate::bgp::tracing::{Direction, PacketKind};
 use crate::bgp::{InOut, peer};
@@ -74,6 +74,13 @@ pub enum Message {
         add: Vec<(bgp_packet::BgpLsNlri, bgp_packet::BgpLsAttr)>,
         withdraw: Vec<bgp_packet::BgpLsNlri>,
     },
+    /// `router bgp port <0-65535>` changed: close the BGP listen
+    /// sockets and reopen them on the (new) configured port — or leave
+    /// them closed when the port is 0. Sent by the config callback
+    /// because the rebind is async (`Bgp::listen`) while callbacks are
+    /// sync; handled directly in [`Bgp::event_loop`], which awaits
+    /// [`Bgp::relisten`].
+    Relisten,
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -415,6 +422,14 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: LocalRib,
+    /// `router bgp port <0-65535>`: TCP port the BGP listener binds
+    /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
+    /// listening entirely — no server socket is open, so every session
+    /// must be dialed by this router. A config change closes and
+    /// reopens the listeners via [`Message::Relisten`] →
+    /// [`Bgp::relisten`]; established sessions are not touched. Scope
+    /// is this instance's listener (per-VRF tasks keep the default).
+    pub port: u16,
     pub listen_task: Option<Task<()>>,
     pub listen_task6: Option<Task<()>>,
     pub listen_err: Option<anyhow::Error>,
@@ -733,6 +748,7 @@ impl Bgp {
             manager_tx,
             callbacks: HashMap::new(),
             pcallbacks: HashMap::new(),
+            port: BGP_PORT,
             listen_task: None,
             listen_task6: None,
             listen_err: None,
@@ -1375,6 +1391,11 @@ impl Bgp {
                     );
                 }
             }
+            Message::Relisten => {
+                // Intercepted in `event_loop` before this dispatcher
+                // (the rebind is async, this method is not). Nothing to
+                // do if one slips through another path.
+            }
         }
     }
 
@@ -1660,6 +1681,12 @@ impl Bgp {
     }
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {
+        // `router bgp port 0` — do not open a server socket at all;
+        // sessions can only be dialed actively from this side.
+        if self.port == 0 {
+            return Ok(());
+        }
+
         let tx = self.tx.clone();
         let tx_clone = tx.clone();
 
@@ -1668,15 +1695,14 @@ impl Bgp {
         let mut ipv6_bound = false;
 
         // Check if we can bind to IPv4
-        match self.ctx.tcp_listen("0.0.0.0:179".parse().unwrap()).await {
+        let addr_v4: SocketAddr = format!("0.0.0.0:{}", self.port).parse().unwrap();
+        match self.ctx.tcp_listen(addr_v4).await {
             Ok(listener) => {
                 ipv4_bound = true;
-                // println!("Successfully bound to IPv4 0.0.0.0:179");
                 use std::os::fd::AsRawFd;
                 self.listen_fd_v4 = Some(listener.as_raw_fd());
                 let tx_ipv4 = tx.clone();
                 self.listen_task = Some(Task::spawn(async move {
-                    // println!("BGP listening on 0.0.0.0:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
@@ -1698,24 +1724,19 @@ impl Bgp {
                 }));
             }
             Err(e) => {
-                eprintln!("Failed to bind to IPv4 0.0.0.0:179: {}", e);
+                eprintln!("Failed to bind to IPv4 {}: {}", addr_v4, e);
             }
         }
 
         // Check if we can bind to IPv6 with IPv6-only socket
-        match self
-            .ctx
-            .tcp_listen_v6_only("[::]:179".parse().unwrap())
-            .await
-        {
+        let addr_v6: SocketAddr = format!("[::]:{}", self.port).parse().unwrap();
+        match self.ctx.tcp_listen_v6_only(addr_v6).await {
             Ok(listener) => {
                 ipv6_bound = true;
-                // println!("Successfully bound to IPv6 [::]:179");
                 use std::os::fd::AsRawFd;
                 self.listen_fd_v6 = Some(listener.as_raw_fd());
                 let tx_ipv6 = tx_clone;
                 self.listen_task6 = Some(Task::spawn(async move {
-                    // println!("BGP listening on [::]:179");
                     loop {
                         match listener.accept().await {
                             Ok((socket, sockaddr)) => {
@@ -1736,7 +1757,7 @@ impl Bgp {
                 }));
             }
             Err(e) => {
-                eprintln!("Failed to bind to IPv6 [::]:179: {}", e);
+                eprintln!("Failed to bind to IPv6 {}: {}", addr_v6, e);
             }
         }
 
@@ -1761,6 +1782,32 @@ impl Bgp {
         super::config::apply_tcp_mss_refresh_all(self);
 
         Ok(())
+    }
+
+    /// Close the BGP listen sockets and, unless the configured
+    /// [`Self::port`] is 0, reopen them on it. Dropping the accept
+    /// tasks aborts them, which drops the `TcpListener`s and closes
+    /// the fds; the cached raw fds (MD5 / TCP-AO / MSS install
+    /// targets) are cleared with them and re-captured — and the
+    /// per-peer options re-applied — by `listen()` on the new
+    /// sockets. Established sessions are left alone: only the
+    /// listener cycles. A `Message::Accept` already queued from an
+    /// old listener is still processed — that connection was
+    /// accepted while its port was live.
+    pub async fn relisten(&mut self) {
+        self.listen_task = None;
+        self.listen_task6 = None;
+        self.listen_fd_v4 = None;
+        self.listen_fd_v6 = None;
+        self.listen_err = None;
+        if self.port == 0 {
+            tracing::info!("bgp: listen port set to 0 — BGP listener disabled");
+            return;
+        }
+        tracing::info!(port = self.port, "bgp: reopening BGP listener");
+        if let Err(err) = self.listen().await {
+            self.listen_err = Some(err);
+        }
     }
 
     /// Recompute every peer's cached `shared_network` against the current
@@ -2808,7 +2855,14 @@ impl Bgp {
                     self.process_rib_msg(msg);
                 }
                 Some(msg) = self.rx.recv() => {
-                    self.process_msg(msg);
+                    // Relisten needs `.await` (async bind), which the
+                    // sync `process_msg` dispatcher cannot do — handle
+                    // it here at the loop level.
+                    if matches!(msg, Message::Relisten) {
+                        self.relisten().await;
+                    } else {
+                        self.process_msg(msg);
+                    }
                 }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);

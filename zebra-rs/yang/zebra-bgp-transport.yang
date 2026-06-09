@@ -52,6 +52,17 @@ module zebra-bgp-transport {
      site in `peer_connect`. Operators using the FRR vocabulary get
      the flat form without giving up the IETF tree.";
 
+  revision 2026-06-09 {
+    description
+      "Add per-neighbor `port <1-65535>` (TCP destination port used to
+       dial the neighbor, default 179) and instance-level
+       `port <0-65535>` (TCP port the BGP listener binds; 0 disables
+       listening entirely, default 179).";
+    reference
+      "FRR `neighbor X port (0-65535)`; FRR bgpd `-p/--bgp_port`
+       startup option (port 0 sets BGP_OPT_NO_LISTEN).";
+  }
+
   revision 2026-06-08 {
     description
       "Add `tcp-mss <1-65535>` per-neighbor leaf (TCP_MAXSEG clamp), and
@@ -178,6 +189,35 @@ module zebra-bgp-transport {
          RFC 4271: A Border Gateway Protocol 4 (BGP-4).";
     }
 
+    leaf port {
+      ext:help "TCP destination port used to connect to this neighbor (1-65535, default 179)";
+      type uint16 {
+        range "1..65535";
+      }
+      description
+        "TCP destination port this router dials when it actively opens
+         the BGP session toward this neighbor. When absent, the IANA
+         default of 179 is used; deleting the leaf returns to 179.
+
+         Only the active (outgoing) connection is affected: an inbound
+         connection is matched to its neighbor by source address alone,
+         never by port, so this leaf does not change what the local
+         listener accepts. To move the local listening side off 179,
+         set the instance-level `router bgp port` instead — the usual
+         pairing is `port <N>` on the instance of one router and
+         `neighbor X port <N>` on the router that dials it.
+
+         A change (set, change, or delete) on a session that is already
+         up bounces it — the same teardown `clear bgp ... hard` uses —
+         so the session re-establishes on the new port immediately
+         (FRR's `peer_change_reset` behaviour for this knob).
+
+         Equivalent to `neighbor X port` in FRR / Cisco IOS.";
+      reference
+        "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 8
+         (TCP port 179).";
+    }
+
     leaf disable-connected-check {
       ext:help "Allow a single-hop eBGP peer that is not on a connected subnet";
       type empty;
@@ -212,6 +252,46 @@ module zebra-bgp-transport {
     }
   }
 
+  grouping bgp-instance-transport-extension {
+    description
+      "FRR-style transport leaves on the BGP instance itself.";
+
+    leaf port {
+      ext:help "TCP port the BGP listener binds (0-65535; 0 disables listening, default 179)";
+      type uint16 {
+        range "0..65535";
+      }
+      description
+        "TCP port the BGP server socket listens on for inbound
+         sessions (IPv4 and IPv6 listeners both). When absent, the
+         IANA default of 179 is used; deleting the leaf returns to
+         179. The special value 0 disables listening entirely: the
+         server sockets are closed and no inbound BGP connection can
+         be accepted — every session must then be opened actively by
+         this router.
+
+         Changing the value closes the current listeners and reopens
+         them on the new port (or, for 0, just closes them). Sessions
+         that are already established are not touched — only the
+         listening socket cycles; a remote peer that later dials the
+         old port is refused by the kernel.
+
+         Outgoing connections are unaffected: they go to each
+         neighbor's default or configured `neighbor X port`, and the
+         local source port of a dialed session stays ephemeral.
+
+         Scope is this instance's listener (the default VRF task);
+         per-VRF instances keep the default port.
+
+         FRR exposes this only as the `-p/--bgp_port` startup option
+         (0 likewise meaning do-not-listen); here it is runtime
+         configuration.";
+      reference
+        "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 8
+         (TCP port 179).";
+    }
+  }
+
   /* =========================================================
    * Augments into the zebra-rs configure tree
    * ========================================================= */
@@ -230,5 +310,21 @@ module zebra-bgp-transport {
       "Same attachment for the delete subtree so
        `delete router bgp neighbor X update-source` is path-valid.";
     uses bgp-neighbor-transport-extension;
+  }
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp" {
+    description
+      "Attach the instance-level transport leaves (listen `port`) in
+       the candidate-set subtree.";
+    uses bgp-instance-transport-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp port` is path-valid.";
+    uses bgp-instance-transport-extension;
   }
 }

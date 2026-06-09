@@ -16,7 +16,7 @@ use super::auth::AoConfig;
 use super::peer::{AfiSafiEncapType, BgpTop};
 use super::route_clean;
 use super::{
-    Bgp,
+    BGP_PORT, Bgp,
     inst::Callback,
     peer::{
         ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, PasswordEncoding, Peer, PeerType, RemovePrivateAs,
@@ -1616,6 +1616,21 @@ fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
         } else {
             peer.config.transport.passive = false;
         }
+        // Make the flag effective now, not at the next idle-hold tick.
+        // A started peer parked in Idle has an idle-hold timer armed
+        // toward its first dial (commonly because `remote-as` in the
+        // same commit fired `start()` a moment before this leaf):
+        // re-running the timer reconciler flips it straight to Active
+        // — listening, never dialing. Without this, an inbound
+        // connection landing in that ≤5s Idle window is dropped by
+        // `handle_peer_connection` (Idle refuses connections) and the
+        // remote parks on its 120s connect-retry timer.
+        if peer.config.transport.passive
+            && peer.active
+            && matches!(peer.state, super::peer::State::Idle)
+        {
+            timer::update_timers(peer);
+        }
     }
 
     Some(())
@@ -1817,6 +1832,63 @@ pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
     }
 }
 
+/// `[no] router bgp neighbor <addr> port <1-65535>` — TCP destination
+/// port used when this router actively dials the neighbor; deleting the
+/// leaf returns to the IANA default 179 ([`BGP_PORT`]). The value is
+/// read by `peer_start_connection` when the connect task is spawned.
+/// Inbound connections are matched by source address only, so the
+/// local listener is unaffected (that side moves with the
+/// instance-level `router bgp port`). Like FRR (`PEER_FLAG_PORT` is a
+/// `peer_change_reset` flag), a change on a live session bounces it
+/// (`Event::Stop`, the `clear bgp ... hard` teardown) so the session
+/// re-establishes on the new port immediately; an Idle peer just picks
+/// the port up on its first connect.
+fn config_peer_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    // On delete the echoed value (if any) is irrelevant — back to 179.
+    let want = if op.is_set() { Some(args.u16()?) } else { None };
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if peer.config.transport.port == want {
+            // No actual change — don't disturb a live session.
+            return Some(());
+        }
+        peer.config.transport.port = want;
+        peer.start();
+        // Only an established / in-progress session needs an explicit
+        // bounce; bouncing an Idle peer here could race the idle-hold
+        // timer `start()` just armed and strand it.
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// `[no] router bgp port <0-65535>` — TCP port the BGP listener binds;
+/// 0 disables listening entirely and deleting the leaf returns to the
+/// IANA default 179 ([`BGP_PORT`]). The bind itself is async while
+/// config callbacks are sync, so the callback only records the value
+/// and queues [`super::inst::Message::Relisten`]; the event loop then
+/// closes the current listeners and reopens them on the new port (or
+/// leaves them closed for 0) in [`Bgp::relisten`]. Established
+/// sessions are not touched — only the server socket cycles. FRR
+/// exposes this as the `-p/--bgp_port` startup option only; here it
+/// is runtime-changeable.
+fn config_global_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let want = if op.is_set() { args.u16()? } else { BGP_PORT };
+    if bgp.port == want {
+        // No actual change — don't cycle a healthy listener.
+        return Some(());
+    }
+    bgp.port = want;
+    let _ = bgp.tx.try_send(super::inst::Message::Relisten);
+    Some(())
+}
+
 /// `[no] router bgp neighbor <addr> disable-connected-check` — exempt a
 /// single-hop eBGP neighbor from the directly-connected-network check, so
 /// a session toward a non-connected address (typically a loopback one L2
@@ -1925,6 +1997,15 @@ fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
             }
         }
         Err(e) => {
+            // Removing a key that was never on this socket is a no-op,
+            // not a failure: the kernel answers ENOENT. It happens for
+            // every password-less peer when the post-(re)bind sweep
+            // (`listen()` / `relisten()`) reconciles a fresh listener,
+            // so only a failed install — or a failed removal of a key
+            // that could really be present — deserves the warning.
+            if password_bytes.is_empty() && e.kind() == std::io::ErrorKind::NotFound {
+                return;
+            }
             tracing::warn!(
                 peer = %addr,
                 error = %e,
@@ -2153,6 +2234,9 @@ impl Bgp {
             "/router/bgp/global/no-fib-install",
             config_global_no_fib_install,
         );
+        // `router bgp port <0-65535>` (zebra-bgp-transport.yang): the
+        // listener port; 0 disables listening.
+        self.callback_add("/router/bgp/port", config_global_port);
         self.callback_add(
             "/router/bgp/segment-routing/srv6/locator",
             config_srv6_locator,
@@ -2344,6 +2428,10 @@ impl Bgp {
         // by Peer::session_ttl and applied at connect / fsm_connected.
         self.callback_peer("/ebgp-multihop", config_ebgp_multihop);
         self.callback_peer("/tcp-mss", config_tcp_mss);
+        // FRR-style `neighbor X port <1-65535>` from
+        // zebra-bgp-transport.yang: TCP destination port used when
+        // dialing this neighbor (default 179).
+        self.callback_peer("/port", config_peer_port);
         // FRR-style `neighbor X disable-connected-check` from
         // zebra-bgp-transport.yang. Exempts a single-hop eBGP neighbor from
         // the directly-connected-network check (Peer::connected_check_ok).
@@ -3407,6 +3495,151 @@ mod neighbor_group_wiring_tests {
             1,
             "disabling on a live session must bounce it",
         );
+    }
+
+    /// `neighbor X port <1-65535>`: Set stores the destination port and
+    /// bounces a live session (FRR `peer_change_reset`); a no-op Set
+    /// does not bounce; Delete clears back to the default (179) and
+    /// bounces again so the session redials on 179.
+    #[tokio::test]
+    async fn peer_port_set_and_delete_bounce_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1", "1790"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().config.transport.port,
+            Some(1790),
+            "set must store the configured destination port",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "changing the port on a live session must bounce it",
+        );
+
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1", "1790"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1", "1790"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().config.transport.port,
+            None,
+            "delete must return to the default port (179)",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "removing the port on a live session must bounce it",
+        );
+    }
+
+    /// A port change on an Idle peer is stored but never bounced — the
+    /// next connect picks it up (same policy as the TTL knobs).
+    #[tokio::test]
+    async fn peer_port_on_idle_peer_does_not_bounce() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1", "1790"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().config.transport.port,
+            Some(1790),
+            "value must still be stored on an Idle peer",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle peer must not be bounced",
+        );
+    }
+
+    /// Setting `transport passive-mode true` on a started peer that is
+    /// still parked in Idle must flip it to Active immediately —
+    /// listening, never dialing. Idle refuses inbound connections, so
+    /// leaving the peer there until the idle-hold tick would drop a
+    /// remote's connect landing in that window (and park the remote on
+    /// its 120s connect-retry timer).
+    #[tokio::test]
+    async fn passive_mode_on_idle_started_peer_goes_active_immediately() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        assert_eq!(
+            bgp.peers.get(&peer_addr()).unwrap().state,
+            State::Idle,
+            "started peer waits out its idle-hold in Idle",
+        );
+
+        config_transport_passive(&mut bgp, arg_words(&["10.0.0.1", "true"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get(&peer_addr()).unwrap();
+        assert!(peer.config.transport.passive);
+        assert_eq!(
+            peer.state,
+            State::Active,
+            "passive peer must accept inbound connections right away",
+        );
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "the flip must not bounce anything",
+        );
+    }
+
+    /// Drain `bgp.rx`, counting queued `Message::Relisten`s.
+    fn drain_relisten(bgp: &mut Bgp) -> usize {
+        use crate::bgp::inst::Message;
+        let mut count = 0;
+        while let Ok(msg) = bgp.rx.try_recv() {
+            if matches!(msg, Message::Relisten) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// `router bgp port <0-65535>`: Set records the listener port and
+    /// queues a Relisten (the event loop does the async rebind); a
+    /// no-op Set queues nothing; port 0 is accepted (listener
+    /// disabled); Delete restores the default 179 and queues another
+    /// Relisten.
+    #[tokio::test]
+    async fn global_port_records_value_and_queues_relisten() {
+        let mut bgp = fresh_bgp();
+        assert_eq!(bgp.port, BGP_PORT, "fresh instance defaults to 179");
+
+        config_global_port(&mut bgp, arg_words(&["1790"]), ConfigOp::Set).unwrap();
+        assert_eq!(bgp.port, 1790);
+        assert_eq!(
+            drain_relisten(&mut bgp),
+            1,
+            "a port change must queue exactly one Relisten",
+        );
+
+        config_global_port(&mut bgp, arg_words(&["1790"]), ConfigOp::Set).unwrap();
+        assert_eq!(
+            drain_relisten(&mut bgp),
+            0,
+            "a no-op set must not cycle a healthy listener",
+        );
+
+        config_global_port(&mut bgp, arg_words(&["0"]), ConfigOp::Set).unwrap();
+        assert_eq!(bgp.port, 0, "port 0 (listener disabled) is accepted");
+        assert_eq!(drain_relisten(&mut bgp), 1);
+
+        config_global_port(&mut bgp, arg_words(&["0"]), ConfigOp::Delete).unwrap();
+        assert_eq!(bgp.port, BGP_PORT, "delete must restore the default 179");
+        assert_eq!(drain_relisten(&mut bgp), 1);
     }
 
     /// A single-hop eBGP peer whose address is not on a connected subnet

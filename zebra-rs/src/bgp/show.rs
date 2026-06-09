@@ -1863,7 +1863,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
 }
 
 fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
-    let local_info = if let Some(local_addr) = &neighbor.timer.local_addr {
+    let mut host_info = if let Some(local_addr) = &neighbor.timer.local_addr {
         format!(
             "  Local host: {}, Local port: {}\n",
             local_addr.ip(),
@@ -1872,6 +1872,19 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
     } else {
         String::new()
     };
+    // FRR's "Foreign host" pair: the TCP remote endpoint of the
+    // session. For a dialed session the port is the neighbor's
+    // configured `port` (default 179); for an accepted one it is the
+    // peer's ephemeral source port.
+    if let Some(remote_addr) = &neighbor.timer.remote_addr {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            host_info,
+            "  Foreign host: {}, Foreign port: {}",
+            remote_addr.ip(),
+            remote_addr.port()
+        );
+    }
 
     writeln!(
         out,
@@ -1886,7 +1899,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.remote_as,
         neighbor.local_as,
         neighbor.peer_type,
-        local_info,
+        host_info,
         neighbor.remote_router_id,
         neighbor.local_router_id,
         neighbor.state,
