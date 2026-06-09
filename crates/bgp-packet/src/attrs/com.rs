@@ -47,14 +47,11 @@ impl<const N: usize> From<[u32; N]> for Community {
 // nom_derive has no Parse impl for BTreeSet, so the wire decode is
 // hand-written: parse the attribute payload as consecutive u32s
 // (`Vec`'s blanket impl) and collect into the set.
-impl<'a, E> Parse<&'a [u8], E> for Community
-where
-    E: nom::error::ParseError<&'a [u8]>,
-{
-    fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self, E> {
+impl<'a> Parse<&'a [u8]> for Community {
+    fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self> {
         Self::parse_be(input)
     }
-    fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self, E> {
+    fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
         let (input, values) = <Vec<u32>>::parse_be(input)?;
         Ok((input, values.into_iter().collect()))
     }

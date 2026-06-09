@@ -1,5 +1,6 @@
 use bytes::{BufMut, BytesMut};
-use nom_derive::NomBE;
+use nom::IResult;
+use nom_derive::{NomBE, Parse};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -7,8 +8,11 @@ use std::str::FromStr;
 use super::{AttrEmitter, AttrFlags};
 use crate::AttrType;
 
-#[derive(Clone, Debug, Default, NomBE, PartialEq, Eq, Hash)]
-pub struct LargeCommunity(pub Vec<LargeCommunityValue>);
+// Large Communities are an unordered set on the wire (RFC 8092);
+// BTreeSet keeps the values deduplicated and canonically sorted so
+// equal sets compare/hash equal regardless of received order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LargeCommunity(pub BTreeSet<LargeCommunityValue>);
 
 impl AttrEmitter for LargeCommunity {
     fn attr_flags(&self) -> AttrFlags {
@@ -37,13 +41,33 @@ impl LargeCommunity {
         Default::default()
     }
 
-    pub fn push(&mut self, value: LargeCommunityValue) {
-        self.0.push(value)
+    pub fn insert(&mut self, value: LargeCommunityValue) {
+        self.0.insert(value);
     }
+}
 
-    pub fn sort_uniq(&mut self) {
-        let coms: BTreeSet<LargeCommunityValue> = self.0.iter().cloned().collect();
-        self.0 = coms.into_iter().collect();
+impl FromIterator<LargeCommunityValue> for LargeCommunity {
+    fn from_iter<I: IntoIterator<Item = LargeCommunityValue>>(iter: I) -> Self {
+        LargeCommunity(iter.into_iter().collect())
+    }
+}
+
+impl<const N: usize> From<[LargeCommunityValue; N]> for LargeCommunity {
+    fn from(values: [LargeCommunityValue; N]) -> Self {
+        LargeCommunity(BTreeSet::from(values))
+    }
+}
+
+// nom_derive has no Parse impl for BTreeSet, so the wire decode is
+// hand-written: parse the attribute payload as consecutive 12-octet
+// values (`Vec`'s blanket impl) and collect into the set.
+impl<'a> Parse<&'a [u8]> for LargeCommunity {
+    fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        Self::parse_be(input)
+    }
+    fn parse_be(input: &'a [u8]) -> IResult<&'a [u8], Self> {
+        let (input, values) = <Vec<LargeCommunityValue>>::parse_be(input)?;
+        Ok((input, values.into_iter().collect()))
     }
 }
 
@@ -72,11 +96,10 @@ impl FromStr for LargeCommunity {
 
         for s in com_strs.iter() {
             match LargeCommunityValue::from_str(s) {
-                Some(c) => coms.push(c),
+                Some(c) => coms.insert(c),
                 None => return Err(()),
             }
         }
-        coms.sort_uniq();
         Ok(coms)
     }
 }
@@ -123,6 +146,10 @@ mod tests {
     #[test]
     fn from_str() {
         let com = LargeCommunity::from_str("65538:655900:14560 100:102:103").unwrap();
+        assert_eq!(format!("{}", com), "100:102:103 65538:655900:14560");
+
+        // Duplicate values collapse into one entry.
+        let com = LargeCommunity::from_str("100:102:103 65538:655900:14560 100:102:103").unwrap();
         assert_eq!(format!("{}", com), "100:102:103 65538:655900:14560");
 
         let com = LargeCommunity::from_str("65538:655900 100:102:103");
