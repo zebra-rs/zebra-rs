@@ -25,13 +25,11 @@ use crate::rib::nht::ResolvedNexthop;
 #[derive(Debug)]
 pub enum BgpVrfMsg {
     /// Inbound TCP connection accepted on `:179` whose source IP
-    /// matches a peer configured in this VRF. The stream is handed
-    /// off to the per-VRF runtime; until the per-VRF FSM driver
-    /// picks it up, `BgpVrf::event_loop` drops the stream silently
-    /// — the dispatch is still wired so the global instance's
-    /// accept path no longer claims connections that should belong
-    /// to a VRF.
-    Accept(#[allow(dead_code)] TcpStream, SocketAddr),
+    /// matches a peer configured in this VRF. The global accept
+    /// dispatcher hands the stream off here; `process_global_msg`
+    /// drives it through the per-VRF passive-accept FSM path
+    /// (`peer::handle_peer_connection` against the VRF's own peers).
+    Accept(TcpStream, SocketAddr),
 
     /// VPNv4 best-path import. The global Loc-RIB resolved a route
     /// whose RT list intersects this VRF's `import_rts_v4`; the

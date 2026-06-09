@@ -2147,22 +2147,22 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
 /// address map, so an inbound connection from it would otherwise be
 /// dropped, and the session (both ends connect actively *and* accept
 /// passively) could never resolve a collision into Established.
-fn handle_peer_connection(
-    bgp: &mut Bgp,
+pub(super) fn handle_peer_connection(
+    peers: &mut PeerMap,
     peer_addr: IpAddr,
     scope_id: Option<u32>,
     stream: TcpStream,
 ) -> Option<TcpStream> {
-    let key = if bgp.peers.get(&peer_addr).is_some() {
+    let key = if peers.get(&peer_addr).is_some() {
         PeerKey::Addr(peer_addr)
     } else if let Some(ifindex) = scope_id
-        && bgp.peers.get_by_key(&PeerKey::Interface(ifindex)).is_some()
+        && peers.get_by_key(&PeerKey::Interface(ifindex)).is_some()
     {
         PeerKey::Interface(ifindex)
     } else {
         return Some(stream);
     };
-    if let Some(peer) = bgp.peers.get_mut_by_key(&key) {
+    if let Some(peer) = peers.get_mut_by_key(&key) {
         // Pin the egress TTL on the freshly accepted socket *before* we
         // decide its fate. For a `ttl-security` (GTSM) peer this is what
         // lets a rejected or dropped inbound connection be torn down
@@ -2243,7 +2243,7 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
         SocketAddr::V6(addr) if addr.scope_id() != 0 => Some(addr.scope_id()),
         _ => None,
     };
-    let mut remaining_stream = handle_peer_connection(bgp, peer_addr, scope_id, stream);
+    let mut remaining_stream = handle_peer_connection(&mut bgp.peers, peer_addr, scope_id, stream);
 
     // Static lookup missed — try a configured listen-range. If LPM
     // hits and the per-range neighbor-group resolves to a usable
@@ -2302,7 +2302,7 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
 
     // Dynamic (listen-range) peers are always address-keyed, so no
     // interface scope is needed here.
-    handle_peer_connection(bgp, peer_addr, None, stream)
+    handle_peer_connection(&mut bgp.peers, peer_addr, None, stream)
 }
 
 /// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,

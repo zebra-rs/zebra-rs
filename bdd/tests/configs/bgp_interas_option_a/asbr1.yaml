@@ -1,0 +1,64 @@
+# ASBR1 (AS 65000 border — a PE in Option A "back-to-back VRFs").
+#  - VPNv4 iBGP to PE1 over the IS-IS/SR core (the intra-AS L3VPN half).
+#  - vrf-cust holds the inter-AS link to ASBR2 (172.16.0.0/30, in the
+#    VRF, NOT in the IGP) and runs a **PE-CE eBGP session inside the VRF**
+#    to ASBR2 (remote-as 65001). Routes learned over that session are
+#    re-exported to VPNv4 toward PE1; VPNv4-imported routes are advertised
+#    to ASBR2. The VPN label terminates here — the inter-AS link carries
+#    plain IP inside vrf-cust.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+interface:
+- if-name: lo
+  ipv4:
+    address: 1.1.1.3/32
+- if-name: p1
+  ipv4:
+    address: 10.0.0.6/30
+- if-name: asbr2
+  vrf: vrf-cust
+  ipv4:
+    address: 172.16.0.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: asbr1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 1.1.1.3
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+        prefix-sid:
+          index: 3
+    - if-name: p1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      identifier: 1.1.1.3
+    neighbor:
+    - remote-address: 1.1.1.1
+      remote-as: 65000
+      update-source: 1.1.1.3
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-cust
+      rd: 65000:2
+      neighbor:
+      - remote-address: 172.16.0.2
+        remote-as: 65001
+        enabled: true
