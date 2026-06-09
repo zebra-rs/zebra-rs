@@ -511,9 +511,21 @@ pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool, is_delete: bool) 
 }
 
 fn matched_enumeration(mx: &Match) -> Option<String> {
-    if let Some(type_node) = &mx.matched_entry.type_node
-        && type_node.kind == YangType::Enumeration
-        && let Some(last_match) = &mx.last_match
+    let type_node = mx.matched_entry.type_node.as_ref()?;
+    let last_match = mx.last_match.as_ref()?;
+    if type_node.kind == YangType::Enumeration {
+        return Some(last_match.clone());
+    }
+    // A union with an inline enumeration arm (e.g. the `show bgp ipv4`
+    // key: address | prefix | `summary`). The winner was the enum
+    // keyword iff `last_match` names one of the arm's enums — the
+    // scalar arms record type hints like `<A.B.C.D>` instead — and
+    // returning the canonical name here is what lets an abbreviated
+    // keyword (`show bgp ipv4 summ`) reach the handler as `summary`.
+    if type_node.kind == YangType::Union
+        && type_node.union.iter().any(|arm| {
+            arm.kind == YangType::Enumeration && arm.enum_stmt.iter().any(|e| &e.name == last_match)
+        })
     {
         return Some(last_match.clone());
     }
@@ -958,6 +970,80 @@ mod tests {
         }
     }
 
+    /// The neighbor summary moved from `show ip bgp summary` to `show
+    /// bgp summary`, and grew per-AFI forms. ipv4/ipv6/vpnv4 carry
+    /// `summary` as an enum arm of the key union, so it arrives as an
+    /// arg of the RIB path; the EVPN form is a child path of the
+    /// `evpn` presence container; the VRF forms ride the existing
+    /// redirect. An abbreviated keyword canonicalizes (`summ` ->
+    /// `summary`) via the union-aware `matched_enumeration`.
+    #[test]
+    fn show_bgp_summary_grammar() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show bgp summary", "/show/bgp/summary", vec![]),
+            ("show bgp ipv4 summary", "/show/bgp/ipv4", vec!["summary"]),
+            ("show bgp ipv4 summ", "/show/bgp/ipv4", vec!["summary"]),
+            ("show bgp ipv6 summary", "/show/bgp/ipv6", vec!["summary"]),
+            ("show bgp vpnv4 summary", "/show/bgp/vpnv4", vec!["summary"]),
+            ("show bgp evpn summary", "/show/bgp/evpn/summary", vec![]),
+            (
+                "show bgp vrf blue summary",
+                "/show/bgp/vrf/summary",
+                vec!["blue"],
+            ),
+            (
+                "show bgp vrf blue ipv4 summary",
+                "/show/bgp/vrf/ipv4",
+                vec!["blue", "summary"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+
+        // The legacy spelling is gone; the legacy per-VRF leaf stays.
+        let (code, _comps, _state) =
+            parse("show ip bgp summary", entry.clone(), None, State::new());
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "`show ip bgp summary` must not be a command"
+        );
+        let (code, _comps, _state) = parse(
+            "show ip bgp vrf v1 summary",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`show ip bgp vrf v1 summary` must parse"
+        );
+    }
+
+    /// `show bgp ipv4 <tab>` surfaces the union arms of the key —
+    /// the value hints and the `summary` keyword — instead of an
+    /// opaque `<value:union>` hint.
+    #[test]
+    fn show_bgp_ipv4_completion_offers_union_arms() {
+        let entry = exec_entry();
+        let (_code, comps, _state) = parse("show bgp ipv4 ", entry, None, State::new());
+        let names: Vec<&str> = comps.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"<A.B.C.D>"), "comps: {names:?}");
+        assert!(names.contains(&"<A.B.C.D/M>"), "comps: {names:?}");
+        assert!(names.contains(&"summary"), "comps: {names:?}");
+    }
+
     /// The positional shortcut is IPv4-only (`ext:default-child
     /// "ipv4"`): a bare IPv6 literal after `show bgp` is not a command —
     /// IPv6 must be reached through the explicit `ipv6` keyword.
@@ -971,7 +1057,9 @@ mod tests {
     }
 
     /// `show bgp <tab>` advertises both the AFI keywords and the
-    /// positional value hints contributed by `ext:default-child`.
+    /// positional value hints contributed by `ext:default-child`. The
+    /// `summary` keyword exists twice in the schema (the leaf and the
+    /// ipv4 key's enum arm) but must be listed once.
     #[test]
     fn show_bgp_completion_offers_positional_hint() {
         let entry = exec_entry();
@@ -981,6 +1069,11 @@ mod tests {
         assert!(names.contains(&"ipv6"), "comps: {names:?}");
         assert!(names.contains(&"<A.B.C.D>"), "comps: {names:?}");
         assert!(names.contains(&"<A.B.C.D/M>"), "comps: {names:?}");
+        assert_eq!(
+            names.iter().filter(|n| **n == "summary").count(),
+            1,
+            "comps: {names:?}"
+        );
     }
 
     /// `show bgp vrf <name> …` mirrors the default-VRF tree: the `vrf`
@@ -1070,6 +1163,12 @@ mod tests {
                 "show bgp vrf blue ipv6 2001:db8::/48 longer-prefix",
                 "/show/bgp/ipv6/longer-prefix",
                 vec!["2001:db8::/48"],
+            ),
+            ("show bgp vrf blue summary", "/show/bgp/summary", vec![]),
+            (
+                "show bgp vrf blue ipv4 summary",
+                "/show/bgp/ipv4",
+                vec!["summary"],
             ),
         ];
 

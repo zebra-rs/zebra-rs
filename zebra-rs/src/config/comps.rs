@@ -191,8 +191,39 @@ fn comps_as_leaf(comps: &mut Vec<Completion>, entry: &Rc<Entry>) {
             }
             return;
         }
+        if node.kind == YangType::Union {
+            // One hint per arm, mirroring how the matcher dispatches:
+            // enum arms surface their keywords (`show bgp ipv4 ?` ->
+            // `summary`), scalar arms their type hints (`<A.B.C.D>`),
+            // instead of an opaque `<value:union>`.
+            for n in node.union.iter() {
+                comps_push_arm(comps, n);
+            }
+            return;
+        }
     }
     comps.push(comps_as_key(entry));
+}
+
+/// Push the completion hint(s) for one union arm: an enumeration arm
+/// contributes its keywords, anything else its type hint. Skips names
+/// already present so a keyword that also exists as a sibling node
+/// (e.g. the `summary` leaf next to the `ipv4` default-child whose key
+/// has a `summary` enum arm) is listed once.
+fn comps_push_arm(comps: &mut Vec<Completion>, arm: &TypeNode) {
+    let mut push_unique = |name: &str| {
+        if !comps.iter().any(|c| c.name == name) {
+            comps.push(Completion::new_name(name));
+        }
+    };
+    if arm.kind == YangType::Enumeration {
+        for e in arm.enum_stmt.iter() {
+            push_unique(&e.name);
+        }
+    } else {
+        let kind = ytype_from_typedef(&arm.typedef).unwrap_or(arm.kind);
+        push_unique(ytype_str(&kind));
+    }
 }
 
 /// Emit the positional completion hints contributed by a container's
@@ -220,12 +251,10 @@ fn comps_default_child_key(comps: &mut Vec<Completion>, parent: &Rc<Entry>) {
     };
     if node.kind == YangType::Union {
         for n in node.union.iter() {
-            let kind = ytype_from_typedef(&n.typedef).unwrap_or(n.kind);
-            comps.push(Completion::new_name(ytype_str(&kind)));
+            comps_push_arm(comps, n);
         }
     } else {
-        let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
-        comps.push(Completion::new_name(ytype_str(&kind)));
+        comps_push_arm(comps, node);
     }
 }
 
