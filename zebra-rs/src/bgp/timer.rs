@@ -53,12 +53,11 @@ impl Default for AdvInterval {
 impl Config {
     const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
     const DEFAULT_HOLD_TIME: u64 = 180;
-    /// RFC 4271 §10 suggests 120 seconds, but that makes the
-    /// Connect⇄Active failure loop glacial — a refused dial would
-    /// park the peer for two minutes between retries. We default
-    /// short so the peer keeps redialing until the connection
-    /// succeeds; `timers connect-retry-time` overrides per neighbor.
-    const DEFAULT_CONNECT_RETRY_TIME: u64 = 10;
+    /// RFC 4271 §10 suggested default. This paces the Connect⇄Active
+    /// redial loop after a connection failure; set `timers
+    /// connect-retry-time` on the neighbor when a faster redial
+    /// cadence is wanted.
+    const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
 
     pub fn idle_hold_time(&self) -> u64 {
         if let Some(idle_hold_time) = self.idle_hold_time {
