@@ -233,16 +233,29 @@ pub fn update_timers(peer: &mut Peer) {
         }
         Connect => {
             peer.timer.idle_hold_timer = None;
+            // The connect-retry backstop only paces the Active park
+            // (connected-check holdoff in `fsm_start`). Entering
+            // Connect means we are dialing: retire it so it can't
+            // fire a stray Event::Start mid-dial, and so the show
+            // output only reports it while it is genuinely pending.
+            peer.timer.connect_retry = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }
         Active => {
+            // `connect_retry` is deliberately left running here — it
+            // is what wakes a peer parked by the connected-check
+            // holdoff.
             peer.timer.idle_hold_timer = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }
         OpenSent => {
             peer.timer.idle_hold_timer = None;
+            // A connection is up (accepted while parked in Active, or
+            // our dial succeeded): the retry backstop is moot, and a
+            // late fire must not clobber the handshake.
+            peer.timer.connect_retry = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }

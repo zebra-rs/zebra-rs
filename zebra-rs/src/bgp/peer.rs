@@ -2773,6 +2773,46 @@ mod fsm_idle_hold_tests {
         assert_eq!(next, State::OpenSent);
     }
 
+    /// The eBGP connected-check holdoff parks in Active with the
+    /// connect-retry backstop armed — the one state where `show ip
+    /// bgp neighbors` reports "Next connect retry timer fires in N
+    /// seconds".
+    #[tokio::test]
+    async fn connected_check_holdoff_parks_active_with_connect_retry() {
+        let mut peer = test_peer(false);
+        peer.peer_type = PeerType::EBGP;
+        peer.shared_network = false; // neighbor not on a connected subnet
+
+        let next = fsm_start(&mut peer);
+        assert_eq!(next, State::Active);
+        assert!(peer.task.connect.is_none(), "holdoff must not dial");
+        assert!(peer.timer.connect_retry.is_some());
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(
+            peer.timer.connect_retry.is_some(),
+            "Active keeps the backstop running"
+        );
+    }
+
+    /// Leaving the Active park (dialing out, a connection coming up,
+    /// or falling back to Idle) retires the backstop: it must not
+    /// fire a stray Event::Start and must leave the show output.
+    #[tokio::test]
+    async fn connect_retry_cleared_when_leaving_the_active_park() {
+        for state in [State::Idle, State::Connect, State::OpenSent] {
+            let mut peer = test_peer(false);
+            peer.timer.connect_retry = Some(timer::start_connect_retry_timer(&peer));
+            peer.state = state;
+            timer::update_timers(&mut peer);
+            assert!(
+                peer.timer.connect_retry.is_none(),
+                "{state:?} must clear the connect-retry backstop"
+            );
+        }
+    }
+
     /// Idle refuses connections: a stale dial completing after the
     /// peer fell back to Idle must not resurrect the session.
     #[tokio::test]
