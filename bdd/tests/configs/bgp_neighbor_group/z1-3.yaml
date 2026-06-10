@@ -1,0 +1,22 @@
+# Full restatement of z1-1.yaml plus GTSM on the GROUP: the member
+# peer 192.168.0.2 carries no per-neighbor ttl-security statement, so
+# its GTSM comes entirely from the `neighbor-group RR` opinion. The
+# far end (z2-2.yaml) enables ttl-security per-neighbor; GTSM only
+# establishes when BOTH ends send TTL 255, so the session coming up
+# proves the inherited knob reached the wire.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor-group:
+    - name: RR
+      remote-as: 65002
+      ttl-security: null
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      neighbor-group: RR

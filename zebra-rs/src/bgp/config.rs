@@ -232,21 +232,24 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     };
 
     // Stash what we need to act on outside the &mut peer borrow.
-    let (peer_ident, resolve_now, should_stop_inherited) = {
+    let (peer_ident, resolve_now, should_stop_inherited, outcome) = {
         let peer = bgp.peers.get_mut(&addr)?;
         peer.config.neighbor_group = new_ref.clone();
-        // Re-resolve the effective MP set against the new reference —
-        // Set adopts the group's afi-safi opinions underneath any
+        // Re-resolve everything the group supplies against the new
+        // reference — Set adopts the group's opinions underneath any
         // explicit per-peer statements; Delete falls back to
-        // default + explicit.
-        super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+        // defaults + explicit. A knob whose effective value changed
+        // on a live session asks for a bounce; the listener/BFD jobs
+        // run after the peer borrow ends.
+        let outcome =
+            super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
 
         match op {
             ConfigOp::Set => {
                 // Resolve only if the peer doesn't already carry an
                 // explicit per-peer remote-as.
                 let needs_resolve = peer.remote_as == 0 || peer.config.remote_as_inherited;
-                (peer.ident, needs_resolve, false)
+                (peer.ident, needs_resolve, false, outcome)
             }
             ConfigOp::Delete => {
                 // Tear down only when the peer was relying on the
@@ -257,9 +260,9 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
                     peer.config.remote_as_inherited = false;
                     peer.active = false;
                 }
-                (peer.ident, false, was_inherited)
+                (peer.ident, false, was_inherited, outcome)
             }
-            _ => (peer.ident, false, false),
+            _ => (peer.ident, false, false, outcome),
         }
     };
 
@@ -290,12 +293,25 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         }
     }
 
-    if should_stop_inherited {
+    if should_stop_inherited || outcome.bounce {
         // FSM teardown — same mechanism `clear bgp ... hard` uses.
+        // Either the inherited remote-as went away or some inherited
+        // knob needs the session to reconnect under its new value.
         let _ = bgp.tx.try_send(super::inst::Message::Event(
             peer_ident,
             super::peer::Event::Stop,
         ));
+    }
+
+    // Cross-borrow jobs the inherited-knob pass asked for.
+    if outcome.mss_refresh {
+        apply_tcp_mss_refresh_all(bgp);
+    }
+    if outcome.md5_refresh {
+        apply_md5_refresh_for(bgp, addr);
+    }
+    if outcome.bfd_reapply {
+        let _ = bfd_apply(bgp, addr);
     }
 
     Some(())
@@ -378,6 +394,37 @@ fn policy_attach_msgs(
     }
 }
 
+/// Bind a resolved policy / prefix-set name to one direction slot on
+/// the peer and (un)register it with the policy actor. The actor's
+/// `PolicyRx` reply resolves the name into the actual object and
+/// soft-replays the direction — the same asynchronous ritual the
+/// per-neighbor callbacks use. Diff-gated inside
+/// [`policy_attach_msgs`] (prior == new sends nothing), so group
+/// sweeps may call this freely. Shared by the per-neighbor callbacks
+/// and the neighbor-group sweep.
+pub(super) fn apply_peer_policy_ref(
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
+    peer: &mut Peer,
+    policy_type: policy::PolicyType,
+    want: Option<String>,
+) {
+    let ident = peer.ident;
+    let slot = match policy_type {
+        policy::PolicyType::PolicyListIn => &mut peer.policy_list.get_mut(&InOut::Input).name,
+        policy::PolicyType::PolicyListOut => &mut peer.policy_list.get_mut(&InOut::Output).name,
+        policy::PolicyType::PrefixSetIn => &mut peer.prefix_set.get_mut(&InOut::Input).name,
+        policy::PolicyType::PrefixSetOut => &mut peer.prefix_set.get_mut(&InOut::Output).name,
+        // Key-chain subscriptions ride a different registry and never
+        // reach this helper.
+        policy::PolicyType::KeyChain(_) => return,
+    };
+    let prior = match &want {
+        Some(n) => slot.replace(n.clone()),
+        None => slot.take(),
+    };
+    policy_attach_msgs(policy_tx, ident, policy_type, prior, want);
+}
+
 fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let new_name = if op.is_set() {
@@ -386,19 +433,11 @@ fn config_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    let peer_ident = peer.ident;
-    let config = peer.policy_list.get_mut(&InOut::Input);
-    let prior = match &new_name {
-        Some(n) => config.name.replace(n.clone()),
-        None => config.name.take(),
-    };
-    policy_attach_msgs(
-        &bgp.policy_tx,
-        peer_ident,
-        policy::PolicyType::PolicyListIn,
-        prior,
-        new_name,
-    );
+    peer.config.knobs_explicit.policy_in = new_name;
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.policy_in.clone()
+    });
+    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PolicyListIn, want);
     Some(())
 }
 
@@ -410,18 +449,15 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    let peer_ident = peer.ident;
-    let config = peer.policy_list.get_mut(&InOut::Output);
-    let prior = match &new_name {
-        Some(n) => config.name.replace(n.clone()),
-        None => config.name.take(),
-    };
-    policy_attach_msgs(
+    peer.config.knobs_explicit.policy_out = new_name;
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.policy_out.clone()
+    });
+    apply_peer_policy_ref(
         &bgp.policy_tx,
-        peer_ident,
+        peer,
         policy::PolicyType::PolicyListOut,
-        prior,
-        new_name,
+        want,
     );
     Some(())
 }
@@ -434,19 +470,11 @@ fn config_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    let peer_ident = peer.ident;
-    let config = peer.prefix_set.get_mut(&InOut::Input);
-    let prior = match &new_name {
-        Some(n) => config.name.replace(n.clone()),
-        None => config.name.take(),
-    };
-    policy_attach_msgs(
-        &bgp.policy_tx,
-        peer_ident,
-        policy::PolicyType::PrefixSetIn,
-        prior,
-        new_name,
-    );
+    peer.config.knobs_explicit.prefix_set_in = new_name;
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.prefix_set_in.clone()
+    });
+    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PrefixSetIn, want);
     Some(())
 }
 
@@ -458,19 +486,11 @@ fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    let peer_ident = peer.ident;
-    let config = peer.prefix_set.get_mut(&InOut::Output);
-    let prior = match &new_name {
-        Some(n) => config.name.replace(n.clone()),
-        None => config.name.take(),
-    };
-    policy_attach_msgs(
-        &bgp.policy_tx,
-        peer_ident,
-        policy::PolicyType::PrefixSetOut,
-        prior,
-        new_name,
-    );
+    peer.config.knobs_explicit.prefix_set_out = new_name;
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.prefix_set_out.clone()
+    });
+    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PrefixSetOut, want);
     Some(())
 }
 
@@ -480,8 +500,29 @@ fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
 
     let peer = bgp.peers.get_mut(&addr)?;
 
-    peer.reflector_client = op.is_set() && flag;
-    None
+    // Record the verbatim statement (the `client` boolean leaf): Set
+    // carries the value, Delete forgets the statement. Then resolve
+    // through the neighbor-group precedence: the explicit statement
+    // wins, a Delete falls back to the group's opinion (or the off
+    // default).
+    peer.config.knobs_explicit.route_reflector_client = op.is_set().then_some(flag);
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.route_reflector_client
+    })
+    .unwrap_or(false);
+    apply_route_reflector_client(peer, want);
+    Some(())
+}
+
+/// Write a resolved `route-reflector client` value onto the peer.
+/// Note the field lives on [`Peer`] directly (`peer.reflector_client`),
+/// not on [`super::peer::PeerConfig`]. Storage-only effective state — no
+/// FSM ritual: like the per-neighbor knob the new role applies to route
+/// reflection performed after the change. Shared by the per-neighbor
+/// callback and the neighbor-group sweep.
+pub(super) fn apply_route_reflector_client(peer: &mut Peer, want: bool) -> bool {
+    peer.reflector_client = want;
+    false
 }
 
 fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -520,14 +561,29 @@ fn config_allowas_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
 
+    // The verbatim statement now rides `knobs_explicit`; the effective
+    // value (explicit-wins over the group opinion) is written below.
     if op.is_set() {
         peer.config
+            .knobs_explicit
             .allowas_in
             .get_or_insert(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
     } else {
-        peer.config.allowas_in = None;
+        peer.config.knobs_explicit.allowas_in = None;
     }
+    let want =
+        super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
+    apply_allowas_in(peer, want);
     Some(())
+}
+
+/// Write a resolved `allowas-in` value onto the peer. Storage-only
+/// effective state — no FSM ritual: like the per-neighbor knob the new
+/// budget applies to inbound UPDATEs processed after the change.
+/// Shared by the per-neighbor callbacks and the neighbor-group sweep.
+pub(super) fn apply_allowas_in(peer: &mut Peer, want: Option<AllowAsIn>) -> bool {
+    peer.config.allowas_in = want;
+    false
 }
 
 /// `set router bgp neighbor X allowas-in count <1-10>`. Deleting just
@@ -539,13 +595,21 @@ fn config_allowas_in_count(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     if op.is_set() {
         let count = args.u8()?;
         let peer = bgp.peers.get_mut(&addr)?;
-        peer.config.allowas_in = Some(AllowAsIn::Count(count));
+        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Count(count));
     } else {
         let peer = bgp.peers.get_mut(&addr)?;
-        if matches!(peer.config.allowas_in, Some(AllowAsIn::Count(_))) {
-            peer.config.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        if matches!(
+            peer.config.knobs_explicit.allowas_in,
+            Some(AllowAsIn::Count(_))
+        ) {
+            peer.config.knobs_explicit.allowas_in =
+                Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
         }
     }
+    let peer = bgp.peers.get_mut(&addr)?;
+    let want =
+        super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
+    apply_allowas_in(peer, want);
     Some(())
 }
 
@@ -557,10 +621,16 @@ fn config_allowas_in_origin(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     let peer = bgp.peers.get_mut(&addr)?;
 
     if op.is_set() {
-        peer.config.allowas_in = Some(AllowAsIn::Origin);
-    } else if matches!(peer.config.allowas_in, Some(AllowAsIn::Origin)) {
-        peer.config.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Origin);
+    } else if matches!(
+        peer.config.knobs_explicit.allowas_in,
+        Some(AllowAsIn::Origin)
+    ) {
+        peer.config.knobs_explicit.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
     }
+    let want =
+        super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.allowas_in);
+    apply_allowas_in(peer, want);
     Some(())
 }
 
@@ -572,8 +642,25 @@ fn config_allowas_in_origin(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
 fn config_as_override(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.as_override = op.is_set();
+    // Record the verbatim statement (a presence container: presence
+    // means "on"), then resolve through the neighbor-group precedence:
+    // the explicit statement wins, a Delete falls back to the group's
+    // opinion (or the off default).
+    peer.config.knobs_explicit.as_override = op.is_set().then_some(true);
+    let want =
+        super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.as_override)
+            .unwrap_or(false);
+    apply_as_override(peer, want);
     Some(())
+}
+
+/// Write a resolved `as-override` value onto the peer. Storage-only
+/// effective state — no FSM ritual: like the per-neighbor knob the new
+/// value applies to UPDATEs advertised after the change. Shared by the
+/// per-neighbor callback and the neighbor-group sweep.
+pub(super) fn apply_as_override(peer: &mut Peer, want: bool) -> bool {
+    peer.config.as_override = want;
+    false
 }
 
 /// `set router bgp neighbor X remove-private-as` — the presence
@@ -591,14 +678,30 @@ fn config_remove_private_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
 
+    // The verbatim statement now rides `knobs_explicit`; the effective
+    // value (explicit-wins over the group opinion) is written below.
     if op.is_set() {
         peer.config
+            .knobs_explicit
             .remove_private_as
             .get_or_insert_with(RemovePrivateAs::default);
     } else {
-        peer.config.remove_private_as = None;
+        peer.config.knobs_explicit.remove_private_as = None;
     }
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.remove_private_as
+    });
+    apply_remove_private_as(peer, want);
     Some(())
+}
+
+/// Write a resolved `remove-private-as` value onto the peer.
+/// Storage-only effective state — no FSM ritual: like the per-neighbor
+/// knob the new policy applies to UPDATEs advertised after the change.
+/// Shared by the per-neighbor callbacks and the neighbor-group sweep.
+pub(super) fn apply_remove_private_as(peer: &mut Peer, want: Option<RemovePrivateAs>) -> bool {
+    peer.config.remove_private_as = want;
+    false
 }
 
 /// `set router bgp neighbor X remove-private-as all`. Act on a mixed
@@ -612,12 +715,17 @@ fn config_remove_private_as_all(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 
     if op.is_set() {
         peer.config
+            .knobs_explicit
             .remove_private_as
             .get_or_insert_with(RemovePrivateAs::default)
             .all = true;
-    } else if let Some(rpa) = peer.config.remove_private_as.as_mut() {
+    } else if let Some(rpa) = peer.config.knobs_explicit.remove_private_as.as_mut() {
         rpa.all = false;
     }
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.remove_private_as
+    });
+    apply_remove_private_as(peer, want);
     Some(())
 }
 
@@ -631,12 +739,17 @@ fn config_remove_private_as_replace_as(bgp: &mut Bgp, mut args: Args, op: Config
 
     if op.is_set() {
         peer.config
+            .knobs_explicit
             .remove_private_as
             .get_or_insert_with(RemovePrivateAs::default)
             .replace_as = true;
-    } else if let Some(rpa) = peer.config.remove_private_as.as_mut() {
+    } else if let Some(rpa) = peer.config.knobs_explicit.remove_private_as.as_mut() {
         rpa.replace_as = false;
     }
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.remove_private_as
+    });
+    apply_remove_private_as(peer, want);
     Some(())
 }
 
@@ -648,8 +761,27 @@ fn config_remove_private_as_replace_as(bgp: &mut Bgp, mut args: Args, op: Config
 fn config_enforce_first_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.enforce_first_as = op.is_set();
+    // Record the verbatim statement (a presence container: presence
+    // means "on"), then resolve through the neighbor-group precedence:
+    // the explicit statement wins, a Delete falls back to the group's
+    // opinion (or the off default).
+    peer.config.knobs_explicit.enforce_first_as = op.is_set().then_some(true);
+    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+        k.enforce_first_as
+    })
+    .unwrap_or(false);
+    apply_enforce_first_as(peer, want);
     Some(())
+}
+
+/// Write a resolved `enforce-first-as` value onto the peer.
+/// Storage-only effective state — no FSM ritual: like the per-neighbor
+/// knob the new check applies to inbound UPDATEs processed after the
+/// change. Shared by the per-neighbor callback and the neighbor-group
+/// sweep.
+pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
+    peer.config.enforce_first_as = want;
+    false
 }
 
 /// `set router bgp neighbor X bfd enable true|false` — flips the
@@ -668,7 +800,7 @@ fn config_enforce_first_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 /// `minimum-ttl` is not part of the key; changing it on an already-up
 /// session needs a bounce (BFD applies params only at session
 /// creation), consistent with how intervals / profile behave.
-fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
+pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     let (enable, desired_key, params) = {
         let peer = bgp.peers.get(&addr)?;
         // Effective enable + Echo = the per-neighbor `bfd {}` merged over the
@@ -1567,9 +1699,18 @@ fn config_next_hop_self(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
 
-    let value = if op.is_set() { args.boolean()? } else { false };
-    let config = peer.config.sub.entry(afi_safi).or_default();
-    config.next_hop_self = value;
+    // Record the verbatim statement, then resolve through the
+    // neighbor-group precedence — a Delete falls back to the group's
+    // per-family opinion (or the off default).
+    if op.is_set() {
+        let value = args.boolean()?;
+        peer.config.nhs_explicit.insert(afi_safi, value);
+    } else {
+        peer.config.nhs_explicit.remove(&afi_safi);
+    }
+    let value =
+        super::neighbor_group::resolve_next_hop_self(&bgp.neighbor_groups, &peer.config, afi_safi);
+    peer.config.sub.entry(afi_safi).or_default().next_hop_self = value;
     Some(())
 }
 
@@ -1628,39 +1769,61 @@ fn config_local_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 fn config_transport_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
-    let addr = if let Some(addr) = args.v4addr() {
-        IpAddr::V4(addr)
-    } else if let Some(addr) = args.v6addr() {
-        IpAddr::V6(addr)
+    let addr = args.addr()?;
+    // Per-neighbor `transport passive-mode` is a boolean leaf: Set
+    // carries the value, Delete forgets the statement.
+    let passive = if op.is_set() {
+        Some(args.boolean()?)
     } else {
-        return None;
+        None
     };
-    let passive = args.boolean()?;
 
     if let Some(peer) = bgp.peers.get_mut(&addr) {
-        if op == ConfigOp::Set {
-            peer.config.transport.passive = passive;
-        } else {
-            peer.config.transport.passive = false;
-        }
-        // Make the flag effective now, not at the next idle-hold tick.
-        // A started peer parked in Idle has an idle-hold timer armed
-        // toward its first dial (commonly because `remote-as` in the
-        // same commit fired `start()` a moment before this leaf):
-        // re-running the timer reconciler flips it straight to Active
-        // — listening, never dialing. Without this, an inbound
-        // connection landing in that ≤5s Idle window is dropped by
-        // `handle_peer_connection` (Idle refuses connections) and the
-        // remote parks on its 120s connect-retry timer.
-        if peer.config.transport.passive
-            && peer.active
-            && matches!(peer.state, super::peer::State::Idle)
-        {
-            timer::update_timers(peer);
-        }
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence: the explicit statement wins, a
+        // Delete falls back to the group's opinion (or the off
+        // default).
+        peer.config.knobs_explicit.passive = passive;
+        let want =
+            super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.passive)
+                .unwrap_or(false);
+        apply_passive(peer, want);
     }
 
     Some(())
+}
+
+/// Write a resolved `passive` value onto the peer, preserving the
+/// per-neighbor ritual. Never bounces (returns `false`): a passive
+/// flip changes only which side dials, applied live by re-running the
+/// timer reconciler. Shared by the per-neighbor callback and the
+/// neighbor-group sweep.
+///
+/// Dynamic (listen-range) members are ALWAYS passive — they only exist
+/// because an inbound connection matched a range and must never dial
+/// back out (see `try_dynamic_accept`, which forces it at
+/// materialization). The resolved opinion is clamped to `true` for such
+/// peers regardless of the group's value.
+///
+/// Make the flag effective now, not at the next idle-hold tick. A
+/// started peer parked in Idle has an idle-hold timer armed toward its
+/// first dial (commonly because `remote-as` in the same commit fired
+/// `start()` a moment before this leaf): re-running the timer
+/// reconciler flips it straight to Active — listening, never dialing.
+/// Without this, an inbound connection landing in that ≤5s Idle window
+/// is dropped by `handle_peer_connection` (Idle refuses connections)
+/// and the remote parks on its 120s connect-retry timer.
+pub(super) fn apply_passive(peer: &mut Peer, want: bool) -> bool {
+    // Dynamic listen-range peers are passive-only, no matter the group.
+    let want = want || matches!(peer.origin, super::peer_key::PeerOrigin::Dynamic { .. });
+    peer.config.transport.passive = want;
+    if peer.config.transport.passive
+        && peer.active
+        && matches!(peer.state, super::peer::State::Idle)
+    {
+        timer::update_timers(peer);
+    }
+    false
 }
 
 fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1672,23 +1835,33 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         return None;
     };
 
-    let peer = bgp.peers.get_mut(&peer_addr)?;
+    {
+        let peer = bgp.peers.get_mut(&peer_addr)?;
 
-    if op == ConfigOp::Set {
-        let source = if let Some(addr) = args.v4addr() {
-            IpAddr::V4(addr)
-        } else if let Some(addr) = args.v6addr() {
-            IpAddr::V6(addr)
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence — a Delete falls back to the
+        // group's source (or none).
+        if op == ConfigOp::Set {
+            let source = if let Some(addr) = args.v4addr() {
+                IpAddr::V4(addr)
+            } else if let Some(addr) = args.v6addr() {
+                IpAddr::V6(addr)
+            } else {
+                return None;
+            };
+            // Address family of the source must match the peer; an
+            // invalid statement is refused outright (not recorded).
+            if source.is_ipv4() != peer_addr.is_ipv4() {
+                return None;
+            }
+            peer.config.knobs_explicit.update_source = Some(source);
         } else {
-            return None;
-        };
-        // Address family of the source must match the peer.
-        if source.is_ipv4() != peer_addr.is_ipv4() {
-            return None;
+            peer.config.knobs_explicit.update_source = None;
         }
-        peer.config.transport.update_source = Some(source);
-    } else {
-        peer.config.transport.update_source = None;
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.update_source
+        });
+        apply_update_source(peer, want);
     }
 
     // IOS-XR semantics: an async BFD session inherits the neighbor's
@@ -1703,6 +1876,33 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     bfd_apply(bgp, peer_addr)
 }
 
+/// Write a resolved `update-source` onto the peer. The connect path
+/// reads it at dial time, so no bounce — parity with the per-neighbor
+/// callback, which has never bounced on a source change. A source
+/// whose address family doesn't match the peer is skipped with a
+/// warning: a group serves IPv4 and IPv6 members alike, so a v4
+/// `update-source` simply doesn't apply to a v6 member
+/// (interface-keyed link-local peers included). Returns `true` when
+/// the stored value changed — the caller owes a `bfd_apply`
+/// reconcile.
+pub(super) fn apply_update_source(peer: &mut Peer, want: Option<IpAddr>) -> bool {
+    if let Some(source) = want
+        && source.is_ipv4() != peer.address.is_ipv4()
+    {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            source = %source,
+            "bgp: update-source address family does not match the peer; not applied to this member",
+        );
+        return false;
+    }
+    if peer.config.transport.update_source == want {
+        return false;
+    }
+    peer.config.transport.update_source = want;
+    true
+}
+
 /// `[no] router bgp neighbor <addr> ttl-security` — enable GTSM (RFC
 /// 5082) for a directly-connected peer. The leaf is `type empty`, so
 /// presence (Set) turns it on and Delete turns it off; no value is
@@ -1714,31 +1914,18 @@ fn config_transport_local_address(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
 /// connect.
 fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let want = op.is_set();
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
-        // Mutually exclusive with ebgp-multihop: GTSM pins the TTL to 255
-        // and filters the received TTL, while ebgp-multihop permits a
-        // decremented TTL. Refuse to enable GTSM on a peer that already
-        // has ebgp-multihop — the existing setting wins; the operator
-        // must remove ebgp-multihop first.
-        if want && peer.config.transport.ebgp_multihop.is_some() {
-            tracing::warn!(
-                peer = %addr,
-                "bgp: ttl-security and ebgp-multihop are mutually exclusive; ignoring ttl-security (remove ebgp-multihop on this neighbor first)",
-            );
-            return Some(());
-        }
-        if peer.config.transport.ttl_security == want {
-            // No actual change — don't disturb a live session.
-            return Some(());
-        }
-        peer.config.transport.ttl_security = want;
-        peer.start();
-        // Only an established / in-progress session needs an explicit
-        // bounce; bouncing an Idle peer here could race the idle-hold
-        // timer `start()` just armed and strand it.
-        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence: the explicit statement wins, a
+        // Delete falls back to the group's opinion (or the off
+        // default).
+        peer.config.knobs_explicit.ttl_security = op.is_set().then_some(true);
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.ttl_security
+        })
+        .unwrap_or(false);
+        (peer.ident, apply_ttl_security(peer, want))
     };
     if bounce {
         let _ = bgp
@@ -1746,6 +1933,36 @@ fn config_ttl_security(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
     Some(())
+}
+
+/// Write a resolved `ttl-security` value onto the peer, preserving the
+/// per-neighbor ritual: the ebgp-multihop mutual-exclusion guard, the
+/// no-change diff-gate, `start()` for a dormant peer, and the
+/// bounce-if-live decision (returned to the caller, which owns the
+/// `Event::Stop` send — only an established / in-progress session
+/// needs the explicit bounce; bouncing an Idle peer here could race
+/// the idle-hold timer `start()` just armed and strand it). Shared by
+/// the per-neighbor callback and the neighbor-group sweep.
+///
+/// GTSM pins the TTL to 255 and filters the received TTL, while
+/// ebgp-multihop permits a decremented TTL — refusing to enable GTSM
+/// on a peer that already has ebgp-multihop keeps the existing
+/// setting; the operator must remove ebgp-multihop first.
+pub(super) fn apply_ttl_security(peer: &mut Peer, want: bool) -> bool {
+    if want && peer.config.transport.ebgp_multihop.is_some() {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: ttl-security and ebgp-multihop are mutually exclusive; ignoring ttl-security (remove ebgp-multihop on this neighbor first)",
+        );
+        return false;
+    }
+    if peer.config.transport.ttl_security == want {
+        // No actual change — don't disturb a live session.
+        return false;
+    }
+    peer.config.transport.ttl_security = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
 }
 
 /// `[no] router bgp neighbor <addr> ebgp-multihop <1-255>` — raise the
@@ -1764,22 +1981,14 @@ fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     let want = if op.is_set() { Some(args.u8()?) } else { None };
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
-        // Mutually exclusive with ttl-security (see `config_ttl_security`).
-        // Refuse to set ebgp-multihop on a peer that already has GTSM —
-        // the existing setting wins; remove ttl-security first.
-        if want.is_some() && peer.config.transport.ttl_security {
-            tracing::warn!(
-                peer = %addr,
-                "bgp: ebgp-multihop and ttl-security are mutually exclusive; ignoring ebgp-multihop (remove ttl-security on this neighbor first)",
-            );
-            return Some(());
-        }
-        if peer.config.transport.ebgp_multihop == want {
-            return Some(());
-        }
-        peer.config.transport.ebgp_multihop = want;
-        peer.start();
-        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence: the explicit statement wins, a
+        // Delete falls back to the group's opinion (or off — `None`).
+        peer.config.knobs_explicit.ebgp_multihop = want;
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.ebgp_multihop
+        });
+        (peer.ident, apply_ebgp_multihop(peer, want))
     };
     if bounce {
         let _ = bgp
@@ -1787,6 +1996,35 @@ fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
     Some(())
+}
+
+/// Write a resolved `ebgp-multihop` value onto the peer, preserving the
+/// per-neighbor ritual: the ttl-security mutual-exclusion guard, the
+/// no-change diff-gate, `start()` for a dormant peer, and the
+/// bounce-if-live decision (returned to the caller, which owns the
+/// `Event::Stop` send — only an established / in-progress session needs
+/// the explicit bounce; bouncing an Idle peer here could race the
+/// idle-hold timer `start()` just armed and strand it). Shared by the
+/// per-neighbor callback and the neighbor-group sweep.
+///
+/// Mutually exclusive with ttl-security (GTSM pins the TTL to 255 while
+/// ebgp-multihop permits a decremented TTL): refusing to raise the TTL
+/// on a peer that already has GTSM keeps the existing setting; the
+/// operator must remove ttl-security first.
+pub(super) fn apply_ebgp_multihop(peer: &mut Peer, want: Option<u8>) -> bool {
+    if want.is_some() && peer.config.transport.ttl_security {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: ebgp-multihop and ttl-security are mutually exclusive; ignoring ebgp-multihop (remove ttl-security on this neighbor first)",
+        );
+        return false;
+    }
+    if peer.config.transport.ebgp_multihop == want {
+        return false;
+    }
+    peer.config.transport.ebgp_multihop = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
 }
 
 /// `[no] router bgp neighbor <addr> tcp-mss <1-65535>` — cap the TCP
@@ -1805,19 +2043,37 @@ fn config_ebgp_multihop(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
 /// (a freshly created, still-Idle peer begins connecting).
 fn config_tcp_mss(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    // On delete the echoed value (if any) is irrelevant — clear it.
-    let want = if op.is_set() { Some(args.u16()?) } else { None };
-    {
+    let changed = {
         let peer = bgp.peers.get_mut(&addr)?;
-        if peer.config.transport.tcp_mss == want {
-            // No actual change — leave the live session and listener alone.
-            return Some(());
-        }
-        peer.config.transport.tcp_mss = want;
-        peer.start();
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence — a Delete falls back to the
+        // group's clamp (or none).
+        peer.config.knobs_explicit.tcp_mss = if op.is_set() { Some(args.u16()?) } else { None };
+        let want =
+            super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.tcp_mss);
+        apply_tcp_mss(peer, want)
+    };
+    if changed {
+        apply_tcp_mss_refresh_all(bgp);
     }
-    apply_tcp_mss_refresh_all(bgp);
     Some(())
+}
+
+/// Write a resolved `tcp-mss` onto the peer, preserving the
+/// per-neighbor ritual: the no-change diff-gate and `start()` for a
+/// dormant peer. Never bounces — the clamp is read at connect time;
+/// the operator clears the session for immediate effect. Returns
+/// `true` when the value changed, in which case the caller owes one
+/// [`apply_tcp_mss_refresh_all`] so the shared listener re-derives
+/// its per-AF minimum.
+pub(super) fn apply_tcp_mss(peer: &mut Peer, want: Option<u16>) -> bool {
+    if peer.config.transport.tcp_mss == want {
+        // No actual change — leave the live session and listener alone.
+        return false;
+    }
+    peer.config.transport.tcp_mss = want;
+    peer.start();
+    true
 }
 
 /// Reconcile the shared BGP listener's TCP MSS. A listening socket
@@ -1876,16 +2132,14 @@ fn config_peer_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let want = if op.is_set() { Some(args.u16()?) } else { None };
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
-        if peer.config.transport.port == want {
-            // No actual change — don't disturb a live session.
-            return Some(());
-        }
-        peer.config.transport.port = want;
-        peer.start();
-        // Only an established / in-progress session needs an explicit
-        // bounce; bouncing an Idle peer here could race the idle-hold
-        // timer `start()` just armed and strand it.
-        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+        // Record the verbatim statement, then resolve through the
+        // neighbor-group precedence: the explicit statement wins, a
+        // Delete falls back to the group's opinion (or the 179
+        // default — `None`).
+        peer.config.knobs_explicit.port = want;
+        let want =
+            super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| k.port);
+        (peer.ident, apply_port(peer, want))
     };
     if bounce {
         let _ = bgp
@@ -1893,6 +2147,23 @@ fn config_peer_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
     Some(())
+}
+
+/// Write a resolved `port` onto the peer, preserving the per-neighbor
+/// ritual: the no-change diff-gate, `start()` for a dormant peer, and
+/// the bounce-if-live decision (returned to the caller, which owns the
+/// `Event::Stop` send — only an established / in-progress session needs
+/// the explicit bounce; bouncing an Idle peer here could race the
+/// idle-hold timer `start()` just armed and strand it). Shared by the
+/// per-neighbor callback and the neighbor-group sweep.
+pub(super) fn apply_port(peer: &mut Peer, want: Option<u16>) -> bool {
+    if peer.config.transport.port == want {
+        // No actual change — don't disturb a live session.
+        return false;
+    }
+    peer.config.transport.port = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
 }
 
 /// `[no] router bgp port <0-65535>` — TCP port the BGP listener binds;
@@ -1929,21 +2200,18 @@ fn config_global_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()>
 /// `peer_change_reset`). An Idle peer just picks it up on its first connect.
 fn config_disable_connected_check(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
-    let want = op.is_set();
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
-        if peer.config.transport.disable_connected_check == want {
-            // No actual change — don't disturb a live session.
-            return Some(());
-        }
-        peer.config.transport.disable_connected_check = want;
-        peer.start();
-        // Only an established / in-progress session needs an explicit
-        // bounce; bouncing an Idle peer here could race the idle-hold
-        // timer `start()` just armed and strand it. A held (Active) peer
-        // is bounced too, so it leaves Active and re-dials on the next
-        // idle-hold rather than waiting out the connect-retry backstop.
-        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+        // Record the verbatim statement (a `type empty` flag: presence
+        // means "on"), then resolve through the neighbor-group
+        // precedence: the explicit statement wins, a Delete falls back
+        // to the group's opinion (or the off default).
+        peer.config.knobs_explicit.disable_connected_check = op.is_set().then_some(true);
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.disable_connected_check
+        })
+        .unwrap_or(false);
+        (peer.ident, apply_disable_connected_check(peer, want))
     };
     if bounce {
         let _ = bgp
@@ -1951,6 +2219,26 @@ fn config_disable_connected_check(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
     Some(())
+}
+
+/// Write a resolved `disable-connected-check` value onto the peer,
+/// preserving the per-neighbor ritual: the no-change diff-gate,
+/// `start()` for a dormant peer, and the bounce-if-live decision
+/// (returned to the caller, which owns the `Event::Stop` send — only an
+/// established / in-progress session needs the explicit bounce;
+/// bouncing an Idle peer here could race the idle-hold timer `start()`
+/// just armed and strand it. A held (Active) peer is bounced too, so it
+/// leaves Active and re-dials on the next idle-hold rather than waiting
+/// out the connect-retry backstop). Shared by the per-neighbor callback
+/// and the neighbor-group sweep.
+pub(super) fn apply_disable_connected_check(peer: &mut Peer, want: bool) -> bool {
+    if peer.config.transport.disable_connected_check == want {
+        // No actual change — don't disturb a live session.
+        return false;
+    }
+    peer.config.transport.disable_connected_check = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
 }
 
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -1962,20 +2250,26 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         return None;
     };
 
-    // Store the password on the peer if it exists. The peer may not
-    // be in the map yet if the per-leaf callbacks fire in deeper-first
+    // Record the verbatim statement on the peer if it exists, then
+    // resolve through the neighbor-group precedence — a Delete falls
+    // back to the group's password (or none). The peer may not be in
+    // the map yet if the per-leaf callbacks fire in deeper-first
     // order (`/password` before `/neighbor`); in that case we just
-    // skip the field-store — the peer will be created momentarily and
-    // a follow-up `apply_md5_refresh_all` will catch up. The earlier
+    // skip the record — the peer will be created momentarily and a
+    // follow-up `apply_md5_refresh_all` will catch up. The earlier
     // `?` short-circuit also skipped the listener install, which is
     // the actual bug that left passive peers unauthenticated.
-    if op == ConfigOp::Set {
-        let password = args.string()?;
-        if let Some(peer) = bgp.peers.get_mut(&addr) {
-            peer.config.transport.md5_password = Some(password);
-        }
-    } else if let Some(peer) = bgp.peers.get_mut(&addr) {
-        peer.config.transport.md5_password = None;
+    let explicit = if op == ConfigOp::Set {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    if let Some(peer) = bgp.peers.get_mut(&addr) {
+        peer.config.knobs_explicit.password = explicit;
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.password.clone()
+        });
+        apply_md5_password(peer, want);
     }
 
     // Reconcile the listener state for this peer regardless of
@@ -1988,12 +2282,26 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     Some(())
 }
 
+/// Write a resolved TCP MD5 password onto the peer. The active
+/// connect path reads it at dial time and the listener key is owned
+/// by [`apply_md5_refresh_for`] — no bounce, parity with the
+/// per-neighbor callback (the live session keeps its key until it
+/// resets). Returns `true` when the stored value changed — the
+/// caller owes a listener re-key for this peer's address.
+pub(super) fn apply_md5_password(peer: &mut Peer, want: Option<String>) -> bool {
+    if peer.config.transport.md5_password == want {
+        return false;
+    }
+    peer.config.transport.md5_password = want;
+    true
+}
+
 /// Reconcile the listener TCP MD5 key for a single peer. Reads
 /// `peer.config.transport.md5_password` and installs (or removes,
 /// with an empty key) on the appropriate listening socket. Silent
 /// when there is no listener fd yet — `apply_md5_refresh_all` from
 /// `listen()` will fill in once the bind completes.
-fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
+pub(super) fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
     let listen_fd = match addr {
         IpAddr::V4(_) => bgp.listen_fd_v4,
         IpAddr::V6(_) => bgp.listen_fd_v6,
@@ -2294,6 +2602,94 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/neighbor-group/afi-safi/enabled",
             super::neighbor_group::config_neighbor_group_afi_safi_enabled,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/next-hop-self",
+            super::neighbor_group::config_neighbor_group_afi_safi_next_hop_self,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/ttl-security",
+            super::neighbor_group::config_neighbor_group_ttl_security,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/port",
+            super::neighbor_group::config_neighbor_group_port,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/ebgp-multihop",
+            super::neighbor_group::config_neighbor_group_ebgp_multihop,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/disable-connected-check",
+            super::neighbor_group::config_neighbor_group_disable_connected_check,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/passive",
+            super::neighbor_group::config_neighbor_group_passive,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/allowas-in",
+            super::neighbor_group::config_neighbor_group_allowas_in,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/allowas-in/count",
+            super::neighbor_group::config_neighbor_group_allowas_in_count,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/allowas-in/origin",
+            super::neighbor_group::config_neighbor_group_allowas_in_origin,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/as-override",
+            super::neighbor_group::config_neighbor_group_as_override,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/remove-private-as",
+            super::neighbor_group::config_neighbor_group_remove_private_as,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/remove-private-as/all",
+            super::neighbor_group::config_neighbor_group_remove_private_as_all,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/remove-private-as/replace-as",
+            super::neighbor_group::config_neighbor_group_remove_private_as_replace_as,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/enforce-first-as",
+            super::neighbor_group::config_neighbor_group_enforce_first_as,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/route-reflector/client",
+            super::neighbor_group::config_neighbor_group_route_reflector_client,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/update-source",
+            super::neighbor_group::config_neighbor_group_update_source,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/tcp-mss",
+            super::neighbor_group::config_neighbor_group_tcp_mss,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/password",
+            super::neighbor_group::config_neighbor_group_password,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/policy/in",
+            super::neighbor_group::config_neighbor_group_policy_in,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/policy/out",
+            super::neighbor_group::config_neighbor_group_policy_out,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/prefix-set/in",
+            super::neighbor_group::config_neighbor_group_prefix_set_in,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/prefix-set/out",
+            super::neighbor_group::config_neighbor_group_prefix_set_out,
         );
         // `set router bgp dynamic-neighbors …`.
         self.callback_add(
@@ -4245,6 +4641,764 @@ mod neighbor_group_wiring_tests {
             vec![v6()],
             "the sweep must reach the interface-keyed member",
         );
+    }
+
+    // ---- whole-session knob inheritance (ttl-security exemplar) --
+
+    use super::super::neighbor_group::config_neighbor_group_ttl_security;
+
+    fn member_ttl_security(bgp: &Bgp) -> bool {
+        bgp.peers
+            .get(&peer_addr())
+            .expect("peer exists")
+            .config
+            .transport
+            .ttl_security
+    }
+
+    /// Group ttl-security flows to a member with the same ritual as
+    /// the per-neighbor knob: applied on an Idle peer without a
+    /// bounce, bounced on a live session, and removed when the group
+    /// opinion goes away.
+    #[tokio::test]
+    async fn group_ttl_security_propagates_and_bounces_live_member() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        // Idle member: flag lands, no bounce.
+        config_neighbor_group_ttl_security(&mut bgp, arg_words(&["G"]), ConfigOp::Set).unwrap();
+        assert!(member_ttl_security(&bgp), "group opinion must apply");
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle member must not be bounced",
+        );
+
+        // Live member: a group flip bounces it, exactly like the
+        // per-neighbor callback would.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_neighbor_group_ttl_security(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert!(!member_ttl_security(&bgp), "group delete must clear");
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a live member must bounce to drop GTSM",
+        );
+    }
+
+    /// Explicit per-neighbor ttl-security outlives group changes, and
+    /// deleting the explicit statement falls back to the group's
+    /// opinion instead of off.
+    #[tokio::test]
+    async fn peer_explicit_ttl_security_wins_and_falls_back() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_ttl_security(&mut bgp, arg_words(&["G"]), ConfigOp::Set).unwrap();
+        assert!(member_ttl_security(&bgp));
+
+        // Deleting the explicit statement keeps GTSM via the group.
+        config_ttl_security(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            member_ttl_security(&bgp),
+            "delete of the explicit statement must fall back to the group opinion",
+        );
+
+        // Dropping the group opinion finally clears it.
+        config_neighbor_group_ttl_security(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert!(!member_ttl_security(&bgp));
+    }
+
+    /// Per-family next-hop-self inherits through the group's afi-safi
+    /// entry with explicit-wins semantics.
+    #[tokio::test]
+    async fn group_next_hop_self_propagates_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_next_hop_self;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        let nhs = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .sub
+                .get(&v4())
+                .map(|s| s.next_hop_self)
+                .unwrap_or(false)
+        };
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_afi_safi_next_hop_self(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(nhs(&bgp), "group next-hop-self must apply");
+
+        // Explicit per-neighbor false outranks the group's true.
+        config_next_hop_self(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(!nhs(&bgp), "explicit statement must win");
+
+        // Removing the explicit statement falls back to the group.
+        config_next_hop_self(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "false"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(nhs(&bgp), "fallback to group opinion");
+
+        // Dropping the family entry (enabled delete removes the whole
+        // entry, next-hop-self opinion included) clears it.
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(!nhs(&bgp), "entry delete clears the inherited value");
+    }
+
+    // ---- the nine additional inheritable whole-session knobs --------
+    //
+    // One focused test per knob. Bounce-family knobs (port,
+    // ebgp-multihop, disable-connected-check) mirror the ttl-security
+    // exemplar: value propagates, a live member bounces, explicit wins
+    // and falls back. Write-only knobs (passive, allowas-in,
+    // as-override, remove-private-as, enforce-first-as,
+    // route-reflector) additionally assert the sweep never bounces.
+
+    use super::super::neighbor_group::{
+        config_neighbor_group_allowas_in, config_neighbor_group_allowas_in_count,
+        config_neighbor_group_allowas_in_origin, config_neighbor_group_as_override,
+        config_neighbor_group_disable_connected_check, config_neighbor_group_ebgp_multihop,
+        config_neighbor_group_enforce_first_as, config_neighbor_group_passive,
+        config_neighbor_group_port, config_neighbor_group_remove_private_as,
+        config_neighbor_group_remove_private_as_all,
+        config_neighbor_group_remove_private_as_replace_as,
+        config_neighbor_group_route_reflector_client,
+    };
+
+    /// Attach `10.0.0.1` to group `G` (which has a remote-as so the
+    /// member can start), draining the setup events. Returns a `Bgp`
+    /// with the member parked Idle.
+    fn bgp_with_member() -> Bgp {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp
+    }
+
+    fn member(bgp: &Bgp) -> &Peer {
+        bgp.peers.get(&peer_addr()).expect("peer exists")
+    }
+
+    /// Group `port` flows to an Idle member without a bounce, bounces a
+    /// live member, and the explicit per-neighbor value wins and falls
+    /// back to the group on explicit-delete.
+    #[tokio::test]
+    async fn group_port_propagates_explicit_wins_and_bounces_live() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+
+        // Idle member: value lands, no bounce.
+        config_neighbor_group_port(&mut bgp, arg_words(&["G", "1790"]), ConfigOp::Set).unwrap();
+        assert_eq!(member(&bgp).config.transport.port, Some(1790));
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle member must not be bounced",
+        );
+
+        // Explicit per-neighbor value wins over the group's.
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1", "1791"]), ConfigOp::Set).unwrap();
+        assert_eq!(member(&bgp).config.transport.port, Some(1791));
+        let _ = drain_stop_events(&mut bgp);
+
+        // Live member: a group flip bounces it (only matters once the
+        // explicit value is gone, so delete it first).
+        config_peer_port(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            member(&bgp).config.transport.port,
+            Some(1790),
+            "explicit delete falls back to the group opinion",
+        );
+        let _ = drain_stop_events(&mut bgp);
+
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_neighbor_group_port(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            member(&bgp).config.transport.port,
+            None,
+            "group delete clears"
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a live member must bounce to re-dial on the new port",
+        );
+    }
+
+    /// Group `ebgp-multihop` propagates with explicit-wins / fallback
+    /// and bounces a live member.
+    #[tokio::test]
+    async fn group_ebgp_multihop_propagates_explicit_wins_and_bounces_live() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+
+        config_neighbor_group_ebgp_multihop(&mut bgp, arg_words(&["G", "5"]), ConfigOp::Set)
+            .unwrap();
+        assert_eq!(member(&bgp).config.transport.ebgp_multihop, Some(5));
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle member must not be bounced",
+        );
+
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1", "10"]), ConfigOp::Set).unwrap();
+        assert_eq!(member(&bgp).config.transport.ebgp_multihop, Some(10));
+        let _ = drain_stop_events(&mut bgp);
+
+        config_ebgp_multihop(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            member(&bgp).config.transport.ebgp_multihop,
+            Some(5),
+            "explicit delete falls back to the group opinion",
+        );
+        let _ = drain_stop_events(&mut bgp);
+
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_neighbor_group_ebgp_multihop(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert_eq!(member(&bgp).config.transport.ebgp_multihop, None);
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a live member must bounce to apply the new TTL",
+        );
+    }
+
+    /// Group `disable-connected-check` (a `type empty` flag)
+    /// propagates with explicit-wins / fallback and bounces a live
+    /// member.
+    #[tokio::test]
+    async fn group_disable_connected_check_propagates_and_bounces_live() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+
+        config_neighbor_group_disable_connected_check(&mut bgp, arg_words(&["G"]), ConfigOp::Set)
+            .unwrap();
+        assert!(member(&bgp).config.transport.disable_connected_check);
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an Idle member must not be bounced",
+        );
+
+        // Live member: dropping the group opinion bounces it.
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        config_neighbor_group_disable_connected_check(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            !member(&bgp).config.transport.disable_connected_check,
+            "group delete clears"
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a live member must bounce when the check is re-enabled",
+        );
+    }
+
+    /// Group `passive` flows to the member, the explicit per-neighbor
+    /// value wins and falls back, and the sweep never bounces.
+    #[tokio::test]
+    async fn group_passive_propagates_explicit_wins_no_bounce() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_passive(&mut bgp, arg_words(&["G", "true"]), ConfigOp::Set).unwrap();
+        assert!(
+            member(&bgp).config.transport.passive,
+            "group opinion must apply"
+        );
+
+        // Explicit per-neighbor false outranks the group's true.
+        config_transport_passive(&mut bgp, arg_words(&["10.0.0.1", "false"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            !member(&bgp).config.transport.passive,
+            "explicit statement must win"
+        );
+
+        // Removing the explicit statement falls back to the group.
+        config_transport_passive(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "false"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            member(&bgp).config.transport.passive,
+            "fallback to group opinion"
+        );
+
+        // Dropping the group opinion clears it.
+        config_neighbor_group_passive(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !member(&bgp).config.transport.passive,
+            "group delete clears"
+        );
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "passive changes must never bounce the session",
+        );
+    }
+
+    /// Group `allowas-in` (bare + count + origin) propagates with
+    /// explicit-wins / fallback and never bounces.
+    #[tokio::test]
+    async fn group_allowas_in_propagates_explicit_wins_no_bounce() {
+        use crate::bgp::peer::AllowAsIn;
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        // Bare form → default count.
+        config_neighbor_group_allowas_in(&mut bgp, arg_words(&["G"]), ConfigOp::Set).unwrap();
+        assert_eq!(member(&bgp).config.allowas_in, Some(AllowAsIn::Count(3)));
+
+        // Group count then origin (order-independent cooperative leaves).
+        config_neighbor_group_allowas_in_count(&mut bgp, arg_words(&["G", "7"]), ConfigOp::Set)
+            .unwrap();
+        assert_eq!(member(&bgp).config.allowas_in, Some(AllowAsIn::Count(7)));
+        config_neighbor_group_allowas_in_origin(&mut bgp, arg_words(&["G"]), ConfigOp::Set)
+            .unwrap();
+        assert_eq!(member(&bgp).config.allowas_in, Some(AllowAsIn::Origin));
+
+        // Explicit per-neighbor count wins over the group's origin.
+        config_allowas_in_count(&mut bgp, arg_words(&["10.0.0.1", "5"]), ConfigOp::Set).unwrap();
+        assert_eq!(member(&bgp).config.allowas_in, Some(AllowAsIn::Count(5)));
+
+        // Removing the whole explicit container falls back to the group.
+        config_allowas_in(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            member(&bgp).config.allowas_in,
+            Some(AllowAsIn::Origin),
+            "fallback to group opinion",
+        );
+
+        // Dropping the group container clears it.
+        config_neighbor_group_allowas_in(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert_eq!(member(&bgp).config.allowas_in, None, "group delete clears");
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "allowas-in changes must never bounce the session",
+        );
+    }
+
+    /// Group `as-override` (presence) propagates with explicit-wins /
+    /// fallback and never bounces.
+    #[tokio::test]
+    async fn group_as_override_propagates_explicit_wins_no_bounce() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_as_override(&mut bgp, arg_words(&["G"]), ConfigOp::Set).unwrap();
+        assert!(member(&bgp).config.as_override, "group opinion must apply");
+
+        // Presence knob: explicit can only assert "on", so explicit-wins
+        // is exercised via the fallback path like the ttl-security
+        // exemplar — an explicit statement keeps the value through a
+        // group delete, then dropping the explicit one finally clears it.
+        config_as_override(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_as_override(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert!(
+            member(&bgp).config.as_override,
+            "explicit statement survives the group delete",
+        );
+        config_as_override(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(!member(&bgp).config.as_override, "dropping both clears it");
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "as-override changes must never bounce the session",
+        );
+    }
+
+    /// Group `remove-private-as` (bare + all + replace-as) propagates
+    /// with explicit-wins / fallback and never bounces.
+    #[tokio::test]
+    async fn group_remove_private_as_propagates_explicit_wins_no_bounce() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_remove_private_as(&mut bgp, arg_words(&["G"]), ConfigOp::Set)
+            .unwrap();
+        let rpa = member(&bgp)
+            .config
+            .remove_private_as
+            .expect("group opinion applies");
+        assert!(!rpa.all && !rpa.replace_as, "bare form: both modifiers off");
+
+        config_neighbor_group_remove_private_as_all(&mut bgp, arg_words(&["G"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_remove_private_as_replace_as(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let rpa = member(&bgp)
+            .config
+            .remove_private_as
+            .expect("group opinion applies");
+        assert!(rpa.all && rpa.replace_as, "both modifiers on");
+
+        // Explicit per-neighbor bare form (both off) wins over the
+        // group's all+replace-as.
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        let rpa = member(&bgp)
+            .config
+            .remove_private_as
+            .expect("explicit applies");
+        assert!(!rpa.all && !rpa.replace_as, "explicit statement must win");
+
+        // Removing the explicit container falls back to the group.
+        config_remove_private_as(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        let rpa = member(&bgp)
+            .config
+            .remove_private_as
+            .expect("fallback to group");
+        assert!(rpa.all && rpa.replace_as, "fallback to group opinion");
+
+        // Dropping the group container clears it.
+        config_neighbor_group_remove_private_as(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert_eq!(
+            member(&bgp).config.remove_private_as,
+            None,
+            "group delete clears"
+        );
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "remove-private-as changes must never bounce the session",
+        );
+    }
+
+    /// Group `enforce-first-as` (presence) propagates and never
+    /// bounces.
+    #[tokio::test]
+    async fn group_enforce_first_as_propagates_no_bounce() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_enforce_first_as(&mut bgp, arg_words(&["G"]), ConfigOp::Set).unwrap();
+        assert!(
+            member(&bgp).config.enforce_first_as,
+            "group opinion must apply"
+        );
+
+        // Presence knob: explicit-wins via the fallback path (see
+        // as-override test).
+        config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_enforce_first_as(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(
+            member(&bgp).config.enforce_first_as,
+            "explicit statement survives the group delete",
+        );
+        config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !member(&bgp).config.enforce_first_as,
+            "dropping both clears it"
+        );
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "enforce-first-as changes must never bounce the session",
+        );
+    }
+
+    /// Group `route-reflector client` flows to the member's
+    /// `reflector_client` (a `Peer` field), explicit wins / falls back,
+    /// and the sweep never bounces.
+    #[tokio::test]
+    async fn group_route_reflector_client_propagates_explicit_wins_no_bounce() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_route_reflector_client(
+            &mut bgp,
+            arg_words(&["G", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(member(&bgp).reflector_client, "group opinion must apply");
+
+        // Explicit per-neighbor false outranks the group's true.
+        config_route_reflector(&mut bgp, arg_words(&["10.0.0.1", "false"]), ConfigOp::Set).unwrap();
+        assert!(
+            !member(&bgp).reflector_client,
+            "explicit statement must win"
+        );
+
+        // Removing the explicit statement falls back to the group.
+        config_route_reflector(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "false"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(member(&bgp).reflector_client, "fallback to group opinion");
+
+        // Dropping the group opinion clears it.
+        config_neighbor_group_route_reflector_client(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(!member(&bgp).reflector_client, "group delete clears");
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "route-reflector changes must never bounce the session",
+        );
+    }
+
+    // ---- side-effectful knobs: tcp-mss / password / update-source /
+    // ---- policy refs ---------------------------------------------
+
+    /// Group tcp-mss flows to a member without a bounce; explicit
+    /// wins; explicit-delete falls back to the group clamp.
+    #[tokio::test]
+    async fn group_tcp_mss_propagates_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_tcp_mss;
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        let mss = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .tcp_mss
+        };
+
+        config_neighbor_group_tcp_mss(&mut bgp, arg_words(&["G", "1300"]), ConfigOp::Set).unwrap();
+        assert_eq!(mss(&bgp), Some(1300), "group clamp must apply");
+
+        config_tcp_mss(&mut bgp, arg_words(&["10.0.0.1", "1200"]), ConfigOp::Set).unwrap();
+        assert_eq!(mss(&bgp), Some(1200), "explicit statement must win");
+
+        config_tcp_mss(&mut bgp, arg_words(&["10.0.0.1", "1200"]), ConfigOp::Delete).unwrap();
+        assert_eq!(mss(&bgp), Some(1300), "fallback to group clamp");
+
+        config_neighbor_group_tcp_mss(&mut bgp, arg_words(&["G", "1300"]), ConfigOp::Delete)
+            .unwrap();
+        assert_eq!(mss(&bgp), None, "group delete clears");
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "tcp-mss changes must never bounce the session",
+        );
+    }
+
+    /// Group MD5 password flows to a member; explicit wins; fallback
+    /// on explicit-delete; never bounces.
+    #[tokio::test]
+    async fn group_password_propagates_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_password;
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        let pw = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .md5_password
+                .clone()
+        };
+
+        config_neighbor_group_password(&mut bgp, arg_words(&["G", "groupsecret"]), ConfigOp::Set)
+            .unwrap();
+        assert_eq!(pw(&bgp).as_deref(), Some("groupsecret"));
+
+        config_peer_tcp_md5_password(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "mysecret"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(pw(&bgp).as_deref(), Some("mysecret"), "explicit wins");
+
+        config_peer_tcp_md5_password(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "mysecret"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            pw(&bgp).as_deref(),
+            Some("groupsecret"),
+            "fallback to group password",
+        );
+
+        config_neighbor_group_password(
+            &mut bgp,
+            arg_words(&["G", "groupsecret"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(pw(&bgp), None, "group delete clears");
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "password changes must never bounce the session",
+        );
+    }
+
+    /// A group update-source applies only to members whose address
+    /// family matches the source — a v4 source lands on the v4 member
+    /// and is skipped (with a warning) on the v6 member.
+    #[tokio::test]
+    async fn group_update_source_respects_address_family() {
+        use super::super::neighbor_group::config_neighbor_group_update_source;
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        config_peer(&mut bgp, arg_words(&["2001:db8::2"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["2001:db8::2", "G"]), ConfigOp::Set)
+            .unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        config_neighbor_group_update_source(
+            &mut bgp,
+            arg_words(&["G", "192.0.2.10"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let src = |bgp: &Bgp, addr: &str| {
+            bgp.peers
+                .get(&addr.parse().unwrap())
+                .unwrap()
+                .config
+                .transport
+                .update_source
+        };
+        assert_eq!(
+            src(&bgp, "10.0.0.1"),
+            Some("192.0.2.10".parse().unwrap()),
+            "v4 member adopts the v4 source",
+        );
+        assert_eq!(
+            src(&bgp, "2001:db8::2"),
+            None,
+            "v6 member must skip the mismatched-family source",
+        );
+    }
+
+    /// Group policy/prefix-set references bind to the member's
+    /// direction slots with explicit-wins semantics.
+    #[tokio::test]
+    async fn group_policy_refs_bind_with_explicit_priority() {
+        use super::super::neighbor_group::{
+            config_neighbor_group_policy_out, config_neighbor_group_prefix_set_in,
+        };
+        use crate::bgp::InOut;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        let pol_out = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .policy_list
+                .get(&InOut::Output)
+                .name
+                .clone()
+        };
+        let pfx_in = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .prefix_set
+                .get(&InOut::Input)
+                .name
+                .clone()
+        };
+
+        config_neighbor_group_policy_out(&mut bgp, arg_words(&["G", "EGRESS"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_prefix_set_in(&mut bgp, arg_words(&["G", "INGRESS"]), ConfigOp::Set)
+            .unwrap();
+        assert_eq!(pol_out(&bgp).as_deref(), Some("EGRESS"));
+        assert_eq!(pfx_in(&bgp).as_deref(), Some("INGRESS"));
+
+        // Explicit per-neighbor name outranks the group's.
+        config_policy_out(&mut bgp, arg_words(&["10.0.0.1", "MINE"]), ConfigOp::Set).unwrap();
+        assert_eq!(pol_out(&bgp).as_deref(), Some("MINE"), "explicit wins");
+
+        // Removing the explicit statement falls back to the group's.
+        config_policy_out(&mut bgp, arg_words(&["10.0.0.1", "MINE"]), ConfigOp::Delete).unwrap();
+        assert_eq!(
+            pol_out(&bgp).as_deref(),
+            Some("EGRESS"),
+            "fallback to group reference",
+        );
+
+        // Dropping the group reference unbinds.
+        config_neighbor_group_policy_out(&mut bgp, arg_words(&["G", "EGRESS"]), ConfigOp::Delete)
+            .unwrap();
+        assert_eq!(pol_out(&bgp), None, "group delete unbinds");
     }
 }
 

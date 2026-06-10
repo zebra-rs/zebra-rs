@@ -123,6 +123,12 @@ router:
 obfuscated form). Maximum password length is 80 bytes, matching the
 kernel's `TCP_MD5SIG_MAXKEYLEN`.
 
+Like the other per-neighbor transport knobs, `password` can also be set
+on a [neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by
+every member; a statement on the neighbor itself wins. A group password
+re-keys each member's listener entry; sessions already established keep
+their key until they reconnect.
+
 ### TCP-AO
 
 A key chain (RFC 8177) carries one or more keys; the BGP neighbor

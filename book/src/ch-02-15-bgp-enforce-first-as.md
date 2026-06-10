@@ -90,6 +90,10 @@ session so the routes are re-received and re-checked under the new policy:
 clear bgp ipv4 neighbor 192.168.0.1
 ```
 
+Like the other per-neighbor knobs, `enforce-first-as` can also be set on
+a [neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by
+every member; a statement on the neighbor itself wins.
+
 ## Verification
 
 `show ip bgp neighbor <addr>` reports whether the knob is active:

@@ -146,6 +146,11 @@ CLI form is the same path:
 set router bgp neighbor 192.168.0.2 ttl-security
 ```
 
+Both `ttl-security` and `ebgp-multihop` can also be set on a
+[neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by every
+member; a statement on the neighbor itself wins. A group change bounces
+every live member session, exactly like the per-neighbor command.
+
 Toggling either `ttl-security` or `ebgp-multihop` on a session that is
 already up bounces it (the same teardown `clear bgp <peer>` performs),
 so the new TTL policy takes effect on the reconnect rather than waiting

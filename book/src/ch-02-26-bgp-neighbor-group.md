@@ -20,16 +20,31 @@ Three kinds of peer can reference a group:
 
 ## Attributes and precedence
 
-A group currently carries two things:
+A group carries the full set of per-neighbor knobs. The complete list,
+grouped by function:
 
-- **`remote-as <asn>`** — the AS number a member peers with.
-- **`afi-safi <family> enabled <true|false>`** — per-family toggles,
-  using the same family names as the per-neighbor `afi-safi` list
-  (`ipv4`, `ipv6`, `vpnv4`, `label-v4`, `evpn`, …).
+**Transport**
+`remote-as`, `passive`, `update-source`, `port`, `ttl-security`,
+`ebgp-multihop`, `tcp-mss`, `password`, `disable-connected-check`
 
-The rule for both is: **anything set explicitly on the neighbor wins;
-otherwise the neighbor inherits from the group.** For address families
-there are three layers, lowest precedence first:
+**Per-family (afi-safi)**
+`afi-safi <name> enabled`, `afi-safi <name> next-hop-self`
+
+**Filtering and policy**
+`policy in`, `policy out`, `prefix-set in`, `prefix-set out`
+
+**AS-path handling**
+`allowas-in [count <1–10>|origin]`, `as-override`,
+`remove-private-as [all] [replace-as]`, `enforce-first-as`
+
+**Route reflection**
+`route-reflector client`
+
+The precedence rule is the same for every one of them: **anything set
+explicitly on the neighbor wins; otherwise the neighbor inherits from
+the group.**
+
+For address families there are three layers, lowest precedence first:
 
 1. the built-in default — every peer starts with **IPv4 unicast
    enabled**;
@@ -44,27 +59,58 @@ So a group with `afi-safi ipv4 enabled false` disables IPv4 unicast
 for its members — except a member that itself carries
 `afi-safi ipv4 enabled true`, which keeps it.
 
+Several knobs are **presence-style** — they can only be stated "on",
+matching the expressiveness of the per-neighbor command: `ttl-security`,
+`as-override`, `remove-private-as`, `enforce-first-as`,
+`disable-connected-check`, and `allowas-in`. Setting one in the group
+enables it for every member that does not suppress it with an explicit
+per-neighbor override.
+
 ## How changes propagate
 
-The two attributes apply on different schedules, matching what they
-mean on the wire:
+Each knob propagates with the same ritual the equivalent per-neighbor
+command uses:
 
 - **`remote-as` changes are immediate.** Setting or changing the
   group's `remote-as` propagates to every member that inherited it
   (members with their own `remote-as` are untouched). A member whose
   AS actually changed is bounced so the FSM renegotiates; deleting the
   group's `remote-as` (or the group) tears inherited members down.
+- **Session-bouncing knobs** — `port`, `ttl-security`, `ebgp-multihop`,
+  `disable-connected-check` — propagate immediately and bounce every
+  live member session so the change takes effect on the wire.
+- **Reconnect-time knobs** — `tcp-mss` and `password` — re-key or
+  clamp the listener and apply to new connections; existing sessions
+  pick them up at the next reconnect.
+- **Policy and prefix-set changes** re-resolve the filter chain and
+  soft-replay routes for every affected member (the equivalent of
+  `clear bgp ipv4 neighbor <X> soft in/out`).
+- **No-bounce knobs** — `passive`, `allowas-in`, `as-override`,
+  `remove-private-as`, `enforce-first-as`, `route-reflector client`,
+  `next-hop-self` — apply without bouncing established sessions. The
+  egress-signature ones (`route-reflector client`, `next-hop-self`,
+  `as-override`, …) take effect on routes and sessions going forward.
 - **`afi-safi` changes apply at the next capability negotiation.**
   Like the per-neighbor `afi-safi <family> enabled` knob, flipping a
   family in the group does *not* bounce established sessions — BGP
   capabilities are exchanged only in the OPEN message. Issue
   `clear bgp ipv4 neighbor <X>` when you want a live session to
   renegotiate with the new family set.
+- **`update-source`** propagates to inherited members, but skips
+  members whose address family does not match the configured source
+  address (e.g. an IPv4 source is not applied to an IPv6-only session).
+- **Dynamic (listen-range) members** are always passive regardless of
+  the group's `passive` setting — an inbound caller materializes the
+  peer and drives the connection.
 
 ## Configuration
 
-A route-reflector-style example: two clients share the group `RR`,
-which supplies the remote AS and enables IPv4 and IPv6 unicast.
+A route-reflector example: two clients share the group `RR`, which
+supplies the remote AS (the local AS — reflection is an iBGP
+mechanism, so the clients must be internal peers), enables IPv4 and
+IPv6 unicast with next-hop-self on IPv4, turns on GTSM
+(`ttl-security` — directly-connected clients only, fixed TTL 255),
+and marks members as route-reflector clients.
 
 ```yaml
 router:
@@ -74,10 +120,14 @@ router:
       router-id: 192.168.0.1
     neighbor-group:
     - name: RR
-      remote-as: 65002
+      remote-as: 65001
+      ttl-security: null
+      route-reflector:
+        client: true
       afi-safi:
       - name: ipv4
         enabled: true
+        next-hop-self: true
       - name: ipv6
         enabled: true
     neighbor:
@@ -89,13 +139,16 @@ router:
       neighbor-group: RR
 ```
 
-Neither neighbor needs its own `remote-as` or `afi-safi` list — both
-come from the group. The equivalent CLI forms:
+Neither neighbor needs its own `remote-as`, `afi-safi`, or policy
+knobs — all come from the group. The equivalent CLI forms:
 
 ```
 set router bgp neighbor-group RR
-set router bgp neighbor-group RR remote-as 65002
+set router bgp neighbor-group RR remote-as 65001
+set router bgp neighbor-group RR ttl-security
+set router bgp neighbor-group RR route-reflector client true
 set router bgp neighbor-group RR afi-safi ipv4 enabled true
+set router bgp neighbor-group RR afi-safi ipv4 next-hop-self true
 set router bgp neighbor-group RR afi-safi ipv6 enabled true
 set router bgp neighbor 192.168.0.2 neighbor-group RR
 ```
@@ -110,22 +163,25 @@ until the group definition lands.
 ## Verification
 
 `show ip bgp neighbor-group` lists every group with a member count;
-the detail form shows the attribute set and which peers reference it:
+the detail form shows every configured knob and which peers reference
+it:
 
 ```
 show ip bgp neighbor-group
 Name                      Remote-AS  Members
-RR                            65002        2
+RR                            65001        2
 ```
 
 ```
 show ip bgp neighbor-group RR
 BGP neighbor-group: RR
-  Remote-AS: 65002
-  Afi-Safi:  ipv4 enabled, ipv6 enabled
+  Remote-AS: 65001
+  Afi-Safi:  ipv4 enabled nhs, ipv6 enabled
+  TTL-security: enabled
+  Route-reflector-client: true
   Members (2):
-    192.168.0.2              remote-as 65002 (inherited) state Established
-    192.168.0.3              remote-as 65002 (inherited) state Established
+    192.168.0.2              remote-as 65001 (inherited) state Established
+    192.168.0.3              remote-as 65001 (inherited) state Established
 ```
 
 `(inherited)` marks members whose AS came from the group rather than a

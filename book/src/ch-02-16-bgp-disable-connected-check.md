@@ -105,6 +105,10 @@ it (the same teardown `clear bgp <peer>` performs): enabling it lets a held
 neighbor connect, and disabling it resets a session that only came up
 because of the override.
 
+Like the other per-neighbor knobs, `disable-connected-check` can also be
+set on a [neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited
+by every member; a statement on the neighbor itself wins.
+
 ## Verification
 
 `show ip bgp neighbor <addr>` reports the active policy:

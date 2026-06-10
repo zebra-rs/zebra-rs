@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
+use super::neighbor_group::InheritableKnobs;
 use super::peer::{
     AfiSafiEncapType, AllowAsIn, Peer, PeerCounter, PeerParam, RemovePrivateAs, State,
 };
@@ -3758,6 +3759,10 @@ fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
 /// One row of `show ip bgp neighbor-group` (list form). Captures the
 /// configured fields plus a member-peer count to make the list useful
 /// at a glance.
+///
+/// Note: keeps `afi_safi` as `BTreeMap<String, bool>` (enabled-only) —
+/// the list view is a summary and the extra per-family detail (e.g.
+/// `next_hop_self`) belongs to the detail view only.
 #[derive(Serialize)]
 struct BgpNeighborGroupListRow {
     name: String,
@@ -3779,11 +3784,97 @@ struct BgpNeighborGroupMember {
     state: String,
 }
 
+/// Per-family entry in the detail JSON `afi_safi` map — richer than
+/// the list row's enabled-only bool because the detail view should
+/// expose per-family knobs such as `next_hop_self`.
+#[derive(Serialize)]
+struct GroupAfiSafiDetail {
+    enabled: bool,
+    /// `null` when not configured, `true`/`false` when explicitly set.
+    next_hop_self: Option<bool>,
+}
+
+/// JSON representation of the group's configured whole-session knobs.
+/// Only `Some(...)` knobs are emitted (the struct itself is always
+/// serialized — fields with `skip_serializing_if` are absent from the
+/// output when `None`). `password` is represented as a boolean presence
+/// flag so the secret is never echoed.
+#[derive(Serialize)]
+struct NeighborGroupKnobsJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl_security: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ebgp_multihop: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tcp_mss: Option<u16>,
+    /// `true` = a password is configured; never serializes the secret.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disable_connected_check: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_out: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix_set_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefix_set_out: Option<String>,
+    /// Serializes as `{"mode":"count","count":N}` or `{"mode":"origin"}`
+    /// (AllowAsIn's own Serialize derive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowas_in: Option<AllowAsIn>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_override: Option<bool>,
+    /// Serializes as `{"all":bool,"replace_as":bool}`
+    /// (RemovePrivateAs's own Serialize derive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remove_private_as: Option<RemovePrivateAs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enforce_first_as: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_reflector_client: Option<bool>,
+}
+
+impl NeighborGroupKnobsJson {
+    fn from_knobs(k: &InheritableKnobs) -> Self {
+        Self {
+            passive: k.passive,
+            update_source: k.update_source.map(|a| a.to_string()),
+            port: k.port,
+            ttl_security: k.ttl_security,
+            ebgp_multihop: k.ebgp_multihop,
+            tcp_mss: k.tcp_mss,
+            password: k.password.as_ref().map(|_| true),
+            disable_connected_check: k.disable_connected_check,
+            policy_in: k.policy_in.clone(),
+            policy_out: k.policy_out.clone(),
+            prefix_set_in: k.prefix_set_in.clone(),
+            prefix_set_out: k.prefix_set_out.clone(),
+            allowas_in: k.allowas_in,
+            as_override: k.as_override,
+            remove_private_as: k.remove_private_as,
+            enforce_first_as: k.enforce_first_as,
+            route_reflector_client: k.route_reflector_client,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct BgpNeighborGroupDetail {
     name: String,
     remote_as: Option<u32>,
-    afi_safi: BTreeMap<String, bool>,
+    /// Per-family detail: `{"enabled": bool, "next_hop_self": bool|null}`.
+    /// The list-row view keeps a simpler `BTreeMap<String, bool>` for
+    /// backwards compatibility; here we use the richer type.
+    afi_safi: BTreeMap<String, GroupAfiSafiDetail>,
+    knobs: NeighborGroupKnobsJson,
     members: Vec<BgpNeighborGroupMember>,
 }
 
@@ -3854,7 +3945,7 @@ fn show_bgp_neighbor_group_list_json(bgp: &Bgp) -> std::result::Result<String, s
             afi_safi: group
                 .afi_safi
                 .iter()
-                .map(|(k, v)| (afi_safi_config_name(k).to_string(), *v))
+                .map(|(k, v)| (afi_safi_config_name(k).to_string(), v.enabled))
                 .collect(),
         })
         .collect();
@@ -3881,8 +3972,17 @@ fn show_bgp_neighbor_group_detail(
             afi_safi: group
                 .afi_safi
                 .iter()
-                .map(|(k, v)| (afi_safi_config_name(k).to_string(), *v))
+                .map(|(k, v)| {
+                    (
+                        afi_safi_config_name(k).to_string(),
+                        GroupAfiSafiDetail {
+                            enabled: v.enabled,
+                            next_hop_self: v.next_hop_self,
+                        },
+                    )
+                })
                 .collect(),
+            knobs: NeighborGroupKnobsJson::from_knobs(&group.knobs),
             members,
         };
         return Ok(serde_json::to_string_pretty(&detail).unwrap_or_default());
@@ -3903,15 +4003,99 @@ fn show_bgp_neighbor_group_detail(
             .afi_safi
             .iter()
             .map(|(k, v)| {
-                format!(
+                let mut s = format!(
                     "{} {}",
                     afi_safi_config_name(k),
-                    if *v { "enabled" } else { "disabled" }
-                )
+                    if v.enabled { "enabled" } else { "disabled" }
+                );
+                if v.next_hop_self == Some(true) {
+                    s.push_str(" nhs");
+                }
+                s
             })
             .collect();
         writeln!(buf, "  Afi-Safi:  {}", families.join(", "))?;
     }
+
+    // --- Configured knobs (one line per Some(...) field) ---
+    let k = &group.knobs;
+    if let Some(v) = k.passive {
+        writeln!(buf, "  Passive:   {v}")?;
+    }
+    if let Some(addr) = k.update_source {
+        writeln!(buf, "  Update-source: {addr}")?;
+    }
+    if let Some(p) = k.port {
+        writeln!(buf, "  Port:      {p}")?;
+    }
+    if k.ttl_security == Some(true) {
+        writeln!(buf, "  TTL-security: enabled")?;
+    }
+    if let Some(hops) = k.ebgp_multihop {
+        writeln!(buf, "  Ebgp-multihop: {hops}")?;
+    }
+    if let Some(mss) = k.tcp_mss {
+        writeln!(buf, "  TCP-MSS:   {mss}")?;
+    }
+    if k.password.is_some() {
+        writeln!(buf, "  Password:  (configured)")?;
+    }
+    if k.disable_connected_check == Some(true) {
+        writeln!(buf, "  Disable-connected-check: enabled")?;
+    }
+    // Policy: emit one combined line listing configured directions.
+    {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ref n) = k.policy_in {
+            parts.push(format!("in {n}"));
+        }
+        if let Some(ref n) = k.policy_out {
+            parts.push(format!("out {n}"));
+        }
+        if !parts.is_empty() {
+            writeln!(buf, "  Policy:    {}", parts.join(", "))?;
+        }
+    }
+    // Prefix-set: same pattern.
+    {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ref n) = k.prefix_set_in {
+            parts.push(format!("in {n}"));
+        }
+        if let Some(ref n) = k.prefix_set_out {
+            parts.push(format!("out {n}"));
+        }
+        if !parts.is_empty() {
+            writeln!(buf, "  Prefix-set: {}", parts.join(", "))?;
+        }
+    }
+    if let Some(aai) = k.allowas_in {
+        let desc = match aai {
+            AllowAsIn::Count(n) => format!("{n} occurrence(s)"),
+            AllowAsIn::Origin => "origin".to_string(),
+        };
+        writeln!(buf, "  Allowas-in: {desc}")?;
+    }
+    if k.as_override == Some(true) {
+        writeln!(buf, "  As-override: enabled")?;
+    }
+    if let Some(rpa) = k.remove_private_as {
+        let mut desc = "enabled".to_string();
+        if rpa.all {
+            desc.push_str(", all");
+        }
+        if rpa.replace_as {
+            desc.push_str(", replace-as");
+        }
+        writeln!(buf, "  Remove-private-as: {desc}")?;
+    }
+    if k.enforce_first_as == Some(true) {
+        writeln!(buf, "  Enforce-first-as: enabled")?;
+    }
+    if let Some(v) = k.route_reflector_client {
+        writeln!(buf, "  Route-reflector-client: {v}")?;
+    }
+
     if members.is_empty() {
         writeln!(buf, "  Members:   (no peers reference this group)")?;
     } else {
