@@ -123,13 +123,21 @@ pub fn materialize_peer(
     // path in `peer_start_connection` reads this back out and
     // builds the SocketAddrV6 accordingly.
     peer.scope_id = Some(ifindex);
-    // When the remote-as came off the group rather than the per-cfg
-    // spec, stamp the back-reference so the reactive sweep on
-    // `neighbor-group remote-as` changes can find this peer.
+    // Stamp the group back-reference whenever the cfg carries one —
+    // it drives every inheritable attribute (afi-safi today), not just
+    // remote-as, so the reactive sweeps on group changes can find this
+    // peer. `remote_as_inherited` still records which side supplied
+    // the ASN: the remote-as sweep must leave a per-cfg spec alone
+    // (it additionally consults the interface-neighbor cfg for the
+    // `external`-placeholder case — see `sweep_peers_for_group`).
+    peer.config.neighbor_group = cfg.neighbor_group.clone();
     if resolved.inherited_from_group {
-        peer.config.neighbor_group = cfg.neighbor_group.clone();
         peer.config.remote_as_inherited = true;
     }
+    // Resolve the group's afi-safi opinions (e.g. `afi-safi ipv6
+    // enabled true` for an unnumbered IPv6 session) into the effective
+    // MP set before the first OPEN is built.
+    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
     bgp.peers.insert_with_key(PeerKey::Interface(ifindex), peer);
 
     // Kick the FSM. `peer.start()` arms the idle-hold timer which
@@ -172,11 +180,26 @@ pub fn config_interface_neighbor_neighbor_group(
     op: ConfigOp,
 ) -> Option<()> {
     let name = args.string()?;
-    let entry = bgp.interface_neighbors.entry(name).or_default();
-    match op {
-        ConfigOp::Set => entry.neighbor_group = Some(args.string()?),
-        ConfigOp::Delete => entry.neighbor_group = None,
-        _ => {}
+    let new_ref = match op {
+        ConfigOp::Set => Some(args.string()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.interface_neighbors
+        .entry(name.clone())
+        .or_default()
+        .neighbor_group = new_ref.clone();
+
+    // Propagate the (re)binding to an already-materialized peer so the
+    // group-driven attributes re-resolve against the new reference.
+    // Scope: afi-safi only — the peer's remote-as keeps its
+    // materialization-time value, matching how a per-cfg `remote-as`
+    // change is also picked up only on the next materialization.
+    if let Some(&ifindex) = bgp.link_index_by_name.get(&name)
+        && let Some(peer) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))
+    {
+        peer.config.neighbor_group = new_ref;
+        super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
     }
     Some(())
 }

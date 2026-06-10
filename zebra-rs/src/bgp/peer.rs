@@ -382,7 +382,18 @@ pub struct PeerConfig {
     pub transport: PeerTransportConfig,
     pub four_octet: bool,
     pub extended_message: bool,
+    /// Effective multiprotocol family set — what the next OPEN
+    /// advertises. Presence means enabled. Recomputed by
+    /// [`super::neighbor_group::recompute_peer_mp`] as
+    /// default (IPv4 unicast) < group opinions < [`Self::mp_explicit`];
+    /// for a peer with no group reference it equals default + explicit.
     pub mp: AfiSafis<bool>,
+    /// Verbatim per-peer `afi-safi <name> enabled <bool>` statements.
+    /// Kept separately from the effective [`Self::mp`] so a referenced
+    /// neighbor-group's opinions can be merged underneath them ("any
+    /// field set explicitly on the neighbor wins") and re-merged when
+    /// the group changes.
+    pub mp_explicit: BTreeMap<AfiSafi, bool>,
     pub restart: AfiSafis<RestartValue>,
     pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
@@ -446,6 +457,7 @@ impl Default for PeerConfig {
             four_octet: Default::default(),
             extended_message: true,
             mp: Default::default(),
+            mp_explicit: BTreeMap::new(),
             restart: AfiSafis::new(),
             llgr: AfiSafis::new(),
             addpath: AfiSafis::new(),
@@ -2223,7 +2235,12 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     // session that has no IPv4 source address. Other AFIs / SAFIs
     // can be added once the operator has a knob, but the
     // single-tuple case covers every interface-neighbor deployment.
-    if matches!(peer.origin, PeerOrigin::Interface { .. }) {
+    // Skipped when IPv4 unicast itself is disabled on the peer (e.g.
+    // via the neighbor-group's `afi-safi ipv4 enabled false`) — ENHE
+    // qualifies an MP family we would not be advertising.
+    if matches!(peer.origin, PeerOrigin::Interface { .. })
+        && peer.config.mp.has(&AfiSafi::new(Afi::Ip, Safi::Unicast))
+    {
         bgp_cap.extended_nexthop = Some(CapExtendedNextHop::new(vec![ExtendedNextHopValue::new(
             Afi::Ip,
             Safi::Unicast,
@@ -2551,6 +2568,9 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     // sweep in `config_neighbor_group_remote_as` to consult.
     peer.config.neighbor_group = Some(group_name);
     peer.config.remote_as_inherited = true;
+    // Resolve the group's afi-safi opinions into the effective MP set
+    // before the OPEN for this very connection is built.
+    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
 
     bgp.peers.insert(peer_addr, peer);
     bgp.dynamic_peer_count += 1;

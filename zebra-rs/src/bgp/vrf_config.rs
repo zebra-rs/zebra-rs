@@ -13,7 +13,7 @@
 //!   — the list-key handler typically arrives first, but staging
 //!   tolerates the leaf handler racing ahead.
 //! - The `peer-group` reference is a plain string (matching the
-//!   schema). Resolution against `neighbor-groups/neighbor-group/<X>`
+//!   schema). Resolution against `neighbor-group <X>`
 //!   happens when the per-VRF runtime materializes peers.
 //! - `BgpVrfNeighborConfig::enabled` defaults to `true` so a freshly
 //!   added neighbor row matches the YANG default without the user

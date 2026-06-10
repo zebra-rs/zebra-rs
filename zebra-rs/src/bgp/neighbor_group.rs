@@ -3,15 +3,22 @@
 //! Storage + the resolver shared by every peer-materialization path
 //! that may inherit from a group: static peers (`config_peer_neighbor_group`),
 //! IPv6 unnumbered (`interface_neighbor::materialize_peer`), and dynamic
-//! peers (`peer::try_dynamic_accept`). The v1 surface inherits only
-//! `remote-as`; per-peer overrides win via the
-//! [`super::peer::PeerConfig::remote_as_inherited`] flag.
+//! peers (`peer::try_dynamic_accept`). The surface inherits `remote-as`
+//! and per-family `afi-safi <name> enabled` toggles; per-peer overrides
+//! win — via the [`super::peer::PeerConfig::remote_as_inherited`] flag
+//! for `remote-as`, and via the explicit-statement record
+//! [`super::peer::PeerConfig::mp_explicit`] for `afi-safi`.
 //!
-//! Group mutations are reactive: `config_neighbor_group_remote_as`
-//! mutates the stored value and then sweeps every peer with a matching
-//! `config.neighbor_group` reference to propagate the change (or tear
-//! the inherited peer down on Delete) — see
-//! [`config_neighbor_group_remote_as`].
+//! Group mutations are reactive, but the two attributes propagate
+//! differently:
+//! - `remote-as` changes sweep every peer with a matching
+//!   `config.neighbor_group` reference and bounce affected sessions
+//!   (the FSM must renegotiate with the new ASN) — see
+//!   [`config_neighbor_group_remote_as`].
+//! - `afi-safi` changes recompute the peers' effective MP set
+//!   ([`effective_mp`]) without touching the FSM: like the per-neighbor
+//!   `afi-safi <name> enabled` knob, the new set is advertised when
+//!   capabilities are next negotiated (`clear bgp …`).
 //!
 //! Naming-wise this sits alongside the existing
 //! `peer-groups/peer-group` schema, not on top of it: a peer can
@@ -21,21 +28,30 @@
 
 use std::collections::BTreeMap;
 
+use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
+
 use super::Bgp;
 use super::inst::Message;
-use super::peer::{Event, PeerType};
+use super::peer::{Event, PeerConfig, PeerType};
+use super::peer_key::PeerOrigin;
 use crate::config::{Args, ConfigOp};
 
 #[derive(Debug, Default, Clone)]
 pub struct NeighborGroup {
     pub remote_as: Option<u32>,
+    /// Per-family `afi-safi <name> enabled <bool>` opinions. Tri-state
+    /// per family: `true` forces the family on for inheriting peers,
+    /// `false` forces it off (overriding the implicit IPv4-unicast
+    /// default), absent means "no opinion" (the peer's own default /
+    /// explicit setting stands).
+    pub afi_safi: BTreeMap<AfiSafi, bool>,
 }
 
-/// `set router bgp neighbor-groups neighbor-group <name>` — list-key
-/// callback. Creates the entry on `Set`; on `Delete` cascades through
-/// the sweep helper (so any peers that inherited from the group are
-/// torn down even when libyang's commit path skips the per-leaf
-/// delete callbacks) and then removes the entry.
+/// `set router bgp neighbor-group <name>` — list-key callback.
+/// Creates the entry on `Set`; on `Delete` cascades through the sweep
+/// helpers (so any peers that inherited from the group are torn down /
+/// reset even when libyang's commit path skips the per-leaf delete
+/// callbacks) and then removes the entry.
 pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     match op {
@@ -50,13 +66,18 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
             // false` and returns `SweepAction::Ignore`.
             sweep_peers_for_group(bgp, &name, None);
             bgp.neighbor_groups.remove(&name);
+            // With the group gone its afi-safi opinions are gone too:
+            // members fall back to default + their own explicit
+            // statements (the reference leaf on the peer still stands
+            // and re-resolves if the group is re-created).
+            sweep_group_afi_safi(bgp, &name);
         }
         _ => {}
     }
     Some(())
 }
 
-/// `set router bgp neighbor-groups neighbor-group <name> remote-as <asn>`.
+/// `set router bgp neighbor-group <name> remote-as <asn>`.
 ///
 /// Mutates the stored value and then reactively sweeps every peer that
 /// references the group with an inherited (or absent) `remote-as`:
@@ -81,6 +102,121 @@ pub fn config_neighbor_group_remote_as(bgp: &mut Bgp, mut args: Args, op: Config
 
     sweep_peers_for_group(bgp, &name, new_asn);
     Some(())
+}
+
+/// `set router bgp neighbor-group <name> afi-safi <family>` — list-key
+/// callback. `Set` just materializes the group entry (the meaningful
+/// state arrives with the mandatory `enabled` leaf); `Delete` drops the
+/// family opinion and re-resolves members — needed because a
+/// whole-entry delete skips the per-leaf delete callbacks (same
+/// libyang-commit behavior the group-level Delete works around).
+pub fn config_neighbor_group_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let family: AfiSafi = args.afi_safi()?;
+    match op {
+        ConfigOp::Set => {
+            bgp.neighbor_groups.entry(name).or_default();
+        }
+        ConfigOp::Delete => {
+            if let Some(group) = bgp.neighbor_groups.get_mut(&name) {
+                group.afi_safi.remove(&family);
+            }
+            sweep_group_afi_safi(bgp, &name);
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> afi-safi <family> enabled <bool>`.
+///
+/// Stores the opinion and recomputes the effective MP set of every
+/// member peer. Deliberately no FSM bounce: exactly like the
+/// per-neighbor `afi-safi <name> enabled` knob, the new family set is
+/// advertised when capabilities are next negotiated — the operator
+/// issues `clear bgp …` to apply it to an established session.
+pub fn config_neighbor_group_afi_safi_enabled(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let family: AfiSafi = args.afi_safi()?;
+    let group = bgp.neighbor_groups.entry(name.clone()).or_default();
+    match op {
+        ConfigOp::Set => {
+            let enabled = args.boolean()?;
+            group.afi_safi.insert(family, enabled);
+        }
+        ConfigOp::Delete => {
+            group.afi_safi.remove(&family);
+        }
+        _ => return Some(()),
+    }
+    sweep_group_afi_safi(bgp, &name);
+    Some(())
+}
+
+/// Compute a peer's effective MP (multiprotocol) family set from the
+/// three layers, lowest precedence first:
+///
+/// 1. the built-in default (IPv4 unicast on — every peer is born with
+///    it, see `Peer::new`),
+/// 2. the referenced neighbor-group's `afi-safi` opinions,
+/// 3. the per-peer explicit `afi-safi <name> enabled` statements
+///    ([`super::peer::PeerConfig::mp_explicit`]) — "any field set
+///    explicitly on the neighbor wins".
+///
+/// Presence in the returned set means enabled — the same invariant
+/// `PeerConfig::mp` always had.
+pub fn effective_mp(
+    group: Option<&BTreeMap<AfiSafi, bool>>,
+    explicit: &BTreeMap<AfiSafi, bool>,
+) -> AfiSafis<bool> {
+    let mut mp = AfiSafis::new();
+    mp.insert(AfiSafi::new(Afi::Ip, Safi::Unicast), true);
+    for (family, enabled) in group.into_iter().flatten() {
+        if *enabled {
+            mp.insert(*family, true);
+        } else {
+            mp.remove(family);
+        }
+    }
+    for (family, enabled) in explicit.iter() {
+        if *enabled {
+            mp.insert(*family, true);
+        } else {
+            mp.remove(family);
+        }
+    }
+    mp
+}
+
+/// Re-resolve one peer's `config.mp` from its group reference and
+/// explicit statements. Takes the group map (not `&Bgp`) so callers
+/// holding a `&mut` borrow into `bgp.peers` can still pass
+/// `&bgp.neighbor_groups` alongside.
+pub fn recompute_peer_mp(groups: &BTreeMap<String, NeighborGroup>, config: &mut PeerConfig) {
+    let opinions = config
+        .neighbor_group
+        .as_ref()
+        .and_then(|name| groups.get(name))
+        .map(|group| &group.afi_safi);
+    config.mp = effective_mp(opinions, &config.mp_explicit);
+}
+
+/// Recompute the effective MP set of every peer referencing `name`.
+/// Called after any change to the group's `afi-safi` opinions (and
+/// after group deletion, where the lookup misses and members fall back
+/// to default + explicit). `iter_mut_all` so interface-keyed (IPv6
+/// unnumbered) members are swept too — `iter_mut` silently skips them.
+fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
+    for (_, peer) in bgp.peers.iter_mut_all() {
+        if peer.config.neighbor_group.as_deref() != Some(name) {
+            continue;
+        }
+        recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+    }
 }
 
 /// Decide what to do with one peer that references the group whose
@@ -142,8 +278,33 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
     let local_asn = bgp.asn;
     let mut stops: Vec<usize> = Vec::new();
 
-    for (_, peer) in bgp.peers.iter_mut() {
+    // Interface-keyed peers carry the group back-reference even when
+    // their remote-as came from the interface-neighbor cfg itself (the
+    // reference also drives afi-safi inheritance). The remote-as sweep
+    // must not adopt over such an explicit spec — `remote-as external`
+    // materializes as the 0 placeholder, which the zero-means-unset
+    // heuristic in [`sweep_action`] would otherwise treat as
+    // group-eligible.
+    let explicit_ifnames: std::collections::BTreeSet<&str> = bgp
+        .interface_neighbors
+        .iter()
+        .filter(|(_, cfg)| cfg.remote_as != super::interface_neighbor::RemoteAsSpec::Unset)
+        .map(|(ifname, _)| ifname.as_str())
+        .collect();
+
+    // `iter_mut_all` so interface-keyed (IPv6 unnumbered) members are
+    // swept too — `iter_mut` silently skips them, which left an
+    // unnumbered peer's inherited remote-as frozen across group edits.
+    for (_, peer) in bgp.peers.iter_mut_all() {
         if peer.config.neighbor_group.as_deref() != Some(name) {
+            continue;
+        }
+        if matches!(peer.origin, PeerOrigin::Interface { .. })
+            && peer
+                .ifname
+                .as_deref()
+                .is_some_and(|ifname| explicit_ifnames.contains(ifname))
+        {
             continue;
         }
         match sweep_action(
@@ -213,6 +374,7 @@ mod tests {
             "RR".into(),
             NeighborGroup {
                 remote_as: Some(65000),
+                ..Default::default()
             },
         );
         assert_eq!(map.get("RR").and_then(|g| g.remote_as), Some(65000));
@@ -227,7 +389,7 @@ mod tests {
     #[test]
     fn remote_as_absent_when_group_has_no_asn() {
         let mut map: BTreeMap<String, NeighborGroup> = BTreeMap::new();
-        map.insert("RR".into(), NeighborGroup { remote_as: None });
+        map.insert("RR".into(), NeighborGroup::default());
         assert_eq!(map.get("RR").and_then(|g| g.remote_as), None);
     }
 
@@ -296,5 +458,72 @@ mod tests {
         // Peer was never inherited and never got an explicit asn —
         // Delete on the group is a no-op from the sweep's perspective.
         assert_eq!(sweep_action(0, false, false, None), SweepAction::Ignore);
+    }
+
+    // [`effective_mp`] precedence matrix: built-in default (IPv4
+    // unicast on) < group opinions < per-peer explicit statements.
+
+    fn v4() -> AfiSafi {
+        AfiSafi::new(Afi::Ip, Safi::Unicast)
+    }
+
+    fn v6() -> AfiSafi {
+        AfiSafi::new(Afi::Ip6, Safi::Unicast)
+    }
+
+    fn families(mp: &AfiSafis<bool>) -> Vec<AfiSafi> {
+        mp.keys().copied().collect()
+    }
+
+    #[test]
+    fn effective_mp_default_is_ipv4_unicast_only() {
+        let mp = effective_mp(None, &BTreeMap::new());
+        assert_eq!(families(&mp), vec![v4()]);
+    }
+
+    #[test]
+    fn effective_mp_group_enables_extra_family() {
+        let group = BTreeMap::from([(v6(), true)]);
+        let mp = effective_mp(Some(&group), &BTreeMap::new());
+        assert_eq!(families(&mp), vec![v4(), v6()]);
+    }
+
+    #[test]
+    fn effective_mp_group_disables_the_ipv4_default() {
+        let group = BTreeMap::from([(v4(), false), (v6(), true)]);
+        let mp = effective_mp(Some(&group), &BTreeMap::new());
+        assert_eq!(families(&mp), vec![v6()]);
+    }
+
+    #[test]
+    fn effective_mp_explicit_wins_over_group() {
+        // Group switches v4 off, but the peer's own `afi-safi ipv4
+        // enabled true` stands; group's v6 opinion is unopposed.
+        let group = BTreeMap::from([(v4(), false), (v6(), true)]);
+        let explicit = BTreeMap::from([(v4(), true)]);
+        let mp = effective_mp(Some(&group), &explicit);
+        assert_eq!(families(&mp), vec![v4(), v6()]);
+
+        // ... and the mirror: group on, explicit off.
+        let group = BTreeMap::from([(v6(), true)]);
+        let explicit = BTreeMap::from([(v6(), false)]);
+        let mp = effective_mp(Some(&group), &explicit);
+        assert_eq!(families(&mp), vec![v4()]);
+    }
+
+    #[test]
+    fn effective_mp_explicit_without_group() {
+        let explicit = BTreeMap::from([(v4(), false), (v6(), true)]);
+        let mp = effective_mp(None, &explicit);
+        assert_eq!(families(&mp), vec![v6()]);
+    }
+
+    #[test]
+    fn effective_mp_group_gone_restores_default() {
+        // Same shape the group-delete cascade produces: reference
+        // still set on the peer, lookup misses → opinions = None.
+        let mp = effective_mp(None, &BTreeMap::new());
+        assert!(mp.has(&v4()));
+        assert!(!mp.has(&v6()));
     }
 }

@@ -3,10 +3,9 @@ router:
     global:
       as: 65001
       router-id: 192.168.0.1
-    neighbor-groups:
-      neighbor-group:
-      - name: RR
-        remote-as: 65099
+    neighbor-group:
+    - name: RR
+      remote-as: 65099
     neighbor:
     - remote-address: 192.168.0.2
       afi-safi:

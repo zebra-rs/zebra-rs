@@ -424,10 +424,12 @@ async fn apply_config(world: &mut World, config_file: String, namespace: String)
 }
 
 /// Apply raw config lines (`set …` / `delete …`, `\n`-separated) and commit —
-/// the runtime-reconfiguration sibling of `I apply config`. `vtyctl apply`
-/// with a file is additive, so exercising a runtime *removal* needs an
-/// explicit `delete` line; this is how scenarios prove a knob can be turned
-/// off on a live session, not just left out at startup.
+/// the runtime-reconfiguration sibling of `I apply config`. NOTE the two
+/// steps differ in replace semantics: `vtyctl apply` with a FILE clears the
+/// candidate and rebuilds it from the file (declarative whole-config
+/// replace — a partial file deletes everything it omits), while `-c` lines
+/// are additive against the running config. Use this step for a surgical
+/// runtime `set`/`delete`; keep config files full restatements.
 #[when(expr = "I apply command {string} in namespace {string}")]
 async fn apply_config_command(world: &mut World, command: String, namespace: String) {
     let scoped = world.ns(&namespace);

@@ -6,7 +6,7 @@ under the `clear bgp …` tree and take effect immediately — there is no
 `commit`.
 
 ```
-clear bgp <ipv4|ipv6|vpnv4|evpn> <peer-address|all> [soft [in|out]]
+clear bgp <ipv4|ipv6|vpnv4|evpn> <peer-address|ifname|all> [soft [in|out]]
 ```
 
 The peer can be typed straight after the AFI (the FRR spelling), or
@@ -16,11 +16,15 @@ command:
 ```
 zebra# clear bgp ipv4 192.168.0.2
 zebra# clear bgp ipv4 neighbor 192.168.0.2      # same thing
+zebra# clear bgp ipv4 neighbor i1               # unnumbered peer, by interface
 zebra# clear bgp ipv4 all soft out
 ```
 
 `all` targets every established peer that negotiated the given
-AFI/SAFI.
+AFI/SAFI. An interface name selects an
+[IPv6 unnumbered](ch-02-27-bgp-unnumbered.md) peer — its kernel-assigned
+link-local is not something an operator can type, so the interface is
+its CLI identity.
 
 ## Hard clear — bounce the session
 

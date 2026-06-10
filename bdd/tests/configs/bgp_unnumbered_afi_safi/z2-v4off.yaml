@@ -1,0 +1,31 @@
+# Phase 3 for z2 — mirror of z1-v4off.yaml (full-config restatement
+# with the group's ipv4 opinion flipped to false; see z1-v4off.yaml
+# for why partial files don't work with `vtyctl apply -f`).
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 2.2.2.2
+    neighbor-group:
+    - name: dynamic
+      afi-safi:
+      - name: ipv4
+        enabled: false
+      - name: ipv6
+        enabled: true
+    interface-neighbor:
+    - interface: i1
+      neighbor-group: dynamic
+      remote-as: internal
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.2/32
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:1::2/128

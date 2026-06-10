@@ -1,0 +1,7 @@
+# Phase 1 for z2 — mirror of z1-base.yaml; same AS (iBGP via
+# `remote-as internal` in phase 2), different router-id.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 2.2.2.2

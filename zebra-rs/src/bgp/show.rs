@@ -3733,6 +3733,28 @@ fn show_bgp_vrf_detail(
 // `show ip bgp neighbor-group [NAME]`
 // ---------------------------------------------------------------------
 
+/// Map an [`AfiSafi`] to the zebra-rs config-layer token name used in
+/// `zebra-afi-safi.yang` and `Args::afi_safi`.
+fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => "ipv4",
+        (Afi::Ip6, Safi::Unicast) => "ipv6",
+        (Afi::Ip, Safi::MplsVpn) => "vpnv4",
+        (Afi::Ip6, Safi::MplsVpn) => "vpnv6",
+        (Afi::Ip, Safi::Rtc) => "rtcv4",
+        (Afi::Ip6, Safi::Rtc) => "rtcv6",
+        (Afi::L2vpn, Safi::Evpn) => "evpn",
+        (Afi::Ip, Safi::MplsLabel) => "label-v4",
+        (Afi::Ip6, Safi::MplsLabel) => "label-v6",
+        (Afi::Ip, Safi::Flowspec) => "flowspec-ipv4",
+        (Afi::Ip6, Safi::Flowspec) => "flowspec-ipv6",
+        (Afi::Ip, Safi::SrTePolicy) => "sr-policy-v4",
+        (Afi::Ip6, Safi::SrTePolicy) => "sr-policy-v6",
+        (Afi::LinkState, Safi::LinkState) => "link-state",
+        _ => "unknown",
+    }
+}
+
 /// One row of `show ip bgp neighbor-group` (list form). Captures the
 /// configured fields plus a member-peer count to make the list useful
 /// at a glance.
@@ -3741,6 +3763,7 @@ struct BgpNeighborGroupListRow {
     name: String,
     remote_as: Option<u32>,
     members: usize,
+    afi_safi: BTreeMap<String, bool>,
 }
 
 /// Detail view: configured fields plus the peer addresses that
@@ -3760,17 +3783,20 @@ struct BgpNeighborGroupMember {
 struct BgpNeighborGroupDetail {
     name: String,
     remote_as: Option<u32>,
+    afi_safi: BTreeMap<String, bool>,
     members: Vec<BgpNeighborGroupMember>,
 }
 
 fn neighbor_group_members(bgp: &Bgp, name: &str) -> Vec<BgpNeighborGroupMember> {
+    // `iter_all` so interface-keyed (IPv6 unnumbered) members appear;
+    // their operator-facing identity is the interface name.
     let mut members: Vec<BgpNeighborGroupMember> = bgp
         .peers
-        .iter()
+        .iter_all()
         .filter_map(|(_, peer)| {
             if peer.config.neighbor_group.as_deref() == Some(name) {
                 Some(BgpNeighborGroupMember {
-                    address: peer.address.to_string(),
+                    address: peer.display_name(),
                     remote_as: peer.remote_as,
                     inherited_remote_as: peer.config.remote_as_inherited,
                     state: peer.state.to_str().to_string(),
@@ -3825,6 +3851,11 @@ fn show_bgp_neighbor_group_list_json(bgp: &Bgp) -> std::result::Result<String, s
             name: name.clone(),
             remote_as: group.remote_as,
             members: neighbor_group_members(bgp, name).len(),
+            afi_safi: group
+                .afi_safi
+                .iter()
+                .map(|(k, v)| (afi_safi_config_name(k).to_string(), *v))
+                .collect(),
         })
         .collect();
     Ok(serde_json::to_string_pretty(&rows).unwrap_or_default())
@@ -3847,6 +3878,11 @@ fn show_bgp_neighbor_group_detail(
         let detail = BgpNeighborGroupDetail {
             name: name.to_string(),
             remote_as: group.remote_as,
+            afi_safi: group
+                .afi_safi
+                .iter()
+                .map(|(k, v)| (afi_safi_config_name(k).to_string(), *v))
+                .collect(),
             members,
         };
         return Ok(serde_json::to_string_pretty(&detail).unwrap_or_default());
@@ -3862,6 +3898,20 @@ fn show_bgp_neighbor_group_detail(
             .map(|a| a.to_string())
             .unwrap_or_else(|| "(unset)".into())
     )?;
+    if !group.afi_safi.is_empty() {
+        let families: Vec<String> = group
+            .afi_safi
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{} {}",
+                    afi_safi_config_name(k),
+                    if *v { "enabled" } else { "disabled" }
+                )
+            })
+            .collect();
+        writeln!(buf, "  Afi-Safi:  {}", families.join(", "))?;
+    }
     if members.is_empty() {
         writeln!(buf, "  Members:   (no peers reference this group)")?;
     } else {
