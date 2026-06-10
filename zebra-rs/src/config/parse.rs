@@ -886,6 +886,104 @@ mod tests {
         to_entry(&yang, module)
     }
 
+    fn configure_entry() -> Rc<Entry> {
+        use libyang::{YangStore, to_entry};
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        to_entry(&yang, module)
+    }
+
+    /// `ext:default-child "neighbor"` on the per-AFI clear containers
+    /// lets the peer address (or `all`) be typed straight after the AFI
+    /// — FRR's `clear bgp ipv4 <peer> [soft [in|out]]` spelling — and
+    /// resolves to the same path + args as the explicit `neighbor`
+    /// keyword form. Pinned with parse() tests because the vtyctl clear
+    /// surface is garbage-tolerant: an unwired grammar silently no-ops
+    /// instead of erroring.
+    #[test]
+    fn clear_bgp_grammar() {
+        use crate::config::path_from_command;
+        let entry = configure_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            (
+                "clear bgp ipv4 192.168.0.1",
+                "/clear/bgp/ipv4/neighbor",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv4 neighbor 192.168.0.1",
+                "/clear/bgp/ipv4/neighbor",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv4 all",
+                "/clear/bgp/ipv4/neighbor",
+                vec!["all"],
+            ),
+            (
+                "clear bgp ipv4 192.168.0.1 soft",
+                "/clear/bgp/ipv4/neighbor/soft",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv4 neighbor 192.168.0.1 soft out",
+                "/clear/bgp/ipv4/neighbor/soft/out",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv4 192.168.0.1 soft out",
+                "/clear/bgp/ipv4/neighbor/soft/out",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv4 neighbor all soft out",
+                "/clear/bgp/ipv4/neighbor/soft/out",
+                vec!["all"],
+            ),
+            (
+                "clear bgp ipv4 all soft out",
+                "/clear/bgp/ipv4/neighbor/soft/out",
+                vec!["all"],
+            ),
+            (
+                "clear bgp ipv4 192.168.0.1 soft in",
+                "/clear/bgp/ipv4/neighbor/soft/in",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp ipv6 2001:db8::1",
+                "/clear/bgp/ipv6/neighbor",
+                vec!["2001:db8::1"],
+            ),
+            (
+                "clear bgp vpnv4 10.0.0.1 soft out",
+                "/clear/bgp/vpnv4/neighbor/soft/out",
+                vec!["10.0.0.1"],
+            ),
+            (
+                "clear bgp evpn all",
+                "/clear/bgp/evpn/neighbor",
+                vec!["all"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
     /// `ext:default-child "ipv4"` lets an address/prefix be typed right
     /// after `show bgp`; the explicit `show bgp ipv4 …` form parses to
     /// the very same path + args. `longer-prefix` rides along as a
