@@ -5135,7 +5135,7 @@ impl Ospf<Ospfv3> {
     /// router-LSA re-origination) is a follow-up PR.
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
-            // RIB-derived router-id (top-level `router-id` config or
+            // RIB-derived router-id (`system router-id` config or
             // the automatic pick from interface IPv4 addresses).
             // Mirrors the v2 arm: store and refresh, so a configured
             // `router ospfv3 router-id` keeps winning and a config

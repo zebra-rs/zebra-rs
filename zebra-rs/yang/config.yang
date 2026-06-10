@@ -325,6 +325,18 @@ module config {
           "The name of the host. This name can be a single domain label or the
            fully qualified domain name of the host.";
       }
+      // Global Router ID, `system router-id A.B.C.D` (the equivalent
+      // of FRR/zebra's top-level `router-id`). When set it overrides
+      // the automatic pick (first non-localhost IPv4, loopbacks
+      // preferred — see `rib/router_id.rs`) and is pushed to protocol
+      // subscribers via `RibRx::RouterIdUpdate`; deleting it falls
+      // back to the automatic pick. Protocol-local identifiers
+      // (`router bgp global router-id`, `router ospf router-id`, …)
+      // still apply on their own instances.
+      leaf router-id {
+        ext:help "Global router identifier";
+        type inet:ipv4-address;
+      }
       container dhcp {
         uses "dhcp:dhcp";
       }
@@ -422,18 +434,6 @@ module config {
              aliases) or accidentally collide.";
         }
       }
-    }
-
-    // Global Router ID, FRR/zebra-style `router-id A.B.C.D`. When
-    // set it overrides the automatic pick (first non-localhost IPv4,
-    // loopbacks preferred — see `rib/router_id.rs`) and is pushed to
-    // protocol subscribers via `RibRx::RouterIdUpdate`; deleting it
-    // falls back to the automatic pick. Protocol-local identifiers
-    // (`router bgp global identifier`, `router ospf router-id`, …)
-    // still apply on their own instances.
-    leaf router-id {
-      ext:help "Global router identifier";
-      type inet:ipv4-address;
     }
 
     container router {
@@ -2612,7 +2612,7 @@ module config {
            one from the VRF's member interfaces (loopback-flagged
            members first), falling back to the global effective
            Router ID. Pushed to this VRF's protocol subscribers via
-           RouterIdUpdate, like the top-level `router-id`.";
+           RouterIdUpdate, like the global `system router-id`.";
         type inet:ipv4-address;
       }
       container ipv4 {

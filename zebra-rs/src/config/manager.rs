@@ -1380,6 +1380,48 @@ mod yang_load_tests {
         );
     }
 
+    /// The global Router-ID override moved from the top level
+    /// (`router-id A.B.C.D`) under the `system` container
+    /// (`system router-id A.B.C.D`); the RIB dispatch in
+    /// `rib/inst.rs` matches the literal `/system/router-id` path.
+    /// Pin both directions at the grammar level: the new spelling
+    /// parses, the old top-level one no longer does.
+    #[test]
+    fn global_router_id_moved_under_system() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set system router-id 10.255.0.1",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set system router-id <ipv4>` must be a settable path",
+        );
+
+        let (code, _comps, _state) = parse("set router-id 10.255.0.1", entry, None, State::new());
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "the pre-move top-level `router-id` spelling must no longer parse",
+        );
+    }
+
     /// A new BGP-neighbor YANG knob must be a *settable* path, not just a
     /// loadable module. Naming it the same as a leaf already present via
     /// `uses ietf-bgp:bgp` makes the augment silently dropped (RFC 7950
