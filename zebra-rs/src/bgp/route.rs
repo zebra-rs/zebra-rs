@@ -5664,6 +5664,32 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.adj_out.v4.0.clear();
 
     peer.cache_vpnv4.clear();
+    peer.cache_vpnv6.clear();
+
+    // IPv6 unicast. Same shape as the IPv4 block above — withdraw
+    // every prefix the peer gave us from the Loc-RIB (which fans out
+    // MP_UNREACH to other peers and removes any main-RIB install),
+    // then drop the Adj-RIB tables. Was missing entirely: a session
+    // leaving Established kept its v6 routes selected forever.
+    let withdrawn_v6 = {
+        let mut withdrawn: Vec<Ipv6Nlri> = vec![];
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        for (prefix, ribs) in peer.adj_in.v6.0.iter() {
+            for rib in ribs.iter() {
+                withdrawn.push(Ipv6Nlri {
+                    id: rib.remote_id,
+                    prefix: *prefix,
+                });
+            }
+        }
+        withdrawn
+    };
+    for withdraw in withdrawn_v6.iter() {
+        route_ipv6_withdraw(peer_id, withdraw, None, bgp, peers, true);
+    }
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_in.v6.0.clear();
+    peer.adj_out.v6.0.clear();
 
     // IPv4 VPN.
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
@@ -5817,6 +5843,142 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.v4vpn.clear();
+
+    // IPv6 VPN. Same two-branch shape as the VPNv4 block above:
+    // LLGR-negotiated sessions retain the adj-in entries stale-marked
+    // (LLGR_STALE community attached, stale timer armed); otherwise
+    // withdraw everything. Was missing entirely alongside the v6
+    // unicast block.
+    let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsVpn);
+    if peer.cap_send.llgr.contains_key(&afi_safi)
+        && let Some(llgr) = peer.cap_recv.llgr.get(&afi_safi)
+    {
+        peer.timer.stale_timer.insert(
+            afi_safi,
+            start_stale_timer(peer, afi_safi, llgr.stale_time()),
+        );
+
+        // RFC 9494 §4.2: NO_LLGR routes are not retained — remove and
+        // withdraw them; only the rest go stale.
+        let no_llgr: Vec<Vpnv6Nlri> = {
+            let mut out = Vec::new();
+            for (rd, table) in peer.adj_in.v6vpn.iter_mut() {
+                for (prefix, ribs) in table.0.iter_mut() {
+                    ribs.retain(|rib| {
+                        let refuse = attr_refuses_llgr(&rib.attr);
+                        if refuse {
+                            out.push(Vpnv6Nlri {
+                                label: rib.label.unwrap_or_default(),
+                                rd: *rd,
+                                nlri: Ipv6Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            });
+                        }
+                        !refuse
+                    });
+                }
+            }
+            out
+        };
+        for withdraw in no_llgr.iter() {
+            route_ipv6_withdraw(peer_id, &withdraw.nlri, Some(withdraw.rd), bgp, peers, true);
+        }
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+
+        for (_rd, table) in peer.adj_in.v6vpn.iter_mut() {
+            for (_prefix, ribs) in table.0.iter_mut() {
+                for rib in ribs.iter_mut() {
+                    rib.stale = true;
+                    let mut new_attr = (*rib.attr).clone();
+                    match &mut new_attr.com {
+                        Some(com) => {
+                            com.insert(CommunityValue::LLGR_STALE.value());
+                        }
+                        None => {
+                            let mut com = Community::new();
+                            com.insert(CommunityValue::LLGR_STALE.value());
+                            new_attr.com = Some(com);
+                        }
+                    }
+                    rib.attr = bgp.attr_store.intern(new_attr);
+                }
+            }
+        }
+
+        // Re-import the now-stale entries into the Loc-RIB so best
+        // path selection still sees them (with the stale community).
+        let stale_updates: Vec<(
+            RouteDistinguisher,
+            Ipv6Nlri,
+            Option<Label>,
+            BgpAttr,
+            Option<VpnNexthop>,
+        )> = {
+            let mut updates = Vec::new();
+            for (rd, table) in peer.adj_in.v6vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        let nlri = Ipv6Nlri {
+                            id: rib.remote_id,
+                            prefix: *prefix,
+                        };
+                        updates.push((
+                            *rd,
+                            nlri,
+                            rib.label,
+                            (*rib.attr).clone(),
+                            rib.nexthop.clone(),
+                        ));
+                    }
+                }
+            }
+            updates
+        };
+        for (rd, nlri, label, attr, nexthop) in stale_updates {
+            route_ipv6_update(
+                peer_id,
+                &nlri,
+                Some(rd),
+                label,
+                &attr,
+                nexthop,
+                bgp,
+                peers,
+                true,
+            );
+        }
+    } else {
+        let withdrawn = {
+            let mut withdrawn: Vec<Vpnv6Nlri> = vec![];
+            let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+
+            for (rd, table) in peer.adj_in.v6vpn.iter() {
+                for (prefix, ribs) in table.0.iter() {
+                    for rib in ribs.iter() {
+                        withdrawn.push(Vpnv6Nlri {
+                            label: rib.label.unwrap_or_default(),
+                            rd: *rd,
+                            nlri: Ipv6Nlri {
+                                id: rib.remote_id,
+                                prefix: *prefix,
+                            },
+                        });
+                    }
+                }
+            }
+            withdrawn
+        };
+        for withdraw in withdrawn.iter() {
+            route_ipv6_withdraw(peer_id, &withdraw.nlri, Some(withdraw.rd), bgp, peers, true);
+        }
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        peer.adj_in.v6vpn.clear();
+    }
+
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_out.v6vpn.clear();
 
     // EVPN. Same shape as the VPNv4 block above:
     //   * If both ends advertised LLGR for L2VPN/EVPN, retain the
@@ -5976,6 +6138,69 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.adj_out.v4lu.0.clear();
     peer.adj_out.v6lu.0.clear();
 
+    // Flowspec v4 / v6 (SAFI 133). Withdraw each rule the peer gave
+    // us — `route_flowspec_withdraw` removes adj-in + Loc-RIB entry
+    // and re-propagates — then drop the Adj-RIB tables.
+    let withdrawn_fs: Vec<(Afi, FlowspecNlri)> = {
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        let mut out = Vec::new();
+        for nlri in peer.adj_in.flowspec_v4.0.keys() {
+            out.push((Afi::Ip, nlri.clone()));
+        }
+        for nlri in peer.adj_in.flowspec_v6.0.keys() {
+            out.push((Afi::Ip6, nlri.clone()));
+        }
+        out
+    };
+    for (afi, nlri) in withdrawn_fs.iter() {
+        route_flowspec_withdraw(peer_id, nlri, *afi, bgp, peers);
+    }
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_in.flowspec_v4.0.clear();
+    peer.adj_in.flowspec_v6.0.clear();
+    peer.adj_out.flowspec_v4.0.clear();
+    peer.adj_out.flowspec_v6.0.clear();
+
+    // BGP Link-State (SAFI 71). Withdraw each NLRI the peer gave us
+    // from the bgp_ls Loc-RIB, then drop the Adj-RIB tables.
+    let withdrawn_ls: Vec<BgpLsNlri> = {
+        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+        peer.adj_in.bgp_ls.0.keys().cloned().collect()
+    };
+    for nlri in withdrawn_ls.iter() {
+        route_bgpls_withdraw(peer_id, nlri, bgp, peers);
+    }
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
+    peer.adj_in.bgp_ls.0.clear();
+    peer.adj_out.bgp_ls.0.clear();
+
+    // SR Policy (SAFI 73). The candidate paths live in the headend
+    // database keyed by <color, endpoint, discriminator> with the
+    // contributing peer recorded per candidate — sweep this peer's
+    // candidates out through `route_srpolicy_withdraw`, which also
+    // tears down any installed Binding-SID / MPLS FIB state and
+    // reflects the withdraw to other SAFI-73 peers.
+    let withdrawn_srp: Vec<SrPolicyNlri> = {
+        let mut out = Vec::new();
+        for (key, policy) in bgp.local_rib.sr_policy.policies.iter() {
+            for (cp_key, cp) in policy.candidates.iter() {
+                if cp.peer == peer_id {
+                    out.push(SrPolicyNlri {
+                        id: 0,
+                        distinguisher: cp_key.discriminator,
+                        color: key.color,
+                        endpoint: key.endpoint,
+                    });
+                }
+            }
+        }
+        out
+    };
+    for nlri in withdrawn_srp.iter() {
+        route_srpolicy_withdraw(peer_id, nlri, bgp, peers);
+    }
+
+    let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.cap_map = CapAfiMap::new();
     peer.cap_recv = BgpCap::default();
     peer.opt.clear();
