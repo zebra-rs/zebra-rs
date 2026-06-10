@@ -301,7 +301,12 @@ module ietf-bgp {
             "Local autonomous system number of the router.  Uses
              the 32-bit as-number type from the model in RFC 6991.";
         }
-        leaf identifier {
+        // zebra-rs divergence from the IETF model: this leaf is named
+        // `identifier` upstream. Renamed to `router-id` so the BGP
+        // surface matches every other router-id knob in zebra-rs
+        // (top-level `router-id`, `vrf <name> router-id`,
+        // `router ospf{,v3} router-id`, `router bgp vrf <n> router-id`).
+        leaf router-id {
           type inet:ipv4-address;
           description
             "BGP Identifier of the router - an unsigned 32-bit,

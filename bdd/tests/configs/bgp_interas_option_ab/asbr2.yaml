@@ -41,7 +41,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 2.2.2.3
+      router-id: 2.2.2.3
     timer:
       adv-interval:
         ibgp: 1

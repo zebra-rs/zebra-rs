@@ -9,7 +9,7 @@ router:
   bgp:
     global:
       as: 100
-      identifier: 192.168.0.2
+      router-id: 192.168.0.2
     timer:
       adv-interval:
         ibgp: 1

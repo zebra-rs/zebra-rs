@@ -93,7 +93,7 @@ router:
   bgp:
     global:
       as: 100
-      identifier: 192.168.0.2
+      router-id: 192.168.0.2
     neighbor:
     - remote-address: 192.168.1.3
       remote-as: 200

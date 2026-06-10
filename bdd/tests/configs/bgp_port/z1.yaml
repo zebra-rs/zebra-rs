@@ -10,7 +10,7 @@ router:
     port: 0
     global:
       as: 65001
-      identifier: 192.168.0.1
+      router-id: 192.168.0.1
     timer:
       adv-interval:
         ibgp: 1

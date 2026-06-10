@@ -106,7 +106,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 192.168.0.1
+      router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
       peer-as: 65002
@@ -145,7 +145,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 192.168.0.1
+      router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
       peer-as: 65002

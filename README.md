@@ -86,7 +86,7 @@ Enter configure mode with `configure`, edit the candidate, then `commit`:
 ubuntu>configure
 ubuntu#set system hostname r1
 ubuntu#set router bgp global as 65001
-ubuntu#set router bgp global identifier 10.0.0.1
+ubuntu#set router bgp global router-id 10.0.0.1
 ubuntu#set router bgp neighbor 10.0.0.2 remote-as 65001
 ubuntu#commit
 r1#show running-config
@@ -97,7 +97,7 @@ router {
   bgp {
     global {
       as 65001;
-      identifier 10.0.0.1;
+      router-id 10.0.0.1;
     }
     neighbor 10.0.0.2 {
       remote-as 65001;

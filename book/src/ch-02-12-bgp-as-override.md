@@ -68,7 +68,7 @@ router:
   bgp:
     global:
       as: 65002
-      identifier: 192.168.0.2
+      router-id: 192.168.0.2
     neighbor:
     - remote-address: 192.168.1.3
       remote-as: 65001

@@ -36,7 +36,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 2.2.2.3
+      router-id: 2.2.2.3
     # Lower the MRAI so the transit VPNv4 route crosses the eBGP boundary
     # (default 30s) and is re-advertised to PE2 promptly (see ASBR1).
     timer:

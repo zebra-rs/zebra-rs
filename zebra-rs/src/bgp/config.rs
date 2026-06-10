@@ -32,7 +32,7 @@ fn config_global_asn(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
-fn config_global_identifier(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_global_router_id(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
         bgp.router_id_config = Some(args.v4addr()?);
     } else {
@@ -2250,7 +2250,7 @@ impl Bgp {
 
     pub fn callback_build(&mut self) {
         self.callback_add("/router/bgp/global/as", config_global_asn);
-        self.callback_add("/router/bgp/global/identifier", config_global_identifier);
+        self.callback_add("/router/bgp/global/router-id", config_global_router_id);
         self.callback_add("/router/bgp/global/hostname", config_global_hostname);
         self.callback_add(
             "/router/bgp/global/no-fib-install",

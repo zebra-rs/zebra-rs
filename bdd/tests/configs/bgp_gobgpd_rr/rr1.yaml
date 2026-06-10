@@ -70,7 +70,7 @@ router:
   bgp:
     global:
       as: 64512
-      identifier: 198.18.39.94
+      router-id: 198.18.39.94
     neighbor:
     - remote-address: 198.18.37.17
       afi-safi:

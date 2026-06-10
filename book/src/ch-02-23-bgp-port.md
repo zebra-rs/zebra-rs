@@ -39,7 +39,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 192.168.0.1
+      router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
       remote-as: 65002
@@ -59,7 +59,7 @@ router:
     port: 1790              # listen on TCP 1790; 0 = do not listen
     global:
       as: 65002
-      identifier: 192.168.0.2
+      router-id: 192.168.0.2
     neighbor:
     - remote-address: 192.168.0.1
       remote-as: 65001

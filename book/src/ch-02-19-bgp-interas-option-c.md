@@ -82,7 +82,7 @@ router:
   bgp:
     global:
       as: 65000
-      identifier: 1.1.1.3
+      router-id: 1.1.1.3
     neighbor:
     - remote-address: 172.16.0.2   # ASBR2, over the inter-AS link
       remote-as: 65001

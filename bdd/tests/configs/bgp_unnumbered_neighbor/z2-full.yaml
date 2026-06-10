@@ -8,7 +8,7 @@ router:
   bgp:
     global:
       as: 65002
-      identifier: 2.2.2.2
+      router-id: 2.2.2.2
     interface-neighbor:
     - interface: i1
       remote-as: 65001
