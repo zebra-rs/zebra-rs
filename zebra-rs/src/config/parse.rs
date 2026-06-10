@@ -1086,8 +1086,8 @@ mod tests {
 
     /// The VPNv4 / EVPN RIB views moved from the legacy `show ip bgp`
     /// tree to `show bgp …`; the old spellings must no longer parse.
-    /// The per-neighbor Adj-RIB filters under `show ip bgp neighbors`
-    /// keep their `vpnv4` / `evpn` keywords.
+    /// The per-neighbor views (and their `vpnv4` / `evpn` Adj-RIB
+    /// filters) moved the same way: `show bgp neighbors …`.
     #[test]
     fn show_ip_bgp_vpnv4_evpn_moved() {
         let entry = exec_entry();
@@ -1095,20 +1095,22 @@ mod tests {
             "show ip bgp vpnv4",
             "show ip bgp vpnv4 route 10.0.0.1",
             "show ip bgp evpn",
+            "show ip bgp neighbors 10.0.0.1",
+            "show ip bgp neighbors 10.0.0.1 advertised-routes vpnv4",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
         }
         for cmd in [
-            "show ip bgp neighbors 10.0.0.1 advertised-routes vpnv4",
-            "show ip bgp neighbors 10.0.0.1 received-routes evpn",
+            "show bgp neighbors 10.0.0.1 advertised-routes vpnv4",
+            "show bgp neighbors 10.0.0.1 received-routes evpn",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
         }
     }
 
-    /// `show ip bgp neighbors <X>` accepts an `interface-neighbor` name
+    /// `show bgp neighbors <X>` accepts an `interface-neighbor` name
     /// — IPv6 unnumbered peers are keyed by interface, and the
     /// `bgp:neighbor` dynamic completion offers those names, so the
     /// execute path (which never sees dynamic candidates) must parse
@@ -1119,29 +1121,28 @@ mod tests {
     /// candidate — an address tying the catch-all string arm (both
     /// Partial) is one leaf match, not an ambiguous command.
     #[test]
-    fn show_ip_bgp_neighbors_interface_name() {
+    fn show_bgp_neighbors_interface_name() {
         use crate::config::path_from_command;
         let entry = exec_entry();
 
         let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            // The bare (all-peers) form rides on the list's
+            // `ext:presence`; the BDD session-state steps poll it.
+            ("show bgp neighbors", "/show/bgp/neighbors", vec![]),
+            ("show bgp neighbors i1", "/show/bgp/neighbors", vec!["i1"]),
             (
-                "show ip bgp neighbors i1",
-                "/show/ip/bgp/neighbors",
+                "show bgp neighbors i1 advertised-routes",
+                "/show/bgp/neighbors/advertised-routes",
                 vec!["i1"],
             ),
             (
-                "show ip bgp neighbors i1 advertised-routes",
-                "/show/ip/bgp/neighbors/advertised-routes",
-                vec!["i1"],
-            ),
-            (
-                "show ip bgp neighbors 10.0.0.1",
-                "/show/ip/bgp/neighbors",
+                "show bgp neighbors 10.0.0.1",
+                "/show/bgp/neighbors",
                 vec!["10.0.0.1"],
             ),
             (
-                "show ip bgp neighbors 2001:db8::1",
-                "/show/ip/bgp/neighbors",
+                "show bgp neighbors 2001:db8::1",
+                "/show/bgp/neighbors",
                 vec!["2001:db8::1"],
             ),
         ];

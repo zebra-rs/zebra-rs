@@ -65,7 +65,7 @@ Feature: BGP remove-private-as strips private ASNs from the egress AS_PATH
     Then BGP session in "z3" to "192.168.1.2" should be "Established"
     And BGP route in "z3" has "10.0.0.1/32"
     And BGP route in "z3" has "10.0.0.1/32" with "as_path" value "100"
-    And show command "show ip bgp neighbors" in namespace "z2" should contain "Private AS removal"
+    And show command "show bgp neighbors" in namespace "z2" should contain "Private AS removal"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the veth
   # pair it holds, so only the daemons and namespaces need teardown.

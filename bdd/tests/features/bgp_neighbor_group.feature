@@ -78,8 +78,8 @@ Feature: BGP neighbor-group inheritance end-to-end
     And I wait 30 seconds for BGP to operate
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
-    And show command "show ip bgp neighbors 192.168.0.2" in namespace "z1" should contain "TTL security (GTSM) enabled"
-    And show command "show ip bgp neighbors 192.168.0.2" in namespace "z1" should contain "Neighbor-group: RR"
+    And show command "show bgp neighbors 192.168.0.2" in namespace "z1" should contain "TTL security (GTSM) enabled"
+    And show command "show bgp neighbors 192.168.0.2" in namespace "z1" should contain "Neighbor-group: RR"
 
   Scenario: Teardown topology
     Given the test topology exists

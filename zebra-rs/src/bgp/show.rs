@@ -4125,29 +4125,26 @@ impl Bgp {
         self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
         self.show_add("/show/ip/bgp/labeled-unicast", show_bgp_labeled);
         self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
-        self.show_add("/show/ip/bgp/neighbors", show_bgp_neighbor::<Bgp>);
+        self.show_add("/show/bgp/neighbors", show_bgp_neighbor::<Bgp>);
+        self.show_add("/show/bgp/neighbors/advertised-routes", show_bgp_advertised);
         self.show_add(
-            "/show/ip/bgp/neighbors/advertised-routes",
-            show_bgp_advertised,
-        );
-        self.show_add(
-            "/show/ip/bgp/neighbors/advertised-routes/vpnv4",
+            "/show/bgp/neighbors/advertised-routes/vpnv4",
             show_bgp_advertised_vpnv4,
         );
         self.show_add(
-            "/show/ip/bgp/neighbors/advertised-routes/evpn",
+            "/show/bgp/neighbors/advertised-routes/evpn",
             show_bgp_advertised_evpn,
         );
-        self.show_add("/show/ip/bgp/neighbors/received-routes", show_bgp_received);
+        self.show_add("/show/bgp/neighbors/received-routes", show_bgp_received);
         self.show_add(
-            "/show/ip/bgp/neighbors/received-routes/vpnv4",
+            "/show/bgp/neighbors/received-routes/vpnv4",
             show_bgp_received_vpnv4,
         );
         self.show_add(
-            "/show/ip/bgp/neighbors/received-routes/evpn",
+            "/show/bgp/neighbors/received-routes/evpn",
             show_bgp_received_evpn,
         );
-        self.show_add("/show/ip/bgp/neighbors/rtcv4", show_bgp_rtcv4);
+        self.show_add("/show/bgp/neighbors/rtcv4", show_bgp_rtcv4);
         self.show_add("/show/ip/bgp/flowspec", show_bgp_flowspec_v4);
         self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
         self.show_add("/show/ip/bgp/sr-policy", show_bgp_sr_policy_v4);
