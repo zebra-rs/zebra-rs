@@ -14,7 +14,9 @@
 ## Routing Protocols
 
 - [BGP](ch-02-00-what-is-bgp.md)
+  - [Neighbor Groups](ch-02-26-bgp-neighbor-group.md)
   - [Dynamic Neighbors](ch-02-01-dynamic-neighbors.md)
+  - [IPv6 Unnumbered (interface-neighbor)](ch-02-27-bgp-unnumbered.md)
   - [Session Authentication (TCP MD5 / TCP-AO)](ch-02-02-tcp-authentication.md)
   - [TTL: eBGP Multihop & Security (GTSM)](ch-02-11-bgp-ttl-security.md)
   - [TCP MSS](ch-02-14-bgp-tcp-mss.md)
