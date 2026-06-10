@@ -1752,6 +1752,12 @@ struct Neighbor<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     idle_hold_timer_rem: Option<u64>,
     idle_hold_timer_next: u64,
+    /// Remaining seconds on the ConnectRetryTimer. It runs while the
+    /// peer dials (Connect — bounding the attempt) and while parked
+    /// in Active between redials (after a connection failure, or held
+    /// by the eBGP connected-check); `None` whenever it isn't armed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connect_retry_timer_rem: Option<u64>,
     #[serde(skip_serializing)]
     cap_send: BgpCap,
     #[serde(skip_serializing)]
@@ -1931,6 +1937,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         .as_ref()
         .map(|t| t.duration_sec())
         .unwrap_or_else(|| peer.config.timer.idle_hold_time());
+    let connect_retry_timer_rem = peer.timer.connect_retry.as_ref().map(|t| t.rem_sec());
 
     let mut n = Neighbor {
         address: peer.address,
@@ -1949,6 +1956,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         hold_timer_rem,
         idle_hold_timer_rem,
         idle_hold_timer_next,
+        connect_retry_timer_rem,
         cap_send: peer.cap_send.clone(),
         cap_recv: peer.cap_recv.clone(),
         cap_map: peer.cap_map.clone(),
@@ -2074,6 +2082,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             out,
             "  Next idle hold timer expires in {} seconds",
             idle_hold_rem
+        )?;
+    }
+    if let Some(connect_retry_rem) = neighbor.connect_retry_timer_rem {
+        writeln!(
+            out,
+            "  Next connect retry timer fires in {} seconds",
+            connect_retry_rem
         )?;
     }
 

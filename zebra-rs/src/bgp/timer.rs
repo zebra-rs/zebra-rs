@@ -53,6 +53,10 @@ impl Default for AdvInterval {
 impl Config {
     const DEFAULT_IDLE_HOLD_TIME: u64 = 5;
     const DEFAULT_HOLD_TIME: u64 = 180;
+    /// RFC 4271 §10 suggested default. This paces the Connect⇄Active
+    /// redial loop after a connection failure; set `timers
+    /// connect-retry-time` on the neighbor when a faster redial
+    /// cadence is wanted.
     const DEFAULT_CONNECT_RETRY_TIME: u64 = 120;
 
     pub fn idle_hold_time(&self) -> u64 {
@@ -218,27 +222,46 @@ pub fn update_timers(peer: &mut Peer) {
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
 
+            // Idle is quiescent: abort any in-flight dial so it can't
+            // deliver a Connected event for a session the FSM just
+            // tore down (e.g. Event::Stop while connecting).
+            peer.task.connect = None;
             peer.task.writer = None;
             peer.task.reader = None;
             peer.packet_tx = None;
             peer.primary_role = None;
+            peer.primary_conn_id = None;
             // A pending §6.8 collision conn is meaningless once the
             // peer is back in Idle — drop it so its reader/writer
             // tasks cancel and the FD is released.
             peer.collision = None;
         }
         Connect => {
+            // The ConnectRetryTimer keeps running while we dial (RFC
+            // 4271 Connect state): `fsm_start` (re)armed it, and if
+            // it expires before the dial resolves — a blackholed SYN
+            // — its Event::Start lands back in `fsm_start`, which
+            // replaces the stuck dial and restarts the timer.
             peer.timer.idle_hold_timer = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }
         Active => {
+            // `connect_retry` is deliberately left running here — it
+            // paces the redial after a connection failure (RFC 4271
+            // Connect/OpenSent TcpConnectionFails cells) and wakes a
+            // peer parked by the connected-check holdoff.
             peer.timer.idle_hold_timer = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }
         OpenSent => {
             peer.timer.idle_hold_timer = None;
+            // A connection is up: RFC 4271 stops the
+            // ConnectRetryTimer on entering OpenSent, and a late fire
+            // must not clobber the handshake. `fsm_conn_fail`
+            // restarts it if this connection dies.
+            peer.timer.connect_retry = None;
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
         }

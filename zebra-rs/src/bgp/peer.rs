@@ -59,9 +59,22 @@ pub enum Role {
     Passive,
 }
 
-/// Identifies which TCP connection an incoming event arrived on.
-/// `Primary` is the connection currently owning `Peer::packet_tx`
-/// and `Peer::task.{reader,writer}`. `Collision` is the parallel
+/// Identity of one TCP connection of a peer (one reader/writer
+/// spawn), minted by [`Peer::alloc_conn_id`]. Events from a
+/// connection carry its `ConnId`; the FSM resolves the id against the
+/// peer's *current* slots at dispatch time ([`resolve_conn`]).
+/// Identity must travel with the connection rather than as a role tag
+/// baked into the reader at spawn: §6.8 promotion moves a connection
+/// between slots while its reader keeps running, and a torn-down
+/// connection's last events can still sit in the queue — both
+/// misroute under a baked tag (a promoted conn's KEEPALIVEs were
+/// ignored and its death never tore the session down).
+pub type ConnId = u64;
+
+/// Which slot a connection's event resolves to — the dispatch-time
+/// product of [`resolve_conn`], never baked into a task. `Primary` is
+/// the connection currently owning `Peer::packet_tx` and
+/// `Peer::task.{reader,writer}`. `Collision` is the parallel
 /// connection held in `Peer::collision` during §6.8 resolution.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum ConnTag {
@@ -75,6 +88,9 @@ pub enum ConnTag {
 /// BGP-Identifier comparison can pick the winner.
 #[derive(Debug)]
 pub struct CollisionConn {
+    /// This connection's identity; becomes `Peer::primary_conn_id` if
+    /// it wins §6.8 resolution and is promoted.
+    pub conn_id: ConnId,
     pub packet_tx: UnboundedSender<BytesMut>,
     pub reader: Task<()>,
     pub writer: Task<()>,
@@ -107,19 +123,23 @@ impl State {
 
 #[derive(Debug)]
 pub enum Event {
-    ConfigUpdate,                          // 0
-    Start,                                 // 1
-    Stop,                                  // 2
-    ConnRetryTimerExpires,                 // 9
-    HoldTimerExpires,                      // 10
-    KeepaliveTimerExpires,                 // 11
-    IdleHoldTimerExpires,                  // 13
-    Connected(TcpStream),                  // 17
-    ConnFail(ConnTag),                     // 18
-    BGPOpen(ConnTag, OpenPacket),          // 19
-    NotifMsg(ConnTag, NotificationPacket), // 25
-    KeepAliveMsg(ConnTag),                 // 26
-    UpdateMsg(UpdatePacket),               // 27
+    ConfigUpdate,          // 0
+    Start,                 // 1
+    Stop,                  // 2
+    ConnRetryTimerExpires, // 9
+    HoldTimerExpires,      // 10
+    KeepaliveTimerExpires, // 11
+    IdleHoldTimerExpires,  // 13
+    Connected(TcpStream),  // 17
+    ConnFail(ConnId),      // 18
+    /// An active dial failed before any connection existed, so no
+    /// `ConnId` was ever minted. Handled only in Connect — a stale
+    /// dial failure must not tear down a session that superseded it.
+    DialFail,
+    BGPOpen(ConnId, OpenPacket),          // 19
+    NotifMsg(ConnId, NotificationPacket), // 25
+    KeepAliveMsg(ConnId),                 // 26
+    UpdateMsg(UpdatePacket),              // 27
     // RFC 2918 Route Refresh receive. Carries the AFI/SAFI from the
     // wire (raw u16/u8) so unknown-AF refreshes still dispatch
     // through the FSM rather than tearing the session down.
@@ -673,6 +693,14 @@ pub struct Peer {
     /// initiated, `Some(Passive)` if peer initiated. `None` while we
     /// have no primary (Idle/Connect/Active states).
     pub primary_role: Option<Role>,
+    /// Identity of the connection in the primary slot, kept in
+    /// lockstep with `packet_tx` / `task.{reader,writer}` /
+    /// `primary_role`. Events whose [`ConnId`] matches neither this
+    /// nor the collision slot come from a dead connection and are
+    /// ignored at dispatch ([`resolve_conn`]).
+    pub primary_conn_id: Option<ConnId>,
+    /// Allocator backing [`Self::alloc_conn_id`].
+    pub conn_id_next: ConnId,
     /// Parallel TCP connection awaiting RFC 4271 §6.8 resolution. Set
     /// when an inbound connect arrives while we already have a primary
     /// in OpenSent/OpenConfirm; cleared (one way or the other) when the
@@ -811,6 +839,8 @@ impl Peer {
             // stat: PeerStat::default(),
             packet_tx: None,
             primary_role: None,
+            primary_conn_id: None,
+            conn_id_next: 0,
             collision: None,
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
@@ -855,6 +885,12 @@ impl Peer {
 
     pub fn event(&self, ident: usize, event: Event) {
         let _ = self.tx.clone().send(Message::Event(ident, event));
+    }
+
+    /// Mint the identity for a freshly spawned connection.
+    pub fn alloc_conn_id(&mut self) -> ConnId {
+        self.conn_id_next += 1;
+        self.conn_id_next
     }
 
     pub fn is_passive(&self) -> bool {
@@ -1239,6 +1275,27 @@ impl LuLabels<'_> {
     }
 }
 
+/// Resolve a connection identity against the peer's current slots.
+/// `None` means the event came from a connection that owns no slot —
+/// it was torn down or superseded (e.g. the §6.8 loser whose last
+/// events were still queued) — and the FSM must ignore it.
+fn resolve_conn(peer: &Peer, id: ConnId) -> Option<ConnTag> {
+    if peer.primary_conn_id == Some(id) {
+        Some(ConnTag::Primary)
+    } else if peer.collision.as_ref().map(|c| c.conn_id) == Some(id) {
+        Some(ConnTag::Collision)
+    } else {
+        if peer.trace_fsm() {
+            tracing::info!(
+                peer = %peer.address,
+                conn_id = id,
+                "bgp: ignoring event from a superseded connection",
+            );
+        }
+        None
+    }
+}
+
 pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     match event {
         Event::ConfigUpdate => (peer.state, FsmEffect::None),
@@ -1249,12 +1306,23 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
         Event::KeepaliveTimerExpires => (fsm_keepalive_expires(peer), FsmEffect::None),
         Event::IdleHoldTimerExpires => (fsm_idle_hold_timer_expires(peer), FsmEffect::None),
         Event::Connected(stream) => (fsm_connected(peer, Role::Active, stream), FsmEffect::None),
-        Event::ConnFail(conn) => (fsm_conn_fail(peer, conn), FsmEffect::None),
-        Event::BGPOpen(conn, packet) => (fsm_bgp_open(peer, conn, packet), FsmEffect::None),
-        Event::NotifMsg(conn, packet) => {
-            (fsm_bgp_notification(peer, conn, packet), FsmEffect::None)
-        }
-        Event::KeepAliveMsg(conn) => (fsm_bgp_keepalive(peer, conn), FsmEffect::None),
+        Event::ConnFail(id) => match resolve_conn(peer, id) {
+            Some(conn) => (fsm_conn_fail(peer, conn), FsmEffect::None),
+            None => (peer.state, FsmEffect::None),
+        },
+        Event::DialFail => (fsm_dial_fail(peer), FsmEffect::None),
+        Event::BGPOpen(id, packet) => match resolve_conn(peer, id) {
+            Some(conn) => (fsm_bgp_open(peer, conn, packet), FsmEffect::None),
+            None => (peer.state, FsmEffect::None),
+        },
+        Event::NotifMsg(id, packet) => match resolve_conn(peer, id) {
+            Some(conn) => (fsm_bgp_notification(peer, conn, packet), FsmEffect::None),
+            None => (peer.state, FsmEffect::None),
+        },
+        Event::KeepAliveMsg(id) => match resolve_conn(peer, id) {
+            Some(conn) => (fsm_bgp_keepalive(peer, conn), FsmEffect::None),
+            None => (peer.state, FsmEffect::None),
+        },
         Event::UpdateMsg(packet) => {
             peer.counter[BgpType::Update as usize].rcvd += 1;
             timer::refresh_hold_timer(peer);
@@ -1377,7 +1445,8 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     // connect-retry timer. The instance also re-kicks us with Event::Start
     // the moment a connected route to the peer appears
     // (`Bgp::refresh_connected`), and a relevant config change bounces the
-    // peer through its callback — so the 120s retry is only a backstop.
+    // peer through its callback — so the connect-retry tick is only a
+    // backstop.
     if !peer.connected_check_ok() {
         if peer.trace_fsm() {
             tracing::info!(
@@ -1389,6 +1458,11 @@ pub fn fsm_start(peer: &mut Peer) -> State {
         return State::Active;
     }
     peer.task.connect = Some(peer_start_connection(peer));
+    // RFC 4271: the ConnectRetryTimer runs while we dial — started on
+    // leaving Idle, restarted on every redial. If it expires before
+    // the dial resolves (a blackholed SYN), its Event::Start lands
+    // back here and replaces the stuck dial.
+    peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Connect
 }
 
@@ -1448,15 +1522,22 @@ fn close_primary(peer: &mut Peer, code: NotifyCode, sub_code: u8) {
     peer.task.reader = None;
     peer.task.writer = None;
     peer.primary_role = None;
+    peer.primary_conn_id = None;
 }
 
 /// Move the collision conn into the primary slot. Caller is
 /// responsible for having already torn down the previous primary.
+/// Transferring `conn_id` is what re-routes the promoted conn's
+/// events: from here on they resolve to `ConnTag::Primary` at
+/// dispatch, so its KEEPALIVEs refresh the hold timer and its death
+/// tears the session down — the two things the §6.8 winner's conn
+/// silently lost when its role tag was baked in at spawn.
 fn promote_collision_to_primary(peer: &mut Peer, collision: CollisionConn) {
     peer.packet_tx = Some(collision.packet_tx);
     peer.task.reader = Some(collision.reader);
     peer.task.writer = Some(collision.writer);
     peer.primary_role = Some(collision.role);
+    peer.primary_conn_id = Some(collision.conn_id);
     // Show the surviving connection's endpoints, not the dead
     // primary's (the collision conn is always accepted, so its
     // local port is the listen port and its remote port ephemeral).
@@ -1690,6 +1771,16 @@ fn record_session_mss(peer: &mut Peer, stream: &TcpStream) {
 }
 
 pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
+    // RFC 4271: Idle refuses all connections (the accept path already
+    // drops inbound streams in Idle — see `handle_peer_connection`).
+    // A Connected event can still arrive here from a dial whose
+    // completion was queued just before the peer fell back to Idle;
+    // promoting it would resurrect a session the FSM has torn down,
+    // bypassing the idle hold damping.
+    if peer.state == State::Idle {
+        drop(stream);
+        return State::Idle;
+    }
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
@@ -1699,11 +1790,13 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     apply_session_ttl(peer, &stream);
     record_session_mss(peer, &stream);
     peer.task.connect = None;
+    let conn_id = peer.alloc_conn_id();
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
     peer.primary_role = Some(role);
+    peer.primary_conn_id = Some(conn_id);
     let (read_half, write_half) = stream.into_split();
-    peer.task.reader = Some(peer_start_reader(peer, ConnTag::Primary, read_half));
+    peer.task.reader = Some(peer_start_reader(peer, conn_id, read_half));
     peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
     peer_send_open(peer);
     State::OpenSent
@@ -1736,6 +1829,28 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
     peer.state
 }
 
+/// An active dial failed before any connection existed (so no
+/// [`ConnId`] was minted). Only an outstanding dial — Connect state —
+/// can fail this way; a stale failure from a dial that an accept or a
+/// teardown already superseded must not disturb the current session.
+///
+/// RFC 4271 Connect state, TcpConnectionFails (Event 18): restart the
+/// ConnectRetryTimer, keep listening for the remote's connect, and go
+/// to Active. The timer's Event::Start redials from there. Passive
+/// peers don't redial — they park in Active listening.
+pub fn fsm_dial_fail(peer: &mut Peer) -> State {
+    if peer.state != State::Connect {
+        return peer.state;
+    }
+    peer.task.connect = None;
+    peer.timer.connect_retry = if peer.is_passive() {
+        None
+    } else {
+        Some(timer::start_connect_retry_timer(peer))
+    };
+    State::Active
+}
+
 pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
     // A failure on the collision conn just drops the collision slot;
     // the primary session is unaffected.
@@ -1745,23 +1860,20 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
         }
         return peer.state;
     }
-    // Primary conn failed. A parked collision conn must NOT be
-    // promoted here: its reader/writer tasks were spawned with
-    // `ConnTag::Collision` baked into every event they emit, so after
-    // a promotion the connection's own failure is misrouted into the
-    // collision arm above (the state silently stays OpenSent with no
-    // socket and no retry timer — a permanent wedge), its KEEPALIVEs
-    // are ignored by `fsm_bgp_keepalive`, and its OPEN hits the §6.8
-    // arms with an empty collision slot. Reproduced by resetting the
-    // TCP session of an Established peer: both ends raced to
-    // reconnect, the parked conn was promoted, and the session never
-    // recovered. Close the parked conn alongside the failed primary
-    // and restart from Active — losing a pre-OPEN conn costs one
-    // reconnect round-trip.
+    // Primary conn failed. A parked collision conn is closed, not
+    // promoted. Historically promotion here caused a permanent wedge
+    // because the promoted conn's events were misrouted (the role tag
+    // was baked into its reader at spawn — see the `ConnId` doc);
+    // dispatch-time resolution has since fixed that for the
+    // legitimate §6.8 promotion. Close-and-restart is kept here
+    // regardless: the parked conn is pre-OPEN by definition, so
+    // restarting costs one reconnect round-trip and keeps this arm a
+    // plain teardown.
     peer.task.writer = None;
     peer.task.reader = None;
     peer.packet_tx = None;
     peer.primary_role = None;
+    peer.primary_conn_id = None;
     if let Some(collision) = peer.collision.take() {
         close_collision(
             collision,
@@ -1769,14 +1881,37 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
             CeaseError::ConnectionRejected.into(),
         );
     }
-    peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
-    State::Active
+    // RFC 4271 TcpConnectionFails cells, by the state the failure
+    // arrived in. Either way the peer keeps retrying until the
+    // connection succeeds — what differs is the pacer and whether we
+    // keep accepting inbound connects in the meantime.
+    match peer.state {
+        // OpenSent: restart the ConnectRetryTimer, keep listening,
+        // go to Active; the timer's Event::Start redials. Passive
+        // peers don't redial — they park in Active listening.
+        State::OpenSent => {
+            if !peer.is_passive() {
+                peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
+            }
+            State::Active
+        }
+        // Active / OpenConfirm / Established: release everything and
+        // go to Idle. Entering Idle re-arms the idle hold timer (the
+        // restart pacer firing Event::Start) and refuses inbound
+        // connections while it runs — the peer-oscillation damping
+        // RFC 4271 §8.1.1 ties to the IdleHoldTimer. Passive peers
+        // skip the hold (`update_timers` flips them straight back to
+        // Active listening). Historically every failure landed in
+        // Active with a 120s connect-retry, so the idle hold timer
+        // never ran again after the first failed redial.
+        _ => State::Idle,
+    }
 }
 
 pub async fn peer_packet_parse(
     rx: &[u8],
     ident: usize,
-    conn: ConnTag,
+    conn: ConnId,
     tx: mpsc::Sender<Message>,
     config: &mut PeerConfig,
     opt: &mut ParseOption,
@@ -1822,7 +1957,7 @@ pub async fn peer_packet_parse(
 
 pub async fn peer_read(
     ident: usize,
-    conn: ConnTag,
+    conn: ConnId,
     tx: mpsc::Sender<Message>,
     mut read_half: OwnedReadHalf,
     mut config: PeerConfig,
@@ -1868,7 +2003,7 @@ pub async fn peer_read(
     }
 }
 
-pub fn peer_start_reader(peer: &Peer, conn: ConnTag, read_half: OwnedReadHalf) -> Task<()> {
+pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) -> Task<()> {
     let ident = peer.ident;
     let tx = peer.tx.clone();
     let config = peer.config.clone();
@@ -1940,9 +2075,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
                 let _ = tx.try_send(Message::Event(ident, Event::Connected(stream)));
             }
             Err(_err) => {
-                // Active-connect failure is by definition a primary
-                // event — there is no collision conn yet.
-                let _ = tx.try_send(Message::Event(ident, Event::ConnFail(ConnTag::Primary)));
+                // The dial never produced a connection, so there is
+                // no ConnId to attribute the failure to.
+                let _ = tx.try_send(Message::Event(ident, Event::DialFail));
             }
         };
     })
@@ -2211,9 +2346,11 @@ fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
 }
 
 /// Stash an inbound TCP stream as the peer's collision connection,
-/// starting a reader/writer pair tagged `ConnTag::Collision` and
-/// sending our OPEN over it. The §6.8 resolution is deferred until an
-/// OPEN arrives on either connection.
+/// starting a reader/writer pair under a fresh [`ConnId`] and sending
+/// our OPEN over it. The §6.8 resolution is deferred until an OPEN
+/// arrives on either connection; if this conn wins, promotion moves
+/// its `ConnId` into the primary slot and its events resolve to
+/// Primary from then on.
 fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     // Same TTL policy as the primary connection: if this collision conn
     // wins §6.8 resolution it is promoted to primary, so it must carry
@@ -2225,13 +2362,15 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     record_session_mss(peer, &stream);
     let local_addr = stream.local_addr().ok();
     let remote_addr = stream.peer_addr().ok();
+    let conn_id = peer.alloc_conn_id();
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
-    let reader = peer_start_reader(peer, ConnTag::Collision, read_half);
+    let reader = peer_start_reader(peer, conn_id, read_half);
     let writer = peer_start_writer(write_half, packet_rx);
     // Stash before sending OPEN so peer_send_open_on_tx has the tx to
     // write into.
     peer.collision = Some(CollisionConn {
+        conn_id,
         packet_tx: packet_tx.clone(),
         reader,
         writer,
@@ -2687,5 +2826,318 @@ mod bfd_config_tests {
         assert!(!eff.enable);
         assert_eq!(eff.echo_mode, Some(EchoMode::Both));
         assert_eq!(eff.echo_transmit_ms, 100); // inherits
+    }
+}
+
+#[cfg(test)]
+mod fsm_idle_hold_tests {
+    use super::*;
+
+    /// Peer wired to a parked event channel — timer callbacks and
+    /// dial tasks can send without erroring, and nothing reads.
+    fn test_peer(passive: bool) -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.config.transport.passive = passive;
+        peer.first_start = false;
+        peer
+    }
+
+    /// RFC 4271 OpenConfirm/Established TcpConnectionFails: the
+    /// session lands back in Idle, where `update_timers` re-arms the
+    /// idle hold timer — the restart pacer. Before the fix every
+    /// failure parked in Active with a connect-retry, so the idle
+    /// hold timer never ran again after the first failed redial.
+    #[tokio::test]
+    async fn conn_fail_lands_in_idle_and_rearms_idle_hold_timer() {
+        let mut peer = test_peer(false);
+        peer.state = State::OpenConfirm;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Idle);
+
+        // What `fsm()` does after a state change.
+        peer.state = next;
+        timer::update_timers(&mut peer);
+
+        assert!(
+            peer.timer.idle_hold_timer.is_some(),
+            "idle hold timer must be re-armed after a connection failure"
+        );
+        assert!(peer.timer.connect_retry.is_none());
+    }
+
+    /// An Established session dying at TCP level (RST, peer killed)
+    /// takes the same path: through Idle with the idle hold timer
+    /// armed — not the old direct hop to Active that skipped idle
+    /// damping entirely.
+    #[tokio::test]
+    async fn established_tcp_death_takes_idle_hold_damping() {
+        let mut peer = test_peer(false);
+        peer.state = State::Established;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Idle);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_some());
+    }
+
+    /// RFC 4271 OpenSent TcpConnectionFails: restart the
+    /// ConnectRetryTimer, keep listening, go to Active — the timer's
+    /// Event::Start paces the redial.
+    #[tokio::test]
+    async fn opensent_tcp_failure_goes_active_with_connect_retry() {
+        let mut peer = test_peer(false);
+        peer.state = State::OpenSent;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Active);
+        assert!(
+            peer.timer.connect_retry.is_some(),
+            "ConnectRetryTimer must be restarted to pace the redial"
+        );
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.connect_retry.is_some());
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// Passive peers never dial: an OpenSent failure parks them in
+    /// Active listening with no redial pacer armed.
+    #[tokio::test]
+    async fn conn_fail_passive_peer_returns_to_listening() {
+        let mut peer = test_peer(true);
+        peer.state = State::OpenSent;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Active);
+        assert!(
+            peer.timer.connect_retry.is_none(),
+            "a passive peer must not arm the redial pacer"
+        );
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// The dial path arms the ConnectRetryTimer (RFC 4271: started on
+    /// leaving Idle, restarted on every redial) so a blackholed SYN
+    /// is bounded and a refused dial has its retry pacer ready.
+    #[tokio::test]
+    async fn dial_path_arms_connect_retry() {
+        let mut peer = test_peer(false);
+        let next = fsm_start(&mut peer);
+        assert_eq!(next, State::Connect);
+        assert!(peer.task.connect.is_some());
+        assert!(peer.timer.connect_retry.is_some());
+    }
+
+    /// A collision-conn failure must not disturb the primary session.
+    #[tokio::test]
+    async fn collision_conn_fail_keeps_state() {
+        let mut peer = test_peer(false);
+        peer.state = State::OpenSent;
+        let next = fsm_conn_fail(&mut peer, ConnTag::Collision);
+        assert_eq!(next, State::OpenSent);
+    }
+
+    /// The eBGP connected-check holdoff parks in Active with the
+    /// connect-retry backstop armed (and `show ip bgp neighbors`
+    /// reports "Next connect retry timer fires in N seconds").
+    #[tokio::test]
+    async fn connected_check_holdoff_parks_active_with_connect_retry() {
+        let mut peer = test_peer(false);
+        peer.peer_type = PeerType::EBGP;
+        peer.shared_network = false; // neighbor not on a connected subnet
+
+        let next = fsm_start(&mut peer);
+        assert_eq!(next, State::Active);
+        assert!(peer.task.connect.is_none(), "holdoff must not dial");
+        assert!(peer.timer.connect_retry.is_some());
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(
+            peer.timer.connect_retry.is_some(),
+            "Active keeps the backstop running"
+        );
+    }
+
+    /// ConnectRetryTimer lifecycle across states: it runs in Connect
+    /// (bounding the dial) and Active (pacing the redial), and is
+    /// retired entering OpenSent (RFC 4271 stops it on TCP success;
+    /// a late fire must not clobber the handshake) and Idle (the
+    /// idle hold timer takes over as pacer).
+    #[tokio::test]
+    async fn connect_retry_lifecycle_across_states() {
+        for (state, kept) in [
+            (State::Idle, false),
+            (State::Connect, true),
+            (State::Active, true),
+            (State::OpenSent, false),
+        ] {
+            let mut peer = test_peer(false);
+            peer.timer.connect_retry = Some(timer::start_connect_retry_timer(&peer));
+            peer.state = state;
+            timer::update_timers(&mut peer);
+            assert_eq!(
+                peer.timer.connect_retry.is_some(),
+                kept,
+                "{state:?}: connect-retry timer kept = {kept}"
+            );
+        }
+    }
+
+    /// A parked collision conn for tests: live channel, no-op tasks.
+    fn test_collision_conn(conn_id: ConnId) -> CollisionConn {
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        Box::leak(Box::new(packet_rx));
+        CollisionConn {
+            conn_id,
+            packet_tx,
+            reader: Task::spawn(async {}),
+            writer: Task::spawn(async {}),
+            role: Role::Passive,
+            local_addr: None,
+            remote_addr: None,
+        }
+    }
+
+    /// Peer in OpenSent with an active-role primary conn and a parked
+    /// collision conn — the §6.8 staging position. Returns the two
+    /// conn ids (primary, collision).
+    fn peer_with_collision() -> (Peer, ConnId, ConnId) {
+        let mut peer = test_peer(false);
+        let primary_id = peer.alloc_conn_id();
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        Box::leak(Box::new(packet_rx));
+        peer.packet_tx = Some(packet_tx);
+        peer.primary_role = Some(Role::Active);
+        peer.primary_conn_id = Some(primary_id);
+        peer.state = State::OpenSent;
+        let collision_id = peer.alloc_conn_id();
+        peer.collision = Some(test_collision_conn(collision_id));
+        (peer, primary_id, collision_id)
+    }
+
+    /// After §6.8 promotion the surviving conn's KEEPALIVEs must
+    /// resolve to Primary and drive the session — with the old baked
+    /// tag they were ignored, so the hold timer was never refreshed
+    /// and a healthy quiet session died of hold-timer expiry.
+    #[tokio::test]
+    async fn promoted_conn_keepalive_reaches_the_fsm() {
+        let (mut peer, _primary_id, collision_id) = peer_with_collision();
+        let collision = peer.collision.take().unwrap();
+        promote_collision_to_primary(&mut peer, collision);
+        assert_eq!(peer.primary_conn_id, Some(collision_id));
+
+        peer.state = State::OpenConfirm;
+        let (next, _) = fsm_next_state(&mut peer, Event::KeepAliveMsg(collision_id));
+        assert_eq!(
+            next,
+            State::Established,
+            "promoted conn's KEEPALIVE must complete the handshake"
+        );
+    }
+
+    /// After §6.8 promotion the surviving conn's TCP death must tear
+    /// the session down — with the old baked tag it hit the collision
+    /// arm (empty slot, no-op) and the peer wedged in Established
+    /// until hold-timer expiry.
+    #[tokio::test]
+    async fn promoted_conn_failure_tears_the_session_down() {
+        let (mut peer, _primary_id, collision_id) = peer_with_collision();
+        let collision = peer.collision.take().unwrap();
+        promote_collision_to_primary(&mut peer, collision);
+
+        peer.state = State::Established;
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(collision_id));
+        assert_eq!(next, State::Idle);
+        assert!(peer.packet_tx.is_none());
+        assert!(peer.primary_conn_id.is_none());
+    }
+
+    /// Events queued by the §6.8 loser (or any torn-down conn) before
+    /// it died resolve to no slot and must be ignored — they must not
+    /// be misattributed to whichever conn now owns the slot.
+    #[tokio::test]
+    async fn superseded_conn_events_are_ignored() {
+        let (mut peer, old_primary_id, collision_id) = peer_with_collision();
+        let collision = peer.collision.take().unwrap();
+        promote_collision_to_primary(&mut peer, collision);
+        assert_ne!(old_primary_id, collision_id);
+
+        peer.state = State::Established;
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(old_primary_id));
+        assert_eq!(next, State::Established, "stale ConnFail must be ignored");
+        assert!(peer.packet_tx.is_some(), "promoted conn must stay intact");
+
+        let notif = NotificationPacket::new(NotifyCode::Cease, 0, Vec::new());
+        let (next, _) = fsm_next_state(&mut peer, Event::NotifMsg(old_primary_id, notif));
+        assert_eq!(
+            next,
+            State::Established,
+            "stale NOTIFICATION must be ignored"
+        );
+    }
+
+    /// A KEEPALIVE from a still-parked (unpromoted) collision conn is
+    /// ignored, as before — §6.8 hasn't picked a winner yet.
+    #[tokio::test]
+    async fn parked_collision_keepalive_is_still_ignored() {
+        let (mut peer, _primary_id, collision_id) = peer_with_collision();
+        let (next, _) = fsm_next_state(&mut peer, Event::KeepAliveMsg(collision_id));
+        assert_eq!(next, State::OpenSent);
+        assert!(peer.collision.is_some());
+    }
+
+    /// A dial failure is only meaningful while the dial is
+    /// outstanding (Connect); arriving later it must not disturb the
+    /// session that superseded it. A current one follows the RFC 4271
+    /// Connect cell: restart the ConnectRetryTimer and go to Active.
+    #[tokio::test]
+    async fn stale_dial_failure_does_not_touch_a_live_session() {
+        let mut peer = test_peer(false);
+        peer.state = State::Established;
+        let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
+        assert_eq!(next, State::Established);
+
+        peer.state = State::Connect;
+        let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
+        assert_eq!(next, State::Active, "a current dial failure retries");
+        assert!(peer.timer.connect_retry.is_some());
+    }
+
+    /// Idle refuses connections: a stale dial completing after the
+    /// peer fell back to Idle must not resurrect the session.
+    #[tokio::test]
+    async fn connected_event_in_idle_is_refused() {
+        let mut peer = test_peer(false);
+        assert_eq!(peer.state, State::Idle);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let next = fsm_connected(&mut peer, Role::Active, stream);
+        assert_eq!(next, State::Idle);
+        assert!(peer.packet_tx.is_none());
+        assert!(peer.task.reader.is_none());
+        assert!(peer.task.writer.is_none());
     }
 }
