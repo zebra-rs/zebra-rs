@@ -855,8 +855,16 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
     // peers can decode the Index-form SIDs we advertise into
     // absolute labels.
     let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for area_id in area_ids.iter() {
+        ospf.e_router_v3_sr_info_lsa_originate(*area_id);
+    }
+
+    // Rebuild every area's v6 RIB + ILM under the new mode — same
+    // pattern as the ti-lfa toggle below. `add_prefix_sids_v3` gates
+    // on the mode, so a disable drops every label imposition and
+    // empties the LFIB instead of waiting for an unrelated SPF.
     for area_id in area_ids {
-        ospf.e_router_v3_sr_info_lsa_originate(area_id);
+        let _ = ospf.tx.send(Message::SpfCalc(area_id));
     }
 
     Some(())

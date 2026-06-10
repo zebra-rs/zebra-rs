@@ -5208,6 +5208,17 @@ impl Ospf<Ospfv3> {
                 .tx
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
         }
+
+        // The Prefix-SID's E-Intra-Area-Prefix-LSA advertises this
+        // link's first routable global as a /128 host prefix. The
+        // config handler originates it at commit time, but the
+        // kernel's AddrAdd for an address configured in the same
+        // commit can land *after* that — origination then finds no
+        // usable address and stays flushed forever. Re-originate
+        // here so the LSA appears as soon as the address does (the
+        // builder gates on SR mode + a configured prefix-sid, so
+        // this is a no-op on links without one).
+        self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
     }
 
     /// Apply a Router-ID to this OSPFv3 instance. Mirror of the v2
@@ -5252,6 +5263,11 @@ impl Ospf<Ospfv3> {
 
         let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
+
+        // Mirror of the `addr_add` re-origination: the advertised
+        // host prefix may have just gone away (the builder flushes)
+        // or a different remaining address now wins.
+        self.ext_intra_area_prefix_v3_lsa_originate(addr.ifindex);
     }
 
     /// Look up the v3 show-path handler for `msg.paths` and invoke
@@ -6476,6 +6492,55 @@ impl Ospf<Ospfv3> {
         ));
     }
 
+    /// v3 sibling of v2's `process_dd_retransmit` (RFC 2328 §10.8,
+    /// inherited by RFC 5340 §4.2.2): the master resends the DBD in
+    /// `nbr.dd.sent` while still in ExStart / Exchange. Without this
+    /// a single lost or crossed negotiation DBD wedges both ends in
+    /// ExStart forever — the NFSM only sends one DBD per state entry,
+    /// and the slave only echoes on duplicate receipt, so nobody ever
+    /// transmits again (the `Message::DdRetransmit` the timer fires
+    /// used to fall through v3's unhandled-variant arm).
+    fn process_dd_retransmit(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        let Some((oi, nbr)) = self.ospf_interface(ifindex, &router_id) else {
+            return;
+        };
+        if (nbr.state != NfsmState::ExStart && nbr.state != NfsmState::Exchange)
+            || !nbr.dd.flags.master()
+        {
+            nbr.timer.db_desc = None;
+            return;
+        }
+        tracing::info!(
+            "[v3 DBD:Retransmit] to {} seq={:#x}",
+            router_id,
+            nbr.dd.seqnum
+        );
+        super::packet_v3::ospfv3_db_desc_resend(&oi, nbr);
+    }
+
+    /// v3 sibling of v2's `process_ls_req_retransmit` (RFC 2328
+    /// §10.9): resend the pending LS Request while the neighbor sits
+    /// in Exchange / Loading. Same missing-arm story as
+    /// `process_dd_retransmit` — a lost LS Request (or its LS Update
+    /// reply) used to park the neighbor in Loading forever.
+    fn process_ls_req_retransmit(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        let Some((mut oi, nbr)) = self.ospf_interface(ifindex, &router_id) else {
+            return;
+        };
+        if nbr.state < NfsmState::Exchange || nbr.state >= NfsmState::Full || nbr.ls_req.is_empty()
+        {
+            nbr.timer.ls_req = None;
+            return;
+        }
+        let ident = *oi.ident;
+        tracing::info!(
+            "[v3 LSReq:Retransmit] to {} entries={}",
+            router_id,
+            nbr.ls_req.len()
+        );
+        super::packet_v3::ospfv3_ls_req_send(&mut oi, nbr, &ident);
+    }
+
     /// Dispatch one v3 instance-level message.
     ///
     /// Subset of v2's `process_msg` covering the IFSM-driver scope:
@@ -6712,6 +6777,12 @@ impl Ospf<Ospfv3> {
             }
             Message::Retransmit(ifindex, router_id) => {
                 self.process_retransmit(ifindex, router_id);
+            }
+            Message::DdRetransmit(ifindex, router_id) => {
+                self.process_dd_retransmit(ifindex, router_id);
+            }
+            Message::LsReqRetransmit(ifindex, router_id) => {
+                self.process_ls_req_retransmit(ifindex, router_id);
             }
             Message::Lsdb(ev, area_id, key) => {
                 ospf_event_trace!(
@@ -7076,11 +7147,18 @@ impl Ospf<Ospfv3> {
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && (link.config.prefix_sid.is_some() || !link.config.flex_algo_prefix_sids.is_empty())
-            && let Some(addr) = link
-                .addr
-                .iter()
-                .find(|a| a.prefix.addr().segments()[0] != 0xfe80)
-        {
+            && let Some(addr) = link.addr.iter().find(|a| {
+                // The SID's host prefix must be a routable global —
+                // skip fe80 (advertised via Link-LSAs) and ::1: the
+                // kernel auto-assigns ::1/128 to `lo` ahead of any
+                // configured loopback address, and a `find` keyed
+                // only on !fe80 made every router advertise its
+                // Prefix-SID for ::1/128. Receivers then stamped all
+                // remote SIDs onto their own ::1/128 route (last
+                // writer wins) instead of the advertised loopbacks.
+                let a = a.prefix.addr();
+                a.segments()[0] != 0xfe80 && !a.is_loopback() && !a.is_unspecified()
+            }) {
             let host = Ipv6Net::new(addr.prefix.addr(), 128).unwrap_or(addr.prefix);
             // Loopback parity with v2 / FRR / Junos: stamp 0 instead
             // of the link's output_cost so a /128 on `lo` doesn't add
@@ -10578,6 +10656,16 @@ fn add_prefix_sids_v3(
     };
 
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // SR-MPLS participation is a local choice: with `segment-routing
+    // mpls` removed, no label may be imposed and no ILM derived, even
+    // though peers' E-LSAs stay in the LSDB. Without this gate a
+    // disable kept every remote node-SID swap entry in the LFIB
+    // (`build_ilm_from_rib6` reads `route.sid` stamped here) — only
+    // the self pop entries went away with the flushed self E-LSAs.
+    if top.segment_routing != super::srmpls::SegmentRoutingMode::Mpls {
+        return;
+    }
 
     let Some(area) = top.areas.get(area_id) else {
         return;

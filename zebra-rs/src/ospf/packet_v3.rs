@@ -611,8 +611,9 @@ fn ospfv3_is_dd_dup(dd: &Ospfv3DbDesc, prev: &Ospfv3DbDesc) -> bool {
 
 /// Resend the DBD stored in `nbr.dd.sent`. Used by the slave on
 /// duplicate-DBD receipt (RFC 5340 §4.2.2 inheriting v2 §10.6) and
-/// by the master retransmit timer.
-fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<Ospfv3>) {
+/// by the master retransmit timer (`process_dd_retransmit` in
+/// `inst.rs`, hence `pub(super)`).
+pub(super) fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<Ospfv3>) {
     let Some(ref sent) = nbr.dd.sent else {
         return;
     };

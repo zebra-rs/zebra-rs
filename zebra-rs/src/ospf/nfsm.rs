@@ -407,7 +407,9 @@ pub fn ospfv3_populate_initial_db_summary(
     nbr: &mut Neighbor<Ospfv3>,
 ) {
     use ospf_packet::{
-        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_E_NETWORK_LSA_TYPE, OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
         OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
     };
@@ -418,6 +420,19 @@ pub fn ospfv3_populate_initial_db_summary(
         OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+        // RFC 8362 E-LSAs share the area flooding scope (S=01) and are
+        // first-class LSDB members, so they belong in the initial DBD
+        // summary like any other area-scope type. Omitting them meant a
+        // neighbor that adjacencied AFTER our E-LSAs were originated
+        // (e.g. SR-MPLS configured before the link came up) never
+        // learned the E-Router-LSA / E-Intra-Area-Prefix-LSA carrying
+        // the RFC 8666 SR SIDs — remote Prefix-SIDs silently failed to
+        // resolve even though live flooding of the same LSAs worked.
+        OSPFV3_E_ROUTER_LSA_TYPE,
+        OSPFV3_E_NETWORK_LSA_TYPE,
+        OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
     ] {
         ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
     }

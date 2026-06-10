@@ -455,6 +455,55 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
 mod tests {
     use super::*;
 
+    /// Wire roundtrip of the RFC 8666 §5 E-Intra-Area-Prefix-LSA: the
+    /// receiver must reconstruct the exact prefix bytes the originator
+    /// advertised. Guards the BDD-found bug where every received
+    /// Prefix-SID stamped onto a mangled prefix instead of the
+    /// advertised loopback.
+    #[test]
+    fn ext_intra_area_prefix_v3_lsa_roundtrip() {
+        use bytes::BytesMut;
+        use packet_utils::ParseBe;
+        use std::net::Ipv6Addr;
+
+        let prefix: Ipv6Net = "2001:db8::5/128".parse().unwrap();
+        let sid = PrefixSid::Index(500);
+        let lsa = ext_intra_area_prefix_v3_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 5),
+            prefix,
+            Some(&sid),
+            &BTreeMap::new(),
+            1,
+            0,
+        );
+
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        let (_, parsed) = Ospfv3Lsa::parse_be(&buf).expect("LSA must parse");
+
+        assert_eq!(parsed.h.ls_type, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE);
+        let Ospfv3LsBody::EIntraAreaPrefix(ref body) = parsed.body else {
+            panic!("expected EIntraAreaPrefix body, got {:?}", parsed.body);
+        };
+        let Ospfv3ExtTlv::IntraAreaPrefix(ref tlv) = body.tlvs[0] else {
+            panic!("expected IntraAreaPrefix TLV, got {:?}", body.tlvs[0]);
+        };
+        assert_eq!(tlv.prefix_length, 128);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&tlv.address_prefix[..16]);
+        assert_eq!(
+            Ipv6Addr::from(bytes),
+            "2001:db8::5".parse::<Ipv6Addr>().unwrap(),
+            "address_prefix must survive the wire roundtrip"
+        );
+        assert!(
+            tlv.subs.iter().any(
+                |s| matches!(s, Ospfv3SubTlv::PrefixSid(p) if p.sid == SidLabelTlv::Index(500))
+            ),
+            "Prefix-SID sub-TLV must survive the wire roundtrip"
+        );
+    }
+
     fn extract_caps(lsa: &OspfLsa) -> RouterCapability {
         let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.lsp else {
             panic!("expected OpaqueAreaRouterInfo, got {:?}", lsa.lsp);
