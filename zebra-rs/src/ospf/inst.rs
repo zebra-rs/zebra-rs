@@ -61,8 +61,7 @@ pub type ShowCallback<V = Ospfv2> = fn(&Ospf<V>, Args, bool) -> Result<String, s
 
 /// Constructor-default Router ID, used until a configured or
 /// RIB-derived value arrives (and as the fallback when a configured
-/// one is deleted on an instance that never received a RIB value,
-/// i.e. OSPFv3 today).
+/// one is deleted on an instance that never received a RIB value).
 pub const DEFAULT_ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 /// OSPF protocol instance.
@@ -104,9 +103,7 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub router_id_config: Option<Ipv4Addr>,
     /// Last RIB-derived router-id (`RibRx::RouterIdUpdate`), kept
     /// while a configured router-id overrides it so a later delete
-    /// can fall back immediately. Always `None` on OSPFv3 today —
-    /// its `process_rib_msg` has no `RouterIdUpdate` arm yet — so v3
-    /// falls back to [`DEFAULT_ROUTER_ID`] instead.
+    /// can fall back immediately.
     pub rib_router_id: Option<Ipv4Addr>,
     pub lsdb_as: Lsdb<V>,
     pub lsp_map: LspMap,
@@ -5122,6 +5119,18 @@ impl Ospf<Ospfv3> {
     /// router-LSA re-origination) is a follow-up PR.
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
+            // RIB-derived router-id (top-level `router-id` config or
+            // the automatic pick from interface IPv4 addresses).
+            // Mirrors the v2 arm: store and refresh, so a configured
+            // `router ospfv3 router-id` keeps winning and a config
+            // delete falls back to this value. Before this arm every
+            // unconfigured v3 instance kept the constructor default
+            // 10.0.0.1 — two such routers shared one Router-ID and
+            // could never form an adjacency.
+            RibRx::RouterIdUpdate(router_id) => {
+                self.rib_router_id = (!router_id.is_unspecified()).then_some(router_id);
+                self.refresh_router_id();
+            }
             RibRx::LinkAdd(link) => self.link_add(link),
             RibRx::LinkUp(ifindex) => self.link_up(ifindex),
             RibRx::LinkDown(ifindex) => self.link_down(ifindex),
@@ -5216,10 +5225,8 @@ impl Ospf<Ospfv3> {
     }
 
     /// v3 sibling of the v2 `refresh_router_id`: configured value
-    /// wins, then RIB-derived, then the constructor default. v3's
-    /// `process_rib_msg` has no `RouterIdUpdate` arm yet, so
-    /// `rib_router_id` is always `None` here and a config delete
-    /// falls back to [`DEFAULT_ROUTER_ID`].
+    /// wins, then the RIB-derived value (v3's `process_rib_msg`
+    /// `RouterIdUpdate` arm), then the constructor default.
     pub(super) fn refresh_router_id(&mut self) {
         let effective = self
             .router_id_config
