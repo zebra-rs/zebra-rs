@@ -230,6 +230,53 @@ module exec {
         ext:help "Summary of BGP neighbor status per AFI/SAFI";
         type empty;
       }
+      list neighbors {
+        ext:help "BGP neighbor information";
+        ext:presence "BGP all neighbor information";
+        key name;
+        leaf name {
+          ext:dynamic "bgp:neighbor";
+          // Accept either address family (peers are keyed by
+          // `IpAddr`) or an `interface-neighbor` name — IPv6
+          // unnumbered peers are keyed by interface, so the name is
+          // their only typeable identity. The string arm is
+          // pattern-less on purpose: a bare string word-matches one
+          // token (a pattern would full-match the remaining LINE and
+          // break `neighbors i1 advertised-routes`). Address inputs
+          // tie the string arm (both Partial), which is safe: the
+          // parser folds a union's arms into a single match
+          // candidate, and the consumed token is the same either
+          // way.
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+            type string;
+          }
+        }
+        leaf rtcv4 {
+          type empty;
+        }
+        container advertised-routes {
+          presence "";
+          leaf vpnv4 {
+            type empty;
+          }
+          leaf evpn {
+            ext:help "EVPN Adj-RIB-Out";
+            type empty;
+          }
+        }
+        container received-routes {
+          presence "";
+          leaf vpnv4 {
+            type empty;
+          }
+          leaf evpn {
+            ext:help "EVPN Adj-RIB-In";
+            type empty;
+          }
+        }
+      }
       uses bgp-show-afi-rib;
       // VPNv4 (SAFI 128) Loc-RIB across every route distinguisher.
       // Mirrors the `ipv4` list above: a bare address after `vpnv4`
@@ -351,53 +398,6 @@ module exec {
           leaf ipv6 {
             ext:help "BGP IPv6 SR Policy (SAFI 73) RIB";
             type empty;
-          }
-        }
-        list neighbors {
-          ext:help "BGP neighbor information";
-          ext:presence "BGP all neighbor information";
-          key name;
-          leaf name {
-            ext:dynamic "bgp:neighbor";
-            // Accept either address family (peers are keyed by
-            // `IpAddr`) or an `interface-neighbor` name — IPv6
-            // unnumbered peers are keyed by interface, so the name is
-            // their only typeable identity. The string arm is
-            // pattern-less on purpose: a bare string word-matches one
-            // token (a pattern would full-match the remaining LINE and
-            // break `neighbors i1 advertised-routes`). Address inputs
-            // tie the string arm (both Partial), which is safe: the
-            // parser folds a union's arms into a single match
-            // candidate, and the consumed token is the same either
-            // way.
-            type union {
-              type inet:ipv4-address;
-              type inet:ipv6-address;
-              type string;
-            }
-          }
-          leaf rtcv4 {
-            type empty;
-          }
-          container advertised-routes {
-            presence "";
-            leaf vpnv4 {
-              type empty;
-            }
-            leaf evpn {
-              ext:help "EVPN Adj-RIB-Out";
-              type empty;
-            }
-          }
-          container received-routes {
-            presence "";
-            leaf vpnv4 {
-              type empty;
-            }
-            leaf evpn {
-              ext:help "EVPN Adj-RIB-In";
-              type empty;
-            }
           }
         }
         leaf attributes {
