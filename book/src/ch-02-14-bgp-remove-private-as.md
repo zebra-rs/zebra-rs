@@ -137,6 +137,10 @@ the session so the provider re-advertises with the stripped AS_PATH:
 clear bgp ipv4 neighbor 192.168.1.3
 ```
 
+Like the other per-neighbor knobs, `remove-private-as` can also be set
+on a [neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by
+every member; a statement on the neighbor itself wins.
+
 ## Verification
 
 `show ip bgp neighbor <addr>` reports the configured form:

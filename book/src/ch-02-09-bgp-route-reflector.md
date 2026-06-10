@@ -35,6 +35,11 @@ reflector client (eBGP peers always receive it). Plain
 iBGP→iBGP advertisement between non-clients is suppressed, which is
 what removes the need for a full mesh.
 
+`route-reflector client` can also be set on a
+[neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by every
+member; a statement on the neighbor itself wins. Setting it on the group
+marks every member as a client — iBGP members only, as ever.
+
 ## Keeping reflected routes out of the FIB
 
 A dedicated route reflector usually sits *outside* the data path: it

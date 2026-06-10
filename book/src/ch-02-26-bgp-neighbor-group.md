@@ -105,10 +105,12 @@ command uses:
 
 ## Configuration
 
-A route-reflector-style example: two clients share the group `RR`,
-which supplies the remote AS, enables IPv4 and IPv6 unicast with
-next-hop-self on IPv4, enforces a TTL-security hop count, and marks
-members as route-reflector clients.
+A route-reflector example: two clients share the group `RR`, which
+supplies the remote AS (the local AS — reflection is an iBGP
+mechanism, so the clients must be internal peers), enables IPv4 and
+IPv6 unicast with next-hop-self on IPv4, turns on GTSM
+(`ttl-security` — directly-connected clients only, fixed TTL 255),
+and marks members as route-reflector clients.
 
 ```yaml
 router:
@@ -118,7 +120,7 @@ router:
       router-id: 192.168.0.1
     neighbor-group:
     - name: RR
-      remote-as: 65002
+      remote-as: 65001
       ttl-security: null
       route-reflector:
         client: true
@@ -142,7 +144,7 @@ knobs — all come from the group. The equivalent CLI forms:
 
 ```
 set router bgp neighbor-group RR
-set router bgp neighbor-group RR remote-as 65002
+set router bgp neighbor-group RR remote-as 65001
 set router bgp neighbor-group RR ttl-security
 set router bgp neighbor-group RR route-reflector client true
 set router bgp neighbor-group RR afi-safi ipv4 enabled true
@@ -167,19 +169,19 @@ it:
 ```
 show ip bgp neighbor-group
 Name                      Remote-AS  Members
-RR                            65002        2
+RR                            65001        2
 ```
 
 ```
 show ip bgp neighbor-group RR
 BGP neighbor-group: RR
-  Remote-AS: 65002
+  Remote-AS: 65001
   Afi-Safi:  ipv4 enabled nhs, ipv6 enabled
   TTL-security: enabled
   Route-reflector-client: true
   Members (2):
-    192.168.0.2              remote-as 65002 (inherited) state Established
-    192.168.0.3              remote-as 65002 (inherited) state Established
+    192.168.0.2              remote-as 65001 (inherited) state Established
+    192.168.0.3              remote-as 65001 (inherited) state Established
 ```
 
 `(inherited)` marks members whose AS came from the group rather than a

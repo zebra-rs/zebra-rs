@@ -123,6 +123,10 @@ clear bgp ipv4 neighbor 192.168.1.2
 This is the key operational difference from an ordinary inbound policy
 change, which re-evaluates the routes already held in the Adj-RIB-In.
 
+Like the other per-neighbor knobs, `allowas-in` can also be set on a
+[neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited by
+every member; a statement on the neighbor itself wins.
+
 ## Verification
 
 `show ip bgp neighbors` reports the active setting for the session:

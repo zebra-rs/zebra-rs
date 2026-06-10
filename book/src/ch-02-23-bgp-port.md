@@ -77,6 +77,12 @@ set router bgp port 1790
 set router bgp port 0
 ```
 
+The per-neighbor `port` knob (the dial-side destination port) can also be
+set on a [neighbor-group](ch-02-26-bgp-neighbor-group.md) and inherited
+by every member; a statement on the neighbor itself wins. The instance
+listen port (`router bgp port`) is not inheritable — it is an
+instance-level setting, not a per-neighbor knob.
+
 ## How it is applied
 
 **Neighbor port (dial side).** The configured port is used when the

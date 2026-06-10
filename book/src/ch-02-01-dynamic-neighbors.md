@@ -36,9 +36,12 @@ Key properties:
   are dropped at accept time. Setting it to `0` disables the ranges
   without removing them. A dynamic peer whose session ends is removed
   again (and frees its slot) rather than lingering in Idle.
-- **Group-driven.** The peer inherits `remote-as` and the `afi-safi`
-  set from the referenced group, with the usual precedence rules —
-  see [Neighbor Groups](ch-02-26-bgp-neighbor-group.md).
+- **Group-driven.** The peer inherits the group's entire attribute
+  set — `remote-as`, the `afi-safi` families, and the whole-session
+  knobs (`password`, `ttl-security`, policies, …) — with the usual
+  precedence rules; see
+  [Neighbor Groups](ch-02-26-bgp-neighbor-group.md). The group's
+  `passive` opinion is moot here: dynamic peers are always passive.
 
 ## Configuration
 
