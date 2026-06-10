@@ -60,10 +60,10 @@ Feature: BGP TTL Security / GTSM (RFC 5082)
     # Hard-reset both ends so each tears down cleanly and reconnects with
     # GTSM, rather than waiting out a multi-minute hold timer.
     #
-    # Use `clear bgp ipv4 neighbor <X>` (the real clear grammar) via the
-    # generic run step — NOT `I clear namespace ... neighbor`, whose
-    # `clear ip bgp neighbors <X>` does not match the grammar and is a
-    # silent no-op (see PR #1264). A clean GTSM reconnect reaches
+    # Use the hard-reset grammar via the generic run step — NOT
+    # `I clear namespace ... neighbor`, which is a SOFT clear (policy
+    # re-run + re-advertise, no session bounce) and would leave the
+    # stale pre-GTSM connection up. A clean GTSM reconnect reaches
     # Established in ~6s once collision-teardown packets carry TTL 255
     # (peer.rs handle_peer_connection); 15s is margin for CI.
     And I run "clear bgp ipv4 neighbor 192.168.0.2" in namespace "z1"

@@ -11,6 +11,15 @@ by swapping z2's input policy and asserting which advertised prefixes
 appear in z2's RIB. z1 attaches an outbound policy that stamps MED=100
 on every advertised route so MED match scenarios have something
 deterministic to compare against.
+Re-evaluation relies entirely on the policy-change trigger
+(PolicyRx -> soft-in): applying a config whose policy content changed
+re-runs the inbound policy over the Adj-RIB-In. Deliberately NO
+`I clear namespace ... neighbor` steps here — that step is a real
+egress soft-clear since the clear grammar was wired (PR #1318), and
+an operator `clear ... soft [in]` after additively-merged same-name
+policy edits currently diverges from the trigger path on the MED
+scenarios (open daemon bug — soft-in replay re-admits trigger-denied
+routes). Historically the step was a silent no-op here anyway.
 
 ## Test Topology
 
