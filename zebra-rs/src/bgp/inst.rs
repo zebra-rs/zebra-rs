@@ -1985,7 +1985,7 @@ impl Bgp {
                 self.refresh_connected();
             }
             RibRx::RouterIdUpdate(router_id) => {
-                // RIB-derived router-id (top-level `router-id` config
+                // RIB-derived router-id (`system router-id` config
                 // or the automatic pick from interface addresses).
                 // Without this arm BGP emitted OPEN with 0.0.0.0 in
                 // the BGP Identifier whenever the operator hadn't

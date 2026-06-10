@@ -62,7 +62,7 @@ impl Rib {
     /// Recompute the global and every VRF's effective Router ID and
     /// push `RouterIdUpdate` to the affected subscriber sets when a
     /// value moved. Call sites: address add/delete, VRF add, a link
-    /// crossing a VRF boundary, and the `router-id` /
+    /// crossing a VRF boundary, and the `system router-id` /
     /// `vrf <name> router-id` config handlers.
     pub fn router_id_update(&mut self) {
         let vrf_masters: BTreeSet<u32> = self.vrfs.values().map(|v| v.ifindex).collect();
@@ -103,7 +103,7 @@ impl Rib {
         }
     }
 
-    /// Top-level `router-id A.B.C.D` config handler. Set stores the
+    /// `system router-id A.B.C.D` config handler. Set stores the
     /// override, delete clears it back to the automatic pick; either
     /// way the effective value is recomputed and, when it moved,
     /// broadcast to subscribers.

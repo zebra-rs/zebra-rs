@@ -36,7 +36,7 @@ set router isis te-router-id 1.1.1.1
 ```
 
 When `te-router-id` is not configured, the RIB-distributed router-id
-(the system-wide selection, or the configured top-level `router-id`)
+(the system-wide selection, or the configured `system router-id`)
 is advertised instead. Setting or deleting `te-router-id`
 re-originates the self LSP immediately, so the change propagates
 without waiting for the refresh timer. A per-VRF instance accepts

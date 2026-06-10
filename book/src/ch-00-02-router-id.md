@@ -22,16 +22,16 @@ Once a router-id has been selected it is *sticky*: if the address it was derived
 
 ## Configuring the global Router-ID
 
-The automatic pick can be overridden with the top-level `router-id` command:
+The automatic pick can be overridden with the `system router-id` command:
 
 ```
-set router-id 10.255.0.1
+set system router-id 10.255.0.1
 ```
 
 The configured value always wins over the automatic pick. Deleting it falls back to the automatic selection again:
 
 ```
-delete router-id 10.255.0.1
+delete system router-id 10.255.0.1
 ```
 
 The effective value and its origin are visible with `show router-id`:
@@ -39,7 +39,7 @@ The effective value and its origin are visible with `show router-id`:
 ```
 > show router-id
 Router ID: 10.255.0.1 (configured)
-> delete router-id 10.255.0.1
+> delete system router-id 10.255.0.1
 > show router-id
 Router ID: 192.0.2.200 (automatic)
 ```

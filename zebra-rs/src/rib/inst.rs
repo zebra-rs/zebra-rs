@@ -2240,7 +2240,7 @@ impl Rib {
             }
             ConfigOp::Set | ConfigOp::Delete => {
                 let (path, args) = path_from_command(&msg.paths);
-                if path.as_str() == "/router-id" {
+                if path.as_str() == "/system/router-id" {
                     let _ = self.router_id_config_exec(args, msg.op);
                 } else if path.as_str().starts_with("/router/static/ipv4/route") {
                     let _ = self.static_v4.exec(path, args, msg.op);
