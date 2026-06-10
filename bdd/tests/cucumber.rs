@@ -460,11 +460,10 @@ async fn wait_for_bgp(_world: &mut World, seconds: u64) {
 /// those. For a hard reset, use the generic run step with
 /// `clear bgp ipv4 <peer>` instead.
 ///
-/// Deliberately NOT `soft` (both directions): the soft-IN replay can
-/// re-admit routes the policy-change trigger just denied when the
-/// additively-merged policy state diverges (observed live on
-/// bgp_route_map_match's med-eq scenarios) — a daemon-side issue
-/// tracked separately; the re-flood intent only needs OUT.
+/// Deliberately `soft out` (not `soft`): every feature uses this step
+/// for its egress re-flood effect; inbound re-evaluation already runs
+/// automatically when an inbound policy changes, so the IN leg adds
+/// nothing here.
 ///
 /// History: this step used to issue the legacy `clear ip bgp
 /// neighbors <X>` grammar, which was never wired into

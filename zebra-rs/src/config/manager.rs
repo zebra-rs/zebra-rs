@@ -821,20 +821,37 @@ impl ConfigManager {
                 let entry = entry.unwrap();
 
                 let format_type = config_format_type(&req.config);
-                let cmds = match format_type {
-                    ConfigFormat::Cli => load_config_file(req.config.clone()),
+                let (cmds, doc_errors) = match format_type {
+                    ConfigFormat::Cli => (load_config_file(req.config.clone()), Vec::new()),
                     ConfigFormat::Json => json_read(entry, req.config.as_str()),
                     ConfigFormat::Yaml => {
                         let config = yaml_parse(req.config.as_str());
                         json_read(entry, config.as_str())
                     }
-                    ConfigFormat::SetDelete => req
-                        .config
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .map(str::to_string)
-                        .collect(),
+                    ConfigFormat::SetDelete => (
+                        req.config
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                        Vec::new(),
+                    ),
                 };
+                // A document key that doesn't exist in the schema used
+                // to be dropped silently, applying a PARTIAL config
+                // with a clean "applied" reply (e.g. a misspelled
+                // policy match leaf that left the policy permit-all).
+                // Reject the document instead so the operator sees
+                // exactly which keys the schema refused.
+                if !doc_errors.is_empty() {
+                    let resp = DeployResponse {
+                        apply_code: ApplyCode::ParseError,
+                        exec_code: ExecCode::Nomatch,
+                        cmd: doc_errors.join("; "),
+                    };
+                    let _ = req.resp.send(resp);
+                    return;
+                }
 
                 if format_type != ConfigFormat::SetDelete {
                     self.store.candidate_clear();

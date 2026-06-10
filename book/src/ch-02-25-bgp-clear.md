@@ -66,13 +66,11 @@ Soft clears re-run policy without touching the TCP session:
 EVPN `soft in` is not implemented yet; the command reports
 `%% EVPN soft-in is not yet implemented` and leaves the session alone.
 
-> **Known issue:** after several *additive* edits to a policy under
-> the same name (re-`apply`ing config variants that overlay entries),
-> a `soft in` replay can disagree with the automatic re-evaluation
-> that runs when policy content changes — re-admitting routes the
-> policy change had just denied. Until that is resolved, prefer
-> `soft out` for re-flooding and rely on the automatic trigger for
-> inbound policy changes.
+Note that a `soft in` is rarely *needed* after a config change:
+editing an inbound policy already triggers the same re-evaluation
+automatically. The explicit command exists for operational use —
+re-checking the table after out-of-band changes, or confirming what
+the current policy admits.
 
 ## Where the per-AFI forms apply
 

@@ -4,7 +4,8 @@ policy:
   - number: 10
     action: permit
     match:
-      med-ge: 200
+      med:
+        ge: 200
 router:
   bgp:
     global:
