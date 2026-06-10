@@ -1,0 +1,40 @@
+# Phase 3: identical to z1-full.yaml except the group's IPv4 opinion
+# flips to `enabled: false`. `vtyctl apply -f` is a declarative
+# whole-config replace (the candidate is cleared and rebuilt from this
+# file), so the file must restate the FULL config — the commit diff
+# against the running config is then exactly one leaf:
+#
+#   set router bgp neighbor-group dynamic afi-safi ipv4 enabled false
+#
+# Deliberately NO session bounce from that change — like the
+# per-neighbor `afi-safi <name> enabled` knob, the new family set is
+# advertised when capabilities are next negotiated; the scenario
+# issues `clear bgp ipv4 neighbor i1` to apply it.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    neighbor-group:
+    - name: dynamic
+      afi-safi:
+      - name: ipv4
+        enabled: false
+      - name: ipv6
+        enabled: true
+    interface-neighbor:
+    - interface: i1
+      neighbor-group: dynamic
+      remote-as: internal
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:1::1/128

@@ -12,6 +12,10 @@ module zebra-bgp-neighbor-group {
     prefix bgp;
   }
 
+  import zebra-afi-safi {
+    prefix zas;
+  }
+
   import config {
     prefix config;
   }
@@ -37,25 +41,27 @@ module zebra-bgp-neighbor-group {
      'these N peers share these few attributes' case ergonomic,
      not to mirror every leaf of `neighbor-group-config`.
 
-     This first cut exposes only `remote-as`. The runtime currently
-     stores the group definition and per-neighbor reference but
-     does NOT yet resolve inheritance — that lands in a follow-up.
-     Field-level override semantics: any field set explicitly on
-     the neighbor wins; otherwise the neighbor inherits from the
-     referenced group.
+     The surface exposes `remote-as` and per-family `afi-safi
+     <name> enabled` toggles. Field-level override semantics: any
+     field set explicitly on the neighbor wins; otherwise the
+     neighbor inherits from the referenced group.
 
-     Resulting CLI / config shape (target):
+     Resulting CLI / config shape:
 
        router bgp {
-         neighbor-groups {
-           neighbor-group RR-CLIENTS {
-             remote-as 65000;
+         neighbor-group RR-CLIENTS {
+           remote-as 65000;
+           afi-safi ipv4 {
+             enabled true;
+           }
+           afi-safi ipv6 {
+             enabled true;
            }
          }
          neighbor 10.0.0.1 {
            neighbor-group RR-CLIENTS;
          }
-         neighbor 10.0.0.2 {
+         interface-neighbor eth0 {
            neighbor-group RR-CLIENTS;
          }
        }
@@ -65,26 +71,45 @@ module zebra-bgp-neighbor-group {
      before `neighbor-group G` has been declared — the same
      staging-friendly pattern other zebra-bgp-* augments use.";
 
-  grouping bgp-neighbor-groups-extension {
+  grouping bgp-neighbor-group-extension {
     description
-      "Top-level `neighbor-groups` container hung off `router bgp`.";
-    container neighbor-groups {
-      ext:help "BGP neighbor-groups (IOS-XR style)";
-      list neighbor-group {
+      "Top-level `neighbor-group` list hung off `router bgp`.";
+    list neighbor-group {
+      key "name";
+      ext:help "BGP neighbor-group (IOS-XR style)";
+      description
+        "List of BGP neighbor-groups configured on the local
+         system, uniquely identified by name.";
+      leaf name {
+        type string;
+        description
+          "Name of the neighbor-group.";
+      }
+      leaf remote-as {
+        type inet:as-number;
+        description
+          "AS number inherited by neighbors that reference this
+           group. A `remote-as` set on the neighbor itself wins.";
+      }
+      list afi-safi {
         key "name";
         description
-          "List of BGP neighbor-groups configured on the local
-           system, uniquely identified by name.";
-        leaf name {
-          type string;
+          "Per-family toggles inherited by neighbors that reference
+           this group. Tri-state per family: an entry with `enabled
+           true` switches the family on for inheriting peers, an
+           entry with `enabled false` switches it off (overriding
+           the implicit IPv4-unicast default), and no entry leaves
+           the peer's own setting (or the default) in effect. An
+           `afi-safi` set explicitly on the neighbor itself wins.
+           Like the per-neighbor knob, a change takes effect when
+           the session next negotiates capabilities (`clear bgp`).";
+        uses zas:afi-safi;
+        leaf enabled {
+          type boolean;
+          mandatory true;
           description
-            "Name of the neighbor-group.";
-        }
-        leaf remote-as {
-          type inet:as-number;
-          description
-            "AS number inherited by neighbors that reference this
-             group. A `remote-as` set on the neighbor itself wins.";
+            "Whether this AFI,SAFI is enabled for peers inheriting
+             from the group.";
         }
       }
     }
@@ -105,17 +130,16 @@ module zebra-bgp-neighbor-group {
 
   augment "/configure:set/config:router/bgp:bgp" {
     description
-      "Attach the `neighbor-groups` container to `router bgp` in
-       the candidate-set subtree.";
-    uses bgp-neighbor-groups-extension;
+      "Attach the `neighbor-group` list to `router bgp` in the
+       candidate-set subtree.";
+    uses bgp-neighbor-group-extension;
   }
 
   augment "/configure:delete/config:router/bgp:bgp" {
     description
       "Same attachment for the delete subtree so
-       `delete router bgp neighbor-groups neighbor-group X` is
-       path-valid.";
-    uses bgp-neighbor-groups-extension;
+       `delete router bgp neighbor-group X` is path-valid.";
+    uses bgp-neighbor-group-extension;
   }
 
   augment "/configure:set/config:router/bgp:bgp/bgp:neighbor" {

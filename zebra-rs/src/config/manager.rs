@@ -1380,6 +1380,56 @@ mod yang_load_tests {
         );
     }
 
+    /// The BGP `neighbor-group` list was flattened to sit directly
+    /// under `router bgp` (the wrapping `neighbor-groups` container is
+    /// gone) and gained per-family `afi-safi <name> enabled` toggles
+    /// (zebra-bgp-neighbor-group.yang). Pin the new spellings as
+    /// settable and the old container level as rejected.
+    #[test]
+    fn bgp_neighbor_group_flattened_with_afi_safi() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor-group dynamic",
+            "set router bgp neighbor-group dynamic remote-as 65000",
+            "set router bgp neighbor-group dynamic afi-safi ipv4 enabled true",
+            "set router bgp neighbor-group dynamic afi-safi ipv6 enabled false",
+            "set router bgp neighbor 192.168.1.3 neighbor-group dynamic",
+            "set router bgp interface-neighbor eth0 neighbor-group dynamic",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        let (code, _comps, _state) = parse(
+            "set router bgp neighbor-groups neighbor-group dynamic",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "the pre-flatten `neighbor-groups` container level must no longer parse",
+        );
+    }
+
     /// The global Router-ID override moved from the top level
     /// (`router-id A.B.C.D`) under the `system` container
     /// (`system router-id A.B.C.D`); the RIB dispatch in

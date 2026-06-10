@@ -1,0 +1,47 @@
+# Phase 2: enable RA on i1 and declare the IPv6-unnumbered iBGP
+# session entirely through a neighbor-group — the user-facing shape
+# this feature exercises:
+#
+#   router bgp {
+#     neighbor-group dynamic {
+#       afi-safi ipv4 { enabled true; }
+#       afi-safi ipv6 { enabled true; }
+#     }
+#     interface-neighbor i1 {
+#       neighbor-group dynamic;
+#       remote-as internal;
+#     }
+#   }
+#
+# `remote-as internal` (iBGP, both ends AS 65001) comes from the
+# interface-neighbor itself; the afi-safi set is inherited from the
+# group. One IPv4 /32 (carried via RFC 8950 ENHE over the link-local
+# session) and one IPv6 /128 are originated per router.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    neighbor-group:
+    - name: dynamic
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+    interface-neighbor:
+    - interface: i1
+      neighbor-group: dynamic
+      remote-as: internal
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.1/32
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:1::1/128

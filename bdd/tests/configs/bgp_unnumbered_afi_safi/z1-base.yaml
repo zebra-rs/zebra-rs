@@ -1,0 +1,11 @@
+# Phase 1 of the two-step bring-up (same rationale as
+# bgp_unnumbered_neighbor): a bare `router bgp` block with no
+# neighbors. Applying this first spawns the ND subsystem so it learns
+# interface i1 BEFORE the next commit enables RA on it — the
+# per-interface `send-advertisements` callback silently drops if ND
+# hasn't yet learned the link.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1

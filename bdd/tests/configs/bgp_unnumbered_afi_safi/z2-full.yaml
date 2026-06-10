@@ -1,0 +1,30 @@
+# Phase 2 for z2 — mirror of z1-full.yaml (same AS, own router-id and
+# originated prefixes).
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 2.2.2.2
+    neighbor-group:
+    - name: dynamic
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+    interface-neighbor:
+    - interface: i1
+      neighbor-group: dynamic
+      remote-as: internal
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.1.2/32
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:1::2/128

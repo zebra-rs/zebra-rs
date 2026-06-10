@@ -210,10 +210,11 @@ fn clear_peer_listener_auth(bgp: &mut Bgp, addr: &IpAddr) {
 
 /// `set router bgp neighbor <addr> neighbor-group <name>`.
 ///
-/// Stores the reference on the peer's `PeerConfig` and — if the peer
-/// has no explicit `remote-as` yet — pulls the group's `remote-as`
-/// in via [`super::neighbor_group::group_remote_as`] and kicks
-/// [`super::peer::Peer::start`]. An explicit per-peer `remote-as`
+/// Stores the reference on the peer's `PeerConfig`, re-resolves the
+/// effective MP family set against the group's afi-safi opinions, and
+/// — if the peer has no explicit `remote-as` yet — pulls the group's
+/// `remote-as` in via [`super::neighbor_group::group_remote_as`] and
+/// kicks [`super::peer::Peer::start`]. An explicit per-peer `remote-as`
 /// (signalled by `remote_as_inherited == false` and `remote_as != 0`)
 /// always wins; in that case the reference is recorded but the
 /// resolved value is left alone.
@@ -234,6 +235,11 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     let (peer_ident, resolve_now, should_stop_inherited) = {
         let peer = bgp.peers.get_mut(&addr)?;
         peer.config.neighbor_group = new_ref.clone();
+        // Re-resolve the effective MP set against the new reference —
+        // Set adopts the group's afi-safi opinions underneath any
+        // explicit per-peer statements; Delete falls back to
+        // default + explicit.
+        super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
 
         match op {
             ConfigOp::Set => {
@@ -918,33 +924,32 @@ fn unspecified_for(remote: &IpAddr) -> IpAddr {
 fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let key: AfiSafi = args.afi_safi()?;
-    let enabled: bool = args.boolean()?;
+    let enabled = args.boolean();
 
-    let ipv4_unicast = key.afi == Afi::Ip && key.safi == Safi::Unicast;
     // Enabling a Labeled-Unicast or VPN family means we may re-advertise
     // routes with next-hop-self and need per-prefix local labels (the
     // Inter-AS Option B/C transit case); request a dynamic label block
     // eagerly so one is granted before routes arrive. A PE with a VRF
     // already requests the block on VRF config — this also covers a
     // transit ASBR that runs VPNv4 with no VRF of its own.
-    let label_block_needed =
-        matches!(key.safi, Safi::MplsLabel | Safi::MplsVpn) && op.is_set() && enabled;
+    let label_block_needed = matches!(key.safi, Safi::MplsLabel | Safi::MplsVpn)
+        && op.is_set()
+        && enabled.unwrap_or(false);
 
     let peer = bgp.peers.get_mut(&addr)?;
 
+    // Record the verbatim statement, then re-resolve the effective MP
+    // set through the default < group < explicit precedence. A Delete
+    // simply forgets the statement: IPv4 unicast falls back to the
+    // built-in default (or the group's opinion), other families to
+    // off (or the group's opinion).
     if op.is_set() {
-        if enabled {
-            peer.config.mp.set(key, true);
-        } else {
-            peer.config.mp.remove(&key);
-        }
+        peer.config.mp_explicit.insert(key, enabled?);
     } else {
-        if ipv4_unicast {
-            peer.config.mp.set(key, true);
-        } else {
-            peer.config.mp.remove(&key);
-        }
+        peer.config.mp_explicit.remove(&key);
     }
+    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+
     if label_block_needed {
         bgp.request_label_block();
     }
@@ -2269,18 +2274,26 @@ impl Bgp {
         );
         self.callback_peer("", config_peer);
         self.callback_peer("/remote-as", config_remote_as);
-        // Per-peer reference to a `neighbor-group`. Storage only —
-        // resolution lands in the follow-up that adds field-level
-        // override semantics.
+        // Per-peer reference to a `neighbor-group`: stores the
+        // back-reference and resolves the inheritable attributes
+        // (remote-as, afi-safi).
         self.callback_peer("/neighbor-group", config_peer_neighbor_group);
-        // `set router bgp neighbor-groups neighbor-group <name> [...]`.
+        // `set router bgp neighbor-group <name> [...]`.
         self.callback_add(
-            "/router/bgp/neighbor-groups/neighbor-group",
+            "/router/bgp/neighbor-group",
             super::neighbor_group::config_neighbor_group,
         );
         self.callback_add(
-            "/router/bgp/neighbor-groups/neighbor-group/remote-as",
+            "/router/bgp/neighbor-group/remote-as",
             super::neighbor_group::config_neighbor_group_remote_as,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi",
+            super::neighbor_group::config_neighbor_group_afi_safi,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/enabled",
+            super::neighbor_group::config_neighbor_group_afi_safi_enabled,
         );
         // `set router bgp dynamic-neighbors …`.
         self.callback_add(
@@ -4038,6 +4051,199 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).contains(&peer_ident),
             "Event::Stop must have been enqueued",
+        );
+    }
+
+    // ---- group afi-safi inheritance ------------------------------
+
+    use super::super::neighbor_group::{
+        config_neighbor_group_afi_safi, config_neighbor_group_afi_safi_enabled,
+    };
+
+    fn v4() -> AfiSafi {
+        AfiSafi::new(Afi::Ip, Safi::Unicast)
+    }
+
+    fn v6() -> AfiSafi {
+        AfiSafi::new(Afi::Ip6, Safi::Unicast)
+    }
+
+    fn peer_mp_families(bgp: &Bgp) -> Vec<AfiSafi> {
+        bgp.peers
+            .get(&peer_addr())
+            .expect("peer exists")
+            .config
+            .mp
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// Group `afi-safi ipv6 enabled true` flows to a member peer's
+    /// effective MP set reactively (no session bounce — the change is
+    /// advertised at the next capability negotiation), and `enabled
+    /// false` on ipv4 overrides the built-in default.
+    #[tokio::test]
+    async fn group_afi_safi_propagates_to_member() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv6", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v4(), v6()]);
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v6()]);
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "afi-safi changes must not bounce the session",
+        );
+    }
+
+    /// An explicit per-peer `afi-safi <name> enabled` statement wins
+    /// over the group's opinion — in either order of arrival.
+    #[tokio::test]
+    async fn peer_explicit_afi_safi_wins_over_group() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        // Peer says ipv4 on; a later group opinion of ipv4 off must
+        // not override it.
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v4()]);
+
+        // Removing the explicit statement lets the group opinion
+        // through.
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "true"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp), Vec::<AfiSafi>::new());
+    }
+
+    /// Deleting one group afi-safi entry (or the whole group) drops
+    /// its opinions and the member falls back to the built-in default
+    /// plus its own statements.
+    #[tokio::test]
+    async fn group_afi_safi_delete_restores_default() {
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv6", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v6()]);
+
+        // Whole-entry delete (the per-leaf delete may be skipped by
+        // the commit path — the entry callback must cope alone).
+        config_neighbor_group_afi_safi(&mut bgp, arg_words(&["G", "ipv4"]), ConfigOp::Delete)
+            .unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v4(), v6()]);
+
+        // Group delete cascade: opinions gone entirely.
+        config_neighbor_group(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
+        assert_eq!(peer_mp_families(&bgp), vec![v4()]);
+    }
+
+    /// Group afi-safi changes must reach interface-keyed (IPv6
+    /// unnumbered) members too. `PeerMap::iter_mut` silently skips
+    /// interface-keyed peers — sweeping with it left the unnumbered
+    /// peer's families frozen (caught by the
+    /// `@bgp_unnumbered_afi_safi` BDD, pinned here).
+    #[tokio::test]
+    async fn group_afi_safi_reaches_interface_keyed_member() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_neighbor_group,
+            config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv6", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_neighbor_group(&mut bgp, arg_words(&["i1", "G"]), ConfigOp::Set)
+            .unwrap();
+        config_interface_neighbor_remote_as(
+            &mut bgp,
+            arg_words(&["i1", "internal"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let link_local: std::net::Ipv6Addr = "fe80::1".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+
+        let families = |bgp: &Bgp| -> Vec<AfiSafi> {
+            bgp.peers
+                .get_by_key(&PeerKey::Interface(7))
+                .expect("interface peer exists")
+                .config
+                .mp
+                .keys()
+                .copied()
+                .collect()
+        };
+        assert_eq!(
+            families(&bgp),
+            vec![v4(), v6()],
+            "materialization inherits the group families",
+        );
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            families(&bgp),
+            vec![v6()],
+            "the sweep must reach the interface-keyed member",
         );
     }
 }
