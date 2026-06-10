@@ -15,6 +15,10 @@
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct VrfConfig {
     pub delete: bool,
+    /// Per-VRF Router-ID override — `set vrf X router-id A.B.C.D`.
+    /// `None` lets the RIB derive one from the VRF's member
+    /// interfaces (falling back to the global effective value).
+    pub router_id: Option<std::net::Ipv4Addr>,
     /// IPv4-unicast RT import set —
     /// `set vrf X ipv4 route-target import …`.
     pub ipv4_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,

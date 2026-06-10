@@ -20,6 +20,18 @@ pub struct Vrf {
     pub name: String,
     pub table_id: u32,
     pub ifindex: u32,
+    /// Effective per-VRF Router ID — what this VRF's subscribers
+    /// receive via `RibRx::RouterIdUpdate` and what the
+    /// subscribe-time replay sends them. Derived by
+    /// `Rib::router_id_update`: configured `vrf <name> router-id`
+    /// first, then the automatic pick from this VRF's member
+    /// interfaces, then the global effective Router ID. Sticky once
+    /// set, like the global one.
+    pub router_id: std::net::Ipv4Addr,
+    /// Operator-configured `vrf <name> router-id`, delivered via
+    /// `Message::VrfRouterId`. Wins over the derived values; `None`
+    /// falls back.
+    pub router_id_config: Option<std::net::Ipv4Addr>,
     /// `true` when this process created the kernel VRF master device,
     /// `false` when it adopted a pre-existing one (operator-created, or
     /// a leftover from a prior run). The shutdown path only deletes the

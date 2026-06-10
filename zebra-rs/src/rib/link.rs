@@ -631,6 +631,11 @@ impl Rib {
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
                     self.api_addr_add_vrf(addr, now_vrf_id);
                 }
+                // The interface's addresses changed scope: both the
+                // VRF it left and the one it joined (and the global
+                // pick, which excludes VRF members) may now derive a
+                // different Router-ID.
+                self.router_id_update();
             }
         }
 
