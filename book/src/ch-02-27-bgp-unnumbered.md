@@ -60,7 +60,12 @@ interface-neighbor itself always wins over the group's.
 `interface-neighbor` deliberately carries no per-peer `afi-safi` list.
 A bare entry negotiates the default — IPv4 unicast only. To run IPv6
 (or any other family) on an unnumbered session, reference a
-neighbor-group and set the families there:
+neighbor-group and set the families there. The full per-neighbor knob
+set — `ttl-security`, `password`, `policy`, `prefix-set`,
+`allowas-in`, and every other knob listed in
+[Neighbor Groups](ch-02-26-bgp-neighbor-group.md) — inherits through
+the group the same way, making the group the natural place to configure
+all shared policy for an unnumbered fabric.
 
 ```yaml
 interface:

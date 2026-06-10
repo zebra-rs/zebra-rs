@@ -134,11 +134,16 @@ pub fn materialize_peer(
     if resolved.inherited_from_group {
         peer.config.remote_as_inherited = true;
     }
-    // Resolve the group's afi-safi opinions (e.g. `afi-safi ipv6
-    // enabled true` for an unnumbered IPv6 session) into the effective
-    // MP set before the first OPEN is built.
-    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
     bgp.peers.insert_with_key(PeerKey::Interface(ifindex), peer);
+
+    // Resolve everything the group supplies (the MP family set for
+    // the first OPEN — e.g. `afi-safi ipv6 enabled true` for an
+    // unnumbered IPv6 session — plus the whole-session knobs). Runs
+    // AFTER insert because the apply ritual may arm timers that
+    // capture `peer.ident`; the bounce flag is irrelevant for a
+    // freshly materialized Idle peer.
+    let peer = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))?;
+    let _ = super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
 
     // Kick the FSM. `peer.start()` arms the idle-hold timer which
     // fires Event::Start → fsm_start → peer_start_connection. The
@@ -148,7 +153,6 @@ pub fn materialize_peer(
     // External` (which yields 0 as a placeholder until OPEN backfill)
     // remain dormant — that case lands in a follow-up alongside the
     // OPEN-side validation.
-    let peer = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))?;
     peer.start();
     Some(peer.ident)
 }
@@ -192,14 +196,25 @@ pub fn config_interface_neighbor_neighbor_group(
 
     // Propagate the (re)binding to an already-materialized peer so the
     // group-driven attributes re-resolve against the new reference.
-    // Scope: afi-safi only — the peer's remote-as keeps its
-    // materialization-time value, matching how a per-cfg `remote-as`
-    // change is also picked up only on the next materialization.
+    // Scope: the inheritable attribute set only — the peer's remote-as
+    // keeps its materialization-time value, matching how a per-cfg
+    // `remote-as` change is also picked up only on the next
+    // materialization.
+    let mut stop: Option<usize> = None;
     if let Some(&ifindex) = bgp.link_index_by_name.get(&name)
         && let Some(peer) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))
     {
         peer.config.neighbor_group = new_ref;
-        super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+        let outcome =
+            super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
+        if outcome.bounce {
+            stop = Some(peer.ident);
+        }
+    }
+    if let Some(ident) = stop {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
     Some(())
 }

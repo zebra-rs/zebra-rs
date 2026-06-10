@@ -16,6 +16,30 @@ module zebra-bgp-neighbor-group {
     prefix zas;
   }
 
+  import zebra-bgp-transport {
+    prefix zbt;
+  }
+
+  import zebra-bgp-password {
+    prefix zbp;
+  }
+
+  import zebra-bgp-allowas-in {
+    prefix zbai;
+  }
+
+  import zebra-bgp-as-override {
+    prefix zbao;
+  }
+
+  import zebra-bgp-remove-private-as {
+    prefix zbrpa;
+  }
+
+  import zebra-bgp-enforce-first-as {
+    prefix zbef;
+  }
+
   import config {
     prefix config;
   }
@@ -91,6 +115,66 @@ module zebra-bgp-neighbor-group {
           "AS number inherited by neighbors that reference this
            group. A `remote-as` set on the neighbor itself wins.";
       }
+
+      /* Per-neighbor knobs inheritable through the group. The same
+       * explicit-wins rule applies to each: a statement on the
+       * neighbor itself outranks the group's; absence of both means
+       * the per-neighbor default. The transport / password /
+       * allowas-in / as-override / remove-private-as /
+       * enforce-first-as shapes are reused verbatim from the modules
+       * that attach them to `neighbor`, so the two surfaces cannot
+       * drift apart. */
+
+      leaf passive {
+        ext:help "Members only accept inbound sessions (never dial)";
+        type boolean;
+        description
+          "Inherited passive mode. The flat-group spelling of the
+           per-neighbor `transport passive-mode` leaf. Ignored by
+           dynamic (listen-range) members, which are always passive.";
+      }
+      uses zbt:bgp-neighbor-transport-extension;
+      uses zbp:bgp-neighbor-password-extension;
+      uses zbai:bgp-neighbor-allowas-in-extension;
+      uses zbao:bgp-neighbor-as-override-extension;
+      uses zbrpa:bgp-neighbor-remove-private-as-extension;
+      uses zbef:bgp-neighbor-enforce-first-as-extension;
+      container policy {
+        ext:help "Route policy inherited by group members";
+        description
+          "Per-direction route-policy references, mirroring the
+           per-neighbor `policy` container.";
+        leaf in {
+          type string;
+        }
+        leaf out {
+          type string;
+        }
+      }
+      container prefix-set {
+        ext:help "Prefix filter inherited by group members";
+        description
+          "Per-direction prefix-set references, mirroring the
+           per-neighbor `prefix-set` container.";
+        leaf in {
+          type string;
+        }
+        leaf out {
+          type string;
+        }
+      }
+      container route-reflector {
+        ext:help "Route reflector parameters inherited by group members";
+        description
+          "Mirror of the per-neighbor `route-reflector` container
+           (client leaf only — `cluster-id` stays per-neighbor).";
+        leaf client {
+          type boolean;
+          description
+            "Members are route-reflector clients.";
+        }
+      }
+
       list afi-safi {
         key "name";
         description
@@ -110,6 +194,14 @@ module zebra-bgp-neighbor-group {
           description
             "Whether this AFI,SAFI is enabled for peers inheriting
              from the group.";
+        }
+        leaf next-hop-self {
+          type boolean;
+          description
+            "Inherited per-family next-hop-self, mirroring the
+             per-neighbor `afi-safi <name> next-hop-self` leaf.
+             Applies to routes advertised after the change (no
+             session bounce).";
         }
       }
     }

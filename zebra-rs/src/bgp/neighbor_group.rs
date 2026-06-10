@@ -27,24 +27,74 @@
 //! pass will pick one.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
 
 use super::Bgp;
 use super::inst::Message;
-use super::peer::{Event, PeerConfig, PeerType};
+use super::peer::{
+    ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, Event, Peer, PeerConfig, PeerType, RemovePrivateAs, State,
+};
 use super::peer_key::PeerOrigin;
 use crate::config::{Args, ConfigOp};
+
+/// The per-neighbor knobs a `neighbor-group` can supply. One struct
+/// serves both sides of the inheritance:
+///
+/// - [`NeighborGroup::knobs`] — the group's opinions,
+/// - [`super::peer::PeerConfig::knobs_explicit`] — the verbatim
+///   statements made on the neighbor itself.
+///
+/// Every field is `Option`: `None` means "no statement" (group: no
+/// opinion / peer: not explicitly configured). Resolution is
+/// field-wise `explicit.or(group)` via [`resolve_knob`]; when both are
+/// `None` the per-knob default applies. Presence-style knobs
+/// (`ttl-security`, `as-override`, `remove-private-as`,
+/// `enforce-first-as`, `disable-connected-check`, `allowas-in`) can
+/// only be stated "on" — exactly the expressiveness the per-neighbor
+/// YANG has.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct InheritableKnobs {
+    pub passive: Option<bool>,
+    pub update_source: Option<IpAddr>,
+    pub port: Option<u16>,
+    pub ttl_security: Option<bool>,
+    pub ebgp_multihop: Option<u8>,
+    pub tcp_mss: Option<u16>,
+    pub password: Option<String>,
+    pub disable_connected_check: Option<bool>,
+    pub policy_in: Option<String>,
+    pub policy_out: Option<String>,
+    pub prefix_set_in: Option<String>,
+    pub prefix_set_out: Option<String>,
+    pub allowas_in: Option<AllowAsIn>,
+    pub as_override: Option<bool>,
+    pub remove_private_as: Option<RemovePrivateAs>,
+    pub enforce_first_as: Option<bool>,
+    pub route_reflector_client: Option<bool>,
+}
+
+/// One group `afi-safi <family>` entry: the mandatory `enabled`
+/// toggle plus optional per-family opinions.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct GroupAfiSafi {
+    pub enabled: bool,
+    pub next_hop_self: Option<bool>,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NeighborGroup {
     pub remote_as: Option<u32>,
-    /// Per-family `afi-safi <name> enabled <bool>` opinions. Tri-state
-    /// per family: `true` forces the family on for inheriting peers,
-    /// `false` forces it off (overriding the implicit IPv4-unicast
-    /// default), absent means "no opinion" (the peer's own default /
-    /// explicit setting stands).
-    pub afi_safi: BTreeMap<AfiSafi, bool>,
+    /// Per-family `afi-safi <name>` opinions. Tri-state per family:
+    /// an entry with `enabled true` forces the family on for
+    /// inheriting peers, `enabled false` forces it off (overriding
+    /// the implicit IPv4-unicast default), absent means "no opinion"
+    /// (the peer's own default / explicit setting stands). The entry
+    /// also carries the optional per-family `next-hop-self` opinion.
+    pub afi_safi: BTreeMap<AfiSafi, GroupAfiSafi>,
+    /// Whole-session knobs inheritable by members.
+    pub knobs: InheritableKnobs,
 }
 
 /// `set router bgp neighbor-group <name>` — list-key callback.
@@ -66,11 +116,11 @@ pub fn config_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
             // false` and returns `SweepAction::Ignore`.
             sweep_peers_for_group(bgp, &name, None);
             bgp.neighbor_groups.remove(&name);
-            // With the group gone its afi-safi opinions are gone too:
-            // members fall back to default + their own explicit
+            // With the group gone every opinion it carried is gone
+            // too: members fall back to defaults + their own explicit
             // statements (the reference leaf on the peer still stands
             // and re-resolves if the group is re-created).
-            sweep_group_afi_safi(bgp, &name);
+            sweep_members_inherit(bgp, &name);
         }
         _ => {}
     }
@@ -146,15 +196,580 @@ pub fn config_neighbor_group_afi_safi_enabled(
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
-            group.afi_safi.insert(family, enabled);
+            group.afi_safi.entry(family).or_default().enabled = enabled;
         }
         ConfigOp::Delete => {
+            // `enabled` is the entry's mandatory core: dropping it
+            // drops the family opinion. A surviving `next-hop-self`
+            // opinion would be unreachable config (the schema requires
+            // `enabled` on the entry), so remove the whole entry.
             group.afi_safi.remove(&family);
         }
         _ => return Some(()),
     }
     sweep_group_afi_safi(bgp, &name);
     Some(())
+}
+
+/// `set router bgp neighbor-group <name> afi-safi <family> next-hop-self <bool>`.
+///
+/// Stores the per-family opinion and re-resolves every member's
+/// effective `next-hop-self` for that family. Like the per-neighbor
+/// leaf, no session bounce and no replay: the new value applies to
+/// routes advertised after the change.
+pub fn config_neighbor_group_afi_safi_next_hop_self(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let family: AfiSafi = args.afi_safi()?;
+    let group = bgp.neighbor_groups.entry(name.clone()).or_default();
+    match op {
+        ConfigOp::Set => {
+            let value = args.boolean()?;
+            group.afi_safi.entry(family).or_default().next_hop_self = Some(value);
+        }
+        ConfigOp::Delete => {
+            if let Some(entry) = group.afi_safi.get_mut(&family) {
+                entry.next_hop_self = None;
+            }
+        }
+        _ => return Some(()),
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let value = resolve_next_hop_self(groups, &peer.config, family);
+        peer.config.sub.entry(family).or_default().next_hop_self = value;
+        false
+    });
+    Some(())
+}
+
+/// Resolve a member's effective per-family `next-hop-self`: the
+/// explicit per-neighbor statement wins, else the group's opinion,
+/// else the default (`false`).
+pub fn resolve_next_hop_self(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &PeerConfig,
+    family: AfiSafi,
+) -> bool {
+    config
+        .nhs_explicit
+        .get(&family)
+        .copied()
+        .or_else(|| {
+            config
+                .neighbor_group
+                .as_deref()
+                .and_then(|name| groups.get(name))
+                .and_then(|group| group.afi_safi.get(&family))
+                .and_then(|entry| entry.next_hop_self)
+        })
+        .unwrap_or(false)
+}
+
+/// `set router bgp neighbor-group <name> ttl-security` (`type empty`).
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (mutual-exclusion guard,
+/// diff-gate, start, bounce-if-live).
+pub fn config_neighbor_group_ttl_security(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .ttl_security = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.ttl_security).unwrap_or(false);
+        super::config::apply_ttl_security(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> port <1-65535>`.
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (diff-gate, start,
+/// bounce-if-live).
+pub fn config_neighbor_group_port(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.u16()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .port = value;
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.port);
+        super::config::apply_port(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> ebgp-multihop <1-255>`.
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (mutual-exclusion guard
+/// vs ttl-security, diff-gate, start, bounce-if-live).
+pub fn config_neighbor_group_ebgp_multihop(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.u8()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .ebgp_multihop = value;
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.ebgp_multihop);
+        super::config::apply_ebgp_multihop(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> disable-connected-check`
+/// (`type empty`).
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (diff-gate, start,
+/// bounce-if-live).
+pub fn config_neighbor_group_disable_connected_check(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .disable_connected_check = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want =
+            resolve_knob(groups, &peer.config, |k| k.disable_connected_check).unwrap_or(false);
+        super::config::apply_disable_connected_check(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> passive <bool>` — the flat
+/// boolean spelling of the per-neighbor `transport passive-mode` leaf.
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (no bounce; dynamic
+/// members stay forced-passive inside the apply fn).
+pub fn config_neighbor_group_passive(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .passive = value;
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.passive).unwrap_or(false);
+        super::config::apply_passive(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> allowas-in` — the presence
+/// container. Mirrors the per-neighbor `config_allowas_in`
+/// `get_or_insert` logic onto the group's opinion, then re-resolves
+/// every member.
+pub fn config_neighbor_group_allowas_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        knobs
+            .allowas_in
+            .get_or_insert(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+    } else {
+        knobs.allowas_in = None;
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.allowas_in);
+        super::config::apply_allowas_in(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> allowas-in count <1-10>`.
+/// Mirrors the per-neighbor `config_allowas_in_count` logic onto the
+/// group's opinion.
+pub fn config_neighbor_group_allowas_in_count(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    if op.is_set() {
+        let count = args.u8()?;
+        let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+        knobs.allowas_in = Some(AllowAsIn::Count(count));
+    } else {
+        let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+        if matches!(knobs.allowas_in, Some(AllowAsIn::Count(_))) {
+            knobs.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+        }
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.allowas_in);
+        super::config::apply_allowas_in(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> allowas-in origin`. Mirrors
+/// the per-neighbor `config_allowas_in_origin` logic onto the group's
+/// opinion.
+pub fn config_neighbor_group_allowas_in_origin(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        knobs.allowas_in = Some(AllowAsIn::Origin);
+    } else if matches!(knobs.allowas_in, Some(AllowAsIn::Origin)) {
+        knobs.allowas_in = Some(AllowAsIn::Count(ALLOWAS_IN_DEFAULT_COUNT));
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.allowas_in);
+        super::config::apply_allowas_in(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> as-override` — presence
+/// container. Stores the opinion and re-resolves every member.
+pub fn config_neighbor_group_as_override(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .as_override = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.as_override).unwrap_or(false);
+        super::config::apply_as_override(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> remove-private-as` — presence
+/// container. Mirrors the per-neighbor `config_remove_private_as`
+/// `get_or_insert_with` logic onto the group's opinion, then
+/// re-resolves every member.
+pub fn config_neighbor_group_remove_private_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        knobs
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default);
+    } else {
+        knobs.remove_private_as = None;
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.remove_private_as);
+        super::config::apply_remove_private_as(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> remove-private-as all`.
+/// Mirrors the per-neighbor `config_remove_private_as_all` logic onto
+/// the group's opinion.
+pub fn config_neighbor_group_remove_private_as_all(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        knobs
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default)
+            .all = true;
+    } else if let Some(rpa) = knobs.remove_private_as.as_mut() {
+        rpa.all = false;
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.remove_private_as);
+        super::config::apply_remove_private_as(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> remove-private-as replace-as`.
+/// Mirrors the per-neighbor `config_remove_private_as_replace_as` logic
+/// onto the group's opinion.
+pub fn config_neighbor_group_remove_private_as_replace_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        knobs
+            .remove_private_as
+            .get_or_insert_with(RemovePrivateAs::default)
+            .replace_as = true;
+    } else if let Some(rpa) = knobs.remove_private_as.as_mut() {
+        rpa.replace_as = false;
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.remove_private_as);
+        super::config::apply_remove_private_as(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> enforce-first-as` — presence
+/// container. Stores the opinion and re-resolves every member.
+pub fn config_neighbor_group_enforce_first_as(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .enforce_first_as = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.enforce_first_as).unwrap_or(false);
+        super::config::apply_enforce_first_as(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> route-reflector client <bool>`.
+///
+/// Stores the opinion and re-resolves every member. The effective
+/// value lands on `peer.reflector_client` (a `Peer` field, not
+/// `PeerConfig`); no session bounce.
+pub fn config_neighbor_group_route_reflector_client(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.boolean()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .route_reflector_client = value;
+    sweep_members(bgp, &name, |groups, peer| {
+        let want =
+            resolve_knob(groups, &peer.config, |k| k.route_reflector_client).unwrap_or(false);
+        super::config::apply_route_reflector_client(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> update-source <addr>`.
+///
+/// Like the per-neighbor knob: no bounce (the source is read at dial
+/// time) and a per-member address-family guard — a v4 source applies
+/// only to v4 members, a v6 source only to v6 members (the apply fn
+/// skips mismatches with a warning). Changed members get their BFD
+/// session re-keyed, mirroring the per-neighbor callback's
+/// `bfd_apply` reconcile.
+pub fn config_neighbor_group_update_source(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.addr()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .update_source = value;
+    sweep_members_inherit(bgp, &name);
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> tcp-mss <1-65535>`.
+///
+/// Like the per-neighbor knob: no bounce (the clamp is read at
+/// connect time; `clear bgp` for immediate effect), and one listener
+/// reconcile after the sweep so the shared socket re-derives its
+/// per-AF minimum.
+pub fn config_neighbor_group_tcp_mss(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.u16()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .tcp_mss = value;
+    sweep_members_inherit(bgp, &name);
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> password <string>`.
+///
+/// Like the per-neighbor knob: no bounce (a live session keeps its
+/// key until it resets); every changed member's listener key is
+/// re-installed so passively-accepted reconnects authenticate under
+/// the inherited password.
+pub fn config_neighbor_group_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let value = match op {
+        ConfigOp::Set => Some(args.string()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .password = value;
+    sweep_members_inherit(bgp, &name);
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> policy {in|out} <name>` and
+/// `… prefix-set {in|out} <name>` — four callbacks sharing one shape.
+///
+/// Like the per-neighbor knobs: the member's direction slot is
+/// re-bound and the policy actor (un)registered; the actor's reply
+/// resolves the name and soft-replays the direction. No bounce.
+pub fn config_neighbor_group_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    config_neighbor_group_policy_ref(bgp, args.string()?, args, op, |knobs| &mut knobs.policy_in)
+}
+
+pub fn config_neighbor_group_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    config_neighbor_group_policy_ref(bgp, args.string()?, args, op, |knobs| &mut knobs.policy_out)
+}
+
+pub fn config_neighbor_group_prefix_set_in(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_neighbor_group_policy_ref(bgp, args.string()?, args, op, |knobs| {
+        &mut knobs.prefix_set_in
+    })
+}
+
+pub fn config_neighbor_group_prefix_set_out(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_neighbor_group_policy_ref(bgp, args.string()?, args, op, |knobs| {
+        &mut knobs.prefix_set_out
+    })
+}
+
+fn config_neighbor_group_policy_ref(
+    bgp: &mut Bgp,
+    name: String,
+    mut args: Args,
+    op: ConfigOp,
+    slot: impl Fn(&mut InheritableKnobs) -> &mut Option<String>,
+) -> Option<()> {
+    let value = match op {
+        ConfigOp::Set => Some(args.string()?),
+        ConfigOp::Delete => None,
+        _ => return Some(()),
+    };
+    *slot(&mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs) = value;
+    sweep_members_inherit(bgp, &name);
+    Some(())
+}
+
+/// Resolve one whole-session inheritable knob for a peer: the explicit
+/// per-peer statement wins, else the referenced group's opinion, else
+/// `None` (the per-knob default applies). `pick` selects the field
+/// from either [`InheritableKnobs`] record.
+pub fn resolve_knob<T>(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &PeerConfig,
+    pick: impl Fn(&InheritableKnobs) -> Option<T>,
+) -> Option<T> {
+    pick(&config.knobs_explicit).or_else(|| {
+        config
+            .neighbor_group
+            .as_deref()
+            .and_then(|name| groups.get(name))
+            .and_then(|group| pick(&group.knobs))
+    })
+}
+
+/// Run `apply` for every member of group `name`, then queue an FSM
+/// stop for each member whose apply asked for one (a knob whose new
+/// value needs a reconnect on a live session — the same `Event::Stop`
+/// ritual the per-neighbor callbacks use). `iter_mut_all` so
+/// interface-keyed (IPv6 unnumbered) and dynamic members are swept
+/// too.
+pub(super) fn sweep_members(
+    bgp: &mut Bgp,
+    name: &str,
+    mut apply: impl FnMut(&BTreeMap<String, NeighborGroup>, &mut Peer) -> bool,
+) {
+    let mut stops: Vec<usize> = Vec::new();
+    for (_, peer) in bgp.peers.iter_mut_all() {
+        if peer.config.neighbor_group.as_deref() != Some(name) {
+            continue;
+        }
+        if apply(&bgp.neighbor_groups, peer) && !matches!(peer.state, State::Idle) {
+            stops.push(peer.ident);
+        }
+    }
+    for ident in stops {
+        let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+    }
 }
 
 /// Compute a peer's effective MP (multiprotocol) family set from the
@@ -170,13 +785,13 @@ pub fn config_neighbor_group_afi_safi_enabled(
 /// Presence in the returned set means enabled — the same invariant
 /// `PeerConfig::mp` always had.
 pub fn effective_mp(
-    group: Option<&BTreeMap<AfiSafi, bool>>,
+    group: Option<&BTreeMap<AfiSafi, GroupAfiSafi>>,
     explicit: &BTreeMap<AfiSafi, bool>,
 ) -> AfiSafis<bool> {
     let mut mp = AfiSafis::new();
     mp.insert(AfiSafi::new(Afi::Ip, Safi::Unicast), true);
-    for (family, enabled) in group.into_iter().flatten() {
-        if *enabled {
+    for (family, entry) in group.into_iter().flatten() {
+        if entry.enabled {
             mp.insert(*family, true);
         } else {
             mp.remove(family);
@@ -205,17 +820,216 @@ pub fn recompute_peer_mp(groups: &BTreeMap<String, NeighborGroup>, config: &mut 
     config.mp = effective_mp(opinions, &config.mp_explicit);
 }
 
-/// Recompute the effective MP set of every peer referencing `name`.
-/// Called after any change to the group's `afi-safi` opinions (and
-/// after group deletion, where the lookup misses and members fall back
-/// to default + explicit). `iter_mut_all` so interface-keyed (IPv6
-/// unnumbered) members are swept too — `iter_mut` silently skips them.
+/// Recompute the per-family inherited state (MP set + next-hop-self)
+/// of every peer referencing `name`. Called after any change to the
+/// group's `afi-safi` opinions (and after group deletion, where the
+/// lookup misses and members fall back to default + explicit).
 fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
+    sweep_members(bgp, name, |groups, peer| {
+        recompute_peer_mp(groups, &mut peer.config);
+        recompute_peer_nhs(groups, peer);
+        false
+    });
+}
+
+/// Re-resolve the effective per-family `next-hop-self` of one peer for
+/// every family either side mentions. Families with no statement left
+/// on either side fall back to the off default — the union sweep is
+/// what clears a removed opinion.
+fn recompute_peer_nhs(groups: &BTreeMap<String, NeighborGroup>, peer: &mut Peer) {
+    let mut families: Vec<AfiSafi> = peer.config.sub.keys().copied().collect();
+    families.extend(peer.config.nhs_explicit.keys().copied());
+    if let Some(group) = peer
+        .config
+        .neighbor_group
+        .as_deref()
+        .and_then(|name| groups.get(name))
+    {
+        families.extend(group.afi_safi.keys().copied());
+    }
+    families.sort_unstable();
+    families.dedup();
+    for family in families {
+        let value = resolve_next_hop_self(groups, &peer.config, family);
+        peer.config.sub.entry(family).or_default().next_hop_self = value;
+    }
+}
+
+/// Re-resolve EVERYTHING a neighbor-group can supply for one peer: the
+/// MP family set, per-family next-hop-self, and the whole-session
+/// knobs — each through the same diff-gated apply ritual its
+/// per-neighbor callback uses. Returns `true` when a live session must
+/// bounce for some knob to take effect (the caller owns the
+/// `Event::Stop` send).
+///
+/// Used by every path where the peer↔group binding itself changes:
+/// peer materialization (static attach, interface RA, dynamic accept),
+/// `interface-neighbor … neighbor-group` rebinding, and the
+/// group-delete cascade.
+/// Cross-borrow side-effect jobs an [`apply_inherited`] pass asks its
+/// caller to run once the peer borrow ends. Each maps to the same
+/// bgp-level reconciler the corresponding per-neighbor callback uses.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InheritOutcome {
+    /// A knob whose new value needs the session to reconnect — send
+    /// `Event::Stop` (skip for Idle peers; the apply fns already
+    /// account for that in their bounce decision).
+    pub bounce: bool,
+    /// `tcp-mss` changed — run `apply_tcp_mss_refresh_all` so the
+    /// shared listener re-derives its per-AF minimum clamp.
+    pub mss_refresh: bool,
+    /// The MD5 password changed — run `apply_md5_refresh_for` with
+    /// this peer's address to re-key the listener.
+    pub md5_refresh: bool,
+    /// `update-source` changed — run `bfd_apply` so an attached BFD
+    /// session re-keys to the new local address.
+    pub bfd_reapply: bool,
+}
+
+pub(super) fn apply_inherited(
+    groups: &BTreeMap<String, NeighborGroup>,
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<crate::policy::Message>,
+    peer: &mut Peer,
+) -> InheritOutcome {
+    recompute_peer_mp(groups, &mut peer.config);
+    recompute_peer_nhs(groups, peer);
+
+    // Resolve every knob up front by constructing the full record —
+    // the struct literal names each field, so adding a knob to
+    // `InheritableKnobs` refuses to compile until this site decides
+    // how to apply it.
+    let resolved = InheritableKnobs {
+        passive: resolve_knob(groups, &peer.config, |k| k.passive),
+        update_source: resolve_knob(groups, &peer.config, |k| k.update_source),
+        port: resolve_knob(groups, &peer.config, |k| k.port),
+        ttl_security: resolve_knob(groups, &peer.config, |k| k.ttl_security),
+        ebgp_multihop: resolve_knob(groups, &peer.config, |k| k.ebgp_multihop),
+        tcp_mss: resolve_knob(groups, &peer.config, |k| k.tcp_mss),
+        password: resolve_knob(groups, &peer.config, |k| k.password.clone()),
+        disable_connected_check: resolve_knob(groups, &peer.config, |k| k.disable_connected_check),
+        policy_in: resolve_knob(groups, &peer.config, |k| k.policy_in.clone()),
+        policy_out: resolve_knob(groups, &peer.config, |k| k.policy_out.clone()),
+        prefix_set_in: resolve_knob(groups, &peer.config, |k| k.prefix_set_in.clone()),
+        prefix_set_out: resolve_knob(groups, &peer.config, |k| k.prefix_set_out.clone()),
+        allowas_in: resolve_knob(groups, &peer.config, |k| k.allowas_in),
+        as_override: resolve_knob(groups, &peer.config, |k| k.as_override),
+        remove_private_as: resolve_knob(groups, &peer.config, |k| k.remove_private_as),
+        enforce_first_as: resolve_knob(groups, &peer.config, |k| k.enforce_first_as),
+        route_reflector_client: resolve_knob(groups, &peer.config, |k| k.route_reflector_client),
+    };
+    // Destructure so an unapplied field is a compile error, not a
+    // silently-ignored knob. Fields whose apply lands in a follow-up
+    // batch are discarded explicitly below — remove the discard when
+    // wiring the knob.
+    let InheritableKnobs {
+        passive,
+        update_source,
+        port,
+        ttl_security,
+        ebgp_multihop,
+        tcp_mss,
+        password,
+        disable_connected_check,
+        policy_in,
+        policy_out,
+        prefix_set_in,
+        prefix_set_out,
+        allowas_in,
+        as_override,
+        remove_private_as,
+        enforce_first_as,
+        route_reflector_client,
+    } = resolved;
+
+    let mut outcome = InheritOutcome::default();
+    let mut bounce = false;
+    // ebgp-multihop before ttl-security: the two are mutually
+    // exclusive and each apply fn refuses to override the other, so
+    // applying ebgp-multihop first lets `apply_ttl_security`'s guard
+    // observe it — matching a per-neighbor commit where both leaves'
+    // callbacks fire and the guard keeps whichever landed first.
+    bounce |= super::config::apply_ebgp_multihop(peer, ebgp_multihop);
+    bounce |= super::config::apply_ttl_security(peer, ttl_security.unwrap_or(false));
+    bounce |= super::config::apply_port(peer, port);
+    bounce |= super::config::apply_disable_connected_check(
+        peer,
+        disable_connected_check.unwrap_or(false),
+    );
+    super::config::apply_passive(peer, passive.unwrap_or(false));
+    super::config::apply_allowas_in(peer, allowas_in);
+    super::config::apply_as_override(peer, as_override.unwrap_or(false));
+    super::config::apply_remove_private_as(peer, remove_private_as);
+    super::config::apply_enforce_first_as(peer, enforce_first_as.unwrap_or(false));
+    super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
+    outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
+    outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);
+    outcome.md5_refresh = super::config::apply_md5_password(peer, password);
+    super::config::apply_peer_policy_ref(
+        policy_tx,
+        peer,
+        crate::policy::PolicyType::PolicyListIn,
+        policy_in,
+    );
+    super::config::apply_peer_policy_ref(
+        policy_tx,
+        peer,
+        crate::policy::PolicyType::PolicyListOut,
+        policy_out,
+    );
+    super::config::apply_peer_policy_ref(
+        policy_tx,
+        peer,
+        crate::policy::PolicyType::PrefixSetIn,
+        prefix_set_in,
+    );
+    super::config::apply_peer_policy_ref(
+        policy_tx,
+        peer,
+        crate::policy::PolicyType::PrefixSetOut,
+        prefix_set_out,
+    );
+    outcome.bounce = bounce;
+    outcome
+}
+
+/// Re-resolve the full inherited attribute set for every member of
+/// group `name` and run the cross-borrow jobs each apply asked for.
+/// The full-resolution sibling of [`sweep_members`], used by the
+/// knobs whose side effects need `&mut Bgp` (listener clamps, MD5
+/// re-keys, BFD reconciles) and by the group-delete cascade.
+pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
+    let policy_tx = bgp.policy_tx.clone();
+    let mut stops: Vec<usize> = Vec::new();
+    let mut mss_refresh = false;
+    let mut md5_addrs: Vec<IpAddr> = Vec::new();
+    let mut bfd_addrs: Vec<IpAddr> = Vec::new();
     for (_, peer) in bgp.peers.iter_mut_all() {
         if peer.config.neighbor_group.as_deref() != Some(name) {
             continue;
         }
-        recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
+        let outcome = apply_inherited(&bgp.neighbor_groups, &policy_tx, peer);
+        if outcome.bounce && !matches!(peer.state, State::Idle) {
+            stops.push(peer.ident);
+        }
+        mss_refresh |= outcome.mss_refresh;
+        if outcome.md5_refresh {
+            md5_addrs.push(peer.address);
+        }
+        if outcome.bfd_reapply {
+            bfd_addrs.push(peer.address);
+        }
+    }
+    for ident in stops {
+        let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+    }
+    if mss_refresh {
+        super::config::apply_tcp_mss_refresh_all(bgp);
+    }
+    for addr in md5_addrs {
+        super::config::apply_md5_refresh_for(bgp, addr);
+    }
+    for addr in bfd_addrs {
+        let _ = super::config::bfd_apply(bgp, addr);
     }
 }
 
@@ -475,6 +1289,14 @@ mod tests {
         mp.keys().copied().collect()
     }
 
+    /// Group `afi-safi <family> enabled <bool>` entry shorthand.
+    fn entry(enabled: bool) -> GroupAfiSafi {
+        GroupAfiSafi {
+            enabled,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn effective_mp_default_is_ipv4_unicast_only() {
         let mp = effective_mp(None, &BTreeMap::new());
@@ -483,14 +1305,14 @@ mod tests {
 
     #[test]
     fn effective_mp_group_enables_extra_family() {
-        let group = BTreeMap::from([(v6(), true)]);
+        let group = BTreeMap::from([(v6(), entry(true))]);
         let mp = effective_mp(Some(&group), &BTreeMap::new());
         assert_eq!(families(&mp), vec![v4(), v6()]);
     }
 
     #[test]
     fn effective_mp_group_disables_the_ipv4_default() {
-        let group = BTreeMap::from([(v4(), false), (v6(), true)]);
+        let group = BTreeMap::from([(v4(), entry(false)), (v6(), entry(true))]);
         let mp = effective_mp(Some(&group), &BTreeMap::new());
         assert_eq!(families(&mp), vec![v6()]);
     }
@@ -499,13 +1321,13 @@ mod tests {
     fn effective_mp_explicit_wins_over_group() {
         // Group switches v4 off, but the peer's own `afi-safi ipv4
         // enabled true` stands; group's v6 opinion is unopposed.
-        let group = BTreeMap::from([(v4(), false), (v6(), true)]);
+        let group = BTreeMap::from([(v4(), entry(false)), (v6(), entry(true))]);
         let explicit = BTreeMap::from([(v4(), true)]);
         let mp = effective_mp(Some(&group), &explicit);
         assert_eq!(families(&mp), vec![v4(), v6()]);
 
         // ... and the mirror: group on, explicit off.
-        let group = BTreeMap::from([(v6(), true)]);
+        let group = BTreeMap::from([(v6(), entry(true))]);
         let explicit = BTreeMap::from([(v6(), false)]);
         let mp = effective_mp(Some(&group), &explicit);
         assert_eq!(families(&mp), vec![v4()]);

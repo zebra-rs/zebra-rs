@@ -1430,6 +1430,62 @@ mod yang_load_tests {
         );
     }
 
+    /// The `neighbor-group` list inherits the per-neighbor knob set
+    /// (zebra-bgp-neighbor-group.yang reuses the feature modules'
+    /// groupings via cross-module `uses`, plus inline mirrors for
+    /// policy / prefix-set / route-reflector / passive /
+    /// afi-safi next-hop-self). Pin every group spelling as settable
+    /// so a grouping rename or import slip in any feature module is
+    /// caught here, not at daemon startup.
+    #[test]
+    fn bgp_neighbor_group_inheritable_knobs_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor-group G passive true",
+            "set router bgp neighbor-group G update-source 10.0.0.1",
+            "set router bgp neighbor-group G ttl-security",
+            "set router bgp neighbor-group G ebgp-multihop 5",
+            "set router bgp neighbor-group G tcp-mss 1400",
+            "set router bgp neighbor-group G port 1179",
+            "set router bgp neighbor-group G disable-connected-check",
+            "set router bgp neighbor-group G password secret",
+            "set router bgp neighbor-group G allowas-in",
+            "set router bgp neighbor-group G allowas-in count 5",
+            "set router bgp neighbor-group G allowas-in origin",
+            "set router bgp neighbor-group G as-override",
+            "set router bgp neighbor-group G remove-private-as",
+            "set router bgp neighbor-group G remove-private-as all",
+            "set router bgp neighbor-group G remove-private-as replace-as",
+            "set router bgp neighbor-group G enforce-first-as",
+            "set router bgp neighbor-group G policy in PL-IN",
+            "set router bgp neighbor-group G policy out PL-OUT",
+            "set router bgp neighbor-group G prefix-set in PS-IN",
+            "set router bgp neighbor-group G prefix-set out PS-OUT",
+            "set router bgp neighbor-group G route-reflector client true",
+            "set router bgp neighbor-group G afi-safi ipv4 next-hop-self true",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// The global Router-ID override moved from the top level
     /// (`router-id A.B.C.D`) under the `system` container
     /// (`system router-id A.B.C.D`); the RIB dispatch in

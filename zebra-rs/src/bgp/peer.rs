@@ -394,6 +394,20 @@ pub struct PeerConfig {
     /// field set explicitly on the neighbor wins") and re-merged when
     /// the group changes.
     pub mp_explicit: BTreeMap<AfiSafi, bool>,
+    /// Verbatim per-peer `afi-safi <name> next-hop-self <bool>`
+    /// statements — same explicit-vs-effective split as
+    /// [`Self::mp_explicit`]; the effective value lives in
+    /// [`Self::sub`].
+    pub nhs_explicit: BTreeMap<AfiSafi, bool>,
+    /// Verbatim per-peer statements for the whole-session knobs a
+    /// `neighbor-group` can supply (passive, update-source,
+    /// ttl-security, …). Same explicit-vs-effective split: the
+    /// effective values live in their usual homes
+    /// ([`Self::transport`], [`Self::allowas_in`], `Peer` fields, …),
+    /// re-resolved through
+    /// [`super::neighbor_group::resolve_knob`] whenever either side
+    /// changes.
+    pub knobs_explicit: super::neighbor_group::InheritableKnobs,
     pub restart: AfiSafis<RestartValue>,
     pub llgr: AfiSafis<LlgrValue>,
     pub addpath: AfiSafis<AddPathValue>,
@@ -458,6 +472,8 @@ impl Default for PeerConfig {
             extended_message: true,
             mp: Default::default(),
             mp_explicit: BTreeMap::new(),
+            nhs_explicit: BTreeMap::new(),
+            knobs_explicit: Default::default(),
             restart: AfiSafis::new(),
             llgr: AfiSafis::new(),
             addpath: AfiSafis::new(),
@@ -2568,12 +2584,19 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     // sweep in `config_neighbor_group_remote_as` to consult.
     peer.config.neighbor_group = Some(group_name);
     peer.config.remote_as_inherited = true;
-    // Resolve the group's afi-safi opinions into the effective MP set
-    // before the OPEN for this very connection is built.
-    super::neighbor_group::recompute_peer_mp(&bgp.neighbor_groups, &mut peer.config);
 
     bgp.peers.insert(peer_addr, peer);
     bgp.dynamic_peer_count += 1;
+
+    // Resolve everything the group supplies (the MP family set for
+    // the OPEN this very connection is about to exchange, plus the
+    // whole-session knobs) — after insert so any timer the apply
+    // ritual arms captures the real ident. Dynamic peers stay
+    // passive regardless of the group's `passive` opinion (forced
+    // above); the bounce flag is irrelevant for a fresh Idle peer.
+    if let Some(peer) = bgp.peers.get_mut(&peer_addr) {
+        let _ = super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
+    }
 
     // Dynamic (listen-range) peers are always address-keyed, so no
     // interface scope is needed here.
