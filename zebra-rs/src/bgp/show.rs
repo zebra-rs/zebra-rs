@@ -1731,9 +1731,10 @@ struct Neighbor<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     idle_hold_timer_rem: Option<u64>,
     idle_hold_timer_next: u64,
-    /// Remaining seconds on the connect-retry backstop. It runs only
-    /// while the peer is parked in Active by the eBGP connected-check
-    /// holdoff (`fsm_start`); `None` whenever it isn't armed.
+    /// Remaining seconds on the ConnectRetryTimer. It runs while the
+    /// peer dials (Connect — bounding the attempt) and while parked
+    /// in Active between redials (after a connection failure, or held
+    /// by the eBGP connected-check); `None` whenever it isn't armed.
     #[serde(skip_serializing_if = "Option::is_none")]
     connect_retry_timer_rem: Option<u64>,
     #[serde(skip_serializing)]

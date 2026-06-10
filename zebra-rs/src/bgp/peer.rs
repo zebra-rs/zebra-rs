@@ -1425,7 +1425,8 @@ pub fn fsm_start(peer: &mut Peer) -> State {
     // connect-retry timer. The instance also re-kicks us with Event::Start
     // the moment a connected route to the peer appears
     // (`Bgp::refresh_connected`), and a relevant config change bounces the
-    // peer through its callback — so the 120s retry is only a backstop.
+    // peer through its callback — so the connect-retry tick is only a
+    // backstop.
     if !peer.connected_check_ok() {
         if peer.trace_fsm() {
             tracing::info!(
@@ -1437,6 +1438,11 @@ pub fn fsm_start(peer: &mut Peer) -> State {
         return State::Active;
     }
     peer.task.connect = Some(peer_start_connection(peer));
+    // RFC 4271: the ConnectRetryTimer runs while we dial — started on
+    // leaving Idle, restarted on every redial. If it expires before
+    // the dial resolves (a blackholed SYN), its Event::Start lands
+    // back here and replaces the stuck dial.
+    peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Connect
 }
 
@@ -1807,11 +1813,22 @@ pub fn fsm_keepalive_expires(peer: &mut Peer) -> State {
 /// [`ConnId`] was minted). Only an outstanding dial — Connect state —
 /// can fail this way; a stale failure from a dial that an accept or a
 /// teardown already superseded must not disturb the current session.
+///
+/// RFC 4271 Connect state, TcpConnectionFails (Event 18): restart the
+/// ConnectRetryTimer, keep listening for the remote's connect, and go
+/// to Active. The timer's Event::Start redials from there. Passive
+/// peers don't redial — they park in Active listening.
 pub fn fsm_dial_fail(peer: &mut Peer) -> State {
     if peer.state != State::Connect {
         return peer.state;
     }
-    fsm_conn_fail(peer, ConnTag::Primary)
+    peer.task.connect = None;
+    peer.timer.connect_retry = if peer.is_passive() {
+        None
+    } else {
+        Some(timer::start_connect_retry_timer(peer))
+    };
+    State::Active
 }
 
 pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
@@ -1844,19 +1861,31 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
             CeaseError::ConnectionRejected.into(),
         );
     }
-    // Restart from Idle, not Active: entering Idle is the one
-    // transition that re-arms the idle hold timer (`update_timers`),
-    // and that timer is this FSM's restart pacer — it fires the
-    // Event::Start that redials. Parking in Active with a 120s
-    // connect-retry meant a single failed redial silently downgraded
-    // the reconnect cadence from idle-hold-time (5s default) to 120s,
-    // and the idle hold timer never ran again for the peer's
-    // lifetime. Sitting out the idle hold in Idle refuses inbound
-    // connections for those few seconds — that is the peer-oscillation
-    // damping RFC 4271 §8.1.1 ties to the IdleHoldTimer; passive
-    // peers skip it (`update_timers` flips them straight back to
-    // Active listening).
-    State::Idle
+    // RFC 4271 TcpConnectionFails cells, by the state the failure
+    // arrived in. Either way the peer keeps retrying until the
+    // connection succeeds — what differs is the pacer and whether we
+    // keep accepting inbound connects in the meantime.
+    match peer.state {
+        // OpenSent: restart the ConnectRetryTimer, keep listening,
+        // go to Active; the timer's Event::Start redials. Passive
+        // peers don't redial — they park in Active listening.
+        State::OpenSent => {
+            if !peer.is_passive() {
+                peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
+            }
+            State::Active
+        }
+        // Active / OpenConfirm / Established: release everything and
+        // go to Idle. Entering Idle re-arms the idle hold timer (the
+        // restart pacer firing Event::Start) and refuses inbound
+        // connections while it runs — the peer-oscillation damping
+        // RFC 4271 §8.1.1 ties to the IdleHoldTimer. Passive peers
+        // skip the hold (`update_timers` flips them straight back to
+        // Active listening). Historically every failure landed in
+        // Active with a 120s connect-retry, so the idle hold timer
+        // never ran again after the first failed redial.
+        _ => State::Idle,
+    }
 }
 
 pub async fn peer_packet_parse(
@@ -2797,14 +2826,15 @@ mod fsm_idle_hold_tests {
         peer
     }
 
-    /// A failed connect must land back in Idle so `update_timers`
-    /// re-arms the idle hold timer — the FSM's restart pacer. The
-    /// old Active + 120s connect-retry parking meant the idle hold
-    /// timer never ran again after the first failed redial.
+    /// RFC 4271 OpenConfirm/Established TcpConnectionFails: the
+    /// session lands back in Idle, where `update_timers` re-arms the
+    /// idle hold timer — the restart pacer. Before the fix every
+    /// failure parked in Active with a connect-retry, so the idle
+    /// hold timer never ran again after the first failed redial.
     #[tokio::test]
     async fn conn_fail_lands_in_idle_and_rearms_idle_hold_timer() {
         let mut peer = test_peer(false);
-        peer.state = State::Connect; // post-fsm_start, dial in flight
+        peer.state = State::OpenConfirm;
 
         let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
         assert_eq!(next, State::Idle);
@@ -2815,7 +2845,7 @@ mod fsm_idle_hold_tests {
 
         assert!(
             peer.timer.idle_hold_timer.is_some(),
-            "idle hold timer must be re-armed after a connect failure"
+            "idle hold timer must be re-armed after a connection failure"
         );
         assert!(peer.timer.connect_retry.is_none());
     }
@@ -2837,20 +2867,56 @@ mod fsm_idle_hold_tests {
         assert!(peer.timer.idle_hold_timer.is_some());
     }
 
-    /// Passive peers never dial, so they skip the idle hold and go
-    /// straight back to Active listening (`update_timers`' flip).
+    /// RFC 4271 OpenSent TcpConnectionFails: restart the
+    /// ConnectRetryTimer, keep listening, go to Active — the timer's
+    /// Event::Start paces the redial.
+    #[tokio::test]
+    async fn opensent_tcp_failure_goes_active_with_connect_retry() {
+        let mut peer = test_peer(false);
+        peer.state = State::OpenSent;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Active);
+        assert!(
+            peer.timer.connect_retry.is_some(),
+            "ConnectRetryTimer must be restarted to pace the redial"
+        );
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.connect_retry.is_some());
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// Passive peers never dial: an OpenSent failure parks them in
+    /// Active listening with no redial pacer armed.
     #[tokio::test]
     async fn conn_fail_passive_peer_returns_to_listening() {
         let mut peer = test_peer(true);
         peer.state = State::OpenSent;
 
         let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
-        assert_eq!(next, State::Idle);
+        assert_eq!(next, State::Active);
+        assert!(
+            peer.timer.connect_retry.is_none(),
+            "a passive peer must not arm the redial pacer"
+        );
 
         peer.state = next;
         timer::update_timers(&mut peer);
-        assert_eq!(peer.state, State::Active);
         assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// The dial path arms the ConnectRetryTimer (RFC 4271: started on
+    /// leaving Idle, restarted on every redial) so a blackholed SYN
+    /// is bounded and a refused dial has its retry pacer ready.
+    #[tokio::test]
+    async fn dial_path_arms_connect_retry() {
+        let mut peer = test_peer(false);
+        let next = fsm_start(&mut peer);
+        assert_eq!(next, State::Connect);
+        assert!(peer.task.connect.is_some());
+        assert!(peer.timer.connect_retry.is_some());
     }
 
     /// A collision-conn failure must not disturb the primary session.
@@ -2863,9 +2929,8 @@ mod fsm_idle_hold_tests {
     }
 
     /// The eBGP connected-check holdoff parks in Active with the
-    /// connect-retry backstop armed — the one state where `show ip
-    /// bgp neighbors` reports "Next connect retry timer fires in N
-    /// seconds".
+    /// connect-retry backstop armed (and `show ip bgp neighbors`
+    /// reports "Next connect retry timer fires in N seconds").
     #[tokio::test]
     async fn connected_check_holdoff_parks_active_with_connect_retry() {
         let mut peer = test_peer(false);
@@ -2885,19 +2950,27 @@ mod fsm_idle_hold_tests {
         );
     }
 
-    /// Leaving the Active park (dialing out, a connection coming up,
-    /// or falling back to Idle) retires the backstop: it must not
-    /// fire a stray Event::Start and must leave the show output.
+    /// ConnectRetryTimer lifecycle across states: it runs in Connect
+    /// (bounding the dial) and Active (pacing the redial), and is
+    /// retired entering OpenSent (RFC 4271 stops it on TCP success;
+    /// a late fire must not clobber the handshake) and Idle (the
+    /// idle hold timer takes over as pacer).
     #[tokio::test]
-    async fn connect_retry_cleared_when_leaving_the_active_park() {
-        for state in [State::Idle, State::Connect, State::OpenSent] {
+    async fn connect_retry_lifecycle_across_states() {
+        for (state, kept) in [
+            (State::Idle, false),
+            (State::Connect, true),
+            (State::Active, true),
+            (State::OpenSent, false),
+        ] {
             let mut peer = test_peer(false);
             peer.timer.connect_retry = Some(timer::start_connect_retry_timer(&peer));
             peer.state = state;
             timer::update_timers(&mut peer);
-            assert!(
-                peer.timer.connect_retry.is_none(),
-                "{state:?} must clear the connect-retry backstop"
+            assert_eq!(
+                peer.timer.connect_retry.is_some(),
+                kept,
+                "{state:?}: connect-retry timer kept = {kept}"
             );
         }
     }
@@ -3007,7 +3080,8 @@ mod fsm_idle_hold_tests {
 
     /// A dial failure is only meaningful while the dial is
     /// outstanding (Connect); arriving later it must not disturb the
-    /// session that superseded it.
+    /// session that superseded it. A current one follows the RFC 4271
+    /// Connect cell: restart the ConnectRetryTimer and go to Active.
     #[tokio::test]
     async fn stale_dial_failure_does_not_touch_a_live_session() {
         let mut peer = test_peer(false);
@@ -3017,7 +3091,8 @@ mod fsm_idle_hold_tests {
 
         peer.state = State::Connect;
         let (next, _) = fsm_next_state(&mut peer, Event::DialFail);
-        assert_eq!(next, State::Idle, "a current dial failure restarts");
+        assert_eq!(next, State::Active, "a current dial failure retries");
+        assert!(peer.timer.connect_retry.is_some());
     }
 
     /// Idle refuses connections: a stale dial completing after the
