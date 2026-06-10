@@ -14,12 +14,15 @@ deterministic to compare against.
 Re-evaluation relies entirely on the policy-change trigger
 (PolicyRx -> soft-in): applying a config whose policy content changed
 re-runs the inbound policy over the Adj-RIB-In. Deliberately NO
-`I clear namespace ... neighbor` steps here — that step is a real
-egress soft-clear since the clear grammar was wired (PR #1318), and
-an operator `clear ... soft [in]` after additively-merged same-name
-policy edits currently diverges from the trigger path on the MED
-scenarios (open daemon bug — soft-in replay re-admits trigger-denied
-routes). Historically the step was a silent no-op here anyway.
+`I clear namespace ... neighbor` steps here — that step is an egress
+soft-clear (since PR #1318/#1320) and adds nothing to an inbound
+policy test; the apply trigger is the path under test.
+History: the MED scenarios were broken from the start — the configs
+used flat `med-eq:`/`med-ge:`/`med-le:` keys that do not exist in
+the schema (the YANG models a one-of `med: { eq | le | ge }`
+choice), and the YAML apply silently dropped unknown keys, leaving
+IN-MED permit-all. The configs now use the nested shape, and apply
+rejects unknown document keys loudly.
 
 ## Test Topology
 
@@ -44,10 +47,10 @@ routes). Historically the step was a silent no-op here anyway.
 - z2-aspath-fail.yaml: input policy `match as-path-set FROM-65999`
 - z2-origin-igp.yaml: input policy `match origin igp` — matches
 - z2-origin-egp.yaml: input policy `match origin egp` — no route
-- z2-med-eq-pass.yaml: input policy `match med-eq 100` — matches.
-- z2-med-eq-fail.yaml: input policy `match med-eq 999` — no match.
-- z2-med-range-pass.yaml: input policy `match med-ge 50, med-le 200`
-- z2-med-range-fail.yaml: input policy `match med-ge 200` — MED=100
+- z2-med-eq-pass.yaml: input policy `match med eq 100` — matches.
+- z2-med-eq-fail.yaml: input policy `match med eq 999` — no match.
+- z2-med-range-pass.yaml: input policy `match med le 200` —
+- z2-med-range-fail.yaml: input policy `match med ge 200` — MED=100
 - z2-nh-pass.yaml: input policy `match next-hop-set PEER-SUBNET`
 - z2-nh-fail.yaml: input policy `match next-hop-set WRONG-SUBNET`
 
@@ -60,10 +63,10 @@ routes). Historically the step was a silent no-op here anyway.
 | match as-path-set rejects routes whose AS_PATH does not match | |
 | match origin igp accepts network-originated routes | |
 | match origin egp rejects network-originated (igp) routes | |
-| match med-eq accepts routes with the exact MED value | |
-| match med-eq rejects routes with a different MED value | |
-| match med-ge and med-le accept routes inside the range | |
-| match med-ge rejects routes below the floor | |
+| match med eq accepts routes with the exact MED value | |
+| match med eq rejects routes with a different MED value | |
+| match med le accepts routes at or below the ceiling | |
+| match med ge rejects routes below the floor | |
 | match next-hop-set accepts routes whose nexthop is in the prefix-set | |
 | match next-hop-set rejects routes whose nexthop is outside the prefix-set | |
 | Teardown topology | |

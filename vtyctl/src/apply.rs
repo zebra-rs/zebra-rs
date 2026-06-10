@@ -30,10 +30,21 @@ pub async fn apply(host: &str, filename: &str, command: Option<&String>) -> Resu
         // when the input ends with one.
         let normalised = cmd.replace("\\n", "\n");
         for line in normalised.lines() {
+            // `-c` is the command surface: a bare line is a `set`
+            // line. Without the explicit prefix the server's format
+            // sniffer would classify the payload as a YAML *document*,
+            // clear the candidate, and REPLACE the entire running
+            // config with whatever that one line parses to.
+            let line = if line.trim().is_empty()
+                || line.starts_with("set ")
+                || line.starts_with("delete ")
+            {
+                line.to_string()
+            } else {
+                format!("set {}", line)
+            };
             println!("line:{}", line);
-            vec.push(ApplyRequest {
-                line: line.to_string() + "\n",
-            });
+            vec.push(ApplyRequest { line: line + "\n" });
         }
     } else if !filename.is_empty() {
         let path = Path::new(filename);

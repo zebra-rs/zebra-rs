@@ -4,7 +4,8 @@ policy:
   - number: 10
     action: permit
     match:
-      med-eq: 999
+      med:
+        eq: 999
 router:
   bgp:
     global:

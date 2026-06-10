@@ -15,12 +15,16 @@ Feature: BGP route-map match clauses
   Re-evaluation relies entirely on the policy-change trigger
   (PolicyRx -> soft-in): applying a config whose policy content changed
   re-runs the inbound policy over the Adj-RIB-In. Deliberately NO
-  `I clear namespace ... neighbor` steps here — that step is a real
-  egress soft-clear since the clear grammar was wired (PR #1318), and
-  an operator `clear ... soft [in]` after additively-merged same-name
-  policy edits currently diverges from the trigger path on the MED
-  scenarios (open daemon bug — soft-in replay re-admits trigger-denied
-  routes). Historically the step was a silent no-op here anyway.
+  `I clear namespace ... neighbor` steps here — that step is an egress
+  soft-clear (since PR #1318/#1320) and adds nothing to an inbound
+  policy test; the apply trigger is the path under test.
+
+  History: the MED scenarios were broken from the start — the configs
+  used flat `med-eq:`/`med-ge:`/`med-le:` keys that do not exist in
+  the schema (the YANG models a one-of `med: { eq | le | ge }`
+  choice), and the YAML apply silently dropped unknown keys, leaving
+  IN-MED permit-all. The configs now use the nested shape, and apply
+  rejects unknown document keys loudly.
 
   Test Topology:
   ```
@@ -49,11 +53,13 @@ Feature: BGP route-map match clauses
     network-originated routes.
   - z2-origin-egp.yaml: input policy `match origin egp` — no route
     matches.
-  - z2-med-eq-pass.yaml: input policy `match med-eq 100` — matches.
-  - z2-med-eq-fail.yaml: input policy `match med-eq 999` — no match.
-  - z2-med-range-pass.yaml: input policy `match med-ge 50, med-le 200`
-    — matches MED=100.
-  - z2-med-range-fail.yaml: input policy `match med-ge 200` — MED=100
+  - z2-med-eq-pass.yaml: input policy `match med eq 100` — matches.
+  - z2-med-eq-fail.yaml: input policy `match med eq 999` — no match.
+  - z2-med-range-pass.yaml: input policy `match med le 200` —
+    MED=100 is at or below the ceiling, matches. (`match med` is a
+    one-of eq|le|ge choice, so a two-sided range needs two entries;
+    the le and ge bounds are exercised separately.)
+  - z2-med-range-fail.yaml: input policy `match med ge 200` — MED=100
     is below the floor, no match.
   - z2-nh-pass.yaml: input policy `match next-hop-set PEER-SUBNET`
     where the prefix-set is 192.168.0.0/24 — matches z1's nexthop
@@ -104,28 +110,28 @@ Feature: BGP route-map match clauses
     Then BGP route in "z2" does not have "10.0.0.1/32"
     And BGP route in "z2" does not have "10.0.0.2/32"
 
-  Scenario: match med-eq accepts routes with the exact MED value
+  Scenario: match med eq accepts routes with the exact MED value
     Given the test topology exists
     When I apply config "z2-med-eq-pass.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z2" has "10.0.0.2/32"
 
-  Scenario: match med-eq rejects routes with a different MED value
+  Scenario: match med eq rejects routes with a different MED value
     Given the test topology exists
     When I apply config "z2-med-eq-fail.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
     Then BGP route in "z2" does not have "10.0.0.1/32"
     And BGP route in "z2" does not have "10.0.0.2/32"
 
-  Scenario: match med-ge and med-le accept routes inside the range
+  Scenario: match med le accepts routes at or below the ceiling
     Given the test topology exists
     When I apply config "z2-med-range-pass.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
     Then BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z2" has "10.0.0.2/32"
 
-  Scenario: match med-ge rejects routes below the floor
+  Scenario: match med ge rejects routes below the floor
     Given the test topology exists
     When I apply config "z2-med-range-fail.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
