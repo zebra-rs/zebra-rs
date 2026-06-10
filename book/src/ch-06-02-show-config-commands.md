@@ -42,15 +42,18 @@ default when you don't specify a serialization.
 ```
 host(config)# show candidate-config
 system {
-    hostname r1
+  hostname r1;
 }
 router {
-    bgp 65000 {
-        router-id 10.0.0.1
-        neighbor 10.0.0.2 {
-            peer-as 65001
-        }
+  bgp {
+    global {
+      as 65000;
+      router-id 10.0.0.1;
     }
+    neighbor 10.0.0.2 {
+      remote-as 65001;
+    }
+  }
 }
 ```
 
@@ -62,8 +65,9 @@ line, suitable for `load` to replay or for diffing in plain text.
 ```
 host(config)# show candidate-config formal
 set system hostname r1
-set router bgp 65000 router-id 10.0.0.1
-set router bgp 65000 neighbor 10.0.0.2 peer-as 65001
+set router bgp global as 65000
+set router bgp global router-id 10.0.0.1
+set router bgp neighbor 10.0.0.2 remote-as 65001
 ```
 
 ### `json`
@@ -77,12 +81,18 @@ internal `preserve_order` flag.
     "hostname": "r1"
   },
   "router": {
-    "bgp": [
-      {
+    "bgp": {
+      "global": {
         "as": 65000,
         "router-id": "10.0.0.1"
-      }
-    ]
+      },
+      "neighbor": [
+        {
+          "remote-address": "10.0.0.2",
+          "remote-as": 65001
+        }
+      ]
+    }
   }
 }
 ```
@@ -96,8 +106,12 @@ system:
   hostname: r1
 router:
   bgp:
-    - as: 65000
+    global:
+      as: 65000
       router-id: 10.0.0.1
+    neighbor:
+    - remote-address: 10.0.0.2
+      remote-as: 65001
 ```
 
 ## Editing helpers
