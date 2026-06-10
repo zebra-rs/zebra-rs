@@ -114,6 +114,10 @@ pub fn materialize_peer(
     );
     peer.tracing_instance = bgp.tracing.clone();
     peer.origin = PeerOrigin::Interface { ifindex };
+    // The operator-facing identity for show/clear output and lookups
+    // (`show bgp summary`, `show ip bgp neighbors i1`, …) — the
+    // link-local in `address` is not something the operator can name.
+    peer.ifname = Some(name.to_string());
     // Required for the kernel connect(2) to a fe80:: target —
     // SocketAddrV6 without a scope_id returns EINVAL. The connect
     // path in `peer_start_connection` reads this back out and

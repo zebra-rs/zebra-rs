@@ -623,6 +623,14 @@ pub struct Peer {
     /// for address-keyed peers — `connect(2)` treats the v4/v6 global
     /// case fine without it.
     pub scope_id: Option<u32>,
+    /// Interface name for an interface-keyed (IPv6 unnumbered) peer —
+    /// the operator-typed `interface-neighbor` list key, captured at
+    /// materialization. It is the peer's operator-facing identity in
+    /// `show`/`clear` output and lookups: the remote link-local in
+    /// `address` is kernel-assigned and can change between RAs, so it
+    /// is not something the operator can name. `None` for
+    /// address-keyed peers.
+    pub ifname: Option<String>,
     pub router_id: Ipv4Addr,
     pub local_identifier: Option<Ipv4Addr>,
     pub remote_id: Ipv4Addr,
@@ -782,6 +790,7 @@ impl Peer {
             ctx,
             origin: PeerOrigin::Static,
             scope_id: None,
+            ifname: None,
             active: false,
             // Fail open until the instance computes connectedness from
             // interface-address events (see `shared_network`).
@@ -850,6 +859,17 @@ impl Peer {
 
     pub fn is_passive(&self) -> bool {
         self.config.transport.passive
+    }
+
+    /// Operator-facing identity for `show`/`clear`: the interface name
+    /// for an unnumbered (interface-keyed) peer, the remote address
+    /// otherwise. FRR renders unnumbered peers the same way in
+    /// `show bgp summary`.
+    pub fn display_name(&self) -> String {
+        match &self.ifname {
+            Some(name) => name.clone(),
+            None => self.address.to_string(),
+        }
     }
 
     // ---- effective (instance ∪ per-neighbor) tracing checks --------
@@ -2523,15 +2543,25 @@ pub fn clear_bgp_action(
         return Ok("%% EVPN soft-in is not yet implemented".to_string());
     }
 
-    let targets: Vec<IpAddr> = if target == "all" {
+    // Resolve to peer idents, not addresses: interface-keyed (IPv6
+    // unnumbered) peers are not reachable via the address map — their
+    // CLI identity is the `interface-neighbor` name, and `all` must
+    // cover them too (hence `iter_all`).
+    let targets: Vec<usize> = if target == "all" {
         bgp.peers
-            .iter()
-            .filter_map(|(_, p)| p.is_afi_safi(afi, safi).then_some(p.address))
+            .iter_all()
+            .filter_map(|(_, p)| p.is_afi_safi(afi, safi).then_some(p.ident))
             .collect()
     } else {
         match target.parse::<IpAddr>() {
-            Ok(addr) => vec![addr],
-            Err(_) => return Ok(format!("invalid peer or 'all': {}", target)),
+            Ok(addr) => bgp.peers.get(&addr).map(|p| p.ident).into_iter().collect(),
+            Err(_) => bgp
+                .peers
+                .iter_all()
+                .filter_map(|(_, p)| {
+                    (p.ifname.as_deref() == Some(target.as_str())).then_some(p.ident)
+                })
+                .collect(),
         }
     };
 
@@ -2539,10 +2569,7 @@ pub fn clear_bgp_action(
         return Ok("%% no matching peers".to_string());
     }
 
-    for addr in &targets {
-        let Some(peer_idx) = bgp.peers.get(addr).map(|p| p.ident) else {
-            continue;
-        };
+    for &peer_idx in &targets {
         match op {
             BgpClearOp::Hard => {
                 let _ = bgp.tx.try_send(Message::Event(peer_idx, Event::Stop));

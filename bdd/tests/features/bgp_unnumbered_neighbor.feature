@@ -61,11 +61,23 @@ Feature: BGP IPv6 unnumbered neighbor discovered via Router Advertisements
     And BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z1" has "10.0.0.2/32"
 
+  Scenario: The unnumbered peer is listed in summaries and addressable by interface name
+    Given the test topology exists
+    # The summary identifies an interface-keyed peer by its interface
+    # name (the trailing space pins the fixed-width Neighbor column),
+    # and `show ip bgp neighbors <ifname>` resolves the peer the
+    # dynamic completion offers, rendering the FRR-style
+    # `BGP neighbor on <ifname>: <link-local>` identity.
+    Then show command "show bgp summary" in namespace "z1" should contain "i1 "
+    And show command "show bgp ipv4 summary" in namespace "z1" should contain "i1 "
+    And show command "show ip bgp neighbors i1" in namespace "z1" should contain "BGP neighbor on i1: fe80::"
+
   Scenario: Removing the interface-neighbor tears the session down
     Given the test topology exists
     When I apply config "z1-base.yaml" to namespace "z1"
     Then BGP session in namespace "z1" should eventually not be "Established"
     And BGP session in namespace "z2" should eventually not be "Established"
+    And show command "show bgp summary" in namespace "z1" should not contain "i1 "
 
   Scenario: Teardown topology
     Given the test topology exists
