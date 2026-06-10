@@ -1725,16 +1725,29 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
         }
         return peer.state;
     }
-    // Primary conn failed. If a collision conn is waiting, promote it
-    // — there is no §6.8 decision to make yet (we haven't seen an
-    // OPEN on either) but the surviving TCP is the only one we have.
+    // Primary conn failed. A parked collision conn must NOT be
+    // promoted here: its reader/writer tasks were spawned with
+    // `ConnTag::Collision` baked into every event they emit, so after
+    // a promotion the connection's own failure is misrouted into the
+    // collision arm above (the state silently stays OpenSent with no
+    // socket and no retry timer — a permanent wedge), its KEEPALIVEs
+    // are ignored by `fsm_bgp_keepalive`, and its OPEN hits the §6.8
+    // arms with an empty collision slot. Reproduced by resetting the
+    // TCP session of an Established peer: both ends raced to
+    // reconnect, the parked conn was promoted, and the session never
+    // recovered. Close the parked conn alongside the failed primary
+    // and restart from Active — losing a pre-OPEN conn costs one
+    // reconnect round-trip.
     peer.task.writer = None;
     peer.task.reader = None;
     peer.packet_tx = None;
     peer.primary_role = None;
     if let Some(collision) = peer.collision.take() {
-        promote_collision_to_primary(peer, collision);
-        return State::OpenSent;
+        close_collision(
+            collision,
+            NotifyCode::Cease,
+            CeaseError::ConnectionRejected.into(),
+        );
     }
     peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
     State::Active
