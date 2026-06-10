@@ -4116,88 +4116,129 @@ fn show_bgp_neighbor_group_detail(
     Ok(buf)
 }
 
-impl Bgp {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
+#[derive(Default)]
+struct Builder {
+    path: String,
+    map: HashMap<String, ShowCallback>,
+}
+
+impl Builder {
+    fn path(mut self, path: &str) -> Self {
+        self.path = path.into();
+        self
     }
 
+    fn set(mut self, cb: ShowCallback) -> Self {
+        self.map.insert(self.path.clone(), cb);
+        self
+    }
+
+    fn map(self) -> HashMap<String, ShowCallback> {
+        self.map
+    }
+}
+
+impl Bgp {
     pub fn show_build(&mut self) {
-        self.show_add("/show/ip/bgp", show_bgp::<Bgp>);
-        self.show_add("/show/ip/bgp/labeled-unicast", show_bgp_labeled);
-        self.show_add("/show/ip/bgp/route", show_bgp_route_entry);
-        self.show_add("/show/bgp/neighbors", show_bgp_neighbor::<Bgp>);
-        self.show_add("/show/bgp/neighbors/advertised-routes", show_bgp_advertised);
-        self.show_add(
-            "/show/bgp/neighbors/advertised-routes/vpnv4",
-            show_bgp_advertised_vpnv4,
-        );
-        self.show_add(
-            "/show/bgp/neighbors/advertised-routes/evpn",
-            show_bgp_advertised_evpn,
-        );
-        self.show_add("/show/bgp/neighbors/received-routes", show_bgp_received);
-        self.show_add(
-            "/show/bgp/neighbors/received-routes/vpnv4",
-            show_bgp_received_vpnv4,
-        );
-        self.show_add(
-            "/show/bgp/neighbors/received-routes/evpn",
-            show_bgp_received_evpn,
-        );
-        self.show_add("/show/bgp/neighbors/rtcv4", show_bgp_rtcv4);
-        self.show_add("/show/ip/bgp/flowspec", show_bgp_flowspec_v4);
-        self.show_add("/show/ip/bgp/flowspec/ipv6", show_bgp_flowspec_v6);
-        self.show_add("/show/ip/bgp/sr-policy", show_bgp_sr_policy_v4);
-        self.show_add("/show/ip/bgp/sr-policy/ipv6", show_bgp_sr_policy_v6);
-        self.show_add("/show/ip/bgp/link-state", show_bgp_link_state);
-        // self.show_add("/show/community-list", show_community_list);
-        self.show_add("/show/ip/bgp/attributes", show_bgp_attributes);
-        self.show_add("/show/ip/bgp/vrf", show_bgp_vrf);
-        self.show_add("/show/ip/bgp/vrf/summary", show_bgp_vrf_not_running);
-        self.show_add("/show/ip/bgp/vrf/neighbors", show_bgp_vrf_not_running);
-        self.show_add("/show/ip/bgp/neighbor-group", show_bgp_neighbor_group);
-        self.show_add("/show/evpn/vni/all", show_evpn_vni_all);
-        // IOS-XR style update-group observability — kept under
-        // `show bgp ...` (not `show ip bgp ...`) per the design doc.
-        self.show_add(
-            "/show/bgp/update-group",
-            super::show_update_group::show_bgp_update_group,
-        );
-
-        // New `show bgp [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
-        // tree. `show bgp` with no AFI is IPv4 unicast; a bare address
-        // or prefix after `bgp` is routed here by the `ext:default-child
-        // "ipv4"` matcher, so `/show/bgp` and `/show/bgp/ipv4` share one
-        // handler.
-        self.show_add("/show/bgp", show_bgp_ipv4::<Bgp>);
-        self.show_add("/show/bgp/ipv4", show_bgp_ipv4::<Bgp>);
-        self.show_add("/show/bgp/ipv4/longer-prefix", show_bgp_ipv4_longer::<Bgp>);
-        self.show_add("/show/bgp/ipv6", show_bgp_ipv6::<Bgp>);
-        self.show_add("/show/bgp/ipv6/longer-prefix", show_bgp_ipv6_longer::<Bgp>);
-        // VPNv4 / EVPN moved here from the legacy `show ip bgp` tree:
-        // `show bgp vpnv4 [<addr>|<prefix>]` and `show bgp evpn`.
-        self.show_add("/show/bgp/vpnv4", show_bgp_vpnv4);
-        self.show_add("/show/bgp/evpn", show_bgp_evpn);
-        // Neighbor summaries, moved here from the legacy `show ip bgp
-        // summary`: the bare form sections every configured AFI/SAFI;
-        // ipv4/ipv6/vpnv4 reach their one-section form through the
-        // key-union `summary` arm handled inside the RIB handlers
-        // above; EVPN has its own path (the `evpn` node is a presence
-        // container, not a keyed list).
-        self.show_add("/show/bgp/summary", show_bgp_summary::<Bgp>);
-        self.show_add("/show/bgp/evpn/summary", show_bgp_evpn_summary);
-
-        // `show bgp vrf <name> …` is normally intercepted by the manager
-        // and redirected into the per-VRF task (see `process_vrf_show`).
-        // These global handlers are the fall-through when no task is
-        // registered for `<name>`: bare `show bgp vrf` lists every VRF,
-        // and a named-but-not-running VRF reports the miss instead of
-        // leaving the request unanswered.
-        self.show_add("/show/bgp/vrf", show_bgp_vrf);
-        self.show_add("/show/bgp/vrf/summary", show_bgp_vrf_not_running);
-        self.show_add("/show/bgp/vrf/ipv4", show_bgp_vrf_not_running);
-        self.show_add("/show/bgp/vrf/ipv4/longer-prefix", show_bgp_vrf_not_running);
-        self.show_add("/show/bgp/vrf/ipv6", show_bgp_vrf_not_running);
-        self.show_add("/show/bgp/vrf/ipv6/longer-prefix", show_bgp_vrf_not_running);
+        self.show_cb = Builder::default()
+            .path("/show/ip/bgp")
+            .set(show_bgp::<Bgp>)
+            .path("/show/ip/bgp/labeled-unicast")
+            .set(show_bgp_labeled)
+            .path("/show/ip/bgp/route")
+            .set(show_bgp_route_entry)
+            .path("/show/bgp/neighbors")
+            .set(show_bgp_neighbor::<Bgp>)
+            .path("/show/bgp/neighbors/advertised-routes")
+            .set(show_bgp_advertised)
+            .path("/show/bgp/neighbors/advertised-routes/vpnv4")
+            .set(show_bgp_advertised_vpnv4)
+            .path("/show/bgp/neighbors/advertised-routes/evpn")
+            .set(show_bgp_advertised_evpn)
+            .path("/show/bgp/neighbors/received-routes")
+            .set(show_bgp_received)
+            .path("/show/bgp/neighbors/received-routes/vpnv4")
+            .set(show_bgp_received_vpnv4)
+            .path("/show/bgp/neighbors/received-routes/evpn")
+            .set(show_bgp_received_evpn)
+            .path("/show/bgp/neighbors/rtcv4")
+            .set(show_bgp_rtcv4)
+            .path("/show/ip/bgp/flowspec")
+            .set(show_bgp_flowspec_v4)
+            .path("/show/ip/bgp/flowspec/ipv6")
+            .set(show_bgp_flowspec_v6)
+            .path("/show/ip/bgp/sr-policy")
+            .set(show_bgp_sr_policy_v4)
+            .path("/show/ip/bgp/sr-policy/ipv6")
+            .set(show_bgp_sr_policy_v6)
+            .path("/show/ip/bgp/link-state")
+            .set(show_bgp_link_state)
+            // .path("/show/community-list").set(show_community_list)
+            .path("/show/ip/bgp/attributes")
+            .set(show_bgp_attributes)
+            .path("/show/ip/bgp/vrf")
+            .set(show_bgp_vrf)
+            .path("/show/ip/bgp/vrf/summary")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/ip/bgp/vrf/neighbors")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/ip/bgp/neighbor-group")
+            .set(show_bgp_neighbor_group)
+            .path("/show/evpn/vni/all")
+            .set(show_evpn_vni_all)
+            // IOS-XR style update-group observability — kept under
+            // `show bgp ...` (not `show ip bgp ...`) per the design doc.
+            .path("/show/bgp/update-group")
+            .set(super::show_update_group::show_bgp_update_group)
+            // New `show bgp [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
+            // tree. `show bgp` with no AFI is IPv4 unicast; a bare address
+            // or prefix after `bgp` is routed here by the `ext:default-child
+            // "ipv4"` matcher, so `/show/bgp` and `/show/bgp/ipv4` share one
+            // handler.
+            .path("/show/bgp")
+            .set(show_bgp_ipv4::<Bgp>)
+            .path("/show/bgp/ipv4")
+            .set(show_bgp_ipv4::<Bgp>)
+            .path("/show/bgp/ipv4/longer-prefix")
+            .set(show_bgp_ipv4_longer::<Bgp>)
+            .path("/show/bgp/ipv6")
+            .set(show_bgp_ipv6::<Bgp>)
+            .path("/show/bgp/ipv6/longer-prefix")
+            .set(show_bgp_ipv6_longer::<Bgp>)
+            // VPNv4 / EVPN moved here from the legacy `show ip bgp` tree:
+            // `show bgp vpnv4 [<addr>|<prefix>]` and `show bgp evpn`.
+            .path("/show/bgp/vpnv4")
+            .set(show_bgp_vpnv4)
+            .path("/show/bgp/evpn")
+            .set(show_bgp_evpn)
+            // Neighbor summaries, moved here from the legacy `show ip bgp
+            // summary`: the bare form sections every configured AFI/SAFI;
+            // ipv4/ipv6/vpnv4 reach their one-section form through the
+            // key-union `summary` arm handled inside the RIB handlers
+            // above; EVPN has its own path (the `evpn` node is a presence
+            // container, not a keyed list).
+            .path("/show/bgp/summary")
+            .set(show_bgp_summary::<Bgp>)
+            .path("/show/bgp/evpn/summary")
+            .set(show_bgp_evpn_summary)
+            // `show bgp vrf <name> …` is normally intercepted by the manager
+            // and redirected into the per-VRF task (see `process_vrf_show`).
+            // These global handlers are the fall-through when no task is
+            // registered for `<name>`: bare `show bgp vrf` lists every VRF,
+            // and a named-but-not-running VRF reports the miss instead of
+            // leaving the request unanswered.
+            .path("/show/bgp/vrf")
+            .set(show_bgp_vrf)
+            .path("/show/bgp/vrf/summary")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/ipv4")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/ipv4/longer-prefix")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/ipv6")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/ipv6/longer-prefix")
+            .set(show_bgp_vrf_not_running)
+            .map();
     }
 }
