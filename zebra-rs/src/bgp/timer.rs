@@ -226,6 +226,7 @@ pub fn update_timers(peer: &mut Peer) {
             peer.task.reader = None;
             peer.packet_tx = None;
             peer.primary_role = None;
+            peer.primary_conn_id = None;
             // A pending §6.8 collision conn is meaningless once the
             // peer is back in Idle — drop it so its reader/writer
             // tasks cancel and the FD is released.
