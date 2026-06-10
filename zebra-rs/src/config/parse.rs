@@ -1126,6 +1126,9 @@ mod tests {
         let entry = exec_entry();
 
         let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            // The bare (all-peers) form rides on the list's
+            // `ext:presence`; the BDD session-state steps poll it.
+            ("show bgp neighbors", "/show/bgp/neighbors", vec![]),
             ("show bgp neighbors i1", "/show/bgp/neighbors", vec!["i1"]),
             (
                 "show bgp neighbors i1 advertised-routes",

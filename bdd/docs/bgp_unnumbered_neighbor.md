@@ -35,7 +35,7 @@ into a single Established session), and ENHE-carried IPv4 routes.
 Note: the interface-keyed peer's remote address is a kernel-assigned
 link-local that the scenario can't name, so the session is asserted
 with the address-agnostic "BGP session in namespace … should
-eventually be …" step (it reads `show ip bgp neighbors`, which lists
+eventually be …" step (it reads `show bgp neighbors`, which lists
 interface-keyed peers).
 
 ## Test Scenarios

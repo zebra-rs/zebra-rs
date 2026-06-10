@@ -71,9 +71,9 @@ Feature: BGP on a non-default TCP port
     Given the test topology exists
     # z1 dialed z2 on the configured neighbor port (z1 cannot have
     # accepted anything: its listener is closed with port 0)...
-    Then show command "show ip bgp neighbors" in namespace "z1" should contain "Foreign port: 1790"
+    Then show command "show bgp neighbors" in namespace "z1" should contain "Foreign port: 1790"
     # ...and z2 accepted it on its non-default listener.
-    And show command "show ip bgp neighbors" in namespace "z2" should contain "Local port: 1790"
+    And show command "show bgp neighbors" in namespace "z2" should contain "Local port: 1790"
     # Routes flow over the non-179 session.
     And BGP route in "z2" has "10.10.0.1/32"
 
@@ -95,7 +95,7 @@ Feature: BGP on a non-default TCP port
     Then BGP session in "z2" to "192.168.1.3" should be "Established"
     And BGP session in "z3" to "192.168.1.2" should be "Established"
     # z3 accepted the session on the reopened default listener.
-    And show command "show ip bgp neighbors" in namespace "z3" should contain "Local port: 179"
+    And show command "show bgp neighbors" in namespace "z3" should contain "Local port: 179"
     # End-to-end: z1's route crossed both custom-port sessions.
     And BGP route in "z3" has "10.10.0.1/32"
 
