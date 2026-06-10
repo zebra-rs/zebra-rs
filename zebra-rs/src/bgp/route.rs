@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use bgp_packet::*;
@@ -6581,33 +6581,55 @@ pub fn route_update_ipv6(
     // AS_PATH prepend for eBGP.
     ebgp_egress_aspath(peer, &mut attrs);
 
-    // NEXT_HOP: next-hop-self for eBGP / locally-originated routes. The
-    // address is the local end of this peer's (i)BGP session when it's
-    // IPv6; otherwise the route's existing v6 next-hop is preserved
-    // (next-hop-unchanged) — a v4-transport session can't carry a
-    // sensible v6 next-hop anyway.
+    // NEXT_HOP: next-hop-self for eBGP / locally-originated routes.
+    // RFC 2545 §2 requires the MP_REACH next-hop be one of OUR IPv6
+    // addresses regardless of the session's transport family:
+    //   - v6-transport session: the session's local end.
+    //   - v4-transport session: the session interface's global v6
+    //     (looked up via the v4 local end's owning ifindex). The old
+    //     code skipped next-hop-self entirely here, so an originated
+    //     route (whose stored next-hop is empty) went on the wire as
+    //     `::` — the peer kept it best-path-selected but could never
+    //     resolve or install it.
     let needs_self = peer.is_ebgp() || rib.is_originated();
-    if needs_self
-        && let Some(ref local_addr) = peer.param.local_addr
-        && let IpAddr::V6(local_v6) = local_addr.ip()
-    {
-        // VPNv6 rows carry a `VpnNexthop::V6` (the route's RD); emit a
-        // VPNv6-shaped next-hop so `flush_vpnv6` picks it up. Plain
-        // v6-unicast rows get a bare IPv6 next-hop.
-        attrs.nexthop = match rib.nexthop {
-            Some(VpnNexthop::V6(ref v6nh)) => Some(BgpNexthop::Vpnv6(Vpnv6Nexthop {
-                rd: v6nh.rd,
-                // SRv6 L3VPN: a VPNv6 route with an SRv6 L3 Service SID
-                // advertises the PE's locator (stored on the row) as the
-                // next-hop; MPLS-mode rows next-hop-self with local_v6.
-                nhop: if attrs.srv6_l3_sid().is_some() {
-                    v6nh.nhop
-                } else {
-                    local_v6
-                },
-            })),
-            _ => Some(BgpNexthop::Ipv6(local_v6)),
+    if needs_self {
+        let self_v6: Option<Ipv6Addr> = match peer.param.local_addr.as_ref().map(|a| a.ip()) {
+            Some(IpAddr::V6(v6)) => Some(v6),
+            Some(IpAddr::V4(v4)) => bgp
+                .interface_addrs
+                .ifindex_for_v4(v4)
+                .and_then(|ifindex| bgp.interface_addrs.global_for(ifindex)),
+            None => None,
         };
+        if let Some(local_v6) = self_v6 {
+            // VPNv6 rows carry a `VpnNexthop::V6` (the route's RD); emit a
+            // VPNv6-shaped next-hop so `flush_vpnv6` picks it up. Plain
+            // v6-unicast rows get a bare IPv6 next-hop.
+            attrs.nexthop = match rib.nexthop {
+                Some(VpnNexthop::V6(ref v6nh)) => Some(BgpNexthop::Vpnv6(Vpnv6Nexthop {
+                    rd: v6nh.rd,
+                    // SRv6 L3VPN: a VPNv6 route with an SRv6 L3 Service SID
+                    // advertises the PE's locator (stored on the row) as the
+                    // next-hop; MPLS-mode rows next-hop-self with local_v6.
+                    nhop: if attrs.srv6_l3_sid().is_some() {
+                        v6nh.nhop
+                    } else {
+                        local_v6
+                    },
+                })),
+                _ => Some(BgpNexthop::Ipv6(local_v6)),
+            };
+        } else if !matches!(
+            attrs.nexthop,
+            Some(BgpNexthop::Ipv6(_)) | Some(BgpNexthop::Vpnv6(_))
+        ) {
+            // No v6 self next-hop available (v4-transport session whose
+            // interface carries no global v6) and the route brings no
+            // usable v6 next-hop of its own. Emitting `::` is worse
+            // than not advertising — the peer would select a route it
+            // can never resolve — so skip it.
+            return None;
+        }
     }
 
     // LOCAL_PREF for iBGP.
