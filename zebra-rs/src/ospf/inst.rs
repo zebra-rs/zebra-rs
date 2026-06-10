@@ -4363,6 +4363,17 @@ impl Ospf<Ospfv2> {
                 .tx
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
         }
+
+        // The Prefix-SID's Extended-Prefix LSA advertises this link's
+        // first non-loopback address as a /32 host prefix. The config
+        // handler originates it at commit time, but the kernel's
+        // AddrAdd for an address configured in the same commit can
+        // land *after* that — origination then finds no usable
+        // address and bails without retry. Re-originate here so the
+        // LSA appears as soon as the address does (no-op on links
+        // without SR + a configured prefix-sid). Mirrors the v3
+        // `addr_add` fix.
+        self.ext_prefix_lsa_originate(addr.ifindex);
     }
 
     fn addr_del(&mut self, addr: LinkAddr) {
@@ -4377,6 +4388,11 @@ impl Ospf<Ospfv2> {
         // Re-evaluate enable state after address removal.
         let (next, next_id) = super::config::link_should_enable(link);
         super::config::apply_link_enable_transition(link, next, next_id);
+
+        // Mirror of the `addr_add` re-origination: the advertised
+        // host prefix may have just gone away or a different
+        // remaining address now wins.
+        self.ext_prefix_lsa_originate(addr.ifindex);
     }
 
     async fn process_recv(
@@ -9146,6 +9162,16 @@ fn build_rib_from_spf(
 /// here, and `SpfRoute.metric` / `SpfRoute.nhops` are left untouched.
 fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, SpfRoute>) {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // SR-MPLS participation is a local choice: with `segment-routing
+    // mpls` removed, no label may be imposed and no ILM derived, even
+    // though peers' Ext-Prefix LSAs stay in the LSDB. Same gate as
+    // `add_prefix_sids_v3` — without it a disable kept every remote
+    // node-SID swap entry in the LFIB while only the self pop entries
+    // went away with the flushed self LSAs.
+    if top.segment_routing != super::srmpls::SegmentRoutingMode::Mpls {
+        return;
+    }
 
     let Some(area) = top.areas.get(area_id) else {
         return;

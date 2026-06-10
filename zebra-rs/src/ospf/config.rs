@@ -1474,6 +1474,15 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
         ospf.ext_link_lsa_originate(ifindex);
     }
 
+    // Rebuild every area's RIB + ILM under the new mode — same
+    // pattern as the v3 toggle. `add_prefix_sids` gates on the mode,
+    // so a disable drops every label imposition and empties the LFIB
+    // instead of waiting for an unrelated SPF.
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for area_id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(area_id));
+    }
+
     Some(())
 }
 
