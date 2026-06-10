@@ -76,7 +76,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 10.255.0.1
+      router-id: 10.255.0.1
     neighbor:
     - remote-address: 10.255.0.2
       remote-as: 65002

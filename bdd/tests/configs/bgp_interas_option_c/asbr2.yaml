@@ -34,7 +34,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 2.2.2.3
+      router-id: 2.2.2.3
     neighbor:
     - remote-address: 2.2.2.1
       remote-as: 65001

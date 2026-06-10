@@ -5,8 +5,10 @@ use crate::config::{Args, ConfigOp};
 
 use super::{Link, Rib};
 
-/// First non-localhost IPv4 among the links accepted by `in_scope` —
-/// loopback-flagged links first, then the rest.
+/// Highest non-localhost IPv4 among the links accepted by `in_scope`
+/// — loopback-flagged links first, then the rest. "Highest" (not
+/// first-seen) is the rule the book documents (ch. 0.2), matching
+/// Cisco IOS selection so operators can predict the value.
 fn pick_router_id(
     links: &BTreeMap<u32, Link>,
     in_scope: impl Fn(&Link) -> bool,
@@ -24,7 +26,8 @@ fn pick_router_id(
                 ipnet::IpNet::V4(v4net) => Some(v4net.addr()),
                 _ => None,
             })
-            .find(|&addr| addr != Ipv4Addr::LOCALHOST)
+            .filter(|&addr| addr != Ipv4Addr::LOCALHOST)
+            .max()
     }
 
     find(links, &in_scope, true).or_else(|| find(links, &in_scope, false))
@@ -169,8 +172,9 @@ mod tests {
         assert!(links.get(&1).unwrap().flags.is_loopback());
         let no_vrfs = BTreeSet::new();
 
-        // Loopback wins over the (lower-ifindex) non-loopback; the
-        // 127.0.0.1 loopback address is never a candidate.
+        // Loopback wins over the non-loopback even though the
+        // non-loopback address is numerically higher; the 127.0.0.1
+        // loopback address is never a candidate.
         assert_eq!(auto_router_id(&links, &no_vrfs), Some(addr("10.255.0.1")));
 
         // Without any loopback candidate, fall back to non-loopback.
@@ -180,6 +184,27 @@ mod tests {
         // Only 127.0.0.1 left -> no candidate at all.
         links.remove(&2);
         assert_eq!(auto_router_id(&links, &no_vrfs), None);
+    }
+
+    #[test]
+    fn auto_pick_selects_highest_address_within_a_class() {
+        // The book's rule (ch. 0.2, Cisco-style): the HIGHEST address
+        // among loopbacks wins — not the first one encountered in
+        // ifindex order.
+        let mut links = BTreeMap::new();
+        links.insert(
+            1,
+            test_link(1, true, None, &[addr("10.2.2.2"), addr("10.1.1.1")]),
+        );
+        links.insert(2, test_link(2, true, None, &[addr("10.3.3.3")]));
+        let no_vrfs = BTreeSet::new();
+        assert_eq!(auto_router_id(&links, &no_vrfs), Some(addr("10.3.3.3")));
+
+        // Same rule on the non-loopback fallback.
+        let mut links = BTreeMap::new();
+        links.insert(5, test_link(5, false, None, &[addr("192.0.2.9")]));
+        links.insert(6, test_link(6, false, None, &[addr("192.0.2.200")]));
+        assert_eq!(auto_router_id(&links, &no_vrfs), Some(addr("192.0.2.200")));
     }
 
     #[test]

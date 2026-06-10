@@ -18,7 +18,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 10.255.0.1
+      router-id: 10.255.0.1
     timer:
       adv-interval:
         ibgp: 1

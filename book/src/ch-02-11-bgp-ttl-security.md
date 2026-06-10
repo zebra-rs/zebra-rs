@@ -43,7 +43,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 10.0.0.1
+      router-id: 10.0.0.1
     neighbor:
     - remote-address: 10.0.0.2
       remote-as: 65002
@@ -126,7 +126,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 192.168.0.1
+      router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
       remote-as: 65002

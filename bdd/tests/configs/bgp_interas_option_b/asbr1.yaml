@@ -42,7 +42,7 @@ router:
   bgp:
     global:
       as: 65000
-      identifier: 1.1.1.3
+      router-id: 1.1.1.3
     # Lower the MRAI so the transit VPNv4 route crosses the eBGP boundary
     # (default 30s) and is re-advertised to PE1 promptly — the four-hop
     # PE2->ASBR2->ASBR1->PE1 chain otherwise converges past the test wait.

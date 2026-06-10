@@ -10,4 +10,4 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 1.1.1.1
+      router-id: 1.1.1.1

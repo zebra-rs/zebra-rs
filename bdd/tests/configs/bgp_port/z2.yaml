@@ -11,7 +11,7 @@ router:
     port: 1790
     global:
       as: 65002
-      identifier: 192.168.0.2
+      router-id: 192.168.0.2
     timer:
       adv-interval:
         ibgp: 1

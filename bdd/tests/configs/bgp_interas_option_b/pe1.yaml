@@ -45,7 +45,7 @@ router:
   bgp:
     global:
       as: 65000
-      identifier: 1.1.1.1
+      router-id: 1.1.1.1
     neighbor:
     - remote-address: 1.1.1.3
       remote-as: 65000

@@ -15,7 +15,7 @@ router:
   bgp:
     global:
       as: 65001
-      identifier: 1.1.1.1
+      router-id: 1.1.1.1
     interface-neighbor:
     - interface: i1
       remote-as: 65002

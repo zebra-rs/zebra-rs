@@ -74,7 +74,7 @@ interface:
   ipv4: { address: 10.1.0.1/30 }
 router:
   bgp:
-    global: { as: 65000, identifier: 1.1.1.1 }
+    global: { as: 65000, router-id: 1.1.1.1 }
     neighbor:
     - remote-address: 1.1.1.3        # ASBR1, intra-AS VPNv4
       remote-as: 65000
@@ -100,7 +100,7 @@ interface:
   ipv4: { address: 172.16.0.1/30 }   # inter-AS link, in the VRF
 router:
   bgp:
-    global: { as: 65000, identifier: 1.1.1.3 }
+    global: { as: 65000, router-id: 1.1.1.3 }
     neighbor:
     - remote-address: 1.1.1.1         # PE1, intra-AS VPNv4
       remote-as: 65000
@@ -119,7 +119,7 @@ router:
 
 A per-VRF neighbor needs no `afi-safi` block — it defaults to IPv4
 unicast, which is what a PE-CE session carries. The per-VRF BGP router-id
-defaults to the global identifier.
+defaults to the global `router-id` (see [Router ID](ch-00-02-router-id.md)).
 
 ## What makes the per-VRF session work
 

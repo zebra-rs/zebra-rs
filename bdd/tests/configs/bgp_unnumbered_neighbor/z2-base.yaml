@@ -3,4 +3,4 @@ router:
   bgp:
     global:
       as: 65002
-      identifier: 2.2.2.2
+      router-id: 2.2.2.2

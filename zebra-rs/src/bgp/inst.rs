@@ -343,18 +343,18 @@ pub struct RibKnownVrf {
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
-    /// paths use. Derived: configured `global identifier` wins, else
+    /// paths use. Derived: configured `global router-id` wins, else
     /// the RIB-derived value, else 0.0.0.0. Mutate via
     /// `refresh_router_id` (or `set_router_id` for the propagation
     /// side effects), never directly.
     pub router_id: Ipv4Addr,
-    /// Operator-configured `router bgp global identifier`. Wins over
+    /// Operator-configured `router bgp global router-id`. Wins over
     /// the RIB-derived value; deleting it falls back (same
     /// configured-vs-derived split IS-IS uses for te-router-id).
     pub router_id_config: Option<Ipv4Addr>,
     /// Last RIB-derived router-id (`RibRx::RouterIdUpdate`), kept
     /// even while a configured identifier overrides it so a later
-    /// `delete ... identifier` can fall back without waiting for the
+    /// `delete ... router-id` can fall back without waiting for the
     /// next RIB push.
     pub rib_router_id: Option<Ipv4Addr>,
     /// FRR-style `advertise-all-vni` knob under `router bgp afi-safi
@@ -1169,7 +1169,7 @@ impl Bgp {
     /// before the router-id was known would emit OPEN messages with
     /// `0.0.0.0` in the BGP Identifier field forever.
     ///
-    /// Both inputs — operator config (`router bgp global identifier`)
+    /// Both inputs — operator config (`router bgp global router-id`)
     /// and the RIB-derived auto-pick (`RibRx::RouterIdUpdate`) — land
     /// here through `refresh_router_id`, which resolves their
     /// precedence (configured wins). Don't call this with a raw input
@@ -1243,7 +1243,7 @@ impl Bgp {
     }
 
     /// Recompute the effective BGP Identifier from its two sources —
-    /// configured `global identifier` wins, RIB-derived second — and
+    /// configured `global router-id` wins, RIB-derived second — and
     /// propagate it. Falls back to 0.0.0.0 only when neither exists
     /// (pre-config cold start, or identifier deleted before any
     /// interface address was learned).
@@ -1256,7 +1256,7 @@ impl Bgp {
     }
 
     /// `RibRx::RouterIdUpdate` handler: remember the RIB-derived
-    /// value and refresh. A configured `global identifier` keeps
+    /// value and refresh. A configured `global router-id` keeps
     /// winning (the update is stored, not applied), so a later
     /// identifier delete can still fall back to it — the IS-IS
     /// `rib_router_id` pattern, replacing the old last-writer-wins
@@ -1983,7 +1983,7 @@ impl Bgp {
                 // or the automatic pick from interface addresses).
                 // Without this arm BGP emitted OPEN with 0.0.0.0 in
                 // the BGP Identifier whenever the operator hadn't
-                // typed `set router bgp global identifier <ip>`.
+                // typed `set router bgp global router-id <ip>`.
                 self.rib_router_id_update(router_id);
             }
             RibRx::FdbAdd(entry) => {

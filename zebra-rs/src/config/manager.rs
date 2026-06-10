@@ -1315,6 +1315,54 @@ mod yang_load_tests {
         }
     }
 
+    /// `router bgp global router-id` is zebra-rs's rename of the IETF
+    /// model's `global/identifier` leaf (vendored ietf-bgp edit), so the
+    /// BGP surface matches every other router-id knob. The leaf lives in
+    /// a `uses ietf-bgp:bgp` grouping — exactly the class of change
+    /// `yang_load_tests` can't see — so pin both directions at the
+    /// grammar level: the new spelling parses, the old one no longer
+    /// does.
+    #[test]
+    fn bgp_global_router_id_renamed_from_identifier() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp global router-id 10.0.0.1",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`set router bgp global router-id <ipv4>` must be a settable path",
+        );
+
+        let (code, _comps, _state) = parse(
+            "set router bgp global identifier 10.0.0.1",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "the pre-rename `identifier` spelling must no longer parse",
+        );
+    }
+
     /// A new BGP-neighbor YANG knob must be a *settable* path, not just a
     /// loadable module. Naming it the same as a leaf already present via
     /// `uses ietf-bgp:bgp` makes the augment silently dropped (RFC 7950

@@ -2040,7 +2040,7 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     if router_id.is_unspecified() {
         tracing::warn!(
             "peer {}: sending OPEN with router-id 0.0.0.0 — \
-             configure `router bgp global identifier <ipv4>` or wait \
+             configure `router bgp global router-id <ipv4>` or wait \
              for an interface address to seed the auto-derivation",
             peer.address
         );
