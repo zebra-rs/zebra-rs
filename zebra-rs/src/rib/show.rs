@@ -1717,8 +1717,13 @@ pub fn hostname_show(_rib: &Rib, _args: Args, _json: bool) -> String {
 
 pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
     let mut buf = String::new();
-    writeln!(buf, " {:<24}{:>10}  Members", "Name", "Table-ID").unwrap();
-    writeln!(buf, " {:-<24}  {:-<10}  {:-<32}", "", "", "").unwrap();
+    writeln!(
+        buf,
+        " {:<24}{:>10}  {:<17}Members",
+        "Name", "Table-ID", "Router-ID"
+    )
+    .unwrap();
+    writeln!(buf, " {:-<24}  {:-<10}  {:-<15}  {:-<32}", "", "", "", "").unwrap();
     for vrf in rib.vrfs.values() {
         let members: Vec<&str> = rib
             .links
@@ -1726,11 +1731,17 @@ pub fn vrf_show(rib: &Rib, _args: Args, _json: bool) -> String {
             .filter(|l| l.master == Some(vrf.ifindex))
             .map(|l| l.name.as_str())
             .collect();
+        let router_id = if vrf.router_id.is_unspecified() {
+            "-".to_string()
+        } else {
+            vrf.router_id.to_string()
+        };
         writeln!(
             buf,
-            " {:<24}{:>10}  {}",
+            " {:<24}{:>10}  {:<17}{}",
             vrf.name,
             vrf.table_id,
+            router_id,
             members.join(", ")
         )
         .unwrap();

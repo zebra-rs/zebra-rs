@@ -2605,6 +2605,16 @@ module config {
            The numeric VRF / kernel routing-table ID is assigned
            internally by zebra-rs and is not user-configurable.";
       }
+      leaf router-id {
+        ext:help "Router identifier for this VRF";
+        description
+          "Per-VRF Router ID override. When absent, zebra-rs derives
+           one from the VRF's member interfaces (loopback-flagged
+           members first), falling back to the global effective
+           Router ID. Pushed to this VRF's protocol subscribers via
+           RouterIdUpdate, like the top-level `router-id`.";
+        type inet:ipv4-address;
+      }
       container ipv4 {
         description
           "IPv4 unicast (VPNv4 / RFC 4364) route policy for this VRF.";

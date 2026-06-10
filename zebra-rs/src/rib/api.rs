@@ -332,12 +332,12 @@ impl Rib {
         }
     }
 
-    /// Router id is daemon-global today (one IPv4 address per
-    /// instance), so this push always targets default-VRF
-    /// subscribers. Per-VRF router-id arrives with the BGP-per-VRF
-    /// config and will gain its own emit path.
-    pub fn api_router_id_update(&self, router_id: Ipv4Addr) {
-        for (_, sub) in self.client_registry.iter_vrf(0) {
+    /// Push a Router-ID change to one VRF's subscriber set — `0` for
+    /// the default VRF (global effective value), a kernel `table_id`
+    /// for a named VRF (its per-VRF effective value). Emitted by
+    /// `Rib::router_id_update`, which owns the derivation.
+    pub fn api_router_id_update(&self, vrf_id: u32, router_id: Ipv4Addr) {
+        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::RouterIdUpdate(router_id));
         }
     }

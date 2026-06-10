@@ -189,6 +189,14 @@ pub enum Message {
         ipv6_import_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
         ipv6_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     },
+    /// Configured `vrf <name> router-id` snapshot from the VRF config
+    /// builder, sent on commit after `VrfAdd` (same ordering contract
+    /// as `VrfRouteTargets`). `None` means the leaf is absent —
+    /// fall back to the derived per-VRF pick.
+    VrfRouterId {
+        name: String,
+        router_id: Option<Ipv4Addr>,
+    },
     /// Bind / unbind an interface to a VRF master device.
     /// `vrf == Some(name)` enslaves; `vrf == None` clears the binding
     /// (sets IFLA_MASTER = 0). The handler tolerates the interface or
@@ -1163,8 +1171,23 @@ impl Rib {
                 let _ = tx.send(RibRx::FdbAdd(entry));
             }
         }
-        if !self.router_id.is_unspecified() {
-            let msg = RibRx::RouterIdUpdate(self.router_id);
+        // Router-id replay: default-VRF subscribers get the global
+        // effective value; per-VRF subscribers (registered under
+        // their kernel `table_id`) get their VRF's effective value —
+        // configured `vrf <name> router-id`, else derived from the
+        // VRF's member interfaces, else the global value (see
+        // `router_id_update`).
+        let replay_router_id = if vrf_id == 0 {
+            self.router_id
+        } else {
+            self.vrfs
+                .values()
+                .find(|v| v.table_id == vrf_id)
+                .map(|v| v.router_id)
+                .unwrap_or(self.router_id)
+        };
+        if !replay_router_id.is_unspecified() {
+            let msg = RibRx::RouterIdUpdate(replay_router_id);
             if tx.send(msg).is_err() {
                 return;
             }
@@ -1661,6 +1684,12 @@ impl Rib {
                         name: name.clone(),
                         table_id,
                         ifindex,
+                        // Router-id config arrives separately via
+                        // `Message::VrfRouterId`; the effective value
+                        // is computed by `router_id_update` below once
+                        // the row exists.
+                        router_id: Ipv4Addr::UNSPECIFIED,
+                        router_id_config: None,
                         owned,
                         // RT sets arrive separately via
                         // `Message::VrfRouteTargets` once the VRF
@@ -1701,6 +1730,12 @@ impl Rib {
                 for (ifname, vrf) in to_replay {
                     let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
                 }
+                // Compute the new VRF's effective router-id (members
+                // may already be enslaved when adopting a pre-existing
+                // kernel VRF) — and re-evaluate the global pick, which
+                // excludes VRF-enslaved links and may change now that
+                // this master is known.
+                self.router_id_update();
             }
             Message::VrfDel { name } => {
                 let Some(vrf) = self.vrfs.remove(&name) else {
@@ -1746,6 +1781,22 @@ impl Rib {
                     tracing::debug!(
                         vrf = %name,
                         "rib: VrfRouteTargets for unknown VRF; dropping",
+                    );
+                }
+            }
+            Message::VrfRouterId { name, router_id } => {
+                // Same ordering contract as `VrfRouteTargets`: the
+                // YANG commit emits `VrfAdd` first, so an unknown name
+                // here is an out-of-order self-send — drop it.
+                if let Some(vrf) = self.vrfs.get_mut(&name) {
+                    vrf.router_id_config = router_id;
+                    // Recompute + emit (configured wins; delete falls
+                    // back to the derived pick / global value).
+                    self.router_id_update();
+                } else {
+                    tracing::debug!(
+                        vrf = %name,
+                        "rib: VrfRouterId for unknown VRF; dropping",
                     );
                 }
             }

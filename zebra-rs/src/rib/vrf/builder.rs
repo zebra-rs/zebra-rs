@@ -59,15 +59,20 @@ impl VrfBuilder {
                 let ipv4_export_rts = config.ipv4_export_rts.clone();
                 let ipv6_import_rts = config.ipv6_import_rts.clone();
                 let ipv6_export_rts = config.ipv6_export_rts.clone();
+                let router_id = config.router_id;
                 self.config.insert(name.clone(), config);
                 let _ = tx.send(Message::VrfAdd { name: name.clone() });
                 let _ = tx.send(Message::VrfRouteTargets {
-                    name,
+                    name: name.clone(),
                     ipv4_import_rts,
                     ipv4_export_rts,
                     ipv6_import_rts,
                     ipv6_export_rts,
                 });
+                // Router-id snapshot follows the same VrfAdd-first
+                // ordering contract as the RT message; `None` (leaf
+                // absent or deleted this commit) clears the override.
+                let _ = tx.send(Message::VrfRouterId { name, router_id });
             }
         }
     }
@@ -123,6 +128,7 @@ impl ConfigBuilder {
         const RT_ERR: &str = "missing route-target argument";
         const RT_PARSE_ERR: &str =
             "route-target must parse as ASN:value, IPv4:value, or 4byteASN:value";
+        const ROUTER_ID_ERR: &str = "missing or invalid router-id argument";
 
         ConfigBuilder::default()
             .path("")
@@ -138,6 +144,23 @@ impl ConfigBuilder {
                     s.delete = true;
                     cache.insert(name.clone(), s);
                 }
+                Ok(())
+            })
+            // /vrf/<name>/router-id — per-VRF Router-ID override.
+            // Delete clears the leaf; the RIB then falls back to the
+            // derived per-VRF pick (or the global effective value).
+            .path("/router-id")
+            .set(|config, cache, name, args| {
+                let router_id = args.v4addr().context(ROUTER_ID_ERR)?;
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .router_id = Some(router_id);
+                Ok(())
+            })
+            .del(|config, cache, name, _args| {
+                cache_get(config, cache, name)
+                    .context(CONFIG_ERR)?
+                    .router_id = None;
                 Ok(())
             })
             // /vrf/<name>/ipv4/route-target/import — leaf-list, one
@@ -317,7 +340,63 @@ mod tests {
         assert!(ipv4_export_rts.contains(&exp));
         assert!(ipv6_import_rts.is_empty());
         assert!(ipv6_export_rts.is_empty());
-        assert!(rx.try_recv().is_err(), "no third message expected");
+
+        // The router-id snapshot always trails the RT message — `None`
+        // here because the operator never set `vrf v1 router-id`.
+        let third = rx.try_recv().expect("VrfRouterId present");
+        let Message::VrfRouterId { name, router_id } = third else {
+            panic!("third message is not VrfRouterId");
+        };
+        assert_eq!(name, "v1");
+        assert_eq!(router_id, None);
+        assert!(rx.try_recv().is_err(), "no fourth message expected");
+    }
+
+    #[test]
+    fn commit_carries_configured_router_id_and_delete_clears_it() {
+        let mut builder = VrfBuilder::new();
+        builder
+            .exec("/vrf".into(), args(&["v1"]), ConfigOp::Set)
+            .expect("create vrf");
+        builder
+            .exec(
+                "/vrf/router-id".into(),
+                args(&["v1", "11.11.11.11"]),
+                ConfigOp::Set,
+            )
+            .expect("set router-id");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+        let mut router_ids = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Message::VrfRouterId { name, router_id } = msg {
+                assert_eq!(name, "v1");
+                router_ids.push(router_id);
+            }
+        }
+        assert_eq!(router_ids, vec![Some("11.11.11.11".parse().unwrap())]);
+
+        // Delete the leaf in a second commit batch — the staged edit
+        // starts from the committed config, so the snapshot reports
+        // the cleared override.
+        builder
+            .exec(
+                "/vrf/router-id".into(),
+                args(&["v1", "11.11.11.11"]),
+                ConfigOp::Delete,
+            )
+            .expect("delete router-id");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        builder.commit(tx);
+        let mut router_ids = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Message::VrfRouterId { name, router_id } = msg {
+                assert_eq!(name, "v1");
+                router_ids.push(router_id);
+            }
+        }
+        assert_eq!(router_ids, vec![None]);
     }
 
     #[test]
