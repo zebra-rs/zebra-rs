@@ -9,8 +9,8 @@ hold time, and the adjacency stays down (RFC 5882 hold-down) until BFD
 recovers — even while IIHs keep arriving.
 The single-hop BFD session is built from the two ends' IPv4 interface
 addresses (learned via TLV 132). Each scenario is self-contained (own setup
-and teardown) so the Echo scenarios configure echo-mode before the session
-first comes up (echo is armed at session establishment, not retrofitted).
+and teardown). Echo params apply to live sessions too — the last scenario
+toggles echo-mode at runtime and the session must not be re-established.
 BFD-down is induced by dropping inbound UDP/3784 in one namespace: the link
 stays up and IIHs (L2 ISO PDUs, not IP/UDP) keep flowing, so a fast teardown
 is provably BFD's doing — not carrier loss, not the ~30s IS-IS hold timer.
@@ -32,4 +32,5 @@ is provably BFD's doing — not carrier loss, not the ~30s IS-IS hold timer.
 |----------|--------|
 | BFD without Echo protects the adjacency and tears it down on BFD failure | |
 | BFD with Echo in one direction (z1 transmit, z2 receive) | |
+| Echo transmit is toggled at runtime on the live session | |
 | BFD with Echo in both directions | |

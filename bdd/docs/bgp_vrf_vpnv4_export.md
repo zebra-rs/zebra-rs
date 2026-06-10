@@ -38,4 +38,5 @@ inside vrf-blue and z2 peers with z1 over VPNv4 only.
 | Setup topology | |
 | z1 advertises the self-originated network as VPNv4 | |
 | z2 receives the VPNv4 NLRI under the same RD | |
+| VPNv4 route detail by address and by exact prefix | |
 | Teardown topology | |
