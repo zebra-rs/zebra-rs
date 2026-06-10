@@ -108,9 +108,11 @@ fn afi_safi_summary_label(afi: Afi, safi: Safi) -> &'static str {
 /// Collect the set of AFI/SAFIs that are configured on at least one peer,
 /// sorted deterministically by `(afi, safi)` ascending. Falls back to
 /// `[IPv4 Unicast]` when no peer has explicitly configured an AFI/SAFI.
+/// `iter_all` so interface-keyed (IPv6 unnumbered) peers contribute
+/// their families too — every peer is born with IPv4 unicast enabled.
 fn configured_afi_safis<V: BgpShowView>(bgp: &V) -> Vec<AfiSafi> {
     let mut set: std::collections::BTreeSet<AfiSafi> = std::collections::BTreeSet::new();
-    for (_, peer) in bgp.peers().iter() {
+    for (_, peer) in bgp.peers().iter_all() {
         for (afi_safi, _) in peer.config.mp.0.iter() {
             set.insert(*afi_safi);
         }
@@ -195,7 +197,9 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
     writeln!(
         buf,
         "{:16}{:>1}{:>11}{:>10}{:>10}{:>9}{:>5}{:>5}{:>9} {:<11} {:>10} {}",
-        peer.address.to_string(),
+        // Interface name for unnumbered peers (FRR-style), remote
+        // address otherwise.
+        peer.display_name(),
         "4",
         peer.remote_as,
         msg_rcvd,
@@ -225,10 +229,12 @@ fn write_summary_section<V: BgpShowView>(
     let rib_entries = rib_entries_count(bgp, &afi_safi);
     // Only the neighbors with this AFI/SAFI enabled appear in the
     // section, so `show bgp summary` reads as the concatenation of
-    // the per-AFI commands (`show bgp ipv4 summary`, …).
+    // the per-AFI commands (`show bgp ipv4 summary`, …). `iter_all`
+    // so interface-keyed (IPv6 unnumbered) peers are listed too —
+    // the address-keyed `iter` would hide them entirely.
     let peers: Vec<&Peer> = bgp
         .peers()
-        .iter()
+        .iter_all()
         .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
         .map(|(_, peer)| peer)
         .collect();
@@ -378,7 +384,13 @@ struct BgpAfiSafiSummaryJson {
 
 #[derive(Serialize)]
 struct BgpPeerSummaryJson {
+    /// Operator-facing identity: the remote address, or the interface
+    /// name for an unnumbered peer (matching the text renderer).
     neighbor: String,
+    /// Set (to the interface name) only for interface-keyed (IPv6
+    /// unnumbered) peers — its presence marks the row as unnumbered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<String>,
     remote_as: u32,
     msg_rcvd: u64,
     msg_sent: u64,
@@ -1604,7 +1616,8 @@ fn summary_peer_row_json(peer: &Peer, afi: Afi, safi: Safi) -> BgpPeerSummaryJso
     };
 
     BgpPeerSummaryJson {
-        neighbor: peer.address.to_string(),
+        neighbor: peer.display_name(),
+        interface: peer.ifname.clone(),
         remote_as: peer.remote_as,
         msg_rcvd,
         msg_sent,
@@ -1618,9 +1631,11 @@ fn summary_peer_row_json(peer: &Peer, afi: Afi, safi: Safi) -> BgpPeerSummaryJso
 fn summary_section_json<V: BgpShowView>(bgp: &V, afi_safi: AfiSafi) -> BgpAfiSafiSummaryJson {
     BgpAfiSafiSummaryJson {
         afi_safi: afi_safi_summary_label(afi_safi.afi, afi_safi.safi).to_string(),
+        // `iter_all` for the same reason as the text renderer:
+        // interface-keyed (unnumbered) peers must be listed.
         peers: bgp
             .peers()
-            .iter()
+            .iter_all()
             .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
             .map(|(_, peer)| summary_peer_row_json(peer, afi_safi.afi, afi_safi.safi))
             .collect(),
@@ -1714,6 +1729,12 @@ fn show_bgp_evpn_summary(
 #[derive(Serialize, Debug)]
 struct Neighbor<'a> {
     address: IpAddr,
+    /// Interface name for an interface-keyed (IPv6 unnumbered) peer.
+    /// Drives the FRR-style `BGP neighbor on <ifname>: <link-local>`
+    /// header form; serialized so JSON consumers can tell an
+    /// unnumbered peer from an address-configured one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<&'a str>,
     peer_type: &'a str,
     local_as: u32,
     remote_as: u32,
@@ -1913,6 +1934,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
 
     let mut n = Neighbor {
         address: peer.address,
+        interface: peer.ifname.as_deref(),
         remote_as: peer.remote_as,
         local_as: peer.local_as,
         peer_type: peer.peer_type.to_str(),
@@ -2002,16 +2024,23 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         );
     }
 
+    // FRR-style identity line: an unnumbered peer is named by its
+    // interface, with the RA-learned link-local alongside.
+    let identity = match neighbor.interface {
+        Some(ifname) => format!("on {}: {}", ifname, neighbor.address),
+        None => format!("is {}", neighbor.address),
+    };
+
     writeln!(
         out,
-        r#"BGP neighbor is {}, remote AS {}, local AS {}, {} link
+        r#"BGP neighbor {}, remote AS {}, local AS {}, {} link
 {}  BGP version 4, remote router ID {}, local router ID {}
   BGP state = {}, up for {}
   Last read 00:00:00, Last write 00:00:00
   Hold time {} seconds, keepalive {} seconds
   Sent Hold time {} seconds, sent keepalive {} seconds
   Recv Hold time {} seconds, Recieved keepalive {} seconds"#,
-        neighbor.address,
+        identity,
         neighbor.remote_as,
         neighbor.local_as,
         neighbor.peer_type,
@@ -2559,26 +2588,37 @@ fn show_bgp_neighbor<V: BgpShowView>(
             render(&mut out, neighbor)?;
         }
     } else {
-        if let Some(addr) = args.addr() {
-            if let Some(peer) = bgp.peers().get(&addr) {
-                let neighbor = fetch(peer);
-                if json {
-                    return Ok(serde_json::to_string_pretty(&neighbor).unwrap_or_else(|e| {
-                        format!("{{\"error\": \"Failed to serialize: {}\"}}", e)
-                    }));
-                }
-                render(&mut out, &neighbor)?;
-            } else {
-                if json {
-                    return Ok(format!("{{\"error\": \"No such neighbor: {}\"}}", addr));
-                }
-                writeln!(out, "% No such neighbor: {}", addr)?;
-            }
-        } else {
+        let Some(target) = args.string() else {
             if json {
                 return Ok(String::from("{\"error\": \"Invalid address specified\"}"));
             }
             writeln!(out, "% Invalid address specified")?;
+            return Ok(out);
+        };
+        // An address selects an address-keyed peer; anything else is
+        // taken as an `interface-neighbor` name (IPv6 unnumbered) —
+        // those peers are keyed by ifindex and their link-local isn't
+        // an identity the operator can type.
+        let peer = match target.parse::<IpAddr>() {
+            Ok(addr) => bgp.peers().get(&addr),
+            Err(_) => bgp
+                .peers()
+                .iter_all()
+                .map(|(_, peer)| peer)
+                .find(|peer| peer.ifname.as_deref() == Some(target.as_str())),
+        };
+        if let Some(peer) = peer {
+            let neighbor = fetch(peer);
+            if json {
+                return Ok(serde_json::to_string_pretty(&neighbor)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize: {}\"}}", e)));
+            }
+            render(&mut out, &neighbor)?;
+        } else {
+            if json {
+                return Ok(format!("{{\"error\": \"No such neighbor: {}\"}}", target));
+            }
+            writeln!(out, "% No such neighbor: {}", target)?;
         }
     }
     Ok(out)
@@ -3108,6 +3148,153 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         assert_eq!(
             afi_safi_summary_label(Afi::Ip, Safi::MplsVpn),
             "VPNv4 Unicast"
+        );
+    }
+
+    use std::collections::VecDeque;
+
+    use super::super::peer_key::{PeerKey, PeerOrigin};
+
+    struct TestView {
+        rib: LocalRib,
+        peers: PeerMap,
+    }
+    impl BgpShowView for TestView {
+        fn local_rib(&self) -> &LocalRib {
+            &self.rib
+        }
+        fn peers(&self) -> &PeerMap {
+            &self.peers
+        }
+        fn router_id(&self) -> Ipv4Addr {
+            Ipv4Addr::new(1, 1, 1, 1)
+        }
+        fn asn(&self) -> u32 {
+            65001
+        }
+    }
+
+    fn make_peer(addr: IpAddr) -> Peer {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        // The renderers never touch sockets; a parked ProtoContext over
+        // a leaked inbound channel is enough (same as the PeerMap tests).
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(inbound_rx));
+        let rib = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        let ctx = crate::context::ProtoContext::default_table(rib);
+        Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(1, 1, 1, 1),
+            65002,
+            addr,
+            None,
+            tx,
+            ctx,
+        )
+    }
+
+    /// One address-keyed peer (10.0.0.9) and one interface-keyed
+    /// (unnumbered, `i1`) peer whose remote address is an RA-learned
+    /// link-local.
+    fn view_with_unnumbered_peer() -> TestView {
+        let mut peers = PeerMap::new();
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 9).into();
+        peers.insert(addr, make_peer(addr));
+
+        let link_local: IpAddr = "fe80::2".parse().unwrap();
+        let mut iface_peer = make_peer(link_local);
+        iface_peer.origin = PeerOrigin::Interface { ifindex: 7 };
+        iface_peer.ifname = Some("i1".to_string());
+        peers.insert_with_key(PeerKey::Interface(7), iface_peer);
+
+        TestView {
+            rib: LocalRib::default(),
+            peers,
+        }
+    }
+
+    /// Interface-keyed (IPv6 unnumbered) peers were invisible to every
+    /// summary: the renderers iterated the address-keyed `iter()`. They
+    /// must be listed — identified by interface name, FRR-style — and
+    /// counted.
+    #[test]
+    fn summary_lists_interface_keyed_peer() {
+        let view = view_with_unnumbered_peer();
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), false).unwrap();
+
+        assert!(
+            out.lines().any(|l| l.starts_with("i1 ")),
+            "unnumbered peer must appear under its interface name:\n{out}"
+        );
+        assert!(
+            out.lines().any(|l| l.starts_with("10.0.0.9 ")),
+            "address-keyed peer row must be unaffected:\n{out}"
+        );
+        assert!(out.contains("Peers 2"), "both peers counted:\n{out}");
+        assert!(
+            out.contains("Total number of neighbors 2"),
+            "trailer counts both peers:\n{out}"
+        );
+    }
+
+    /// JSON summary: the unnumbered row is identified by the interface
+    /// name and carries an `interface` field marking its provenance;
+    /// address-keyed rows must not grow one.
+    #[test]
+    fn summary_json_marks_unnumbered_peer() {
+        let view = view_with_unnumbered_peer();
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        let peers = v["afi_safis"][0]["peers"]
+            .as_array()
+            .expect("ipv4-unicast section with peers");
+        assert_eq!(peers.len(), 2, "both peers listed: {out}");
+
+        let iface = peers
+            .iter()
+            .find(|p| p["neighbor"] == "i1")
+            .expect("unnumbered peer keyed by interface name");
+        assert_eq!(iface["interface"], "i1");
+
+        let addr = peers
+            .iter()
+            .find(|p| p["neighbor"] == "10.0.0.9")
+            .expect("address-keyed peer");
+        assert!(addr.get("interface").is_none());
+    }
+
+    /// `show ip bgp neighbors <name>` resolves an `interface-neighbor`
+    /// name (the completion offers them) and renders the FRR-style
+    /// `BGP neighbor on <ifname>: <link-local>` identity; address
+    /// lookups and the no-match error keep their existing forms.
+    #[test]
+    fn neighbor_show_accepts_interface_name() {
+        let view = view_with_unnumbered_peer();
+
+        let out =
+            show_bgp_neighbor(&view, Args(VecDeque::from(["i1".to_string()])), false).unwrap();
+        assert!(
+            out.contains("BGP neighbor on i1: fe80::2"),
+            "interface identity line:\n{out}"
+        );
+
+        let out = show_bgp_neighbor(&view, Args(VecDeque::from(["10.0.0.9".to_string()])), false)
+            .unwrap();
+        assert!(
+            out.contains("BGP neighbor is 10.0.0.9"),
+            "address identity line unchanged:\n{out}"
+        );
+
+        let out =
+            show_bgp_neighbor(&view, Args(VecDeque::from(["nope".to_string()])), false).unwrap();
+        assert!(
+            out.contains("% No such neighbor: nope"),
+            "unknown name reports cleanly:\n{out}"
         );
     }
 }

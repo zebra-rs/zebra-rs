@@ -359,10 +359,21 @@ module exec {
           key name;
           leaf name {
             ext:dynamic "bgp:neighbor";
-            // Accept either family — peers are keyed by `IpAddr`.
+            // Accept either address family (peers are keyed by
+            // `IpAddr`) or an `interface-neighbor` name — IPv6
+            // unnumbered peers are keyed by interface, so the name is
+            // their only typeable identity. The string arm is
+            // pattern-less on purpose: a bare string word-matches one
+            // token (a pattern would full-match the remaining LINE and
+            // break `neighbors i1 advertised-routes`). Address inputs
+            // tie the string arm (both Partial), which is safe: the
+            // parser folds a union's arms into a single match
+            // candidate, and the consumed token is the same either
+            // way.
             type union {
               type inet:ipv4-address;
               type inet:ipv6-address;
+              type string;
             }
           }
           leaf rtcv4 {

@@ -371,11 +371,36 @@ fn entry_match_type(entry: &Rc<Entry>, input: &str, m: &mut Match, s: &mut State
 
     if let Some(node) = &entry.type_node {
         if node.kind == YangType::Union {
+            // Match every arm into a side `Match`, then fold the best
+            // result into `m` as a single candidate. Arms of one union
+            // leaf are alternative spellings of the same command
+            // position, so two arms accepting the same token must not
+            // read as an ambiguous command — an address input matches
+            // both its address arm and a catch-all `string` arm (both
+            // Partial; the scalar matchers never return Exact), which
+            // per-arm counting would reject as Ambiguous. `last_match`
+            // carries the winning arm's comp name so an enum arm still
+            // canonicalizes abbreviations via `matched_enumeration`,
+            // and every matching arm's completion hint is kept for
+            // interactive display.
+            let mut um = Match::default();
             for n in node.union.iter() {
                 let kind = ytype_from_typedef(&n.typedef).unwrap_or(n.kind);
                 if let Some(f) = matcher.get(&kind) {
-                    f(m, entry, input, n);
+                    f(&mut um, entry, input, n);
                 }
+            }
+            if um.matched_type > MatchType::None {
+                if um.matched_type > m.matched_type {
+                    m.count = 1;
+                    m.pos = um.pos;
+                    m.matched_type = um.matched_type;
+                    m.matched_entry = entry.clone();
+                    m.last_match = um.last_match.clone();
+                } else if um.matched_type == m.matched_type {
+                    m.count += 1;
+                }
+                m.comps.append(&mut um.comps);
             }
         } else {
             let kind = ytype_from_typedef(&node.typedef).unwrap_or(node.kind);
@@ -972,6 +997,21 @@ mod tests {
                 "/clear/bgp/evpn/neighbor",
                 vec!["all"],
             ),
+            // Interface-neighbor names (IPv6 unnumbered peers have no
+            // typeable address). The pattern-less string arm of
+            // `peer-id-or-all` must word-match a single token, so the
+            // walk continues into `soft out`; `all` and address
+            // spellings above pin that the new arm doesn't shadow them.
+            (
+                "clear bgp ipv4 neighbor i1",
+                "/clear/bgp/ipv4/neighbor",
+                vec!["i1"],
+            ),
+            (
+                "clear bgp ipv4 i1 soft out",
+                "/clear/bgp/ipv4/neighbor/soft/out",
+                vec!["i1"],
+            ),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {
@@ -1065,6 +1105,54 @@ mod tests {
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
+        }
+    }
+
+    /// `show ip bgp neighbors <X>` accepts an `interface-neighbor` name
+    /// — IPv6 unnumbered peers are keyed by interface, and the
+    /// `bgp:neighbor` dynamic completion offers those names, so the
+    /// execute path (which never sees dynamic candidates) must parse
+    /// them through the key's string arm. The arm is pattern-less so it
+    /// word-matches one token: trailing keywords like
+    /// `advertised-routes` must keep parsing. Address spellings keep
+    /// resolving because the union folds its arms into a single match
+    /// candidate — an address tying the catch-all string arm (both
+    /// Partial) is one leaf match, not an ambiguous command.
+    #[test]
+    fn show_ip_bgp_neighbors_interface_name() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            (
+                "show ip bgp neighbors i1",
+                "/show/ip/bgp/neighbors",
+                vec!["i1"],
+            ),
+            (
+                "show ip bgp neighbors i1 advertised-routes",
+                "/show/ip/bgp/neighbors/advertised-routes",
+                vec!["i1"],
+            ),
+            (
+                "show ip bgp neighbors 10.0.0.1",
+                "/show/ip/bgp/neighbors",
+                vec!["10.0.0.1"],
+            ),
+            (
+                "show ip bgp neighbors 2001:db8::1",
+                "/show/ip/bgp/neighbors",
+                vec!["2001:db8::1"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
         }
     }
 

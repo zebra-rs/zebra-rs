@@ -1478,10 +1478,16 @@ impl Bgp {
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
     }
 
+    /// Candidates for the `bgp:neighbor` dynamic completion (`show ip
+    /// bgp neighbors <X>`, `clear bgp <afi> neighbor <X>`): every
+    /// address-keyed peer plus the configured `interface-neighbor`
+    /// names — interface-keyed (unnumbered) peers have no typeable
+    /// address, the interface name IS their CLI identity.
     pub fn peer_comps(&self) -> Vec<String> {
         self.peers
             .keys()
-            .map(|addr| addr.to_string().clone())
+            .map(|addr| addr.to_string())
+            .chain(self.interface_neighbors.keys().cloned())
             .collect()
     }
 

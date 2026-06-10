@@ -33,8 +33,9 @@ module zebra-bgp-clear {
        /clear/bgp/<afi>/neighbor/soft/in          soft, inbound only
        /clear/bgp/<afi>/neighbor/soft/out         soft, outbound only
 
-     The list key on `neighbor` is a `peer-id-or-all` — either the peer's
-     IP literal, or the keyword `all` to target every peer at that AFI.";
+     The list key on `neighbor` is a `peer-id-or-all` — the peer's IP
+     literal, an `interface-neighbor` name (IPv6 unnumbered), or the
+     keyword `all` to target every peer at that AFI.";
 
   /* =========================================================
    * Types
@@ -42,7 +43,9 @@ module zebra-bgp-clear {
 
   typedef peer-id-or-all {
     description
-      "BGP peer address (IPv4 or IPv6), or the literal `all` meaning
+      "BGP peer address (IPv4 or IPv6), an `interface-neighbor` name
+       (IPv6 unnumbered peers are keyed by interface — the name is
+       their only typeable identity), or the literal `all` meaning
        every peer at the enclosing AFI/SAFI. The same typedef is used
        across all four AFI containers — under vpnv4 the runtime only
        resolves IPv4 transports (and reports `peer not found` for IPv6
@@ -59,6 +62,12 @@ module zebra-bgp-clear {
       type enumeration {
         enum all;
       }
+      // Interface-neighbor names. Pattern-less so it word-matches a
+      // single token (`clear bgp ipv4 neighbor i1 soft out` keeps
+      // walking into `soft`); addresses and the full `all` keyword
+      // still win over it via Exact-over-Partial. Listed last so the
+      // typed arms get first shot.
+      type string;
     }
   }
 

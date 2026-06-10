@@ -259,7 +259,14 @@ async fn set_namespace_interface_state(
     );
 }
 
+// Keyword-agnostic on purpose: cucumber-rs binds a step to its
+// attribute keyword, and an `And` inherits the preceding `Given`/
+// `When`/`Then` — a `when`-only utility step silently SKIPS (along
+// with every step after it in the scenario) when it follows a `Then`.
+// That exact pattern hid the bgp_unnumbered_neighbor route assertions.
+#[given(expr = "I wait {int} seconds")]
 #[when(expr = "I wait {int} seconds")]
+#[then(expr = "I wait {int} seconds")]
 async fn wait_seconds(_world: &mut World, seconds: u64) {
     tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
 }
