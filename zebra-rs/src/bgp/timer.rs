@@ -218,6 +218,10 @@ pub fn update_timers(peer: &mut Peer) {
             peer.timer.hold_timer = None;
             peer.timer.keepalive = None;
 
+            // Idle is quiescent: abort any in-flight dial so it can't
+            // deliver a Connected event for a session the FSM just
+            // tore down (e.g. Event::Stop while connecting).
+            peer.task.connect = None;
             peer.task.writer = None;
             peer.task.reader = None;
             peer.packet_tx = None;

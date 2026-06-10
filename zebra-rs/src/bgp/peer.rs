@@ -1670,6 +1670,16 @@ fn record_session_mss(peer: &mut Peer, stream: &TcpStream) {
 }
 
 pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
+    // RFC 4271: Idle refuses all connections (the accept path already
+    // drops inbound streams in Idle — see `handle_peer_connection`).
+    // A Connected event can still arrive here from a dial whose
+    // completion was queued just before the peer fell back to Idle;
+    // promoting it would resurrect a session the FSM has torn down,
+    // bypassing the idle hold damping.
+    if peer.state == State::Idle {
+        drop(stream);
+        return State::Idle;
+    }
     if let Ok(local_addr) = stream.local_addr() {
         peer.param.local_addr = Some(local_addr);
     }
@@ -1736,7 +1746,7 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
     // TCP session of an Established peer: both ends raced to
     // reconnect, the parked conn was promoted, and the session never
     // recovered. Close the parked conn alongside the failed primary
-    // and restart from Active — losing a pre-OPEN conn costs one
+    // and restart from Idle — losing a pre-OPEN conn costs one
     // reconnect round-trip.
     peer.task.writer = None;
     peer.task.reader = None;
@@ -1749,8 +1759,19 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
             CeaseError::ConnectionRejected.into(),
         );
     }
-    peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
-    State::Active
+    // Restart from Idle, not Active: entering Idle is the one
+    // transition that re-arms the idle hold timer (`update_timers`),
+    // and that timer is this FSM's restart pacer — it fires the
+    // Event::Start that redials. Parking in Active with a 120s
+    // connect-retry meant a single failed redial silently downgraded
+    // the reconnect cadence from idle-hold-time (5s default) to 120s,
+    // and the idle hold timer never ran again for the peer's
+    // lifetime. Sitting out the idle hold in Idle refuses inbound
+    // connections for those few seconds — that is the peer-oscillation
+    // damping RFC 4271 §8.1.1 ties to the IdleHoldTimer; passive
+    // peers skip it (`update_timers` flips them straight back to
+    // Active listening).
+    State::Idle
 }
 
 pub async fn peer_packet_parse(
@@ -2660,5 +2681,114 @@ mod bfd_config_tests {
         assert!(!eff.enable);
         assert_eq!(eff.echo_mode, Some(EchoMode::Both));
         assert_eq!(eff.echo_transmit_ms, 100); // inherits
+    }
+}
+
+#[cfg(test)]
+mod fsm_idle_hold_tests {
+    use super::*;
+
+    /// Peer wired to a parked event channel — timer callbacks and
+    /// dial tasks can send without erroring, and nothing reads.
+    fn test_peer(passive: bool) -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.config.transport.passive = passive;
+        peer.first_start = false;
+        peer
+    }
+
+    /// A failed connect must land back in Idle so `update_timers`
+    /// re-arms the idle hold timer — the FSM's restart pacer. The
+    /// old Active + 120s connect-retry parking meant the idle hold
+    /// timer never ran again after the first failed redial.
+    #[tokio::test]
+    async fn conn_fail_lands_in_idle_and_rearms_idle_hold_timer() {
+        let mut peer = test_peer(false);
+        peer.state = State::Connect; // post-fsm_start, dial in flight
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Idle);
+
+        // What `fsm()` does after a state change.
+        peer.state = next;
+        timer::update_timers(&mut peer);
+
+        assert!(
+            peer.timer.idle_hold_timer.is_some(),
+            "idle hold timer must be re-armed after a connect failure"
+        );
+        assert!(peer.timer.connect_retry.is_none());
+    }
+
+    /// An Established session dying at TCP level (RST, peer killed)
+    /// takes the same path: through Idle with the idle hold timer
+    /// armed — not the old direct hop to Active that skipped idle
+    /// damping entirely.
+    #[tokio::test]
+    async fn established_tcp_death_takes_idle_hold_damping() {
+        let mut peer = test_peer(false);
+        peer.state = State::Established;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Idle);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(peer.timer.idle_hold_timer.is_some());
+    }
+
+    /// Passive peers never dial, so they skip the idle hold and go
+    /// straight back to Active listening (`update_timers`' flip).
+    #[tokio::test]
+    async fn conn_fail_passive_peer_returns_to_listening() {
+        let mut peer = test_peer(true);
+        peer.state = State::OpenSent;
+
+        let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
+        assert_eq!(next, State::Idle);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert_eq!(peer.state, State::Active);
+        assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// A collision-conn failure must not disturb the primary session.
+    #[tokio::test]
+    async fn collision_conn_fail_keeps_state() {
+        let mut peer = test_peer(false);
+        peer.state = State::OpenSent;
+        let next = fsm_conn_fail(&mut peer, ConnTag::Collision);
+        assert_eq!(next, State::OpenSent);
+    }
+
+    /// Idle refuses connections: a stale dial completing after the
+    /// peer fell back to Idle must not resurrect the session.
+    #[tokio::test]
+    async fn connected_event_in_idle_is_refused() {
+        let mut peer = test_peer(false);
+        assert_eq!(peer.state, State::Idle);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let next = fsm_connected(&mut peer, Role::Active, stream);
+        assert_eq!(next, State::Idle);
+        assert!(peer.packet_tx.is_none());
+        assert!(peer.task.reader.is_none());
+        assert!(peer.task.writer.is_none());
     }
 }
