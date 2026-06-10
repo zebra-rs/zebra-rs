@@ -17,17 +17,22 @@
 //! peers see stable next-hops across daemon restarts and reorderings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv6Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ipnet::IpNet;
 
 use crate::rib::link::LinkAddr;
 
-/// Per-ifindex IPv6 address registry, split by kind.
+/// Per-ifindex IPv6 address registry, split by kind, plus an
+/// IPv4-address → owning-ifindex map so a v4-addressed BGP session
+/// can be tied back to its interface (and from there to that
+/// interface's global v6 — the RFC 2545 next-hop source for v6 NLRI
+/// carried over v4 transport).
 #[derive(Debug, Default)]
 pub struct InterfaceAddrs {
     link_local: BTreeMap<u32, BTreeSet<Ipv6Addr>>,
     global: BTreeMap<u32, BTreeSet<Ipv6Addr>>,
+    v4_owner: BTreeMap<Ipv4Addr, u32>,
 }
 
 impl InterfaceAddrs {
@@ -35,9 +40,10 @@ impl InterfaceAddrs {
         Self::default()
     }
 
-    /// Register an address with the table. IPv4, loopback, and the
-    /// unspecified address are ignored; link-locals and globals
-    /// (including ULA) are routed to their respective bucket.
+    /// Register an address with the table. Loopback and the
+    /// unspecified address are ignored; v6 link-locals and globals
+    /// (including ULA) are routed to their respective bucket, and v4
+    /// addresses record which ifindex owns them.
     pub fn record(&mut self, addr: &LinkAddr) {
         match classify(addr) {
             Some(V6Kind::LinkLocal(host)) => {
@@ -51,6 +57,12 @@ impl InterfaceAddrs {
             }
             None => {}
         }
+        if let IpNet::V4(net) = addr.addr {
+            let host = net.addr();
+            if !host.is_loopback() && !host.is_unspecified() {
+                self.v4_owner.insert(host, addr.ifindex);
+            }
+        }
     }
 
     /// Forget an address previously passed to [`Self::record`]. If the
@@ -62,6 +74,21 @@ impl InterfaceAddrs {
             Some(V6Kind::Global(host)) => drop_from(&mut self.global, addr.ifindex, host),
             None => {}
         }
+        if let IpNet::V4(net) = addr.addr {
+            // Guard against an out-of-order AddrDel for an address that
+            // has since been re-claimed by another interface.
+            if self.v4_owner.get(&net.addr()) == Some(&addr.ifindex) {
+                self.v4_owner.remove(&net.addr());
+            }
+        }
+    }
+
+    /// Which interface owns this local IPv4 address, if any. Used to
+    /// map a v4-addressed BGP session's local end back to its
+    /// interface so [`Self::global_for`] can supply the v6 next-hop
+    /// for v6 NLRI advertised over that session.
+    pub fn ifindex_for_v4(&self, addr: Ipv4Addr) -> Option<u32> {
+        self.v4_owner.get(&addr).copied()
     }
 
     /// Return the chosen link-local for `ifindex`, or `None` if none
@@ -170,6 +197,29 @@ mod tests {
         t.record(&v6("::1", 128, 7));
         assert_eq!(t.link_local_for(7), None);
         assert_eq!(t.global_for(7), None);
+    }
+
+    #[test]
+    fn v4_owner_maps_session_address_to_interface_v6_global() {
+        // The RFC 2545 fix: a v4-addressed session's local end resolves
+        // to its owning ifindex, whose global v6 becomes the MP_REACH
+        // next-hop for v6 NLRI carried over that session.
+        let mut t = InterfaceAddrs::new();
+        t.record(&v4("192.168.0.1", 30, 7));
+        t.record(&v6("2001:db8:12::1", 64, 7));
+        let ifindex = t.ifindex_for_v4("192.168.0.1".parse().unwrap());
+        assert_eq!(ifindex, Some(7));
+        assert_eq!(
+            ifindex.and_then(|i| t.global_for(i)),
+            Some("2001:db8:12::1".parse().unwrap())
+        );
+        // Forget drops the mapping; a stale AddrDel for an address
+        // re-claimed by another interface must not clobber it.
+        t.record(&v4("192.168.0.1", 30, 9));
+        t.forget(&v4("192.168.0.1", 30, 7));
+        assert_eq!(t.ifindex_for_v4("192.168.0.1".parse().unwrap()), Some(9));
+        t.forget(&v4("192.168.0.1", 30, 9));
+        assert_eq!(t.ifindex_for_v4("192.168.0.1".parse().unwrap()), None);
     }
 
     #[test]
