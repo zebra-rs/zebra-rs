@@ -1228,13 +1228,18 @@ module config {
           // Per-VRF OSPFv3 instance. See `container ospf`'s `vrf`
           // list for the forwarding model. Exposes the per-interface
           // knobs the v3 instance handles (enable / network-type /
-          // priority / timers). `router-id` and `redistribute` are
-          // omitted — the v3 instance has no config handler for them
-          // today (so a forwarded line would be a no-op).
+          // priority / timers) plus `router-id` (the forwarded line
+          // hits the same `/router/ospfv3/router-id` callback on the
+          // child). `redistribute` stays omitted — the v3 instance
+          // has no config handler for it today (a forwarded line
+          // would be a no-op).
           key "name";
           leaf name {
             ext:dynamic "rib:vrf";
             type string;
+          }
+          leaf router-id {
+            type inet:ipv4-address;
           }
           list area {
             key "area-id";
@@ -2150,6 +2155,17 @@ module config {
               enum level-1-2;
               enum level-2-only;
             }
+          }
+          leaf te-router-id {
+            ext:help "Traffic-engineering stable Router ID";
+            // Forwarded to the child's `/router/isis/te-router-id`
+            // callback and stored per-VRF. NOTE: the TLVs that carry
+            // it (TE Router ID 134, Router Capability router-id) are
+            // gated on `sr_enabled()` at LSP build time, and the
+            // per-VRF surface doesn't expose `segment-routing` yet —
+            // so the value stages today and goes on the wire once
+            // per-VRF SR lands.
+            type inet:ipv4-address;
           }
           container timers {
             // `hold-time` (hyphen) matches the callback path

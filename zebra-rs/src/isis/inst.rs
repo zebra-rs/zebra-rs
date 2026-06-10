@@ -876,7 +876,50 @@ impl Isis {
         if let Some(handle) = self.vrf_registry.get(&name) {
             let _ = handle.cm_tx.send(ConfigRequest::new(rewritten.clone(), op));
         }
-        self.vrf_log.entry(name).or_default().push((rewritten, op));
+        self.vrf_log
+            .entry(name.clone())
+            .or_default()
+            .push((rewritten, op));
+        // The kernel VrfAdd may already have been processed BEFORE this
+        // intent line: in a same-commit `vrf X` + `router isis vrf X ...`
+        // apply, the netlink-acked VrfAdd and the config lines race on
+        // separate channels, and `vrf_add` alone only spawns when intent
+        // landed first. Spawn here too (no-op while either half is still
+        // missing) instead of waiting for a VrfDel/VrfAdd flap.
+        self.vrf_spawn_if_ready(&name);
+    }
+
+    /// Spawn the per-VRF child once BOTH halves exist — kernel info
+    /// (`rib_known_vrfs`, from `VrfAdd`) and active config intent
+    /// (`vrf_log`). Called from `vrf_add` (kernel half arriving) and
+    /// `vrf_config_record` (intent half arriving); whichever lands
+    /// second performs the spawn.
+    fn vrf_spawn_if_ready(&mut self, name: &str) {
+        if self.vrf_registry.contains_key(name) {
+            return;
+        }
+        let Some(&(table_id, _)) = self.rib_known_vrfs.get(name) else {
+            return;
+        };
+        let has_intent = self
+            .vrf_log
+            .get(name)
+            .is_some_and(|log| super::vrf::vrf_log_active(log));
+        if !has_intent {
+            return;
+        }
+        // Clone the replay log so the spawn borrow doesn't overlap the
+        // `vrf_registry` insert below.
+        let log = self.vrf_log.get(name).cloned().unwrap_or_default();
+        let handle = super::vrf::spawn_isis_vrf(
+            name,
+            table_id,
+            &self.rib_subscriber,
+            &self.config_tx,
+            &self.policy_tx,
+            &log,
+        );
+        self.vrf_registry.insert(name.to_string(), handle);
     }
 
     /// CommitEnd fan-out for the default instance: tear down per-VRF
@@ -1510,28 +1553,7 @@ impl Isis {
     fn vrf_add(&mut self, name: String, table_id: u32, ifindex: u32) {
         self.rib_known_vrfs
             .insert(name.clone(), (table_id, ifindex));
-        if self.vrf_registry.contains_key(&name) {
-            return;
-        }
-        let has_intent = self
-            .vrf_log
-            .get(&name)
-            .is_some_and(|log| super::vrf::vrf_log_active(log));
-        if !has_intent {
-            return;
-        }
-        // Clone the replay log so the spawn borrow doesn't overlap the
-        // `vrf_registry` insert below.
-        let log = self.vrf_log.get(&name).cloned().unwrap_or_default();
-        let handle = super::vrf::spawn_isis_vrf(
-            &name,
-            table_id,
-            &self.rib_subscriber,
-            &self.config_tx,
-            &self.policy_tx,
-            &log,
-        );
-        self.vrf_registry.insert(name, handle);
+        self.vrf_spawn_if_ready(&name);
     }
 
     /// Kernel VRF master removed. Despawn the child but KEEP its config
