@@ -47,8 +47,18 @@ operator wrote it.
 
 | YANG leaf | Type | Notes |
 |---|---|---|
-| `/router/ospf/router-id` | `inet:ipv4-address` | Optional; falls back to the system-wide router-id selection rules. |
+| `/router/ospf/router-id` | `inet:ipv4-address` | Optional; wins over the RIB-distributed value. Deleting it falls back to the RIB-distributed router-id, then to the constructor default `10.0.0.1`. |
+| `/router/ospf/vrf/<name>/router-id` | `inet:ipv4-address` | Per-VRF instance override; same precedence against the VRF's RIB-distributed router-id. |
 | `/router/ospf/area/<id>/area-id` | `union { uint32; ipv4-address }` | List key — see above. |
+
+Two routers must not share a Router ID — a neighbor advertising our
+own ID looks like self-originated traffic and no adjacency forms — so
+either configure it explicitly per router (recommended) or ensure each
+router derives a unique value (e.g. a unique loopback address). The
+same `router-id` leaf exists on `router ospfv3` (and its `vrf` list)
+with identical semantics. See
+[Selection of the Router-ID](ch-00-02-router-id.md) for the full
+selection and precedence model.
 
 ## Per-interface knobs
 

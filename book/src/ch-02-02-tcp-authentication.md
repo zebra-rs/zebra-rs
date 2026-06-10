@@ -109,7 +109,7 @@ router:
       router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
-      peer-as: 65002
+      remote-as: 65002
       enabled: true
       afi-safi:
       - name: ipv4
@@ -148,7 +148,7 @@ router:
       router-id: 192.168.0.1
     neighbor:
     - remote-address: 192.168.0.2
-      peer-as: 65002
+      remote-as: 65002
       enabled: true
       afi-safi:
       - name: ipv4
