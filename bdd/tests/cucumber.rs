@@ -452,16 +452,36 @@ async fn wait_for_bgp(_world: &mut World, seconds: u64) {
     println!("✓ Waited {} seconds for BGP to operate", seconds);
 }
 
+/// Soft-clear OUTBOUND toward a BGP neighbor: re-run the egress
+/// policy over the Loc-RIB and re-advertise (with diff-withdraws),
+/// WITHOUT bouncing the session. Every feature uses this step to
+/// "force an immediate re-flood" after a config change, with waits as
+/// short as 5 s — a hard reset (bounce + reconnect) would overrun
+/// those. For a hard reset, use the generic run step with
+/// `clear bgp ipv4 <peer>` instead.
+///
+/// Deliberately NOT `soft` (both directions): the soft-IN replay can
+/// re-admit routes the policy-change trigger just denied when the
+/// additively-merged policy state diverges (observed live on
+/// bgp_route_map_match's med-eq scenarios) — a daemon-side issue
+/// tracked separately; the re-flood intent only needs OUT.
+///
+/// History: this step used to issue the legacy `clear ip bgp
+/// neighbors <X>` grammar, which was never wired into
+/// zebra-bgp-clear.yang and silently no-op'd (the clear surface is
+/// garbage-tolerant). The spelling below is pinned by the
+/// `clear_bgp_grammar` parse test in zebra-rs/src/config/parse.rs, so
+/// grammar rot now fails unit tests instead of silently no-opping.
 #[when(expr = "I clear namespace {string} neighbor {string}")]
 async fn clear_bgp_neighbor(world: &mut World, namespace: String, neighbor: String) {
     let scoped = world.ns(&namespace);
-    let cmd = format!("clear ip bgp neighbors {}", neighbor);
+    let cmd = format!("clear bgp ipv4 {} soft out", neighbor);
     netns::exec_in_netns(&scoped, "vtyctl", &["clear", &cmd])
         .await
         .expect("Failed to clear BGP neighbor");
 
     println!(
-        "✓ Cleared BGP neighbor {} in namespace {}",
+        "✓ Soft-cleared (out) BGP neighbor {} in namespace {}",
         neighbor, scoped
     );
 }
