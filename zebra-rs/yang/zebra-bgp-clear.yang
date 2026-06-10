@@ -50,8 +50,14 @@ module zebra-bgp-clear {
     type union {
       type inet:ipv4-address;
       type inet:ipv6-address;
-      type string {
-        pattern "all";
+      // `all` is an enumeration, NOT `type string { pattern "all" }`:
+      // a pattern arm full-matches the entire remaining line (the
+      // description-LINE semantics), so it can never match when more
+      // tokens follow — `clear bgp ipv4 all soft out` was Nomatch in
+      // every spelling. Enum arms match per-token (and abbreviate),
+      // exactly like the `summary` key arm in exec.yang.
+      type enumeration {
+        enum all;
       }
     }
   }
@@ -101,20 +107,29 @@ module zebra-bgp-clear {
        Each AFI container reuses the same neighbor/soft grouping.";
     container bgp {
       ext:help "BGP clear actions";
+      // FRR-style positional form: a peer address (or `all`) typed
+      // straight after the AFI (`clear bgp ipv4 10.0.0.1 [soft ...]`)
+      // is routed into the `neighbor` list by the matcher via
+      // `ext:default-child` — resolving to the same path and args as
+      // the explicit `clear bgp <afi> neighbor <peer>` spelling.
       container ipv4 {
         ext:help "IPv4 unicast";
+        ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
       }
       container ipv6 {
         ext:help "IPv6 unicast";
+        ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
       }
       container vpnv4 {
         ext:help "VPNv4 (BGP/MPLS-VPN, RFC 4364)";
+        ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
       }
       container evpn {
         ext:help "L2VPN EVPN (RFC 7432)";
+        ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
       }
     }
