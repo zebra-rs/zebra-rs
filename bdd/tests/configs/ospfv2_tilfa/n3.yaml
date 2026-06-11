@@ -2,12 +2,12 @@ interface:
 - if-name: lo
   ipv4:
     address: 10.0.0.4/32
-- if-name: n3-n2
+- if-name: n3-s
   ipv4:
-    address: 192.168.3.2/30
-- if-name: n3-d
+    address: 192.168.0.10/30
+- if-name: n3-r1
   ipv4:
-    address: 192.168.4.1/30
+    address: 192.168.0.21/30
 router:
   ospf:
     router-id: 10.0.0.4
@@ -22,13 +22,15 @@ router:
         enable: true
         prefix-sid:
           index: 400
-      - if-name: n3-n2
+      - if-name: n3-s
         enable: true
         network-type: point-to-point
+        cost: 1000
         adjacency-sid:
-          index: 43
-      - if-name: n3-d
+          index: 41
+      - if-name: n3-r1
         enable: true
         network-type: point-to-point
+        cost: 1000
         adjacency-sid:
           index: 45

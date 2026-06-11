@@ -4,10 +4,13 @@ interface:
     address: 10.0.0.1/32
 - if-name: s-n1
   ipv4:
-    address: 192.168.1.1/30
-- if-name: s-d
+    address: 192.168.0.1/30
+- if-name: s-n2
   ipv4:
-    address: 192.168.5.2/30
+    address: 192.168.0.5/30
+- if-name: s-n3
+  ipv4:
+    address: 192.168.0.9/30
 router:
   ospf:
     router-id: 10.0.0.1
@@ -23,10 +26,18 @@ router:
       - if-name: s-n1
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
           index: 12
-      - if-name: s-d
+      - if-name: s-n2
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
-          index: 15
+          index: 13
+      - if-name: s-n3
+        enable: true
+        network-type: point-to-point
+        cost: 1000
+        adjacency-sid:
+          index: 14
