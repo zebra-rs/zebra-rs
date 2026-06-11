@@ -1,3 +1,4 @@
+use crate::config::Builder;
 use crate::policy::Policy;
 use crate::policy::inst::ShowCallback;
 
@@ -10,38 +11,34 @@ use super::policy_list;
 use super::prefix;
 
 impl Policy {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
-    }
-
     pub fn show_build(&mut self) {
-        self.show_add("/show/policy", policy_list::show);
-        self.show_add("/show/prefix-set", prefix::show::prefix_set);
-        self.show_add("/show/prefix-set/name", prefix::show::prefix_set_name);
-        self.show_add("/show/community-set", community::show::community_set);
-        self.show_add(
-            "/show/community-set/name",
-            community::show::community_set_name,
-        );
-        self.show_add(
-            "/show/ext-community-set",
-            ext_community::show::ext_community_set,
-        );
-        self.show_add(
-            "/show/ext-community-set/name",
-            ext_community::show::ext_community_set_name,
-        );
-        self.show_add(
-            "/show/large-community-set",
-            large_community::show::large_community_set,
-        );
-        self.show_add(
-            "/show/large-community-set/name",
-            large_community::show::large_community_set_name,
-        );
-        self.show_add("/show/as-path-set", aspath::show::as_path_set);
-        self.show_add("/show/as-path-set/name", aspath::show::as_path_set_name);
-        self.show_add("/show/key-chains", keychain::show::key_chains);
-        self.show_add("/show/key-chains/name", keychain::show::key_chain_name);
+        self.show_cb = Builder::<ShowCallback>::default()
+            .path("/show/policy")
+            .set(policy_list::show)
+            .path("/show/prefix-set")
+            .set(prefix::show::prefix_set)
+            .path("/show/prefix-set/name")
+            .set(prefix::show::prefix_set_name)
+            .path("/show/community-set")
+            .set(community::show::community_set)
+            .path("/show/community-set/name")
+            .set(community::show::community_set_name)
+            .path("/show/ext-community-set")
+            .set(ext_community::show::ext_community_set)
+            .path("/show/ext-community-set/name")
+            .set(ext_community::show::ext_community_set_name)
+            .path("/show/large-community-set")
+            .set(large_community::show::large_community_set)
+            .path("/show/large-community-set/name")
+            .set(large_community::show::large_community_set_name)
+            .path("/show/as-path-set")
+            .set(aspath::show::as_path_set)
+            .path("/show/as-path-set/name")
+            .set(aspath::show::as_path_set_name)
+            .path("/show/key-chains")
+            .set(keychain::show::key_chains)
+            .path("/show/key-chains/name")
+            .set(keychain::show::key_chain_name)
+            .map();
     }
 }

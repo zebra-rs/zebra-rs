@@ -12,7 +12,7 @@ use super::rib::{IsisRibFamily, SpfNexthop, SpfRoute, V4, V6};
 use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
 
-use crate::config::Args;
+use crate::config::{Args, Builder};
 use crate::isis::link::Afi;
 use crate::isis::{Level, hostname, link, neigh};
 use crate::rib;
@@ -20,50 +20,63 @@ use crate::rib;
 use crate::spf;
 
 impl Isis {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
-    }
-
     pub fn show_build(&mut self) {
-        self.show_add("/show/isis", show_isis);
-        self.show_add("/show/isis/summary", show_isis_summary);
-        self.show_add("/show/isis/route", show_isis_route);
-        self.show_add("/show/isis/route/detail", show_isis_route_detail);
-        self.show_add(
-            "/show/isis/fast-reroute/summary",
-            show_isis_fast_reroute_summary,
-        );
-        self.show_add(
-            "/show/isis/fast-reroute/prefix/detail",
-            show_isis_fast_reroute_prefix_detail,
-        );
-        self.show_add("/show/isis/interface", link::show);
-        self.show_add("/show/isis/interface/detail", link::show_detail);
-        self.show_add("/show/isis/dis/statistics", link::show_dis_statistics);
-        self.show_add("/show/isis/dis/history", link::show_dis_history);
-        self.show_add("/show/isis/neighbor", neigh::show);
-        self.show_add("/show/isis/neighbor/detail", neigh::show_detail);
-        self.show_add("/show/isis/graceful-restart", show_isis_graceful_restart);
-        self.show_add("/show/isis/checkpoint", show_isis_checkpoint);
-        self.show_add("/show/isis/database", show_isis_database);
-        self.show_add("/show/isis/database/detail", show_isis_database_detail);
-        self.show_add("/show/isis/hostname", hostname::show);
-        self.show_add("/show/isis/graph", show_isis_graph);
-        self.show_add("/show/isis/spf", show_isis_spf);
-        self.show_add("/show/isis/spf/detail", show_isis_spf_detail);
-        self.show_add("/show/isis/repair-list", show_isis_repair_list);
-        self.show_add(
-            "/show/isis/repair-list/detail",
-            show_isis_repair_list_detail,
-        );
-        self.show_add("/show/isis/topology", show_isis_topology);
-        self.show_add("/show/isis/ti-lfa", show_isis_tilfa);
-        self.show_add("/show/isis/flex-algo", show_isis_flex_algo);
-        self.show_add("/show/isis/flex-algo/route", show_isis_flex_algo_route);
-        self.show_add(
-            "/show/isis/flex-algo/route/algorithm",
-            show_isis_flex_algo_route_algo,
-        );
+        self.show_cb = Builder::<ShowCallback>::default()
+            .path("/show/isis")
+            .set(show_isis)
+            .path("/show/isis/summary")
+            .set(show_isis_summary)
+            .path("/show/isis/route")
+            .set(show_isis_route)
+            .path("/show/isis/route/detail")
+            .set(show_isis_route_detail)
+            .path("/show/isis/fast-reroute/summary")
+            .set(show_isis_fast_reroute_summary)
+            .path("/show/isis/fast-reroute/prefix/detail")
+            .set(show_isis_fast_reroute_prefix_detail)
+            .path("/show/isis/interface")
+            .set(link::show)
+            .path("/show/isis/interface/detail")
+            .set(link::show_detail)
+            .path("/show/isis/dis/statistics")
+            .set(link::show_dis_statistics)
+            .path("/show/isis/dis/history")
+            .set(link::show_dis_history)
+            .path("/show/isis/neighbor")
+            .set(neigh::show)
+            .path("/show/isis/neighbor/detail")
+            .set(neigh::show_detail)
+            .path("/show/isis/graceful-restart")
+            .set(show_isis_graceful_restart)
+            .path("/show/isis/checkpoint")
+            .set(show_isis_checkpoint)
+            .path("/show/isis/database")
+            .set(show_isis_database)
+            .path("/show/isis/database/detail")
+            .set(show_isis_database_detail)
+            .path("/show/isis/hostname")
+            .set(hostname::show)
+            .path("/show/isis/graph")
+            .set(show_isis_graph)
+            .path("/show/isis/spf")
+            .set(show_isis_spf)
+            .path("/show/isis/spf/detail")
+            .set(show_isis_spf_detail)
+            .path("/show/isis/repair-list")
+            .set(show_isis_repair_list)
+            .path("/show/isis/repair-list/detail")
+            .set(show_isis_repair_list_detail)
+            .path("/show/isis/topology")
+            .set(show_isis_topology)
+            .path("/show/isis/ti-lfa")
+            .set(show_isis_tilfa)
+            .path("/show/isis/flex-algo")
+            .set(show_isis_flex_algo)
+            .path("/show/isis/flex-algo/route")
+            .set(show_isis_flex_algo_route)
+            .path("/show/isis/flex-algo/route/algorithm")
+            .set(show_isis_flex_algo_route_algo)
+            .map();
     }
 }
 

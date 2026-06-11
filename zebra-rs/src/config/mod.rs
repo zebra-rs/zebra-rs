@@ -29,6 +29,9 @@ mod paths;
 pub use paths::path_from_command;
 pub use paths::vrf_redirect_split;
 
+mod show_builder;
+pub use show_builder::Builder;
+
 mod api;
 pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Message, ShowChannel};
 

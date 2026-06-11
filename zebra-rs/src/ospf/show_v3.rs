@@ -25,34 +25,42 @@ use super::lsdb::{Lsa, OSPF_MAX_AGE};
 use super::version::Ospfv3;
 use super::{Ospf, ShowCallback};
 
-use crate::config::Args;
-
-const SHOW_OSPFV3: &str = "/show/ipv6/ospf";
+use crate::config::{Args, Builder};
 
 impl Ospf<Ospfv3> {
     /// Register the v3 show-path dispatch table. Mirrors v2's
     /// `show_build` shape and command set.
     pub fn show_build(&mut self) {
-        let prefix = SHOW_OSPFV3;
-        let entries: &[(&str, ShowCallback<Ospfv3>)] = &[
-            ("", show_ospfv3_summary),
-            ("/interface", show_ospfv3_interface),
-            ("/neighbor", show_ospfv3_neighbor),
-            ("/neighbor/detail", show_ospfv3_neighbor_detail),
-            ("/database", show_ospfv3_database),
-            ("/database/detail", show_ospfv3_database_detail),
-            ("/route", show_ospfv3_route),
-            ("/spf", show_ospfv3_spf),
-            ("/graph", show_ospfv3_graph),
-            ("/ti-lfa", show_ospfv3_tilfa),
-            ("/repair-list", show_ospfv3_repair_list),
-            ("/repair-list/detail", show_ospfv3_repair_list_detail),
-            ("/segment-routing", show_ospfv3_segment_routing),
-            ("/flex-algo", show_ospfv3_flex_algo),
-        ];
-        for (path, cb) in entries {
-            self.show_cb.insert(format!("{}{}", prefix, path), *cb);
-        }
+        self.show_cb = Builder::<ShowCallback<Ospfv3>>::default()
+            .path("/show/ipv6/ospf")
+            .set(show_ospfv3_summary)
+            .path("/show/ipv6/ospf/interface")
+            .set(show_ospfv3_interface)
+            .path("/show/ipv6/ospf/neighbor")
+            .set(show_ospfv3_neighbor)
+            .path("/show/ipv6/ospf/neighbor/detail")
+            .set(show_ospfv3_neighbor_detail)
+            .path("/show/ipv6/ospf/database")
+            .set(show_ospfv3_database)
+            .path("/show/ipv6/ospf/database/detail")
+            .set(show_ospfv3_database_detail)
+            .path("/show/ipv6/ospf/route")
+            .set(show_ospfv3_route)
+            .path("/show/ipv6/ospf/spf")
+            .set(show_ospfv3_spf)
+            .path("/show/ipv6/ospf/graph")
+            .set(show_ospfv3_graph)
+            .path("/show/ipv6/ospf/ti-lfa")
+            .set(show_ospfv3_tilfa)
+            .path("/show/ipv6/ospf/repair-list")
+            .set(show_ospfv3_repair_list)
+            .path("/show/ipv6/ospf/repair-list/detail")
+            .set(show_ospfv3_repair_list_detail)
+            .path("/show/ipv6/ospf/segment-routing")
+            .set(show_ospfv3_segment_routing)
+            .path("/show/ipv6/ospf/flex-algo")
+            .set(show_ospfv3_flex_algo)
+            .map();
     }
 }
 

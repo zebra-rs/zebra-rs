@@ -18,7 +18,7 @@ use super::peer_map::PeerMap;
 use super::route::LocalRib;
 use super::vrf::inst::BgpVrf;
 use crate::bgp::{AdjRibEvpnTable, AdjRibTable, BgpRib, BgpRibType, RibDirection};
-use crate::config::Args;
+use crate::config::{Args, Builder};
 use crate::config::{DisplayRequest, path_from_command};
 
 /// Read-only view of the per-instance BGP state the `show bgp …`
@@ -4116,31 +4116,9 @@ fn show_bgp_neighbor_group_detail(
     Ok(buf)
 }
 
-#[derive(Default)]
-struct Builder {
-    path: String,
-    map: HashMap<String, ShowCallback>,
-}
-
-impl Builder {
-    fn path(mut self, path: &str) -> Self {
-        self.path = path.into();
-        self
-    }
-
-    fn set(mut self, cb: ShowCallback) -> Self {
-        self.map.insert(self.path.clone(), cb);
-        self
-    }
-
-    fn map(self) -> HashMap<String, ShowCallback> {
-        self.map
-    }
-}
-
 impl Bgp {
     pub fn show_build(&mut self) {
-        self.show_cb = Builder::default()
+        self.show_cb = Builder::<ShowCallback>::default()
             .path("/show/ip/bgp")
             .set(show_bgp::<Bgp>)
             .path("/show/ip/bgp/labeled-unicast")
