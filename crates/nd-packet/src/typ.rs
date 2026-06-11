@@ -4,6 +4,8 @@
 pub enum Icmp6Type {
     RouterSolicit = 133,
     RouterAdvert = 134,
+    NeighborSolicit = 135,
+    NeighborAdvert = 136,
 }
 
 impl Icmp6Type {
@@ -11,6 +13,8 @@ impl Icmp6Type {
         match v {
             133 => Some(Self::RouterSolicit),
             134 => Some(Self::RouterAdvert),
+            135 => Some(Self::NeighborSolicit),
+            136 => Some(Self::NeighborAdvert),
             _ => None,
         }
     }

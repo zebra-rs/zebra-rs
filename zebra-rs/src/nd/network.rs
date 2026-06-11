@@ -93,6 +93,10 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
                         Ok(rs) => NdRecv::RouterSolicit { ifindex, src, rs },
                         Err(_) => return Ok(()),
                     },
+                    // NS/NA are filtered out at the socket (ICMP6_FILTER in
+                    // socket.rs) and will be handled when the ND engine grows
+                    // counters — for now drop, preserving current behaviour.
+                    Some(_) => return Ok(()),
                     None => return Ok(()),
                 };
 
