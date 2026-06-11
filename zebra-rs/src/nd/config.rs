@@ -34,20 +34,19 @@ impl Nd {
 
 fn config_send_advertisements(nd: &mut Nd, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let enable = args.boolean()?;
+    // A delete may arrive without the leaf value — default to false
+    // so it still lands in the unset branch.
+    let enable = args.boolean().unwrap_or(false);
 
-    // RIB may not have notified us about this link yet — for example
-    // the operator stages config before bringing the interface up.
-    // The lookup miss is expected; the future link-add notification
-    // path will need to re-evaluate pending config. For this first
-    // cut we silently drop — the operator can re-apply.
-    let ifindex = nd.engine().ifindex_of(&name)?;
-
+    // The engine stores the config keyed by interface name, so it
+    // survives the race against RIB's link dump (which arrives on a
+    // separate channel and may not have populated the name → ifindex
+    // map yet) and applies when the link appears.
     if op.is_set() && enable {
         nd.engine_mut()
-            .enable_interface(ifindex, RaSendConfig::default(), Instant::now());
+            .set_ra_config(name, RaSendConfig::default(), Instant::now());
     } else {
-        nd.engine_mut().disable_interface(ifindex);
+        nd.engine_mut().unset_ra_config(&name);
     }
     Some(())
 }

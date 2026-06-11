@@ -45,6 +45,16 @@ pub struct NdEngine {
     /// [`super::inst::NdClientReq::EnableInterface`].
     ifindex_by_name: BTreeMap<String, u32>,
     name_by_ifindex: BTreeMap<u32, String>,
+    /// Operator-typed RA config, keyed by interface *name* — the
+    /// durable source of truth. The YANG layer dispatches config by
+    /// name, but RIB's link dump (which feeds the name → ifindex
+    /// maps above) arrives on a different channel and may land
+    /// *after* the config does. Keeping the config here lets
+    /// [`Self::process_link_add`] apply it whenever the link
+    /// appears — at the initial dump, or for an interface created
+    /// long after the commit — instead of silently dropping config
+    /// that raced ahead of the dump.
+    ra_config_by_name: BTreeMap<String, RaSendConfig>,
 }
 
 impl NdEngine {
@@ -54,6 +64,7 @@ impl NdEngine {
             notifier: None,
             ifindex_by_name: BTreeMap::new(),
             name_by_ifindex: BTreeMap::new(),
+            ra_config_by_name: BTreeMap::new(),
         }
     }
 
@@ -61,7 +72,7 @@ impl NdEngine {
     /// LinkDel — once a link is known it stays in our table even if
     /// the kernel administratively removes the device. That matches
     /// the OSPF / BFD pattern in this repo.
-    pub fn process_link_add(&mut self, link: &Link) {
+    pub fn process_link_add(&mut self, link: &Link, now: Instant) {
         // Insert preserves the most recently seen name; renaming a
         // link via `ip link set X name Y` is rare but if it happens,
         // we drop the old name entry to keep the reverse map
@@ -70,8 +81,48 @@ impl NdEngine {
             && old_name != link.name
         {
             self.ifindex_by_name.remove(&old_name);
+            // The running sender (if any) was driven by the old
+            // name's config; a rename away from a configured name
+            // means RA must stop. If the *new* name is configured
+            // too, the apply step below re-enables with that
+            // config's template.
+            if self.ra_config_by_name.contains_key(&old_name) {
+                self.disable_interface(link.index);
+            }
         }
         self.ifindex_by_name.insert(link.name.clone(), link.index);
+
+        // Deferred config apply: the operator's `send-advertisements`
+        // may have been committed before RIB announced this link.
+        // Skip when a sender is already running so a repeated
+        // LinkAdd (flag/MTU change re-announce) doesn't restart the
+        // RFC 4861 §6.2.4 initial-burst schedule.
+        if !self.senders.contains_key(&link.index)
+            && let Some(cfg) = self.ra_config_by_name.get(&link.name).cloned()
+        {
+            self.enable_interface(link.index, cfg, now);
+        }
+    }
+
+    /// Store the RA config for interface `name` and start advertising
+    /// right away when the link is already known. Unknown links keep
+    /// the config pending; [`Self::process_link_add`] applies it when
+    /// the LinkAdd arrives.
+    pub fn set_ra_config(&mut self, name: String, cfg: RaSendConfig, now: Instant) {
+        if let Some(&ifindex) = self.ifindex_by_name.get(&name) {
+            self.enable_interface(ifindex, cfg.clone(), now);
+        }
+        self.ra_config_by_name.insert(name, cfg);
+    }
+
+    /// Drop the RA config for interface `name`, stopping the running
+    /// sender if the link is known. Removing pending config for a
+    /// link RIB never announced is a no-op beyond the map removal.
+    pub fn unset_ra_config(&mut self, name: &str) {
+        self.ra_config_by_name.remove(name);
+        if let Some(&ifindex) = self.ifindex_by_name.get(name) {
+            self.disable_interface(ifindex);
+        }
     }
 
     /// Look up the ifindex for a given link name. Returns `None` if
@@ -360,7 +411,7 @@ mod tests {
     #[test]
     fn link_add_populates_both_lookup_directions() {
         let mut eng = NdEngine::new();
-        eng.process_link_add(&link("eth0", 7));
+        eng.process_link_add(&link("eth0", 7), t0());
         assert_eq!(eng.ifindex_of("eth0"), Some(7));
         assert_eq!(eng.ifname_of(7), Some("eth0"));
     }
@@ -368,11 +419,104 @@ mod tests {
     #[test]
     fn link_rename_drops_stale_name_entry() {
         let mut eng = NdEngine::new();
-        eng.process_link_add(&link("eth0", 7));
+        eng.process_link_add(&link("eth0", 7), t0());
         // Rename: same ifindex, new name.
-        eng.process_link_add(&link("swp1", 7));
+        eng.process_link_add(&link("swp1", 7), t0());
         assert_eq!(eng.ifindex_of("eth0"), None);
         assert_eq!(eng.ifindex_of("swp1"), Some(7));
         assert_eq!(eng.ifname_of(7), Some("swp1"));
+    }
+
+    #[test]
+    fn config_before_link_add_applies_when_link_appears() {
+        // The bug this guards: `send-advertisements true` dispatched
+        // before RIB's link dump must not be lost — the engine holds
+        // it and enables the sender on LinkAdd.
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(!eng.is_enabled(7), "no link yet — nothing to enable");
+        assert!(eng.next_wakeup().is_none());
+
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(eng.is_enabled(7), "pending config applied on LinkAdd");
+        assert!(eng.next_wakeup().is_some());
+    }
+
+    #[test]
+    fn config_after_link_add_applies_immediately() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(eng.is_enabled(7));
+    }
+
+    #[test]
+    fn unset_config_disables_running_sender() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(eng.is_enabled(7));
+
+        eng.unset_ra_config("eth0");
+        assert!(!eng.is_enabled(7));
+        // The pending store is cleared too — a later LinkAdd must not
+        // resurrect the sender.
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(!eng.is_enabled(7));
+    }
+
+    #[test]
+    fn unset_pending_config_before_link_add_stays_disabled() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        eng.unset_ra_config("eth0");
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(!eng.is_enabled(7));
+    }
+
+    #[test]
+    fn repeated_link_add_keeps_running_sender() {
+        // RIB re-announces a link on any attribute change; that must
+        // not restart the RFC 4861 initial-burst schedule. Observable
+        // via the wakeup: a replaced sender would re-randomize it.
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        let scheduled = eng.next_wakeup();
+
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(eng.is_enabled(7));
+        assert_eq!(eng.next_wakeup(), scheduled, "sender must not restart");
+    }
+
+    #[test]
+    fn rename_away_from_configured_name_stops_sender() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(eng.is_enabled(7));
+
+        // `ip link set eth0 name swp1` — swp1 has no RA config, so
+        // advertising must stop.
+        eng.process_link_add(&link("swp1", 7), start);
+        assert!(!eng.is_enabled(7));
+    }
+
+    #[test]
+    fn rename_onto_configured_name_starts_sender() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.set_ra_config("swp1".into(), RaSendConfig::default(), start);
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(!eng.is_enabled(7));
+
+        eng.process_link_add(&link("swp1", 7), start);
+        assert!(eng.is_enabled(7));
     }
 }
