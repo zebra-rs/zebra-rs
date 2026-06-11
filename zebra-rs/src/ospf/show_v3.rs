@@ -17,8 +17,8 @@ use ospf_packet::{
     OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
     OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
     OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E,
-    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, Ospfv3ExtTlv,
-    Ospfv3LsBody, Ospfv3Options, Ospfv3PrefixOptions, Ospfv3RouterLinkType,
+    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody,
+    Ospfv3Options, Ospfv3PrefixOptions, Ospfv3RouterLinkType,
 };
 
 use super::lsdb::{Lsa, OSPF_MAX_AGE};
@@ -941,10 +941,9 @@ fn write_lsa_detail(
                 )?;
             }
         }
-        // RFC 8362 Extended LSAs — list the top-level TLVs by name.
-        // Per-TLV field / sub-TLV rendering stays a follow-up; the
-        // decoded SR contents are visible via `show ipv6 ospf
-        // segment-routing` meanwhile.
+        // RFC 8362 Extended LSAs — full per-TLV / sub-TLV rendering,
+        // mirroring v2's Opaque-LSA detail (`show_ext_link_detail` /
+        // `show_router_info_detail` in show.rs).
         Ospfv3LsBody::ERouter(b)
         | Ospfv3LsBody::ENetwork(b)
         | Ospfv3LsBody::EInterAreaPrefix(b)
@@ -952,28 +951,7 @@ fn write_lsa_detail(
         | Ospfv3LsBody::EAsExternal(b)
         | Ospfv3LsBody::ELink(b)
         | Ospfv3LsBody::EIntraAreaPrefix(b) => {
-            writeln!(
-                out,
-                "  Extended LSA body, {} top-level TLV(s)",
-                b.tlvs.len()
-            )?;
-            for tlv in &b.tlvs {
-                match tlv {
-                    Ospfv3ExtTlv::RouterLink(_) => writeln!(out, "    TLV: Router-Link")?,
-                    Ospfv3ExtTlv::IntraAreaPrefix(_) => {
-                        writeln!(out, "    TLV: Intra-Area-Prefix")?
-                    }
-                    Ospfv3ExtTlv::SrAlgorithm(_) => writeln!(out, "    TLV: SR-Algorithm")?,
-                    Ospfv3ExtTlv::SidLabelRange(_) => writeln!(out, "    TLV: SID/Label Range")?,
-                    Ospfv3ExtTlv::SrLocalBlock(_) => writeln!(out, "    TLV: SR Local Block")?,
-                    Ospfv3ExtTlv::Fad(_) => {
-                        writeln!(out, "    TLV: Flexible Algorithm Definition")?
-                    }
-                    Ospfv3ExtTlv::Unknown { typ, value } => {
-                        writeln!(out, "    TLV: Unknown (type={} len={})", typ, value.len())?
-                    }
-                }
-            }
+            write_ext_lsa_body(out, b)?;
         }
         Ospfv3LsBody::Grace(b) => {
             if let Some(secs) = b.grace_period() {
@@ -985,6 +963,264 @@ fn write_lsa_detail(
         }
         Ospfv3LsBody::Unknown(bytes) => {
             writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
+        }
+    }
+    Ok(())
+}
+
+/// Clean algorithm name (the `Algo` Display impl appends the numeric
+/// value, e.g. "SPF(0)", which reads doubled next to the number we
+/// already print).
+fn format_algo(algo: &ospf_packet::Algo) -> String {
+    use ospf_packet::Algo;
+    match algo {
+        Algo::Spf => "SPF".to_string(),
+        Algo::StrictSpf => "Strict SPF".to_string(),
+        Algo::FlexAlgo(n) => format!("Flex-Algo {}", n),
+        Algo::Unknown(n) => format!("Unknown {}", n),
+    }
+}
+
+/// "Label: N" / "Index: N" — v2's SID rendering convention.
+fn format_sid_label(sid: &ospf_packet::SidLabelTlv) -> String {
+    match sid {
+        ospf_packet::SidLabelTlv::Label(v) => format!("Label: {}", v),
+        ospf_packet::SidLabelTlv::Index(v) => format!("Index: {}", v),
+    }
+}
+
+/// Hex byte plus decoded letters, e.g. "0x60 : V|L" (RFC 8666 §6.1).
+fn format_adj_sid_flags(flags: &ospf_packet::AdjSidFlags) -> String {
+    let mut names = Vec::new();
+    if flags.b_flag() {
+        names.push("B");
+    }
+    if flags.v_flag() {
+        names.push("V");
+    }
+    if flags.l_flag() {
+        names.push("L");
+    }
+    if flags.g_flag() {
+        names.push("G");
+    }
+    if flags.p_flag() {
+        names.push("P");
+    }
+    let joined = if names.is_empty() {
+        "-".to_string()
+    } else {
+        names.join("|")
+    };
+    format!("0x{:02x} : {}", u8::from(*flags), joined)
+}
+
+/// Hex byte plus decoded letters, e.g. "0x20 : NP" (RFC 8666 §5).
+fn format_prefix_sid_flags(flags: &ospf_packet::PrefixSidFlags) -> String {
+    let mut names = Vec::new();
+    if flags.np_flag() {
+        names.push("NP");
+    }
+    if flags.m_flag() {
+        names.push("M");
+    }
+    if flags.e_flag() {
+        names.push("E");
+    }
+    if flags.v_flag() {
+        names.push("V");
+    }
+    if flags.l_flag() {
+        names.push("L");
+    }
+    let joined = if names.is_empty() {
+        "-".to_string()
+    } else {
+        names.join("|")
+    };
+    format!("0x{:02x} : {}", u8::from(*flags), joined)
+}
+
+fn write_v3_asla_sub(
+    out: &mut String,
+    asla: &ospf_packet::Ospfv3AslaSubTlv,
+) -> Result<(), std::fmt::Error> {
+    use ospf_packet::Ospfv3AslaSubSubTlv;
+    writeln!(out, "    Application-Specific Link Attributes Sub-TLV:")?;
+    writeln!(out, "      SABM: {:02x?}", asla.sabm)?;
+    if !asla.udabm.is_empty() {
+        writeln!(out, "      UDABM: {:02x?}", asla.udabm)?;
+    }
+    for sub in &asla.subs {
+        match sub {
+            Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => {
+                writeln!(out, "      Extended Admin Group = {:08x?}", g.words)?;
+            }
+            Ospfv3AslaSubSubTlv::Unknown { typ, value } => {
+                writeln!(
+                    out,
+                    "      Unknown Sub-sub-TLV: type={} len={}",
+                    typ,
+                    value.len()
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Render one RFC 8362 sub-TLV nested under a Router-Link or
+/// Intra-Area-Prefix TLV.
+fn write_v3_sub_tlv(
+    out: &mut String,
+    sub: &ospf_packet::Ospfv3SubTlv,
+) -> Result<(), std::fmt::Error> {
+    use ospf_packet::Ospfv3SubTlv;
+    match sub {
+        Ospfv3SubTlv::PrefixSid(sid) => {
+            writeln!(out, "    Prefix-SID Sub-TLV:")?;
+            writeln!(out, "      Flags: {}", format_prefix_sid_flags(&sid.flags))?;
+            writeln!(
+                out,
+                "      Algorithm: {} ({})",
+                u8::from(sid.algo),
+                format_algo(&sid.algo)
+            )?;
+            writeln!(out, "      SID/Label: {}", format_sid_label(&sid.sid))?;
+        }
+        Ospfv3SubTlv::AdjSid(adj) => {
+            writeln!(out, "    Adj-SID Sub-TLV:")?;
+            writeln!(out, "      Flags: {}", format_adj_sid_flags(&adj.flags))?;
+            writeln!(out, "      Weight: {}", adj.weight)?;
+            writeln!(out, "      SID/Label: {}", format_sid_label(&adj.sid))?;
+        }
+        Ospfv3SubTlv::LanAdjSid(lan) => {
+            writeln!(out, "    LAN Adj-SID Sub-TLV:")?;
+            writeln!(out, "      Flags: {}", format_adj_sid_flags(&lan.flags))?;
+            writeln!(out, "      Weight: {}", lan.weight)?;
+            writeln!(out, "      Neighbor Router ID: {}", lan.neighbor_router_id)?;
+            writeln!(out, "      SID/Label: {}", format_sid_label(&lan.sid))?;
+        }
+        Ospfv3SubTlv::Asla(asla) => {
+            write_v3_asla_sub(out, asla)?;
+        }
+        Ospfv3SubTlv::Unknown { typ, value } => {
+            writeln!(out, "    Unknown Sub-TLV: type={} len={}", typ, value.len())?;
+        }
+    }
+    Ok(())
+}
+
+/// Render an RFC 8362 Extended LSA body TLV-by-TLV — the v3 analogue
+/// of v2's `show_ext_link_detail` / `show_router_info_detail`.
+fn write_ext_lsa_body(
+    out: &mut String,
+    body: &ospf_packet::Ospfv3ELsaBody,
+) -> Result<(), std::fmt::Error> {
+    use ospf_packet::{Ospfv3ExtTlv, Ospfv3FadSubTlv};
+    for tlv in &body.tlvs {
+        match tlv {
+            Ospfv3ExtTlv::RouterLink(rl) => {
+                writeln!(
+                    out,
+                    "  Router-Link TLV: Type: {}",
+                    router_link_type_name(rl.link.link_type)
+                )?;
+                writeln!(out, "    Metric: {}", rl.link.metric)?;
+                writeln!(out, "    Interface ID: {}", rl.link.interface_id)?;
+                writeln!(
+                    out,
+                    "    Neighbor Interface ID: {}",
+                    rl.link.neighbor_interface_id
+                )?;
+                writeln!(
+                    out,
+                    "    Neighbor Router ID: {}",
+                    rl.link.neighbor_router_id
+                )?;
+                for sub in &rl.subs {
+                    write_v3_sub_tlv(out, sub)?;
+                }
+            }
+            Ospfv3ExtTlv::IntraAreaPrefix(p) => {
+                writeln!(out, "  Intra-Area-Prefix TLV:")?;
+                writeln!(out, "    Metric: {}", p.metric)?;
+                writeln!(
+                    out,
+                    "    Prefix: {} (Options: {})",
+                    format_v3_prefix(p.prefix_length, &p.address_prefix),
+                    format_prefix_options(p.prefix_options)
+                )?;
+                writeln!(
+                    out,
+                    "    Reference: {} Id: {} Adv: {}",
+                    ls_type_name(p.referenced_ls_type as u16),
+                    p.referenced_link_state_id,
+                    p.referenced_advertising_router
+                )?;
+                for sub in &p.subs {
+                    write_v3_sub_tlv(out, sub)?;
+                }
+            }
+            Ospfv3ExtTlv::SrAlgorithm(a) => {
+                writeln!(out, "  SR-Algorithm TLV:")?;
+                for algo in &a.algos {
+                    writeln!(
+                        out,
+                        "    Algorithm {}: {}",
+                        u8::from(*algo),
+                        format_algo(algo)
+                    )?;
+                }
+            }
+            Ospfv3ExtTlv::SidLabelRange(r) => {
+                writeln!(out, "  SID/Label Range TLV (SRGB):")?;
+                writeln!(out, "    Range Size: {}", r.range)?;
+                writeln!(out, "    SID/Label: {}", format_sid_label(&r.sid_label))?;
+            }
+            Ospfv3ExtTlv::SrLocalBlock(lb) => {
+                writeln!(out, "  SR Local Block TLV (SRLB):")?;
+                writeln!(out, "    Range Size: {}", lb.range)?;
+                writeln!(out, "    SID/Label: {}", format_sid_label(&lb.sid_label))?;
+            }
+            Ospfv3ExtTlv::Fad(fad) => {
+                writeln!(out, "  Flexible Algorithm Definition TLV:")?;
+                writeln!(out, "    Flex-Algorithm = {}", fad.flex_algorithm)?;
+                let metric = match fad.metric_type {
+                    0 => "IGP",
+                    1 => "Min Unidirectional Link Delay",
+                    2 => "TE Default",
+                    _ => "Unknown",
+                };
+                writeln!(out, "    Metric-Type = {} ({})", fad.metric_type, metric)?;
+                writeln!(out, "    Calc-Type = {}", fad.calc_type)?;
+                writeln!(out, "    Priority = {}", fad.priority)?;
+                for sub in &fad.subs {
+                    match sub {
+                        Ospfv3FadSubTlv::ExcludeAg(g) => {
+                            writeln!(out, "    Exclude Admin Group = {:08x?}", g.words)?;
+                        }
+                        Ospfv3FadSubTlv::IncludeAnyAg(g) => {
+                            writeln!(out, "    Include-Any Admin Group = {:08x?}", g.words)?;
+                        }
+                        Ospfv3FadSubTlv::IncludeAllAg(g) => {
+                            writeln!(out, "    Include-All Admin Group = {:08x?}", g.words)?;
+                        }
+                        Ospfv3FadSubTlv::Flags(fl) => {
+                            writeln!(out, "    Flags: M-flag = {}", fl.m_flag)?;
+                        }
+                        Ospfv3FadSubTlv::ExcludeSrlg(s) => {
+                            writeln!(out, "    Exclude SRLG = {:?}", s.srlgs)?;
+                        }
+                        Ospfv3FadSubTlv::Unknown { typ, value } => {
+                            writeln!(out, "    Unknown Sub-TLV: type={} len={}", typ, value.len())?;
+                        }
+                    }
+                }
+            }
+            Ospfv3ExtTlv::Unknown { typ, value } => {
+                writeln!(out, "  Unknown TLV: type={} len={}", typ, value.len())?;
+            }
         }
     }
     Ok(())
@@ -1853,5 +2089,111 @@ mod tests {
             "E-Intra-Area-Prefix-LSA"
         );
         assert_eq!(ls_type_name(0x1FFF), "Unknown");
+    }
+
+    fn render_ext_body(lsa: &ospf_packet::Ospfv3Lsa) -> String {
+        let mut out = String::new();
+        match &lsa.body {
+            Ospfv3LsBody::ERouter(b) | Ospfv3LsBody::EIntraAreaPrefix(b) => {
+                write_ext_lsa_body(&mut out, b).unwrap();
+            }
+            other => panic!("unexpected body: {:?}", other),
+        }
+        out
+    }
+
+    /// The SR-capabilities E-Router-LSA must render the SRGB / SRLB
+    /// ranges and the algorithm list — `show ipv6 ospf database
+    /// detail` regressed to bare TLV names once; these pin the
+    /// field-level output.
+    #[test]
+    fn ext_lsa_detail_renders_sr_capabilities() {
+        use crate::ospf::srmpls::{
+            SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, e_router_v3_sr_info_lsa_build,
+        };
+        use ospf_packet::Algo;
+
+        let lsa =
+            e_router_v3_sr_info_lsa_build("10.0.0.1".parse().unwrap(), vec![Algo::Spf], Vec::new());
+        let out = render_ext_body(&lsa);
+        assert!(out.contains("SR-Algorithm TLV:"), "{out}");
+        assert!(out.contains("Algorithm 0: SPF"), "{out}");
+        assert!(out.contains("SID/Label Range TLV (SRGB):"), "{out}");
+        assert!(
+            out.contains(&format!("Range Size: {}", SRGB_RANGE)),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("SID/Label: Label: {}", SRGB_START)),
+            "{out}"
+        );
+        assert!(out.contains("SR Local Block TLV (SRLB):"), "{out}");
+        assert!(
+            out.contains(&format!("Range Size: {}", SRLB_RANGE)),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("SID/Label: Label: {}", SRLB_START)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn ext_lsa_detail_renders_adj_sid() {
+        use crate::ospf::link::AdjacencySid;
+        use crate::ospf::srmpls::{build_v3_p2p_adj_sub, e_router_v3_lsa_build};
+        use ospf_packet::Ospfv3RouterLinkType;
+
+        let lsa = e_router_v3_lsa_build(
+            "10.0.0.1".parse().unwrap(),
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            1648,
+            1647,
+            "10.0.0.2".parse().unwrap(),
+            vec![build_v3_p2p_adj_sub(&AdjacencySid::Absolute(15003))],
+            1648,
+        );
+        let out = render_ext_body(&lsa);
+        assert!(
+            out.contains("Router-Link TLV: Type: Point-to-Point"),
+            "{out}"
+        );
+        assert!(out.contains("Metric: 10"), "{out}");
+        assert!(out.contains("Neighbor Router ID: 10.0.0.2"), "{out}");
+        assert!(out.contains("Adj-SID Sub-TLV:"), "{out}");
+        // Absolute label => V|L set (RFC 8666 §6.1) — the dynamic
+        // SRLB Adj-SIDs advertise in exactly this form.
+        assert!(out.contains("Flags: 0x60 : V|L"), "{out}");
+        assert!(out.contains("SID/Label: Label: 15003"), "{out}");
+    }
+
+    #[test]
+    fn ext_lsa_detail_renders_prefix_sid() {
+        use crate::ospf::link::PrefixSid;
+        use crate::ospf::srmpls::ext_intra_area_prefix_v3_lsa_build;
+        use std::collections::BTreeMap;
+
+        let lsa = ext_intra_area_prefix_v3_lsa_build(
+            "10.0.0.1".parse().unwrap(),
+            "2001:db8::1/128".parse().unwrap(),
+            Some(&PrefixSid::Index(100)),
+            &BTreeMap::new(),
+            1,
+            0,
+        );
+        let out = render_ext_body(&lsa);
+        assert!(out.contains("Intra-Area-Prefix TLV:"), "{out}");
+        assert!(out.contains("Prefix: 2001:db8::1/128"), "{out}");
+        assert!(
+            out.contains("Reference: Router-LSA Id: 0 Adv: 10.0.0.1"),
+            "{out}"
+        );
+        assert!(out.contains("Prefix-SID Sub-TLV:"), "{out}");
+        // Index form carries NP (no-PHP) per the v3 origination
+        // path; NP is the top bit of the flags octet.
+        assert!(out.contains("Flags: 0x80 : NP"), "{out}");
+        assert!(out.contains("Algorithm: 0 (SPF)"), "{out}");
+        assert!(out.contains("SID/Label: Index: 100"), "{out}");
     }
 }
