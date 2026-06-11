@@ -1,5 +1,6 @@
-//! ICMPv6 packet structs: Router Advertisement (134) and Router
-//! Solicitation (133). RFC 4861 §4.1 / §4.2.
+//! ICMPv6 packet structs for all four RFC 4861 message types:
+//! Router Solicitation (133), Router Advertisement (134),
+//! Neighbor Solicitation (135), and Neighbor Advertisement (136).
 
 use std::net::Ipv6Addr;
 
@@ -161,6 +162,28 @@ impl RouterAdvert {
     }
 }
 
+/// Minimum size of a Neighbor Solicitation (RFC 4861 §4.3). ICMPv6
+/// header (4) + reserved (4) + target address (16).
+pub const MIN_NS_LEN: usize = 24;
+
+/// Minimum size of a Neighbor Advertisement (RFC 4861 §4.4). ICMPv6
+/// header (4) + flags/reserved (4) + target address (16).
+pub const MIN_NA_LEN: usize = 24;
+
+bitflags::bitflags! {
+    /// Flags from the Neighbor Advertisement header (RFC 4861 §4.4).
+    /// These occupy the first byte of the 4-byte flags/reserved word.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct NaFlags: u8 {
+        /// Router flag — sender is a router.
+        const R = 0b1000_0000;
+        /// Solicited flag — sent in response to a Neighbor Solicitation.
+        const S = 0b0100_0000;
+        /// Override flag — should override an existing cache entry.
+        const O = 0b0010_0000;
+    }
+}
+
 /// Router Solicitation (RFC 4861 §4.1).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RouterSolicit {
@@ -218,6 +241,171 @@ impl RouterSolicit {
         buf.put_u8(0); // code
         buf.put_u16(0); // checksum placeholder
         buf.put_u32(0); // reserved
+        for opt in &self.options {
+            opt.emit(buf);
+        }
+    }
+}
+
+/// Neighbor Solicitation (RFC 4861 §4.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborSolicit {
+    pub target: Ipv6Addr,
+    pub options: Vec<NdOption>,
+}
+
+impl NeighborSolicit {
+    /// Parse a Neighbor Solicitation from `payload`. If `verify_against`
+    /// is `Some((src, dst))`, the ICMPv6 checksum is verified using
+    /// those addresses; pass `None` if the socket already validated
+    /// (e.g. via `IPV6_CHECKSUM`).
+    pub fn parse(
+        payload: &[u8],
+        verify_against: Option<(Ipv6Addr, Ipv6Addr)>,
+    ) -> Result<Self, ParseError> {
+        if payload.len() < MIN_NS_LEN {
+            return Err(ParseError::TooShort);
+        }
+        let typ = payload[0];
+        if typ != Icmp6Type::NeighborSolicit.into() {
+            return Err(ParseError::UnsupportedType(typ));
+        }
+        let code = payload[1];
+        if code != 0 {
+            return Err(ParseError::NonZeroCode(code));
+        }
+        if let Some((src, dst)) = verify_against {
+            let mut zeroed = payload.to_vec();
+            zeroed[2] = 0;
+            zeroed[3] = 0;
+            let computed = compute_icmp6_checksum(src, dst, &zeroed);
+            let on_wire = u16::from_be_bytes([payload[2], payload[3]]);
+            if computed != on_wire {
+                return Err(ParseError::ChecksumMismatch);
+            }
+        }
+        // payload[4..8] is reserved per RFC 4861 §4.3.
+        let mut target_bytes = [0u8; 16];
+        target_bytes.copy_from_slice(&payload[8..24]);
+        let target = Ipv6Addr::from(target_bytes);
+
+        let mut options = Vec::new();
+        let mut rest = &payload[MIN_NS_LEN..];
+        while !rest.is_empty() {
+            let (opt, next) = NdOption::parse(rest)?;
+            options.push(opt);
+            rest = next;
+        }
+        Ok(Self { target, options })
+    }
+
+    /// Emit the NS into `buf` with the ICMPv6 checksum filled in for
+    /// the given source / destination addresses.
+    pub fn emit(&self, buf: &mut BytesMut, src: Ipv6Addr, dst: Ipv6Addr) {
+        let start = buf.len();
+        self.emit_without_checksum(buf);
+        let end = buf.len();
+        let cksum = compute_icmp6_checksum(src, dst, &buf[start..end]);
+        buf[start + 2] = (cksum >> 8) as u8;
+        buf[start + 3] = (cksum & 0xff) as u8;
+    }
+
+    /// Emit the NS into `buf` with the checksum field left as zero.
+    /// Useful when the kernel computes the checksum (`IPV6_CHECKSUM`
+    /// on `IPPROTO_ICMPV6` sockets).
+    pub fn emit_without_checksum(&self, buf: &mut BytesMut) {
+        buf.put_u8(Icmp6Type::NeighborSolicit.into());
+        buf.put_u8(0); // code
+        buf.put_u16(0); // checksum placeholder
+        buf.put_u32(0); // reserved
+        buf.put_slice(&self.target.octets());
+        for opt in &self.options {
+            opt.emit(buf);
+        }
+    }
+}
+
+/// Neighbor Advertisement (RFC 4861 §4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborAdvert {
+    pub flags: NaFlags,
+    pub target: Ipv6Addr,
+    pub options: Vec<NdOption>,
+}
+
+impl NeighborAdvert {
+    /// Parse a Neighbor Advertisement from `payload`. If `verify_against`
+    /// is `Some((src, dst))`, the ICMPv6 checksum is verified using
+    /// those addresses; pass `None` if the socket already validated
+    /// (e.g. via `IPV6_CHECKSUM`).
+    pub fn parse(
+        payload: &[u8],
+        verify_against: Option<(Ipv6Addr, Ipv6Addr)>,
+    ) -> Result<Self, ParseError> {
+        if payload.len() < MIN_NA_LEN {
+            return Err(ParseError::TooShort);
+        }
+        let typ = payload[0];
+        if typ != Icmp6Type::NeighborAdvert.into() {
+            return Err(ParseError::UnsupportedType(typ));
+        }
+        let code = payload[1];
+        if code != 0 {
+            return Err(ParseError::NonZeroCode(code));
+        }
+        if let Some((src, dst)) = verify_against {
+            let mut zeroed = payload.to_vec();
+            zeroed[2] = 0;
+            zeroed[3] = 0;
+            let computed = compute_icmp6_checksum(src, dst, &zeroed);
+            let on_wire = u16::from_be_bytes([payload[2], payload[3]]);
+            if computed != on_wire {
+                return Err(ParseError::ChecksumMismatch);
+            }
+        }
+        // payload[4] = flags byte; payload[5..8] = reserved per RFC 4861 §4.4.
+        let flags = NaFlags::from_bits_truncate(payload[4]);
+        let mut target_bytes = [0u8; 16];
+        target_bytes.copy_from_slice(&payload[8..24]);
+        let target = Ipv6Addr::from(target_bytes);
+
+        let mut options = Vec::new();
+        let mut rest = &payload[MIN_NA_LEN..];
+        while !rest.is_empty() {
+            let (opt, next) = NdOption::parse(rest)?;
+            options.push(opt);
+            rest = next;
+        }
+        Ok(Self {
+            flags,
+            target,
+            options,
+        })
+    }
+
+    /// Emit the NA into `buf` with the ICMPv6 checksum filled in for
+    /// the given source / destination addresses.
+    pub fn emit(&self, buf: &mut BytesMut, src: Ipv6Addr, dst: Ipv6Addr) {
+        let start = buf.len();
+        self.emit_without_checksum(buf);
+        let end = buf.len();
+        let cksum = compute_icmp6_checksum(src, dst, &buf[start..end]);
+        buf[start + 2] = (cksum >> 8) as u8;
+        buf[start + 3] = (cksum & 0xff) as u8;
+    }
+
+    /// Emit the NA into `buf` with the checksum field left as zero.
+    /// Useful when the kernel computes the checksum (`IPV6_CHECKSUM`
+    /// on `IPPROTO_ICMPV6` sockets).
+    pub fn emit_without_checksum(&self, buf: &mut BytesMut) {
+        buf.put_u8(Icmp6Type::NeighborAdvert.into());
+        buf.put_u8(0); // code
+        buf.put_u16(0); // checksum placeholder
+        buf.put_u8(self.flags.bits());
+        buf.put_u8(0); // reserved[0]
+        buf.put_u8(0); // reserved[1]
+        buf.put_u8(0); // reserved[2]
+        buf.put_slice(&self.target.octets());
         for opt in &self.options {
             opt.emit(buf);
         }
@@ -348,5 +536,181 @@ mod tests {
     fn ra_too_short_is_rejected() {
         let wire = hex!("86 00 00 00");
         assert_eq!(RouterAdvert::parse(&wire, None), Err(ParseError::TooShort));
+    }
+
+    // ── Neighbor Solicitation tests ──────────────────────────────────────
+
+    #[test]
+    fn ns_minimal_round_trip() {
+        // NS to solicited-node multicast for fe80::2 (ff02::1:ff00:2).
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let src = ll("fe80::1");
+        let dst: Ipv6Addr = "ff02::1:ff00:2".parse().unwrap();
+        let ns = NeighborSolicit {
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        ns.emit(&mut buf, src, dst);
+        assert_eq!(buf.len(), MIN_NS_LEN);
+
+        let parsed = NeighborSolicit::parse(&buf, Some((src, dst))).unwrap();
+        assert_eq!(parsed, ns);
+    }
+
+    #[test]
+    fn ns_with_source_lla() {
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let src = ll("fe80::1");
+        let dst: Ipv6Addr = "ff02::1:ff00:2".parse().unwrap();
+        let ns = NeighborSolicit {
+            target,
+            options: vec![NdOption::SourceLinkLayerAddress(
+                LinkLayerAddress::ethernet([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]),
+            )],
+        };
+        let mut buf = BytesMut::new();
+        ns.emit(&mut buf, src, dst);
+        let parsed = NeighborSolicit::parse(&buf, Some((src, dst))).unwrap();
+        assert_eq!(parsed, ns);
+    }
+
+    #[test]
+    fn ns_dad_unspecified_source() {
+        // DAD: source is ::, destination is the solicited-node multicast
+        // address of the tentative address. The codec is address-agnostic
+        // and should round-trip cleanly.
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let src: Ipv6Addr = "::".parse().unwrap();
+        let dst: Ipv6Addr = "ff02::1:ff00:2".parse().unwrap();
+        let ns = NeighborSolicit {
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        ns.emit(&mut buf, src, dst);
+        let parsed = NeighborSolicit::parse(&buf, Some((src, dst))).unwrap();
+        assert_eq!(parsed, ns);
+    }
+
+    #[test]
+    fn ns_rejects_non_zero_code() {
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let ns = NeighborSolicit {
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        ns.emit_without_checksum(&mut buf);
+        buf[1] = 1; // bad code
+        let res = NeighborSolicit::parse(&buf, None);
+        assert_eq!(res, Err(ParseError::NonZeroCode(1)));
+    }
+
+    #[test]
+    fn ns_too_short_is_rejected() {
+        // 0x87 = 135 (NS type), but only 8 bytes — shorter than MIN_NS_LEN (24).
+        let wire = hex!("87 00 00 00 00 00 00 00");
+        assert_eq!(
+            NeighborSolicit::parse(&wire, None),
+            Err(ParseError::TooShort)
+        );
+    }
+
+    // ── Neighbor Advertisement tests ─────────────────────────────────────
+
+    #[test]
+    fn na_round_trip_with_flags_and_tlla() {
+        // Solicited reply: S + O flags, target fe80::2, TLLA option.
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let src = ll("fe80::2");
+        let dst = ll("fe80::1");
+        let na = NeighborAdvert {
+            flags: NaFlags::S | NaFlags::O,
+            target,
+            options: vec![NdOption::TargetLinkLayerAddress(
+                LinkLayerAddress::ethernet([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]),
+            )],
+        };
+        let mut buf = BytesMut::new();
+        na.emit(&mut buf, src, dst);
+        let parsed = NeighborAdvert::parse(&buf, Some((src, dst))).unwrap();
+        assert_eq!(parsed, na);
+    }
+
+    #[test]
+    fn na_flags_wire_position() {
+        // Emit NA with only R flag and no checksum; assert that byte[4]
+        // is 0x80 (R bit) and bytes[5..8] are all zero — pins the flag
+        // byte position per RFC 4861 §4.4.
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let na = NeighborAdvert {
+            flags: NaFlags::R,
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        na.emit_without_checksum(&mut buf);
+        assert_eq!(buf[4], 0x80);
+        assert_eq!(buf[5], 0x00);
+        assert_eq!(buf[6], 0x00);
+        assert_eq!(buf[7], 0x00);
+    }
+
+    #[test]
+    fn na_checksum_mismatch_is_caught() {
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let src = ll("fe80::2");
+        let dst = ll("fe80::1");
+        let na = NeighborAdvert {
+            flags: NaFlags::S | NaFlags::O,
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        na.emit(&mut buf, src, dst);
+        // Verify against wrong destination — checksum should fail.
+        let res = NeighborAdvert::parse(&buf, Some((src, ll("fe80::2"))));
+        assert_eq!(res, Err(ParseError::ChecksumMismatch));
+    }
+
+    #[test]
+    fn na_rejects_wrong_type() {
+        // Feed an NS wire image (type 0x87 = 135) to NeighborAdvert::parse.
+        // The message is MIN_NA_LEN bytes long so it passes the length check.
+        let target: Ipv6Addr = "fe80::2".parse().unwrap();
+        let ns = NeighborSolicit {
+            target,
+            options: vec![],
+        };
+        let mut buf = BytesMut::new();
+        ns.emit_without_checksum(&mut buf);
+        let res = NeighborAdvert::parse(&buf, None);
+        assert_eq!(res, Err(ParseError::UnsupportedType(135)));
+    }
+
+    #[test]
+    fn na_parse_known_wire() {
+        // Hand-crafted NA wire image:
+        //   type=0x88 (136), code=0x00, checksum=0x0000 (skipped),
+        //   flags=0x60 (S|O), reserved=0x00 0x00 0x00,
+        //   target=fe80::2 (fe80:0000:...:0002),
+        //   TLLA option: type=02 len=01 mac=52:54:00:ab:cd:ef
+        let wire = hex!(
+            "88 00 00 00 "          // type, code, checksum
+            "60 00 00 00 "          // flags=S|O, reserved
+            "fe 80 00 00 00 00 00 00 00 00 00 00 00 00 00 02 " // target fe80::2
+            "02 01 52 54 00 ab cd ef" // TLLA option
+        );
+        let na = NeighborAdvert::parse(&wire, None).unwrap();
+        assert_eq!(na.flags, NaFlags::S | NaFlags::O);
+        assert_eq!(na.target, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(na.options.len(), 1);
+        assert_eq!(
+            na.options[0],
+            NdOption::TargetLinkLayerAddress(LinkLayerAddress::ethernet([
+                0x52, 0x54, 0x00, 0xab, 0xcd, 0xef
+            ]))
+        );
     }
 }

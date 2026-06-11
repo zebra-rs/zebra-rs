@@ -823,6 +823,22 @@ pub struct Peer {
     /// show path gates on state rather than clearing this on teardown.
     /// `None` until the first session comes up. See [`super::mss`].
     pub tcp_mss_synced: Option<u16>,
+
+    /// When the first `NdEvent::NeighborDiscovered` materialized this
+    /// interface-keyed peer. `None` for address-keyed peers and for
+    /// dormant peers created at config time before any RA has arrived.
+    pub nd_discovered_at: Option<Instant>,
+    /// Timestamp of the most recent `NdEvent::NeighborDiscovered` for
+    /// this peer. Updated on every RA that refreshes the remote
+    /// link-local; equal to `nd_discovered_at` right after the first
+    /// event.  `None` in the same cases as `nd_discovered_at`.
+    pub nd_refreshed_at: Option<Instant>,
+    /// Running total of `NdEvent::NeighborDiscovered` events applied to
+    /// this peer. 0 for address-keyed and dormant peers; 1 after the
+    /// first RA; incremented on every subsequent refresh. The render
+    /// path reports `nd_event_count.saturating_sub(1)` as the refresh
+    /// count (events after the initial discovery).
+    pub nd_event_count: u64,
 }
 
 impl Peer {
@@ -901,6 +917,9 @@ impl Peer {
             tracing: super::tracing::BgpTracing::default(),
             tracing_instance: super::tracing::BgpTracing::default(),
             tcp_mss_synced: None,
+            nd_discovered_at: None,
+            nd_refreshed_at: None,
+            nd_event_count: 0,
         };
         peer.config
             .mp

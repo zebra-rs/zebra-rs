@@ -730,6 +730,19 @@ module exec {
           }
         }
       }
+      container nd {
+        ext:help "IPv6 neighbor discovery";
+        presence "Show IPv6 ND status";
+        list interface {
+          ext:help "ND status per interface";
+          ext:presence "Show all interfaces";
+          key if-name;
+          leaf if-name {
+            ext:dynamic "rib:interface";
+            type string;
+          }
+        }
+      }
       container ospf {
         ext:help "OSPFv3 commands";
         presence "OSPFv3 instance";

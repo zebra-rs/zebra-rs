@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
+use std::time::Instant;
 
 use super::Bgp;
 use super::peer::Peer;
@@ -125,6 +126,7 @@ fn materialize(
     if let Some(existing) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex)) {
         if let Some(link_local) = link_local {
             existing.address = link_local.into();
+            nd_mark_refreshed(existing, Instant::now());
             // No-op on a running peer (`start()` gates on `!active`);
             // a dormant one leaves Idle now that it can dial.
             existing.start();
@@ -157,6 +159,11 @@ fn materialize(
     // path in `peer_start_connection` reads this back out and
     // builds the SocketAddrV6 accordingly.
     peer.scope_id = Some(ifindex);
+    // Record the ND discovery timestamp only when an RA-learned
+    // link-local is being set (not for dormant pre-RA peers).
+    if link_local.is_some() {
+        nd_mark_discovered(&mut peer, Instant::now());
+    }
     // Stamp the group back-reference whenever the cfg carries one —
     // it drives every inheritable attribute (afi-safi today), not just
     // remote-as, so the reactive sweeps on group changes can find this
@@ -191,6 +198,34 @@ fn materialize(
     // (no RA yet — the RA path upgrades them in place).
     peer.start();
     Some(peer.ident)
+}
+
+/// Stamp the initial ND discovery fields on a freshly created
+/// interface-keyed peer. Called exactly once — on the create path
+/// when a link-local is available (`link_local.is_some()`).
+///
+/// Extracted so unit tests can exercise the field-update semantics
+/// on a plain `Peer` without constructing a full `Bgp`.
+fn nd_mark_discovered(peer: &mut super::peer::Peer, now: Instant) {
+    peer.nd_discovered_at = Some(now);
+    peer.nd_refreshed_at = Some(now);
+    peer.nd_event_count = 1;
+}
+
+/// Update the ND refresh timestamp on an already-materialized
+/// interface-keyed peer when a subsequent RA arrives with a
+/// (possibly new) link-local.
+///
+/// `nd_discovered_at` is intentionally left unchanged — it records
+/// the first event only.
+fn nd_mark_refreshed(peer: &mut super::peer::Peer, now: Instant) {
+    // If the peer was created dormant (no RA yet), treat this first
+    // RA as the discovery event so both timestamps are set.
+    if peer.nd_discovered_at.is_none() {
+        peer.nd_discovered_at = Some(now);
+    }
+    peer.nd_refreshed_at = Some(now);
+    peer.nd_event_count = peer.nd_event_count.saturating_add(1);
 }
 
 /// `set router bgp interface-neighbor <name>` — list-key callback.
@@ -321,5 +356,77 @@ mod tests {
     #[test]
     fn materialize_unset_returns_none() {
         assert_eq!(RemoteAsSpec::Unset.materialize(64512), None);
+    }
+
+    /// Build a minimal Peer suitable for testing nd_mark_* helpers.
+    /// Uses a parked channel and a no-RIB context — no sockets are
+    /// opened and no timers fire during these synchronous tests.
+    fn make_peer() -> super::super::peer::Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        Box::leak(Box::new(rx));
+        super::super::peer::Peer::new(
+            0,
+            65001,
+            "1.1.1.1".parse().unwrap(),
+            65002,
+            "fe80::1".parse::<std::net::IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        )
+    }
+
+    /// After `nd_mark_discovered`: count == 1, both timestamps set
+    /// and equal.
+    #[test]
+    fn nd_mark_discovered_sets_all_three_fields() {
+        let mut peer = make_peer();
+        assert!(peer.nd_discovered_at.is_none());
+        assert_eq!(peer.nd_event_count, 0);
+
+        let t0 = Instant::now();
+        nd_mark_discovered(&mut peer, t0);
+
+        assert_eq!(peer.nd_event_count, 1);
+        assert_eq!(peer.nd_discovered_at, Some(t0));
+        assert_eq!(peer.nd_refreshed_at, Some(t0));
+    }
+
+    /// After a subsequent `nd_mark_refreshed`: count increments,
+    /// `nd_refreshed_at` advances, `nd_discovered_at` stays.
+    #[test]
+    fn nd_mark_refreshed_increments_count_and_updates_refresh_only() {
+        let mut peer = make_peer();
+        let t0 = Instant::now();
+        nd_mark_discovered(&mut peer, t0);
+
+        // Simulate a later RA arriving.
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        nd_mark_refreshed(&mut peer, t1);
+
+        assert_eq!(peer.nd_event_count, 2);
+        // Discovery timestamp must not change.
+        assert_eq!(peer.nd_discovered_at, Some(t0));
+        // Refresh timestamp must advance.
+        assert_eq!(peer.nd_refreshed_at, Some(t1));
+    }
+
+    /// A dormant peer (created at config time, no RA yet) has all
+    /// three fields at their zero values. When its first RA arrives
+    /// via `nd_mark_refreshed`, both timestamps are set (treating
+    /// the first refresh as discovery).
+    #[test]
+    fn nd_mark_refreshed_on_dormant_peer_sets_discovered_at() {
+        let mut peer = make_peer();
+        // Dormant: no RA yet.
+        assert!(peer.nd_discovered_at.is_none());
+        assert_eq!(peer.nd_event_count, 0);
+
+        let t0 = Instant::now();
+        nd_mark_refreshed(&mut peer, t0);
+
+        assert_eq!(peer.nd_event_count, 1);
+        assert_eq!(peer.nd_discovered_at, Some(t0));
+        assert_eq!(peer.nd_refreshed_at, Some(t0));
     }
 }

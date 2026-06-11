@@ -1829,6 +1829,22 @@ struct Neighbor<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     neighbor_group: Option<String>,
     remote_as_inherited: bool,
+
+    /// Seconds elapsed since the first `NdEvent::NeighborDiscovered`
+    /// materialized this interface-keyed peer. `None` for
+    /// address-keyed peers and dormant peers that have never seen an
+    /// RA. Serialized in JSON for consumers that want the raw value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nd_discovered_secs_ago: Option<u64>,
+    /// Number of RA refresh events applied to this peer after the
+    /// initial discovery (`nd_event_count - 1`). `None` in the same
+    /// cases as `nd_discovered_secs_ago`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nd_refresh_count: Option<u64>,
+    /// Seconds elapsed since the most recent RA refresh. `None` in
+    /// the same cases as `nd_discovered_secs_ago`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nd_refreshed_secs_ago: Option<u64>,
 }
 
 const ONE_DAY_SECOND: u64 = 60 * 60 * 24;
@@ -1940,6 +1956,20 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         .unwrap_or_else(|| peer.config.timer.idle_hold_time());
     let connect_retry_timer_rem = peer.timer.connect_retry.as_ref().map(|t| t.rem_sec());
 
+    // Snapshot now once so all ND elapsed-time calculations are
+    // consistent within a single fetch call.
+    let now = Instant::now();
+    let nd_discovered_secs_ago = peer
+        .nd_discovered_at
+        .map(|t| now.saturating_duration_since(t).as_secs());
+    let nd_refresh_count = peer
+        .nd_event_count
+        .checked_sub(1)
+        .filter(|_| peer.nd_discovered_at.is_some());
+    let nd_refreshed_secs_ago = peer
+        .nd_refreshed_at
+        .map(|t| now.saturating_duration_since(t).as_secs());
+
     let mut n = Neighbor {
         address: peer.address,
         interface: peer.ifname.as_deref(),
@@ -1987,6 +2017,9 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         disable_connected_check: peer.config.transport.disable_connected_check,
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
+        nd_discovered_secs_ago,
+        nd_refresh_count,
+        nd_refreshed_secs_ago,
     };
 
     // Timers.
@@ -2007,6 +2040,27 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
     };
     n.count.insert("total", total);
     n
+}
+
+/// Format a number of seconds as `NhNmNs` (or just `Ns` / `NmNs`
+/// depending on magnitude).  Used for the ND discovery / refresh
+/// elapsed-time lines in `show bgp neighbors`.
+///
+/// Examples:
+/// * 27 → `"27s"`
+/// * 331 → `"5m31s"`
+/// * 3661 → `"1h1m1s"`
+fn format_nd_elapsed(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{}h{}m{}s", h, m, s)
+    } else if m > 0 {
+        format!("{}m{}s", m, s)
+    } else {
+        format!("{}s", s)
+    }
 }
 
 fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
@@ -2065,6 +2119,34 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         neighbor.timer_recv.hold_time,
         neighbor.timer_recv.keepalive,
     )?;
+
+    // ND discovery block — interface-keyed (unnumbered) peers only.
+    if let Some(discovered_secs) = neighbor.nd_discovered_secs_ago {
+        writeln!(
+            out,
+            "  Interface peer: link-local learned via IPv6 ND router advertisement"
+        )?;
+        let discovered_ago = format_nd_elapsed(discovered_secs);
+        match neighbor.nd_refresh_count {
+            Some(0) | None => {
+                writeln!(out, "  Discovered {} ago", discovered_ago)?;
+            }
+            Some(refreshes) => {
+                let refreshed_ago = neighbor
+                    .nd_refreshed_secs_ago
+                    .map(format_nd_elapsed)
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "  Discovered {} ago, refreshed {} time{} (last {} ago)",
+                    discovered_ago,
+                    refreshes,
+                    if refreshes == 1 { "" } else { "s" },
+                    refreshed_ago,
+                )?;
+            }
+        }
+    }
 
     // Display timer expiry information
     if let Some(keepalive_rem) = neighbor.keepalive_timer_rem {
@@ -3344,6 +3426,141 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             "unknown name reports cleanly:\n{out}"
         );
     }
+
+    /// Build a `Neighbor` DTO directly (all-`None` ND fields) and
+    /// verify that `render` does NOT emit any ND block — address-keyed
+    /// peers must be unaffected.
+    #[test]
+    fn nd_block_absent_for_address_keyed_peer() {
+        let mut out = String::new();
+        let n = minimal_neighbor(None);
+        render(&mut out, &n).unwrap();
+        assert!(
+            !out.contains("Interface peer:"),
+            "address-keyed peer must not get ND block:\n{out}"
+        );
+    }
+
+    /// An interface-keyed peer with ND discovery data (no refreshes
+    /// yet) renders the "Discovered N ago" line but not the refresh
+    /// clause.
+    #[test]
+    fn nd_block_discovery_only_no_refresh() {
+        let mut out = String::new();
+        let mut n = minimal_neighbor(Some("enp0s5"));
+        // 331 seconds = 5m31s
+        n.nd_discovered_secs_ago = Some(331);
+        n.nd_refresh_count = Some(0);
+        n.nd_refreshed_secs_ago = Some(331);
+        render(&mut out, &n).unwrap();
+        assert!(
+            out.contains("Interface peer: link-local learned via IPv6 ND router advertisement"),
+            "ND header line missing:\n{out}"
+        );
+        assert!(
+            out.contains("Discovered 5m31s ago"),
+            "discovery line missing:\n{out}"
+        );
+        assert!(
+            !out.contains("refreshed"),
+            "no refresh clause when count is 0:\n{out}"
+        );
+    }
+
+    /// An interface-keyed peer with multiple refresh events renders
+    /// the full "Discovered … ago, refreshed N times (last … ago)" form.
+    #[test]
+    fn nd_block_with_refreshes() {
+        let mut out = String::new();
+        let mut n = minimal_neighbor(Some("enp0s5"));
+        n.nd_discovered_secs_ago = Some(331); // 5m31s
+        n.nd_refresh_count = Some(12);
+        n.nd_refreshed_secs_ago = Some(27); // 27s
+        render(&mut out, &n).unwrap();
+        assert!(
+            out.contains("Discovered 5m31s ago, refreshed 12 times (last 27s ago)"),
+            "full refresh line missing:\n{out}"
+        );
+    }
+
+    /// JSON output for an interface-keyed peer carries the three ND
+    /// fields; an address-keyed peer must not carry them.
+    #[test]
+    fn nd_fields_in_json_interface_peer_only() {
+        // Interface-keyed peer with ND data.
+        let mut n = minimal_neighbor(Some("enp0s5"));
+        n.nd_discovered_secs_ago = Some(331);
+        n.nd_refresh_count = Some(12);
+        n.nd_refreshed_secs_ago = Some(27);
+        let json_str = serde_json::to_string(&n).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["nd_discovered_secs_ago"], 331);
+        assert_eq!(v["nd_refresh_count"], 12);
+        assert_eq!(v["nd_refreshed_secs_ago"], 27);
+
+        // Address-keyed peer: ND fields must be absent.
+        let n2 = minimal_neighbor(None);
+        let json_str2 = serde_json::to_string(&n2).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&json_str2).unwrap();
+        assert!(
+            v2.get("nd_discovered_secs_ago").is_none(),
+            "address-keyed peer must not carry nd_discovered_secs_ago"
+        );
+        assert!(
+            v2.get("nd_refresh_count").is_none(),
+            "address-keyed peer must not carry nd_refresh_count"
+        );
+        assert!(
+            v2.get("nd_refreshed_secs_ago").is_none(),
+            "address-keyed peer must not carry nd_refreshed_secs_ago"
+        );
+    }
+
+    /// Helper: build a minimal `Neighbor<'static>` with placeholder
+    /// values — only the fields under test need to be non-default.
+    fn minimal_neighbor(interface: Option<&'static str>) -> Neighbor<'static> {
+        use std::collections::HashMap as HM;
+        Neighbor {
+            address: "10.0.0.1".parse().unwrap(),
+            interface,
+            peer_type: "internal",
+            local_as: 65001,
+            remote_as: 65002,
+            local_router_id: Ipv4Addr::UNSPECIFIED,
+            remote_router_id: Ipv4Addr::UNSPECIFIED,
+            state: "Idle",
+            uptime: String::from("never"),
+            timer: PeerParam::default(),
+            timer_sent: PeerParam::default(),
+            timer_recv: PeerParam::default(),
+            keepalive_timer_rem: None,
+            hold_timer_rem: None,
+            idle_hold_timer_rem: None,
+            idle_hold_timer_next: 0,
+            connect_retry_timer_rem: None,
+            cap_send: BgpCap::default(),
+            cap_recv: BgpCap::default(),
+            cap_map: CapAfiMap::new(),
+            count: HM::default(),
+            reflector_client: false,
+            soft_reconfig_in: false,
+            allowas_in: None,
+            as_override: false,
+            remove_private_as: None,
+            enforce_first_as: false,
+            encapsulation_type_ipv6: None,
+            ttl_security: false,
+            ebgp_multihop: None,
+            tcp_mss: None,
+            tcp_mss_synced: None,
+            disable_connected_check: false,
+            neighbor_group: None,
+            remote_as_inherited: false,
+            nd_discovered_secs_ago: None,
+            nd_refresh_count: None,
+            nd_refreshed_secs_ago: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4227,5 +4444,30 @@ impl Bgp {
             .path("/show/bgp/vrf/ipv6/longer-prefix")
             .set(show_bgp_vrf_not_running)
             .map();
+    }
+}
+
+#[cfg(test)]
+mod nd_elapsed_tests {
+    use super::format_nd_elapsed;
+
+    #[test]
+    fn seconds_only() {
+        assert_eq!(format_nd_elapsed(0), "0s");
+        assert_eq!(format_nd_elapsed(27), "27s");
+        assert_eq!(format_nd_elapsed(59), "59s");
+    }
+
+    #[test]
+    fn minutes_and_seconds() {
+        assert_eq!(format_nd_elapsed(60), "1m0s");
+        assert_eq!(format_nd_elapsed(331), "5m31s");
+        assert_eq!(format_nd_elapsed(3599), "59m59s");
+    }
+
+    #[test]
+    fn hours_minutes_seconds() {
+        assert_eq!(format_nd_elapsed(3600), "1h0m0s");
+        assert_eq!(format_nd_elapsed(3661), "1h1m1s");
     }
 }

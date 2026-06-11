@@ -8,9 +8,9 @@
 //!     same check on inbound packets.
 //!   * `IPV6_RECVPKTINFO` on so the receive side learns the
 //!     destination address and arriving ifindex.
-//!   * `ICMP6_FILTER` scoped to RS (133) + RA (134) so neighbor
-//!     solicitation / advertisement (135 / 136) and the kernel's NDP
-//!     cache are left alone.
+//!   * `ICMP6_FILTER` scoped to RS (133) + RA (134) + NS (135) + NA
+//!     (136) so the daemon can passively observe NS/NA for counters
+//!     and diagnostics while leaving the kernel's NDP cache alone.
 //!
 //! Note: there is no `IPV6_CHECKSUM` setsockopt here on purpose. Linux
 //! returns `EINVAL` for `IPV6_CHECKSUM` on raw `IPPROTO_ICMPV6`
@@ -87,7 +87,7 @@ pub fn nd_socket() -> Result<AsyncFd<Socket>, SocketError> {
     // Note: no `IPV6_CHECKSUM` here — Linux returns EINVAL for that
     // option on raw ICMPv6 sockets; the kernel does the checksum for
     // us. See module-level docs.
-    let filter = Icmp6Filter::pass_only(&[133, 134]);
+    let filter = Icmp6Filter::pass_only(&[133, 134, 135, 136]);
     apply_icmp6_filter(&socket, &filter).map_err(SocketError::Filter)?;
 
     AsyncFd::new(socket).map_err(SocketError::AsyncFd)
@@ -227,11 +227,12 @@ mod tests {
 
     #[test]
     fn filter_pass_only_passes_listed_types() {
-        let f = Icmp6Filter::pass_only(&[133, 134]);
+        // The production socket now passes all four ND types.
+        let f = Icmp6Filter::pass_only(&[133, 134, 135, 136]);
         assert!(f.will_pass(133));
         assert!(f.will_pass(134));
-        assert!(!f.will_pass(135));
-        assert!(!f.will_pass(136));
+        assert!(f.will_pass(135));
+        assert!(f.will_pass(136));
         assert!(!f.will_pass(128));
         assert!(!f.will_pass(0));
     }
