@@ -133,6 +133,16 @@ impl Nd {
     }
 
     async fn event_loop(&mut self) {
+        // We will use this after "link name" -> "RIB link" bug is fixed.
+        // loop {
+        //     match self.rib_rx.recv().await {
+        //         Some(RibRx::EoR) => {
+        //             break;
+        //         }
+        //         Some(msg) => self.process_rib_msg(msg),
+        //         None => break,
+        //     }
+        // }
         loop {
             let wakeup = self.engine.next_wakeup();
             tokio::select! {
@@ -167,7 +177,7 @@ impl Nd {
         // BGP unnumbered hand-off needs to derive the local source
         // link-local in a follow-up PR).
         if let RibRx::LinkAdd(link) = msg {
-            self.engine.process_link_add(&link);
+            self.engine.process_link_add(&link, Instant::now());
         }
     }
 
