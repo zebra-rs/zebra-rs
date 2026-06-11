@@ -186,8 +186,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// kill — the origination side resolves the address back to a
     /// router-id at LSA build time.
     /// Used to drive LAN Adj-SID origination on broadcast/NBMA links
-    /// (RFC 8665 §6) and the matching local ILM install. Cleared when
-    /// SR-MPLS is disabled.
+    /// (RFC 8665 §6), the dynamic P2P Adj-SID fallback (advertised as
+    /// a local V|L label when no `adjacency-sid` is configured —
+    /// IS-IS-parity automatic allocation), and the matching local ILM
+    /// install. Cleared when SR-MPLS is disabled.
     pub lan_adj_sids: BTreeMap<(u32, Ipv4Addr), u32>,
     /// v3 IPv6 RIB shadow. Populated by
     /// `apply_routing_updates_v3` after each SPF run; diffed
@@ -1880,8 +1882,10 @@ impl Ospf<Ospfv2> {
     ///
     /// Originates when SR-MPLS is enabled, the link is enabled, has at
     /// least one Full neighbor, and either of:
-    ///   * P2P link with an `adjacency_sid` configured — one
-    ///     `AdjSidSubTlv` carrying the configured value.
+    ///   * P2P link — one `AdjSidSubTlv` carrying the configured
+    ///     `adjacency_sid` or, when none is configured, the SRLB
+    ///     label dynamically allocated on the Full transition
+    ///     (advertised as a local V|L Adj-SID, IS-IS parity).
     ///   * Broadcast / NBMA link with a known DR and at least one
     ///     entry in `lan_adj_sids` — one `LanAdjSidSubTlv` per Full
     ///     neighbor that has a label allocated, per RFC 8665 §6.
@@ -1927,6 +1931,14 @@ impl Ospf<Ospfv2> {
                         let mut subs = Vec::new();
                         if let Some(adjacency_sid) = link.config.adjacency_sid {
                             subs.push(super::srmpls::build_p2p_adj_sub(&adjacency_sid));
+                        } else if let Some(label) =
+                            self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))
+                        {
+                            // Dynamic SRLB Adj-SID fallback — see the
+                            // v3 sibling in `e_router_v3_lsa_originate`.
+                            subs.push(super::srmpls::build_p2p_adj_sub(
+                                &super::link::AdjacencySid::Absolute(*label),
+                            ));
                         }
                         if let Some(asla) = asla {
                             subs.push(asla);
@@ -3328,9 +3340,10 @@ impl Ospf<Ospfv2> {
         // Adjacency-SID label allocation. Each Full adjacency claims
         // one label out of the SRLB on transition into Full and
         // releases it on regression. The label is consumed by LAN
-        // Adj-SID origination (broadcast / NBMA links) and the matching
-        // local ILM install. Pool is only present when SR-MPLS is
-        // enabled, so this is a no-op otherwise.
+        // Adj-SID origination (broadcast / NBMA links), by the dynamic
+        // P2P Adj-SID fallback (no `adjacency-sid` configured), and by
+        // the matching local ILM install. Pool is only present when
+        // SR-MPLS is enabled, so this is a no-op otherwise.
         if new_state == NfsmState::Full
             && let Some(pool) = self.local_pool.as_mut()
             && let Some(label) = pool.allocate()
@@ -7249,8 +7262,10 @@ impl Ospf<Ospfv3> {
     ///
     /// Originates when SR-MPLS is on, the link is enabled, has at
     /// least one Full neighbor, and either of:
-    ///   * P2P link with an `adjacency_sid` configured -- one
-    ///     `AdjSid` sub-TLV with the configured value.
+    ///   * P2P link -- one `AdjSid` sub-TLV with the configured
+    ///     `adjacency_sid` or, when none is configured, the SRLB
+    ///     label dynamically allocated on the Full transition
+    ///     (advertised as a local V|L Adj-SID, IS-IS parity).
     ///   * Broadcast / NBMA link with a known DR and at least one
     ///     entry in `lan_adj_sids` -- one `LanAdjSid` sub-TLV per
     ///     Full neighbor that has a label allocated (RFC 8666 §6.2).
@@ -7291,6 +7306,16 @@ impl Ospf<Ospfv3> {
                         let mut subs = Vec::new();
                         if let Some(adjacency_sid) = link.config.adjacency_sid {
                             subs.push(super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid));
+                        } else if let Some(label) =
+                            self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))
+                        {
+                            // No configured Adj-SID: advertise the SRLB
+                            // label allocated on the Full transition as
+                            // a local (V|L) Adj-SID — IS-IS-parity
+                            // dynamic allocation, no config needed.
+                            subs.push(super::srmpls::build_v3_p2p_adj_sub(
+                                &super::link::AdjacencySid::Absolute(*label),
+                            ));
                         }
                         if let Some(a) = asla.clone() {
                             subs.push(a);
@@ -7566,8 +7591,10 @@ impl Ospf<Ospfv3> {
         // Adjacency-SID label allocation. Mirrors v2 (#850): each Full
         // adjacency claims one label out of the SRLB on transition
         // into Full and releases it on regression. Consumed by the
-        // LAN-Adj-SID origination path (broadcast / NBMA links).
-        // No-op when SR-MPLS is disabled (no pool present).
+        // LAN-Adj-SID origination path (broadcast / NBMA links) and
+        // by the dynamic P2P Adj-SID fallback (no `adjacency-sid`
+        // configured). No-op when SR-MPLS is disabled (no pool
+        // present).
         if new_state == NfsmState::Full
             && let Some(pool) = self.local_pool.as_mut()
             && let Some(label) = pool.allocate()

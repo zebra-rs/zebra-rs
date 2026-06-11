@@ -14,10 +14,11 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
   machinery (RFC 8362 E-LSAs instead of v2's Opaque LSAs). All links
   are point-to-point; every router enables `segment-routing mpls` and
   `fast-reroute ti-lfa`. Loopback Prefix-SIDs index 100..800 resolve
-  against the default SRGB (base 16000), and each link carries an
-  Adjacency-SID (index = <from><to> digit pair, s=1 n1=2 n2=3 n3=4
-  r1=5 r2=6 r3=7 d=8) — the repair encodes its mid-path hops as
-  Adj-SID segments.
+  against the default SRGB (base 16000). Adjacency-SIDs are NOT
+  configured: each router allocates one per Full adjacency out of its
+  SRLB (base 15000) automatically and advertises it as a local (V|L)
+  Adj-SID — IS-IS-parity dynamic allocation — and the repair encodes
+  its mid-path hops as those Adj-SID segments.
 
   The metrics are tuned so a simple LFA is impossible: s reaches d via
   s-n1 (cost 2); the only other neighbours (n2, n3) are equidistant /
@@ -29,7 +30,8 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
   legs already protect the prefix), so repairs exist exactly for r2,
   r3 and d — the single-nexthop destinations behind n1. Per RFC 9855
   §5.3, the repair for d is <Node-SID(r1), Adj-SID(r1-r2),
-  Adj-SID(r2-r3)> via first-hop n2: labels [16500, 16056, 16067].
+  Adj-SID(r2-r3)> via first-hop n2: labels [16500, 15xxx, 15yyy] —
+  the Adj-SID values are whatever r1 / r2 carved from their SRLBs.
 
   Test Topology (metric shown where != 1; loopback 2001:db8::X /
   SID X00 / router-id 10.0.0.X):
@@ -117,11 +119,13 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     # And the repairs are installed against the single-nexthop
     # loopbacks behind n1: r2, r3 and d (r1 itself is ECMP via n1/n2
     # and self-protects). Every repair starts with r1's node-SID label
-    # 16500.
+    # 16500, followed by dynamically allocated SRLB Adj-SID labels
+    # (15xxx — exact values depend on each router's allocation order,
+    # so the assertion pins the SRLB range, not a specific label).
     And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::6/128"
     And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::7/128"
     And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::8/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "16500"
+    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "[16500, 15"
     And show command "show ipv6 ospf repair-list detail" in namespace "s" should contain "sr-mpls"
 
   Scenario: Source reaches the destination over the primary path

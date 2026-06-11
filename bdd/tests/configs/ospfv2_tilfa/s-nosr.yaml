@@ -27,17 +27,11 @@ router:
         enable: true
         network-type: point-to-point
         cost: 1
-        adjacency-sid:
-          index: 12
       - if-name: s-n2
         enable: true
         network-type: point-to-point
         cost: 1
-        adjacency-sid:
-          index: 13
       - if-name: s-n3
         enable: true
         network-type: point-to-point
         cost: 1000
-        adjacency-sid:
-          index: 14

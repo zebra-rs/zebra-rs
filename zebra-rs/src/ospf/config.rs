@@ -1463,13 +1463,14 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
         ospf.ext_prefix_lsa_originate(ifindex);
     }
 
-    // Same for Extended Link LSAs (Adj-SID).
-    let ifindexes: Vec<u32> = ospf
-        .links
-        .iter()
-        .filter(|(_, link)| link.config.adjacency_sid.is_some())
-        .map(|(ifindex, _)| *ifindex)
-        .collect();
+    // Same for Extended Link LSAs (Adj-SID) — sweep every link
+    // unconditionally; the originator gates on mode + warrant itself
+    // (and flushes otherwise). Filtering on a configured
+    // `adjacency_sid` here broke both toggle directions once
+    // Adj-SIDs went dynamic: enable-after-Full never originated the
+    // P2P LSAs, and disable never flushed them (leaving stale
+    // self-ILM pops behind).
+    let ifindexes: Vec<u32> = ospf.links.keys().copied().collect();
     for ifindex in ifindexes {
         ospf.ext_link_lsa_originate(ifindex);
     }

@@ -32,23 +32,15 @@ router:
         enable: true
         network-type: point-to-point
         cost: 1
-        adjacency-sid:
-          index: 52
       - if-name: r1-n2
         enable: true
         network-type: point-to-point
         cost: 1
-        adjacency-sid:
-          index: 53
       - if-name: r1-n3
         enable: true
         network-type: point-to-point
         cost: 1000
-        adjacency-sid:
-          index: 54
       - if-name: r1-r2
         enable: true
         network-type: point-to-point
         cost: 1000
-        adjacency-sid:
-          index: 56

@@ -1595,10 +1595,13 @@ fn show_ospfv3_segment_routing(
             iface.prefix_sid.as_deref().unwrap_or("-"),
             iface.adjacency_sid.as_deref().unwrap_or("-"),
         )?;
+        // Dynamically allocated per-adjacency labels — LAN Adj-SIDs
+        // on broadcast/NBMA segments, plain Adj-SIDs on P2P links
+        // with no configured `adjacency-sid`; don't tag them "LAN".
         for lan in &iface.lan_adj_sids {
             writeln!(
                 text,
-                "  {:<12}  {:<14}  {:<14}  LAN nbr={} lbl={}",
+                "  {:<12}  {:<14}  {:<14}  nbr={} lbl={}",
                 "", "", "", lan.neighbor_router_id, lan.label
             )?;
         }
