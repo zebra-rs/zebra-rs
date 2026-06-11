@@ -1973,6 +1973,14 @@ impl Bgp {
                 // covered by simple insert-replaces-on-collision.
                 self.link_index_by_name
                     .insert(link.name.clone(), link.index);
+                // An `interface-neighbor` typed before RIB announced
+                // this link (config replay at startup races the link
+                // dump) materializes its dormant peer now, so the
+                // neighbor is listed by `show bgp summary` without
+                // waiting for the remote's first RA.
+                if self.interface_neighbors.contains_key(&link.name) {
+                    super::interface_neighbor::materialize_dormant(self, &link.name);
+                }
             }
             RibRx::AddrAdd(addr) => {
                 self.interface_addrs.record(&addr);

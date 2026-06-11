@@ -4643,6 +4643,127 @@ mod neighbor_group_wiring_tests {
         );
     }
 
+    // ---- interface-neighbor dormant materialization ---------------
+    // A configured `interface-neighbor` must exist as a Peer (and so
+    // be listed by `show bgp summary`) even when the remote node has
+    // never sent an RA — before dormant materialization the neighbor
+    // was invisible until the first NeighborDiscovered event.
+
+    /// Config alone (link already known to RIB) materializes a dormant
+    /// Idle peer; the first RA upgrades it in place — address learned,
+    /// FSM kicked — instead of re-creating it.
+    #[tokio::test]
+    async fn interface_neighbor_is_visible_before_first_ra() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+        use crate::bgp::peer::State;
+
+        let mut bgp = fresh_bgp();
+        // RIB announced the link; no RA has arrived.
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+
+        let peer = bgp
+            .peers
+            .get_by_key(&PeerKey::Interface(7))
+            .expect("dormant peer must materialize from config alone");
+        assert_eq!(peer.ifname.as_deref(), Some("i1"));
+        assert_eq!(peer.remote_as, 65002);
+        assert_eq!(peer.state, State::Idle);
+        assert!(peer.address.is_unspecified(), "no RA yet — no address");
+        assert!(!peer.active, "FSM must not dial an unspecified address");
+        let ident = peer.ident;
+
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("RA upgrades the peer");
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.ident, ident, "upgraded in place, not re-created");
+        assert_eq!(peer.address, IpAddr::from(link_local));
+        assert!(peer.active, "the first RA must kick the FSM");
+    }
+
+    /// Config typed before RIB announces the interface (startup config
+    /// replay races the link dump): the `RibRx::LinkAdd` arm must
+    /// materialize the dormant peer.
+    #[tokio::test]
+    async fn interface_neighbor_materializes_on_link_add() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            bgp.peers.get_by_key(&PeerKey::Interface(7)).is_none(),
+            "no link yet — nothing to key the peer by"
+        );
+
+        let link = crate::rib::Link {
+            index: 7,
+            name: "i1".to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: Default::default(),
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vxlan_local: None,
+            mtu_error: None,
+        };
+        bgp.process_rib_msg(crate::rib::api::RibRx::LinkAdd(link));
+
+        let peer = bgp
+            .peers
+            .get_by_key(&PeerKey::Interface(7))
+            .expect("LinkAdd must materialize the configured neighbor");
+        assert_eq!(peer.ifname.as_deref(), Some("i1"));
+        assert!(!peer.active, "still no RA — stays dormant");
+    }
+
+    /// The group supplies the remote-as after an interface-neighbor
+    /// referenced it: the group callback must surface the dormant
+    /// member — the remote-as sweep only reaches peers that already
+    /// exist.
+    #[tokio::test]
+    async fn group_remote_as_materializes_dormant_interface_member() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_neighbor_group,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_neighbor_group(&mut bgp, arg_words(&["i1", "G"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            bgp.peers.get_by_key(&PeerKey::Interface(7)).is_none(),
+            "no remote-as resolvable yet"
+        );
+
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65003"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp
+            .peers
+            .get_by_key(&PeerKey::Interface(7))
+            .expect("the group's remote-as completes the config gates");
+        assert_eq!(peer.remote_as, 65003);
+        assert!(peer.config.remote_as_inherited);
+        assert!(!peer.active, "still no RA — stays dormant");
+    }
+
     // ---- whole-session knob inheritance (ttl-security exemplar) --
 
     use super::super::neighbor_group::config_neighbor_group_ttl_security;

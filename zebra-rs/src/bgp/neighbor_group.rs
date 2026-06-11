@@ -151,6 +151,23 @@ pub fn config_neighbor_group_remote_as(bgp: &mut Bgp, mut args: Args, op: Config
         .remote_as = new_asn;
 
     sweep_peers_for_group(bgp, &name, new_asn);
+
+    // The group's remote-as can be the missing gate for an
+    // interface-neighbor that references this group but has no peer
+    // yet (interface known, no RA, no per-cfg remote-as) — the sweep
+    // above only reaches already-materialized peers. Surface those
+    // members as dormant peers so `show bgp summary` lists them.
+    if new_asn.is_some() {
+        let members: Vec<String> = bgp
+            .interface_neighbors
+            .iter()
+            .filter(|(_, cfg)| cfg.neighbor_group.as_deref() == Some(name.as_str()))
+            .map(|(ifname, _)| ifname.clone())
+            .collect();
+        for ifname in members {
+            super::interface_neighbor::materialize_dormant(bgp, &ifname);
+        }
+    }
     Some(())
 }
 
