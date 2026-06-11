@@ -22,7 +22,7 @@ use super::config::{
     parse_area_id,
 };
 use super::ifsm::{IfsmEvent, ospf_hello_timer};
-use super::link::OspfNetworkType;
+use super::link::{OSPF_DEFAULT_OUTPUT_COST, OspfNetworkType};
 use super::version::Ospfv3;
 use super::{Message, Ospf, OspfLink};
 
@@ -106,6 +106,7 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_network_type,
             ),
             ("/area/interface/priority", config_ospfv3_interface_priority),
+            ("/area/interface/cost", config_ospfv3_interface_cost),
             (
                 "/area/interface/hello-interval",
                 config_ospfv3_interface_hello_interval,
@@ -501,6 +502,41 @@ fn config_ospfv3_interface_priority(
     let _ = link
         .tx
         .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
+
+    Some(())
+}
+
+/// `/router/ospfv3/area/<id>/interface/<name>/cost` — v3 sibling of
+/// v2's `config_ospf_interface_cost` (RFC 2328 §C.3 interface output
+/// cost; RFC 5340 keeps the semantics). Stored straight into
+/// `link.output_cost`; clearing restores the protocol default (10).
+/// Unlike v2 — where the Router-LSA carries both topology and stub
+/// prefixes — v3 splits the metric across three LSAs, so all of them
+/// re-originate: the Router-LSA (P2P link metric / SPF edge weight),
+/// the Intra-Area-Prefix-LSA (per-prefix metric), and the
+/// E-Intra-Area-Prefix-LSA (Prefix-SID host metric on non-loopbacks).
+/// Each origination path schedules the area's SPF itself.
+fn config_ospfv3_interface_cost(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let cost = args.u16()?;
+
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    link.output_cost = if op.is_set() {
+        cost as u32
+    } else {
+        OSPF_DEFAULT_OUTPUT_COST
+    };
+    let area_id = link.area_id;
+    let ifindex = link.index;
+
+    ospf.router_lsa_originate();
+    ospf.router_intra_area_prefix_lsa_originate(area_id);
+    ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
 
     Some(())
 }

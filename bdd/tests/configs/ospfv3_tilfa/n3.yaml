@@ -2,12 +2,12 @@ interface:
 - if-name: lo
   ipv6:
     address: 2001:db8::4/128
-- if-name: n3-n2
+- if-name: n3-s
   ipv6:
     address: 2001:db8:3::2/64
-- if-name: n3-d
+- if-name: n3-r1
   ipv6:
-    address: 2001:db8:4::1/64
+    address: 2001:db8:6::1/64
 router:
   ospfv3:
     router-id: 10.0.0.4
@@ -22,13 +22,15 @@ router:
         enable: true
         prefix-sid:
           index: 400
-      - if-name: n3-n2
+      - if-name: n3-s
         enable: true
         network-type: point-to-point
+        cost: 1000
         adjacency-sid:
-          index: 43
-      - if-name: n3-d
+          index: 41
+      - if-name: n3-r1
         enable: true
         network-type: point-to-point
+        cost: 1000
         adjacency-sid:
           index: 45

@@ -1,22 +1,22 @@
 interface:
 - if-name: lo
   ipv6:
-    address: 2001:db8::2/128
-- if-name: n1-s
+    address: 2001:db8::5/128
+- if-name: r1-n1
   ipv6:
-    address: 2001:db8:1::2/64
-- if-name: n1-r1
+    address: 2001:db8:4::2/64
+- if-name: r1-n2
   ipv6:
-    address: 2001:db8:4::1/64
-- if-name: n1-r2
+    address: 2001:db8:5::2/64
+- if-name: r1-n3
   ipv6:
-    address: 2001:db8:7::1/64
-- if-name: n1-d
+    address: 2001:db8:6::2/64
+- if-name: r1-r2
   ipv6:
-    address: 2001:db8:10::1/64
+    address: 2001:db8:8::1/64
 router:
   ospfv3:
-    router-id: 10.0.0.2
+    router-id: 10.0.0.5
     segment-routing:
       mpls: {}
     fast-reroute:
@@ -27,28 +27,28 @@ router:
       - if-name: lo
         enable: true
         prefix-sid:
-          index: 200
-      - if-name: n1-s
+          index: 500
+      - if-name: r1-n1
         enable: true
         network-type: point-to-point
         cost: 1
         adjacency-sid:
-          index: 21
-      - if-name: n1-r1
+          index: 52
+      - if-name: r1-n2
         enable: true
         network-type: point-to-point
         cost: 1
         adjacency-sid:
-          index: 25
-      - if-name: n1-r2
+          index: 53
+      - if-name: r1-n3
         enable: true
         network-type: point-to-point
-        cost: 1
+        cost: 1000
         adjacency-sid:
-          index: 26
-      - if-name: n1-d
+          index: 54
+      - if-name: r1-r2
         enable: true
         network-type: point-to-point
-        cost: 1
+        cost: 1000
         adjacency-sid:
-          index: 28
+          index: 56

@@ -5,9 +5,12 @@ interface:
 - if-name: s-n1
   ipv6:
     address: 2001:db8:1::1/64
-- if-name: s-d
+- if-name: s-n2
   ipv6:
-    address: 2001:db8:5::2/64
+    address: 2001:db8:2::1/64
+- if-name: s-n3
+  ipv6:
+    address: 2001:db8:3::1/64
 router:
   ospfv3:
     router-id: 10.0.0.1
@@ -25,10 +28,18 @@ router:
       - if-name: s-n1
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
           index: 12
-      - if-name: s-d
+      - if-name: s-n2
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
-          index: 15
+          index: 13
+      - if-name: s-n3
+        enable: true
+        network-type: point-to-point
+        cost: 1000
+        adjacency-sid:
+          index: 14

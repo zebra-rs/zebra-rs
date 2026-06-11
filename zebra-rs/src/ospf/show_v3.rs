@@ -451,6 +451,7 @@ struct Ospfv3InterfaceJson {
     d_router: String,
     bd_router: String,
     priority: u8,
+    cost: u32,
     hello_interval: u16,
     dead_interval: u32,
     neighbor_count: usize,
@@ -479,6 +480,7 @@ fn show_ospfv3_interface(
             d_router: link.ident.d_router.to_string(),
             bd_router: link.ident.bd_router.to_string(),
             priority: link.priority(),
+            cost: link.output_cost,
             hello_interval: link.hello_interval(),
             dead_interval: link.dead_interval(),
             neighbor_count: link.nbrs.len(),
@@ -493,8 +495,8 @@ fn show_ospfv3_interface(
         )?;
         writeln!(
             text,
-            "  Interface ID: {}  Priority: {}  Hello {}s  Dead {}s",
-            e.interface_id, e.priority, e.hello_interval, e.dead_interval
+            "  Interface ID: {}  Priority: {}  Cost: {}  Hello {}s  Dead {}s",
+            e.interface_id, e.priority, e.cost, e.hello_interval, e.dead_interval
         )?;
         writeln!(text, "  DR: {}  BDR: {}", e.d_router, e.bd_router)?;
     }
