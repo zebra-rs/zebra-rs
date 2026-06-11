@@ -1658,6 +1658,14 @@ async fn create_dummy_interface(world: &mut World, iface: String, addr: String, 
 /// `via inet6 fe80::` pins the RFC 8950/5549 v4-over-v6 install.
 /// Polls because the install crosses the zebra-rs RIB task and a
 /// netlink round-trip after the BGP-table assertion that precedes it.
+/// Address-family flag for `ip route show <prefix>`. `ip` does NOT
+/// infer the family from the prefix argument — without `-6` an IPv6
+/// prefix silently returns nothing, which would make the negative
+/// (`should eventually be gone`) step pass vacuously.
+fn route_family_flag(prefix: &str) -> &'static str {
+    if prefix.contains(':') { "-6" } else { "-4" }
+}
+
 #[then(expr = "kernel route {string} in namespace {string} should eventually contain {string}")]
 async fn kernel_route_eventually_contains(
     world: &mut World,
@@ -1666,10 +1674,11 @@ async fn kernel_route_eventually_contains(
     needle: String,
 ) {
     let scoped = world.ns(&namespace);
+    let family = route_family_flag(&prefix);
     const ATTEMPTS: u32 = 30;
     let mut last_output = String::new();
     for i in 0..ATTEMPTS {
-        last_output = netns::exec_in_netns(&scoped, "ip", &["route", "show", &prefix])
+        last_output = netns::exec_in_netns(&scoped, "ip", &[family, "route", "show", &prefix])
             .await
             .expect("Failed to run ip route show");
         if last_output.contains(&needle) {
@@ -1695,10 +1704,11 @@ async fn kernel_route_eventually_contains(
 #[then(expr = "kernel route {string} in namespace {string} should eventually be gone")]
 async fn kernel_route_eventually_gone(world: &mut World, prefix: String, namespace: String) {
     let scoped = world.ns(&namespace);
+    let family = route_family_flag(&prefix);
     const ATTEMPTS: u32 = 30;
     let mut last_output = String::new();
     for i in 0..ATTEMPTS {
-        last_output = netns::exec_in_netns(&scoped, "ip", &["route", "show", &prefix])
+        last_output = netns::exec_in_netns(&scoped, "ip", &[family, "route", "show", &prefix])
             .await
             .expect("Failed to run ip route show");
         if last_output.trim().is_empty() {
