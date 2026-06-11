@@ -1,0 +1,41 @@
+# Classic-SID sibling of configs/tilfa_srv6: the locator omits
+# `behavior: usid`, so SIDs use the RFC 8986 full-SID layout.
+# r3 — last r-plane hop before d (Q-node side).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::7/128
+- if-name: r3-r2
+  ipv6:
+    address: 2001:db8:0:9::2/64
+- if-name: r3-d
+  ipv6:
+    address: 2001:db8:0:11::1/64
+segment-routing:
+  locator:
+  - name: LOC7
+    prefix: fcbb:bbbb:7::/48
+router:
+  isis:
+    net: 49.0000.0000.0000.0007.00
+    hostname: r3
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC7
+    fast-reroute:
+      ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r3-r2
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enable: true
+    - if-name: r3-d
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
