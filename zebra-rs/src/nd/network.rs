@@ -4,11 +4,14 @@
 //! `crate::ospf::network` so the runtime wiring (channels, cmsg
 //! plumbing, `AsyncFd::async_io`) is familiar.
 //!
-//! Inbound packets are filtered to ICMPv6 RA + RS by the kernel
-//! (`ICMP6_FILTER` was set in [`super::socket::nd_socket`]); we add
-//! one more application-layer check here: drop anything whose
-//! IPv6 hop limit isn't 255, per RFC 4861 §6.1.2. The kernel can't
-//! enforce that on raw sockets, so it's our job.
+//! Inbound packets are filtered to ICMPv6 RS + RA + NS + NA by the
+//! kernel (`ICMP6_FILTER` was set in [`super::socket::nd_socket`]); we
+//! add one more application-layer check here: drop anything whose IPv6
+//! hop limit isn't 255, per RFC 4861 §6.1.2. The kernel can't enforce
+//! that on raw sockets, so it's our job.
+//!
+//! Drops are surfaced as [`NdRecv::Dropped`] so the engine (not the I/O
+//! task) is the single place where every counter increments.
 #![allow(dead_code)]
 
 use std::io::{ErrorKind, IoSlice, IoSliceMut};
@@ -17,14 +20,14 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use nd_packet::{Icmp6Type, RouterAdvert, RouterSolicit};
+use nd_packet::{Icmp6Type, NeighborAdvert, NeighborSolicit, RouterAdvert, RouterSolicit};
 use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn6};
 use socket2::Socket;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use super::{NdRecv, NdSend};
+use super::{DropReason, NdRecv, NdSend};
 
 /// Hop limit required by RFC 4861 §6.1.2 — anything else is dropped.
 const REQUIRED_HOP_LIMIT: i32 = 255;
@@ -33,9 +36,9 @@ const REQUIRED_HOP_LIMIT: i32 = 255;
 const ALL_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x2);
 
 /// Read loop: parse ICMPv6 packets off the raw socket, deliver
-/// [`NdRecv`] messages on `tx`. Drops malformed packets and packets
-/// failing the hop-limit-255 check silently — both situations are
-/// "MUST silently discard" in RFC 4861.
+/// [`NdRecv`] messages on `tx`. Drops are surfaced as
+/// [`NdRecv::Dropped`] so the engine counts them; the read task never
+/// increments counters directly.
 pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>) {
     let mut buf = [0u8; 1500];
     let mut iov = [IoSliceMut::new(&mut buf)];
@@ -73,7 +76,13 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
                     return Err(ErrorKind::InvalidData.into());
                 };
                 if hop_limit != REQUIRED_HOP_LIMIT {
-                    // RFC 4861 §6.1.2: silently drop.
+                    // RFC 4861 §6.1.2: MUST silently discard any ND
+                    // message with a hop limit other than 255. Surface
+                    // this as a Dropped message so the engine counts it.
+                    let _ = tx.send(NdRecv::Dropped {
+                        ifindex,
+                        reason: DropReason::HopLimit,
+                    });
                     return Ok(());
                 }
 
@@ -87,16 +96,49 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
                 let parsed = match Icmp6Type::from_u8(payload[0]) {
                     Some(Icmp6Type::RouterAdvert) => match RouterAdvert::parse(payload, None) {
                         Ok(ra) => NdRecv::RouterAdvert { ifindex, src, ra },
-                        Err(_) => return Ok(()),
+                        Err(_) => {
+                            let _ = tx.send(NdRecv::Dropped {
+                                ifindex,
+                                reason: DropReason::Malformed,
+                            });
+                            return Ok(());
+                        }
                     },
                     Some(Icmp6Type::RouterSolicit) => match RouterSolicit::parse(payload, None) {
                         Ok(rs) => NdRecv::RouterSolicit { ifindex, src, rs },
-                        Err(_) => return Ok(()),
+                        Err(_) => {
+                            let _ = tx.send(NdRecv::Dropped {
+                                ifindex,
+                                reason: DropReason::Malformed,
+                            });
+                            return Ok(());
+                        }
                     },
-                    // NS/NA are filtered out at the socket (ICMP6_FILTER in
-                    // socket.rs) and will be handled when the ND engine grows
-                    // counters — for now drop, preserving current behaviour.
-                    Some(_) => return Ok(()),
+                    Some(Icmp6Type::NeighborSolicit) => {
+                        match NeighborSolicit::parse(payload, None) {
+                            Ok(ns) => NdRecv::NeighborSolicit { ifindex, src, ns },
+                            Err(_) => {
+                                let _ = tx.send(NdRecv::Dropped {
+                                    ifindex,
+                                    reason: DropReason::Malformed,
+                                });
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Some(Icmp6Type::NeighborAdvert) => match NeighborAdvert::parse(payload, None) {
+                        Ok(na) => NdRecv::NeighborAdvert { ifindex, src, na },
+                        Err(_) => {
+                            let _ = tx.send(NdRecv::Dropped {
+                                ifindex,
+                                reason: DropReason::Malformed,
+                            });
+                            return Ok(());
+                        }
+                    },
+                    // Unknown numeric type — `from_u8` returns None for
+                    // anything outside 133-136. The ICMP6_FILTER in
+                    // socket.rs makes this path unreachable in production.
                     None => return Ok(()),
                 };
 

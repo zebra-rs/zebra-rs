@@ -147,6 +147,35 @@ impl<R: RngSource> RaSender<R> {
         }
     }
 
+    // ── Read accessors for show ──────────────────────────────────────────
+
+    /// The current RA send configuration template.
+    pub fn cfg(&self) -> &RaSendConfig {
+        &self.cfg
+    }
+
+    /// Number of initial RAs still to send before switching to the
+    /// periodic schedule (counts down from
+    /// [`MAX_INITIAL_RTR_ADVERTISEMENTS`]).
+    pub fn initial_remaining(&self) -> u32 {
+        self.initial_remaining
+    }
+
+    /// Scheduled time for the next unsolicited RA.
+    pub fn next_unsolicited_at(&self) -> Instant {
+        self.next_unsolicited_at
+    }
+
+    /// Scheduled time for the pending solicited reply, if any.
+    pub fn pending_solicited_at(&self) -> Option<Instant> {
+        self.pending_solicited_at
+    }
+
+    /// Time of the most recent multicast RA we sent, if any.
+    pub fn last_multicast_at(&self) -> Option<Instant> {
+        self.last_multicast_at
+    }
+
     /// Update the template fields (router lifetime, options, etc.).
     /// Doesn't reschedule — operators tweaking timers don't expect a
     /// burst of RAs.

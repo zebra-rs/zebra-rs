@@ -17,10 +17,12 @@ use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
+use nd_packet::RaFlags;
+
 use crate::rib::link::Link;
 
 use super::send::{RaEvent, RaSendConfig, RaSender};
-use super::{NdRecv, NdSend};
+use super::{DropReason, NdRecv, NdSend};
 
 /// Lifecycle events emitted by [`NdEngine`] for downstream consumers.
 /// One subscriber today (BGP unnumbered will plug in here); a
@@ -33,6 +35,77 @@ pub enum NdEvent {
     /// debouncing repeats.
     NeighborDiscovered { ifindex: u32, src: Ipv6Addr },
 }
+
+/// Per-interface packet counters observed at the daemon's raw socket.
+///
+/// Note: kernel-originated NS/NA are invisible here because the host
+/// kernel owns the NDP cache and multicast loopback is disabled on the
+/// ND socket. Only packets received on the wire and our own RA
+/// transmissions are counted.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NdIfCounters {
+    /// Unsolicited RAs we transmitted (periodic).
+    pub tx_ra_unsolicited: u64,
+    /// Solicited RAs we transmitted (in response to RS).
+    pub tx_ra_solicited: u64,
+    /// Router Advertisements received.
+    pub rx_ra: u64,
+    /// Router Solicitations received.
+    pub rx_rs: u64,
+    /// Neighbor Solicitations received.
+    pub rx_ns: u64,
+    /// Neighbor Advertisements received.
+    pub rx_na: u64,
+    /// Packets discarded because the IPv6 hop limit was not 255
+    /// (RFC 4861 §6.1.2 MUST silently discard).
+    pub rx_drop_hop_limit: u64,
+    /// Packets discarded due to a parse error (too short, non-zero
+    /// ICMPv6 code, malformed option, etc.).
+    pub rx_drop_malformed: u64,
+    /// Sources that arrived when the per-interface neighbor table was
+    /// full (see [`MAX_TRACKED_SOURCES`]). Counted per packet, not per
+    /// unique source.
+    pub untracked_sources: u64,
+}
+
+/// Snapshot of the most recently received Router Advertisement from a
+/// given source. Stored in [`NdNeighbor`] so the show command can
+/// render lifetime / flags without re-parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastRa {
+    pub router_lifetime: u16,
+    pub cur_hop_limit: u8,
+    pub flags: RaFlags,
+}
+
+/// Per-source observation record in the neighbor table.
+///
+/// Keyed by the IPv6 source address of received ND messages. The
+/// source may be `::` for DAD (Duplicate Address Detection) probes
+/// — those get a table entry like any other source.
+#[derive(Debug, Clone)]
+pub struct NdNeighbor {
+    /// Wall-clock time the first packet from this source was seen.
+    pub first_seen: Instant,
+    /// Wall-clock time the most recent packet from this source was seen.
+    pub last_seen: Instant,
+    /// Router Advertisements received from this source.
+    pub rx_ra: u64,
+    /// Router Solicitations received from this source.
+    pub rx_rs: u64,
+    /// Neighbor Solicitations received from this source.
+    pub rx_ns: u64,
+    /// Neighbor Advertisements received from this source.
+    pub rx_na: u64,
+    /// Fields from the most recently received RA, if any.
+    pub last_ra: Option<LastRa>,
+}
+
+/// Per-interface neighbor-table cap. When the table is full, additional
+/// *new* sources are not inserted; instead `untracked_sources` on the
+/// interface counters is incremented. Existing sources continue to be
+/// updated even when the table is at capacity.
+pub const MAX_TRACKED_SOURCES: usize = 256;
 
 pub struct NdEngine {
     senders: BTreeMap<u32, RaSender>,
@@ -55,6 +128,13 @@ pub struct NdEngine {
     /// long after the commit — instead of silently dropping config
     /// that raced ahead of the dump.
     ra_config_by_name: BTreeMap<String, RaSendConfig>,
+    /// Per-interface packet counters. Independent of `senders` — NS/NA
+    /// arrive on interfaces with no RA sender configured and must still
+    /// be counted.
+    counters: BTreeMap<u32, NdIfCounters>,
+    /// Per-interface, per-source observation records. Independent of
+    /// `senders` for the same reason as `counters`.
+    neighbors: BTreeMap<u32, BTreeMap<Ipv6Addr, NdNeighbor>>,
 }
 
 impl NdEngine {
@@ -65,6 +145,8 @@ impl NdEngine {
             ifindex_by_name: BTreeMap::new(),
             name_by_ifindex: BTreeMap::new(),
             ra_config_by_name: BTreeMap::new(),
+            counters: BTreeMap::new(),
+            neighbors: BTreeMap::new(),
         }
     }
 
@@ -166,13 +248,57 @@ impl NdEngine {
         self.senders.values().map(|s| s.next_wakeup()).min()
     }
 
-    /// Handle an inbound ND frame: emit a [`NdEvent::NeighborDiscovered`]
-    /// for the RA case (the BGP unnumbered hand-off), and forward RS
-    /// events into the matching sender so a solicited reply gets
-    /// scheduled.
+    // ── Read accessors (used by the upcoming show command) ──────────────
+
+    /// All per-interface counters, keyed by ifindex.
+    pub fn counters(&self) -> &BTreeMap<u32, NdIfCounters> {
+        &self.counters
+    }
+
+    /// All per-interface neighbor tables, keyed by ifindex then source
+    /// address.
+    pub fn neighbors(&self) -> &BTreeMap<u32, BTreeMap<Ipv6Addr, NdNeighbor>> {
+        &self.neighbors
+    }
+
+    /// The [`RaSender`] for `ifindex`, if RA is enabled on that
+    /// interface.
+    pub fn sender(&self, ifindex: u32) -> Option<&RaSender> {
+        self.senders.get(&ifindex)
+    }
+
+    /// All active [`RaSender`]s, keyed by ifindex.
+    pub fn senders(&self) -> &BTreeMap<u32, RaSender> {
+        &self.senders
+    }
+
+    /// Handle an inbound ND frame: update counters, update the
+    /// neighbor table, emit [`NdEvent::NeighborDiscovered`] for RA
+    /// (the BGP unnumbered hand-off), and forward RS events into the
+    /// matching sender so a solicited reply gets scheduled.
     pub fn on_recv(&mut self, recv: NdRecv, now: Instant) {
         match recv {
-            NdRecv::RouterAdvert { ifindex, src, .. } => {
+            NdRecv::RouterAdvert { ifindex, src, ra } => {
+                // Update counters and neighbor table first using
+                // disjoint field borrows — doing this before the
+                // senders.get_mut call avoids a borrow-checker conflict.
+                self.counters.entry(ifindex).or_default().rx_ra += 1;
+                let last_ra = Some(LastRa {
+                    router_lifetime: ra.router_lifetime,
+                    cur_hop_limit: ra.cur_hop_limit,
+                    flags: ra.flags,
+                });
+                Self::record_neighbor(
+                    &mut self.neighbors,
+                    &mut self.counters,
+                    ifindex,
+                    src,
+                    now,
+                    |nb| {
+                        nb.rx_ra += 1;
+                        nb.last_ra = last_ra.clone();
+                    },
+                );
                 if let Some(tx) = &self.notifier {
                     // Ignore SendError — a closed subscriber just
                     // means nobody's listening, not a fatal state.
@@ -180,8 +306,46 @@ impl NdEngine {
                 }
             }
             NdRecv::RouterSolicit { ifindex, src, .. } => {
+                self.counters.entry(ifindex).or_default().rx_rs += 1;
+                Self::record_neighbor(
+                    &mut self.neighbors,
+                    &mut self.counters,
+                    ifindex,
+                    src,
+                    now,
+                    |nb| nb.rx_rs += 1,
+                );
                 if let Some(sender) = self.senders.get_mut(&ifindex) {
                     sender.on_router_solicit(src, now);
+                }
+            }
+            NdRecv::NeighborSolicit { ifindex, src, .. } => {
+                self.counters.entry(ifindex).or_default().rx_ns += 1;
+                Self::record_neighbor(
+                    &mut self.neighbors,
+                    &mut self.counters,
+                    ifindex,
+                    src,
+                    now,
+                    |nb| nb.rx_ns += 1,
+                );
+            }
+            NdRecv::NeighborAdvert { ifindex, src, .. } => {
+                self.counters.entry(ifindex).or_default().rx_na += 1;
+                Self::record_neighbor(
+                    &mut self.neighbors,
+                    &mut self.counters,
+                    ifindex,
+                    src,
+                    now,
+                    |nb| nb.rx_na += 1,
+                );
+            }
+            NdRecv::Dropped { ifindex, reason } => {
+                let c = self.counters.entry(ifindex).or_default();
+                match reason {
+                    DropReason::HopLimit => c.rx_drop_hop_limit += 1,
+                    DropReason::Malformed => c.rx_drop_malformed += 1,
                 }
             }
         }
@@ -195,20 +359,70 @@ impl NdEngine {
         for (&ifindex, sender) in self.senders.iter_mut() {
             for ev in sender.tick(now) {
                 match ev {
-                    RaEvent::SendUnsolicited { ra } => out.push(NdSend::RouterAdvert {
-                        ifindex,
-                        dst: ALL_NODES,
-                        ra,
-                    }),
-                    RaEvent::SendSolicited { ra } => out.push(NdSend::RouterAdvert {
-                        ifindex,
-                        dst: ALL_NODES,
-                        ra,
-                    }),
+                    RaEvent::SendUnsolicited { ra } => {
+                        // Disjoint field borrow: `senders` is mutably
+                        // borrowed by the iterator; `counters` is a
+                        // separate field so this compiles.
+                        self.counters.entry(ifindex).or_default().tx_ra_unsolicited += 1;
+                        out.push(NdSend::RouterAdvert {
+                            ifindex,
+                            dst: ALL_NODES,
+                            ra,
+                        });
+                    }
+                    RaEvent::SendSolicited { ra } => {
+                        self.counters.entry(ifindex).or_default().tx_ra_solicited += 1;
+                        out.push(NdSend::RouterAdvert {
+                            ifindex,
+                            dst: ALL_NODES,
+                            ra,
+                        });
+                    }
                 }
             }
         }
         out
+    }
+
+    /// Update (or insert) the per-source observation record for `src`
+    /// on `ifindex`. If the table is already at [`MAX_TRACKED_SOURCES`]
+    /// and `src` is a new entry, increment `untracked_sources` instead.
+    ///
+    /// `update` is a closure that bumps the appropriate per-type counter
+    /// and sets any additional fields (e.g. `last_ra`) on the record.
+    ///
+    /// Takes `neighbors` and `counters` as explicit parameters so the
+    /// borrow checker can see they are disjoint fields — this function
+    /// is called from `on_recv` while `self.senders` may also be
+    /// accessed.
+    fn record_neighbor(
+        neighbors: &mut BTreeMap<u32, BTreeMap<Ipv6Addr, NdNeighbor>>,
+        counters: &mut BTreeMap<u32, NdIfCounters>,
+        ifindex: u32,
+        src: Ipv6Addr,
+        now: Instant,
+        update: impl FnOnce(&mut NdNeighbor),
+    ) {
+        let table = neighbors.entry(ifindex).or_default();
+        if let Some(nb) = table.get_mut(&src) {
+            nb.last_seen = now;
+            update(nb);
+        } else if table.len() < MAX_TRACKED_SOURCES {
+            let mut nb = NdNeighbor {
+                first_seen: now,
+                last_seen: now,
+                rx_ra: 0,
+                rx_rs: 0,
+                rx_ns: 0,
+                rx_na: 0,
+                last_ra: None,
+            };
+            update(&mut nb);
+            table.insert(src, nb);
+        } else {
+            // Table full — count the overflow but don't insert.
+            counters.entry(ifindex).or_default().untracked_sources += 1;
+        }
     }
 }
 
@@ -229,7 +443,7 @@ mod tests {
     use super::*;
     use crate::nd::send::RaSendConfig;
     use crate::rib::link::{Link, LinkType};
-    use nd_packet::{RouterAdvert, RouterSolicit};
+    use nd_packet::{NaFlags, NeighborAdvert, NeighborSolicit, RouterAdvert, RouterSolicit};
     use netlink_packet_route::link::LinkFlags;
     use tokio::sync::mpsc;
 
@@ -260,6 +474,36 @@ mod tests {
             mtu_error: None,
         }
     }
+
+    fn make_ra() -> RouterAdvert {
+        RouterAdvert {
+            cur_hop_limit: 64,
+            flags: Default::default(),
+            router_lifetime: 1800,
+            reachable_time: 0,
+            retrans_timer: 0,
+            options: vec![],
+        }
+    }
+
+    fn make_ns() -> NeighborSolicit {
+        let target: Ipv6Addr = "fe80::ffff".parse().unwrap();
+        NeighborSolicit {
+            target,
+            options: vec![],
+        }
+    }
+
+    fn make_na() -> NeighborAdvert {
+        let target: Ipv6Addr = "fe80::ffff".parse().unwrap();
+        NeighborAdvert {
+            flags: NaFlags::empty(),
+            target,
+            options: vec![],
+        }
+    }
+
+    // ── Existing tests (unmodified) ──────────────────────────────────────
 
     #[test]
     fn no_interfaces_means_no_wakeup() {
@@ -301,14 +545,7 @@ mod tests {
             NdRecv::RouterAdvert {
                 ifindex: 5,
                 src: ll("fe80::1"),
-                ra: RouterAdvert {
-                    cur_hop_limit: 64,
-                    flags: Default::default(),
-                    router_lifetime: 1800,
-                    reachable_time: 0,
-                    retrans_timer: 0,
-                    options: vec![],
-                },
+                ra: make_ra(),
             },
             t0(),
         );
@@ -518,5 +755,397 @@ mod tests {
 
         eng.process_link_add(&link("swp1", 7), start);
         assert!(eng.is_enabled(7));
+    }
+
+    // ── New tests for PR 2 ───────────────────────────────────────────────
+
+    #[test]
+    fn rx_counters_increment_per_type() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+
+        eng.on_recv(
+            NdRecv::RouterAdvert {
+                ifindex: 5,
+                src: ll("fe80::1"),
+                ra: make_ra(),
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::RouterSolicit {
+                ifindex: 5,
+                src: ll("fe80::2"),
+                rs: RouterSolicit::default(),
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: ll("fe80::3"),
+                ns: make_ns(),
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::NeighborAdvert {
+                ifindex: 5,
+                src: ll("fe80::4"),
+                na: make_na(),
+            },
+            start,
+        );
+
+        let c = &eng.counters()[&5];
+        assert_eq!(c.rx_ra, 1);
+        assert_eq!(c.rx_rs, 1);
+        assert_eq!(c.rx_ns, 1);
+        assert_eq!(c.rx_na, 1);
+        assert_eq!(c.rx_drop_hop_limit, 0);
+        assert_eq!(c.rx_drop_malformed, 0);
+    }
+
+    #[test]
+    fn dropped_reasons_map_to_counters() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+
+        eng.on_recv(
+            NdRecv::Dropped {
+                ifindex: 5,
+                reason: DropReason::HopLimit,
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::Dropped {
+                ifindex: 5,
+                reason: DropReason::HopLimit,
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::Dropped {
+                ifindex: 5,
+                reason: DropReason::Malformed,
+            },
+            start,
+        );
+
+        let c = &eng.counters()[&5];
+        assert_eq!(c.rx_drop_hop_limit, 2);
+        assert_eq!(c.rx_drop_malformed, 1);
+    }
+
+    #[test]
+    fn neighbor_table_records_per_source() {
+        use std::time::Duration;
+        let start = t0();
+        let later = start + Duration::from_secs(5);
+        let mut eng = NdEngine::new();
+
+        // Source A: one NS at start, one NA at start.
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: ll("fe80::a"),
+                ns: make_ns(),
+            },
+            start,
+        );
+        eng.on_recv(
+            NdRecv::NeighborAdvert {
+                ifindex: 5,
+                src: ll("fe80::a"),
+                na: make_na(),
+            },
+            start,
+        );
+
+        // Source B: one RA at later.
+        eng.on_recv(
+            NdRecv::RouterAdvert {
+                ifindex: 5,
+                src: ll("fe80::b"),
+                ra: make_ra(),
+            },
+            later,
+        );
+
+        let table = &eng.neighbors()[&5];
+        let a = &table[&ll("fe80::a")];
+        assert_eq!(a.rx_ns, 1);
+        assert_eq!(a.rx_na, 1);
+        assert_eq!(a.rx_ra, 0);
+        // both packets arrived at `start` so first_seen == last_seen
+        assert_eq!(a.first_seen, a.last_seen);
+
+        // Now send another packet from A at `later` — last_seen advances.
+        let mut eng2 = NdEngine::new();
+        eng2.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: ll("fe80::a"),
+                ns: make_ns(),
+            },
+            start,
+        );
+        eng2.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: ll("fe80::a"),
+                ns: make_ns(),
+            },
+            later,
+        );
+        let table2 = &eng2.neighbors()[&5];
+        let a2 = &table2[&ll("fe80::a")];
+        assert!(a2.first_seen < a2.last_seen);
+        assert_eq!(a2.rx_ns, 2);
+
+        let b = &table[&ll("fe80::b")];
+        assert_eq!(b.rx_ra, 1);
+    }
+
+    #[test]
+    fn last_ra_updates_on_each_ra() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let src = ll("fe80::1:1");
+
+        eng.on_recv(
+            NdRecv::RouterAdvert {
+                ifindex: 5,
+                src,
+                ra: RouterAdvert {
+                    cur_hop_limit: 64,
+                    flags: nd_packet::RaFlags::empty(),
+                    router_lifetime: 1800,
+                    reachable_time: 0,
+                    retrans_timer: 0,
+                    options: vec![],
+                },
+            },
+            start,
+        );
+
+        // Second RA with lifetime=0 (router going away).
+        eng.on_recv(
+            NdRecv::RouterAdvert {
+                ifindex: 5,
+                src,
+                ra: RouterAdvert {
+                    cur_hop_limit: 64,
+                    flags: nd_packet::RaFlags::empty(),
+                    router_lifetime: 0,
+                    reachable_time: 0,
+                    retrans_timer: 0,
+                    options: vec![],
+                },
+            },
+            start,
+        );
+
+        let table = &eng.neighbors()[&5];
+        let nb = &table[&src];
+        assert_eq!(nb.rx_ra, 2);
+        let lr = nb.last_ra.as_ref().expect("last_ra should be set");
+        // Latest RA wins.
+        assert_eq!(lr.router_lifetime, 0);
+    }
+
+    #[test]
+    fn dad_unspecified_source_is_tracked() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let unspec: Ipv6Addr = "::".parse().unwrap();
+
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: unspec,
+                ns: make_ns(),
+            },
+            start,
+        );
+
+        let table = &eng.neighbors()[&5];
+        assert!(
+            table.contains_key(&unspec),
+            "DAD probe from :: should create a table entry"
+        );
+        assert_eq!(table[&unspec].rx_ns, 1);
+    }
+
+    #[test]
+    fn source_cap_overflows_to_untracked() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+
+        // Fill the table with MAX_TRACKED_SOURCES distinct sources.
+        for i in 0u32..MAX_TRACKED_SOURCES as u32 {
+            // Build fe80::0001, fe80::0002, … — unique per i.
+            let addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, (i + 1) as u16);
+            eng.on_recv(
+                NdRecv::NeighborSolicit {
+                    ifindex: 5,
+                    src: addr,
+                    ns: make_ns(),
+                },
+                start,
+            );
+        }
+
+        let table_len_before = eng.neighbors()[&5].len();
+        assert_eq!(table_len_before, MAX_TRACKED_SOURCES);
+
+        // One more NEW source — should be untracked.
+        let new_src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0xdead, 0xbeef);
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: new_src,
+                ns: make_ns(),
+            },
+            start,
+        );
+
+        assert_eq!(eng.counters()[&5].untracked_sources, 1);
+        // Table didn't grow.
+        assert_eq!(eng.neighbors()[&5].len(), MAX_TRACKED_SOURCES);
+
+        // An EXISTING source must still update even when the table is full.
+        let existing = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let old_ns = eng.neighbors()[&5][&existing].rx_ns;
+        use std::time::Duration;
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 5,
+                src: existing,
+                ns: make_ns(),
+            },
+            start + Duration::from_secs(1),
+        );
+        // Counter bumped, untracked_sources unchanged.
+        assert_eq!(
+            eng.neighbors()[&5][&existing].rx_ns,
+            old_ns + 1,
+            "existing source should still update when table is full"
+        );
+        assert_eq!(
+            eng.counters()[&5].untracked_sources,
+            1,
+            "untracked_sources should not grow for an existing source"
+        );
+    }
+
+    #[test]
+    fn counters_on_interface_without_sender() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+
+        // ifindex 42 has no RA sender configured.
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 42,
+                src: ll("fe80::1"),
+                ns: make_ns(),
+            },
+            start,
+        );
+
+        assert_eq!(eng.counters()[&42].rx_ns, 1);
+        assert!(eng.neighbors()[&42].contains_key(&ll("fe80::1")));
+        assert!(!eng.is_enabled(42), "no sender should have been created");
+    }
+
+    #[test]
+    fn tx_counters_split_unsolicited_solicited() {
+        use crate::nd::send::RaSendConfig;
+        use std::time::Duration;
+
+        // (a) Unsolicited: enable + tick at the scheduled wakeup.
+        {
+            let start = t0();
+            let mut eng = NdEngine::new();
+            eng.enable_interface(5, RaSendConfig::default(), start);
+            let wakeup = eng.next_wakeup().unwrap();
+            let frames = eng.tick(wakeup);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(eng.counters()[&5].tx_ra_unsolicited, 1);
+            assert_eq!(eng.counters()[&5].tx_ra_solicited, 0);
+        }
+
+        // (b) Solicited: enable, send RS before any tick, tick at the
+        //     solicited wakeup → tx_ra_solicited == 1.
+        //
+        // We need a deterministic RNG so we know exactly when the
+        // solicited reply will fire. Use RaSender::with_rng with a
+        // FixedRng that returns a very long initial delay so the first
+        // tick we care about is the solicited one.
+        {
+            // We drive this sub-test entirely through NdEngine's public
+            // API. The trick: enable the interface with a large
+            // max_interval so the first unsolicited fires far in the
+            // future; then send an RS; the solicited wakeup is within
+            // MAX_RA_DELAY_TIME (500ms) of `start`.
+            use crate::nd::send::{MAX_RA_DELAY_TIME, MIN_DELAY_BETWEEN_RAS};
+
+            let start = t0();
+            let mut eng = NdEngine::new();
+            // Large intervals push the unsolicited RA far into the future.
+            let cfg = RaSendConfig {
+                min_interval: Duration::from_secs(3600),
+                max_interval: Duration::from_secs(7200),
+                ..RaSendConfig::default()
+            };
+            eng.enable_interface(5, cfg, start);
+            let initial_wakeup = eng.next_wakeup().unwrap();
+
+            // Receive an RS — this schedules a solicited reply.
+            eng.on_recv(
+                NdRecv::RouterSolicit {
+                    ifindex: 5,
+                    src: ll("fe80::c1"),
+                    rs: RouterSolicit::default(),
+                },
+                start,
+            );
+
+            let solicited_wakeup = eng.next_wakeup().unwrap();
+            assert!(
+                solicited_wakeup < initial_wakeup,
+                "solicited wakeup should be earlier than the unsolicited one"
+            );
+            // Solicited wakeup must be within MAX_RA_DELAY_TIME of start
+            // (plus MIN_DELAY_BETWEEN_RAS in case we just sent — but we
+            // haven't sent yet so the rate-limit doesn't apply).
+            assert!(
+                solicited_wakeup <= start + MAX_RA_DELAY_TIME + MIN_DELAY_BETWEEN_RAS,
+                "solicited wakeup should be within the delay window"
+            );
+
+            let frames = eng.tick(solicited_wakeup);
+            // The solicited RA should fire; the unsolicited one should not.
+            assert!(!frames.is_empty(), "expected at least one frame");
+            assert_eq!(
+                eng.counters()
+                    .get(&5)
+                    .map(|c| c.tx_ra_solicited)
+                    .unwrap_or(0),
+                1,
+                "tx_ra_solicited should be 1"
+            );
+            // Unsolicited counter must still be 0.
+            assert_eq!(
+                eng.counters()
+                    .get(&5)
+                    .map(|c| c.tx_ra_unsolicited)
+                    .unwrap_or(0),
+                0,
+                "tx_ra_unsolicited should remain 0"
+            );
+        }
     }
 }
