@@ -3257,6 +3257,37 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         );
     }
 
+    /// A dormant unnumbered peer — configured `interface-neighbor`
+    /// whose remote has never sent an RA, so its address is still
+    /// unspecified and the FSM was never kicked — must still be
+    /// listed (as Idle), exactly like FRR. Before dormant
+    /// materialization existed no Peer was created at all and the
+    /// configured neighbor was invisible to every summary.
+    #[test]
+    fn summary_lists_dormant_unnumbered_peer() {
+        let mut peers = PeerMap::new();
+        let unspecified: IpAddr = std::net::Ipv6Addr::UNSPECIFIED.into();
+        let mut iface_peer = make_peer(unspecified);
+        iface_peer.origin = PeerOrigin::Interface { ifindex: 7 };
+        iface_peer.ifname = Some("i1".to_string());
+        peers.insert_with_key(PeerKey::Interface(7), iface_peer);
+        let view = TestView {
+            rib: LocalRib::default(),
+            peers,
+        };
+
+        let out = show_bgp_summary(&view, Args(VecDeque::new()), false).unwrap();
+        let row = out
+            .lines()
+            .find(|l| l.starts_with("i1 "))
+            .unwrap_or_else(|| panic!("dormant unnumbered peer must be listed:\n{out}"));
+        assert!(row.contains("Idle"), "no session yet — Idle row:\n{row}");
+        assert!(
+            out.contains("Peers 1"),
+            "dormant peer must be counted:\n{out}"
+        );
+    }
+
     /// JSON summary: the unnumbered row is identified by the interface
     /// name and carries an `interface` field marking its provenance;
     /// address-keyed rows must not grow one.

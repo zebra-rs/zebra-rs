@@ -91,23 +91,57 @@ pub fn materialize_peer(
     ifindex: u32,
     link_local: Ipv6Addr,
 ) -> Option<usize> {
+    materialize(bgp, name, ifindex, Some(link_local))
+}
+
+/// Materialize a dormant Peer for `interface-neighbor IFNAME` before
+/// any RA has surfaced the remote link-local. The address stays
+/// unspecified and the FSM is left alone (`peer.start()` gates on a
+/// dialable address), so the peer is operator-visible state only:
+/// `show bgp summary` / `show bgp neighbors` list the configured
+/// neighbor as Idle even when the remote node has never been up,
+/// matching FRR. The RA path ([`materialize_peer`]) upgrades it in
+/// place. `None` when the interface is unknown to RIB yet or the
+/// config gates (resolvable remote-as) aren't satisfied — callers
+/// simply retry on the next config/link event.
+pub fn materialize_dormant(bgp: &mut Bgp, name: &str) -> Option<usize> {
+    let ifindex = *bgp.link_index_by_name.get(name)?;
+    materialize(bgp, name, ifindex, None)
+}
+
+fn materialize(
+    bgp: &mut Bgp,
+    name: &str,
+    ifindex: u32,
+    link_local: Option<Ipv6Addr>,
+) -> Option<usize> {
     let cfg = bgp.interface_neighbors.get(name)?.clone();
     let resolved = resolve_remote_as_with_source(bgp, &cfg)?;
 
     // Already materialized? Refresh address (the peer's link-local
     // can change if the kernel reassigns it) but otherwise leave the
-    // FSM alone.
+    // FSM alone — except a dormant peer (materialized at config time,
+    // address still unspecified), which gets its first kick here.
     if let Some(existing) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex)) {
-        existing.address = link_local.into();
+        if let Some(link_local) = link_local {
+            existing.address = link_local.into();
+            // No-op on a running peer (`start()` gates on `!active`);
+            // a dormant one leaves Idle now that it can dial.
+            existing.start();
+        }
         return Some(existing.ident);
     }
 
+    let address: std::net::IpAddr = match link_local {
+        Some(link_local) => link_local.into(),
+        None => Ipv6Addr::UNSPECIFIED.into(),
+    };
     let mut peer = Peer::new(
         0,
         bgp.asn,
         bgp.router_id,
         resolved.asn,
-        link_local.into(),
+        address,
         bgp.hostname(),
         bgp.tx.clone(),
         bgp.ctx.clone(),
@@ -148,11 +182,13 @@ pub fn materialize_peer(
     // Kick the FSM. `peer.start()` arms the idle-hold timer which
     // fires Event::Start → fsm_start → peer_start_connection. The
     // timer captures `peer.ident`, so it must run AFTER insert (which
-    // assigns the real ident). The gate inside start() also requires
-    // `remote_as != 0`, so peers materialized from a `RemoteAsSpec::
-    // External` (which yields 0 as a placeholder until OPEN backfill)
-    // remain dormant — that case lands in a follow-up alongside the
-    // OPEN-side validation.
+    // assigns the real ident). The gates inside start() also require
+    // `remote_as != 0` and a specified address, so two kinds of peer
+    // remain dormant in Idle here: ones materialized from a
+    // `RemoteAsSpec::External` (which yields 0 as a placeholder until
+    // OPEN backfill — that case lands in a follow-up alongside the
+    // OPEN-side validation) and ones materialized without a link-local
+    // (no RA yet — the RA path upgrades them in place).
     peer.start();
     Some(peer.ident)
 }
@@ -162,7 +198,12 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
     let name = args.string()?;
     match op {
         ConfigOp::Set => {
-            bgp.interface_neighbors.entry(name).or_default();
+            bgp.interface_neighbors.entry(name.clone()).or_default();
+            // Become operator-visible right away when the interface
+            // already exists and a remote-as resolves (via a group
+            // bound before this key arrived) — no RA required for the
+            // neighbor to appear in `show bgp summary`.
+            materialize_dormant(bgp, &name);
         }
         ConfigOp::Delete => {
             // Take the cfg out first so we can tear the peer (if any)
@@ -216,6 +257,11 @@ pub fn config_interface_neighbor_neighbor_group(
             .tx
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
+    // The (re)bound group may supply the remote-as this neighbor was
+    // missing — an unmaterialized cfg becomes a dormant peer now. A
+    // no-op when the peer above already exists or the gates still
+    // aren't satisfied.
+    materialize_dormant(bgp, &name);
     Some(())
 }
 
@@ -226,7 +272,7 @@ pub fn config_interface_neighbor_remote_as(
     op: ConfigOp,
 ) -> Option<()> {
     let name = args.string()?;
-    let entry = bgp.interface_neighbors.entry(name).or_default();
+    let entry = bgp.interface_neighbors.entry(name.clone()).or_default();
     match op {
         ConfigOp::Set => {
             let raw = args.string()?;
@@ -235,6 +281,10 @@ pub fn config_interface_neighbor_remote_as(
                 "internal" => RemoteAsSpec::Internal,
                 numeric => RemoteAsSpec::Asn(numeric.parse().ok()?),
             };
+            // remote-as usually completes the config (it arrives after
+            // the list-key callback in a commit) — surface the dormant
+            // peer so the neighbor shows up before any RA.
+            materialize_dormant(bgp, &name);
         }
         ConfigOp::Delete => entry.remote_as = RemoteAsSpec::Unset,
         _ => {}

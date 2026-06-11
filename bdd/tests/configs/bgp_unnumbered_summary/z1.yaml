@@ -1,0 +1,14 @@
+# One-sided unnumbered bring-up: the remote namespace never runs
+# zebra-rs, so no RA ever arrives on i1 and no BGP session is ever
+# attempted. The configured interface-neighbor must nevertheless be
+# visible as a dormant Idle peer in `show bgp summary` (FRR parity) —
+# its Peer is materialized from config + link knowledge alone, with the
+# remote link-local left unspecified until a first RA upgrades it.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65002
