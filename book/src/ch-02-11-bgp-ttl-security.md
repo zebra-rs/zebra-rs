@@ -134,13 +134,14 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      ttl-security: null
+      ttl-security: {}
 ```
 
-`ttl-security: null` is the YAML spelling of a `type empty` leaf — the
-key is present with no value, which the loader turns into
-`set router bgp neighbor 192.168.0.2 ttl-security`. The FRR / IOS-style
-CLI form is the same path:
+`ttl-security: {}` is the YAML spelling of a presence container — the
+key is present with no children, which the loader turns into
+`set router bgp neighbor 192.168.0.2 ttl-security` (the legacy
+`ttl-security: null` spelling still loads the same way). The FRR /
+IOS-style CLI form is the same path:
 
 ```
 set router bgp neighbor 192.168.0.2 ttl-security

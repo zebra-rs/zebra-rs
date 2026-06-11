@@ -26,7 +26,7 @@ router:
     afi-safi:
     - name: ipv4
       redistribute:
-        connected: null
+        connected: {}
     - name: ipv6
       redistribute:
-        connected: null
+        connected: {}

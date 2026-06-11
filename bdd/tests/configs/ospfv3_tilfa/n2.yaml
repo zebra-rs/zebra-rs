@@ -12,9 +12,9 @@ router:
   ospfv3:
     router-id: 10.0.0.3
     segment-routing:
-      mpls: null
+      mpls: {}
     fast-reroute:
-      ti-lfa: null
+      ti-lfa: {}
     area:
     - area-id: 0.0.0.0
       interface:

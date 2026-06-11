@@ -1904,7 +1904,7 @@ pub(super) fn apply_update_source(peer: &mut Peer, want: Option<IpAddr>) -> bool
 }
 
 /// `[no] router bgp neighbor <addr> ttl-security` — enable GTSM (RFC
-/// 5082) for a directly-connected peer. The leaf is `type empty`, so
+/// 5082) for a directly-connected peer. The node is a presence container, so
 /// presence (Set) turns it on and Delete turns it off; no value is
 /// read. The socket options themselves are installed when the TCP
 /// session is set up (`fsm_connected`), so a change to an already
@@ -2202,7 +2202,7 @@ fn config_disable_connected_check(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
     let addr = args.addr()?;
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
-        // Record the verbatim statement (a `type empty` flag: presence
+        // Record the verbatim statement (a presence flag: presence
         // means "on"), then resolve through the neighbor-group
         // precedence: the explicit statement wins, a Delete falls back
         // to the group's opinion (or the off default).
@@ -2850,7 +2850,7 @@ impl Bgp {
         // the same runtime state.
         self.callback_peer("/update-source", config_transport_local_address);
         // FRR-style `neighbor X ttl-security` (GTSM, RFC 5082) from
-        // zebra-bgp-transport.yang. `type empty` flag — directly
+        // zebra-bgp-transport.yang. Presence-container flag — directly
         // connected only, TTL pinned to 255. Lowered onto the session
         // socket in `fsm_connected`.
         self.callback_peer("/ttl-security", config_ttl_security);
@@ -3779,7 +3779,7 @@ mod neighbor_group_wiring_tests {
         assert!(peer.active, "peer.start() must have fired");
     }
 
-    /// `ttl-security` is a `type empty` flag: Set turns it on, Delete
+    /// `ttl-security` is a presence flag: Set turns it on, Delete
     /// turns it off, and a change to an already-established session is
     /// bounced (`Event::Stop`) so the new TTL policy applies on the
     /// reconnect. A no-op Set must not bounce.
@@ -3875,7 +3875,7 @@ mod neighbor_group_wiring_tests {
         }
     }
 
-    /// `disable-connected-check` is a `type empty` flag: Set/Delete toggle
+    /// `disable-connected-check` is a presence flag: Set/Delete toggle
     /// it and a change to a live session is bounced (FRR resets the peer
     /// on this flag); a no-op set does not bounce, an Idle peer is not
     /// bounced.
@@ -5023,7 +5023,7 @@ mod neighbor_group_wiring_tests {
         );
     }
 
-    /// Group `disable-connected-check` (a `type empty` flag)
+    /// Group `disable-connected-check` (a presence flag)
     /// propagates with explicit-wins / fallback and bounces a live
     /// member.
     #[tokio::test]

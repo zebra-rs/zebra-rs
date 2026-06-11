@@ -76,11 +76,11 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      as-override: null
+      as-override: {}
 ```
 
-`as-override: null` is the YAML spelling of a presence container — the
-key is present with no value, which the loader turns into
+`as-override: {}` is the YAML spelling of a presence container — the
+key is present with no children, which the loader turns into
 `set router bgp neighbor 192.168.1.3 as-override`. The FRR / IOS-style
 CLI form is the same path:
 

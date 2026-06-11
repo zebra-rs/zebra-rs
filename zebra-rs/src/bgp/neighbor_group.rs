@@ -285,7 +285,7 @@ pub fn resolve_next_hop_self(
         .unwrap_or(false)
 }
 
-/// `set router bgp neighbor-group <name> ttl-security` (`type empty`).
+/// `set router bgp neighbor-group <name> ttl-security` (presence container).
 ///
 /// Stores the opinion and re-resolves every member through the same
 /// apply ritual as the per-neighbor callback (mutual-exclusion guard,
@@ -361,7 +361,7 @@ pub fn config_neighbor_group_ebgp_multihop(
 }
 
 /// `set router bgp neighbor-group <name> disable-connected-check`
-/// (`type empty`).
+/// (presence container).
 ///
 /// Stores the opinion and re-resolves every member through the same
 /// apply ritual as the per-neighbor callback (diff-gate, start,

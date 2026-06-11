@@ -12,7 +12,7 @@ router:
   ospfv3:
     router-id: 10.0.0.1
     segment-routing:
-      mpls: null
+      mpls: {}
     area:
     - area-id: 0.0.0.0
       interface:
