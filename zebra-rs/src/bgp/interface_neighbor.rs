@@ -9,7 +9,7 @@ use std::net::Ipv6Addr;
 use std::time::Instant;
 
 use super::Bgp;
-use super::peer::Peer;
+use super::peer::{Peer, PeerType};
 use super::peer_key::{PeerKey, PeerOrigin};
 use crate::config::{Args, ConfigOp};
 
@@ -149,6 +149,16 @@ fn materialize(
         bgp.ctx.clone(),
     );
     peer.tracing_instance = bgp.tracing.clone();
+    // `Peer::new` defaults to IBGP; derive the session type from the
+    // resolved remote-as like the addressed-neighbor and group-sweep
+    // paths do — it drives admin distance (20 vs 200), the eBGP
+    // AS_PATH egress rules, and the TTL convention. An `external`
+    // placeholder (asn 0 until OPEN backfill) is eBGP by definition.
+    peer.peer_type = if resolved.asn == bgp.asn {
+        PeerType::IBGP
+    } else {
+        PeerType::EBGP
+    };
     peer.origin = PeerOrigin::Interface { ifindex };
     // The operator-facing identity for show/clear output and lookups
     // (`show bgp summary`, `show ip bgp neighbors i1`, …) — the
@@ -245,6 +255,37 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
             // down without holding a borrow.
             bgp.interface_neighbors.remove(&name);
             if let Some(&ifindex) = bgp.link_index_by_name.get(&name) {
+                // Withdraw everything the peer contributed (Loc-RIB,
+                // main RIB / kernel FIB, MP_UNREACH fan-out to other
+                // peers) before dropping it — mirrors the addressed
+                // `neighbor <addr>` delete path in `config.rs`.
+                // Without this the peer's ENHE-installed v4 routes
+                // outlive the neighbor in the kernel.
+                let peer_idx = bgp
+                    .peers
+                    .get_by_key(&PeerKey::Interface(ifindex))
+                    .map(|p| p.ident);
+                if let Some(peer_idx) = peer_idx {
+                    let mut bgp_ref = super::peer::BgpTop {
+                        router_id: &bgp.router_id,
+                        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+                        local_rib: &mut bgp.local_rib,
+                        tx: &bgp.tx,
+                        rib_client: &bgp.ctx.rib,
+                        attr_store: &mut bgp.attr_store,
+                        update_groups: &mut bgp.update_groups,
+                        interface_addrs: &bgp.interface_addrs,
+                        vrf_export: None,
+                        color_policy: Some(&bgp.color_policy),
+                        flex_algo_routes: Some(&bgp.flex_algo_routes),
+                        vrf_import: None,
+                        nexthop_cache: None,
+                        vrf_transport_v4: None,
+                        vrf_transport_v6: None,
+                        lu_labels: None,
+                    };
+                    super::route::route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+                }
                 bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
             }
         }

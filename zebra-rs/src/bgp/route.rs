@@ -156,11 +156,13 @@ fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
 /// next-hop rewrite) shouldn't reach the kernel FIB.
 ///
 /// When the route was received via RFC 8950 ENHE (MP_REACH with an
-/// IPv6 next-hop for an IPv4 prefix), the kernel install uses
-/// `Nexthop::Link(ifindex)` — the route is on-link via the
-/// already-discovered IPv6 onlink on that interface, and the v4
-/// NEXT_HOP attribute (which RFC 8950 §4 says the receiver MUST
-/// ignore) is irrelevant.
+/// IPv6 next-hop for an IPv4 prefix), the kernel install programs the
+/// v6 link-local as the gateway, pinned to the receiving interface
+/// (`via inet6 fe80::.. dev N`, RFC 5549 style — the kernel resolves
+/// the MAC through ND). The v4 NEXT_HOP attribute (which RFC 8950 §4
+/// says the receiver MUST ignore) is irrelevant. `ifindex_origin`
+/// makes the RIB resolver accept the nexthop as-is — a link-local
+/// can't be disambiguated by table walk anyway.
 fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     // Administrative distance per Cisco / FRR convention. eBGP=20,
     // iBGP=200; originated paths take the iBGP value since they're
@@ -171,8 +173,15 @@ fn make_bgp_rib_entry_v4(best: &BgpRib) -> Option<rib::entry::RibEntry> {
     };
     let metric = best.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
 
-    let nexthop = if let Some(ifindex) = best.egress_ifindex_v6 {
-        rib::Nexthop::Link(ifindex)
+    let nexthop = if let Some((nh6, ifindex)) = best.enhe_egress {
+        rib::Nexthop::Uni(rib::NexthopUni {
+            addr: IpAddr::V6(nh6),
+            metric,
+            weight: 1,
+            valid: true,
+            ifindex_origin: Some(ifindex),
+            ..Default::default()
+        })
     } else {
         let nh = match best.attr.nexthop.as_ref()? {
             BgpNexthop::Ipv4(addr) => *addr,
@@ -817,12 +826,14 @@ pub struct BgpRib {
     /// it from the `Bgp` nexthop cache for received routes.
     pub nexthop_reachable: bool,
     /// RFC 8950 IPv4-over-IPv6: when the route was received via
-    /// MP_REACH(AFI=1) with an IPv6 next-hop, this is the local egress
-    /// ifindex (the interface where we received the UPDATE). FIB
-    /// install reads this and uses `Nexthop::Link(ifindex)` instead of
-    /// the v4 NEXT_HOP attribute, which RFC 8950 §4 says the receiver
-    /// MUST ignore for these routes. `None` for normal v4 routes.
-    pub egress_ifindex_v6: Option<u32>,
+    /// MP_REACH(AFI=1) with an IPv6 next-hop, this is that next-hop
+    /// (the peer's link-local) plus the local egress ifindex (the
+    /// interface where we received the UPDATE — link-locals are
+    /// meaningless without one). FIB install reads this and programs
+    /// a v6-gateway nexthop (`via inet6 fe80::.. dev N`, RFC 5549
+    /// style) instead of the v4 NEXT_HOP attribute, which RFC 8950 §4
+    /// says the receiver MUST ignore. `None` for normal v4 routes.
+    pub enhe_egress: Option<(Ipv6Addr, u32)>,
     // Stale.
     pub stale: bool,
     // EVPN ESI (Ethernet Segment Identifier) for multi-homing.
@@ -896,7 +907,7 @@ impl BgpRib {
             local_label: None,
             nexthop,
             nexthop_reachable: true,
-            egress_ifindex_v6: None,
+            enhe_egress: None,
             stale,
             esi: None,
             vrf_transit_only: false,
@@ -1965,6 +1976,13 @@ fn nht_untrack_withdrawn(
     let mut seen = std::collections::BTreeSet::new();
     let mut to_unregister = Vec::new();
     for r in removed {
+        // ENHE rows were never tracked (see the guard at the
+        // `nht_track_received` call) — their v4 NEXT_HOP attribute is
+        // ignored per RFC 8950 §4, so releasing it here could steal a
+        // registration a genuine v4 path holds on the same address.
+        if r.enhe_egress.is_some() {
+            continue;
+        }
         let Some(nh) = super::nht::bgp_nexthop_ip(&r.attr) else {
             continue;
         };
@@ -2013,7 +2031,7 @@ pub fn route_ipv4_update(
     label: Option<Label>,
     attr: &BgpAttr,
     nexthop: Option<VpnNexthop>,
-    egress_ifindex_v6: Option<u32>,
+    enhe_egress: Option<(Ipv6Addr, u32)>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
     stale: bool,
@@ -2098,7 +2116,7 @@ pub fn route_ipv4_update(
         nexthop,
         stale,
     );
-    rib.egress_ifindex_v6 = egress_ifindex_v6;
+    rib.enhe_egress = enhe_egress;
 
     // Register to peer's AdjRibIn and update stats
     let decision = {
@@ -2123,7 +2141,16 @@ pub fn route_ipv4_update(
         Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V4(nlri.prefix),
     };
-    nht_track_received(bgp, &mut rib, dep.clone());
+    // RFC 8950 §4: an ENHE route's v4 NEXT_HOP attribute is to be
+    // ignored — don't NHT-track it (it's typically the sender's
+    // router-id, unreachable over a link-local-only topology, and
+    // tracking it would gate the route out of the FIB forever). The
+    // real next-hop is the MP_REACH v6 link-local pinned to the
+    // egress interface; the RIB's origin-pinned resolution already
+    // gates that install on the link being up.
+    if rib.enhe_egress.is_none() {
+        nht_track_received(bgp, &mut rib, dep.clone());
+    }
     // VPNv4 transit (Inter-AS Option B): allocate a per-(RD,prefix) local
     // label. A received VPNv4 route is never self-originated, so it is
     // always a transit FEC; if we later re-advertise it with next-hop-self
@@ -5392,17 +5419,16 @@ pub fn route_from_peer(
                     updates,
                 } => {
                     // RFC 8950 IPv4-over-IPv6: install the prefix into
-                    // Loc-RIB and the FIB. The v6 next-hop in `nhop` is
-                    // the remote's link-local; the receiver doesn't need
-                    // it for forwarding (kernel uses the v6 onlink already
-                    // discovered via ND), so we route the install via the
-                    // egress ifindex of the peer that delivered the
-                    // UPDATE. ENHE on a non-interface peer is unexpected —
-                    // ENHE is currently only negotiated by unnumbered
-                    // peers; log and drop in that case rather than fall
-                    // back to a bogus install.
+                    // Loc-RIB and the FIB with the v6 next-hop from
+                    // MP_REACH (the remote's link-local) as the gateway,
+                    // pinned to the egress ifindex of the peer that
+                    // delivered the UPDATE (a link-local needs its
+                    // interface). ENHE on a non-interface peer or with a
+                    // v4-shaped next-hop is unexpected — ENHE is currently
+                    // only negotiated by unnumbered peers; log and drop in
+                    // that case rather than fall back to a bogus install.
                     let egress_ifindex = peers.get_by_idx(peer_id).and_then(|p| p.scope_id);
-                    if let Some(ifindex) = egress_ifindex {
+                    if let (IpAddr::V6(nh6), Some(ifindex)) = (nhop, egress_ifindex) {
                         for update in updates.iter() {
                             route_ipv4_update(
                                 peer_id,
@@ -5411,7 +5437,7 @@ pub fn route_from_peer(
                                 None,
                                 bgp_attr,
                                 None,
-                                Some(ifindex),
+                                Some((nh6, ifindex)),
                                 bgp,
                                 peers,
                                 false,
@@ -5419,7 +5445,7 @@ pub fn route_from_peer(
                         }
                     } else {
                         tracing::warn!(
-                            "RFC 8950: dropping IPv4 routes from peer {} via v6 next-hop {} — peer has no egress ifindex",
+                            "RFC 8950: dropping IPv4 routes from peer {} via next-hop {} — need a v6 next-hop and an egress ifindex",
                             peer_id,
                             nhop,
                         );
@@ -6435,7 +6461,7 @@ pub fn route_update_ipv4(
     // 3. NEXT_HOP
     //
     // eBGP and self-originated routes always get a v4 rewrite. ENHE-
-    // sourced routes (`egress_ifindex_v6.is_some()`) join that set
+    // sourced routes (`enhe_egress.is_some()`) join that set
     // unconditionally: the inbound NEXT_HOP for such a route is
     // 0.0.0.0 (RFC 8950 §4) — preserving it for iBGP-iBGP, the way
     // RFC 4271 normally prescribes, would forward a black-hole. The
@@ -6450,7 +6476,7 @@ pub fn route_update_ipv4(
     // PE. eBGP and self-originated routes rewrite unconditionally as before.
     let needs_v4_rewrite = peer.is_ebgp()
         || rib.is_originated()
-        || rib.egress_ifindex_v6.is_some()
+        || rib.enhe_egress.is_some()
         || (rib.nexthop.is_some() && peer.next_hop_self(Afi::Ip, Safi::MplsVpn));
     if needs_v4_rewrite {
         let nexthop = if let Some(ref local_addr) = peer.param.local_addr
@@ -11229,17 +11255,23 @@ mod tests {
     }
 
     #[test]
-    fn fib_entry_uses_link_install_when_enhe_egress_set() {
+    fn fib_entry_uses_v6_gateway_when_enhe_egress_set() {
         // RFC 8950 path: even with no v4 NEXT_HOP attribute, the
-        // route is installable as `dev <ifindex>` because the
-        // receiver knows the egress interface.
+        // route is installable as `via inet6 <ll> dev <ifindex>`
+        // because MP_REACH carried the v6 next-hop and the receiver
+        // knows the egress interface.
+        let ll: std::net::Ipv6Addr = "fe80::1".parse().unwrap();
         let mut rib = bgp_rib_with_nexthop(None, super::BgpRibType::EBGP);
-        rib.egress_ifindex_v6 = Some(7);
+        rib.enhe_egress = Some((ll, 7));
         let entry = super::make_bgp_rib_entry_v4(&rib).expect("must build");
         assert_eq!(entry.distance, 20);
         match entry.nexthop {
-            crate::rib::Nexthop::Link(ifindex) => assert_eq!(ifindex, 7),
-            other => panic!("expected Nexthop::Link, got {:?}", other),
+            crate::rib::Nexthop::Uni(ref uni) => {
+                assert_eq!(uni.addr, IpAddr::V6(ll));
+                assert_eq!(uni.ifindex_origin, Some(7));
+                assert!(uni.valid);
+            }
+            other => panic!("expected Nexthop::Uni, got {:?}", other),
         }
     }
 
@@ -11248,16 +11280,20 @@ mod tests {
         // RFC 8950 §4: receiver MUST ignore the NEXT_HOP attribute
         // when MP_REACH carries an IPv6 next-hop. A stale 0.0.0.0
         // (or anything else) in the v4 NEXT_HOP must not perturb
-        // the install — egress_ifindex_v6 wins.
+        // the install — enhe_egress wins.
+        let ll: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
         let mut rib = bgp_rib_with_nexthop(
             Some(BgpNexthop::Ipv4(Ipv4Addr::UNSPECIFIED)),
             super::BgpRibType::EBGP,
         );
-        rib.egress_ifindex_v6 = Some(11);
+        rib.enhe_egress = Some((ll, 11));
         let entry = super::make_bgp_rib_entry_v4(&rib).expect("must build");
         match entry.nexthop {
-            crate::rib::Nexthop::Link(ifindex) => assert_eq!(ifindex, 11),
-            other => panic!("expected Nexthop::Link, got {:?}", other),
+            crate::rib::Nexthop::Uni(ref uni) => {
+                assert_eq!(uni.addr, IpAddr::V6(ll));
+                assert_eq!(uni.ifindex_origin, Some(11));
+            }
+            other => panic!("expected Nexthop::Uni, got {:?}", other),
         }
     }
 

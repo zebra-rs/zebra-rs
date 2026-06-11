@@ -380,7 +380,7 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
             local_label: None,
             nexthop: None,
             nexthop_reachable: true,
-            egress_ifindex_v6: None,
+            enhe_egress: None,
             stale: false,
             esi: None,
             vrf_transit_only: false,

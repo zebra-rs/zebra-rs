@@ -1653,6 +1653,69 @@ async fn create_dummy_interface(world: &mut World, iface: String, addr: String, 
     );
 }
 
+/// Assert the kernel FIB (not the zebra-rs RIB) carries `prefix` with
+/// `needle` in its `ip route show <prefix>` rendering — e.g.
+/// `via inet6 fe80::` pins the RFC 8950/5549 v4-over-v6 install.
+/// Polls because the install crosses the zebra-rs RIB task and a
+/// netlink round-trip after the BGP-table assertion that precedes it.
+#[then(expr = "kernel route {string} in namespace {string} should eventually contain {string}")]
+async fn kernel_route_eventually_contains(
+    world: &mut World,
+    prefix: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "ip", &["route", "show", &prefix])
+            .await
+            .expect("Failed to run ip route show");
+        if last_output.contains(&needle) {
+            println!(
+                "✓ kernel route {} in namespace {} contains '{}'",
+                prefix, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    let diag = route_failure_diagnostics(&scoped).await;
+    panic!(
+        "kernel route {} in namespace {} did not contain '{}' after {} attempts\nlast `ip route show {}` output:\n{}\n{}",
+        prefix, scoped, needle, ATTEMPTS, prefix, last_output, diag
+    );
+}
+
+/// Negative sibling: poll until `ip route show <prefix>` returns
+/// nothing — the route has been withdrawn from the kernel FIB.
+#[then(expr = "kernel route {string} in namespace {string} should eventually be gone")]
+async fn kernel_route_eventually_gone(world: &mut World, prefix: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "ip", &["route", "show", &prefix])
+            .await
+            .expect("Failed to run ip route show");
+        if last_output.trim().is_empty() {
+            println!("✓ kernel route {} in namespace {} is gone", prefix, scoped);
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    let diag = route_failure_diagnostics(&scoped).await;
+    panic!(
+        "kernel route {} in namespace {} still present after {} attempts\nlast `ip route show {}` output:\n{}\n{}",
+        prefix, scoped, ATTEMPTS, prefix, last_output, diag
+    );
+}
+
 #[then("the test environment should be clean")]
 async fn verify_clean_environment(world: &mut World) {
     if keep_topology() {

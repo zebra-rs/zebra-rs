@@ -3,9 +3,11 @@
 # only when an RA is received on i1 (the peer's link-local is learned
 # from it), so RA send must be on at BOTH ends. `remote-as` is numeric
 # (not `external`) because the `external` placeholder leaves the peer
-# dormant until OPEN-side AS backfill lands. The IPv4 network is
+# dormant until OPEN-side AS backfill lands. The IPv4 networks are
 # advertised over the link-local session via RFC 8950 ENHE, which is
-# auto-negotiated for interface-keyed peers.
+# auto-negotiated for interface-keyed peers: a bare /32 plus the LAN
+# /24 that lives on the local `lan` dummy — the latter is what the
+# forwarding scenario pings across.
 interface:
 - if-name: i1
   ipv6:
@@ -23,3 +25,4 @@ router:
     - name: ipv4
       network:
       - prefix: 10.0.0.1/32
+      - prefix: 10.10.1.0/24

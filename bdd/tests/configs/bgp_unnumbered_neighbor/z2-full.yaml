@@ -16,3 +16,4 @@ router:
     - name: ipv4
       network:
       - prefix: 10.0.0.2/32
+      - prefix: 10.10.2.0/24
