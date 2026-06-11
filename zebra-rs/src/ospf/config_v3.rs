@@ -865,23 +865,15 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
         ospf.ext_intra_area_prefix_v3_lsa_originate(ifindex);
     }
 
-    // Re-originate / flush E-Router-LSAs for every link with either
-    // a configured P2P adjacency-SID or any LAN Adj-SID labels just
-    // allocated above. Using both criteria covers static-config P2P
-    // and dynamic-allocation broadcast in one pass.
-    let ifindexes: Vec<u32> = ospf
-        .links
-        .iter()
-        .filter(|(ifindex, link)| {
-            link.config.adjacency_sid.is_some()
-                || ospf
-                    .lan_adj_sids
-                    .range((**ifindex, std::net::Ipv4Addr::UNSPECIFIED)..)
-                    .next()
-                    .is_some_and(|((idx, _), _)| idx == *ifindex)
-        })
-        .map(|(ifindex, _)| *ifindex)
-        .collect();
+    // Re-originate / flush the per-link E-Router-LSA on every link.
+    // The originator gates on mode + warrant itself (and flushes
+    // otherwise), so sweeping unconditionally covers all four cases:
+    // enable/disable x configured/dynamic Adj-SID. Filtering by
+    // `adjacency_sid.is_some() || lan_adj_sids non-empty` here broke
+    // the disable path once Adj-SIDs went dynamic — the map is
+    // cleared just above, so no link matched and the stale LSAs
+    // (and their self-ILM pops) survived the SR-MPLS delete.
+    let ifindexes: Vec<u32> = ospf.links.keys().copied().collect();
     for ifindex in ifindexes {
         ospf.e_router_v3_lsa_originate(ifindex);
     }

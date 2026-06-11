@@ -26,11 +26,7 @@ router:
         enable: true
         network-type: point-to-point
         cost: 1000
-        adjacency-sid:
-          index: 76
       - if-name: r3-d
         enable: true
         network-type: point-to-point
         cost: 1
-        adjacency-sid:
-          index: 78

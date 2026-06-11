@@ -2417,7 +2417,7 @@ fn show_ospf_checkpoint(
             )?;
         }
     }
-    writeln!(buf, "  LAN Adj-SIDs: {}", cp.lan_adj_sids.len())?;
+    writeln!(buf, "  Adj-SID labels: {}", cp.lan_adj_sids.len())?;
     for ((ifindex, addr), label) in &cp.lan_adj_sids {
         writeln!(buf, "    if{} {} -> label {}", ifindex, addr, label)?;
     }
