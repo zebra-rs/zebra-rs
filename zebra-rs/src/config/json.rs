@@ -54,6 +54,14 @@ pub fn json_to_list(
             }
         }
         Value::Object(map) => {
+            // A childless presence container marshals as `{}`; restore
+            // it as the bare `set <path>` (a presence container exists
+            // on its own, unlike a plain container which only exists
+            // through its children — an empty `{}` there is a no-op).
+            if map.is_empty() && entry.presence {
+                lines.push(format!("set {}", p.join(" ")));
+                return;
+            }
             let mut p = p.clone();
             if !entry.key.is_empty() {
                 if let Some(value) = map.get(&entry.key[0]) {
@@ -184,6 +192,44 @@ mod tests {
                 .iter()
                 .any(|l| l == "set policy IN-MED entry 10 action permit"),
             "siblings after the unknown key must still apply; lines: {lines:?}"
+        );
+    }
+
+    /// A childless presence container dumps as `{}` — loading that
+    /// shape must restore the bare `set <path>` line, and the legacy
+    /// `null` shape (pre-`{}` dumps) must keep loading the same way.
+    /// An empty object on a plain (non-presence) container stays a
+    /// silent no-op: such a container has no independent existence.
+    #[test]
+    fn empty_object_restores_presence_container() {
+        let doc =
+            r#"{"router":{"bgp":{"neighbor":[{"remote-address":"10.0.0.1","as-override":{}}]}}}"#;
+        let (lines, errors) = json_read(set_entry(), doc);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "set router bgp neighbor 10.0.0.1 as-override"),
+            "lines: {lines:?}"
+        );
+
+        let doc =
+            r#"{"router":{"bgp":{"neighbor":[{"remote-address":"10.0.0.1","as-override":null}]}}}"#;
+        let (lines, errors) = json_read(set_entry(), doc);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "set router bgp neighbor 10.0.0.1 as-override"),
+            "legacy null shape must keep loading; lines: {lines:?}"
+        );
+
+        let doc = r#"{"router":{"bgp":{}}}"#;
+        let (lines, errors) = json_read(set_entry(), doc);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(
+            lines.is_empty(),
+            "non-presence `{{}}` must not emit a command; lines: {lines:?}"
         );
     }
 

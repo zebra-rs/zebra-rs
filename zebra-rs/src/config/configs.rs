@@ -372,11 +372,17 @@ impl Config {
             self.marshal_configs(out);
 
             // A `type empty` leaf or a childless presence container has
-            // emitted only a dangling `"name":` so far. Close it with an
-            // explicit null: json_to_list() maps null back to the bare
-            // `set <path>` on load, whereas `{}` is silently dropped.
+            // emitted only a dangling `"name":` so far. A presence
+            // container closes as `{}` (it is a container in the YANG
+            // data tree); a `type empty` leaf closes as null. Both
+            // shapes round-trip: json_to_list() restores each as the
+            // bare `set <path>`.
             if !has_configs && self.value.borrow().is_empty() && self.list.borrow().is_empty() {
-                out.push_str("null");
+                if self.presence {
+                    out.push_str("{}");
+                } else {
+                    out.push_str("null");
+                }
             }
         }
     }
@@ -1156,11 +1162,11 @@ mod tests {
     }
 
     #[test]
-    fn test_presence_container_json_null() {
+    fn test_presence_container_json_empty_object() {
         // A childless presence container (e.g. `set router bgp
-        // segment-routing srv6 ipv6-unicast`) marshals as null, not `{}`:
-        // json_to_list() restores null as the bare `set <path>` but
-        // silently drops an empty object, losing the node on re-apply.
+        // segment-routing srv6 ipv6-unicast`) marshals as `{}`, not
+        // null — null is reserved for `type empty` leaves. json_to_list()
+        // restores an empty object as the bare `set <path>` on re-apply.
         let root = Rc::new(Config::new("".to_string(), None));
 
         let paths = vec![
@@ -1181,6 +1187,11 @@ mod tests {
         root.json(&mut json_output);
         let parsed: serde_json::Value =
             serde_json::from_str(&json_output).expect("JSON output should be valid");
-        assert_eq!(parsed["srv6"]["ipv6-unicast"], serde_json::Value::Null);
+        assert_eq!(parsed["srv6"]["ipv6-unicast"], serde_json::json!({}));
+
+        let mut yaml_output = String::new();
+        root.yaml(&mut yaml_output);
+        assert!(yaml_output.contains("ipv6-unicast: {}"));
+        assert!(!yaml_output.contains("% "));
     }
 }
