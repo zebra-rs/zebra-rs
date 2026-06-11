@@ -1788,7 +1788,7 @@ fn write_isis_backup_v6_detail(
     } else {
         writeln!(
             buf,
-            "      SID list {}, Encap: {:?}",
+            "      SID list {}, Encap: {}",
             fmt_isis_srv6_segs(&backup.segs),
             backup.encap,
         )?;

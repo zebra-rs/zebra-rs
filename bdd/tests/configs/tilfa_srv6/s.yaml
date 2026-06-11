@@ -1,0 +1,78 @@
+# s — TI-LFA source. IS-IS L2, SRv6 locator LOC1, all circuits P2P.
+# iBGP to d's loopback with redistribute connected + SRv6 ipv6-unicast,
+# so the lan0 stub prefix is carried with an End.DT6 SID from LOC1.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: s-n1
+  ipv6:
+    address: 2001:db8:0:1::1/64
+- if-name: s-n2
+  ipv6:
+    address: 2001:db8:0:2::1/64
+- if-name: s-n3
+  ipv6:
+    address: 2001:db8:0:3::1/64
+- if-name: lan0
+  ipv6:
+    address: 2001:db8:100::1/64
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: s
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC1
+    fast-reroute:
+      ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: s-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: s-n2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: s-n3
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 2001:db8::8
+      remote-as: 65000
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}

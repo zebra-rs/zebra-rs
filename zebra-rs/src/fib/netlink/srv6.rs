@@ -16,9 +16,11 @@ use crate::rib::{SidBehavior, SidStructure};
 //
 // HEncap carries every segment in the SRH. HEncapRed (RFC 8986 §5.2) drops
 // the first segment from the SRH because the kernel's outer IPv6 destination
-// already encodes it; the remaining segments must be non-empty. Other
-// EncapType variants are rejected here so callers surface a useful error
-// instead of silently flattening behavior.
+// already encodes it; the remaining segments must be non-empty. HInsert
+// (kernel `mode inline`) inserts the SRH into the existing IPv6 packet with
+// the original destination as the final segment — see build_srh_inline.
+// Other EncapType variants are rejected here so callers surface a useful
+// error instead of silently flattening behavior.
 pub fn build_seg6_lwtunnel(
     segments: &[Ipv6Addr],
     encap_type: EncapType,
@@ -26,20 +28,20 @@ pub fn build_seg6_lwtunnel(
     if segments.is_empty() {
         bail!("SRv6 encap requires at least one segment");
     }
-    let sr_segments: Vec<Ipv6Addr> = match encap_type {
-        EncapType::HEncap => segments.to_vec(),
+    let (mode, ipv6_sr_hdr) = match encap_type {
+        EncapType::HEncap => (Seg6IpTunnelMode::Encap, build_srh(segments)),
         EncapType::HEncapRed => {
             if segments.len() < 2 {
                 bail!("H.Encap.Red requires at least two segments");
             }
-            segments[1..].to_vec()
+            (Seg6IpTunnelMode::Encap, build_srh(&segments[1..]))
         }
+        EncapType::HInsert => (Seg6IpTunnelMode::Inline, build_srh_inline(segments)),
         other => bail!("unsupported SRv6 encap type: {other}"),
     };
 
-    let ipv6_sr_hdr = build_srh(&sr_segments);
     let seg6 = Seg6IpTunnelEncap {
-        mode: Seg6IpTunnelMode::Encap,
+        mode,
         ipv6_sr_hdr: VecIpv6SrHdr(vec![ipv6_sr_hdr]),
     };
     Ok(RouteLwTunnelEncap::Seg6(RouteSeg6IpTunnel::Seg6IpTunnel(
@@ -60,6 +62,33 @@ pub fn build_seg6_attrs(
         RouteAttribute::Encap(vec![lwencap]),
         RouteAttribute::EncapType(RouteLwEnCapType::Seg6),
     ))
+}
+
+// Build the tunnel-info SRH for the inline (H.Insert) mode. The kernel
+// inserts this SRH into the existing IPv6 packet and overwrites
+// segments[0] with the packet's original destination, so the wire
+// layout is
+//   segments = [orig-DA placeholder, s_n, ..., s_1]
+//   segments_left = first_segment = n
+// (the active segment indexes from the top, so the initial destination
+// rewrite lands on s_1, and the original destination becomes the final
+// segment). `segments` arrives in forwarding order (s_1 first).
+fn build_srh_inline(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
+    let n = segments.len() as u8;
+    let mut segs: Vec<Ipv6Addr> = Vec::with_capacity(segments.len() + 1);
+    segs.push(Ipv6Addr::UNSPECIFIED);
+    segs.extend(segments.iter().rev().copied());
+    Ipv6SrHdr {
+        nexthdr: 0,
+        hdrlen: (n + 1).saturating_mul(2),
+        typ: 4,
+        segments_left: n,
+        first_segment: n,
+        flags: 0,
+        tag: 0,
+        segments: segs,
+        ..Default::default()
+    }
 }
 
 // Build the SRH (`Ipv6SrHdr`) carrying `segments` in forwarding order,
@@ -103,11 +132,24 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
 // knows where to split the destination address when shifting the next
 // uSID into position. Returns None for classic behaviors — they don't
 // need a Flavors attribute at all.
+//
+// Only uN gets the flavor. uN is a *prefix* install (LB+LN), so a uSID
+// carrier with more bits after the node id legitimately matches it and
+// must shift; a carrier whose argument is exhausted falls back to
+// classic End, which also processes a full-SID SRH hop correctly. uA
+// installs at /128 — only the exact B:N:F address can match, so there
+// is never a next uSID to shift into position. Worse, NEXT-CSID with
+// nflen covering only the node bits makes the kernel read the uA's
+// *function* bits as a pending argument and "shift" the DA into the
+// garbage address LB:F:: instead of running End.X — so a uA referenced
+// as a full SID from an SRH (e.g. a TI-LFA repair list) blackholes.
+// Classic End.X is the correct kernel programming for a /128 full-SID
+// install.
 fn build_seg6local_flavors(
     behavior: SidBehavior,
     structure: Option<SidStructure>,
 ) -> Option<RouteSeg6LocalIpTunnel> {
-    if !matches!(behavior, SidBehavior::UN | SidBehavior::UA) {
+    if !matches!(behavior, SidBehavior::UN) {
         return None;
     }
     let s = structure?;
@@ -292,5 +334,61 @@ mod tests {
     fn end_b6_encaps_without_segments_skips_install() {
         // No segment list → no SRH to push → skip the FIB install.
         assert!(build_seg6local_lwtunnel(SidBehavior::EndB6Encap, None, None, 0, &[]).is_none());
+    }
+
+    #[test]
+    fn h_insert_builds_inline_srh_with_orig_da_placeholder() {
+        // TI-LFA repair: forwarding-order [s1, s2] must become the wire
+        // layout [::, s2, s1] with SL = first_segment = 2 — the kernel
+        // overwrites segments[0] with the packet's original destination
+        // and starts at s1.
+        let s1: Ipv6Addr = "fcbb:bbbb:2::".parse().unwrap();
+        let s2: Ipv6Addr = "fcbb:bbbb:2:e000::".parse().unwrap();
+        let encap = build_seg6_lwtunnel(&[s1, s2], EncapType::HInsert).expect("encap built");
+        let RouteLwTunnelEncap::Seg6(RouteSeg6IpTunnel::Seg6IpTunnel(seg6)) = encap else {
+            panic!("expected seg6 iptunnel encap");
+        };
+        assert_eq!(seg6.mode, Seg6IpTunnelMode::Inline);
+        let srh = &seg6.ipv6_sr_hdr.0[0];
+        assert_eq!(srh.segments, vec![Ipv6Addr::UNSPECIFIED, s2, s1]);
+        assert_eq!(srh.segments_left, 2);
+        assert_eq!(srh.first_segment, 2);
+        assert_eq!(srh.hdrlen, 6);
+    }
+
+    #[test]
+    fn ua_installs_classic_end_x_without_flavors() {
+        // A uA is a /128 full-SID install: NEXT-CSID would misread the
+        // function bits as a shift argument and forward to LB:F::
+        // instead of running End.X, so the flavor must be omitted.
+        let nh6: Ipv6Addr = "fe80::2".parse().unwrap();
+        let structure = Some(SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 64,
+        });
+        let encaps = build_seg6local_lwtunnel(SidBehavior::UA, Some(nh6), structure, 0, &[])
+            .expect("encap built");
+        assert!(
+            !encaps.iter().any(|e| matches!(
+                e,
+                RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Flavors(_))
+            )),
+            "uA must not carry a NEXT-CSID Flavors attribute"
+        );
+        assert!(encaps.iter().any(|e| matches!(
+            e,
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(Seg6LocalAction::EndX))
+        )));
+
+        // uN keeps the flavor — it is a prefix install where carriers
+        // with a remaining argument legitimately shift.
+        let encaps = build_seg6local_lwtunnel(SidBehavior::UN, None, structure, 0, &[])
+            .expect("encap built");
+        assert!(encaps.iter().any(|e| matches!(
+            e,
+            RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Flavors(_))
+        )));
     }
 }

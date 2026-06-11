@@ -1613,6 +1613,23 @@ async fn add_address_to_interface(
     );
 }
 
+/// Add a static route inside a namespace, family inferred from the
+/// prefix (use `::/0` for an IPv6 default). Gives plain host
+/// namespaces — LAN endpoints with no routing daemon — their route
+/// toward the segment's router in dataplane end-to-end tests.
+#[given(expr = "I add route {string} via {string} in namespace {string}")]
+#[when(expr = "I add route {string} via {string} in namespace {string}")]
+async fn add_route_via(world: &mut World, prefix: String, via: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "ip", &["route", "add", &prefix, "via", &via])
+        .await
+        .expect("Failed to add route");
+    println!(
+        "✓ Added route {} via {} in namespace {}",
+        prefix, via, scoped
+    );
+}
+
 /// Create a standalone dummy interface (not wired into any OSPF/IS-IS
 /// area) and give it an address. The resulting connected route is a
 /// genuine *external* prefix for redistribution tests — unlike an

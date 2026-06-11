@@ -1,0 +1,69 @@
+# d — TI-LFA destination. Mirror of s: IS-IS L2 + LOC8, iBGP back to
+# s's loopback carrying the d-LAN stub prefix with an End.DT6 from LOC8.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::8/128
+- if-name: d-n1
+  ipv6:
+    address: 2001:db8:0:10::2/64
+- if-name: d-r3
+  ipv6:
+    address: 2001:db8:0:11::2/64
+- if-name: lan0
+  ipv6:
+    address: 2001:db8:200::1/64
+segment-routing:
+  locator:
+  - name: LOC8
+    prefix: fcbb:bbbb:8::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0008.00
+    hostname: d
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC8
+    fast-reroute:
+      ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: d-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: d-r3
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.8
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC8
+        ipv6-unicast: {}
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65000
+      update-source: 2001:db8::8
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        encapsulation-type: srv6
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}

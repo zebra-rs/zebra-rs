@@ -307,6 +307,16 @@ pub enum EncapType {
     HEncapRed,
     HEncapL2,
     HEncapL2Red,
+    /// SRH insertion (H.Insert, kernel `seg6 mode inline`): the segment
+    /// list is inserted into the existing IPv6 packet with the original
+    /// destination appended as the final segment, instead of pushing an
+    /// outer IPv6 header. Unlike H.Encap*, the segment list needs no
+    /// decapsulating terminator — after the last listed segment the
+    /// packet continues to its original destination by plain IPv6
+    /// forwarding. TI-LFA repair paths use this: their segments are
+    /// transit End / End.X SIDs, which on Linux drop encapsulated
+    /// traffic at SL=0 (no USD flavor support).
+    HInsert,
 }
 
 impl EncapType {
@@ -316,6 +326,7 @@ impl EncapType {
             EncapType::HEncapRed => "H.Encap.Red",
             EncapType::HEncapL2 => "H.Encap.L2",
             EncapType::HEncapL2Red => "H.Encap.L2.Red",
+            EncapType::HInsert => "H.Insert",
         }
     }
 }
@@ -339,6 +350,7 @@ impl FromStr for EncapType {
             "H.Encap.Red" => Ok(EncapType::HEncapRed),
             "H.Encap.L2" => Ok(EncapType::HEncapL2),
             "H.Encap.L2.Red" => Ok(EncapType::HEncapL2Red),
+            "H.Insert" => Ok(EncapType::HInsert),
             other => Err(ParseEncapTypeError(other.to_string())),
         }
     }

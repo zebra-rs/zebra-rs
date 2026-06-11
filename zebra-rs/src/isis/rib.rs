@@ -2238,7 +2238,7 @@ mod tests {
                     ifindex: 20,
                     addr: backup_addr,
                     segs: vec![end_sid, endx_sid],
-                    encap: EncapType::HEncap,
+                    encap: EncapType::HInsert,
                 }),
             },
         );
@@ -2262,7 +2262,7 @@ mod tests {
         };
         assert_eq!(b.metric, 21);
         assert_eq!(b.segs, vec![end_sid, endx_sid]);
-        assert_eq!(b.encap_type, Some(EncapType::HEncap));
+        assert_eq!(b.encap_type, Some(EncapType::HInsert));
         assert!(b.mpls.is_empty());
     }
 
