@@ -2700,28 +2700,30 @@ pub enum BgpClearOp {
     SoftOut,
 }
 
-/// Drive `clear bgp <afi> <peer-or-all> [soft [in|out]]` requests from
-/// the new YANG schema in zebra-bgp-clear.yang. The first arg is the
+/// Drive `clear bgp [<afi>] <peer-or-all> [soft [in|out]]` requests
+/// from the YANG schema in zebra-bgp-clear.yang. The first arg is the
 /// list key — either an IP literal or the keyword `all`.
 ///
-/// Filtering by `(afi, safi)` only matters when the key is `all`; for
-/// a concrete peer address we look it up directly and skip the filter
-/// (the caller asked for *that* peer specifically). EVPN soft-in is
-/// not yet wired into `route_soft_in_peer`, so a soft-in/soft-both on
-/// EVPN logs a "not yet implemented" notice and leaves the session
-/// alone.
+/// `afi_safi` is `Some` for the per-AFI containers and `None` for the
+/// AFI-less `clear bgp <peer-or-all>` form. Filtering by it only
+/// matters when the key is `all`; for a concrete peer address we look
+/// it up directly and skip the filter (the caller asked for *that*
+/// peer specifically). EVPN soft-in is not yet wired into
+/// `route_soft_in_peer`, so a soft-in/soft-both on EVPN logs a "not
+/// yet implemented" notice and leaves the session alone.
 pub fn clear_bgp_action(
     bgp: &mut Bgp,
     args: &mut Args,
-    afi: bgp_packet::Afi,
-    safi: bgp_packet::Safi,
+    afi_safi: Option<(bgp_packet::Afi, bgp_packet::Safi)>,
     op: BgpClearOp,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(target) = args.string() else {
         return Ok("missing peer or 'all' argument".to_string());
     };
 
-    if matches!(op, BgpClearOp::SoftIn | BgpClearOp::SoftBoth) && safi == bgp_packet::Safi::Evpn {
+    if matches!(op, BgpClearOp::SoftIn | BgpClearOp::SoftBoth)
+        && afi_safi.map(|(_, safi)| safi) == Some(bgp_packet::Safi::Evpn)
+    {
         return Ok("%% EVPN soft-in is not yet implemented".to_string());
     }
 
@@ -2732,7 +2734,11 @@ pub fn clear_bgp_action(
     let targets: Vec<usize> = if target == "all" {
         bgp.peers
             .iter_all()
-            .filter_map(|(_, p)| p.is_afi_safi(afi, safi).then_some(p.ident))
+            .filter_map(|(_, p)| {
+                afi_safi
+                    .is_none_or(|(afi, safi)| p.is_afi_safi(afi, safi))
+                    .then_some(p.ident)
+            })
             .collect()
     } else {
         match target.parse::<IpAddr>() {
@@ -2975,6 +2981,47 @@ mod fsm_idle_hold_tests {
         peer.state = next;
         timer::update_timers(&mut peer);
         assert!(peer.timer.idle_hold_timer.is_none());
+    }
+
+    /// `clear bgp <peer>` hard reset (Event::Stop): the session drops
+    /// to Idle and the idle hold timer is armed — the pacer whose
+    /// Event::Start brings the session back up.
+    #[tokio::test]
+    async fn stop_lands_in_idle_and_arms_idle_hold_timer() {
+        let mut peer = test_peer(false);
+        peer.state = State::Established;
+
+        let next = fsm_stop(&mut peer);
+        assert_eq!(next, State::Idle);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert!(
+            peer.timer.idle_hold_timer.is_some(),
+            "a cleared peer must pace its restart with the idle hold timer"
+        );
+        assert!(peer.timer.connect_retry.is_none());
+    }
+
+    /// `clear bgp <peer>` on a passive neighbor: no idle hold, no
+    /// redial — `update_timers` flips the peer straight to Active
+    /// listening, waiting for the remote router to reconnect.
+    #[tokio::test]
+    async fn stop_passive_peer_returns_to_listening() {
+        let mut peer = test_peer(true);
+        peer.state = State::Established;
+
+        let next = fsm_stop(&mut peer);
+        assert_eq!(next, State::Idle);
+
+        peer.state = next;
+        timer::update_timers(&mut peer);
+        assert_eq!(peer.state, State::Active);
+        assert!(peer.timer.idle_hold_timer.is_none());
+        assert!(
+            peer.timer.connect_retry.is_none(),
+            "a passive peer must not arm the redial pacer"
+        );
     }
 
     /// The dial path arms the ConnectRetryTimer (RFC 4271: started on

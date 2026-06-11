@@ -28,23 +28,33 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 /// for larger fleets is a follow-up.
 const VRF_LABEL_BLOCK_SIZE: u32 = 1024;
 
-/// Map a `/clear/bgp/<afi>/neighbor[/soft[/in|out]]` path (from
-/// zebra-bgp-clear.yang) to the (AFI, SAFI, op) triple the BGP runtime
-/// understands. Returns None for unrecognised paths.
+/// Map a `/clear/bgp[/<afi>]/neighbor[/soft[/in|out]]` path (from
+/// zebra-bgp-clear.yang) to the (AFI/SAFI filter, op) pair the BGP
+/// runtime understands. The AFI segment is optional — the AFI-less
+/// `clear bgp <peer-or-all>` form returns `None` for the filter,
+/// meaning every AFI/SAFI. Returns None for unrecognised paths.
 fn parse_clear_bgp_path(
     path: &str,
-) -> Option<(bgp_packet::Afi, bgp_packet::Safi, peer::BgpClearOp)> {
+) -> Option<(
+    Option<(bgp_packet::Afi, bgp_packet::Safi)>,
+    peer::BgpClearOp,
+)> {
     use bgp_packet::{Afi, Safi};
     use peer::BgpClearOp;
 
     let rest = path.strip_prefix("/clear/bgp/")?;
-    let (afi_str, tail) = rest.split_once('/')?;
-    let (afi, safi) = match afi_str {
-        "ipv4" => (Afi::Ip, Safi::Unicast),
-        "ipv6" => (Afi::Ip6, Safi::Unicast),
-        "vpnv4" => (Afi::Ip, Safi::MplsVpn),
-        "evpn" => (Afi::L2vpn, Safi::Evpn),
-        _ => return None,
+    let (afi_safi, tail) = if rest == "neighbor" || rest.starts_with("neighbor/") {
+        (None, rest)
+    } else {
+        let (afi_str, tail) = rest.split_once('/')?;
+        let pair = match afi_str {
+            "ipv4" => (Afi::Ip, Safi::Unicast),
+            "ipv6" => (Afi::Ip6, Safi::Unicast),
+            "vpnv4" => (Afi::Ip, Safi::MplsVpn),
+            "evpn" => (Afi::L2vpn, Safi::Evpn),
+            _ => return None,
+        };
+        (Some(pair), tail)
     };
     let op = match tail {
         "neighbor" => BgpClearOp::Hard,
@@ -53,7 +63,7 @@ fn parse_clear_bgp_path(
         "neighbor/soft/out" => BgpClearOp::SoftOut,
         _ => return None,
     };
-    Some((afi, safi, op))
+    Some((afi_safi, op))
 }
 
 #[derive(Debug)]
@@ -1701,13 +1711,13 @@ impl Bgp {
                 msg.resp.unwrap().send(self.peer_comps()).unwrap();
             }
             ConfigOp::Clear => {
-                // FRR-style `clear bgp <afi> <peer-or-all> [soft [in|out]]`
-                // surface (zebra-bgp-clear.yang). The first segment after
-                // `/clear/bgp/` is the AFI; the remainder selects the
-                // operation.
+                // FRR-style `clear bgp [<afi>] <peer-or-all> [soft [in|out]]`
+                // surface (zebra-bgp-clear.yang). The optional segment after
+                // `/clear/bgp/` is the AFI (absent = every AFI/SAFI); the
+                // remainder selects the operation.
                 let (path, mut args) = path_from_command(&msg.paths);
-                if let Some((afi, safi, op)) = parse_clear_bgp_path(&path) {
-                    let _ = peer::clear_bgp_action(self, &mut args, afi, safi, op);
+                if let Some((afi_safi, op)) = parse_clear_bgp_path(&path) {
+                    let _ = peer::clear_bgp_action(self, &mut args, afi_safi, op);
                 }
             }
         }
@@ -3604,6 +3614,53 @@ mod tests {
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// `/clear/bgp/...` path → (AFI/SAFI filter, op) mapping, both the
+    /// per-AFI containers and the AFI-less form (filter = None, meaning
+    /// every AFI/SAFI). Pinned here because the vtyctl clear surface is
+    /// garbage-tolerant: an unmapped path silently no-ops.
+    #[test]
+    fn clear_bgp_path_mapping() {
+        use crate::bgp::peer::BgpClearOp;
+        use bgp_packet::{Afi, Safi};
+
+        let cases = [
+            (
+                "/clear/bgp/ipv4/neighbor",
+                Some((Some((Afi::Ip, Safi::Unicast)), BgpClearOp::Hard)),
+            ),
+            (
+                "/clear/bgp/ipv6/neighbor/soft",
+                Some((Some((Afi::Ip6, Safi::Unicast)), BgpClearOp::SoftBoth)),
+            ),
+            (
+                "/clear/bgp/vpnv4/neighbor/soft/in",
+                Some((Some((Afi::Ip, Safi::MplsVpn)), BgpClearOp::SoftIn)),
+            ),
+            (
+                "/clear/bgp/evpn/neighbor/soft/out",
+                Some((Some((Afi::L2vpn, Safi::Evpn)), BgpClearOp::SoftOut)),
+            ),
+            ("/clear/bgp/neighbor", Some((None, BgpClearOp::Hard))),
+            (
+                "/clear/bgp/neighbor/soft",
+                Some((None, BgpClearOp::SoftBoth)),
+            ),
+            (
+                "/clear/bgp/neighbor/soft/in",
+                Some((None, BgpClearOp::SoftIn)),
+            ),
+            (
+                "/clear/bgp/neighbor/soft/out",
+                Some((None, BgpClearOp::SoftOut)),
+            ),
+            ("/clear/bgp/bogus/neighbor", None),
+            ("/clear/bgp/neighbor/bogus", None),
+        ];
+        for (path, want) in cases {
+            assert_eq!(super::parse_clear_bgp_path(path), want, "path `{path}`");
+        }
     }
 
     #[test]

@@ -33,9 +33,15 @@ module zebra-bgp-clear {
        /clear/bgp/<afi>/neighbor/soft/in          soft, inbound only
        /clear/bgp/<afi>/neighbor/soft/out         soft, outbound only
 
+     plus an AFI-less form directly under /clear/bgp — same subtree,
+     no AFI/SAFI filter (`clear bgp <peer-or-all> [soft [in|out]]`):
+
+       /clear/bgp/neighbor[/soft[/in|/out]]
+
      The list key on `neighbor` is a `peer-id-or-all` — the peer's IP
      literal, an `interface-neighbor` name (IPv6 unnumbered), or the
-     keyword `all` to target every peer at that AFI.";
+     keyword `all` to target every peer at that AFI (every peer
+     outright in the AFI-less form).";
 
   /* =========================================================
    * Types
@@ -116,6 +122,16 @@ module zebra-bgp-clear {
        Each AFI container reuses the same neighbor/soft grouping.";
     container bgp {
       ext:help "BGP clear actions";
+      // AFI-less form: `clear bgp {<peer>|all} [soft [in|out]]` clears
+      // across every AFI/SAFI. The positional routing is safe next to
+      // the AFI keyword children because the matcher only takes the
+      // default-child descent on a *strictly better* match: `ipv4`
+      // etc. keyword-match Exact (or Partial when abbreviated) while
+      // the key's pattern-less string arm is only ever Partial — so
+      // any AFI spelling, including abbreviations, still wins and an
+      // IP literal / interface name / `all` falls through to the key.
+      ext:default-child "neighbor";
+      uses bgp-clear-neighbor-actions;
       // FRR-style positional form: a peer address (or `all`) typed
       // straight after the AFI (`clear bgp ipv4 10.0.0.1 [soft ...]`)
       // is routed into the `neighbor` list by the matcher via
