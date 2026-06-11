@@ -32,4 +32,4 @@ router:
       # private — so the bare form strips it before z2 prepends its own
       # AS 100. z3 receives AS_PATH "100" instead of "100 65001"; z1's
       # private AS 65001 is hidden from z3.
-      remove-private-as:
+      remove-private-as: {}

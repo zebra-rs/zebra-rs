@@ -19,5 +19,5 @@ router:
       enabled: true
       remote-as: 65002
       # Bare presence container → default occurrence budget of 3.
-      # (`allowas-in:` with a null value lowers to `set ... allowas-in`.)
-      allowas-in:
+      # (`allowas-in: {}` — a childless presence container — lowers to `set ... allowas-in`.)
+      allowas-in: {}

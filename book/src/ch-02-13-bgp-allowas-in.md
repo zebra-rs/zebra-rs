@@ -79,11 +79,13 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      allowas-in:            # bare presence container → default count 3
+      allowas-in: {}         # bare presence container → default count 3
 ```
 
-`allowas-in:` with no value is the YAML spelling of a presence container;
-the loader turns it into `set router bgp neighbor 192.168.1.2 allowas-in`.
+`allowas-in: {}` is the YAML spelling of a childless presence container;
+the loader turns it into `set router bgp neighbor 192.168.1.2 allowas-in`
+(the legacy `allowas-in: null` / bare `allowas-in:` spellings still load
+the same way).
 To set an explicit budget, nest `count`; for origin-only mode, nest the
 `origin` flag:
 
