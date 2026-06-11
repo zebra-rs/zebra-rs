@@ -2,124 +2,154 @@
 @ospfv3_tilfa
 Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
   As a network operator
-  I want five zebra-rs instances running OSPFv3 with SR-MPLS (RFC 8666)
+  I want eight zebra-rs instances running OSPFv3 with SR-MPLS (RFC 8666)
   and TI-LFA (RFC 9490) to pre-compute a topology-independent loop-free
   repair for the source's primary path, so that when the primary link
   fails the source still reaches the destination over the SR repair /
   post-convergence path.
 
-  All links are point-to-point veth pairs at the default interface cost
-  (OSPFv3 has no per-interface cost knob yet, so the topology — not the
-  metrics — must rule a plain LFA out). Every router enables
-  `segment-routing mpls` and `fast-reroute ti-lfa`; loopback Prefix-SIDs
-  index 100..500 resolve against the RIB's default SRGB (base 16000), so
-  node s's SID is label 16100, d's is 16500, etc. Each ring interface
-  also carries a configured Adjacency-SID (index = <from><to> digit
-  pair) — the OSPFv3 repair encodes its last hop as an Adj-SID segment,
-  which only resolves when the penultimate repair node advertises one.
+  IPv6 OSPFv3 sibling of `ospfv2_tilfa.feature` / `isis_tilfa.feature`
+  — the same eight-node RFC 9855 §5 topology and metrics, expressed
+  through the (new) per-interface `cost` knob, with the v3 SR
+  machinery (RFC 8362 E-LSAs instead of v2's Opaque LSAs). All links
+  are point-to-point; every router enables `segment-routing mpls` and
+  `fast-reroute ti-lfa`. Loopback Prefix-SIDs index 100..800 resolve
+  against the default SRGB (base 16000), and each link carries an
+  Adjacency-SID (index = <from><to> digit pair, s=1 n1=2 n2=3 n3=4
+  r1=5 r2=6 r3=7 d=8) — the repair encodes its mid-path hops as
+  Adj-SID segments.
 
-  The topology is a uniform-cost five-node ring — the textbook
-  no-plain-LFA case: for any destination two hops away, the source's
-  alternate neighbour reaches it through the source itself, so the
-  pre-computed repair must tunnel (Node-SID + Adj-SID segments) to a
-  node beyond the failure before plain forwarding can resume. OSPFv3
-  TI-LFA excludes the primary first-hop *vertex* (node protection), so
-  repairs exist exactly for the non-adjacent destinations n2 and n3.
+  The metrics are tuned so a simple LFA is impossible: s reaches d via
+  s-n1 (cost 2); the only other neighbours (n2, n3) are equidistant /
+  expensive, so protecting the s-n1 first hop requires an SR repair
+  tunnel through the r-plane rather than a plain loop-free alternate.
 
-  Test Topology (loopback 2001:db8::X / SID X00 / router-id 10.0.0.X):
+  OSPFv3 TI-LFA excludes the primary first-hop *vertex* (node
+  protection) and skips SPF-level ECMP destinations (the remaining
+  legs already protect the prefix), so repairs exist exactly for r2,
+  r3 and d — the single-nexthop destinations behind n1. Per RFC 9855
+  §5.3, the repair for d is <Node-SID(r1), Adj-SID(r1-r2),
+  Adj-SID(r2-r3)> via first-hop n2: labels [16500, 16056, 16067].
+
+  Test Topology (metric shown where != 1; loopback 2001:db8::X /
+  SID X00 / router-id 10.0.0.X):
   ```
-        s (::1) ────────── d (::5)        s-d:   2001:db8:5::/64
-         │                  │             s-n1:  2001:db8:1::/64
-        n1 (::2)           n3 (::4)       n1-n2: 2001:db8:2::/64
-         │                  │             n2-n3: 2001:db8:3::/64
-        n2 (::3) ───────────┘             n3-d:  2001:db8:4::/64
+                 s (2001:db8::1)
+             1 / 1 \      \ 1000
+              n1    n2     n3
+          1 / |1 \1  \1     \1000
+       d ─┘ 1 |   \    \      \
+ (2001:db8::8)│    \1000\      \
+          1 \ │     r1───────── (r1-n3 1000)
+             r3    /  \1000
+          1000\   /1   \(r1-r2 1000)
+               r2 ──────┘
+                 \1000
+                  r3 (r3-d 1)
+    s-n1 1  s-n2 1  s-n3 1000   n1-r1 1  n2-r1 1  n3-r1 1000
+    n1-r2 1 r1-r2 1000 r2-r3 1000  n1-d 1  r3-d 1
   ```
-  s reaches n3 (2001:db8::4) via s-d (cost 20); protecting that
-  first hop, the repair tunnels via n1 with [Node-SID(n2) 16300,
-  Adj-SID(n2->n3)] and is installed as the route's backup nexthop.
 
-  Scenario: Build the TI-LFA ring and confirm adjacencies + routes
+  Scenario: Build the TI-LFA topology and confirm adjacencies + routes
     Given a clean test environment
     When I create namespace "s"
     And I create namespace "n1"
     And I create namespace "n2"
     And I create namespace "n3"
+    And I create namespace "r1"
+    And I create namespace "r2"
+    And I create namespace "r3"
     And I create namespace "d"
     And I connect namespace "s" interface "s-n1" to namespace "n1" interface "n1-s"
-    And I connect namespace "n1" interface "n1-n2" to namespace "n2" interface "n2-n1"
-    And I connect namespace "n2" interface "n2-n3" to namespace "n3" interface "n3-n2"
-    And I connect namespace "n3" interface "n3-d" to namespace "d" interface "d-n3"
-    And I connect namespace "d" interface "d-s" to namespace "s" interface "s-d"
+    And I connect namespace "s" interface "s-n2" to namespace "n2" interface "n2-s"
+    And I connect namespace "s" interface "s-n3" to namespace "n3" interface "n3-s"
+    And I connect namespace "n1" interface "n1-r1" to namespace "r1" interface "r1-n1"
+    And I connect namespace "n2" interface "n2-r1" to namespace "r1" interface "r1-n2"
+    And I connect namespace "n3" interface "n3-r1" to namespace "r1" interface "r1-n3"
+    And I connect namespace "n1" interface "n1-r2" to namespace "r2" interface "r2-n1"
+    And I connect namespace "r1" interface "r1-r2" to namespace "r2" interface "r2-r1"
+    And I connect namespace "r2" interface "r2-r3" to namespace "r3" interface "r3-r2"
+    And I connect namespace "n1" interface "n1-d" to namespace "d" interface "d-n1"
+    And I connect namespace "r3" interface "r3-d" to namespace "d" interface "d-r3"
     And I start zebra-rs in namespace "s"
     And I start zebra-rs in namespace "n1"
     And I start zebra-rs in namespace "n2"
     And I start zebra-rs in namespace "n3"
+    And I start zebra-rs in namespace "r1"
+    And I start zebra-rs in namespace "r2"
+    And I start zebra-rs in namespace "r3"
     And I start zebra-rs in namespace "d"
     And I apply config "s.yaml" to namespace "s"
     And I apply config "n1.yaml" to namespace "n1"
     And I apply config "n2.yaml" to namespace "n2"
     And I apply config "n3.yaml" to namespace "n3"
+    And I apply config "r1.yaml" to namespace "r1"
+    And I apply config "r2.yaml" to namespace "r2"
+    And I apply config "r3.yaml" to namespace "r3"
     And I apply config "d.yaml" to namespace "d"
     And I wait 30 seconds
-    # Directly-connected adjacency over s-n1, then a multi-hop loopback
-    # (n2, two hops away) over the converged v3 RIB.
-    Then ping from "s" to "2001:db8:1::2" should succeed
-    And ping from "s" to "2001:db8::3" should succeed
+    # The configured costs surface on the interface (new v3 knob) ...
+    Then show command "show ipv6 ospf interface" in namespace "s" should contain "Cost: 1000"
+    # ... and shape the SPF: directly-connected adjacency over s-n1,
+    # then a multi-hop loopback (d, two hops away) over the converged
+    # v3 RIB.
+    And ping from "s" to "2001:db8:1::2" should succeed
+    And ping from "s" to "2001:db8::8" should succeed
 
   Scenario: SR-MPLS labels and a TI-LFA repair are installed on the source
     Given the test topology exists
     # Remote node-SIDs resolved into the LFIB. OSPFv3 originates its
     # Prefix-SIDs with the NP (no-PHP) flag (RFC 8666 §5), so even the
     # SID owner's direct neighbour swaps (label kept all the way; the
-    # owner pops via its own ILM entry) — unlike IS-IS's PHP default.
-    Then mpls ilm in namespace "s" should contain label 16300
-    And mpls ilm in namespace "s" should contain label 16500
+    # owner pops via its own ILM entry) — unlike v2's PHP at adjacent
+    # owners.
+    Then mpls ilm in namespace "s" should contain label 16500
+    And mpls ilm in namespace "s" should contain label 16800
     And mpls ilm outgoing label for label 16100 in namespace "s" should be "Pop"
-    And mpls ilm outgoing label for label 16300 in namespace "s" should be "16300"
-    And mpls ilm outgoing label for label 16500 in namespace "s" should be "16500"
+    And mpls ilm outgoing label for label 16200 in namespace "s" should be "16200"
+    And mpls ilm outgoing label for label 16800 in namespace "s" should be "16800"
     # The graph-level TI-LFA computation found repairs that need an SR
-    # tunnel: a Node-SID to reach past the failure, then an Adj-SID for
-    # the final hop.
+    # tunnel: a Node-SID to reach the P-node r1 past the failure, then
+    # Adj-SIDs walking the expensive r-plane links.
     And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "OSPFv3 TI-LFA repair paths:"
     And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "Node-SID"
     And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "Adj-SID"
-    # And the repairs are installed against the non-adjacent loopbacks:
-    # n2's (protected against s-n1 loss) and n3's (protected against
-    # s-d loss, tunnelling via n1 with n2's node-SID label 16300).
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::3/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::4/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "16300"
+    # And the repairs are installed against the single-nexthop
+    # loopbacks behind n1: r2, r3 and d (r1 itself is ECMP via n1/n2
+    # and self-protects). Every repair starts with r1's node-SID label
+    # 16500.
+    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::6/128"
+    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::7/128"
+    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::8/128"
+    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "16500"
     And show command "show ipv6 ospf repair-list detail" in namespace "s" should contain "sr-mpls"
 
   Scenario: Source reaches the destination over the primary path
     Given the test topology exists
-    # s -> d primary is the direct s-d link (one hop); s -> n3 rides
-    # the same link one hop further.
-    Then ping from "s" to "2001:db8::5" should succeed
-    And ping from "s" to "2001:db8::4" should succeed
+    # s -> d primary is s-n1-d (cost 2).
+    Then ping from "s" to "2001:db8::8" should succeed
     And ping from "d" to "2001:db8::1" should succeed
 
-  Scenario: Fast-reroute survives the primary link failure (s-d)
+  Scenario: Fast-reroute survives the primary link failure (s-n1)
     Given the test topology exists
-    Then ping from "s" to "2001:db8::4" should succeed
-    When I make namespace "s" interface "s-d" down
+    Then ping from "s" to "2001:db8::8" should succeed
+    When I make namespace "s" interface "s-n1" down
     And I wait 5 seconds
-    # n3's loopback was TI-LFA-protected (backup via n1 pre-installed);
-    # d's loopback is the failed first hop itself (no repair exists for
-    # an adjacent destination) and recovers via reconvergence. Both end
-    # up on the long way around (s-n1-n2-n3[-d]), out a different
-    # interface than the failed s-d.
-    Then ping from "s" to "2001:db8::4" should succeed
-    And ping from "s" to "2001:db8::5" should succeed
-    When I make namespace "s" interface "s-d" up
+    # d's loopback was TI-LFA-protected: the pre-installed backup
+    # tunnels via n2 with [Node-SID(r1) 16500, Adj-SID(r1-r2),
+    # Adj-SID(r2-r3)], avoiding the protected vertex n1 entirely
+    # (s-n2-r1-r2-r3-d); reconvergence then settles on s-n2-r1-n1-d.
+    # Either way the egress differs from the failed s-n1.
+    Then ping from "s" to "2001:db8::8" should succeed
+    When I make namespace "s" interface "s-n1" up
     And I wait 30 seconds
     # Primary restored once the adjacency re-forms.
-    Then ping from "s" to "2001:db8::5" should succeed
+    Then ping from "s" to "2001:db8::8" should succeed
 
   Scenario: Disabling fast-reroute clears the repair-list
     Given the test topology exists
     # s still holds TI-LFA backups from the previous scenarios.
-    Then show command "show ipv6 ospf repair-list" in namespace "s" should contain "16300"
+    Then show command "show ipv6 ospf repair-list" in namespace "s" should contain "16500"
     # Re-apply s without `fast-reroute ti-lfa` (SR-MPLS stays on).
     When I apply config "s-nofrr.yaml" to namespace "s"
     And I wait 5 seconds
@@ -127,14 +157,14 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     # no installed backups — while the SR labels stay in the LFIB.
     Then show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "(no TI-LFA repair paths computed)"
     And show command "show ipv6 ospf repair-list" in namespace "s" should contain "(no TI-LFA repair-list entries)"
-    And mpls ilm in namespace "s" should contain label 16300
+    And mpls ilm in namespace "s" should contain label 16800
 
   Scenario: Deleting segment-routing mpls clears all MPLS ILM entries
     Given the test topology exists
-    # s still has remote node-SID labels installed (n2 SID 300 -> 16300,
-    # d SID 500 -> 16500).
-    Then mpls ilm in namespace "s" should contain label 16300
-    And mpls ilm in namespace "s" should contain label 16500
+    # s still has remote node-SID labels installed (r1 SID 500 -> 16500,
+    # d SID 800 -> 16800).
+    Then mpls ilm in namespace "s" should contain label 16500
+    And mpls ilm in namespace "s" should contain label 16800
     # Remove `segment-routing mpls` from s entirely.
     When I apply config "s-nosr.yaml" to namespace "s"
     And I wait 5 seconds
@@ -148,10 +178,16 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     And I stop zebra-rs in namespace "n1"
     And I stop zebra-rs in namespace "n2"
     And I stop zebra-rs in namespace "n3"
+    And I stop zebra-rs in namespace "r1"
+    And I stop zebra-rs in namespace "r2"
+    And I stop zebra-rs in namespace "r3"
     And I stop zebra-rs in namespace "d"
     And I delete namespace "s"
     And I delete namespace "n1"
     And I delete namespace "n2"
     And I delete namespace "n3"
+    And I delete namespace "r1"
+    And I delete namespace "r2"
+    And I delete namespace "r3"
     And I delete namespace "d"
     Then the test environment should be clean
