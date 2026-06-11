@@ -163,6 +163,30 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     Then ping from "s" to "2001:db8::8" should succeed
     And ping from "sh" to "2001:db8:200::2" should succeed
 
+  Scenario: Promoted backup actually forwards over the SRv6 repair
+    Given the test topology exists
+    # `backup-as-primary` swaps the metric-sort offset so each TI-LFA
+    # repair installs as the active route and the SPF primary demotes
+    # to metric+1; `clear isis spf` recomputes and reinstalls with the
+    # flag applied. Traffic is pinned onto the SRv6 repair while every
+    # link stays up — proving the uN/uA SID list genuinely forwards,
+    # which the link-failure scenario cannot (by ping time SPF has
+    # already reconverged onto a plain post-convergence primary).
+    When I apply command "set router isis fast-reroute backup-as-primary" in namespace "s"
+    And I run "clear isis spf" in namespace "s"
+    # d's loopback route now has the SRH-insert repair as its best
+    # kernel entry: out the repair egress s-n2 at metric 12 (2 path +
+    # 10 for d's loopback prefix), demoted plain primary behind at 13.
+    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "mode inline"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto isis metric 12"
+    # End-to-end over the repair: the IGP loopback path and the
+    # BGP/SRv6 LAN-to-LAN service traffic, whose H.Encaps outer
+    # destination resolves via the promoted locator route. These die
+    # if any repair-segment uN/uA hop fails to forward (e.g. the
+    # kernel End.X nh6 lookup resolving on the wrong link).
+    And ping from "s" to "2001:db8::8" should succeed
+    And ping from "sh" to "2001:db8:200::2" should succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"
