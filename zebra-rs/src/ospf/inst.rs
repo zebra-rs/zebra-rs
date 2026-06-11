@@ -4346,8 +4346,11 @@ impl Ospf<Ospfv2> {
         let IpNet::V4(prefix) = &addr.addr else {
             return;
         };
+        // Duplicate-delivery guard — see `link_addr_push_unique` for
+        // why the same address arrives multiple times. Without it the
+        // Router-LSA repeats the stub network once per delivery.
         let ospf_addr = OspfAddr::from(&addr, prefix);
-        link.addr.push(ospf_addr);
+        super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
         link.ident.prefix = *prefix;
 
         // If this address made an enabled-but-Down interface usable,
@@ -5216,8 +5219,11 @@ impl Ospf<Ospfv3> {
         let IpNet::V6(prefix) = &addr.addr else {
             return;
         };
+        // Duplicate-delivery guard — see `link_addr_push_unique` for
+        // why the same address arrives multiple times. Without it the
+        // Intra-Area-Prefix-LSA repeats the prefix once per delivery.
         let ospf_addr = OspfAddr::<Ospfv3>::from(&addr, prefix);
-        link.addr.push(ospf_addr);
+        super::addr::link_addr_push_unique(&mut link.addr, ospf_addr);
 
         if link.enabled && link.state == IfsmState::Down {
             let _ = self
