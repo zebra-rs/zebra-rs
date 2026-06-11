@@ -4151,7 +4151,6 @@ impl Bgp {
             .set(show_bgp_sr_policy_v6)
             .path("/show/ip/bgp/link-state")
             .set(show_bgp_link_state)
-            // .path("/show/community-list").set(show_community_list)
             .path("/show/ip/bgp/attributes")
             .set(show_bgp_attributes)
             .path("/show/ip/bgp/vrf")
@@ -4164,15 +4163,8 @@ impl Bgp {
             .set(show_bgp_neighbor_group)
             .path("/show/evpn/vni/all")
             .set(show_evpn_vni_all)
-            // IOS-XR style update-group observability — kept under
-            // `show bgp ...` (not `show ip bgp ...`) per the design doc.
             .path("/show/bgp/update-group")
             .set(super::show_update_group::show_bgp_update_group)
-            // New `show bgp [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
-            // tree. `show bgp` with no AFI is IPv4 unicast; a bare address
-            // or prefix after `bgp` is routed here by the `ext:default-child
-            // "ipv4"` matcher, so `/show/bgp` and `/show/bgp/ipv4` share one
-            // handler.
             .path("/show/bgp")
             .set(show_bgp_ipv4::<Bgp>)
             .path("/show/bgp/ipv4")
@@ -4183,28 +4175,14 @@ impl Bgp {
             .set(show_bgp_ipv6::<Bgp>)
             .path("/show/bgp/ipv6/longer-prefix")
             .set(show_bgp_ipv6_longer::<Bgp>)
-            // VPNv4 / EVPN moved here from the legacy `show ip bgp` tree:
-            // `show bgp vpnv4 [<addr>|<prefix>]` and `show bgp evpn`.
             .path("/show/bgp/vpnv4")
             .set(show_bgp_vpnv4)
             .path("/show/bgp/evpn")
             .set(show_bgp_evpn)
-            // Neighbor summaries, moved here from the legacy `show ip bgp
-            // summary`: the bare form sections every configured AFI/SAFI;
-            // ipv4/ipv6/vpnv4 reach their one-section form through the
-            // key-union `summary` arm handled inside the RIB handlers
-            // above; EVPN has its own path (the `evpn` node is a presence
-            // container, not a keyed list).
             .path("/show/bgp/summary")
             .set(show_bgp_summary::<Bgp>)
             .path("/show/bgp/evpn/summary")
             .set(show_bgp_evpn_summary)
-            // `show bgp vrf <name> …` is normally intercepted by the manager
-            // and redirected into the per-VRF task (see `process_vrf_show`).
-            // These global handlers are the fall-through when no task is
-            // registered for `<name>`: bare `show bgp vrf` lists every VRF,
-            // and a named-but-not-running VRF reports the miss instead of
-            // leaving the request unanswered.
             .path("/show/bgp/vrf")
             .set(show_bgp_vrf)
             .path("/show/bgp/vrf/summary")
