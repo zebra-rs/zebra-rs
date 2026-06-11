@@ -394,9 +394,13 @@ impl FibHandle {
                         msg.attributes
                             .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
                     }
+                    // Cross-family gateway (RFC 5549 / RFC 8950: v4
+                    // prefix via a v6 next-hop) must ride RTA_VIA —
+                    // the kernel rejects an RTA_GATEWAY whose length
+                    // doesn't match the route's address family.
                     IpAddr::V6(ipv6) => {
                         msg.attributes
-                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                            .push(RouteAttribute::Via(RouteVia::Inet6(ipv6)));
                     }
                 }
                 if let Some(ifindex) = uni.ifindex() {
@@ -411,7 +415,8 @@ impl FibHandle {
                     let mut nhop = RouteNextHop::default();
                     let attr = match uni.addr {
                         IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
-                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                        // Cross-family gateway — RTA_VIA, as above.
+                        IpAddr::V6(ipv6) => RouteAttribute::Via(RouteVia::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
                     if let Some(ifindex) = uni.ifindex() {
@@ -540,9 +545,12 @@ impl FibHandle {
                         msg.attributes
                             .push(RouteAttribute::Gateway(RouteAddress::Inet(ipv4)));
                     }
+                    // Cross-family gateway (RFC 5549 / RFC 8950) —
+                    // RTA_VIA, mirroring the add path so the delete
+                    // matches what was installed.
                     IpAddr::V6(ipv6) => {
                         msg.attributes
-                            .push(RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)));
+                            .push(RouteAttribute::Via(RouteVia::Inet6(ipv6)));
                     }
                 }
                 if let Some(ifindex) = uni.ifindex() {
@@ -557,7 +565,8 @@ impl FibHandle {
                     let mut nhop = RouteNextHop::default();
                     let attr = match uni.addr {
                         IpAddr::V4(ipv4) => RouteAttribute::Gateway(RouteAddress::Inet(ipv4)),
-                        IpAddr::V6(ipv6) => RouteAttribute::Gateway(RouteAddress::Inet6(ipv6)),
+                        // Cross-family gateway — RTA_VIA, as above.
+                        IpAddr::V6(ipv6) => RouteAttribute::Via(RouteVia::Inet6(ipv6)),
                     };
                     nhop.attributes.push(attr);
                     if let Some(ifindex) = uni.ifindex() {

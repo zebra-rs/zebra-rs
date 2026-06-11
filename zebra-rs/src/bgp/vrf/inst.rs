@@ -571,7 +571,7 @@ impl BgpVrf {
             // from `attr.nexthop` set above.
             nexthop: None,
             nexthop_reachable: true,
-            egress_ifindex_v6: None,
+            enhe_egress: None,
             stale: false,
             esi: None,
             vrf_transit_only: false,
@@ -789,7 +789,7 @@ impl BgpVrf {
             local_label: None,
             nexthop: None,
             nexthop_reachable: true,
-            egress_ifindex_v6: None,
+            enhe_egress: None,
             stale: false,
             esi: None,
             vrf_transit_only: false,
