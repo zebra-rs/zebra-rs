@@ -22,4 +22,4 @@ router:
       # session is bounced, z2 re-receives 10.0.0.1/32 with AS_PATH
       # "65099 65001"; the left-most AS (65099) is not z1's AS (65001), so
       # the inbound first-AS check drops the update.
-      enforce-first-as:
+      enforce-first-as: {}

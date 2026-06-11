@@ -31,4 +31,4 @@ router:
       # z3, replaces z3's AS (65001) in the AS_PATH with z2's AS (65002)
       # before the local-AS prepend, so z3's RFC 4271 loop check accepts
       # 10.0.0.1/32 (it sees "65002 65002" instead of "65002 65001").
-      as-override:
+      as-override: {}
