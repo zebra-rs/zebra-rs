@@ -17,8 +17,8 @@ use ospf_packet::{
     OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
     OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
     OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_FLAG_B, OSPFV3_ROUTER_LSA_FLAG_E,
-    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody,
-    Ospfv3Options, Ospfv3PrefixOptions, Ospfv3RouterLinkType,
+    OSPFV3_ROUTER_LSA_FLAG_V, OSPFV3_ROUTER_LSA_FLAG_W, OSPFV3_ROUTER_LSA_TYPE, Ospfv3ExtTlv,
+    Ospfv3LsBody, Ospfv3Options, Ospfv3PrefixOptions, Ospfv3RouterLinkType,
 };
 
 use super::lsdb::{Lsa, OSPF_MAX_AGE};
@@ -80,7 +80,10 @@ fn render_or<T: serde::Serialize>(
 
 fn ls_type_name(ls_type: u16) -> &'static str {
     use ospf_packet::{
-        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_AS_EXTERNAL_LSA_TYPE,
+        OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE, OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_E_LINK_LSA_TYPE, OSPFV3_E_NETWORK_LSA_TYPE,
+        OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_GRACE_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
         OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
     };
@@ -93,6 +96,14 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_NSSA_LSA_TYPE => "NSSA-LSA",
         OSPFV3_LINK_LSA_TYPE => "Link-LSA",
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => "Intra-Area-Prefix-LSA",
+        OSPFV3_GRACE_LSA_TYPE => "Grace-LSA",
+        OSPFV3_E_ROUTER_LSA_TYPE => "E-Router-LSA",
+        OSPFV3_E_NETWORK_LSA_TYPE => "E-Network-LSA",
+        OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE => "E-Inter-Area-Prefix-LSA",
+        OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE => "E-Inter-Area-Router-LSA",
+        OSPFV3_E_AS_EXTERNAL_LSA_TYPE => "E-AS-External-LSA",
+        OSPFV3_E_LINK_LSA_TYPE => "E-Link-LSA",
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => "E-Intra-Area-Prefix-LSA",
         _ => "Unknown",
     }
 }
@@ -665,13 +676,13 @@ fn show_ospfv3_database(
         writeln!(text, "{}:", label)?;
         writeln!(
             text,
-            "  {:<22} {:<16} {:<16} {:<10} Age",
+            "  {:<24} {:<16} {:<16} {:<10} Age",
             "Type", "LS-ID", "Adv-Router", "Seq#"
         )?;
         for h in entries {
             writeln!(
                 text,
-                "  {:<22} {:<16} {:<16} {:<10} {}",
+                "  {:<24} {:<16} {:<16} {:<10} {}",
                 h.ls_type, h.link_state_id, h.advertising_router, h.ls_seq_number, h.ls_age
             )?;
         }
@@ -703,6 +714,11 @@ fn show_ospfv3_database_detail(
         OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+        ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE,
+        ospf_packet::OSPFV3_E_NETWORK_LSA_TYPE,
+        ospf_packet::OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
+        ospf_packet::OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
+        ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
     ];
 
     for (area_id, area) in top.areas.iter() {
@@ -728,42 +744,53 @@ fn show_ospfv3_database_detail(
         }
     }
 
-    let mut section_printed = false;
-    for ((ls_id, adv_router), lsa) in top.lsdb_as.iter_by_raw_type(OSPFV3_AS_EXTERNAL_LSA_TYPE) {
-        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
-            continue;
-        }
-        if !section_printed {
-            writeln!(
-                out,
-                "                {} (AS-Scope)",
-                ls_type_name(OSPFV3_AS_EXTERNAL_LSA_TYPE)
-            )?;
-            writeln!(out)?;
-            section_printed = true;
-        }
-        write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
-        writeln!(out)?;
-    }
+    const AS_TYPES: &[u16] = &[
+        OSPFV3_AS_EXTERNAL_LSA_TYPE,
+        ospf_packet::OSPFV3_E_AS_EXTERNAL_LSA_TYPE,
+    ];
 
-    for link in top.links.values() {
+    for &ls_type in AS_TYPES {
         let mut section_printed = false;
-        for ((ls_id, adv_router), lsa) in link.lsdb.iter_by_raw_type(OSPFV3_LINK_LSA_TYPE) {
+        for ((ls_id, adv_router), lsa) in top.lsdb_as.iter_by_raw_type(ls_type) {
             if lsa.data.h.ls_age >= OSPF_MAX_AGE {
                 continue;
             }
             if !section_printed {
-                writeln!(
-                    out,
-                    "                {} (Interface {})",
-                    ls_type_name(OSPFV3_LINK_LSA_TYPE),
-                    link.name
-                )?;
+                writeln!(out, "                {} (AS-Scope)", ls_type_name(ls_type))?;
                 writeln!(out)?;
                 section_printed = true;
             }
             write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
             writeln!(out)?;
+        }
+    }
+
+    const LINK_TYPES: &[u16] = &[
+        OSPFV3_LINK_LSA_TYPE,
+        ospf_packet::OSPFV3_GRACE_LSA_TYPE,
+        ospf_packet::OSPFV3_E_LINK_LSA_TYPE,
+    ];
+
+    for link in top.links.values() {
+        for &ls_type in LINK_TYPES {
+            let mut section_printed = false;
+            for ((ls_id, adv_router), lsa) in link.lsdb.iter_by_raw_type(ls_type) {
+                if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                    continue;
+                }
+                if !section_printed {
+                    writeln!(
+                        out,
+                        "                {} (Interface {})",
+                        ls_type_name(ls_type),
+                        link.name
+                    )?;
+                    writeln!(out)?;
+                    section_printed = true;
+                }
+                write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
+                writeln!(out)?;
+            }
         }
     }
 
@@ -914,10 +941,10 @@ fn write_lsa_detail(
                 )?;
             }
         }
-        // RFC 8362 Extended LSAs — for now we only know the TLV
-        // count. Top-level TLV decoders (Router-Link, Intra-Area-Prefix,
-        // …) land in the SR-MPLS consumption follow-up; render a brief
-        // summary until then.
+        // RFC 8362 Extended LSAs — list the top-level TLVs by name.
+        // Per-TLV field / sub-TLV rendering stays a follow-up; the
+        // decoded SR contents are visible via `show ipv6 ospf
+        // segment-routing` meanwhile.
         Ospfv3LsBody::ERouter(b)
         | Ospfv3LsBody::ENetwork(b)
         | Ospfv3LsBody::EInterAreaPrefix(b)
@@ -930,6 +957,23 @@ fn write_lsa_detail(
                 "  Extended LSA body, {} top-level TLV(s)",
                 b.tlvs.len()
             )?;
+            for tlv in &b.tlvs {
+                match tlv {
+                    Ospfv3ExtTlv::RouterLink(_) => writeln!(out, "    TLV: Router-Link")?,
+                    Ospfv3ExtTlv::IntraAreaPrefix(_) => {
+                        writeln!(out, "    TLV: Intra-Area-Prefix")?
+                    }
+                    Ospfv3ExtTlv::SrAlgorithm(_) => writeln!(out, "    TLV: SR-Algorithm")?,
+                    Ospfv3ExtTlv::SidLabelRange(_) => writeln!(out, "    TLV: SID/Label Range")?,
+                    Ospfv3ExtTlv::SrLocalBlock(_) => writeln!(out, "    TLV: SR Local Block")?,
+                    Ospfv3ExtTlv::Fad(_) => {
+                        writeln!(out, "    TLV: Flexible Algorithm Definition")?
+                    }
+                    Ospfv3ExtTlv::Unknown { typ, value } => {
+                        writeln!(out, "    TLV: Unknown (type={} len={})", typ, value.len())?
+                    }
+                }
+            }
         }
         Ospfv3LsBody::Grace(b) => {
             if let Some(secs) = b.grace_period() {
@@ -1749,4 +1793,62 @@ fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
             .then_with(|| a.area.cmp(&b.area))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the LS-Type → display-name map for every codepoint we
+    /// originate or parse, so `show ipv6 ospf database` never falls
+    /// back to "Unknown" for our own LSAs again (the RFC 8362 E-LSA
+    /// family regressed this way once: SR-enabled LSDBs listed 38
+    /// "Unknown" entries).
+    #[test]
+    fn ls_type_name_covers_extended_lsas() {
+        use ospf_packet::{
+            OSPFV3_E_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
+            OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+            OSPFV3_E_LINK_LSA_TYPE, OSPFV3_E_NETWORK_LSA_TYPE, OSPFV3_E_ROUTER_LSA_TYPE,
+            OSPFV3_GRACE_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE,
+        };
+        assert_eq!(ls_type_name(OSPFV3_ROUTER_LSA_TYPE), "Router-LSA");
+        assert_eq!(ls_type_name(OSPFV3_NETWORK_LSA_TYPE), "Network-LSA");
+        assert_eq!(
+            ls_type_name(OSPFV3_INTER_AREA_PREFIX_LSA_TYPE),
+            "Inter-Area-Prefix-LSA"
+        );
+        assert_eq!(
+            ls_type_name(OSPFV3_INTER_AREA_ROUTER_LSA_TYPE),
+            "Inter-Area-Router-LSA"
+        );
+        assert_eq!(ls_type_name(OSPFV3_AS_EXTERNAL_LSA_TYPE), "AS-External-LSA");
+        assert_eq!(ls_type_name(OSPFV3_NSSA_LSA_TYPE), "NSSA-LSA");
+        assert_eq!(ls_type_name(OSPFV3_LINK_LSA_TYPE), "Link-LSA");
+        assert_eq!(
+            ls_type_name(OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE),
+            "Intra-Area-Prefix-LSA"
+        );
+        assert_eq!(ls_type_name(OSPFV3_GRACE_LSA_TYPE), "Grace-LSA");
+        assert_eq!(ls_type_name(OSPFV3_E_ROUTER_LSA_TYPE), "E-Router-LSA");
+        assert_eq!(ls_type_name(OSPFV3_E_NETWORK_LSA_TYPE), "E-Network-LSA");
+        assert_eq!(
+            ls_type_name(OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE),
+            "E-Inter-Area-Prefix-LSA"
+        );
+        assert_eq!(
+            ls_type_name(OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE),
+            "E-Inter-Area-Router-LSA"
+        );
+        assert_eq!(
+            ls_type_name(OSPFV3_E_AS_EXTERNAL_LSA_TYPE),
+            "E-AS-External-LSA"
+        );
+        assert_eq!(ls_type_name(OSPFV3_E_LINK_LSA_TYPE), "E-Link-LSA");
+        assert_eq!(
+            ls_type_name(OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE),
+            "E-Intra-Area-Prefix-LSA"
+        );
+        assert_eq!(ls_type_name(0x1FFF), "Unknown");
+    }
 }
