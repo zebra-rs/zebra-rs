@@ -21,20 +21,21 @@ use std::time::{Duration, Instant};
 use bfd_packet::{Diag, State};
 use serde::Serialize;
 
-use crate::config::Args;
+use crate::config::{Args, Builder};
 
 use super::inst::{Bfd, ShowCallback};
 use super::session::{Session, SessionKey};
 
 impl Bfd {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
-    }
-
     pub fn show_build(&mut self) {
-        self.show_add("/show/bfd", show_bfd);
-        self.show_add("/show/bfd/peers", show_bfd_peers);
-        self.show_add("/show/bfd/counters", show_bfd_counters);
+        self.show_cb = Builder::<ShowCallback>::default()
+            .path("/show/bfd")
+            .set(show_bfd)
+            .path("/show/bfd/peers")
+            .set(show_bfd_peers)
+            .path("/show/bfd/counters")
+            .set(show_bfd_counters)
+            .map();
     }
 }
 

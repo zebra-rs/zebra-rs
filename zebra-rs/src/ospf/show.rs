@@ -6,7 +6,7 @@ use netlink_packet_route::link::LinkFlags;
 use ospf_packet::*;
 use serde::Serialize;
 
-use crate::config::Args;
+use crate::config::{Args, Builder};
 use crate::rib::LinkFlagsExt;
 use crate::spf;
 
@@ -166,30 +166,41 @@ struct OspfNetworkLsaDetailJson {
 }
 
 impl Ospf {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
-    }
-
     pub fn show_build(&mut self) {
-        self.show_add("/show/ip/ospf", show_ospf);
-        self.show_add("/show/ip/ospf/interface", show_ospf_interface);
-        self.show_add("/show/ip/ospf/neighbor", show_ospf_neighbor);
-        self.show_add("/show/ip/ospf/neighbor/detail", show_ospf_neighbor_detail);
-        self.show_add("/show/ip/ospf/database", show_ospf_database);
-        self.show_add("/show/ip/ospf/database/detail", show_ospf_database_detail);
-        self.show_add("/show/ip/ospf/route", show_ospf_route);
-        self.show_add("/show/ip/ospf/spf", show_ospf_spf);
-        self.show_add("/show/ip/ospf/flex-algo", show_ospf_flex_algo);
-        self.show_add("/show/ip/ospf/graph", show_ospf_graph);
-        self.show_add("/show/ip/ospf/ti-lfa", show_ospf_tilfa);
-        self.show_add("/show/ip/ospf/repair-list", show_ospf_repair_list);
-        self.show_add(
-            "/show/ip/ospf/repair-list/detail",
-            show_ospf_repair_list_detail,
-        );
-        self.show_add("/show/ip/ospf/segment-routing", show_ospf_segment_routing);
-        self.show_add("/show/ip/ospf/graceful-restart", show_ospf_graceful_restart);
-        self.show_add("/show/ip/ospf/checkpoint", show_ospf_checkpoint);
+        self.show_cb = Builder::<ShowCallback>::default()
+            .path("/show/ip/ospf")
+            .set(show_ospf)
+            .path("/show/ip/ospf/interface")
+            .set(show_ospf_interface)
+            .path("/show/ip/ospf/neighbor")
+            .set(show_ospf_neighbor)
+            .path("/show/ip/ospf/neighbor/detail")
+            .set(show_ospf_neighbor_detail)
+            .path("/show/ip/ospf/database")
+            .set(show_ospf_database)
+            .path("/show/ip/ospf/database/detail")
+            .set(show_ospf_database_detail)
+            .path("/show/ip/ospf/route")
+            .set(show_ospf_route)
+            .path("/show/ip/ospf/spf")
+            .set(show_ospf_spf)
+            .path("/show/ip/ospf/flex-algo")
+            .set(show_ospf_flex_algo)
+            .path("/show/ip/ospf/graph")
+            .set(show_ospf_graph)
+            .path("/show/ip/ospf/ti-lfa")
+            .set(show_ospf_tilfa)
+            .path("/show/ip/ospf/repair-list")
+            .set(show_ospf_repair_list)
+            .path("/show/ip/ospf/repair-list/detail")
+            .set(show_ospf_repair_list_detail)
+            .path("/show/ip/ospf/segment-routing")
+            .set(show_ospf_segment_routing)
+            .path("/show/ip/ospf/graceful-restart")
+            .set(show_ospf_graceful_restart)
+            .path("/show/ip/ospf/checkpoint")
+            .set(show_ospf_checkpoint)
+            .map();
     }
 }
 

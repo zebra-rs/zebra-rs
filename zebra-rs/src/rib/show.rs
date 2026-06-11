@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    config::Args,
+    config::{Args, Builder},
     rib::{Label, Nexthop, nexthop::NexthopList, nexthop::NexthopMember, nexthop::NexthopUni},
 };
 
@@ -1653,32 +1653,51 @@ fn format_mac_flags(flags: u8) -> String {
 }
 
 impl Rib {
-    fn show_add(&mut self, path: &str, cb: ShowCallback) {
-        self.show_cb.insert(path.to_string(), cb);
-    }
-
     pub fn show_build(&mut self) {
-        self.show_add("/show/interface", link_show);
-        self.show_add("/show/ip/route", rib_show);
-        self.show_add("/show/ip/route/detail", rib_show_detail);
-        self.show_add("/show/ip/route/prefix", rib_show_prefix);
-        self.show_add("/show/ip/route/prefix/detail", rib_show_prefix_detail);
-        self.show_add("/show/ip/route/vrf", rib_show_vrf);
-        self.show_add("/show/ip/route/vrf/detail", rib_show_vrf_detail);
-        self.show_add("/show/ipv6/route", rib6_show);
-        self.show_add("/show/ipv6/route/detail", rib6_show_detail);
-        self.show_add("/show/ipv6/route/prefix", rib6_show_prefix);
-        self.show_add("/show/ipv6/route/prefix/detail", rib6_show_prefix_detail);
-        self.show_add("/show/ipv6/route/vrf", rib6_show_vrf);
-        self.show_add("/show/ipv6/route/vrf/detail", rib6_show_vrf_detail);
-        self.show_add("/show/nexthop", nexthop_show);
-        self.show_add("/show/mpls/ilm", ilm_show);
-        self.show_add("/show/l2/mac/table", mac_show);
-        self.show_add("/show/l2/neighbor", l2_neighbor_show);
-        self.show_add("/show/segment-routing/srv6/sid", sid_show);
-        self.show_add("/show/vrf", vrf_show);
-        self.show_add("/show/hostname", hostname_show);
-        self.show_add("/show/router-id", router_id_show);
+        self.show_cb = Builder::<ShowCallback>::default()
+            .path("/show/interface")
+            .set(link_show)
+            .path("/show/ip/route")
+            .set(rib_show)
+            .path("/show/ip/route/detail")
+            .set(rib_show_detail)
+            .path("/show/ip/route/prefix")
+            .set(rib_show_prefix)
+            .path("/show/ip/route/prefix/detail")
+            .set(rib_show_prefix_detail)
+            .path("/show/ip/route/vrf")
+            .set(rib_show_vrf)
+            .path("/show/ip/route/vrf/detail")
+            .set(rib_show_vrf_detail)
+            .path("/show/ipv6/route")
+            .set(rib6_show)
+            .path("/show/ipv6/route/detail")
+            .set(rib6_show_detail)
+            .path("/show/ipv6/route/prefix")
+            .set(rib6_show_prefix)
+            .path("/show/ipv6/route/prefix/detail")
+            .set(rib6_show_prefix_detail)
+            .path("/show/ipv6/route/vrf")
+            .set(rib6_show_vrf)
+            .path("/show/ipv6/route/vrf/detail")
+            .set(rib6_show_vrf_detail)
+            .path("/show/nexthop")
+            .set(nexthop_show)
+            .path("/show/mpls/ilm")
+            .set(ilm_show)
+            .path("/show/l2/mac/table")
+            .set(mac_show)
+            .path("/show/l2/neighbor")
+            .set(l2_neighbor_show)
+            .path("/show/segment-routing/srv6/sid")
+            .set(sid_show)
+            .path("/show/vrf")
+            .set(vrf_show)
+            .path("/show/hostname")
+            .set(hostname_show)
+            .path("/show/router-id")
+            .set(router_id_show)
+            .map();
     }
 }
 
