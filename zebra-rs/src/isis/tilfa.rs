@@ -26,7 +26,12 @@ pub struct RepairPathMpls {
 
 /// TI-LFA SRv6 repair path. The segment list expresses the post-
 /// convergence path as IPv6 endpoint SIDs — typically
-/// `[End(P), End.X(P→Q)]` for the 2-segment case.
+/// `[End(P), End.X(P→Q)]` for the 2-segment case — in forwarding
+/// order. The encap is `HInsert` (SRH insertion): the repair segments
+/// are transit End / End.X SIDs with no decapsulating terminator, so
+/// the original destination must ride along as the SRH's final
+/// segment; H.Encap would blackhole at the last SID (Linux drops
+/// End / End.X at SL=0 without USD-flavor support).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepairPathSrv6 {
     pub ifindex: u32,
@@ -103,15 +108,14 @@ pub(super) fn build_repair_path_mpls(
 }
 
 /// SRv6 sibling of `build_repair_path_mpls`. Resolves the SR segment
-/// list to a list of End SIDs (from `top.srv6_end_map`) and pins the
-/// post-conv first-hop's IPv6 link-local egress. Encap defaults to
-/// `HEncap` (full SRH push); `HEncap.Red` is an opt-in per project
-/// default and would be selected at install time.
-///
-/// Only the empty and 1-segment-NodeSid cases are supported today —
-/// multi-segment SRv6 repairs need End.X (adjacency) SID resolution
-/// which isn't yet wired (no `srv6_endx_map` analogous to
-/// `srv6_end_map`). Multi-segment cases return `None` for now.
+/// list to IPv6 SIDs — NodeSids to the originator's End SID (from
+/// `top.srv6_end_map`), AdjSids to the advertiser's End.X SID (from
+/// its IS-reach sub-TLVs, RFC 9352 §8) — and pins the post-conv
+/// first-hop's IPv6 link-local egress. Returns `None` when any
+/// segment fails to resolve: a partial SID list would diverge from
+/// the post-convergence path the algorithm computed. The encap is
+/// `HInsert` — see `RepairPathSrv6` for why insertion rather than
+/// H.Encap.
 ///
 /// LAN trivial-repair (empty segs, first_hop is a pseudonode) is
 /// skipped for the same reason as in the MPLS sibling — `RepairPath`
@@ -122,15 +126,25 @@ pub(super) fn build_repair_path_srv6(
     rp: &spf::RepairPath,
 ) -> Option<RepairPathSrv6> {
     let lsp_map = top.lsp_map.get(&level);
-    let segs: Vec<Ipv6Addr> = match rp.segs.as_slice() {
-        [] => vec![],
-        [spf::SrSegment::NodeSid(v)] => {
-            let sys_id = lsp_map.resolve(*v)?;
-            let end_sid = top.srv6_end_map.get(&level).get(sys_id).copied()?;
-            vec![end_sid]
-        }
-        _ => return None,
-    };
+    let mut segs: Vec<Ipv6Addr> = Vec::with_capacity(rp.segs.len());
+    for (idx, seg) in rp.segs.iter().enumerate() {
+        let resolved = match seg {
+            spf::SrSegment::NodeSid(v) => lsp_map
+                .resolve(*v)
+                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id).copied()),
+            spf::SrSegment::AdjSid(from, to, via) => {
+                srv6_endx_sid_for_link(top, level, *from, *to, *via)
+            }
+        };
+        let Some(sid) = resolved else {
+            tracing::debug!(
+                "[tilfa] {level:?} repair segment[{idx}] {seg:?} failed to resolve to an SRv6 \
+                 SID; dropping repair list (partial: {segs:?})"
+            );
+            return None;
+        };
+        segs.push(sid);
+    }
 
     let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
     let link = top.links.get(&ifindex)?;
@@ -159,8 +173,68 @@ pub(super) fn build_repair_path_srv6(
         ifindex,
         addr,
         segs,
-        encap: EncapType::HEncap,
+        encap: EncapType::HInsert,
     })
+}
+
+/// Look up the SRv6 End.X SID `from` advertises for the link to `to`
+/// — the SRv6 sibling of `adj_sid_label_for_link`. For LAN
+/// adjacencies (`via_pseudonode = Some(pn)`) the IS Reach entry's
+/// neighbor_id matches the pseudonode and the LAN End.X sub-TLV's
+/// `system_id` field identifies the LAN member; for P2P adjacencies
+/// the neighbor_id is `(to_sys, 0)` and any End.X sub-TLV under it
+/// qualifies (RFC 9352 §8.1 / §8.2).
+fn srv6_endx_sid_for_link(
+    top: &IsisTop,
+    level: Level,
+    from_vertex: usize,
+    to_vertex: usize,
+    via_pseudonode: Option<usize>,
+) -> Option<Ipv6Addr> {
+    let from_sys = *top.lsp_map.get(&level).resolve(from_vertex)?;
+    let target_neighbor_id = if let Some(via_v) = via_pseudonode {
+        *top.lsp_map.get(&level).resolve_neighbor(via_v)?
+    } else {
+        let to_sys = *top.lsp_map.get(&level).resolve(to_vertex)?;
+        IsisNeighborId::from_sys_id(&to_sys, 0)
+    };
+
+    // Walk every non-pseudonode fragment originated by `from_sys` at
+    // this level — with send-side LSP fragmentation the IS-reach
+    // entry carrying the End.X can live in any fragment (same rule
+    // as adj_sid_label_for_link).
+    for (lsp_id, lsa) in top.lsdb.get(&level).iter() {
+        if lsp_id.sys_id() != from_sys || lsp_id.is_pseudo() {
+            continue;
+        }
+        for tlv in &lsa.lsp.tlvs {
+            let IsisTlv::ExtIsReach(reach) = tlv else {
+                continue;
+            };
+            for entry in &reach.entries {
+                if entry.neighbor_id != target_neighbor_id {
+                    continue;
+                }
+                for sub in &entry.subs {
+                    match sub {
+                        neigh::IsisSubTlv::Srv6EndXSid(endx) => {
+                            return Some(endx.sid);
+                        }
+                        neigh::IsisSubTlv::Srv6LanEndXSid(lan_endx) => {
+                            let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
+                                continue;
+                            };
+                            if &lan_endx.system_id == to_sys {
+                                return Some(lan_endx.sid);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Resolve a peer-advertised SID to an absolute MPLS label, using
