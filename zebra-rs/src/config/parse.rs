@@ -1012,6 +1012,43 @@ mod tests {
                 "/clear/bgp/ipv4/neighbor/soft/out",
                 vec!["i1"],
             ),
+            // AFI-less form — `clear bgp {<peer>|all} [soft [in|out]]`
+            // routes positionally into the `neighbor` list directly
+            // under /clear/bgp (no AFI/SAFI filter at runtime). The
+            // `clear bgp ipv4 …` cases above pin that the AFI keyword
+            // children still win over the positional key.
+            ("clear bgp all", "/clear/bgp/neighbor", vec!["all"]),
+            (
+                "clear bgp 192.168.0.1",
+                "/clear/bgp/neighbor",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp 2001:db8::1",
+                "/clear/bgp/neighbor",
+                vec!["2001:db8::1"],
+            ),
+            ("clear bgp i1", "/clear/bgp/neighbor", vec!["i1"]),
+            (
+                "clear bgp neighbor 192.168.0.1",
+                "/clear/bgp/neighbor",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp 192.168.0.1 soft",
+                "/clear/bgp/neighbor/soft",
+                vec!["192.168.0.1"],
+            ),
+            (
+                "clear bgp all soft out",
+                "/clear/bgp/neighbor/soft/out",
+                vec!["all"],
+            ),
+            (
+                "clear bgp i1 soft in",
+                "/clear/bgp/neighbor/soft/in",
+                vec!["i1"],
+            ),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {
