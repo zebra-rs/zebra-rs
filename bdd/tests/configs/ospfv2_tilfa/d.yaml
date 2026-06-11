@@ -1,16 +1,16 @@
 interface:
 - if-name: lo
   ipv4:
-    address: 10.0.0.5/32
-- if-name: d-n3
+    address: 10.0.0.8/32
+- if-name: d-n1
   ipv4:
-    address: 192.168.4.2/30
-- if-name: d-s
+    address: 192.168.0.37/30
+- if-name: d-r3
   ipv4:
-    address: 192.168.5.1/30
+    address: 192.168.0.41/30
 router:
   ospf:
-    router-id: 10.0.0.5
+    router-id: 10.0.0.8
     segment-routing:
       mpls: {}
     fast-reroute:
@@ -21,14 +21,16 @@ router:
       - if-name: lo
         enable: true
         prefix-sid:
-          index: 500
-      - if-name: d-n3
+          index: 800
+      - if-name: d-n1
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
-          index: 54
-      - if-name: d-s
+          index: 82
+      - if-name: d-r3
         enable: true
         network-type: point-to-point
+        cost: 1
         adjacency-sid:
-          index: 51
+          index: 87
