@@ -133,16 +133,22 @@ impl Nd {
     }
 
     async fn event_loop(&mut self) {
-        // We will use this after "link name" -> "RIB link" bug is fixed.
-        // loop {
-        //     match self.rib_rx.recv().await {
-        //         Some(RibRx::EoR) => {
-        //             break;
-        //         }
-        //         Some(msg) => self.process_rib_msg(msg),
-        //         None => break,
-        //     }
-        // }
+        // Drain RIB's initial dump up to `EoR` before selecting on
+        // the other channels. `commit_config` enqueues ConfigRequests
+        // synchronously in the same call that spawned us, while the
+        // link dump makes a round trip through the RIB task — so
+        // without this barrier a `send-advertisements` callback can
+        // run before the LinkAdds that feed name → ifindex
+        // resolution. The engine's name-keyed pending config covers
+        // links that appear later (and would absorb this race too);
+        // the barrier makes the cold-start ordering deterministic so
+        // config applies on the spot instead of waiting for a replay.
+        while let Some(msg) = self.rib_rx.recv().await {
+            if matches!(msg, RibRx::EoR) {
+                break;
+            }
+            self.process_rib_msg(msg);
+        }
         loop {
             let wakeup = self.engine.next_wakeup();
             tokio::select! {
