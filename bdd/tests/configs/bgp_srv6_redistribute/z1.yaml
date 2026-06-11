@@ -23,7 +23,7 @@ router:
     segment-routing:
       srv6:
         locator: LOC1
-        ipv6-unicast: null
+        ipv6-unicast: {}
     neighbor:
     - remote-address: 2001:db8:12::2
       remote-as: 65002
@@ -34,4 +34,4 @@ router:
     afi-safi:
     - name: ipv6
       redistribute:
-        connected: null
+        connected: {}

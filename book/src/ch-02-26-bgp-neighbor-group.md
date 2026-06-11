@@ -121,7 +121,7 @@ router:
     neighbor-group:
     - name: RR
       remote-as: 65001
-      ttl-security: null
+      ttl-security: {}
       route-reflector:
         client: true
       afi-safi:

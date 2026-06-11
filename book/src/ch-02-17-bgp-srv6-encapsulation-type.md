@@ -116,7 +116,7 @@ router:
     segment-routing:
       srv6:
         locator: LOC1
-        ipv6-unicast: null    # presence: originate an End.DT6 SID
+        ipv6-unicast: {}    # presence: originate an End.DT6 SID
 ```
 
 ```

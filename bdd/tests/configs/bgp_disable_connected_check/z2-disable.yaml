@@ -27,7 +27,7 @@ router:
       enabled: true
       remote-as: 65001
       update-source: 10.255.0.2
-      disable-connected-check: null
+      disable-connected-check: {}
     afi-safi:
     - name: ipv4
       network:

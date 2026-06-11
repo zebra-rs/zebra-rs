@@ -217,7 +217,7 @@ pub struct PeerTransportConfig {
     /// The options are installed on the session socket in
     /// [`fsm_connected`], the common active/passive convergence point,
     /// so one site covers both roles. Always 255 — there is no
-    /// configurable hop count (the YANG leaf is `type empty`). Mutually
+    /// configurable hop count (the YANG node is a presence container). Mutually
     /// exclusive with ebgp-multihop. See `zebra-bgp-transport.yang`.
     pub ttl_security: bool,
     /// eBGP multihop TTL (`ebgp-multihop N`, RFC 4271 operational

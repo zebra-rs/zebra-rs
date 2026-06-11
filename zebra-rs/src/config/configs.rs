@@ -1111,10 +1111,12 @@ mod tests {
 
     #[test]
     fn test_empty_leaf_json_yaml() {
-        // `set router bgp neighbor 2001:db8::8 disable-connected-check` —
-        // a `type empty` leaf ends the path at YangMatch::Leaf with no
-        // value. The marshaled JSON used to stop at a dangling `"name":`,
-        // and `show running-config yaml` panicked the daemon on it.
+        // `set router bgp neighbor 2001:db8::8 remove-private-as all` —
+        // a `type empty` leaf (`all`) ends the path at YangMatch::Leaf
+        // with no value. The marshaled JSON used to stop at a dangling
+        // `"name":`, and `show running-config yaml` panicked the daemon
+        // on it. The leaf sits inside a presence container, so this also
+        // pins the presence-with-child shape: an object, not `{}`.
         let root = Rc::new(Config::new("".to_string(), None));
 
         let paths = vec![
@@ -1140,7 +1142,12 @@ mod tests {
                 ..Default::default()
             },
             CommandPath {
-                name: "disable-connected-check".to_string(),
+                name: "remove-private-as".to_string(),
+                ymatch: YangMatch::DirMatched as i32,
+                ..Default::default()
+            },
+            CommandPath {
+                name: "all".to_string(),
                 ymatch: YangMatch::Leaf as i32,
                 ..Default::default()
             },
@@ -1153,11 +1160,14 @@ mod tests {
             serde_json::from_str(&json_output).expect("JSON output should be valid");
         let neighbor = &parsed["router"]["bgp"]["neighbor"][0];
         assert_eq!(neighbor["address"], "2001:db8::8");
-        assert_eq!(neighbor["disable-connected-check"], serde_json::Value::Null);
+        assert_eq!(
+            neighbor["remove-private-as"]["all"],
+            serde_json::Value::Null
+        );
 
         let mut yaml_output = String::new();
         root.yaml(&mut yaml_output);
-        assert!(yaml_output.contains("disable-connected-check: null"));
+        assert!(yaml_output.contains("all: null"));
         assert!(!yaml_output.contains("% "));
     }
 

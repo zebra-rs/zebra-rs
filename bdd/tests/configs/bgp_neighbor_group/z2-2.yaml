@@ -13,4 +13,4 @@ router:
         enabled: true
       enabled: true
       remote-as: 65001
-      ttl-security: null
+      ttl-security: {}

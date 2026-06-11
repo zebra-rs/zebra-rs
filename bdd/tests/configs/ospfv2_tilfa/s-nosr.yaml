@@ -12,7 +12,7 @@ router:
   ospf:
     router-id: 10.0.0.1
     fast-reroute:
-      ti-lfa: null
+      ti-lfa: {}
     area:
     - area-id: 0.0.0.0
       interface:

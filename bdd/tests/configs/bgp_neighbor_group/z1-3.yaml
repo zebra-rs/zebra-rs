@@ -12,7 +12,7 @@ router:
     neighbor-group:
     - name: RR
       remote-as: 65002
-      ttl-security: null
+      ttl-security: {}
     neighbor:
     - remote-address: 192.168.0.2
       afi-safi:

@@ -99,9 +99,9 @@ module zebra-bgp-transport {
          ietf-bgp-common.";
     }
 
-    leaf ttl-security {
+    container ttl-security {
       ext:help "Enable GTSM: accept this peer only when directly connected (TTL 255)";
-      type empty;
+      presence "Enable GTSM (TTL 255 send + receive enforcement) for this neighbor";
       description
         "When present, enable the Generalized TTL Security Mechanism
          (GTSM) for this neighbor. The peer is treated as directly
@@ -113,7 +113,7 @@ module zebra-bgp-transport {
          dropped before it reaches BGP, which protects the session
          from off-path spoofing.
 
-         This leaf is a flag (`type empty`), not a hop count: the only
+         This node is a flag (presence container), not a hop count: the only
          supported policy is the directly-connected case (expected hop
          count 0, TTL 255). A configurable number of hops, as in
          `neighbor X ttl-security hops <N>`, is intentionally not
@@ -218,9 +218,9 @@ module zebra-bgp-transport {
          (TCP port 179).";
     }
 
-    leaf disable-connected-check {
+    container disable-connected-check {
       ext:help "Allow a single-hop eBGP peer that is not on a connected subnet";
-      type empty;
+      presence "Skip the directly-connected-network check for this eBGP neighbor";
       description
         "When present, skip the directly-connected-network check for this
          eBGP neighbor.
@@ -243,7 +243,7 @@ module zebra-bgp-transport {
 
          Enable it on the end(s) that dial the non-connected address. The
          check applies to eBGP only; iBGP, ebgp-multihop and ttl-security
-         sessions are never gated by it, so the leaf is a no-op there.
+         sessions are never gated by it, so the knob is a no-op there.
 
          Equivalent to `neighbor X disable-connected-check` in FRR / Cisco
          IOS (FRR also accepts the legacy spelling `enforce-multihop`).";

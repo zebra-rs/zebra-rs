@@ -70,11 +70,11 @@ router:
       afi-safi:
       - name: ipv4
         enabled: true
-      enforce-first-as: null
+      enforce-first-as: {}
 ```
 
-`enforce-first-as: null` is the YAML spelling of a presence container —
-the key is present with no value, which the loader turns into
+`enforce-first-as: {}` is the YAML spelling of a presence container —
+the key is present with no children, which the loader turns into
 `set router bgp neighbor 192.168.0.1 enforce-first-as`. The FRR / IOS-style
 CLI form is the same path:
 
