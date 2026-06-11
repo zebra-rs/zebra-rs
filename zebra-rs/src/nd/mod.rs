@@ -25,6 +25,7 @@ pub mod engine;
 pub mod inst;
 pub mod network;
 pub mod send;
+pub mod show;
 pub mod socket;
 
 /// Inbound ND messages produced by [`network::read_packet`].

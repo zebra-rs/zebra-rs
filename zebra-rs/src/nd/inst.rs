@@ -17,7 +17,9 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep_until;
 
-use crate::config::{ConfigChannel, ConfigRequest, path_from_command};
+use crate::config::{
+    Args, ConfigChannel, ConfigRequest, DisplayRequest, ShowChannel, path_from_command,
+};
 use crate::context::Task;
 use crate::rib::api::RibRx;
 
@@ -26,6 +28,11 @@ use super::engine::{NdEngine, NdEvent};
 use super::network::{read_packet, write_packet};
 use super::send::RaSendConfig;
 use super::{NdRecv, NdSend};
+
+/// `show nd ...` dispatch handler. Mirrors [`crate::bfd::inst::ShowCallback`]:
+/// given the Nd instance, parsed trailing [`Args`], and the JSON flag,
+/// renders the response text.
+pub type ShowCallback = fn(&Nd, Args, bool) -> Result<String, std::fmt::Error>;
 
 /// Control requests from external clients (the YANG callback layer
 /// in RA-5, BGP unnumbered for the `SetNotifier` variant, and tests).
@@ -57,6 +64,14 @@ pub struct Nd {
     /// Config-manager subscription endpoints. The receive half drains
     /// in the event loop and feeds [`Self::process_cm_msg`].
     pub cm: ConfigChannel,
+    /// `show ipv6 nd ...` subscription endpoints. The receive half
+    /// drains in the event loop and dispatches through
+    /// [`Self::show_cb`].
+    pub show: ShowChannel,
+    /// Show callback table — path → handler — populated by
+    /// [`Self::show_build`] (in `super::show`) and consulted by
+    /// [`Self::process_show_msg`].
+    pub show_cb: HashMap<String, ShowCallback>,
     /// Callback table — path → handler — populated by
     /// [`Self::callback_build`] (in `super::config`) and consumed by
     /// [`Self::process_cm_msg`].
@@ -102,11 +117,14 @@ impl Nd {
             client_tx,
             rib_rx,
             cm: ConfigChannel::new(),
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
             callbacks: HashMap::new(),
             _read_task: read_task,
             _write_task: write_task,
         };
         nd.callback_build();
+        nd.show_build();
         nd
     }
 
@@ -164,6 +182,9 @@ impl Nd {
                 Some(cmsg) = self.cm.rx.recv() => {
                     self.process_cm_msg(cmsg);
                 }
+                Some(smsg) = self.show.rx.recv() => {
+                    self.process_show_msg(smsg).await;
+                }
                 _ = sleep_until_opt(wakeup) => {
                     let now = Instant::now();
                     for frame in self.engine.tick(now) {
@@ -191,6 +212,17 @@ impl Nd {
         let (path, args) = path_from_command(&msg.paths);
         if let Some(f) = self.callbacks.get(&path).copied() {
             f(self, args, msg.op);
+        }
+    }
+
+    async fn process_show_msg(&self, msg: DisplayRequest) {
+        let (path, args) = path_from_command(&msg.paths);
+        if let Some(f) = self.show_cb.get(&path) {
+            let output = match f(self, args, msg.json) {
+                Ok(result) => result,
+                Err(e) => format!("Error formatting output: {}", e),
+            };
+            let _ = msg.resp.send(output).await;
         }
     }
 

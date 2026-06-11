@@ -46,6 +46,7 @@ pub fn spawn_nd(config: &ConfigManager) {
     let (_rib_client, rib_rx) = config.subscribe_to_rib("nd");
     let nd = inst::Nd::new(socket, rib_rx);
     config.subscribe("nd", nd.cm.tx.clone());
+    config.subscribe_show("nd", nd.show.tx.clone());
     // Publish the ND client-request channel so other protocol modules
     // (BGP unnumbered) can attach a subscriber for `NeighborDiscovered`
     // events at their own spawn time.

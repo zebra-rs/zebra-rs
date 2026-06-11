@@ -1121,6 +1121,34 @@ mod tests {
         }
     }
 
+    /// Pin the `show ipv6 nd` grammar: three spellings — bare summary,
+    /// all-interfaces detail, single-interface detail — must parse to the
+    /// expected paths and arg vectors.
+    #[test]
+    fn show_ipv6_nd_grammar() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show ipv6 nd", "/show/ipv6/nd", vec![]),
+            ("show ipv6 nd interface", "/show/ipv6/nd/interface", vec![]),
+            (
+                "show ipv6 nd interface eth0",
+                "/show/ipv6/nd/interface",
+                vec!["eth0"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
     /// The VPNv4 / EVPN RIB views moved from the legacy `show ip bgp`
     /// tree to `show bgp …`; the old spellings must no longer parse.
     /// The per-neighbor views (and their `vpnv4` / `evpn` Adj-RIB
