@@ -52,6 +52,14 @@ pub struct Neighbor {
     /// allocator pass picks a function.
     pub endx_sid: Option<(u16, Ipv6Addr)>,
 
+    /// The nexthop the installed End.X SID currently forwards to.
+    /// Tracked separately from `endx_sid` because the SID address is
+    /// stable for the life of the adjacency while the preferred
+    /// nexthop can drift across Hellos (the neighbor gains or loses a
+    /// global address); `reconcile_endx_sid` re-installs the FIB entry
+    /// when [`Neighbor::endx_nh6`] stops matching this.
+    pub endx_installed_nh6: Option<Ipv6Addr>,
+
     /// Graceful Restart observation (RFC 5306). Records the peer's
     /// most recent Restart TLV and drives helper-side behavior
     /// (refresh hold once, send RA, suppress teardown).
@@ -88,6 +96,7 @@ impl Neighbor {
             hold_time: 0,
             network_type,
             endx_sid: None,
+            endx_installed_nh6: None,
             gr: AdjGrState::default(),
             created: true,
         }
@@ -121,6 +130,25 @@ impl Neighbor {
         self.advertises_ipv6() && !self.addr6l.is_empty()
     }
 
+    /// Nexthop for this neighbor's End.X SID: prefer a global address
+    /// from its IPv6 Global Interface Address TLV (233, on-link by
+    /// definition), falling back to its link-local (TLV 232).
+    ///
+    /// The preference is a Linux kernel constraint, not a taste call.
+    /// seg6local `End.X` (`input_action_end_x`) ignores the route's
+    /// `dev` and resolves `nh6` with a fresh FIB lookup whose iif is
+    /// the packet's INGRESS interface — a link-local nh6 therefore
+    /// matches the fe80::/64 route of the wrong (ingress) link and the
+    /// repair traffic blackholes behind an unanswered NS. A global nh6
+    /// resolves via the connected prefix to the correct egress link.
+    fn endx_nh6(&self) -> Option<Ipv6Addr> {
+        self.addr6
+            .keys()
+            .next()
+            .copied()
+            .or_else(|| self.addr6l.first().copied())
+    }
+
     /// Re-originate the self-LSP (both levels; the per-level guard in
     /// `process_lsp_originate` drops the one this instance doesn't run)
     /// when the adjacency is already Up, so an End.X SID allocated or
@@ -146,6 +174,10 @@ impl Neighbor {
     ///   IPv6, or withdrew its IPv6 link-local) → release it so our LSP
     ///   stops advertising an End.X we have no IPv6 nexthop to forward
     ///   over.
+    /// - Eligible with a SID already held → re-install the FIB entry if
+    ///   the preferred nexthop ([`Neighbor::endx_nh6`]) drifted, e.g. a
+    ///   global address arrived in a later Hello than the link-local
+    ///   the SID was first installed against.
     ///
     /// Called on every Hello (after `nbr_hello_interpret` refreshes the
     /// neighbor's protocols / addresses), so a change in the neighbor's
@@ -170,9 +202,6 @@ impl Neighbor {
             return;
         }
 
-        if self.endx_sid.is_some() {
-            return;
-        }
         let Some(locator) = sr_locator.as_ref() else {
             return;
         };
@@ -182,6 +211,29 @@ impl Neighbor {
         let Some(loc_name) = watched_locator.clone() else {
             return;
         };
+        // `endx_eligible` guarantees at least a link-local, so this
+        // nexthop is always present here. See `endx_nh6` for why a
+        // global is preferred over the link-local.
+        let nh6 = self.endx_nh6();
+
+        if let Some((_, addr)) = self.endx_sid {
+            // SID already allocated. The SID address never changes for
+            // the life of the adjacency, but the preferred nexthop can
+            // (the neighbor's first Hello often carries only the
+            // link-local; a global learned later must upgrade the FIB
+            // entry). Delete-then-add rather than a bare re-add so the
+            // RIB walks back the old nexthop-group reference.
+            if self.endx_installed_nh6 == nh6 {
+                return;
+            }
+            let sid = self.endx_sid_entry(ifname, locator, loc_name, addr, nh6);
+            let _ = rib_client.send(rib::Message::SidDel { addr });
+            let _ = rib_client.send(rib::Message::SidAdd { sid });
+            self.endx_installed_nh6 = nh6;
+            // The advertised SID is unchanged — no LSP re-origination.
+            return;
+        }
+
         let Some(function) = elib.allocate() else {
             return;
         };
@@ -191,15 +243,27 @@ impl Neighbor {
             elib.release(function);
             return;
         };
-        // End.X forwards to the neighbor's IPv6 link-local (from its
-        // IPv6 IIH address TLV). `endx_eligible` guarantees `addr6l` is
-        // non-empty, so this nexthop is always present here.
-        let nh6 = self.addr6l.first().copied();
+        let sid = self.endx_sid_entry(ifname, locator, loc_name, addr, nh6);
+        let _ = rib_client.send(rib::Message::SidAdd { sid });
+        self.endx_sid = Some((function, addr));
+        self.endx_installed_nh6 = nh6;
+        self.reoriginate_endx_if_up();
+    }
+
+    /// Build the RIB registry entry for this neighbor's End.X SID.
+    fn endx_sid_entry(
+        &self,
+        ifname: &str,
+        locator: &Locator,
+        loc_name: String,
+        addr: Ipv6Addr,
+        nh6: Option<Ipv6Addr>,
+    ) -> Sid {
         let (behavior, structure) = match locator.behavior {
             Some(crate::rib::LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
             None => (SidBehavior::EndX, None),
         };
-        let sid = Sid {
+        Sid {
             addr,
             behavior,
             context: SidContext::Interface(ifname.to_string()),
@@ -212,10 +276,7 @@ impl Neighbor {
             // End.X is a local cross-connect, not a table decap.
             table_id: 0,
             segs: Vec::new(),
-        };
-        let _ = rib_client.send(rib::Message::SidAdd { sid });
-        self.endx_sid = Some((function, addr));
-        self.reoriginate_endx_if_up();
+        }
     }
 
     /// Release the neighbor's End.X SID, sending a SidDel and freeing
@@ -228,6 +289,7 @@ impl Neighbor {
     ) {
         if let Some((function, addr)) = self.endx_sid.take() {
             elib.release(function);
+            self.endx_installed_nh6 = None;
             let _ = rib_client.send(rib::Message::SidDel { addr });
         }
     }
@@ -547,5 +609,26 @@ mod tests {
         // eligibility again — the re-evaluation path that releases a SID.
         nbr.proto = Some(IsisTlvProtoSupported { nlpids: vec![v4] });
         assert!(!nbr.endx_eligible());
+    }
+
+    // End.X nexthop selection: a global address (IIH TLV 233) must win
+    // over the link-local because Linux's seg6local End.X resolves nh6
+    // by FIB lookup with the packet's ingress iif — a link-local nh6
+    // binds fe80::/64 to the wrong link and blackholes the repair.
+    #[test]
+    fn endx_nh6_prefers_global_over_linklocal() {
+        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
+        let global: Ipv6Addr = "2001:db8:0:8::2".parse().unwrap();
+
+        let mut nbr = test_neighbor();
+        assert_eq!(nbr.endx_nh6(), None);
+
+        // Link-local only (the common first-Hello state) → fall back.
+        nbr.addr6l = vec![ll];
+        assert_eq!(nbr.endx_nh6(), Some(ll));
+
+        // Global learned later → preferred over the link-local.
+        nbr.addr6.insert(global, NeighborAddr6::new(global));
+        assert_eq!(nbr.endx_nh6(), Some(global));
     }
 }
