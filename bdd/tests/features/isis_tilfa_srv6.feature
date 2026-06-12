@@ -19,7 +19,7 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     P-node plus End.X SIDs along the post-convergence path — installed
     as an SRH insertion (H.Insert) so the final End.X hop forwards the
     original packet on by plain IPv6 (no decap terminator needed);
-  - s and d each have a stub LAN segment (a host namespace sh / dh);
+  - s and d each have a stub LAN segment (a host namespace e1 / e2);
     s and d speak iBGP over their loopbacks with `redistribute
     connected` and `segment-routing srv6 ipv6-unicast`, so each LAN
     prefix is carried in BGP with an End.DT6 service SID and the
@@ -33,14 +33,14 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
   Test Topology (metric shown where != 1; loopback 2001:db8::X,
   locator fcbb:bbbb:X::/48):
   ```
-   sh ── s (2001:db8::1, fcbb:bbbb:1::/48)
+   e1 ── s (2001:db8::1, fcbb:bbbb:1::/48)
              1 / 1 \      \ 1000
               n1    n2     n3        (n1 ::2, n2 ::3, n3 ::4)
           1 / |1 \1  \1     \1000
        d ─┘ 1 |   \    \      \
   (2001:db8::8)│    \1000\      \
     fcbb:8::/48│     r1───────── (r1-n3 1000)   (r1 ::5)
-   dh ── d 1 \ │    /  \1000
+   e2 ── d 1 \ │    /  \1000
               r3   /1   \(r1-r2 1000)           (r2 ::6)
           1000\   /      \
                r2 ────────┘                     (r3 ::7)
@@ -48,7 +48,7 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
                   r3 (r3-d 1)
     s-n1 1  s-n2 1  s-n3 1000   n1-r1 1  n2-r1 1  n3-r1 1000
     n1-r2 1 r1-r2 1000 r2-r3 1000  n1-d 1  r3-d 1
-    s-LAN: 2001:db8:100::/64 (sh)   d-LAN: 2001:db8:200::/64 (dh)
+    s-LAN: 2001:db8:100::/64 (e1)   d-LAN: 2001:db8:200::/64 (e2)
   ```
 
   Scenario: Build the SRv6 TI-LFA topology and confirm IS-IS + BGP
@@ -61,8 +61,8 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     And I create namespace "r2"
     And I create namespace "r3"
     And I create namespace "d"
-    And I create namespace "sh"
-    And I create namespace "dh"
+    And I create namespace "e1"
+    And I create namespace "e2"
     And I connect namespace "s" interface "s-n1" to namespace "n1" interface "n1-s"
     And I connect namespace "s" interface "s-n2" to namespace "n2" interface "n2-s"
     And I connect namespace "s" interface "s-n3" to namespace "n3" interface "n3-s"
@@ -74,12 +74,12 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     And I connect namespace "r2" interface "r2-r3" to namespace "r3" interface "r3-r2"
     And I connect namespace "n1" interface "n1-d" to namespace "d" interface "d-n1"
     And I connect namespace "r3" interface "r3-d" to namespace "d" interface "d-r3"
-    And I connect namespace "s" interface "lan0" to namespace "sh" interface "eth0"
-    And I connect namespace "d" interface "lan0" to namespace "dh" interface "eth0"
-    And I add address "2001:db8:100::2/64" to interface "eth0" in namespace "sh"
-    And I add address "2001:db8:200::2/64" to interface "eth0" in namespace "dh"
-    And I add route "::/0" via "2001:db8:100::1" in namespace "sh"
-    And I add route "::/0" via "2001:db8:200::1" in namespace "dh"
+    And I connect namespace "s" interface "lan0" to namespace "e1" interface "eth0"
+    And I connect namespace "d" interface "lan0" to namespace "e2" interface "eth0"
+    And I add address "2001:db8:100::2/64" to interface "eth0" in namespace "e1"
+    And I add address "2001:db8:200::2/64" to interface "eth0" in namespace "e2"
+    And I add route "::/0" via "2001:db8:100::1" in namespace "e1"
+    And I add route "::/0" via "2001:db8:200::1" in namespace "e2"
     And I start zebra-rs in namespace "s"
     And I start zebra-rs in namespace "n1"
     And I start zebra-rs in namespace "n2"
@@ -139,15 +139,15 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     And show command "show ipv6 route 2001:db8:200::/64" in namespace "s" should contain "via seg6"
     And show command "show bgp ipv6 2001:db8:100::/64" in namespace "d" should contain "Remote SID"
     # LAN-to-LAN service traffic rides the SRv6 underlay end-to-end:
-    # sh -> s (H.Encaps to d's End.DT6) -> IGP -> d (decap) -> dh, and
+    # e1 -> s (H.Encaps to d's End.DT6) -> IGP -> d (decap) -> e2, and
     # the reply mirrors it via s's End.DT6.
-    And ping from "sh" to "2001:db8:200::2" should succeed
-    And ping from "dh" to "2001:db8:100::2" should succeed
+    And ping from "e1" to "2001:db8:200::2" should succeed
+    And ping from "e2" to "2001:db8:100::2" should succeed
 
   Scenario: Fast-reroute survives the primary link failure (s-n1)
     Given the test topology exists
     Then ping from "s" to "2001:db8::8" should succeed
-    And ping from "sh" to "2001:db8:200::2" should succeed
+    And ping from "e1" to "2001:db8:200::2" should succeed
     When I make namespace "s" interface "s-n1" down
     And I wait 5 seconds
     # Reachability restored over the SRv6 repair / post-convergence
@@ -156,12 +156,12 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     # whose H.Encaps outer destination resolves via the protected
     # locator route.
     Then ping from "s" to "2001:db8::8" should succeed
-    And ping from "sh" to "2001:db8:200::2" should succeed
+    And ping from "e1" to "2001:db8:200::2" should succeed
     When I make namespace "s" interface "s-n1" up
     And I wait 10 seconds
     # Primary restored.
     Then ping from "s" to "2001:db8::8" should succeed
-    And ping from "sh" to "2001:db8:200::2" should succeed
+    And ping from "e1" to "2001:db8:200::2" should succeed
 
   Scenario: Promoted backup actually forwards over the SRv6 repair
     Given the test topology exists
@@ -185,7 +185,7 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     # if any repair-segment uN/uA hop fails to forward (e.g. the
     # kernel End.X nh6 lookup resolving on the wrong link).
     And ping from "s" to "2001:db8::8" should succeed
-    And ping from "sh" to "2001:db8:200::2" should succeed
+    And ping from "e1" to "2001:db8:200::2" should succeed
 
   Scenario: Teardown topology
     Given the test topology exists
@@ -205,6 +205,6 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     And I delete namespace "r2"
     And I delete namespace "r3"
     And I delete namespace "d"
-    And I delete namespace "sh"
-    And I delete namespace "dh"
+    And I delete namespace "e1"
+    And I delete namespace "e2"
     Then the test environment should be clean
