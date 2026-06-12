@@ -181,7 +181,12 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     # kernel entry: out the repair egress s-n2 at metric 12 (2 path +
     # 10 for d's loopback prefix), demoted plain primary behind at 13.
     Then kernel route "2001:db8::8" in namespace "s" should eventually contain "mode inline"
-    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto isis metric 12"
+    # The promoted SRv6 repair is the protected primary and references
+    # a protection indirection group; iproute2 renders v6 group routes
+    # on two lines (route attrs on the first, nexthop detail on the
+    # continuation), so assert the two halves separately.
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "proto isis metric 12"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
     # NEXT-C-SID compression: the three repair uSIDs (uN of the P node
     # plus two uAs) ride one 128-bit carrier, so the inserted SRH is
     # carrier + original destination — 2 segments, not 4.
