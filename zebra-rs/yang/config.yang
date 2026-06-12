@@ -44,6 +44,10 @@ module config {
     prefix zbr;
   }
 
+  import zebra-bgp-table-map {
+    prefix zbtm;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }

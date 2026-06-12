@@ -1429,6 +1429,42 @@ mod yang_load_tests {
         );
     }
 
+    /// `table-map <name>` (zebra-bgp-table-map.yang) sits bare,
+    /// FRR-style, directly under the global afi-safi list entry —
+    /// no wrapping container. Pin the spelling so an augment-path
+    /// slip is caught here, not at daemon startup. (Only the `set`
+    /// spelling is pinnable: `delete` completion resolves against
+    /// the running config tree, not the schema, so it Nomatches in
+    /// this harness — same for every delete-subtree augment.)
+    #[test]
+    fn bgp_table_map_parses() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp afi-safi ipv4 table-map RIB-FILTER",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "table-map must parse as a settable path"
+        );
+    }
+
     /// The `neighbor-group` list inherits the per-neighbor knob set
     /// (zebra-bgp-neighbor-group.yang reuses the feature modules'
     /// groupings via cross-module `uses`, plus inline mirrors for

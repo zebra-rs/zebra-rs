@@ -1,0 +1,38 @@
+prefix-set:
+- name: DENY
+  prefixes:
+  - prefix: 1.1.1.1/32
+- name: MED
+  prefixes:
+  - prefix: 2.2.2.2/32
+policy:
+- name: TMAP
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix: DENY
+  - number: 20
+    action: permit
+    match:
+      prefix: MED
+    set:
+      med:
+        set: 50
+  - number: 30
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      table-map: TMAP

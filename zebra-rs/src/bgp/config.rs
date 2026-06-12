@@ -414,9 +414,10 @@ pub(super) fn apply_peer_policy_ref(
         policy::PolicyType::PolicyListOut => &mut peer.policy_list.get_mut(&InOut::Output).name,
         policy::PolicyType::PrefixSetIn => &mut peer.prefix_set.get_mut(&InOut::Input).name,
         policy::PolicyType::PrefixSetOut => &mut peer.prefix_set.get_mut(&InOut::Output).name,
-        // Key-chain subscriptions ride a different registry and never
-        // reach this helper.
-        policy::PolicyType::KeyChain(_) => return,
+        // Key-chain subscriptions ride a different registry, and
+        // table-map subscriptions are AFI-scoped rather than
+        // peer-scoped; neither reaches this helper.
+        policy::PolicyType::KeyChain(_) | policy::PolicyType::TableMap => return,
     };
     let prior = match &want {
         Some(n) => slot.replace(n.clone()),
@@ -1625,6 +1626,74 @@ pub(super) fn config_redistribute_ospf_match_type(
         true,
         bgp_set_ospf_match,
     )
+}
+
+/// Families `table-map` accepts today. The YANG augment attaches the
+/// leaf to every afi-safi list entry, so filter at the callback —
+/// returning `None` surfaces as a commit failure. v4 unicast only
+/// until the policy-apply path grows a v6 NLRI form.
+fn table_map_afi_valid(afi_safi: &AfiSafi) -> bool {
+    matches!((afi_safi.afi, afi_safi.safi), (Afi::Ip, Safi::Unicast))
+}
+
+/// `ident` slot a table-map binding uses on the policy watch
+/// registry: there's no peer behind it, so the AFI/SAFI itself is
+/// encoded. The codec already spans v6 for the follow-up.
+pub(super) fn table_map_ident(afi_safi: &AfiSafi) -> Option<usize> {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => Some(0),
+        (Afi::Ip6, Safi::Unicast) => Some(1),
+        _ => None,
+    }
+}
+
+pub(super) fn table_map_ident_decode(ident: usize) -> Option<AfiSafi> {
+    match ident {
+        0 => Some(AfiSafi::new(Afi::Ip, Safi::Unicast)),
+        1 => Some(AfiSafi::new(Afi::Ip6, Safi::Unicast)),
+        _ => None,
+    }
+}
+
+/// `router bgp afi-safi <af> table-map <policy>`
+/// (zebra-bgp-table-map.yang). Stores the binding on
+/// `local_rib.table_map`, (un)registers the policy watch via
+/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
+/// resync to the `PolicyRx` reply — always sent for
+/// `PolicyType::TableMap`, even when the name doesn't resolve — so
+/// the FIB flips exactly once, on the definitive answer. Delete
+/// resyncs immediately (nothing will reply).
+pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if !table_map_afi_valid(&afi_safi) {
+        return None;
+    }
+    let ident = table_map_ident(&afi_safi)?;
+    if op.is_set() {
+        let new = args.string()?;
+        let tm = bgp.local_rib.table_map.entry(afi_safi).or_default();
+        let prior = std::mem::replace(&mut tm.name, Some(new.clone()));
+        policy_attach_msgs(
+            &bgp.policy_tx,
+            ident,
+            policy::PolicyType::TableMap,
+            prior,
+            Some(new),
+        );
+    } else {
+        let Some(tm) = bgp.local_rib.table_map.remove(&afi_safi) else {
+            return Some(());
+        };
+        policy_attach_msgs(
+            &bgp.policy_tx,
+            ident,
+            policy::PolicyType::TableMap,
+            tm.name,
+            None,
+        );
+        bgp.table_map_resync(afi_safi);
+    }
+    Some(())
 }
 
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -3029,6 +3098,10 @@ impl Bgp {
             config_redistribute_ospf_match_type,
         );
 
+        // Per-AFI table-map (zebra-bgp-table-map.yang): policy gate /
+        // rewrite at BGP-to-RIB install time.
+        self.callback_add("/router/bgp/afi-safi/table-map", config_table_map);
+
         // Applying policy.
         self.callback_peer("/policy/in", config_policy_in);
         self.callback_peer("/policy/out", config_policy_out);
@@ -3077,6 +3150,41 @@ impl Bgp {
         // left-most AS_PATH segment begins with the neighbor's own AS
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
+    }
+}
+
+#[cfg(test)]
+mod table_map_ident_tests {
+    use super::*;
+
+    /// The watch `ident` must survive the round trip for every family
+    /// the codec covers — a drift here silently misroutes `PolicyRx`
+    /// pushes and the table-map never refreshes.
+    #[test]
+    fn ident_roundtrip() {
+        for afi_safi in [
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+        ] {
+            let ident = table_map_ident(&afi_safi).expect("codec covers the family");
+            assert_eq!(table_map_ident_decode(ident), Some(afi_safi));
+        }
+        assert_eq!(
+            table_map_ident(&AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
+            None,
+            "uncovered families must not register a watch"
+        );
+        assert_eq!(table_map_ident_decode(999), None);
+    }
+
+    /// v4 unicast is the only family the callback accepts today; the
+    /// YANG augment attaches the leaf to every afi-safi entry, so the
+    /// gate is what rejects the rest at commit time.
+    #[test]
+    fn afi_gate_is_v4_unicast_only() {
+        assert!(table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::Unicast)));
+        assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip6, Safi::Unicast)));
+        assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::MplsVpn)));
     }
 }
 
