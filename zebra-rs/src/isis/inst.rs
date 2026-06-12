@@ -2497,7 +2497,6 @@ impl Isis {
         // if the neighbour entry is absent from `nbrs` at that point (race:
         // BFD Up fires before the next IIH re-creates the entry).
         link.state.bfd_holddown_nbr.insert(*key, (level, sys_id));
-        drop(link);
         // Fast-reroute switchover (kernel-failover phase 3): rewire the
         // pre-installed protection groups onto their TI-LFA repairs NOW,
         // before the LSP regeneration / SPF / per-prefix reinstall pipeline
