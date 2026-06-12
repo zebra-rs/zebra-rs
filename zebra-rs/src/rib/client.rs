@@ -136,6 +136,10 @@ impl RibClient {
     /// this on a BFD-down-with-link-up detection, BEFORE starting
     /// SPF, so traffic moves to the pre-installed TI-LFA repairs in
     /// O(adjacencies) while reconvergence runs.
+    // Callers are the phase-3/4 IGP BFD hooks; `expect` forces this
+    // annotation off when the first one lands (zebra-rs is a bin
+    // crate, so `pub` alone doesn't exempt it from dead-code).
+    #[expect(dead_code)]
     pub fn protect_switch(&self, addr: std::net::IpAddr) -> Result<(), SendError<RibInbound>> {
         self.send(Message::ProtectSwitch { addr })
     }
