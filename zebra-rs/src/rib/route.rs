@@ -2064,25 +2064,43 @@ fn rib_resolve_nexthop_v6(
         // (without this, the Multi wrapper's `gid` stays at 0 and
         // the FIB install fails with ENODEV at Nhid(0)).
         for member in pro.nexthops.iter_mut() {
-            match member {
-                NexthopMember::Uni(uni) => {
-                    let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
-                }
-                NexthopMember::Multi(multi) => {
-                    let mut set = BTreeSet::<(usize, u8)>::new();
-                    for uni in multi.nexthops.iter_mut() {
-                        let valid = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
-                        if valid {
-                            set.insert((uni.gid, uni.weight));
-                        }
-                    }
-                    resolve_nexthop_multi(multi, nmap, set);
-                }
-            }
+            resolve_nexthop_member_v6(member, nmap, table, table_id);
+        }
+    }
+    if let Nexthop::Protect(pro) = &mut entry.nexthop {
+        // Same member-wise walk as List. Missing this block left v6
+        // Protect entries (IS-IS v6 / OSPFv3 / SRv6 TI-LFA) with
+        // every gid at 0 — `is_valid_nexthop` then never validated
+        // the entry, so protected v6 routes silently never installed.
+        for member in pro.members_mut() {
+            resolve_nexthop_member_v6(member, nmap, table, table_id);
         }
     }
     // If one of nexthop is valid, the entry is valid.
     entry.set_valid(entry.is_valid_nexthop(nmap));
+}
+
+fn resolve_nexthop_member_v6(
+    member: &mut NexthopMember,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv6Net, RibEntries>,
+    table_id: u32,
+) {
+    match member {
+        NexthopMember::Uni(uni) => {
+            let _ = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
+        }
+        NexthopMember::Multi(multi) => {
+            let mut set = BTreeSet::<(usize, u8)>::new();
+            for uni in multi.nexthops.iter_mut() {
+                let valid = resolve_nexthop_uni_v6(uni, nmap, table, table_id);
+                if valid {
+                    set.insert((uni.gid, uni.weight));
+                }
+            }
+            resolve_nexthop_multi(multi, nmap, set);
+        }
+    }
 }
 
 fn resolve_nexthop_uni_v6(
@@ -2502,6 +2520,59 @@ mod tests {
         let mut nmap = NexthopMap::default();
         let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
         rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("entry.nexthop should still be Protect");
+        };
+        let NexthopMember::Multi(multi_member) = &pro.primary else {
+            panic!("primary Multi preserved");
+        };
+        assert!(
+            multi_member.gid != 0,
+            "primary Multi must get a kernel-side group allocated (gid != 0)"
+        );
+        for leg in &multi_member.nexthops {
+            assert!(leg.gid != 0, "each leg also gets a gid");
+        }
+        let NexthopMember::Uni(backup_uni) = &pro.backup else {
+            panic!("backup Uni preserved");
+        };
+        assert!(backup_uni.gid != 0, "backup Uni gets its own group");
+    }
+
+    /// Regression: the v6 resolver was missing the `Protect` block
+    /// entirely, so v6 protected entries (IS-IS v6 / OSPFv3 / SRv6
+    /// TI-LFA) kept every gid at 0, never validated, and silently
+    /// never installed. The v4 twin above passed all along — this
+    /// pins the v6 path.
+    #[test]
+    fn protect_resolves_gids_on_v6_path() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember, NexthopMulti};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop_v6;
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+
+        let leg_a = NexthopUni::new("fe80::a:1".parse().unwrap(), 1011, vec![]);
+        let leg_b = NexthopUni::new("fe80::a:2".parse().unwrap(), 1011, vec![]);
+        let multi = NexthopMulti {
+            metric: 1011,
+            nexthops: vec![leg_a, leg_b],
+            ..Default::default()
+        };
+        let backup = NexthopUni::new("fe80::a:3".parse().unwrap(), 1012, vec![]);
+
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Multi(multi),
+            backup: NexthopMember::Uni(backup),
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop_v6(&mut entry, &table, &mut nmap, 0);
 
         let Nexthop::Protect(pro) = &entry.nexthop else {
             panic!("entry.nexthop should still be Protect");
