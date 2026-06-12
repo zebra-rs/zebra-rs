@@ -130,6 +130,17 @@ pub enum Message {
         proto: String,
         nh: std::net::IpAddr,
     },
+    /// Fast-reroute switchover trigger (phase 2 of
+    /// `docs/design/nexthop-protect-kernel-failover.md`): the sender
+    /// detected a primary-adjacency failure the kernel can't see (BFD
+    /// down while the link stays up) at gateway `addr`. RIB rewires
+    /// every protection indirection group whose primary rides that
+    /// adjacency onto its repair — one atomic kernel group-replace
+    /// per group, independent of prefix count. The sender's normal
+    /// SPF reconvergence then supersedes the bridge.
+    ProtectSwitch {
+        addr: IpAddr,
+    },
     /// Drop `proto`'s interest in `nh`; the tracking entry is removed
     /// once its last watcher unregisters.
     NexthopUnregister {
@@ -1563,6 +1574,12 @@ impl Rib {
             }
             Message::NexthopRegister { proto, nh } => {
                 self.nht_register(proto, nh);
+            }
+            Message::ProtectSwitch { addr } => {
+                let n =
+                    super::route::protect_switch(&mut self.nmap, &self.fib_handle, table_id, addr)
+                        .await;
+                tracing::info!("ProtectSwitch {addr} table {table_id}: {n} group(s) rewired");
             }
             Message::NexthopUnregister { proto, nh } => {
                 self.nht.unregister(&proto, nh);
