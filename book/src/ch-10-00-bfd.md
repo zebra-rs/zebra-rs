@@ -312,9 +312,13 @@ Notes and guard-rails:
   — there is no transmit half; the daemon keeps sending its own control
   packets).
 
-It is enabled per OSPF interface (or instance-wide) — see
-[OSPF BFD](ch-08-02-ospf-bfd.md#offloading-expiration-detection);
-IS-IS and BGP attachment is a planned follow-up. `show bfd peers`
+It is enabled per attachment, with the same per-interface /
+per-neighbour + instance-level inheritance as `echo-mode` — see
+[OSPF BFD](ch-08-02-ospf-bfd.md#offloading-expiration-detection),
+[IS-IS BFD](ch-07-03-isis-bfd.md#offloading-expiration-detection), and
+[BGP BFD](ch-02-08-bgp-bfd.md#offloading-expiration-detection)
+(single-hop neighbours; BGP sessions are keyed by the connected
+interface so the helper knows where to attach). `show bfd peers`
 reports where detection currently runs:
 
 ```
@@ -355,9 +359,8 @@ native timers would allow.
   **In-kernel expiration detection** (`detect-offload`,
   RFC 5880 §6.8.4 evaluated in an XDP `bpf_timer` — see
   [Offloading expiration detection](#offloading-expiration-detection-detect-offload)),
-  configurable on OSPFv2/v3 interfaces.
+  configurable on OSPFv2/v3 and IS-IS interfaces and on single-hop BGP
+  neighbours.
 - **Not yet:** configurable control-packet timers (the intervals are
   fixed at the defaults); BFD for **static routes**; per-VRF OSPF BFD;
-  a BFD `profile` mechanism; `detect-offload` on IS-IS and BGP
-  attachments (the subsystem supports it; the per-protocol knob is the
-  follow-up).
+  a BFD `profile` mechanism.

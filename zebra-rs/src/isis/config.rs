@@ -293,6 +293,10 @@ impl Isis {
             "/router/isis/interface/bfd/echo-receive-interval",
             link::config_bfd_echo_receive_interval,
         );
+        self.callback_add(
+            "/router/isis/interface/bfd/detect-offload",
+            link::config_bfd_detect_offload,
+        );
         // Instance-level `router isis { bfd { ... } }` defaults.
         self.callback_add("/router/isis/bfd/enable", link::config_isis_bfd_enable);
         self.callback_add(
@@ -306,6 +310,10 @@ impl Isis {
         self.callback_add(
             "/router/isis/bfd/echo-receive-interval",
             link::config_isis_bfd_echo_receive_interval,
+        );
+        self.callback_add(
+            "/router/isis/bfd/detect-offload",
+            link::config_isis_bfd_detect_offload,
         );
         // Per-interface hello-authentication.
         self.callback_add(

@@ -55,6 +55,18 @@ module zebra-bgp-bfd {
      (iBGP and multihop eBGP). Hop-mode (`multihop`) and `minimum-ttl` are
      per-neighbor only.";
 
+  revision 2026-06-12 {
+    description
+      "Add `detect-offload`: offload control-packet expiration detection
+       (the RFC 5880 §6.8.4 detection timer) to the per-interface
+       XDP/eBPF helper once the session is Up. Single-hop only. Also
+       correct the stale `echo-mode` description: Echo supports IPv6
+       single-hop sessions, not only IPv4.";
+    reference
+      "RFC 5880 §6.8.4 (Calculating the Detection Time); RFC 5881 §5
+       (GTSM).";
+  }
+
   revision 2026-06-01 {
     description
       "Add instance-level `router bgp { bfd {} }` defaults with
@@ -98,8 +110,9 @@ module zebra-bgp-bfd {
       description
         "Enable the BFD Echo function (RFC 5880 §6.4). **Single-hop only**
          — RFC 5883 multihop has no Echo, so this is inert on multihop
-         sessions (iBGP / multihop eBGP). Single-hop IPv4 only. Overrides
-         the instance default; absent ⇒ inherit (Echo off if unset).";
+         sessions (iBGP / multihop eBGP). Both IPv4 and IPv6 single-hop
+         sessions are supported. Overrides the instance default; absent ⇒
+         inherit (Echo off if unset).";
     }
     leaf echo-transmit-interval {
       ext:help "Echo transmit interval (ms)";
@@ -116,6 +129,20 @@ module zebra-bgp-bfd {
       description
         "Advertised Required Min Echo RX (echo-mode `receive`/`both`).
          Hard default 50 ms when unset.";
+    }
+    leaf detect-offload {
+      ext:help "Offload expiration detection to the XDP helper (kernel)";
+      type boolean;
+      description
+        "Once the session is Up, detect missing BFD control packets in
+         the kernel: the per-interface XDP/eBPF helper re-arms a
+         per-session timer on every arriving control packet (UDP/3784,
+         TTL 255) and drives the session Down with Control Detection
+         Time Expired when they stop (RFC 5880 §6.8.4) — immune to
+         daemon scheduling latency. The userspace detection timer stays
+         armed as a stretched backstop. **Single-hop only** — inert on
+         multihop sessions (the helper attaches per interface). Absent ⇒
+         inherit (false: detection in userspace).";
     }
   }
 

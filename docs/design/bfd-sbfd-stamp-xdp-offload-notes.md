@@ -156,9 +156,17 @@ BFD Echo は本質的に「ローカルが送出 → リモートのフォワー
   入口 IF が固定でなく GTSM 床も 255 未満）。認証付きセッションは将来 BFD
   auth が入った場合オフロード禁止にすること（XDP では MD5/SHA1 を検証
   できない）。
-- **設定**: OSPF の `bfd { detect-offload true; }`（per-interface /
-  instance-level、echo-mode と同じ継承）。IS-IS / BGP への展開は echo-mode
-  と同様にフォローアップ。
+- **設定**: OSPF / IS-IS / BGP の `bfd { detect-offload true; }`
+  （per-interface または per-neighbor / instance-level、echo-mode と同じ
+  継承）。BGP は single-hop のみ（multihop では inert）。
+- **BGP の ifindex 解決（フォローアップ PR で追加）**: BGP の BFD
+  SessionKey は従来 `ifindex: 0` 固定 — per-ifindex アタッチのヘルパーが
+  **一度も起動できず**、BGP echo は実質 inert だった。`ConnectedSubnets` に
+  記録元 ifindex を持たせ（`ifindex_for`、v6 link-local は除外）、single-hop
+  セッションを connected interface でキーする。アドレス学習が `bfd enable`
+  より後なら `RibRx::AddrAdd` フックの `bfd_reconcile_all` が再キー
+  （unsubscribe→subscribe）。これで BGP の echo / detect-offload 両方が
+  実際に機能する。
 - **検証**: `scripts/veth-detect-test.sh` — 600ms 検知で 150ms 間隔の制御
   パケットを 1.2 秒流し（早発 = bootstrap fallback 発火で FAIL、つまり XDP
   再アームの実証）、停止後 ~600ms で `detect-down` が来るのを確認。

@@ -1889,10 +1889,11 @@ impl Isis {
             }
             return;
         };
-        // Resolve the interface's effective Echo config (per-interface `bfd {}`
-        // merged over the instance-level `router isis { bfd {} }` default) and
-        // pass it in the session params. The BFD instance gates Echo further to
-        // single-hop IPv4 with a live reflector, so it's inert on v6 adjacencies.
+        // Resolve the interface's effective offload config (per-interface
+        // `bfd {}` merged over the instance-level `router isis { bfd {} }`
+        // default) and pass it in the session params. The BFD instance gates
+        // Echo further to single-hop with a live reflector; both families
+        // work (a v6 adjacency runs Echo over the link-local pair).
         let eff = self
             .links
             .get(&key.ifindex)
@@ -1909,12 +1910,13 @@ impl Isis {
         let _ = tx.send(crate::bfd::inst::ClientReq::Subscribe {
             client: "isis".to_string(),
             key,
-            // Only Echo params are wired here; everything else uses the BFD
-            // session defaults.
+            // Only the offload params (Echo + detect-offload) are wired here;
+            // everything else uses the BFD session defaults.
             params: crate::bfd::session::SessionParams {
                 echo_mode,
                 required_min_echo_rx_us: echo_rx_us,
                 echo_transmit_us: echo_tx_us,
+                detect_offload: eff.detect_offload,
                 ..crate::bfd::session::SessionParams::default()
             },
             notifier: self.bfd_event_tx.clone(),
