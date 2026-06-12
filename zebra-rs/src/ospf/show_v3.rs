@@ -174,21 +174,38 @@ fn collect_ospfv3_repair_rows(top: &Ospf<Ospfv3>) -> Vec<RepairRowV3Json> {
             let Some(backup) = nhop.backup.as_ref() else {
                 continue;
             };
-            let segments = backup
-                .labels
-                .iter()
-                .map(|label| RepairSegmentV3Json {
-                    kind: "sr-mpls",
-                    value: label_value_str_v3(label),
-                })
-                .collect();
+            use crate::ospf::tilfa::RepairBackupV3;
+            let (segments, repair_nexthop, repair_ifindex) = match backup {
+                RepairBackupV3::Mpls(b) => (
+                    b.labels
+                        .iter()
+                        .map(|label| RepairSegmentV3Json {
+                            kind: "sr-mpls",
+                            value: label_value_str_v3(label),
+                        })
+                        .collect(),
+                    b.addr.to_string(),
+                    b.ifindex,
+                ),
+                RepairBackupV3::Srv6(b) => (
+                    b.segs
+                        .iter()
+                        .map(|sid| RepairSegmentV3Json {
+                            kind: "srv6",
+                            value: sid.to_string(),
+                        })
+                        .collect(),
+                    b.addr.to_string(),
+                    b.ifindex,
+                ),
+            };
             rows.push(RepairRowV3Json {
                 prefix: prefix.to_string(),
                 primary_nexthop: addr.to_string(),
                 primary_ifindex: nhop.ifindex,
                 primary_metric: route.metric,
-                repair_nexthop: backup.addr.to_string(),
-                repair_ifindex: backup.ifindex,
+                repair_nexthop,
+                repair_ifindex,
                 repair_metric: route
                     .metric
                     .saturating_add(super::inst::BACKUP_METRIC_OFFSET),

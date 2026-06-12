@@ -433,3 +433,243 @@ fn adj_sid_label_for_link_v3(
     }
     None
 }
+
+// ---------------------------------------------------------------------
+// SRv6 TI-LFA repairs (RFC 9513) — Phase 5 of
+// docs/design/ospfv3-srv6-plan.md.
+// ---------------------------------------------------------------------
+
+/// A resolved v3 TI-LFA repair, in whichever encoding the instance's
+/// dataplane runs: an SR-MPLS label stack or an SRv6 SID list. The
+/// route builder picks SRv6 whenever the locator is active, else
+/// MPLS — the two modes can in principle coexist, but a repair only
+/// needs one encoding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepairBackupV3 {
+    Mpls(RepairPathMplsV3),
+    Srv6(RepairPathSrv6V3),
+}
+
+/// SRv6 TI-LFA repair for one v3 route — the OSPFv3 sibling of
+/// `isis::tilfa::RepairPathSrv6`. The SID list is SRH-inserted
+/// (H.Insert): repair segments are transit End/End.X SIDs with no
+/// decap terminator, so the original destination must stay the SRH's
+/// final segment (H.Encap would blackhole at the last SID).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepairPathSrv6V3 {
+    pub ifindex: u32,
+    pub addr: Ipv6Addr,
+    pub segs: Vec<Ipv6Addr>,
+    pub encap: isis_packet::srv6::EncapType,
+}
+
+/// Resolve a graph-level repair to an SRv6 SID list from the v3 LSDB
+/// and pack it into NEXT-C-SID carriers — the OSPFv3 sibling of
+/// `isis::tilfa::build_repair_path_srv6`. NodeSids resolve to the
+/// vertex router's End SID (its SRv6 Locator LSA), AdjSids to the
+/// advertiser's End.X SID (sub-TLV 31/32 on its E-Router-LSA
+/// Router-Link TLVs). Returns `None` when any segment fails to
+/// resolve — a partial SID list would diverge from the
+/// post-convergence path.
+pub(super) fn build_repair_path_srv6_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    rp: &spf::RepairPath,
+) -> Option<RepairPathSrv6V3> {
+    use crate::spf::srv6::{RepairSeg, pack_carriers};
+
+    let mut parts: Vec<RepairSeg> = Vec::with_capacity(rp.segs.len());
+    for seg in &rp.segs {
+        let part = match seg {
+            spf::SrSegment::NodeSid(v) => {
+                let info = srv6_end_sid_for_vertex_v3(top, area, *v)?;
+                RepairSeg {
+                    sid: info.sid,
+                    landing: *v,
+                    csid: csid_bits_end_v3(&info),
+                }
+            }
+            spf::SrSegment::AdjSid(from, to, _via) => {
+                let info = srv6_endx_sid_for_link_v3(top, area, *from, *to)?;
+                RepairSeg {
+                    sid: info.sid,
+                    landing: *to,
+                    csid: csid_bits_endx_v3(&info, *from),
+                }
+            }
+        };
+        parts.push(part);
+    }
+    let segs = pack_carriers(&parts);
+
+    let first_hop_router = *top.lsp_map.resolve(rp.first_hop)?;
+    let (ifindex, addr) = resolve_first_hop_egress_v3(top, first_hop_router)?;
+    Some(RepairPathSrv6V3 {
+        ifindex,
+        addr,
+        segs,
+        encap: isis_packet::srv6::EncapType::HInsert,
+    })
+}
+
+/// An SRv6 SID with its endpoint behavior and structure, as resolved
+/// from the v3 LSDB for repair encoding.
+struct Srv6SidInfoV3 {
+    sid: Ipv6Addr,
+    behavior: u16,
+    structure: Option<ospf_packet::Ospfv3Srv6SidStructure>,
+}
+
+/// The vertex router's End SID from its SRv6 Locator LSA (algo-0
+/// Locator TLV → End SID sub-TLV, structure from the locator-registry
+/// SID Structure sub-TLV).
+fn srv6_end_sid_for_vertex_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    vertex: usize,
+) -> Option<Srv6SidInfoV3> {
+    use ospf_packet::{
+        OSPFV3_SRV6_LOCATOR_LSA_TYPE, Ospfv3LsBody, Ospfv3Srv6LocatorLsaTlv,
+        Ospfv3Srv6LocatorSubTlv,
+    };
+    let router_id = *top.lsp_map.resolve(vertex)?;
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_SRV6_LOCATOR_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE || adv_router != router_id {
+            continue;
+        }
+        let Ospfv3LsBody::Srv6Locator(ref body) = lsa.data.body else {
+            continue;
+        };
+        for tlv in &body.tlvs {
+            let Ospfv3Srv6LocatorLsaTlv::Locator(loc) = tlv else {
+                continue;
+            };
+            if loc.algorithm != 0 {
+                continue;
+            }
+            for sub in &loc.subs {
+                let Ospfv3Srv6LocatorSubTlv::EndSid(end) = sub else {
+                    continue;
+                };
+                let structure = end.subs.iter().find_map(|s| {
+                    if let Ospfv3Srv6LocatorSubTlv::SidStructure(st) = s {
+                        Some(*st)
+                    } else {
+                        None
+                    }
+                });
+                return Some(Srv6SidInfoV3 {
+                    sid: end.sid,
+                    behavior: end.behavior,
+                    structure,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// `from`'s End.X SID toward `to`, from the Router-Link TLVs of its
+/// per-link E-Router-LSAs — the SRv6 sibling of
+/// `adj_sid_label_for_link_v3`. P2P links carry sub-TLV 31; LAN
+/// links sub-TLV 32 qualified by the Neighbor Router-ID.
+fn srv6_endx_sid_for_link_v3(
+    top: &Ospf<Ospfv3>,
+    area: &OspfArea<Ospfv3>,
+    from_vertex: usize,
+    to_vertex: usize,
+) -> Option<Srv6SidInfoV3> {
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv};
+    let from_router = *top.lsp_map.resolve(from_vertex)?;
+    let to_router = *top.lsp_map.resolve(to_vertex)?;
+
+    fn nested_structure(subs: &[Ospfv3SubTlv]) -> Option<ospf_packet::Ospfv3Srv6SidStructure> {
+        subs.iter().find_map(|s| {
+            if let Ospfv3SubTlv::Srv6SidStructure(st) = s {
+                Some(*st)
+            } else {
+                None
+            }
+        })
+    }
+
+    for ((_ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE || adv_router != from_router {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
+                continue;
+            };
+            if rl.link.neighbor_router_id != to_router {
+                continue;
+            }
+            for sub in &rl.subs {
+                match sub {
+                    Ospfv3SubTlv::Srv6EndXSid(endx) => {
+                        return Some(Srv6SidInfoV3 {
+                            sid: endx.sid,
+                            behavior: endx.behavior,
+                            structure: nested_structure(&endx.subs),
+                        });
+                    }
+                    Ospfv3SubTlv::Srv6LanEndXSid(lan) if lan.neighbor_router_id == to_router => {
+                        return Some(Srv6SidInfoV3 {
+                            sid: lan.sid,
+                            behavior: lan.behavior,
+                            structure: nested_structure(&lan.subs),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Carrier metadata for a v3-advertised End/uN SID — identifier is
+/// the locator-node portion. `None` (full-SID fallback) for classic
+/// behaviors or missing/degenerate structures.
+fn csid_bits_end_v3(info: &Srv6SidInfoV3) -> Option<crate::spf::srv6::CsidBits> {
+    use crate::spf::srv6::{CsidBits, sid_bits, sid_block};
+    if !isis_packet::Behavior::from(info.behavior).is_end_next_csid() {
+        return None;
+    }
+    let st = info.structure.as_ref()?;
+    let (lb, ln) = (st.lb_len as u32, st.ln_len as u32);
+    if ln == 0 || lb + ln > 128 {
+        return None;
+    }
+    Some(CsidBits {
+        block: sid_block(info.sid, st.lb_len),
+        lb: st.lb_len,
+        id: sid_bits(info.sid, lb, ln),
+        width: st.ln_len,
+        lib_owner: None,
+    })
+}
+
+/// Carrier metadata for a v3-advertised End.X/uA SID — identifier is
+/// the function portion, locally significant to `owner`.
+fn csid_bits_endx_v3(info: &Srv6SidInfoV3, owner: usize) -> Option<crate::spf::srv6::CsidBits> {
+    use crate::spf::srv6::{CsidBits, sid_bits, sid_block};
+    if !isis_packet::Behavior::from(info.behavior).is_endx_next_csid() {
+        return None;
+    }
+    let st = info.structure.as_ref()?;
+    let (lb, ln, fun) = (st.lb_len as u32, st.ln_len as u32, st.fun_len as u32);
+    if fun == 0 || lb + ln + fun > 128 {
+        return None;
+    }
+    Some(CsidBits {
+        block: sid_block(info.sid, st.lb_len),
+        lb: st.lb_len,
+        id: sid_bits(info.sid, lb + ln, fun),
+        width: st.fun_len,
+        lib_owner: Some(owner),
+    })
+}
