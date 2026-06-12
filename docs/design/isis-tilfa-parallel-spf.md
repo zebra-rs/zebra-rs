@@ -1,6 +1,9 @@
 # TI-LFA Parallel SPF Computation — Design (IS-IS first)
 
-Status: ACCEPTED (2026-06-12). Branch: `ti-lfa-scaling`.
+Status: ACCEPTED (2026-06-12). Shipped: PR-A #1384 (spf refactor +
+oracle tests), PR-B #1390 (modes + IS-IS wiring + config + telemetry).
+PR-C adds the BDD scenarios (`bdd/tests/features/isis_tilfa.feature`)
+and the `tilfa_perf_modes` ignored harness.
 Decisions: rayon substrate; default mode `serial`; **no redundant SPF
 in any mode** — serial is the sequential 2-SPF-per-target loop, not the
 legacy 3-SPF path (see §6.0, §15).

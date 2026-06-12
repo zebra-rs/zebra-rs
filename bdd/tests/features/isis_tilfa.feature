@@ -104,6 +104,45 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     # Primary restored.
     Then ping from "s" to "10.0.0.8" should succeed
 
+  Scenario: TI-LFA compute-mode aggressive computes the same repair in parallel
+    Given the test topology exists
+    # Switch the TI-LFA scheduler to the parallel map-reduce mode
+    # (docs/design/isis-tilfa-parallel-spf.md). The config handler
+    # re-runs SPF on its own; results are identical across modes by
+    # design — only the CPU scheduling differs.
+    When I apply command "set router isis fast-reroute ti-lfa compute-mode aggressive" in namespace "s"
+    And I wait 5 seconds
+    # The repair tunnel is still computed after the parallel run...
+    Then show command "show isis route detail" in namespace "s" should contain "Backup path: TI-LFA"
+    # ...and the SPF telemetry proves the aggressive scheduler ran it
+    # (q = one reverse SPF per protected destination, pc deduped per
+    # protected first-hop node).
+    And show command "show isis spf" in namespace "s" should contain "mode=aggressive"
+
+  Scenario: TI-LFA compute-mode sharding bounds parallelism and still protects
+    Given the test topology exists
+    When I apply command "set router isis fast-reroute ti-lfa compute-shards 2" in namespace "s"
+    And I apply command "set router isis fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    And I wait 5 seconds
+    Then show command "show isis route detail" in namespace "s" should contain "Backup path: TI-LFA"
+    And show command "show isis spf" in namespace "s" should contain "mode=sharding(2)"
+    # The sharded recompute still protects for real: fail the primary
+    # link and reach d over the repair / post-convergence path.
+    When I make namespace "s" interface "s-n1" down
+    And I wait 5 seconds
+    Then ping from "s" to "10.0.0.8" should succeed
+    When I make namespace "s" interface "s-n1" up
+    And I wait 10 seconds
+    Then ping from "s" to "10.0.0.8" should succeed
+    # Surgical runtime deletes exercise the handlers' reset-to-default
+    # path; the next full-file apply would wipe these leaves anyway
+    # (file applies are whole-config replaces). Leaf deletes carry the
+    # current value, like `delete … bfd echo-mode transmit`.
+    When I apply command "delete router isis fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    And I apply command "delete router isis fast-reroute ti-lfa compute-shards 2" in namespace "s"
+    And I wait 5 seconds
+    Then show command "show isis spf" in namespace "s" should contain "mode=serial"
+
   Scenario: no-php sets the P (no-PHP) flag and makes the penultimate hop swap
     Given the test topology exists
     # By default s advertises its loopback Prefix-SID (10.0.0.1/32, SID
