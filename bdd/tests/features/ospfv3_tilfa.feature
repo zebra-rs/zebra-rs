@@ -132,7 +132,13 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     Given the test topology exists
     # s -> d primary is s-n1-d (cost 2).
     Then ping from "s" to "2001:db8::8" should succeed
-    And ping from "d" to "2001:db8::1" should succeed
+    # The reverse direction races full-mesh convergence: d's best
+    # route to s flips from the expensive r3 path to the n1 path only
+    # once every E-LSA has flooded and n1's ILM for s's node-SID
+    # (16100, kept end-to-end by the v3 NP flag) settles — observed
+    # ~40s after config, right at this scenario's runtime. Poll
+    # instead of single-shot.
+    And ping from "d" to "2001:db8::1" should eventually succeed
 
   Scenario: Fast-reroute survives the primary link failure (s-n1)
     Given the test topology exists
@@ -148,6 +154,31 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     When I make namespace "s" interface "s-n1" up
     And I wait 30 seconds
     # Primary restored once the adjacency re-forms.
+    Then ping from "s" to "2001:db8::8" should succeed
+
+  Scenario: Promoted backup actually forwards over the SR-MPLS repair
+    Given the test topology exists
+    # `backup-as-primary` swaps the metric-sort offset so each TI-LFA
+    # repair installs as the active route and the SPF primary demotes
+    # to metric+1; the toggle re-runs SPF itself. Traffic is pinned
+    # onto the repair label stack while every link stays up — proving
+    # the [Node-SID(r1), Adj-SID, Adj-SID] tunnel genuinely forwards,
+    # which the link-failure scenario cannot (by ping time SPF has
+    # already reconverged onto a plain post-convergence primary).
+    # Must run before the s-nofrr / s-nosr scenarios strip the
+    # repair machinery from s.
+    When I apply command "set router ospfv3 fast-reroute backup-as-primary" in namespace "s"
+    And I wait 5 seconds
+    # d's loopback route now has the label-stack repair as its best
+    # kernel entry, out the repair egress s-n2.
+    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "encap mpls"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    # End-to-end over the repair: dies if any label hop on the
+    # s-n2-r1-r2-r3-d repair path fails to swap/pop/forward.
+    And ping from "s" to "2001:db8::8" should succeed
+    # Restore install-side ordering for the scenarios that follow.
+    When I apply command "delete router ospfv3 fast-reroute backup-as-primary" in namespace "s"
+    And I wait 5 seconds
     Then ping from "s" to "2001:db8::8" should succeed
 
   Scenario: Disabling fast-reroute clears the repair-list

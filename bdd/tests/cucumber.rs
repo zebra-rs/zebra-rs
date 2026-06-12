@@ -290,6 +290,41 @@ async fn ping_should_succeed(world: &mut World, namespace: String, target: Strin
     println!("✓ ping from {} to {} succeeded", scoped, target);
 }
 
+/// Polled sibling of `ping … should succeed` for assertions that race
+/// protocol convergence — e.g. the reverse direction of a path right
+/// after topology bring-up, where the forward direction converged
+/// first. The plain step is a single 3-packet probe; this one retries
+/// a 1-packet ping every second for up to 30 seconds.
+#[then(expr = "ping from {string} to {string} should eventually succeed")]
+async fn ping_eventually_succeeds(world: &mut World, namespace: String, target: String) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 30;
+    for i in 0..ATTEMPTS {
+        let ok = if target.contains(':') {
+            netns::ping6(&scoped, &target, 1, 1).await
+        } else {
+            netns::ping4(&scoped, &target, 1, 1).await
+        }
+        .unwrap_or(false);
+        if ok {
+            println!(
+                "✓ ping from {} to {} succeeded (attempt {})",
+                scoped,
+                target,
+                i + 1
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "ping from {} to {} did not succeed within {} attempts",
+        scoped, target, ATTEMPTS
+    );
+}
+
 #[then(expr = "ping from {string} to {string} should fail")]
 async fn ping_should_fail(world: &mut World, namespace: String, target: String) {
     let scoped = world.ns(&namespace);
