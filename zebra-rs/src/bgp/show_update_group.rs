@@ -46,6 +46,11 @@ struct SigView {
     /// only): the modifiers in force and the AS kept for loop
     /// prevention. `None` (the common case) means no stripping.
     remove_private_as: Option<RemovePrivateAsView>,
+    /// `Some((substitute, replace_as))` when a `local-as` substitute
+    /// is active on the members (eBGP only): the egress prepend is
+    /// `substitute, real` — or just `substitute` with `replace_as`.
+    /// `None` (the common case) means the normal real-AS prepend.
+    local_as_substitute: Option<(u32, bool)>,
     capabilities: CapsView,
     signature_version: u32,
 }
@@ -151,6 +156,7 @@ fn build_view(bgp: &Bgp, afi_safi: AfiSafi, group: &UpdateGroup) -> GroupView {
             prefix_set_out: group.sig.prefix_set_out_name.clone(),
             as_override_target: group.sig.as_override_target,
             remove_private_as: group.sig.remove_private_as.map(Into::into),
+            local_as_substitute: group.sig.local_as_substitute,
             capabilities: CapsView {
                 as4_negotiated: group.sig.as4_negotiated,
                 extended_message: group.sig.extended_message,
@@ -304,6 +310,20 @@ fn render_detail_text(view: &GroupView) -> Result<String, std::fmt::Error> {
                     s.push_str(" replace-AS");
                 }
                 format!("{s} (keep {})", rpa.keep_as)
+            })
+            .unwrap_or_else(|| "—".to_string())
+    )?;
+    writeln!(
+        out,
+        "    Local-AS substitute:        {}",
+        view.signature
+            .local_as_substitute
+            .map(|(asn, replace_as)| {
+                if replace_as {
+                    format!("{asn} replace-as")
+                } else {
+                    asn.to_string()
+                }
             })
             .unwrap_or_else(|| "—".to_string())
     )?;

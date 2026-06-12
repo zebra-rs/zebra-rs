@@ -61,6 +61,41 @@ fn aspath_local_as_loop(aspath: &As4Path, local_as: u32, allow: Option<AllowAsIn
     }
 }
 
+/// RFC 4271 inbound AS_PATH loop detection for `peer`, covering both
+/// the router's own AS and — when a `local-as` substitute is active on
+/// the session — the substitute AS (FRR's "AS path local-as loop
+/// check" in `bgp_update`, bgp_route.c). Returns `true` when the
+/// update must be dropped.
+///
+/// The substitute check's occurrence budget mirrors FRR: a configured
+/// `allowas-in` count replaces it; otherwise it is 1 while the ingress
+/// prepend is on (the prepend in [`route_from_peer`] put exactly one
+/// occurrence there) and 0 under `no-prepend`. One deliberate
+/// divergence: with `allowas-in origin` and the ingress prepend both
+/// active, FRR's budget of 0 drops every route from the peer (our own
+/// leftmost prepend can never be at the origin); the substitute check
+/// is skipped instead.
+fn aspath_own_as_loop(peer: &Peer, aspath: &As4Path) -> bool {
+    if aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in) {
+        return true;
+    }
+    let Some(substitute) = peer.change_local_as() else {
+        return false;
+    };
+    let no_prepend = peer.config.local_as.is_some_and(|la| la.no_prepend);
+    let allow = match peer.config.allowas_in {
+        // FRR parity: a configured allowas-in budget replaces the
+        // prepend allowance (the ingress prepend counts against it).
+        Some(AllowAsIn::Count(n)) => Some(AllowAsIn::Count(n)),
+        Some(AllowAsIn::Origin) if !no_prepend => return false,
+        Some(AllowAsIn::Origin) => Some(AllowAsIn::Origin),
+        // The ingress prepend itself put one occurrence in the path.
+        None if !no_prepend => Some(AllowAsIn::Count(1)),
+        None => None,
+    };
+    aspath_local_as_loop(aspath, substitute, allow)
+}
+
 /// True when every occurrence of `local_as` is the trailing originating
 /// AS (prepends at the origin are allowed) — i.e. it never appears as a
 /// transit AS. Used by [`AllowAsIn::Origin`].
@@ -122,7 +157,11 @@ fn aspath_first_as_mismatch(aspath: Option<&As4Path>, expected_as: u32) -> bool 
 /// 2. `as-override`: replace the peer's own AS with the local AS so its
 ///    RFC 4271 loop check accepts a route that transited its AS. Mirrors
 ///    FRR's `bgp_peer_as_override`, which runs after remove-private-as.
-/// 3. the mandatory local-AS prepend.
+/// 3. the mandatory local-AS prepend. With a `local-as` substitute
+///    active on the session, the real AS is prepended first and the
+///    substitute on top of it (the receiver sees `substitute, real, …`);
+///    `replace-as` skips the real AS so only the substitute appears.
+///    Mirrors FRR's `bgp_packet_attribute` (bgp_attr.c).
 ///
 /// Call this at every eBGP egress site instead of prepending inline, so
 /// the transforms apply uniformly across address families.
@@ -146,7 +185,16 @@ fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
     if peer.config.as_override {
         aspath.replace_as_mut(peer.remote_as, peer.local_as);
     }
-    aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
+    match peer.change_local_as() {
+        Some(substitute) => {
+            let replace_as = peer.config.local_as.is_some_and(|la| la.replace_as);
+            if !replace_as {
+                aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
+            }
+            aspath.prepend_mut(As4Path::from(vec![substitute]));
+        }
+        None => aspath.prepend_mut(As4Path::from(vec![peer.local_as])),
+    }
 }
 
 /// Build a `rib::entry::RibEntry` from the BGP best-path winner for an
@@ -2106,7 +2154,7 @@ pub fn route_ipv4_update(
         // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
         // This prevents routing loops by detecting if the route has already passed through this AS
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             eprintln!(
                 "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
@@ -3460,7 +3508,7 @@ pub fn route_ipv6_update(
 
         // RFC 4271 / 4456 loop detection — identical to the v4 path.
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -3727,7 +3775,7 @@ pub fn route_labelv4_update(
 
         // RFC 4271 / 4456 loop detection — identical to the unicast path.
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -3827,7 +3875,7 @@ pub fn route_labelv6_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -4339,7 +4387,7 @@ pub fn route_evpn_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -4486,7 +4534,7 @@ pub fn route_flowspec_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -4595,7 +4643,7 @@ pub fn route_srpolicy_update(
     {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -4789,7 +4837,7 @@ pub fn route_bgpls_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
-            && aspath_local_as_loop(aspath, peer.local_as, peer.config.allowas_in)
+            && aspath_own_as_loop(peer, aspath)
         {
             return;
         }
@@ -5397,7 +5445,7 @@ fn withdraw_mp_reach(peer_id: usize, mp: MpReachAttr, bgp: &mut BgpTop, peers: &
 
 pub fn route_from_peer(
     peer_id: usize,
-    packet: UpdatePacket,
+    mut packet: UpdatePacket,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
@@ -5408,6 +5456,24 @@ pub fn route_from_peer(
             withdraws = packet.ipv4_withdraw.len(),
             "recv UPDATE NLRI"
         );
+    }
+    // `local-as` ingress prepend (FRR does this at the attribute-parse
+    // stage, bgp_attr.c): routes received from an eBGP neighbor with an
+    // active substitute AS get the substitute prepended once, so the
+    // rest of the network sees the path as if it still transited the
+    // old AS; `no-prepend` turns it off. Done here — once per UPDATE,
+    // before the per-family dispatch — because every family handler
+    // below shares `packet.bgp_attr`. Adj-RIB-In stores the
+    // post-prepend attrs, so soft-reconfig replays (which start from
+    // `peer.adj_in`, not from here) never prepend twice.
+    if let Some(peer) = peers.get_by_idx(peer_id)
+        && peer.is_ebgp()
+        && let Some(substitute) = peer.change_local_as()
+        && !peer.config.local_as.is_some_and(|la| la.no_prepend)
+        && let Some(attr) = packet.bgp_attr.as_mut()
+        && let Some(aspath) = attr.aspath.as_mut()
+    {
+        aspath.prepend_mut(As4Path::from(vec![substitute]));
     }
     // Convert UpdatePacket to BgpAttr.
     // let attr = BgpAttr::from(&packet.attrs);
@@ -11665,6 +11731,129 @@ mod allowas_in_tests {
         assert!(loops("65001 65002 65001", Some(AllowAsIn::Origin)));
         // No local AS at all ⇒ no loop.
         assert!(!loops("65002 65003", Some(AllowAsIn::Origin)));
+    }
+}
+
+/// `local-as` AS_PATH behavior (zebra-bgp-local-as.yang): the egress
+/// prepend forms and the substitute-AS leg of the inbound loop check.
+#[cfg(test)]
+mod local_as_tests {
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
+
+    use bgp_packet::{As4Path, BgpAttr};
+    use tokio::sync::mpsc;
+
+    use super::super::peer::{LocalAs, Peer, PeerType};
+    use super::{aspath_own_as_loop, ebgp_egress_aspath};
+
+    const REAL_AS: u32 = 65100;
+    const SUBSTITUTE: u32 = 64999;
+    const PEER_AS: u32 = 65001;
+
+    fn test_peer(local_as: Option<LocalAs>) -> Peer {
+        let (tx, rx) = mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            REAL_AS,
+            Ipv4Addr::new(10, 255, 0, 1),
+            PEER_AS,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.peer_type = PeerType::EBGP;
+        peer.config.local_as = local_as;
+        peer
+    }
+
+    fn local_as(no_prepend: bool, replace_as: bool) -> Option<LocalAs> {
+        Some(LocalAs {
+            as_number: SUBSTITUTE,
+            no_prepend,
+            replace_as,
+            dual_as: false,
+        })
+    }
+
+    /// Run the egress transform and flatten the resulting AS_PATH.
+    fn egress(peer: &Peer, path: &str) -> String {
+        let mut attrs = BgpAttr {
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            ..Default::default()
+        };
+        ebgp_egress_aspath(peer, &mut attrs);
+        attrs
+            .aspath
+            .unwrap()
+            .segs
+            .iter()
+            .flat_map(|seg| seg.asn.iter())
+            .map(|asn| asn.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn egress_without_local_as_prepends_real() {
+        assert_eq!(egress(&test_peer(None), "65010"), "65100 65010");
+    }
+
+    #[test]
+    fn egress_bare_prepends_substitute_over_real() {
+        // The receiver sees `substitute, real, …` — both ASes visible.
+        assert_eq!(
+            egress(&test_peer(local_as(false, false)), "65010"),
+            "64999 65100 65010"
+        );
+    }
+
+    #[test]
+    fn egress_replace_as_hides_real() {
+        assert_eq!(
+            egress(&test_peer(local_as(false, true)), "65010"),
+            "64999 65010"
+        );
+    }
+
+    #[test]
+    fn egress_dual_as_fallback_degrades_to_real() {
+        // While the dual-as fallback presents the global AS, the
+        // substitute must vanish from the egress prepend too.
+        let mut peer = test_peer(Some(LocalAs {
+            as_number: SUBSTITUTE,
+            no_prepend: false,
+            replace_as: true,
+            dual_as: true,
+        }));
+        peer.local_as_dual_fallback = true;
+        assert_eq!(egress(&peer, "65010"), "65100 65010");
+    }
+
+    fn loops(peer: &Peer, path: &str) -> bool {
+        aspath_own_as_loop(peer, &As4Path::from_str(path).unwrap())
+    }
+
+    #[test]
+    fn loop_budget_allows_the_ingress_prepend() {
+        let peer = test_peer(local_as(false, false));
+        // One substitute occurrence is our own ingress prepend.
+        assert!(!loops(&peer, "64999 65001 65010"));
+        // Two means the route really looped through the old AS.
+        assert!(loops(&peer, "64999 65001 64999"));
+        // The real AS is still checked strictly.
+        assert!(loops(&peer, "64999 65001 65100"));
+    }
+
+    #[test]
+    fn loop_budget_zero_under_no_prepend() {
+        // Without the ingress prepend any substitute occurrence came
+        // from the network — strict.
+        let peer = test_peer(local_as(true, false));
+        assert!(loops(&peer, "64999 65001"));
+        assert!(!loops(&peer, "65001 65010"));
     }
 }
 

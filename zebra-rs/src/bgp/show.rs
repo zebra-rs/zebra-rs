@@ -12,7 +12,7 @@ use super::cap::CapAfiMap;
 use super::inst::{Bgp, ShowCallback};
 use super::neighbor_group::InheritableKnobs;
 use super::peer::{
-    AfiSafiEncapType, AllowAsIn, Peer, PeerCounter, PeerParam, RemovePrivateAs, State,
+    AfiSafiEncapType, AllowAsIn, LocalAs, Peer, PeerCounter, PeerParam, RemovePrivateAs, State,
 };
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
@@ -1788,6 +1788,15 @@ struct Neighbor<'a> {
     /// `replace_as`, rewrites) private ASNs on outbound eBGP UPDATEs.
     #[serde(skip_serializing_if = "Option::is_none")]
     remove_private_as: Option<RemovePrivateAs>,
+    /// FRR-style `neighbor X local-as` (zebra-bgp-local-as.yang), if
+    /// configured: the substitute AS presented to this neighbor plus
+    /// the three modifiers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_as_config: Option<LocalAs>,
+    /// `true` while the `dual-as` fallback has the session presenting
+    /// the router's global AS instead of the substitute.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    local_as_dual_fallback: bool,
     /// FRR-style `neighbor X enforce-first-as` flag
     /// (zebra-bgp-enforce-first-as.yang). When true, an inbound eBGP
     /// UPDATE is dropped unless its AS_PATH begins with this neighbor's
@@ -1979,7 +1988,9 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         address: peer.address,
         interface: peer.ifname.as_deref(),
         remote_as: peer.remote_as,
-        local_as: peer.local_as,
+        // The AS this session presents — the `local-as` substitute when
+        // one is active (FRR prints change_local_as here too).
+        local_as: peer.open_local_as(),
         peer_type: peer.peer_type.to_str(),
         local_router_id: peer.router_id,
         remote_router_id: peer.remote_id,
@@ -2002,6 +2013,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         allowas_in: peer.config.allowas_in,
         as_override: peer.config.as_override,
         remove_private_as: peer.config.remove_private_as,
+        local_as_config: peer.config.local_as,
+        local_as_dual_fallback: peer.local_as_dual_fallback,
         enforce_first_as: peer.config.enforce_first_as,
         encapsulation_type_ipv6: peer
             .config
@@ -2209,6 +2222,24 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
             form.push_str(" replace-AS");
         }
         writeln!(out, "  Private AS removal: {form} (outbound)")?;
+    }
+
+    if let Some(la) = neighbor.local_as_config {
+        // Echo the configured form, e.g. "local-as 64999 no-prepend".
+        let mut form = format!("local-as {}", la.as_number);
+        if la.no_prepend {
+            form.push_str(" no-prepend");
+        }
+        if la.replace_as {
+            form.push_str(" replace-as");
+        }
+        if la.dual_as {
+            form.push_str(" dual-as");
+        }
+        writeln!(out, "  Local AS substitution: {form}")?;
+        if neighbor.local_as_dual_fallback {
+            writeln!(out, "    dual-as fallback active: presenting the global AS")?;
+        }
     }
 
     if neighbor.enforce_first_as {
@@ -3560,6 +3591,8 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             allowas_in: None,
             as_override: false,
             remove_private_as: None,
+            local_as_config: None,
+            local_as_dual_fallback: false,
             enforce_first_as: false,
             encapsulation_type_ipv6: None,
             ttl_security: false,
