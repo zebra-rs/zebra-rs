@@ -41,7 +41,7 @@ clear ospf neighbor          # reset all OSPFv2 adjacencies
 ```
 
 The OSPFv3 commands behave identically; for OSPFv3 the Router-ID is the
-neighbor identity shown by `show ipv6 ospf neighbor` (RFC 5340 §10
+neighbor identity shown by `show ospfv3 neighbor` (RFC 5340 §10
 keys neighbors by Router-ID rather than by interface address).
 
 What a clear triggers, as a side effect of the adjacency dropping and

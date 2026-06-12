@@ -1,7 +1,7 @@
-//! OSPFv3 `show ipv6 ospf ...` command handlers.
+//! OSPFv3 `show ospfv3 ...` command handlers.
 //!
 //! Sibling of v2's `show.rs`. Mirrors the v2 dispatch shape — one
-//! handler per `/show/ipv6/ospf/...` path, registered through
+//! handler per `/show/ospfv3/...` path, registered through
 //! `Ospf<Ospfv3>::show_build`, dispatched by the v3 event loop's
 //! `process_show_msg` arm. Output formatting is plain text by
 //! default; the `json` flag carried by `ShowCallback` produces a
@@ -32,33 +32,33 @@ impl Ospf<Ospfv3> {
     /// `show_build` shape and command set.
     pub fn show_build(&mut self) {
         self.show_cb = Builder::<ShowCallback<Ospfv3>>::default()
-            .path("/show/ipv6/ospf")
+            .path("/show/ospfv3")
             .set(show_ospfv3_summary)
-            .path("/show/ipv6/ospf/interface")
+            .path("/show/ospfv3/interface")
             .set(show_ospfv3_interface)
-            .path("/show/ipv6/ospf/neighbor")
+            .path("/show/ospfv3/neighbor")
             .set(show_ospfv3_neighbor)
-            .path("/show/ipv6/ospf/neighbor/detail")
+            .path("/show/ospfv3/neighbor/detail")
             .set(show_ospfv3_neighbor_detail)
-            .path("/show/ipv6/ospf/database")
+            .path("/show/ospfv3/database")
             .set(show_ospfv3_database)
-            .path("/show/ipv6/ospf/database/detail")
+            .path("/show/ospfv3/database/detail")
             .set(show_ospfv3_database_detail)
-            .path("/show/ipv6/ospf/route")
+            .path("/show/ospfv3/route")
             .set(show_ospfv3_route)
-            .path("/show/ipv6/ospf/spf")
+            .path("/show/ospfv3/spf")
             .set(show_ospfv3_spf)
-            .path("/show/ipv6/ospf/graph")
+            .path("/show/ospfv3/graph")
             .set(show_ospfv3_graph)
-            .path("/show/ipv6/ospf/ti-lfa")
+            .path("/show/ospfv3/ti-lfa")
             .set(show_ospfv3_tilfa)
-            .path("/show/ipv6/ospf/repair-list")
+            .path("/show/ospfv3/repair-list")
             .set(show_ospfv3_repair_list)
-            .path("/show/ipv6/ospf/repair-list/detail")
+            .path("/show/ospfv3/repair-list/detail")
             .set(show_ospfv3_repair_list_detail)
-            .path("/show/ipv6/ospf/segment-routing")
+            .path("/show/ospfv3/segment-routing")
             .set(show_ospfv3_segment_routing)
-            .path("/show/ipv6/ospf/flex-algo")
+            .path("/show/ospfv3/flex-algo")
             .set(show_ospfv3_flex_algo)
             .map();
     }
@@ -111,8 +111,8 @@ fn ls_type_name(ls_type: u16) -> &'static str {
 }
 
 // ---- TI-LFA (RFC 9490) ------------------------------------------
-// `show ipv6 ospf ti-lfa` (graph-level per-destination repair lists)
-// and `show ipv6 ospf repair-list` (repair backups installed on the
+// `show ospfv3 ti-lfa` (graph-level per-destination repair lists)
+// and `show ospfv3 repair-list` (repair backups installed on the
 // v6 RIB). v3 siblings of the v2 handlers in `show.rs`.
 
 fn label_value_str_v3(label: &crate::rib::Label) -> String {
@@ -382,7 +382,7 @@ fn show_ospfv3_tilfa(
     Ok(buf)
 }
 
-// ---- show ipv6 ospf (instance summary) --------------------------
+// ---- show ospfv3 (instance summary) --------------------------
 
 #[derive(Serialize)]
 struct Ospfv3AreaGateJson {
@@ -451,7 +451,7 @@ fn show_ospfv3_summary(
     render_or(json, &summary, text)
 }
 
-// ---- show ipv6 ospf interface -----------------------------------
+// ---- show ospfv3 interface -----------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3InterfaceJson {
@@ -516,7 +516,7 @@ fn show_ospfv3_interface(
     render_or(json, &entries, text)
 }
 
-// ---- show ipv6 ospf neighbor ------------------------------------
+// ---- show ospfv3 neighbor ------------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3NeighborJson {
@@ -590,7 +590,7 @@ fn show_ospfv3_neighbor_detail(
     render_or(json, &entries, text)
 }
 
-// ---- show ipv6 ospf database ------------------------------------
+// ---- show ospfv3 database ------------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3LsaHeaderJson {
@@ -1427,7 +1427,7 @@ fn format_v3_prefix(prefix_length: u8, bytes: &[u8]) -> String {
     }
 }
 
-// ---- show ipv6 ospf route ---------------------------------------
+// ---- show ospfv3 route ---------------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3RouteNexthopJson {
@@ -1498,7 +1498,7 @@ fn show_ospfv3_route(
     render_or(json, &entries, text)
 }
 
-// ---- show ipv6 ospf spf -----------------------------------------
+// ---- show ospfv3 spf -----------------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3SpfPathJson {
@@ -1554,7 +1554,7 @@ fn show_ospfv3_spf(top: &Ospf<Ospfv3>, _args: Args, json: bool) -> Result<String
     render_or(json, &entries, text)
 }
 
-/// `show ipv6 ospf flex-algo` — for each configured Flexible Algorithm
+/// `show ospfv3 flex-algo` — for each configured Flexible Algorithm
 /// (RFC 9350): its local definition plus the FAD-filtered per-algo SPF
 /// tree (the routers reachable under that algorithm's constraints).
 /// v3 sibling of v2's `show_ospf_flex_algo`. Per-algo v6 routes land
@@ -1659,7 +1659,7 @@ fn show_ospfv3_flex_algo(
     Ok(buf)
 }
 
-// ---- show ipv6 ospf graph ---------------------------------------
+// ---- show ospfv3 graph ---------------------------------------
 
 #[derive(Serialize)]
 struct Ospfv3GraphLinkJson {
@@ -1716,7 +1716,7 @@ fn show_ospfv3_graph(
     render_or(json, &entries, text)
 }
 
-// ---- show ipv6 ospf segment-routing -----------------------------
+// ---- show ospfv3 segment-routing -----------------------------
 
 #[derive(Serialize)]
 struct Ospfv3SrLanAdjSidJson {
@@ -2131,7 +2131,7 @@ mod tests {
     use super::*;
 
     /// Pin the LS-Type → display-name map for every codepoint we
-    /// originate or parse, so `show ipv6 ospf database` never falls
+    /// originate or parse, so `show ospfv3 database` never falls
     /// back to "Unknown" for our own LSAs again (the RFC 8362 E-LSA
     /// family regressed this way once: SR-enabled LSDBs listed 38
     /// "Unknown" entries).
@@ -2199,7 +2199,7 @@ mod tests {
     }
 
     /// The SR-capabilities E-Router-LSA must render the SRGB / SRLB
-    /// ranges and the algorithm list — `show ipv6 ospf database
+    /// ranges and the algorithm list — `show ospfv3 database
     /// detail` regressed to bare TLV names once; these pin the
     /// field-level output.
     #[test]

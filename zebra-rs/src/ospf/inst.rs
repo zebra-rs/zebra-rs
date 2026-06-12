@@ -10141,7 +10141,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     top.graph = Some(graph);
     top.tilfa_result = Some(tilfa_result);
 
-    // Per-algo SPF trees, for `show ipv6 ospf flex-algo`.
+    // Per-algo SPF trees, for `show ospfv3 flex-algo`.
     top.spf_flex_algo = flex_algos
         .into_iter()
         .map(|o| (o.algo, o.spf_result))
@@ -10172,7 +10172,7 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
 /// our own. The FIB picks between this OSPF route (admin distance
 /// 110) and the kernel's connected route (0), so the connected
 /// route always wins for the directly-attached prefix; the OSPF
-/// route table still shows the prefix for `show ipv6 ospf route`
+/// route table still shows the prefix for `show ospfv3 route`
 /// symmetry across DR-role flips.
 fn build_rib6_from_spf(
     top: &Ospf<Ospfv3>,

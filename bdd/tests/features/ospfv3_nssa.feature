@@ -63,26 +63,26 @@ Feature: OSPFv3 NSSA (Not-So-Stubby Area) Type-7 origination and translation
 
     # --- Adjacencies are Full on every link (the NSSA links require the
     #     N-bit to match between a and c / a and d). ---
-    Then show command "show ipv6 ospf neighbor" in namespace "a" should contain "Full"
-    And show command "show ipv6 ospf neighbor" in namespace "a" should contain "10.0.0.2"
-    And show command "show ipv6 ospf neighbor" in namespace "a" should contain "10.0.0.3"
-    And show command "show ipv6 ospf neighbor" in namespace "a" should contain "10.0.0.4"
-    And show command "show ipv6 ospf neighbor" in namespace "c" should contain "Full"
-    And show command "show ipv6 ospf neighbor" in namespace "c" should contain "10.0.0.1"
+    Then show command "show ospfv3 neighbor" in namespace "a" should contain "Full"
+    And show command "show ospfv3 neighbor" in namespace "a" should contain "10.0.0.2"
+    And show command "show ospfv3 neighbor" in namespace "a" should contain "10.0.0.3"
+    And show command "show ospfv3 neighbor" in namespace "a" should contain "10.0.0.4"
+    And show command "show ospfv3 neighbor" in namespace "c" should contain "Full"
+    And show command "show ospfv3 neighbor" in namespace "c" should contain "10.0.0.1"
 
     # --- Type-7 inside the NSSA: d installs the external prefix straight
     #     from c's Type-7. ---
-    And show command "show ipv6 ospf route" in namespace "d" should contain "2001:db8:dead::/64"
+    And show command "show ospfv3 route" in namespace "d" should contain "2001:db8:dead::/64"
 
     # --- The headline: Type-7 -> Type-5 translation at the ABR. b is in
     #     the backbone only, so it can learn 2001:db8:dead::/64 ONLY as a
     #     translated Type-5 (the Type-7 never leaves the NSSA). ---
-    And show command "show ipv6 ospf route" in namespace "b" should contain "2001:db8:dead::/64"
+    And show command "show ospfv3 route" in namespace "b" should contain "2001:db8:dead::/64"
 
     # --- ABR default-originate: a injects a default Type-7 into the NSSA,
     #     so both internal routers hold a ::/0. ---
-    And show command "show ipv6 ospf route" in namespace "c" should contain "::/0"
-    And show command "show ipv6 ospf route" in namespace "d" should contain "::/0"
+    And show command "show ospfv3 route" in namespace "c" should contain "::/0"
+    And show command "show ospfv3 route" in namespace "d" should contain "::/0"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"
@@ -121,10 +121,10 @@ Feature: OSPFv3 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I wait 60 seconds
 
     # --- Intra-NSSA Type-7 install is unchanged: d still learns it. ---
-    Then show command "show ipv6 ospf route" in namespace "d" should contain "2001:db8:dead::/64"
+    Then show command "show ospfv3 route" in namespace "d" should contain "2001:db8:dead::/64"
     # --- But with translation disabled the prefix never reaches the
     #     backbone: b must NOT contain it. ---
-    And show command "show ipv6 ospf route" in namespace "b" should not contain "2001:db8:dead::/64"
+    And show command "show ospfv3 route" in namespace "b" should not contain "2001:db8:dead::/64"
 
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"

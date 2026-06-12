@@ -17,7 +17,7 @@ slice; reading their diffs is the fastest way to learn the file
 layout if you're new to the v3 path.
 
 - **#806** — `Ospf<Ospfv3>` IPv6 RIB diff/apply + `top.rib6` shadow.
-  `show ipv6 ospf route` walks the shadow.
+  `show ospfv3 route` walks the shadow.
 - **#807** — Drop `IPV6_V6ONLY` on the v3 raw socket (Linux returns
   `EINVAL` on raw sockets with non-TCP/UDP protocols).
 - **#808** — Retransmit-list bookkeeping for area-scope flooding +

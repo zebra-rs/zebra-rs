@@ -91,7 +91,7 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     And I apply config "d.yaml" to namespace "d"
     And I wait 30 seconds
     # The configured costs surface on the interface (new v3 knob) ...
-    Then show command "show ipv6 ospf interface" in namespace "s" should contain "Cost: 1000"
+    Then show command "show ospfv3 interface" in namespace "s" should contain "Cost: 1000"
     # ... and shape the SPF: directly-connected adjacency over s-n1,
     # then a multi-hop loopback (d, two hops away) over the converged
     # v3 RIB.
@@ -113,20 +113,20 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     # The graph-level TI-LFA computation found repairs that need an SR
     # tunnel: a Node-SID to reach the P-node r1 past the failure, then
     # Adj-SIDs walking the expensive r-plane links.
-    And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "OSPFv3 TI-LFA repair paths:"
-    And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "Node-SID"
-    And show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "Adj-SID"
+    And show command "show ospfv3 ti-lfa" in namespace "s" should contain "OSPFv3 TI-LFA repair paths:"
+    And show command "show ospfv3 ti-lfa" in namespace "s" should contain "Node-SID"
+    And show command "show ospfv3 ti-lfa" in namespace "s" should contain "Adj-SID"
     # And the repairs are installed against the single-nexthop
     # loopbacks behind n1: r2, r3 and d (r1 itself is ECMP via n1/n2
     # and self-protects). Every repair starts with r1's node-SID label
     # 16500, followed by dynamically allocated SRLB Adj-SID labels
     # (15xxx — exact values depend on each router's allocation order,
     # so the assertion pins the SRLB range, not a specific label).
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::6/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::7/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "2001:db8::8/128"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "[16500, 15"
-    And show command "show ipv6 ospf repair-list detail" in namespace "s" should contain "sr-mpls"
+    And show command "show ospfv3 repair-list" in namespace "s" should contain "2001:db8::6/128"
+    And show command "show ospfv3 repair-list" in namespace "s" should contain "2001:db8::7/128"
+    And show command "show ospfv3 repair-list" in namespace "s" should contain "2001:db8::8/128"
+    And show command "show ospfv3 repair-list" in namespace "s" should contain "[16500, 15"
+    And show command "show ospfv3 repair-list detail" in namespace "s" should contain "sr-mpls"
 
   Scenario: Source reaches the destination over the primary path
     Given the test topology exists
@@ -184,14 +184,14 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
   Scenario: Disabling fast-reroute clears the repair-list
     Given the test topology exists
     # s still holds TI-LFA backups from the previous scenarios.
-    Then show command "show ipv6 ospf repair-list" in namespace "s" should contain "16500"
+    Then show command "show ospfv3 repair-list" in namespace "s" should contain "16500"
     # Re-apply s without `fast-reroute ti-lfa` (SR-MPLS stays on).
     When I apply config "s-nofrr.yaml" to namespace "s"
     And I wait 5 seconds
     # The toggle re-runs SPF without the TI-LFA pass: no graph repairs,
     # no installed backups — while the SR labels stay in the LFIB.
-    Then show command "show ipv6 ospf ti-lfa" in namespace "s" should contain "(no TI-LFA repair paths computed)"
-    And show command "show ipv6 ospf repair-list" in namespace "s" should contain "(no TI-LFA repair-list entries)"
+    Then show command "show ospfv3 ti-lfa" in namespace "s" should contain "(no TI-LFA repair paths computed)"
+    And show command "show ospfv3 repair-list" in namespace "s" should contain "(no TI-LFA repair-list entries)"
     And mpls ilm in namespace "s" should contain label 16800
 
   Scenario: Deleting segment-routing mpls clears all MPLS ILM entries

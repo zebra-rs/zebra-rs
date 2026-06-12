@@ -80,7 +80,7 @@ In-house conventions carried over:
    `isis_tilfa_srv6.feature` (eight routers, e1/e2 LAN hosts if BGP
    service traffic is included, uSID + classic variants as needed),
    including the promoted-backup forwarding scenario from the start;
-   `show ipv6 ospf` SRv6 blocks.
+   `show ospfv3` SRv6 blocks.
 
 ## Deferred / out of scope
 

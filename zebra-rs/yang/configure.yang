@@ -253,7 +253,7 @@ module configure {
       // `clear ospfv3 neighbor [<router-id>]` — v3 sibling of the
       // `clear ospf neighbor` surface. Bare (presence) resets every
       // OSPFv3 adjacency; with a value it resets only the neighbor
-      // whose OSPF Router-ID (the "Neighbor ID" in `show ipv6 ospf
+      // whose OSPF Router-ID (the "Neighbor ID" in `show ospfv3
       // neighbor`) matches. The Router-ID is a dotted-quad, so the
       // arg stays `inet:ipv4-address`; for v3 it is also the
       // `OspfLink.nbrs` map key (RFC 5340 §10). Same presence-list

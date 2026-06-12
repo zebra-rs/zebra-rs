@@ -40,11 +40,11 @@ Feature: OSPFv3 two-router adjacency forms over a point-to-point link
     And I wait 30 seconds
 
     # o1 (slave) sees o2 (master) Full.
-    Then show command "show ipv6 ospf neighbor" in namespace "o1" should contain "10.0.0.2"
-    And show command "show ipv6 ospf neighbor" in namespace "o1" should contain "Full"
+    Then show command "show ospfv3 neighbor" in namespace "o1" should contain "10.0.0.2"
+    And show command "show ospfv3 neighbor" in namespace "o1" should contain "Full"
     # o2 (master) sees o1 (slave) Full — both ends complete the exchange.
-    And show command "show ipv6 ospf neighbor" in namespace "o2" should contain "10.0.0.1"
-    And show command "show ipv6 ospf neighbor" in namespace "o2" should contain "Full"
+    And show command "show ospfv3 neighbor" in namespace "o2" should contain "10.0.0.1"
+    And show command "show ospfv3 neighbor" in namespace "o2" should contain "Full"
 
     # Teardown.
     When I stop zebra-rs in namespace "o1"
