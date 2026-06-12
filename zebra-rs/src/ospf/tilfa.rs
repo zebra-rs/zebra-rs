@@ -4,10 +4,12 @@
 //! The post-convergence repair *list* (a sequence of Node-SID /
 //! Adj-SID segments) is computed graph-only by [`tilfa_repair_path`]
 //! on the SPF worker — it mirrors the IS-IS path and reuses the
-//! protocol-agnostic [`crate::spf::tilfa`]. Turning those segments
-//! into an installable SR-MPLS label stack ([`build_repair_path_mpls`])
-//! needs the LSDB (peer SRGBs, Extended-Prefix / Extended-Link Opaque
-//! LSAs) and so runs on the main task during RIB build.
+//! protocol-agnostic [`crate::spf::tilfa_compute`] scheduler (serial
+//! by default; `fast-reroute ti-lfa compute-mode` fans it out on the
+//! rayon pool). Turning those segments into an installable SR-MPLS
+//! label stack ([`build_repair_path_mpls`]) needs the LSDB (peer
+//! SRGBs, Extended-Prefix / Extended-Link Opaque LSAs) and so runs on
+//! the main task during RIB build.
 //!
 //! Unlike IS-IS, OSPF collapses a transit network into a direct mesh
 //! of router→router edges (there is no pseudonode vertex in the SPF
@@ -42,22 +44,18 @@ pub struct RepairPathMpls {
     pub labels: Vec<rib::Label>,
 }
 
-/// Per-destination TI-LFA repair computation (graph-only). For every
-/// destination in `spf_result` other than the source that has a single
-/// primary first-hop (SPF-level ECMP is skipped — the remaining legs
-/// already protect the prefix), call [`spf::tilfa`] to compute the
-/// post-convergence repair list, protecting against the first-hop node
-/// (`X`). The returned map is keyed by destination vertex id.
-///
-/// Runs on the SPF worker, so it borrows nothing but the graph and the
-/// SPF result. The graph must carry `ilinks` (reverse edges) — the
-/// OSPF graph builder populates them for exactly this Q-space step.
-pub(super) fn tilfa_repair_path(
-    graph: &spf::Graph,
+/// Plan the TI-LFA targets from the primary SPF result: every
+/// destination other than the source with a single primary first-hop
+/// (SPF-level ECMP is skipped — the remaining legs already protect
+/// the prefix), paired with the protected vertex X (the first-hop
+/// node). Pure planning — the SPF work happens in
+/// `spf::tilfa_compute`. No pseudonode handling: OSPF collapses
+/// transit networks into a direct router→router mesh.
+pub(super) fn tilfa_targets(
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-) -> BTreeMap<usize, Vec<spf::RepairPath>> {
-    let mut tilfa_result = BTreeMap::new();
+) -> Vec<spf::TilfaTarget> {
+    let mut targets = Vec::new();
     for (d, path) in spf_result.iter() {
         if *d == source {
             continue;
@@ -70,18 +68,52 @@ pub(super) fn tilfa_repair_path(
             continue;
         }
         // X — the protected element: the single primary first-hop node.
-        // `spf::tilfa` returns an empty vec when `d == x` (the
-        // destination *is* the protected neighbor), so that case
-        // self-skips below.
+        // The `d == x` case (destination *is* the protected neighbor)
+        // self-skips downstream: the x-excluded SPF can't reach d, so
+        // the repair list comes back empty and the destination is
+        // omitted from the result map.
         let Some(&x) = path.nexthops.iter().next().and_then(|seq| seq.first()) else {
             continue;
         };
-        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
-        if !repair_paths.is_empty() {
-            tilfa_result.insert(*d, repair_paths);
-        }
+        targets.push(spf::TilfaTarget { d: *d, x });
     }
-    tilfa_result
+    targets
+}
+
+/// Per-destination TI-LFA repair computation (graph-only): plan the
+/// targets, then hand them to `spf::tilfa_compute`, which schedules
+/// the Q/PC SPF jobs per the configured compute mode (serial by
+/// default). The returned map is keyed by destination vertex id;
+/// destinations with no computable repair are absent.
+///
+/// Unlike IS-IS, OSPF's primary SPF runs in nexthop mode
+/// (`SpfOpt::default()`), and the P-space filter inside
+/// `tilfa_compute` needs full paths — so one extra full-path SPF on
+/// the unmodified graph is run here. It is independent of the
+/// protected node, so a single run is shared across every target
+/// (the design doc's `N + |X| + 1` count for OSPF).
+///
+/// Runs on the SPF worker, so it borrows nothing but the graph and the
+/// SPF result. The graph must carry `ilinks` (reverse edges) — the
+/// OSPF graph builder populates them for exactly this Q-space step.
+pub(super) fn tilfa_repair_path(
+    graph: &spf::Graph,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    mode: spf::TilfaComputeMode,
+) -> (BTreeMap<usize, Vec<spf::RepairPath>>, spf::TilfaStats) {
+    let targets = tilfa_targets(source, spf_result);
+    if targets.is_empty() {
+        // Skip the full-path SPF when there is nothing to protect.
+        let stats = spf::TilfaStats {
+            mode,
+            width: 1,
+            ..spf::TilfaStats::default()
+        };
+        return (BTreeMap::new(), stats);
+    }
+    let full_path_spf = spf::spf(graph, source, &spf::SpfOpt::full_path());
+    spf::tilfa_compute(graph, source, &full_path_spf, &targets, mode)
 }
 
 /// Translate a graph-level `spf::RepairPath` into the FIB-ready
@@ -672,4 +704,59 @@ fn csid_bits_endx_v3(info: &Srv6SidInfoV3, owner: usize) -> Option<crate::spf::s
         width: st.fun_len,
         lib_owner: Some(owner),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spf::calc::fixtures::tilfa_graph;
+
+    /// The OSPF pipeline equals the legacy per-destination
+    /// `spf::tilfa` loop. OSPF's primary SPF runs in nexthop mode, so
+    /// this specifically pins the full-path-SPF substitution inside
+    /// `tilfa_repair_path` (the P-space filter must see the same tree
+    /// `p_space_vertices` computed internally), on top of the mode
+    /// equivalence already pinned in `spf::tilfa_par`.
+    #[test]
+    fn repair_path_matches_reference_loop() {
+        let graph = tilfa_graph();
+        let source = 0;
+        // Nexthop mode — exactly what OSPF's `compute_spf` passes.
+        let primary = spf::spf(&graph, source, &spf::SpfOpt::default());
+        let targets = tilfa_targets(source, &primary);
+        assert!(!targets.is_empty(), "fixture must produce targets");
+
+        let mut want = BTreeMap::new();
+        for t in &targets {
+            let repairs = spf::tilfa(&graph, source, t.d, &[t.x]);
+            if !repairs.is_empty() {
+                want.insert(t.d, repairs);
+            }
+        }
+
+        for mode in [
+            spf::TilfaComputeMode::Serial,
+            spf::TilfaComputeMode::Conservative,
+            spf::TilfaComputeMode::Aggressive,
+            spf::TilfaComputeMode::Sharding(2),
+        ] {
+            let (got, stats) = tilfa_repair_path(&graph, source, &primary, mode);
+            assert_eq!(got, want, "mode {mode:?}");
+            assert_eq!(stats.targets, targets.len(), "mode {mode:?}");
+        }
+    }
+
+    /// A topology with nothing to protect (single router) short-
+    /// circuits before the extra full-path SPF and returns empty
+    /// zeroed stats.
+    #[test]
+    fn empty_targets_skip_compute() {
+        let mut graph: spf::Graph = BTreeMap::new();
+        graph.insert(0, spf::Vertex::new_node("S", 0));
+        let primary = spf::spf(&graph, 0, &spf::SpfOpt::default());
+        let (got, stats) = tilfa_repair_path(&graph, 0, &primary, spf::TilfaComputeMode::Serial);
+        assert!(got.is_empty());
+        assert_eq!(stats.targets, 0);
+        assert_eq!(stats.q_spf, 0);
+    }
 }

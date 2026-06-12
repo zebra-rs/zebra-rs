@@ -158,6 +158,14 @@ impl Ospf<Ospfv3> {
             ("/segment-routing/srv6/locator", config_ospfv3_srv6_locator),
             ("/fast-reroute/ti-lfa", config_ospfv3_ti_lfa),
             (
+                "/fast-reroute/ti-lfa/compute-mode",
+                config_ospfv3_ti_lfa_compute_mode,
+            ),
+            (
+                "/fast-reroute/ti-lfa/compute-shards",
+                config_ospfv3_ti_lfa_compute_shards,
+            ),
+            (
                 "/fast-reroute/backup-as-primary",
                 config_ospfv3_fast_reroute_backup_as_primary,
             ),
@@ -177,6 +185,55 @@ fn config_ospfv3_ti_lfa(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> O
     let prev = ospf.ti_lfa_enabled;
     ospf.ti_lfa_enabled = op.is_set();
     if ospf.ti_lfa_enabled == prev {
+        return Some(());
+    }
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-mode` — v3 sibling of
+/// the v2 callback. Results are identical across modes; the SPF
+/// re-run makes the change observable in the telemetry.
+fn config_ospfv3_ti_lfa_compute_mode(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let prev = ospf.ti_lfa_compute_mode;
+    ospf.ti_lfa_compute_mode = if op.is_set() {
+        args.string()?.parse().ok()?
+    } else {
+        crate::spf::TilfaComputeModeConfig::default()
+    };
+    if ospf.ti_lfa_compute_mode == prev {
+        return Some(());
+    }
+    let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospfv3/fast-reroute/ti-lfa/compute-shards` — v3 sibling of
+/// the v2 callback. Consulted only in sharding mode.
+fn config_ospfv3_ti_lfa_compute_shards(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let prev = ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards);
+    ospf.ti_lfa_compute_shards = if op.is_set() { args.u16()? } else { 8 };
+    if ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards)
+        == prev
+    {
         return Some(());
     }
     let area_ids: Vec<std::net::Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();

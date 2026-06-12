@@ -200,6 +200,14 @@ impl Ospf {
         self.ospf_add("/segment-routing/mpls", config_ospf_sr_mpls);
         self.ospf_add("/fast-reroute/ti-lfa", config_ospf_ti_lfa);
         self.ospf_add(
+            "/fast-reroute/ti-lfa/compute-mode",
+            config_ospf_ti_lfa_compute_mode,
+        );
+        self.ospf_add(
+            "/fast-reroute/ti-lfa/compute-shards",
+            config_ospf_ti_lfa_compute_shards,
+        );
+        self.ospf_add(
             "/fast-reroute/backup-as-primary",
             config_ospf_fast_reroute_backup_as_primary,
         );
@@ -1409,6 +1417,51 @@ fn config_ospf_ti_lfa(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> 
     let prev = ospf.ti_lfa_enabled;
     ospf.ti_lfa_enabled = op.is_set();
     if ospf.ti_lfa_enabled == prev {
+        return Some(());
+    }
+    let area_ids: Vec<Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospf/fast-reroute/ti-lfa/compute-mode`. Picks how the
+/// TI-LFA computation is scheduled across cores (see
+/// `spf::TilfaComputeMode`). Results are identical across modes —
+/// nothing advertised changes, no LSA re-origination. The SPF re-run
+/// makes the change observable immediately in the telemetry.
+fn config_ospf_ti_lfa_compute_mode(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prev = ospf.ti_lfa_compute_mode;
+    ospf.ti_lfa_compute_mode = if op.is_set() {
+        args.string()?.parse().ok()?
+    } else {
+        crate::spf::TilfaComputeModeConfig::default()
+    };
+    if ospf.ti_lfa_compute_mode == prev {
+        return Some(());
+    }
+    let area_ids: Vec<Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();
+    for id in area_ids {
+        let _ = ospf.tx.send(Message::SpfCalc(id));
+    }
+    Some(())
+}
+
+/// `/router/ospf/fast-reroute/ti-lfa/compute-shards`. Upper bound on
+/// TI-LFA parallelism; consulted only when `compute-mode sharding` is
+/// configured (the effective-mode comparison keeps the SPF re-run
+/// suppressed otherwise).
+fn config_ospf_ti_lfa_compute_shards(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prev = ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards);
+    ospf.ti_lfa_compute_shards = if op.is_set() { args.u16()? } else { 8 };
+    if ospf
+        .ti_lfa_compute_mode
+        .with_shards(ospf.ti_lfa_compute_shards)
+        == prev
+    {
         return Some(());
     }
     let area_ids: Vec<Ipv4Addr> = ospf.areas.iter().map(|(id, _)| *id).collect();

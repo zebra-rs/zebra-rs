@@ -810,6 +810,32 @@ module config {
             // must also be enabled for the repair to install in the
             // dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
+
+            leaf compute-mode {
+              ext:help "How the TI-LFA computation is scheduled";
+              // Execution scheduling for the per-destination TI-LFA
+              // computation; same modes and semantics as
+              // `router isis fast-reroute ti-lfa compute-mode` (see
+              // docs/design/isis-tilfa-parallel-spf.md, §13 for the
+              // OSPF specifics).
+              type enumeration {
+                enum serial;
+                enum conservative;
+                enum aggressive;
+                enum sharding;
+              }
+              default "serial";
+            }
+
+            leaf compute-shards {
+              ext:help "Max parallel TI-LFA shards (sharding mode)";
+              // Hard upper bound on TI-LFA parallelism, consulted
+              // only when `compute-mode sharding` is set.
+              type uint16 {
+                range "1..256";
+              }
+              default "8";
+            }
           }
           container backup-as-primary {
             // Swap the metric-sort offset between the SPF primary
@@ -1230,6 +1256,29 @@ module config {
             // Topology-Independent Loop-Free Alternate (TI-LFA,
             // RFC 9490). Post-convergence repair over the v3 LSDB.
             presence "Enable Topology-Independent LFA (TI-LFA)";
+
+            leaf compute-mode {
+              ext:help "How the TI-LFA computation is scheduled";
+              // Same modes and semantics as `router ospf
+              // fast-reroute ti-lfa compute-mode`.
+              type enumeration {
+                enum serial;
+                enum conservative;
+                enum aggressive;
+                enum sharding;
+              }
+              default "serial";
+            }
+
+            leaf compute-shards {
+              ext:help "Max parallel TI-LFA shards (sharding mode)";
+              // Hard upper bound on TI-LFA parallelism, consulted
+              // only when `compute-mode sharding` is set.
+              type uint16 {
+                range "1..256";
+              }
+              default "8";
+            }
           }
           container backup-as-primary {
             // Swap the metric-sort offset between the SPF primary and

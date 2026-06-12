@@ -8,6 +8,7 @@ use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
 use crate::spf;
+use crate::spf::TilfaComputeModeConfig;
 
 use super::Isis;
 use super::ifsm::has_level;
@@ -718,23 +719,6 @@ impl IsisAuthConfig {
     }
 }
 
-/// YANG mirror of `/router/isis/fast-reroute/ti-lfa/compute-mode`
-/// (payload-free — the sharding count lives in the sibling
-/// `compute-shards` leaf; [`IsisConfig::tilfa_compute_mode`] joins
-/// them into the scheduler-facing `spf::TilfaComputeMode`).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, EnumString, Display)]
-pub enum TilfaComputeModeConfig {
-    #[default]
-    #[strum(serialize = "serial")]
-    Serial,
-    #[strum(serialize = "conservative")]
-    Conservative,
-    #[strum(serialize = "aggressive")]
-    Aggressive,
-    #[strum(serialize = "sharding")]
-    Sharding,
-}
-
 impl Default for IsisConfig {
     // Manual rather than derived because `gr_helper_enabled` defaults
     // to `true` (matches the YANG default for
@@ -819,14 +803,8 @@ impl IsisConfig {
     /// scheduler-facing [`spf::TilfaComputeMode`], snapshotted into
     /// `SpfInput` at graph-build time.
     pub fn tilfa_compute_mode(&self) -> spf::TilfaComputeMode {
-        match self.ti_lfa_compute_mode {
-            TilfaComputeModeConfig::Serial => spf::TilfaComputeMode::Serial,
-            TilfaComputeModeConfig::Conservative => spf::TilfaComputeMode::Conservative,
-            TilfaComputeModeConfig::Aggressive => spf::TilfaComputeMode::Aggressive,
-            TilfaComputeModeConfig::Sharding => {
-                spf::TilfaComputeMode::Sharding(self.ti_lfa_compute_shards)
-            }
-        }
+        self.ti_lfa_compute_mode
+            .with_shards(self.ti_lfa_compute_shards)
     }
 
     /// Resolve the hostname to advertise in TLV 137. Configured hostname
