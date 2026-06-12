@@ -321,7 +321,9 @@ fn run_sharded(
         q_spf: targets.len(),
         pc_spf: group_count,
         pc_deduped: targets.len() - group_count,
-        width: k.min(rayon::current_num_threads()),
+        // Groups are never split, so the effective parallelism is also
+        // capped by the group count, not just K and the pool.
+        width: k.min(group_count).min(rayon::current_num_threads()),
         ..TilfaStats::default()
     };
     (
@@ -549,6 +551,59 @@ mod tests {
             let (got, stats) = tilfa_compute(&graph, 0, &primary, &[], mode);
             assert!(got.is_empty());
             assert_eq!(stats.targets, 0);
+        }
+    }
+
+    /// Manual perf harness — not a correctness gate (CI never runs
+    /// ignored tests). Compares the legacy 3-SPF reference loop and
+    /// every compute mode on a ~400-vertex random graph:
+    ///
+    ///   cargo test --release -p zebra-rs tilfa_perf -- --ignored --nocapture
+    ///
+    /// Debug builds are ~10× slower and skew the comparison; use
+    /// `--release`. The mode outputs are also cross-checked for
+    /// equality so a perf run doubles as a large-graph equivalence
+    /// run.
+    #[test]
+    #[ignore = "manual perf harness; run with --release --ignored --nocapture"]
+    fn tilfa_perf_modes() {
+        let n = 400;
+        let graph = random_graph(42, n);
+        let primary = spf(&graph, 0, &SpfOpt::full_path());
+        let targets = derive_targets(&graph, 0, &primary);
+        let distinct_x: BTreeSet<usize> = targets.iter().map(|t| t.x).collect();
+        println!(
+            "graph: {n} vertices, {} targets, {} protected first-hops",
+            targets.len(),
+            distinct_x.len()
+        );
+
+        let t0 = Instant::now();
+        let want = reference(&graph, 0, &targets);
+        println!(
+            "{:<20} {:>12?}  (3 SPFs per target)",
+            "reference",
+            t0.elapsed()
+        );
+
+        for mode in [
+            TilfaComputeMode::Serial,
+            TilfaComputeMode::Conservative,
+            TilfaComputeMode::Aggressive,
+            TilfaComputeMode::Sharding(2),
+            TilfaComputeMode::Sharding(8),
+        ] {
+            let t0 = Instant::now();
+            let (got, stats) = tilfa_compute(&graph, 0, &primary, &targets, mode);
+            println!(
+                "{:<20} {:>12?}  spf{{q={} pc={}}} width={}",
+                mode.to_string(),
+                t0.elapsed(),
+                stats.q_spf,
+                stats.pc_spf,
+                stats.width
+            );
+            assert_eq!(got, want, "mode {mode:?} diverged from reference");
         }
     }
 
