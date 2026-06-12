@@ -16,6 +16,7 @@ use crate::rib::tracing::rib_nexthop;
 pub enum Group {
     Uni(GroupUni),
     Multi(GroupMulti),
+    Protect(GroupProtect),
 }
 
 #[derive(Default, Debug, Clone)]
@@ -204,6 +205,42 @@ impl GroupTrait for GroupMulti {
     }
 }
 
+/// Kernel indirection group for a protected primary (see
+/// `docs/design/nexthop-protect-kernel-failover.md`). Installs as a
+/// single-member `NHA_GROUP` containing `primary_gid`; protected
+/// routes reference this gid instead of the member's, so the phase-2
+/// switchover can move every route onto `backup_gid` with one atomic
+/// `RTM_NEWNEXTHOP` replace. Valid iff the primary member's group is
+/// valid — on link down the kernel flushes the member, the emptied
+/// group, and the routes referencing it (probe-validated), leaving
+/// the metric-offset shadow route forwarding.
+#[derive(Debug, Clone)]
+pub struct GroupProtect {
+    common: GroupCommon,
+    pub primary_gid: usize,
+    pub backup_gid: usize,
+}
+
+impl GroupProtect {
+    pub fn new(gid: usize, primary_gid: usize, backup_gid: usize) -> Self {
+        Self {
+            common: GroupCommon::new(gid),
+            primary_gid,
+            backup_gid,
+        }
+    }
+}
+
+impl GroupTrait for GroupProtect {
+    fn common(&self) -> &GroupCommon {
+        &self.common
+    }
+
+    fn common_mut(&mut self) -> &mut GroupCommon {
+        &mut self.common
+    }
+}
+
 pub trait GroupTrait {
     fn common(&self) -> &GroupCommon;
 
@@ -255,6 +292,7 @@ impl GroupTrait for Group {
         match self {
             Uni(uni) => &uni.common,
             Multi(multi) => &multi.common,
+            Protect(pro) => &pro.common,
         }
     }
 
@@ -262,6 +300,7 @@ impl GroupTrait for Group {
         match self {
             Uni(uni) => &mut uni.common,
             Multi(multi) => &mut multi.common,
+            Protect(pro) => &mut pro.common,
         }
     }
 
@@ -269,6 +308,7 @@ impl GroupTrait for Group {
         match self {
             Group::Uni(uni) => uni.refcnt(),
             Group::Multi(multi) => multi.refcnt(),
+            Group::Protect(pro) => pro.refcnt(),
         }
     }
 }

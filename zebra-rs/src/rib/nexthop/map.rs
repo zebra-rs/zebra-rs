@@ -7,7 +7,7 @@ use isis_packet::srv6::EncapType;
 
 use crate::fib::FibHandle;
 
-use super::{Group, GroupMulti, GroupTrait, GroupUni, NexthopUni};
+use super::{Group, GroupMulti, GroupProtect, GroupTrait, GroupUni, NexthopUni};
 
 // Dedupe key for SRv6-encapsulated nexthops. Two NexthopUnis with the same
 // outer destination, segment list, and endpoint behavior share one entry —
@@ -26,6 +26,10 @@ pub struct NexthopMap {
     mpls: BTreeMap<(IpAddr, Vec<u32>), usize>,
     seg6: BTreeMap<Seg6Key, usize>,
     seg6local: BTreeMap<Seg6LocalKey, usize>,
+    // Dedupe key for protection indirection groups: (primary gid,
+    // backup gid). Two prefixes sharing a primary but with different
+    // repairs get distinct groups so each switches to its own repair.
+    protect: BTreeMap<(usize, usize), usize>,
     pub groups: Vec<Option<Group>>,
 }
 
@@ -43,6 +47,7 @@ impl Default for NexthopMap {
             mpls: BTreeMap::new(),
             seg6: BTreeMap::new(),
             seg6local: BTreeMap::new(),
+            protect: BTreeMap::new(),
             groups: Vec::new(),
         };
         nmap.groups.push(None);
@@ -190,6 +195,32 @@ impl NexthopMap {
         }
     }
 
+    /// Fetch (or create) the protection indirection group for a
+    /// (primary, backup) member pair. Protected routes reference this
+    /// gid; phase 2's switchover replaces its membership in place.
+    pub fn fetch_protect(&mut self, primary_gid: usize, backup_gid: usize) -> Option<&mut Group> {
+        let key = (primary_gid, backup_gid);
+        if let Some(&gid) = self.protect.get(&key) {
+            let entry = self.groups.get_mut(gid)?;
+            if entry.is_none() {
+                *entry = Some(Group::Protect(GroupProtect::new(
+                    gid,
+                    primary_gid,
+                    backup_gid,
+                )));
+            }
+            return self.get_mut(gid);
+        }
+
+        let gid = self.new_gid();
+        let group = Group::Protect(GroupProtect::new(gid, primary_gid, backup_gid));
+
+        self.protect.insert(key, gid);
+        self.groups.push(Some(group));
+
+        self.get_mut(gid)
+    }
+
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.set.get(set) {
             let update = self.groups.get_mut(gid)?;
@@ -213,6 +244,17 @@ impl NexthopMap {
     }
 
     pub async fn shutdown(&mut self, fib: &FibHandle) {
+        // Indirection groups first — a group must leave the kernel
+        // before its members so member deletion can't cascade-empty
+        // it behind our back.
+        for (_, id) in self.protect.iter() {
+            let entry = self.get(*id);
+            if let Some(grp) = entry
+                && grp.is_installed()
+            {
+                fib.nexthop_del(grp).await;
+            }
+        }
         for (_, id) in self.set.iter() {
             let entry = self.get(*id);
             if let Some(grp) = entry
@@ -281,6 +323,7 @@ mod tests {
         match grp {
             Group::Uni(uni) => uni.gid(),
             Group::Multi(multi) => multi.gid(),
+            Group::Protect(pro) => pro.gid(),
         }
     }
 

@@ -125,6 +125,9 @@ impl RibEntry {
             for member in pro.members_mut() {
                 member_group_sync(member, nmap, fib).await;
             }
+            // The indirection group references the primary member's
+            // kernel object, so it must install after the members.
+            protect_group_sync(pro.gid, nmap, fib).await;
         }
     }
 
@@ -152,6 +155,12 @@ impl RibEntry {
                 }
             }
             Nexthop::Protect(pro) => {
+                // Drop the indirection group before its members so
+                // member deletion can't cascade-empty it in the
+                // kernel out from under the explicit delete.
+                if pro.gid != 0 {
+                    self.handle_nexthop_group(nmap, fib, pro.gid).await;
+                }
                 for member in pro.members() {
                     self.member_nexthop_unsync(member, nmap, fib).await;
                 }
@@ -196,6 +205,23 @@ impl RibEntry {
 
 async fn uni_group_sync(uni: &NexthopUni, nmap: &mut NexthopMap, fib: &FibHandle) {
     let Some(group) = nmap.get_mut(uni.gid) else {
+        return;
+    };
+    if !group.is_valid() || group.is_installed() {
+        return;
+    }
+    fib.nexthop_add(group).await;
+    group.set_installed(true);
+}
+
+/// Install the protection indirection group once it's valid — same
+/// gate as the Uni/Multi sync helpers. `gid == 0` means no
+/// indirection was allocated (Multi primary).
+async fn protect_group_sync(gid: usize, nmap: &mut NexthopMap, fib: &FibHandle) {
+    if gid == 0 {
+        return;
+    }
+    let Some(group) = nmap.get_mut(gid) else {
         return;
     };
     if !group.is_valid() || group.is_installed() {

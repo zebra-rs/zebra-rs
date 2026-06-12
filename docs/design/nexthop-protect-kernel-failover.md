@@ -19,7 +19,7 @@ paths for protected routes.
 | Slice | PR | What lands |
 | ----- | -- | ---------- |
 | 0 — `Nexthop::Protect` RIB shape | #1370, #1373 | explicit primary/backup pair, producers + consumers, v6 resolver fix |
-| 1 — indirection group | (this branch) | `Group::Protect` + `NexthopProtect.gid`; protected v4/v6 routes reference a 1-member kernel group; behavior-neutral |
+| 1 — indirection group | #1374 | `Group::Protect` + `NexthopProtect.gid`; protected v4/v6 routes reference a 1-member kernel group; behavior-neutral |
 | 2 — switchover op | — | `FibHandle::protect_switch` + `Message::ProtectSwitch` + nmap state |
 | 3 — IS-IS hook | — | BFD/adjacency-down emits `ProtectSwitch` before SPF; BDD for the link-up failure class |
 | 4 — OSPF hook | — | v2 + v3, same shape |

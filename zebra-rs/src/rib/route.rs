@@ -13,8 +13,8 @@ use super::inst::{IlmEntry, RT_TABLE_MAIN, Rib};
 use super::nexthop::NexthopUni;
 use super::tracing::{rib_interface, rib_nexthop, rib_route};
 use super::{
-    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti, RibEntries,
-    RibType,
+    Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti,
+    NexthopProtect, RibEntries, RibType,
 };
 
 /// Hold-down policy for kernel-driven address recovery.
@@ -1185,6 +1185,41 @@ pub async fn ipv4_nexthop_sync(
             }
         }
     }
+
+    protect_groups_sync(nmap, fib).await;
+}
+
+/// Re-derive each protection indirection group's validity from its
+/// primary member and (re)install on the valid transition. Family-
+/// agnostic, but called from BOTH the v4 and v6 nexthop syncs: the v4
+/// pass runs before v6 Uni groups revalidate, so a v6-primaried
+/// protect group synced only there would lag a cycle behind.
+async fn protect_groups_sync(nmap: &mut NexthopMap, fib: &FibHandle) {
+    let mut cache: Vec<(usize, bool)> = Vec::new();
+    for (idx, nhop) in nmap.groups.iter().enumerate() {
+        if let Some(Group::Protect(pro)) = nhop {
+            let valid = nmap.get(pro.primary_gid).is_some_and(|g| g.is_valid());
+            cache.push((idx, valid));
+        }
+    }
+    for (idx, valid) in cache {
+        if let Some(Some(Group::Protect(pro))) = nmap.groups.get_mut(idx) {
+            if valid {
+                pro.set_valid(true);
+                if !pro.is_installed() {
+                    fib.nexthop_add(&Group::Protect(pro.clone())).await;
+                    pro.set_installed(true);
+                }
+            } else {
+                // The member died (link down) — the kernel flushed it,
+                // the emptied group, and the routes referencing it
+                // (probe 4 in the design doc); sync our view so the
+                // next valid transition re-creates the object.
+                pro.set_valid(false);
+                pro.set_installed(false);
+            }
+        }
+    }
 }
 
 /// Per-prefix selected-entry transition produced by a sync pass:
@@ -1346,7 +1381,7 @@ fn nexthop_force_reinstall(nexthop: &Nexthop, nmap: &mut NexthopMap) {
         if let Some(group) = nmap.get_mut(gid) {
             match group {
                 Group::Uni(_) => group.set_installed(false),
-                Group::Multi(_) => {
+                Group::Multi(_) | Group::Protect(_) => {
                     group.set_valid(false);
                     group.set_installed(false);
                 }
@@ -1367,6 +1402,7 @@ fn nexthop_force_reinstall(nexthop: &Nexthop, nmap: &mut NexthopMap) {
             }
         }
         Nexthop::Protect(pro) => {
+            force(nmap, pro.gid);
             for member in pro.members() {
                 member_force_reinstall(member, nmap);
             }
@@ -1547,9 +1583,38 @@ fn rib_resolve_nexthop(
         for member in pro.members_mut() {
             resolve_nexthop_member(member, nmap, table, table_id);
         }
+        resolve_nexthop_protect(pro, nmap);
     }
     // If one of nexthop is valid, the entry is valid.
     entry.set_valid(entry.is_valid_nexthop(nmap));
+}
+
+/// Allocate (or refetch) the kernel indirection group for a protected
+/// primary and stamp its id into `pro.gid`. Only a Uni primary gets
+/// one — kernel groups can't nest, so a Multi primary's ECMP group is
+/// itself the future switch point and `pro.gid` stays 0 (routes then
+/// reference the member gids directly, exactly as before phase 1).
+fn resolve_nexthop_protect(pro: &mut NexthopProtect, nmap: &mut NexthopMap) {
+    let NexthopMember::Uni(primary) = &pro.primary else {
+        return;
+    };
+    if primary.gid == 0 {
+        return;
+    }
+    let backup_gid = match &pro.backup {
+        NexthopMember::Uni(u) => u.gid,
+        NexthopMember::Multi(m) => m.gid,
+    };
+    let primary_gid = primary.gid;
+    // The indirection group is installable exactly when its sole
+    // member is — the sync passes keep this in step afterwards.
+    let primary_valid = nmap.get(primary_gid).is_some_and(|g| g.is_valid());
+    let Some(group) = nmap.fetch_protect(primary_gid, backup_gid) else {
+        return;
+    };
+    group.set_valid(primary_valid);
+    group.refcnt_inc();
+    pro.gid = group.gid();
 }
 
 fn resolve_nexthop_member(
@@ -2075,6 +2140,7 @@ fn rib_resolve_nexthop_v6(
         for member in pro.members_mut() {
             resolve_nexthop_member_v6(member, nmap, table, table_id);
         }
+        resolve_nexthop_protect(pro, nmap);
     }
     // If one of nexthop is valid, the entry is valid.
     entry.set_valid(entry.is_valid_nexthop(nmap));
@@ -2242,6 +2308,8 @@ pub async fn ipv6_nexthop_sync(
             }
         }
     }
+    protect_groups_sync(nmap, fib).await;
+
     if rib_nexthop() {
         println!("[ipv6_nexthop_sync] done");
     }
@@ -2517,6 +2585,7 @@ mod tests {
         entry.nexthop = Nexthop::Protect(NexthopProtect {
             primary: NexthopMember::Multi(multi),
             backup: NexthopMember::Uni(backup),
+            gid: 0,
         });
 
         let mut nmap = NexthopMap::default();
@@ -2540,6 +2609,107 @@ mod tests {
             panic!("backup Uni preserved");
         };
         assert!(backup_uni.gid != 0, "backup Uni gets its own group");
+    }
+
+    /// Phase 1 of the kernel-failover design: a Uni primary gets a
+    /// protection indirection group allocated and stamped into
+    /// `pro.gid`; the same (primary, backup) pair on a second entry
+    /// dedupes onto the same gid (that sharing is what makes the
+    /// phase-2 switchover O(1) in prefixes).
+    #[test]
+    fn protect_uni_primary_allocates_indirection_group() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{GroupTrait, NexthopProtect, NexthopUni};
+        use super::super::{Group, Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let mk_entry = || {
+            let mut primary = NexthopUni::new("10.0.0.1".parse().unwrap(), 20, vec![]);
+            primary.ifindex_origin = Some(10);
+            let mut backup = NexthopUni::new("10.0.0.5".parse().unwrap(), 21, vec![]);
+            backup.ifindex_origin = Some(20);
+            let mut entry = RibEntry::new(RibType::Isis);
+            entry.nexthop = Nexthop::Protect(NexthopProtect {
+                primary: NexthopMember::Uni(primary),
+                backup: NexthopMember::Uni(backup),
+                gid: 0,
+            });
+            entry
+        };
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+
+        let mut entry_a = mk_entry();
+        rib_resolve_nexthop(&mut entry_a, &table, &mut nmap, 0);
+        let Nexthop::Protect(pro_a) = &entry_a.nexthop else {
+            panic!("still Protect");
+        };
+        assert_ne!(pro_a.gid, 0, "Uni primary must get an indirection group");
+
+        let Some(Group::Protect(grp)) = nmap.get(pro_a.gid) else {
+            panic!("Group::Protect allocated in nmap");
+        };
+        let (NexthopMember::Uni(p), NexthopMember::Uni(b)) = (&pro_a.primary, &pro_a.backup) else {
+            panic!("members stay Uni");
+        };
+        assert_eq!(grp.primary_gid, p.gid);
+        assert_eq!(grp.backup_gid, b.gid);
+        // ifindex_origin pinned both members valid, so the wrapper is
+        // installable straight away.
+        assert!(grp.is_valid());
+
+        // Second entry with the same pair: same indirection gid.
+        let mut entry_b = mk_entry();
+        rib_resolve_nexthop(&mut entry_b, &table, &mut nmap, 0);
+        let Nexthop::Protect(pro_b) = &entry_b.nexthop else {
+            panic!("still Protect");
+        };
+        assert_eq!(pro_a.gid, pro_b.gid, "same (primary, backup) pair dedupes");
+        assert_eq!(nmap.get(pro_b.gid).unwrap().refcnt(), 2);
+    }
+
+    /// The nesting constraint: a Multi (ECMP) primary gets NO
+    /// indirection group — its own ECMP group is the future switch
+    /// point — so `pro.gid` stays 0 and routes reference member gids
+    /// exactly as before phase 1.
+    #[test]
+    fn protect_multi_primary_gets_no_indirection_group() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember, NexthopMulti};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let leg_a = NexthopUni::new("10.0.0.1".parse().unwrap(), 20, vec![]);
+        let leg_b = NexthopUni::new("10.0.0.2".parse().unwrap(), 20, vec![]);
+        let multi = NexthopMulti {
+            metric: 20,
+            nexthops: vec![leg_a, leg_b],
+            ..Default::default()
+        };
+        let backup = NexthopUni::new("10.0.0.5".parse().unwrap(), 21, vec![]);
+
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Multi(multi),
+            backup: NexthopMember::Uni(backup),
+            gid: 0,
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("still Protect");
+        };
+        assert_eq!(pro.gid, 0, "Multi primary: ECMP group is the switch point");
     }
 
     /// Regression: the v6 resolver was missing the `Protect` block
@@ -2570,6 +2740,7 @@ mod tests {
         entry.nexthop = Nexthop::Protect(NexthopProtect {
             primary: NexthopMember::Multi(multi),
             backup: NexthopMember::Uni(backup),
+            gid: 0,
         });
 
         let mut nmap = NexthopMap::default();
