@@ -109,6 +109,13 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// `{FLEX_ALGO_PREFIX}/...`.
     const FLEX_ALGO_PREFIX: &'static str;
 
+    /// A neighbor's `ident.prefix` as a plain `IpAddr` — the exact
+    /// address SPF keys this adjacency's route nexthops on (v2: the
+    /// hello source / interface address, v3: the link-local), and
+    /// therefore the key the RIB's protection groups use for their
+    /// primaries. Drives the BFD-down fast-reroute switchover.
+    fn prefix_ip(prefix: &Self::Prefix) -> std::net::IpAddr;
+
     /// Proto label base for this version — `"ospf"` (v2) or
     /// `"ospfv3"` (v3). Used as the default instance's RIB / policy
     /// registration name and as the prefix for per-VRF labels
@@ -368,6 +375,10 @@ impl OspfVersion for Ospfv2 {
     type LsRequest = OspfLsRequest;
     type LsRequestEntry = OspfLsRequestEntry;
     const FLEX_ALGO_PREFIX: &'static str = "/router/ospf/flex-algo";
+
+    fn prefix_ip(prefix: &Ipv4Net) -> std::net::IpAddr {
+        std::net::IpAddr::V4(prefix.addr())
+    }
     const PROTO: &'static str = "ospf";
 
     fn spawn_vrf(
@@ -505,6 +516,10 @@ impl OspfVersion for Ospfv3 {
     type LsRequest = Ospfv3LsRequest;
     type LsRequestEntry = Ospfv3LsRequestEntry;
     const FLEX_ALGO_PREFIX: &'static str = "/router/ospfv3/flex-algo";
+
+    fn prefix_ip(prefix: &Ipv6Net) -> std::net::IpAddr {
+        std::net::IpAddr::V6(prefix.addr())
+    }
     const PROTO: &'static str = "ospfv3";
 
     fn spawn_vrf(

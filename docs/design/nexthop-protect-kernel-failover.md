@@ -22,7 +22,7 @@ paths for protected routes.
 | 1 — indirection group | #1374 | `Group::Protect` + `NexthopProtect.gid`; protected v4/v6 routes reference a 1-member kernel group; behavior-neutral |
 | 2 — switchover op | #1377 | `Message::ProtectSwitch` + `GroupProtect.active` + atomic group re-send; revert-on-reassert |
 | 3 — IS-IS hook | #1378 | `process_bfd_down` emits `ProtectSwitch` per failed nexthop addr before SPF; `@tilfa_bfd` BDD for the link-up failure class |
-| 4 — OSPF hook | — | v2 + v3, same shape |
+| 4 — OSPF hook | #1379 | `process_bfd_event` (generic v2+v3) emits `ProtectSwitch` via `OspfVersion::prefix_ip`; `@ospfv2_bfd_frr` + `@ospfv3_bfd_frr` BDD |
 | 5 — ECMP leg-level replace | — | per-leg repair on `Multi` primaries |
 
 ## 1. Problem

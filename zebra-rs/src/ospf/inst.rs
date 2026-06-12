@@ -567,11 +567,11 @@ impl<V: OspfVersion> Ospf<V> {
         }
 
         let ifindex = key.ifindex;
-        let Some(nbr_addr) = self.links.get(&ifindex).and_then(|link| {
+        let Some((nbr_addr, protect_addr)) = self.links.get(&ifindex).and_then(|link| {
             link.nbrs
                 .iter()
                 .find(|(_, n)| n.bfd_session_key == Some(key))
-                .map(|(addr, _)| *addr)
+                .map(|(addr, n)| (*addr, V::prefix_ip(&n.ident.prefix)))
         }) else {
             tracing::debug!(
                 ?key,
@@ -604,6 +604,14 @@ impl<V: OspfVersion> Ospf<V> {
             nbr.bfd_session_key = None;
             nbr.bfd_session_params = None;
         }
+        // Fast-reroute switchover (kernel-failover phase 4): rewire the
+        // pre-installed protection groups onto their TI-LFA repairs NOW,
+        // before the teardown-driven SPF / per-prefix reinstall pipeline
+        // starts. The address is the neighbour's hello source — exactly
+        // what SPF keyed this adjacency's route nexthops on. The RIB
+        // no-ops when nothing is protected; channel ordering lands this
+        // before the post-convergence route updates.
+        let _ = self.ctx.rib.protect_switch(protect_addr);
         let _ = self.tx.send(Message::Nfsm(
             ifindex,
             nbr_addr,
