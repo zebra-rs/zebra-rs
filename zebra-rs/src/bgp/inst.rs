@@ -2794,7 +2794,7 @@ impl Bgp {
                     self.redist_v6.remove(&(rtype, prefix));
                     // Withdraw from both v6 targets unconditionally (the
                     // config row may already be gone), mirroring the v4 path.
-                    self.route_redist_withdraw_v6(prefix);
+                    self.route_redist_withdraw_v6(rtype, prefix);
                     self.route_redist_withdraw_labelv6(rtype, prefix);
                 }
             }

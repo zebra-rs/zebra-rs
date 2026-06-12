@@ -43,10 +43,15 @@ use crate::context::Timer;
 /// in `show bgp update-group` so a stale view is detectable.
 pub const SIGNATURE_VERSION: u32 = 3;
 
-/// Address families the v1 grouping logic considers. The advertise
-/// pipeline today only fans out to these three.
-pub const TRACKED_AFI_SAFIS: [(Afi, Safi); 3] = [
+/// Address families the grouping logic considers — every family whose
+/// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
+/// joined late: the v6 advertise path (`route_advertise_to_peers_v6`)
+/// has bucketed reach into the per-group `cache_ipv6` since it was
+/// built, but the family was never enrolled here, so the group lookup
+/// always missed and incremental v6 reach was silently dropped.
+pub const TRACKED_AFI_SAFIS: [(Afi, Safi); 4] = [
     (Afi::Ip, Safi::Unicast),
+    (Afi::Ip6, Safi::Unicast),
     (Afi::Ip, Safi::MplsVpn),
     (Afi::L2vpn, Safi::Evpn),
 ];
@@ -69,6 +74,7 @@ impl UpdateGroupId {
     pub fn afi_safi_tag(afi: Afi, safi: Safi) -> &'static str {
         match (afi, safi) {
             (Afi::Ip, Safi::Unicast) => "ipv4-unicast",
+            (Afi::Ip6, Safi::Unicast) => "ipv6-unicast",
             (Afi::Ip, Safi::MplsVpn) => "vpnv4",
             (Afi::L2vpn, Safi::Evpn) => "evpn",
             _ => "other",
@@ -1216,10 +1222,112 @@ mod tests {
     fn id_format_matches_iosxr_style() {
         let id = UpdateGroupId::new(Afi::Ip, Safi::Unicast, 0);
         assert_eq!(id.to_string(), "ipv4-unicast.0");
+        let id = UpdateGroupId::new(Afi::Ip6, Safi::Unicast, 1);
+        assert_eq!(id.to_string(), "ipv6-unicast.1");
         let id = UpdateGroupId::new(Afi::Ip, Safi::MplsVpn, 7);
         assert_eq!(id.to_string(), "vpnv4.7");
         let id = UpdateGroupId::new(Afi::L2vpn, Safi::Evpn, 2);
         assert_eq!(id.to_string(), "evpn.2");
+    }
+
+    fn attach_test_peer(addr: std::net::IpAddr) -> Peer {
+        let (tx, _rx) = mpsc::channel(1);
+        // The attach path never touches sockets; a parked ProtoContext
+        // over a leaked inbound channel is enough (mirrors the PeerMap
+        // test scaffolding).
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(inbound_rx));
+        let rib = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        let ctx = crate::context::ProtoContext::default_table(rib);
+        Peer::new(
+            0,
+            65000,
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+            65000,
+            addr,
+            None,
+            tx,
+            ctx,
+        )
+    }
+
+    fn negotiate(peer: &mut Peer, afi: Afi, safi: Safi) {
+        let key = bgp_packet::CapMultiProtocol::new(&afi, &safi);
+        let entry = peer
+            .cap_map
+            .entries
+            .get_mut(&key)
+            .expect("family pre-seeded in CapAfiMap");
+        entry.send = true;
+        entry.recv = true;
+    }
+
+    /// `attach` must enroll a peer into one group per *negotiated*
+    /// tracked family — pinning IPv6 unicast in particular, whose
+    /// missing enrollment silently killed incremental v6 reach (the
+    /// advertise path gates on `update_group_id[(Ip6, Unicast)]`).
+    #[test]
+    fn attach_enrolls_negotiated_v6_unicast() {
+        let mut peers = PeerMap::new();
+
+        // Dual-stack peer: v4 + v6 unicast negotiated.
+        let dual: IpAddr = std::net::Ipv4Addr::new(10, 0, 0, 1).into();
+        let mut peer = attach_test_peer(dual);
+        negotiate(&mut peer, Afi::Ip, Safi::Unicast);
+        negotiate(&mut peer, Afi::Ip6, Safi::Unicast);
+        peers.insert(dual, peer);
+        let dual_idx = peers.get(&dual).unwrap().ident;
+
+        // v4-only peer: must not be enrolled in a v6 group.
+        let v4only: IpAddr = std::net::Ipv4Addr::new(10, 0, 0, 2).into();
+        let mut peer = attach_test_peer(v4only);
+        negotiate(&mut peer, Afi::Ip, Safi::Unicast);
+        peers.insert(v4only, peer);
+        let v4only_idx = peers.get(&v4only).unwrap().ident;
+
+        let mut groups = empty_map();
+        attach(&mut groups, &mut peers, dual_idx);
+        attach(&mut groups, &mut peers, v4only_idx);
+
+        let v4_key = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let v6_key = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+
+        let dual_peer = peers.get(&dual).unwrap();
+        assert!(dual_peer.update_group_id.contains_key(&v4_key));
+        let v6_id = dual_peer
+            .update_group_id
+            .get(&v6_key)
+            .expect("v6-unicast must be enrolled — its advertise path is group-gated");
+        assert_eq!(v6_id.to_string(), "ipv6-unicast.0");
+        assert!(
+            groups
+                .get(&v6_key)
+                .and_then(|af| af.groups.values().find(|g| g.members.contains(&dual_idx)))
+                .is_some(),
+            "dual-stack peer must be a member of an ipv6-unicast group"
+        );
+
+        let v4only_peer = peers.get(&v4only).unwrap();
+        assert!(v4only_peer.update_group_id.contains_key(&v4_key));
+        assert!(
+            !v4only_peer.update_group_id.contains_key(&v6_key),
+            "non-negotiated family must not be enrolled"
+        );
+
+        // detach must clear both memberships symmetrically.
+        detach(&mut groups, &mut peers, dual_idx);
+        let dual_peer = peers.get(&dual).unwrap();
+        assert!(dual_peer.update_group_id.is_empty());
+        assert!(
+            groups
+                .get(&v6_key)
+                .map(|af| af.groups.is_empty())
+                .unwrap_or(true),
+            "emptied v6 group must be dropped"
+        );
     }
 
     /// The counter-bump path uses `group_by_id_mut` to find the
