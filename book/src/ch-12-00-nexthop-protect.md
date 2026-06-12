@@ -101,6 +101,63 @@ Notes:
   shadow — an operator knob for exercising the repair path without
   rewiring the topology.
 
+## Scaling the TI-LFA computation (compute modes)
+
+The repair pre-computation is per-destination work: every protected
+destination needs its own reverse SPF (Q-space), plus one
+excluded-graph SPF per protected first-hop neighbor (the
+post-convergence paths, shared by all destinations behind that
+neighbor). On a large topology this dominates the SPF cycle's CPU —
+historically it ran as three full SPFs per destination, serially, on
+one core.
+
+The `compute-mode` knob (IS-IS, OSPFv2 and OSPFv3 alike) chooses how
+that work is scheduled across CPU cores. **Results are identical in
+every mode** — the same repairs install bit-for-bit; only CPU usage and
+wall-clock time differ:
+
+```
+router isis {                       // same under router ospf / ospfv3
+  fast-reroute {
+    ti-lfa {
+      compute-mode aggressive;      // serial | conservative | aggressive | sharding
+      compute-shards 4;             // sharding mode only, 1..256 (default 8)
+    }
+  }
+}
+```
+
+| mode | scheduling | when to use |
+|---|---|---|
+| `serial` (default) | sequential on the SPF worker thread | small topologies; the conservative default |
+| `conservative` | one parallel task per destination, no shared state between tasks | simple parallelism without shared SPF trees |
+| `aggressive` | shares each first-hop's excluded-graph SPF across its destinations, all jobs fanned out | fastest wall clock and lowest total CPU |
+| `sharding` | the same shared-SPF work, packed into at most `compute-shards` parallel shards | hard cap on TI-LFA's core usage — reserve CPU for other daemons on a shared box |
+
+Parallel modes run on a process-wide worker pool sized to the machine's
+core count, so concurrent SPF runs (L1+L2, multiple areas, VRF
+instances, IS-IS and OSPF together) cannot oversubscribe the box.
+Changing the mode triggers an SPF re-run so the effect is immediately
+visible; nothing is re-advertised.
+
+Each run reports its compute telemetry — mode, worker parallelism, SPF
+counts and the SPFs saved by sharing (`dedup-saved`):
+
+```
+> show isis spf
+SPF stats:
+  L2: last 12s ago, took 41ms, inflight=false, pending=false
+      ti-lfa: targets=998 mode=aggressive workers=16 spf{q=998 pc=8 dedup-saved=990} took 38ms
+
+> show ospf            # OSPFv2; `show ospfv3` carries the same line
+ TI-LFA compute: targets=6 mode=sharding(2) workers=2 spf{q=6 pc=3 dedup-saved=3} took 215 usecs
+```
+
+On a 5-core machine with a 400-router topology, `aggressive` computes
+the full repair set ~12× faster than the pre-series serial code. The
+scheduling design and measured numbers live in
+`docs/design/isis-tilfa-parallel-spf.md`.
+
 ## What gets installed
 
 For each protected destination the FIB holds two routes and one

@@ -1,9 +1,11 @@
 # TI-LFA Parallel SPF Computation — Design (IS-IS first)
 
-Status: ACCEPTED (2026-06-12). Shipped: PR-A #1384 (spf refactor +
-oracle tests), PR-B #1390 (modes + IS-IS wiring + config + telemetry).
-PR-C adds the BDD scenarios (`bdd/tests/features/isis_tilfa.feature`)
-and the `tilfa_perf_modes` ignored harness.
+Status: COMPLETE (2026-06-12) for both protocols. Shipped: IS-IS
+#1384 (spf refactor + oracle tests), #1390 (modes + wiring + config +
+telemetry), #1395 (BDD + `tilfa_perf_modes` harness); OSPF #1399
+(v2+v3 port per §13), #1400 (BDD). Remaining potential work is
+tracked in `tilfa-parallel-spf-followups.md` (supersedes §14 here).
+Operator documentation: `book/src/ch-12-00-nexthop-protect.md`.
 Decisions: rayon substrate; default mode `serial`; **no redundant SPF
 in any mode** — serial is the sequential 2-SPF-per-target loop, not the
 legacy 3-SPF path (see §6.0, §15).
