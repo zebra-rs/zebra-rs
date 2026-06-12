@@ -320,11 +320,19 @@ of B.
    `attach`, or add the v4-style fallback + `warn!`.
 2. **Bug-fix PR (B2):** ident-based collection in the fan-out sites so
    interface-keyed peers are reachable.
-3. **Bug-fix PR (B3):** decide per family: either implement the
-   per-candidate AddPath twins for VPNv6/EVPN/LU, or guard the scans
-   with `!is_add_path_send` + `warn!` (wire-safe, capability inert)
-   until the twins exist. The malformed-withdraw hazard argues for
-   doing at least the guard immediately.
+3. **Bug-fix PR (B3):** mask the *capability*, not the scans. The
+   original idea here — guard the fan-outs with `!is_add_path_send` —
+   turned out not to be wire-safe: RFC 7911 §3 binds every NLRI of a
+   *negotiated* family to carry a path-id, so once Send is negotiated,
+   both "send id-less" and "send nothing" are protocol violations;
+   the only coherent cheap fix is to never negotiate Send for a
+   family without the per-path pipeline. Landed as
+   `addpath_send_implemented()` (v4-unicast + VPNv4 only): the OPEN
+   build withholds/downgrades the Send half for other families and
+   `cap_addpath_recv` mirrors the gate, both with `warn!`s. The
+   half-stamped advertise code in VPNv6/EVPN/LU becomes unreachable
+   and stands as the hook for the real per-candidate twins, which
+   must grow the supported set when they land.
 4. **Refactor (Option B):** now a pure no-behavior-change
    consolidation — convert site by site with the `debug_assert`
    cross-check active; include detach-on-remove.
