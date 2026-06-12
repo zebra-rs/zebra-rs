@@ -1601,6 +1601,18 @@ fn resolve_nexthop_protect(pro: &mut NexthopProtect, nmap: &mut NexthopMap) {
     if primary.gid == 0 {
         return;
     }
+    // Kernel 6.8 silently DROPS traffic when a seg6-inline-lwtunnel
+    // nexthop sits inside a group: object creation, grouping, route
+    // install, and `ip route get` all succeed, but the dataplane
+    // never transmits (verified 2026-06-12 in netns; direct member
+    // reference forwards fine, and BDD tilfa_srv6 backup-as-primary
+    // black-holed through the wrapper). SRv6 repairs are inline by
+    // default, so SRv6-encap'd primaries keep the direct member
+    // reference — plain and MPLS-encap'd primaries (group forwarding
+    // BDD- and probe-verified) get the indirection.
+    if !primary.segs.is_empty() {
+        return;
+    }
     let backup_gid = match &pro.backup {
         NexthopMember::Uni(u) => u.gid,
         NexthopMember::Multi(m) => m.gid,
@@ -2670,6 +2682,54 @@ mod tests {
         };
         assert_eq!(pro_a.gid, pro_b.gid, "same (primary, backup) pair dedupes");
         assert_eq!(nmap.get(pro_b.gid).unwrap().refcnt(), 2);
+    }
+
+    /// Kernel 6.8 drops seg6-inline traffic routed through a nexthop
+    /// group (the object/route install succeeds — only the dataplane
+    /// black-holes), so an SRv6-encap'd primary must keep its direct
+    /// member reference: `pro.gid` stays 0. Caught live by the
+    /// `@tilfa_srv6` backup-as-primary scenario.
+    #[test]
+    fn protect_srv6_primary_gets_no_indirection_group() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop_v6;
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+
+        // Repair promoted to primary (backup-as-primary): inline SRH
+        // via the repair neighbor.
+        let mut primary = NexthopUni::new("2001:db8:0:2::2".parse().unwrap(), 12, vec![]);
+        primary.ifindex_origin = Some(10);
+        primary.segs = vec!["fcbb:bbbb:8::".parse().unwrap()];
+        primary.encap_type = Some(isis_packet::srv6::EncapType::HInsert);
+        let mut backup = NexthopUni::new("2001:db8:0:1::2".parse().unwrap(), 13, vec![]);
+        backup.ifindex_origin = Some(20);
+
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Uni(primary),
+            backup: NexthopMember::Uni(backup),
+            gid: 0,
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop_v6(&mut entry, &table, &mut nmap, 0);
+
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("still Protect");
+        };
+        let NexthopMember::Uni(p) = &pro.primary else {
+            panic!("primary stays Uni");
+        };
+        assert_ne!(p.gid, 0, "the seg6 member itself still gets its group");
+        assert_eq!(
+            pro.gid, 0,
+            "SRv6 primary must NOT be wrapped in an indirection group"
+        );
     }
 
     /// The nesting constraint: a Multi (ECMP) primary gets NO

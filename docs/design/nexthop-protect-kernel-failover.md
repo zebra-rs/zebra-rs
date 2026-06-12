@@ -76,7 +76,33 @@ All load-bearing assumptions validated in throwaway netns
 
 Probe 2 passing means the fallback design ("Plan B": `RTM_DELNEXTHOP`
 the primary and let the kernel flush primary routes onto the shadows)
-is **not needed**.
+is **not needed** for plain/MPLS primaries.
+
+### Phase-1 BDD findings (2026-06-12) — two probe blind spots
+
+The first probes validated netlink acceptance and **rendering**, not
+end-to-end traffic through encap'd members. The phase-1 BDD run
+closed that gap:
+
+1. **seg6 `mode inline` members black-hole inside groups.** Object
+   creation, grouping, route install, and `ip route get` all succeed,
+   but the dataplane never transmits: a tcpdump probe shows the SRH
+   packet egress with a direct `nhid <member>` reference and **zero
+   packets** via `nhid <group{member}>`. seg6 `mode encap` members DO
+   forward through a group (traffic-verified), as do MPLS members
+   (BDD `@isis_tilfa` backup-as-primary ping rides `Gp{mpls}`).
+   zebra-rs SRv6 TI-LFA repairs are inline, so **SRv6-encap'd
+   primaries are excluded from indirection** (`pro.gid` stays 0,
+   direct member reference, pre-phase-1 behavior). Phase 2's SRv6
+   switchover therefore needs one of: kernel fix upstream, encap-mode
+   repairs, or per-prefix `RTM_NEWROUTE` replace for the SRv6 subset.
+2. **IPv6 group routes render with continuation lines.** `ip -6 route`
+   prints `<prefix> nhid G proto X metric M` on line 1 and
+   `nexthop ... dev D weight 1` on line 2 (IPv4 stays one line). Any
+   text assertion expecting `dev D proto X metric M` as one substring
+   breaks. Moot for SRv6 after the exclusion above; still relevant to
+   v6+MPLS protected primaries (OSPFv3/IS-IS v6 TI-LFA) — sweep
+   `bdd/` route asserts when phase 1 lands, per the show-grammar rule.
 
 ## 3. Design
 
@@ -163,9 +189,11 @@ leg) but must be called out in the phase-5 PR.
 
 ## 5. Constraints
 
+- **SRv6 primaries are NOT wrapped** (see Phase-1 BDD findings):
+  kernel 6.8 black-holes seg6-inline traffic routed through a group.
+  `resolve_nexthop_protect` skips members with a non-empty `segs`.
 - **seg6local** can't ride nexthop objects (existing constraint) —
-  irrelevant: local-SID installs aren't protected routes. SRv6 H.Encap
-  repairs work (probe 2/5).
+  irrelevant: local-SID installs aren't protected routes.
 - `show nexthop` should render `Group::Protect` (+ active member from
   phase 2). Route show output is unchanged; RIB/kernel divergence
   during a switchover is bounded by SPF reconvergence.
