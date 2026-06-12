@@ -721,6 +721,8 @@ fn show_ospfv3_database_detail(
         ospf_packet::OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
         ospf_packet::OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
         ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+        // RFC 9513 SRv6 Locator LSA — area scope, own function code.
+        ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE,
     ];
 
     for (area_id, area) in top.areas.iter() {
@@ -2209,8 +2211,12 @@ mod tests {
         };
         use ospf_packet::Algo;
 
-        let lsa =
-            e_router_v3_sr_info_lsa_build("10.0.0.1".parse().unwrap(), vec![Algo::Spf], Vec::new());
+        let lsa = e_router_v3_sr_info_lsa_build(
+            "10.0.0.1".parse().unwrap(),
+            vec![Algo::Spf],
+            Vec::new(),
+            false,
+        );
         let out = render_ext_body(&lsa);
         assert!(out.contains("SR-Algorithm TLV:"), "{out}");
         assert!(out.contains("Algorithm 0: SPF"), "{out}");

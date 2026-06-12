@@ -149,6 +149,7 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_flex_algo_prefix_sid_absolute,
             ),
             ("/segment-routing/mpls", config_ospfv3_sr_mpls),
+            ("/segment-routing/srv6/locator", config_ospfv3_srv6_locator),
             ("/fast-reroute/ti-lfa", config_ospfv3_ti_lfa),
             (
                 "/fast-reroute/backup-as-primary",
@@ -804,6 +805,24 @@ fn config_ospfv3_interface_flex_algo_prefix_sid_absolute(
 /// configured SR-MPLS attribute so the matching E-LSAs are
 /// originated (on enable) or flushed (on disable). Mirrors v2's
 /// `config_ospf_sr_mpls`.
+/// `/router/ospfv3/segment-routing/srv6/locator` — name of a locator
+/// from the global /segment-routing/locator list (RFC 9513 Phase 2,
+/// `docs/design/ospfv3-srv6-plan.md`). Mirrors the IS-IS staging
+/// convention: the name is held as a string and only resolves once
+/// the global locator commits — `reconcile_locator_watch` registers
+/// at the RIB and the snapshot reply drives End/uN SID install plus
+/// SRv6 Locator LSA origination.
+fn config_ospfv3_srv6_locator(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        let name = args.string()?;
+        ospf.srv6_locator_name = Some(name);
+    } else {
+        ospf.srv6_locator_name = None;
+    }
+    ospf.reconcile_locator_watch();
+    Some(())
+}
+
 fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
     use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
     use crate::spf::label_pool::LabelPool;

@@ -199,6 +199,19 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub rib6: PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
     pub tracing: OspfTracing,
     pub segment_routing: super::srmpls::SegmentRoutingMode,
+
+    /// SRv6 (RFC 9513) — name of the locator configured under
+    /// `segment-routing srv6 locator`, the name currently watched at
+    /// the RIB, the resolved snapshot, and the installed End/uN SID.
+    /// v3-only: the config handler exists only in `config_v3.rs`, so
+    /// these stay `None` on an `Ospf<Ospfv2>` instance.
+    pub srv6_locator_name: Option<String>,
+    pub watched_locator: Option<String>,
+    pub sr_locator: Option<crate::rib::Locator>,
+    pub sr_end_sid: Option<std::net::Ipv6Addr>,
+    /// SR snapshot channel from the RIB (`SrSubscribe`); only the v3
+    /// event loop polls it.
+    pub sr_rx: UnboundedReceiver<crate::rib::RibSrRx>,
     /// Per-instance graceful-restart helper policy (RFC 3623 §3.1).
     /// Defaults: helper enabled, max grace 1800s, strict LSA
     /// checking on — same as the YANG model's defaults.
@@ -989,6 +1002,10 @@ impl Ospf<Ospfv2> {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, prx) = mpsc::unbounded_channel();
+        // v2 never watches SRv6 locators; the channel exists only
+        // because the field is shared with v3. Dropping the tx makes
+        // it permanently silent (and the v2 loop never polls it).
+        let (_sr_tx, sr_rx) = mpsc::unbounded_channel();
         let mut ospf = Self {
             tx,
             rx,
@@ -1025,6 +1042,11 @@ impl Ospf<Ospfv2> {
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
+            srv6_locator_name: None,
+            watched_locator: None,
+            sr_locator: None,
+            sr_end_sid: None,
+            sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -4958,6 +4980,15 @@ impl Ospf<Ospfv3> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, _prx) = mpsc::unbounded_channel();
 
+        // SR snapshot subscription (locator watches for RFC 9513).
+        // One-time registration keyed by the instance's proto label so
+        // VRF children don't stomp the parent's channel.
+        let (sr_tx, sr_rx) = mpsc::unbounded_channel();
+        let _ = ctx.rib.send(crate::rib::Message::SrSubscribe {
+            proto: proto_label.clone(),
+            tx: sr_tx,
+        });
+
         // v3 raw-IPv6 packet path. `read_packet_v6` recvmsg's,
         // verifies the RFC 5340 §4.4 pseudo-header checksum, parses
         // `Ospfv3Packet`, and pushes `Ospfv3Recv` items. `write_packet_v6`
@@ -5016,6 +5047,11 @@ impl Ospf<Ospfv3> {
             rib6: PrefixMap::new(),
             tracing: OspfTracing::default(),
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
+            srv6_locator_name: None,
+            watched_locator: None,
+            sr_locator: None,
+            sr_end_sid: None,
+            sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
             key_chains: BTreeMap::new(),
@@ -6881,6 +6917,11 @@ impl Ospf<Ospfv3> {
                         t if t == OSPFV3_E_ROUTER_LSA_TYPE && ls_id == SR_INFO_LSID => {
                             self.e_router_v3_sr_info_lsa_originate(area)
                         }
+                        // SRv6 Locator LSA (RFC 9513) — single
+                        // instance, ls_id == SRV6_LOCATOR_LSID.
+                        t if t == ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE => {
+                            self.srv6_locator_lsa_originate(area)
+                        }
                         t if t == OSPFV3_E_ROUTER_LSA_TYPE => self.e_router_v3_lsa_originate(ls_id),
                         // E-Intra-Area-Prefix-LSA (RFC 8362 §3.7 /
                         // RFC 8666 §5) carries the per-link
@@ -7465,15 +7506,169 @@ impl Ospf<Ospfv3> {
 
         let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
 
-        if self.segment_routing == SegmentRoutingMode::Mpls && self.areas.get(area_id).is_some() {
+        let srv6 = self.srv6_active();
+        if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
+            && self.areas.get(area_id).is_some()
+        {
             let algos = crate::flex_algo::sr_algorithms(&self.flex_algo);
             let fads = super::flex_algo::build_fad_v3(
                 &self.flex_algo,
                 &self.affinity_map,
                 &self.srlg_groups,
             );
-            let mut lsa = super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id, algos, fads);
+            let mut lsa =
+                super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id, algos, fads, srv6);
 
+            if let Some(area) = self.areas.get(area_id)
+                && let Some(prev_seq) = area
+                    .lsdb
+                    .lookup_by_raw_key(key)
+                    .map(|prev| prev.h.ls_seq_number)
+            {
+                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
+            }
+            lsa.update();
+
+            let flood_lsa = lsa.clone();
+            if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.install_originated(lsa, &self.tx, Some(area_id));
+            }
+            self.flood_self_originated_lsa(area_id, &flood_lsa);
+        } else {
+            let flushed = if let Some(area) = self.areas.get_mut(area_id) {
+                area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
+            } else {
+                None
+            };
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+        }
+    }
+
+    /// SRv6 is active once the watched locator resolved with a prefix
+    /// — the gate for Locator-LSA origination and the SRv6
+    /// Capabilities TLV.
+    fn srv6_active(&self) -> bool {
+        self.sr_locator.as_ref().is_some_and(|l| l.prefix.is_some())
+    }
+
+    /// Align the RIB locator watch with `srv6_locator_name` —
+    /// the OSPFv3 sibling of `Isis::reconcile_locator_watch`.
+    /// Unwatching drops the resolved snapshot, withdraws the End/uN
+    /// SID, and flushes the Locator LSA; watching triggers an
+    /// immediate snapshot reply from the RIB which re-originates.
+    pub fn reconcile_locator_watch(&mut self) {
+        let desired = self.srv6_locator_name.clone();
+        if desired == self.watched_locator {
+            return;
+        }
+        if let Some(prev) = self.watched_locator.take() {
+            let _ = self.ctx.rib.send(rib::Message::SrLocatorUnwatch {
+                proto: self.proto_label.clone(),
+                name: prev,
+            });
+            self.sr_locator = None;
+            self.update_srv6_end_sid();
+        }
+        if let Some(next) = desired {
+            let _ = self.ctx.rib.send(rib::Message::SrLocatorWatch {
+                proto: self.proto_label.clone(),
+                name: next.clone(),
+            });
+            self.watched_locator = Some(next);
+        }
+        self.srv6_originate_all_areas();
+    }
+
+    /// SR snapshot from the RIB (`SrSubscribe` channel). A locator
+    /// update re-installs the End/uN SID against the new snapshot and
+    /// re-originates the SRv6 LSAs in every area.
+    pub fn process_sr_rx(&mut self, msg: crate::rib::RibSrRx) {
+        match msg {
+            crate::rib::RibSrRx::Locator { name, locator } => {
+                if self.watched_locator.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                self.sr_locator = locator;
+                self.update_srv6_end_sid();
+                self.srv6_originate_all_areas();
+            }
+            // OSPF's SRGB / SRLB are fixed constants today; no block
+            // watches are registered, so nothing arrives here.
+            crate::rib::RibSrRx::Block { .. } => {}
+        }
+    }
+
+    /// Re-originate (or flush) the SRv6 Locator LSA and the SR-info
+    /// E-Router-LSA (which carries the SRv6 Capabilities TLV) in
+    /// every configured area.
+    fn srv6_originate_all_areas(&mut self) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for id in area_ids {
+            self.srv6_locator_lsa_originate(id);
+            self.e_router_v3_sr_info_lsa_originate(id);
+        }
+    }
+
+    /// Install / withdraw the End (classic) or uN (uSID) SID derived
+    /// from the resolved locator — the OSPFv3 sibling of
+    /// `Isis::update_end_sid`. Always del-then-add: the address can
+    /// survive a classic↔uSID flip while behavior/structure change,
+    /// and the FIB needs the updated install.
+    fn update_srv6_end_sid(&mut self) {
+        use crate::rib::{
+            LocatorBehavior, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner,
+        };
+        if let Some(prev) = self.sr_end_sid.take() {
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr: prev });
+        }
+        if let Some(locator) = self.sr_locator.as_ref()
+            && let Some(addr) = locator.node_sid_addr()
+            && let Some(loc_name) = self.watched_locator.clone()
+        {
+            let (behavior, structure) = match locator.behavior {
+                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                None => (SidBehavior::End, None),
+            };
+            let sid = Sid {
+                addr,
+                behavior,
+                context: SidContext::None,
+                owner: SidOwner::new("ospfv3", 0),
+                locator: loc_name,
+                allocation_type: SidAllocationType::Dynamic,
+                // End / uN is local-processing; ifindex=0 lets the RIB
+                // resolve to the sr0 dummy. nh6 has no meaning here.
+                ifindex: 0,
+                nh6: None,
+                structure,
+                table_id: 0,
+                segs: Vec::new(),
+            };
+            let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
+            self.sr_end_sid = Some(addr);
+        }
+    }
+
+    /// Originate (locator resolved) or flush (not) the SRv6 Locator
+    /// LSA in `area_id` — the same keyed install/flush shape as
+    /// `e_router_v3_sr_info_lsa_originate`.
+    pub fn srv6_locator_lsa_originate(&mut self, area_id: Ipv4Addr) {
+        use ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE;
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_SRV6_LOCATOR_LSA_TYPE,
+            super::srv6::SRV6_LOCATOR_LSID,
+            self.router_id,
+        );
+
+        let built = self
+            .sr_locator
+            .as_ref()
+            .filter(|_| self.areas.get(area_id).is_some())
+            .and_then(|loc| super::srv6::srv6_locator_lsa_build(self.router_id, loc));
+        if let Some(mut lsa) = built {
             if let Some(area) = self.areas.get(area_id)
                 && let Some(prev_seq) = area
                     .lsdb
@@ -8070,6 +8265,9 @@ impl Ospf<Ospfv3> {
                 }
                 Some(recv) = v3_recv_rx.recv() => {
                     self.process_recv(recv);
+                }
+                Some(msg) = self.sr_rx.recv() => {
+                    self.process_sr_rx(msg);
                 }
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg);

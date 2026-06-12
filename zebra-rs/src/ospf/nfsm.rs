@@ -433,6 +433,12 @@ pub fn ospfv3_populate_initial_db_summary(
         OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
         OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+        // RFC 9513 SRv6 Locator LSA — same area scope, same rule, same
+        // failure mode as the E-LSAs above: it is originated at
+        // configuration time, usually BEFORE any adjacency exists, so
+        // the initial DBD summary is the only path that carries it to
+        // a neighbor that adjacencies later.
+        ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE,
     ] {
         ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
     }
