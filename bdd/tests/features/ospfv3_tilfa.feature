@@ -156,6 +156,40 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     # Primary restored once the adjacency re-forms.
     Then ping from "s" to "2001:db8::8" should succeed
 
+  Scenario: TI-LFA compute-mode aggressive computes the same repair in parallel
+    Given the test topology exists
+    # Switch the TI-LFA scheduler to the parallel map-reduce mode —
+    # v3 sibling of the v2 scenario; the summary (`show ospfv3`)
+    # carries the compute telemetry.
+    When I apply command "set router ospfv3 fast-reroute ti-lfa compute-mode aggressive" in namespace "s"
+    And I wait 5 seconds
+    # The repair list is still computed after the parallel run...
+    Then show command "show ospfv3 ti-lfa" in namespace "s" should contain "Node-SID"
+    # ...and the telemetry proves the aggressive scheduler ran it.
+    And show command "show ospfv3" in namespace "s" should contain "mode=aggressive"
+
+  Scenario: TI-LFA compute-mode sharding bounds parallelism and still protects
+    Given the test topology exists
+    When I apply command "set router ospfv3 fast-reroute ti-lfa compute-shards 2" in namespace "s"
+    And I apply command "set router ospfv3 fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    And I wait 5 seconds
+    Then show command "show ospfv3 ti-lfa" in namespace "s" should contain "Node-SID"
+    And show command "show ospfv3" in namespace "s" should contain "mode=sharding(2)"
+    # The sharded recompute still protects for real: fail the primary
+    # link and reach d over the repair / post-convergence path.
+    When I make namespace "s" interface "s-n1" down
+    And I wait 5 seconds
+    Then ping from "s" to "2001:db8::8" should succeed
+    When I make namespace "s" interface "s-n1" up
+    And I wait 30 seconds
+    Then ping from "s" to "2001:db8::8" should succeed
+    # Runtime leaf deletes (value-carrying) reset the scheduler to the
+    # stock serial mode for the remaining scenarios.
+    When I apply command "delete router ospfv3 fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    And I apply command "delete router ospfv3 fast-reroute ti-lfa compute-shards 2" in namespace "s"
+    And I wait 5 seconds
+    Then show command "show ospfv3" in namespace "s" should contain "mode=serial"
+
   Scenario: Promoted backup actually forwards over the SR-MPLS repair
     Given the test topology exists
     # `backup-as-primary` swaps the metric-sort offset so each TI-LFA
