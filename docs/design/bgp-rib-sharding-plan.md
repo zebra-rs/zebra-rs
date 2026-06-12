@@ -345,11 +345,43 @@ consider flipping the default.
 
 ## 9. Performance record
 
-Baseline and per-step numbers land here as Phase 0/A/C complete.
+Harness: `tools/bgp-bench` (Phase 0.1, PR #1406). Methodology: N eBGP
+senders blast the same `--prefixes` set (RIB-FIB ratio = N), 2 eBGP
+receivers count re-advertisements; convergence = blast start → last
+announce at the slowest receiver (3s quiet window, excluded from the
+number). Daemon config: `no-fib-install true`, MRAI 1s both peer
+types (±1s quantization floor).
 
-| Scenario | Config | Baseline | A.2 | B.5 (N=1) | C.4 (best) |
+Machine: 5-vCPU VM (model not exposed), 31 GB RAM, Linux
+6.8.0-124-generic. Flamegraph pending: `perf_event_paranoid=4` blocks
+unprivileged perf on this box and user namespaces are restricted —
+thread-level attribution needs a root run (recipe in the bench
+README). The single-task serialization claim in §3 rests on code
+structure, not yet on a profile.
+
+Baseline, branch point `41a1d07d` (2026-06-12):
+
+| senders × prefixes | paths in | convergence | unique pfx/s | paths/s in | daemon RSS |
 |---|---|---|---|---|---|
-| TBD (0.1) | | | | | |
+| 4 × 100k | 400k | 1.564s | 64.0k | ~256k | 789 MB |
+| 8 × 100k | 800k | 4.556s | 21.9k | ~176k | 1.43 GB |
+| 4 × 500k | 2.0M | 8.147s | 61.4k | ~245k | 3.69 GB |
+
+Observations: per-path throughput *drops* as candidates-per-prefix
+rise (8-sender row), and the 4×500k run re-advertised 1.17M NLRIs for
+500k prefixes — best-path flips between senders' paths during ingest
+roughly double the egress work. Both are exactly the costs that shard
+(per-prefix re-election) and update-worker (egress encode) parallelism
+attack.
+
+Per-step results (same matrix) land here as A.2 / B.5 / C.4 complete:
+
+| Step | 4×100k | 8×100k | 4×500k |
+|---|---|---|---|
+| Baseline | 1.564s | 4.556s | 8.147s |
+| A.2 | | | |
+| B.5 (N=1) | | | |
+| C.4 (best) | | | |
 
 ## 10. Caveats & out of scope
 
