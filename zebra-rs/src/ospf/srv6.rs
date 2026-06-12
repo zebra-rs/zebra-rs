@@ -170,3 +170,118 @@ mod tests {
         assert!(srv6_locator_lsa_build("10.0.0.1".parse().unwrap(), &unresolved).is_none());
     }
 }
+
+/// Per-adjacency End.X SID state — one entry per Full neighbor, keyed
+/// like `lan_adj_sids` by `(ifindex, neighbor router-id)`. Tracks the
+/// allocated ELIB function, the advertised SID, the LIB twin (uSID
+/// locators only), and the nexthop the kernel entry currently
+/// forwards to, so a later-arriving neighbor global (Link-LSA) can
+/// drift-reinstall — same shape as the IS-IS `Neighbor::endx_sid` +
+/// `endx_installed_nh6` pair.
+#[derive(Debug, Clone)]
+pub struct EndxSidState {
+    pub function: u16,
+    pub addr: std::net::Ipv6Addr,
+    pub lib_addr: Option<std::net::Ipv6Addr>,
+    pub nh6: Option<std::net::Ipv6Addr>,
+}
+
+/// Endpoint behavior codepoint for an End.X carved from `locator` —
+/// `End.X with NEXT-CSID` (uA) for uSID locators, plain `End.X`
+/// otherwise. Shared by the LSA advertisement and the show side.
+pub fn endx_behavior(locator: &Locator) -> u16 {
+    match locator.behavior {
+        Some(LocatorBehavior::Usid) => u16::from(isis_packet::Behavior::EndXCSID),
+        None => u16::from(isis_packet::Behavior::EndX),
+    }
+}
+
+/// Nested SID-Structure sub-TLV (Extended-LSA registry type 30) for
+/// SIDs carved from `locator`, advertised for both classic and uSID
+/// modes like the IS-IS LSP emit.
+fn endx_structure_sub(locator: &Locator) -> Option<ospf_packet::Ospfv3SubTlv> {
+    locator.sid_structure().map(|s| {
+        ospf_packet::Ospfv3SubTlv::Srv6SidStructure(Ospfv3Srv6SidStructure {
+            lb_len: s.lb_bits,
+            ln_len: s.ln_bits,
+            fun_len: s.fun_bits,
+            arg_len: s.arg_bits,
+        })
+    })
+}
+
+/// SRv6 End.X SID sub-TLV (RFC 9513 §9.1) for a P2P Router-Link TLV.
+pub fn build_v3_endx_sub(locator: &Locator, sid: std::net::Ipv6Addr) -> ospf_packet::Ospfv3SubTlv {
+    ospf_packet::Ospfv3SubTlv::Srv6EndXSid(ospf_packet::Ospfv3Srv6EndXSidSubTlv {
+        behavior: endx_behavior(locator),
+        flags: 0,
+        algo: 0,
+        weight: 0,
+        sid,
+        subs: endx_structure_sub(locator).into_iter().collect(),
+    })
+}
+
+/// SRv6 LAN End.X SID sub-TLV (RFC 9513 §9.2) for broadcast / NBMA
+/// links — the Neighbor Router-ID picks which LAN member the
+/// adjacency points at.
+pub fn build_v3_lan_endx_sub(
+    locator: &Locator,
+    neighbor_router_id: Ipv4Addr,
+    sid: std::net::Ipv6Addr,
+) -> ospf_packet::Ospfv3SubTlv {
+    ospf_packet::Ospfv3SubTlv::Srv6LanEndXSid(ospf_packet::Ospfv3Srv6LanEndXSidSubTlv {
+        behavior: endx_behavior(locator),
+        flags: 0,
+        algo: 0,
+        weight: 0,
+        neighbor_router_id,
+        sid,
+        subs: endx_structure_sub(locator).into_iter().collect(),
+    })
+}
+
+#[cfg(test)]
+mod endx_tests {
+    use super::*;
+    use ipnet::Ipv6Net;
+
+    fn usid_locator() -> Locator {
+        Locator {
+            prefix: Some("fcbb:bbbb:1::/48".parse::<Ipv6Net>().unwrap()),
+            behavior: Some(LocatorBehavior::Usid),
+        }
+    }
+
+    #[test]
+    fn endx_sub_carries_ua_behavior_and_structure() {
+        let sub = build_v3_endx_sub(&usid_locator(), "fcbb:bbbb:1:e000::".parse().unwrap());
+        let ospf_packet::Ospfv3SubTlv::Srv6EndXSid(endx) = &sub else {
+            panic!("expected End.X sub-TLV");
+        };
+        assert_eq!(endx.behavior, u16::from(isis_packet::Behavior::EndXCSID));
+        assert_eq!(endx.subs.len(), 1);
+        let ospf_packet::Ospfv3SubTlv::Srv6SidStructure(st) = &endx.subs[0] else {
+            panic!("expected nested SID structure");
+        };
+        assert_eq!((st.lb_len, st.ln_len, st.fun_len), (32, 16, 16));
+    }
+
+    #[test]
+    fn lan_endx_sub_names_the_neighbor() {
+        let classic = Locator {
+            prefix: Some("2001:db8:f:2::/64".parse::<Ipv6Net>().unwrap()),
+            behavior: None,
+        };
+        let sub = build_v3_lan_endx_sub(
+            &classic,
+            Ipv4Addr::new(10, 0, 0, 5),
+            "2001:db8:f:2:e000::".parse().unwrap(),
+        );
+        let ospf_packet::Ospfv3SubTlv::Srv6LanEndXSid(lan) = &sub else {
+            panic!("expected LAN End.X sub-TLV");
+        };
+        assert_eq!(lan.behavior, u16::from(isis_packet::Behavior::EndX));
+        assert_eq!(lan.neighbor_router_id, Ipv4Addr::new(10, 0, 0, 5));
+    }
+}

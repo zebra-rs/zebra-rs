@@ -1422,6 +1422,10 @@ fn ospfv3_ls_upd_proc(
             }
             Ospfv3LsaScope::Link => {
                 oi.link_lsdb.install_lsa(cloned, oi.tx, Some(area_id));
+                // A peer Link-LSA can carry the neighbor's global /128
+                // (LA-bit) — the preferred SRv6 End.X nexthop. Nudge
+                // the instance to re-evaluate installs on this link.
+                let _ = oi.tx.send(Message::Srv6EndxReconcile(nbr.ifindex));
             }
             Ospfv3LsaScope::Reserved => {
                 return LsaProcessResult::DiscardNoAck;
