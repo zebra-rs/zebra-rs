@@ -130,6 +130,16 @@ impl RibClient {
         })
     }
 
+    /// Trigger the fast-reroute switchover for every protection
+    /// indirection group whose primary rides the failed adjacency at
+    /// `addr` (phase 2 of the kernel-failover design). Protocols call
+    /// this on a BFD-down-with-link-up detection, BEFORE starting
+    /// SPF, so traffic moves to the pre-installed TI-LFA repairs in
+    /// O(adjacencies) while reconvergence runs.
+    pub fn protect_switch(&self, addr: std::net::IpAddr) -> Result<(), SendError<RibInbound>> {
+        self.send(Message::ProtectSwitch { addr })
+    }
+
     /// Toggle FIB-install suppression for this client and every clone
     /// that shares its `Arc`. Idempotent.
     pub fn set_suppress_install(&self, suppress: bool) {
