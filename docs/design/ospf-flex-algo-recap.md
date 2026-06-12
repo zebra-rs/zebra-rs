@@ -108,7 +108,7 @@ first. OSPFv2 follows the standard RI/Ext-Link/Ext-Prefix Opaque LSAs.
 | #1101 | SR-Algorithm participation + FAD origination (`build_fad_v3`) |
 | #1102 | Per-link ASLA origination (`build_link_asla_v3`) |
 | #1103 | Per-algo Prefix-SID origination (E-Intra-Area-Prefix-LSA) |
-| #1104 | Per-algo SPF compute (`graph_v3_flex_algo`) + `show ipv6 ospf flex-algo` |
+| #1104 | Per-algo SPF compute (`graph_v3_flex_algo`) + `show ospfv3 flex-algo` |
 | #1105 | Per-algo IPv6 RIB (`build_rib6_from_flex_algo`, `rib6_flex_algo`) |
 | #1106 | Per-algo Prefix-SID `ilm6` kernel install |
 

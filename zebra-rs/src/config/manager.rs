@@ -1076,21 +1076,12 @@ fn is_ospf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ospf")
 }
 
-/// True for `show ipv6 ospf ...` paths, routed to the `"ospfv3"`
-/// subscriber. Must be checked BEFORE [`is_ospf`] — every v3 show
-/// path also contains an `"ospf"` segment, so `is_ospf` matches as
-/// well and would otherwise win.
+/// True for `show ospfv3 ...` paths, routed to the `"ospfv3"`
+/// subscriber. The segment name is `ospfv3` (not `ospf`), so this
+/// never overlaps [`is_ospf`]; it's still checked first in
+/// [`show_proto`] to keep the most-specific-first ordering explicit.
 fn is_ospfv3(paths: &[CommandPath]) -> bool {
-    let mut has_ipv6 = false;
-    let mut has_ospf = false;
-    for p in paths {
-        if p.name == "ipv6" {
-            has_ipv6 = true;
-        } else if p.name == "ospf" {
-            has_ospf = true;
-        }
-    }
-    has_ipv6 && has_ospf
+    paths.iter().any(|x| x.name == "ospfv3")
 }
 
 fn is_isis(paths: &[CommandPath]) -> bool {

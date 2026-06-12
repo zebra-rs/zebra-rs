@@ -92,7 +92,7 @@ config-surface change.
    link-local flooding scope `0x0008`; same first two sub-TLVs
    (no v3 IP Interface Address — RFC 5187 §2.1).
 4. Decode-only `show ospf database opaque-link` /
-   `show ipv6 ospf database link` rendering (mirror existing
+   `show ospfv3 database link` rendering (mirror existing
    `show_router_info_detail` shape in `show.rs:1282`).
 5. Fixture decode tests under `crates/ospf-packet/tests/`. Use
    the FRR-emitted Grace LSA as the golden capture if available;

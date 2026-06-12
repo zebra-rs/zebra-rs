@@ -1285,10 +1285,9 @@ mod tests {
 
     /// The OSPFv2 show tree moved from `show ip ospf …` to a
     /// top-level `show ospf …` (matching `show isis`); the legacy
-    /// `ip` spellings must no longer parse. OSPFv3 keeps
-    /// `show ipv6 ospf …`. Pinned with parse() tests because the
-    /// vtyctl show surface is garbage-tolerant: an unwired grammar
-    /// returns empty output instead of erroring.
+    /// `ip` spellings must no longer parse. Pinned with parse()
+    /// tests because the vtyctl show surface is garbage-tolerant:
+    /// an unwired grammar returns empty output instead of erroring.
     #[test]
     fn show_ospf_moved_out_of_show_ip() {
         use crate::config::path_from_command;
@@ -1338,15 +1337,63 @@ mod tests {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
         }
+    }
 
-        // OSPFv3 is untouched by the move.
-        let (code, _comps, _state) =
-            parse("show ipv6 ospf neighbor", entry.clone(), None, State::new());
-        assert_eq!(
-            code,
-            ExecCode::Success,
-            "`show ipv6 ospf neighbor` must still parse"
-        );
+    /// The OSPFv3 show tree moved the same way: `show ipv6 ospf …`
+    /// became a top-level `show ospfv3 …` (the container is renamed,
+    /// so the dispatch segment is `ospfv3`, never colliding with
+    /// v2's `ospf`). The legacy `ipv6` spellings must no longer
+    /// parse; v2's `show ospf` is untouched.
+    #[test]
+    fn show_ospfv3_moved_out_of_show_ipv6() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show ospfv3", "/show/ospfv3", vec![]),
+            ("show ospfv3 interface", "/show/ospfv3/interface", vec![]),
+            ("show ospfv3 neighbor", "/show/ospfv3/neighbor", vec![]),
+            (
+                "show ospfv3 neighbor detail",
+                "/show/ospfv3/neighbor/detail",
+                vec![],
+            ),
+            ("show ospfv3 database", "/show/ospfv3/database", vec![]),
+            ("show ospfv3 route", "/show/ospfv3/route", vec![]),
+            ("show ospfv3 ti-lfa", "/show/ospfv3/ti-lfa", vec![]),
+            ("show ospfv3 vrf blue", "/show/ospfv3/vrf", vec!["blue"]),
+            (
+                "show ospfv3 vrf blue route",
+                "/show/ospfv3/vrf/route",
+                vec!["blue"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+
+        // The legacy `show ipv6 ospf …` spellings are gone.
+        for cmd in [
+            "show ipv6 ospf",
+            "show ipv6 ospf neighbor",
+            "show ipv6 ospf route",
+            "show ipv6 ospf vrf blue",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+
+        // v2 (`show ospf`) and the other `show ipv6` trees survive.
+        for cmd in ["show ospf neighbor", "show ipv6 route", "show ipv6 nd"] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must still parse");
+        }
     }
 
     /// `show bgp ipv4 <tab>` surfaces the union arms of the key —
