@@ -58,6 +58,8 @@ impl Ospf<Ospfv3> {
             .set(show_ospfv3_repair_list_detail)
             .path("/show/ospfv3/segment-routing")
             .set(show_ospfv3_segment_routing)
+            .path("/show/ospfv3/srv6")
+            .set(show_ospfv3_srv6)
             .path("/show/ospfv3/flex-algo")
             .set(show_ospfv3_flex_algo)
             .map();
@@ -2314,5 +2316,210 @@ mod tests {
         assert!(out.contains("Flags: 0x80 : NP"), "{out}");
         assert!(out.contains("Algorithm: 0 (SPF)"), "{out}");
         assert!(out.contains("SID/Label: Index: 100"), "{out}");
+    }
+}
+
+// ---- show ospfv3 srv6 ------------------------------------------------
+
+#[derive(Serialize)]
+struct Ospfv3Srv6LocatorJson {
+    name: String,
+    prefix: Option<String>,
+    behavior: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct Ospfv3Srv6EndSidJson {
+    sid: String,
+    behavior: &'static str,
+}
+
+#[derive(Serialize)]
+struct Ospfv3Srv6EndXJson {
+    interface: String,
+    neighbor_router_id: String,
+    sid: String,
+    behavior: &'static str,
+    nexthop: Option<String>,
+    lib_sid: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Ospfv3Srv6Json {
+    locator: Option<Ospfv3Srv6LocatorJson>,
+    end_sid: Option<Ospfv3Srv6EndSidJson>,
+    end_x_sids: Vec<Ospfv3Srv6EndXJson>,
+}
+
+/// Pure text layout for `show ospfv3 srv6`, split out so the format
+/// can be pinned by a unit test without constructing an instance.
+fn render_ospfv3_srv6_text(v: &Ospfv3Srv6Json) -> Result<String, std::fmt::Error> {
+    let mut out = String::new();
+    writeln!(out, "OSPFv3 SRv6:")?;
+    match &v.locator {
+        None => writeln!(out, "  Locator: (not configured)")?,
+        Some(loc) => match (&loc.prefix, loc.behavior) {
+            (Some(prefix), Some(behavior)) => {
+                writeln!(out, "  Locator: {} ({}, {})", loc.name, prefix, behavior)?
+            }
+            _ => writeln!(out, "  Locator: {} (unresolved)", loc.name)?,
+        },
+    }
+    if let Some(end) = &v.end_sid {
+        writeln!(out, "  End SID: {} ({})", end.sid, end.behavior)?;
+    }
+    if v.end_x_sids.is_empty() {
+        return Ok(out);
+    }
+    writeln!(out)?;
+    writeln!(out, "Local SRv6 End.X SIDs:")?;
+    writeln!(
+        out,
+        " {:<10} {:<15} {:<24} {:<8} {:<24} LIB",
+        "Interface", "Neighbor", "SID", "Behavior", "Nexthop"
+    )?;
+    for row in &v.end_x_sids {
+        writeln!(
+            out,
+            " {:<10} {:<15} {:<24} {:<8} {:<24} {}",
+            row.interface,
+            row.neighbor_router_id,
+            row.sid,
+            row.behavior,
+            row.nexthop.as_deref().unwrap_or("-"),
+            row.lib_sid.as_deref().unwrap_or("-"),
+        )?;
+    }
+    Ok(out)
+}
+
+/// `show ospfv3 srv6` — the operational SRv6 view: the configured /
+/// resolved locator, the End/uN SID, and one row per adjacency End.X
+/// with the *installed* nexthop (the neighbor's global once its
+/// Link-LSA delivered one — the #1361 kernel constraint makes this
+/// the column operators check first) and the uA(LIB) twin.
+fn show_ospfv3_srv6(
+    top: &Ospf<Ospfv3>,
+    _args: Args,
+    json: bool,
+) -> Result<String, std::fmt::Error> {
+    use crate::rib::LocatorBehavior;
+
+    let usid = matches!(
+        top.sr_locator.as_ref().and_then(|l| l.behavior.as_ref()),
+        Some(LocatorBehavior::Usid)
+    );
+    let locator = top
+        .srv6_locator_name
+        .as_ref()
+        .map(|name| Ospfv3Srv6LocatorJson {
+            name: name.clone(),
+            prefix: top
+                .sr_locator
+                .as_ref()
+                .and_then(|l| l.prefix)
+                .map(|p| p.to_string()),
+            behavior: top
+                .sr_locator
+                .as_ref()
+                .and_then(|l| l.prefix)
+                .map(|_| if usid { "usid" } else { "classic" }),
+        });
+    let end_sid = top.sr_end_sid.map(|sid| Ospfv3Srv6EndSidJson {
+        sid: sid.to_string(),
+        behavior: if usid { "uN" } else { "End" },
+    });
+    let end_x_sids: Vec<Ospfv3Srv6EndXJson> = top
+        .endx_sids
+        .iter()
+        .map(|((ifindex, rid), state)| Ospfv3Srv6EndXJson {
+            interface: top
+                .links
+                .get(ifindex)
+                .map(|l| l.name.clone())
+                .unwrap_or_else(|| ifindex.to_string()),
+            neighbor_router_id: rid.to_string(),
+            sid: state.addr.to_string(),
+            behavior: if usid { "uA" } else { "End.X" },
+            nexthop: state.nh6.map(|a| a.to_string()),
+            lib_sid: state.lib_addr.map(|a| a.to_string()),
+        })
+        .collect();
+
+    let v = Ospfv3Srv6Json {
+        locator,
+        end_sid,
+        end_x_sids,
+    };
+    if json {
+        return Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| String::from("{}")));
+    }
+    render_ospfv3_srv6_text(&v)
+}
+
+#[cfg(test)]
+mod srv6_show_tests {
+    use super::*;
+
+    // Pin the text layout: locator line, End SID line, and the End.X
+    // table with the installed (global) nexthop and LIB twin.
+    #[test]
+    fn srv6_show_renders_locator_end_and_endx_rows() {
+        let v = Ospfv3Srv6Json {
+            locator: Some(Ospfv3Srv6LocatorJson {
+                name: "LOC1".into(),
+                prefix: Some("fcbb:bbbb:1::/48".into()),
+                behavior: Some("usid"),
+            }),
+            end_sid: Some(Ospfv3Srv6EndSidJson {
+                sid: "fcbb:bbbb:1::".into(),
+                behavior: "uN",
+            }),
+            end_x_sids: vec![Ospfv3Srv6EndXJson {
+                interface: "i2".into(),
+                neighbor_router_id: "10.0.0.2".into(),
+                sid: "fcbb:bbbb:1:e000::".into(),
+                behavior: "uA",
+                nexthop: Some("2001:db8:12::2".into()),
+                lib_sid: Some("fcbb:bbbb:e000::".into()),
+            }],
+        };
+        let text = render_ospfv3_srv6_text(&v).unwrap();
+        assert!(text.contains("Locator: LOC1 (fcbb:bbbb:1::/48, usid)"));
+        assert!(text.contains("End SID: fcbb:bbbb:1:: (uN)"));
+        assert!(text.contains("Local SRv6 End.X SIDs:"));
+        assert!(text.contains("fcbb:bbbb:1:e000::"));
+        assert!(text.contains("2001:db8:12::2"));
+        assert!(text.contains("fcbb:bbbb:e000::"));
+    }
+
+    // The unconfigured / unresolved degradations.
+    #[test]
+    fn srv6_show_degrades_without_locator() {
+        let none = Ospfv3Srv6Json {
+            locator: None,
+            end_sid: None,
+            end_x_sids: vec![],
+        };
+        assert!(
+            render_ospfv3_srv6_text(&none)
+                .unwrap()
+                .contains("Locator: (not configured)")
+        );
+
+        let unresolved = Ospfv3Srv6Json {
+            locator: Some(Ospfv3Srv6LocatorJson {
+                name: "LOC1".into(),
+                prefix: None,
+                behavior: None,
+            }),
+            end_sid: None,
+            end_x_sids: vec![],
+        };
+        assert!(
+            render_ospfv3_srv6_text(&unresolved)
+                .unwrap()
+                .contains("Locator: LOC1 (unresolved)")
+        );
     }
 }

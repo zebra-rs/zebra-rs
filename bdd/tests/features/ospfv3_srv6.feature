@@ -75,6 +75,17 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # per-link E-Router-LSA and floods to the peer.
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 End.X SID Sub-TLV:"
     And show command "show ospfv3 database detail" in namespace "z1" should contain "SRv6 End.X SID Sub-TLV:"
+    # The dedicated SRv6 show surfaces the locator, the End SID, and
+    # the per-adjacency End.X table with the installed nexthop and
+    # the LIB twin.
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "Locator: LOC1 (fcbb:bbbb:1::/48, usid)"
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "End SID: fcbb:bbbb:1:: (uN)"
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "Local SRv6 End.X SIDs:"
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "2001:db8:12::2"
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "fcbb:bbbb:e000::"
+    And show command "show ospfv3 srv6" in namespace "z2" should contain "Locator: LOC2 (2001:db8:f:2::/64, classic)"
+    And show command "show ospfv3 srv6" in namespace "z2" should contain "End SID: 2001:db8:f:2:: (End)"
+    And show command "show ospfv3 srv6" in namespace "z2" should contain "End.X"
     # The kernel entries forward to the NEIGHBOR'S GLOBAL address —
     # learned from its Link-LSA LA-bit /128, upgraded from the
     # hello link-local once that LSA arrives. Linux's seg6local
@@ -106,6 +117,7 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # the flushed LSA disappears from the peer too (MaxAge flood).
     Then show command "show segment-routing srv6 sid" in namespace "z1" should not contain "uN"
     And show command "show segment-routing srv6 sid" in namespace "z1" should not contain "uA"
+    And show command "show ospfv3 srv6" in namespace "z1" should contain "Locator: (not configured)"
     And kernel route "fcbb:bbbb:1::/48" in namespace "z1" should eventually be gone
     And kernel route "fcbb:bbbb:1:e000::" in namespace "z1" should eventually be gone
     And show command "show ospfv3 database detail" in namespace "z2" should not contain "SRv6 Locator TLV: fcbb:bbbb:1::/48"

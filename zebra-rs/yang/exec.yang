@@ -794,6 +794,10 @@ module exec {
       leaf segment-routing {
         type empty;
       }
+      leaf srv6 {
+        ext:help "Show SRv6 state (locator, End/End.X SIDs)";
+        type empty;
+      }
       list vrf {
         // Per-VRF OSPFv3 show. `show ospfv3 vrf <name> <cmd>` is
         // redirected by the config manager into the per-VRF task's
