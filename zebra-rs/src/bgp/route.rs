@@ -6916,6 +6916,18 @@ pub(super) fn route_advertise_to_peers_v6(
                     && let Some(group) = af.group_by_id_mut(&gid)
                 {
                     super::update_group::send_ipv6(group, nlri, attr, source_ident, bgp.tx, true);
+                } else {
+                    // Established peer with no IPv6 unicast group is a
+                    // bug — `update_group::attach` is supposed to
+                    // enroll every negotiated family. Surface it
+                    // rather than dropping the reach on the floor
+                    // (which is exactly how the missing-enrollment
+                    // bug stayed invisible).
+                    tracing::warn!(
+                        peer = %peer.address,
+                        prefix = %prefix,
+                        "IPv6 advertise: peer is Established but not in any update-group; advertise skipped"
+                    );
                 }
             }
             Some(_) => {
