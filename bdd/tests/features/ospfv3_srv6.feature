@@ -86,6 +86,18 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # NEXT-CSID flavor.
     And kernel route "fcbb:bbbb:e000::/48" in namespace "z1" should eventually contain "flavors next-csid"
 
+  Scenario: Remote locators are reachable via the SRv6 Locator LSA
+    Given the test topology exists
+    # Locator prefixes ride only the SRv6 Locator LSA — they are not
+    # interface subnets and appear in no Intra-Area-Prefix-LSA — so
+    # these routes prove the RFC 9513 §7 receive-side processing:
+    # each router computes a route to the peer's locator through the
+    # SPF cost to the advertising router.
+    Then kernel route "2001:db8:f:2::/64" in namespace "z1" should eventually contain "proto ospf"
+    And kernel route "fcbb:bbbb:1::/48" in namespace "z2" should eventually contain "proto ospf"
+    And show command "show ospfv3 route" in namespace "z1" should contain "2001:db8:f:2::/64"
+    And show command "show ospfv3 route" in namespace "z2" should contain "fcbb:bbbb:1::/48"
+
   Scenario: Removing the locator flushes the LSA and withdraws the SID
     Given the test topology exists
     When I apply command "delete router ospfv3 segment-routing srv6 locator LOC1" in namespace "z1"
@@ -97,6 +109,7 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     And kernel route "fcbb:bbbb:1::/48" in namespace "z1" should eventually be gone
     And kernel route "fcbb:bbbb:1:e000::" in namespace "z1" should eventually be gone
     And show command "show ospfv3 database detail" in namespace "z2" should not contain "SRv6 Locator TLV: fcbb:bbbb:1::/48"
+    And kernel route "fcbb:bbbb:1::/48" in namespace "z2" should eventually be gone
     # z2's own origination is untouched.
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 Locator TLV: 2001:db8:f:2::/64"
 

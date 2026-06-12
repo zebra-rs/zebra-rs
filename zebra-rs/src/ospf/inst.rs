@@ -10887,6 +10887,14 @@ fn build_rib6_from_spf(
         add_nssa_routes_v3(top, area_id, spf_result, &mut rib);
     }
 
+    // RFC 9513 §7: SRv6 locator reachability. Locator prefixes ride
+    // their own LSA (not any Intra-Area-Prefix-LSA), so without this
+    // pass remote locators — and every SID carved from them — are
+    // unreachable. Runs before the TI-LFA pass so locator routes
+    // carry dest_vertex and pick up repair backups like any other
+    // single-nexthop prefix.
+    add_srv6_locator_routes_v3(top, area_id, source, spf_result, &mut rib);
+
     // TI-LFA second pass: stamp the post-convergence repair backup onto
     // single-primary routes (ECMP skipped — surviving legs already
     // protect). v3 sibling of the v2 second pass in `build_rib_from_spf`;
@@ -10913,6 +10921,99 @@ fn build_rib6_from_spf(
     }
 
     rib
+}
+
+/// RFC 9513 §7: install routes toward remote SRv6 locators. Walks the
+/// area's SRv6 Locator LSAs; each algo-0 intra-area Locator TLV
+/// installs at `cost(advertising router) + locator metric` with the
+/// same nexthops as any other prefix of that router. Self-originated
+/// Locator LSAs are skipped — the local End/uN SID install already
+/// covers the prefix in the FIB. Non-zero algorithms (Flex-Algo
+/// SRv6) and inter-area route types are deferred per the plan.
+fn add_srv6_locator_routes_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    rib: &mut PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+) {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_SRV6_LOCATOR_LSA_TYPE, Ospfv3LsBody, Ospfv3Srv6LocatorLsaTlv};
+
+    let Some(area) = top.areas.get(area_id) else {
+        return;
+    };
+    for (_key, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_SRV6_LOCATOR_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::Srv6Locator(ref body) = lsa.data.body else {
+            continue;
+        };
+        let Some(vertex) = top.lsp_map.lookup(lsa.data.h.advertising_router) else {
+            continue;
+        };
+        if vertex == source {
+            continue;
+        }
+        let Some(path) = spf_result.get(&vertex) else {
+            continue;
+        };
+        let nhops = collect_v3_nexthops(top, path);
+        if nhops.is_empty() {
+            continue;
+        }
+        let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
+            .into_iter()
+            .map(|(addr, ifindex)| {
+                (
+                    addr,
+                    SpfNexthopV3 {
+                        ifindex,
+                        adjacency: false,
+                        backup: None,
+                    },
+                )
+            })
+            .collect();
+
+        for tlv in &body.tlvs {
+            let Ospfv3Srv6LocatorLsaTlv::Locator(loc) = tlv else {
+                continue;
+            };
+            if loc.algorithm != 0 {
+                continue;
+            }
+            let Ok(net) = ipnet::Ipv6Net::new(loc.locator, loc.locator_length) else {
+                continue;
+            };
+            let net = net.trunc();
+            let entry = SpfRouteV3 {
+                metric: path.cost.saturating_add(loc.metric),
+                nhops: nhops_map.clone(),
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: Some(vertex),
+                backup_as_primary: top.fast_reroute_backup_as_primary,
+            };
+            // Same lowest-metric / equal-cost-ECMP merge as the
+            // Intra-Area-Prefix pass.
+            match rib.get_mut(&net) {
+                None => {
+                    rib.insert(net, entry);
+                }
+                Some(curr) => {
+                    if curr.metric > entry.metric {
+                        *curr = entry;
+                    } else if curr.metric == entry.metric {
+                        for (addr, nhop) in entry.nhops {
+                            curr.nhops.insert(addr, nhop);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Walk v3 Type-5 (AS-External, 0x4005) entries in `lsdb_as` and
