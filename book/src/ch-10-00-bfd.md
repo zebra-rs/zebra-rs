@@ -186,7 +186,8 @@ Each command also accepts a trailing `json` for machine-readable output.
 
 The BFD task is quiet by default. A single runtime flag turns on its
 diagnostic traces — session FSM transitions, control-packet handling, and
-the Echo reflector (`xdp-bfd-echo`) lifecycle:
+the `xdp-bfd-echo` helper lifecycle (Echo and the in-kernel expiration
+watchdog it hosts):
 
 ```
 set bfd tracing true     # enable
@@ -213,21 +214,26 @@ the BFD task itself.
 ## Echo function
 
 The BFD **Echo function** (RFC 5880 §6.4 / RFC 5881 §6) is a forwarding-plane
-liveness test: a node sends a *self-addressed* UDP/3785 packet that the peer's
-forwarding plane loops straight back, and times the round trip. Because the
-loop never enters the peer's BFD control software, it detects a forwarding
-fault even while control packets still flow — and it lets a node slow its
-control-packet rate while keeping fast detection. Echo is **single-hop IPv4
-only** (RFC 5883 multi-hop has no Echo).
+liveness test: a node sends a UDP/3785 packet crafted so the peer loops it
+straight back without its BFD software ever processing it, and times the round
+trip. Because the loop never enters the peer's BFD control software, it
+detects a forwarding fault even while control packets still flow — and it lets
+a node slow its control-packet rate while keeping fast detection. Echo is
+**single-hop only** (RFC 5883 multi-hop has no Echo); **both IPv4 and IPv6**
+are supported.
 
 The two halves are independent and zebra-rs implements both, offloaded to a
 per-interface XDP/eBPF helper, **`xdp-bfd-echo`**:
 
 - **Responder** — when we advertise a non-zero `Required Min Echo RX Interval`,
-  the helper's XDP program loops a peer's Echo back in the data plane
-  (decrementing TTL so it returns at 254, the way a forwarding hop would), so
-  the *peer* gets fast detection. We only advertise non-zero once the helper is
-  confirmed running, so the promise to loop is honest.
+  the helper's XDP program loops a peer's Echo back in the data plane, so the
+  *peer* gets fast detection. We only advertise non-zero once the helper is
+  confirmed running, so the promise to loop is honest. The loop differs per
+  family to match what real peers send: IPv4 Echo is *self-addressed* and
+  looped as a forwarding hop (TTL decremented to 254), while IPv6 Echo (as FRR
+  sends it) is *peer-addressed*, so the reflector also swaps the IPv6
+  source/destination and decrements the Hop Limit — both interop-validated
+  against FRR `echo-mode`.
 - **Originator** — the helper sends our Echo from a raw `AF_PACKET` socket and
   the XDP program arms a per-session in-kernel `bpf_timer` on each return; if
   returns stop for `interval × detect-mult`, the session goes `Down` with
@@ -235,20 +241,88 @@ per-interface XDP/eBPF helper, **`xdp-bfd-echo`**:
   the session is `Up` and the peer advertised a non-zero echo-rx (§6.8.9).
 
 The helper is reference-counted **per interface**: one `xdp-bfd-echo` process is
-spawned for each interface that has at least one Echo-enabled session, shared by
-all sessions on that link, and stopped when the last one goes away. It needs
+spawned for each interface that has at least one Echo-enabled (or
+[`detect-offload`](#offloading-expiration-detection-detect-offload)-enabled)
+session, shared by all sessions on that link, and stopped when the last one
+goes away. It needs
 `cap_net_admin,cap_bpf` (load/attach XDP) and `cap_net_raw` (the originator's
 raw socket); the packaged install grants these. A node with no Echo configured
 runs no helper and advertises `Required Min Echo RX Interval = 0`.
 
-Echo is enabled per attachment — on OSPF and IS-IS interfaces, and on
+Echo is enabled per attachment — on OSPFv2/v3 and IS-IS interfaces, and on
 single-hop eBGP neighbours, where `echo-mode` selects the role
 (`transmit` / `receive` / `both`) and `echo-transmit-interval` /
 `echo-receive-interval` set the rates; see
 [OSPF BFD](ch-08-02-ospf-bfd.md#echo), [IS-IS BFD](ch-07-03-isis-bfd.md#echo),
-and [BGP BFD](ch-02-08-bgp-bfd.md#echo).
-`show bfd peers` reports the negotiated `Echo receive interval` /
-`Echo transmission interval`.
+and [BGP BFD](ch-02-08-bgp-bfd.md#echo). An IPv6-only session (an OSPFv3 or
+IS-IS adjacency over link-locals, a v6 eBGP neighbour) runs IPv6 Echo the same
+way. Echo configuration changes apply to **live** sessions on commit — no
+session bounce. `show bfd peers` reports the negotiated
+`Echo receive interval` / `Echo transmission interval`.
+
+## Offloading expiration detection (`detect-offload`)
+
+Detection of a *silent* failure — the peer's control packets simply stop
+arriving — normally rides on a userspace timer (RFC 5880 §6.8.4): every
+valid packet resets it, and its expiry drives the session `Down` with
+`Control Detection Time Expired`. That timer races the daemon's event
+loop, which has two failure modes under load:
+
+- **false Down** — packets are *arriving* but sit unprocessed in the
+  socket queue while the daemon is busy (a BGP churn, a large SPF, a
+  config commit), so the timer fires anyway;
+- **late Down** — the peer really is gone, but the expiry event waits
+  behind the same backlog.
+
+`detect-offload` moves that timing into the kernel, using the same
+per-interface `xdp-bfd-echo` helper as the [Echo
+function](#echo-function). Once the session is `Up`, the helper's XDP
+program *observes* every BFD control packet (UDP 3784 at TTL 255) on the
+interface: it matches the packet's `Your Discriminator` against the
+session, re-arms a per-session in-kernel `bpf_timer`, and **passes the
+packet up unchanged** — the daemon still runs the full state machine,
+Poll/Final handling, and timer negotiation on every packet; only the
+liveness clock lives in the kernel. If control packets stop for the
+negotiated detection time, the timer fires in softirq and the session
+goes `Down` exactly as a userspace expiry would.
+
+Because the re-arm happens at packet *arrival* (before any socket
+queueing) and the expiry fires in softirq (no event-loop latency),
+detection neither false-fires nor waits on a busy daemon — which is
+what makes aggressive detection times honest.
+
+Notes and guard-rails:
+
+- **Up sessions only.** Before the session is established the peer may
+  send `Your Discriminator = 0`, which cannot be matched in the kernel;
+  zebra-rs arms the watchdog on the `Up` transition and disarms it when
+  the session leaves `Up`. Renegotiated timers retune the armed value
+  automatically.
+- **Single-hop only.** The helper attaches per interface; multi-hop
+  ingress is not bound to one (and its TTL floor is below the GTSM 255
+  the observer requires). IPv4 and IPv6 are both supported.
+- **The userspace timer stays as a backstop.** While the watchdog is
+  armed, the normal detection timer keeps running, stretched to 4× the
+  detection time; if the helper process ever dies, zebra-rs reverts the
+  session to ordinary userspace detection immediately.
+- **Honesty gate.** The watchdog is only armed once the helper is
+  confirmed running — if it cannot start (missing binary, capabilities,
+  kernel without XDP/`bpf_timer`), detection simply stays in userspace.
+  A watchdog-only helper needs `cap_net_admin,cap_bpf` (no `cap_net_raw`
+  — there is no transmit half; the daemon keeps sending its own control
+  packets).
+
+It is enabled per OSPF interface (or instance-wide) — see
+[OSPF BFD](ch-08-02-ospf-bfd.md#offloading-expiration-detection);
+IS-IS and BGP attachment is a planned follow-up. `show bfd peers`
+reports where detection currently runs:
+
+```
+    Detection timeout: 900ms
+    Detection runs in: kernel/XDP (900ms)
+```
+
+(`userspace` when the watchdog is not armed.)
 
 ## What happens on failure
 
@@ -267,14 +341,23 @@ native timers would allow.
   defaults; RFC 5880 §6.8.3 slow-transmit-while-not-Up with §6.8.7 Poll
   Sequences (both initiating and answering); BGP `update-source`
   inherited as the session's local address; the **Echo function**
-  (RFC 5880 §6.4, single-hop IPv4) — both reflecting a peer's Echo and
-  originating our own, offloaded to the `xdp-bfd-echo` XDP/eBPF helper
-  (see [Echo function](#echo-function) below), with per-role
-  (`transmit` / `receive` / `both`) config and an instance-level
-  `router <proto> { bfd {} }` default inherited and overridden per
-  interface / neighbour. Echo is configurable on OSPF, IS-IS, and
-  single-hop eBGP (BGP echo is inert on multihop sessions — RFC 5883 has
-  no Echo).
+  (RFC 5880 §6.4, single-hop, IPv4 **and** IPv6) — both reflecting a
+  peer's Echo and originating our own, offloaded to the `xdp-bfd-echo`
+  XDP/eBPF helper (see [Echo function](#echo-function) below), with
+  per-role (`transmit` / `receive` / `both`) config applied live on
+  commit and an instance-level `router <proto> { bfd {} }` default
+  inherited and overridden per interface / neighbour. Echo is
+  configurable on OSPFv2/v3, IS-IS, and single-hop eBGP (BGP echo is
+  inert on multihop sessions — RFC 5883 has no Echo); the IS-IS
+  attachment additionally pins a BFD-Down neighbour below `Up`
+  (RFC 5882 §3.2 hold-down — see
+  [IS-IS BFD](ch-07-03-isis-bfd.md#hold-down-while-bfd-is-down)).
+  **In-kernel expiration detection** (`detect-offload`,
+  RFC 5880 §6.8.4 evaluated in an XDP `bpf_timer` — see
+  [Offloading expiration detection](#offloading-expiration-detection-detect-offload)),
+  configurable on OSPFv2/v3 interfaces.
 - **Not yet:** configurable control-packet timers (the intervals are
   fixed at the defaults); BFD for **static routes**; per-VRF OSPF BFD;
-  a BFD `profile` mechanism.
+  a BFD `profile` mechanism; `detect-offload` on IS-IS and BGP
+  attachments (the subsystem supports it; the per-protocol knob is the
+  follow-up).

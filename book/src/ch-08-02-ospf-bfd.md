@@ -38,9 +38,10 @@ The same `bfd {}` leaves can also be set once at the **instance level**
 |---|---|---|---|
 | `enable` | boolean | `false` | Attach (or detach) BFD for neighbours on this interface. |
 | `min-neighbor-state` | `two-way` \| `full` | `two-way` | Neighbour state at which the session starts / stops. |
-| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop IPv4 sessions, choosing which half is active. |
+| `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's sessions (IPv4 on OSPFv2, IPv6 on OSPFv3), choosing which half is active. |
 | `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
 | `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
+| `detect-offload` | boolean | `false` | [Offload expiration detection](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload) to the in-kernel (XDP) watchdog once the session is Up. |
 
 Sessions use the BFD defaults (300 ms / ×3 ⇒ ~900 ms detection); the
 timers are not currently tunable — see
@@ -78,9 +79,11 @@ router ospf {
 ## Echo
 
 `echo-mode` turns on the [BFD Echo function](ch-10-00-bfd.md#echo-function) for
-this interface's sessions — single-hop IPv4 only (OSPFv2; on OSPFv3 the leaf is
-accepted but inert, since Echo has no IPv6 form here). The two halves are
-independent (RFC 5880 §6.4), backed by the per-interface `xdp-bfd-echo` helper:
+this interface's sessions — single-hop only, both address families: IPv4 on
+OSPFv2, and on OSPFv3 the Echo session runs over the same IPv6 link-local pair
+as the control session. The two halves are independent (RFC 5880 §6.4), backed
+by the per-interface `xdp-bfd-echo` helper, whose XDP program handles IPv4 and
+IPv6 frames alike:
 
 - **`receive`** — advertise a non-zero Required Min Echo RX and loop the peer's
   Echo back (the *peer* gets fast detection).
@@ -109,6 +112,47 @@ OSPF Hello/Dead timers. The helper needs `cap_net_admin,cap_bpf,cap_net_raw`
 and a kernel with XDP + `bpf_timer` support; if it can't start, the session
 stays up on control packets and advertises echo-rx `0`. `show bfd peers` shows
 the negotiated `Echo receive interval` / `Echo transmission interval`.
+
+## Offloading expiration detection
+
+`detect-offload true` moves the RFC 5880 §6.8.4 detection timer — the
+clock that drives the session `Down` when the neighbour's control
+packets stop arriving — into the kernel, via the same per-interface
+`xdp-bfd-echo` helper that backs Echo. The XDP program re-arms a
+per-session `bpf_timer` on every arriving control packet and the expiry
+fires in softirq, so detection neither false-fires because the daemon
+was busy (packets queued but unprocessed) nor waits on its event loop.
+The daemon still processes every packet normally; only the liveness
+timing is offloaded. See
+[the overview](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload)
+for the mechanism and guard-rails.
+
+```
+router ospf {
+  area 0 {
+    interface eth0 {
+      bfd {
+        enable true;
+        detect-offload true;   // expiration detection in kernel/XDP
+      }
+    }
+  }
+}
+```
+
+The watchdog arms when the session reaches `Up` (and the helper is
+confirmed running) and disarms when it leaves `Up`; the ordinary
+userspace timer keeps running as a stretched backstop and takes over
+again if the helper dies. Works for both OSPFv2 and OSPFv3 (the
+sessions are single-hop, which is the offload's scope). Unlike Echo,
+it sends nothing on the wire — it only times what already arrives.
+
+`show bfd peers` confirms where detection runs:
+
+```
+    Detection timeout: 900ms
+    Detection runs in: kernel/XDP (900ms)
+```
 
 ## Instance-level defaults
 
@@ -144,7 +188,9 @@ OSPFv3 BFD is configured identically under `router ospfv3`. The session
 runs over the interface's IPv6 **link-local** addresses (the same
 addresses OSPFv3 sources its control packets from) and is demultiplexed
 per interface, so overlapping `fe80::` addresses on different links do
-not collide.
+not collide. The full leaf set applies: `echo-mode` runs IPv6 Echo over
+the same link-local pair, and `detect-offload` arms the in-kernel
+watchdog for the IPv6 control packets just as it does for IPv4.
 
 ## Verifying
 

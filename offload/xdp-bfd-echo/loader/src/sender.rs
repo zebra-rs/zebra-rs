@@ -20,8 +20,19 @@
 //! covered by a userspace bootstrap fallback: if the timer hasn't armed within
 //! the detection time of `echo-add`, the tick reports `echo-down` itself.
 //!
+//! The same engine also fronts the **control-packet expiration watchdog**
+//! (`detect-add <discr> <detect-us>` / `detect-del <discr>`): it seeds the
+//! XDP `CONTROL_TIMERS` map entry whose `bpf_timer` the program re-arms on
+//! every inbound BFD control packet for that discriminator, and the tick polls
+//! the entry's `down` flag, reporting `detect-down <discr>` when control
+//! packets stopped (RFC 5880 §6.8.4, evaluated in-kernel). There is no
+//! transmit half — the daemon keeps sending its own control packets — so this
+//! path needs no `AF_PACKET` socket. The same bootstrap fallback applies
+//! before the first packet arms the kernel timer.
+//!
 //! The `AF_PACKET` socket (which needs `CAP_NET_RAW`) is opened lazily on the
-//! first `echo-add`, so a reflector-only / standalone run never touches it.
+//! first `echo-add`, so a reflector-only / watchdog-only / standalone run
+//! never touches it.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -34,30 +45,45 @@ use aya::Pod;
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use log::{debug, warn};
 
-/// Userspace mirror of the eBPF `EchoState` value in the `ECHO_TIMERS` map.
-/// Byte-identical layout (`#[repr(C)]`, 32 bytes, 8-byte aligned). Userspace
-/// seeds an entry at `echo-add` with the `timer` zeroed (the kernel manages and
+/// Userspace mirror of the eBPF `DetectState` value shared by the
+/// `ECHO_TIMERS` and `CONTROL_TIMERS` maps. Byte-identical layout
+/// (`#[repr(C)]`, 32 bytes, 8-byte aligned). Userspace seeds an entry at
+/// `echo-add` / `detect-add` with the `timer` zeroed (the kernel manages and
 /// re-zeroes it; only XDP may `bpf_timer_init` it) and reads back `armed` /
 /// `down` each tick.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct EchoState {
+pub struct DetectState {
     /// Opaque kernel `struct bpf_timer` (`[u64; 2]`). Never touched here.
     timer: [u64; 2],
     /// Detection time in nanoseconds; the timer's re-arm delay (set by us).
     detect_ns: u64,
     /// 1 once XDP has init'd + started the timer (it took over detection).
     armed: u8,
-    /// 1 when the timer fired (returns stopped). Polled here, reset by XDP on
-    /// the next return.
+    /// 1 when the timer fired (tracked packets stopped). Polled here, reset by
+    /// XDP on the next observed packet.
     down: u8,
     _pad: [u8; 6],
 }
 
-// SAFETY: `EchoState` is `#[repr(C)]`, `Copy`, and contains only integer fields
-// with no padding beyond the explicit `_pad`, so it is safe to read/write as raw
-// bytes to/from a BPF map (the contract of `aya::Pod`).
-unsafe impl Pod for EchoState {}
+// SAFETY: `DetectState` is `#[repr(C)]`, `Copy`, and contains only integer
+// fields with no padding beyond the explicit `_pad`, so it is safe to
+// read/write as raw bytes to/from a BPF map (the contract of `aya::Pod`).
+unsafe impl Pod for DetectState {}
+
+impl DetectState {
+    /// A fresh entry to seed: zeroed timer (only XDP may init it), the
+    /// detection time, not yet armed, not down.
+    fn seed(detect: Duration) -> Self {
+        Self {
+            timer: [0, 0],
+            detect_ns: detect.as_nanos().min(u64::MAX as u128) as u64,
+            armed: 0,
+            down: 0,
+            _pad: [0; 6],
+        }
+    }
+}
 
 /// Tags our Echo payload so the RX path only ever matches our own frames (a
 /// peer's Echo carries the peer's own opaque payload). ASCII "zbfd".
@@ -106,6 +132,19 @@ struct EchoSession {
     down: bool,
 }
 
+/// One control-packet expiration watch, keyed by our local discriminator. The
+/// timing itself lives in the kernel (`CONTROL_TIMERS`); this is only what the
+/// poll loop needs: the bootstrap deadline and the reported-down latch.
+struct DetectWatch {
+    /// Detection time — the bootstrap fallback window from `added` until the
+    /// first observed control packet arms the kernel timer.
+    detect: Duration,
+    /// When `detect-add` (re)created this watch.
+    added: Instant,
+    /// `detect-down` already reported (don't re-report before `detect-del`).
+    down: bool,
+}
+
 pub struct EchoEngine {
     iface: String,
     ifindex: u32,
@@ -118,11 +157,16 @@ pub struct EchoEngine {
     local_ips_v6: BpfHashMap<MapData, In6Key, u8>,
     /// The XDP `ECHO_TIMERS` map (key = discriminator). We seed an entry per
     /// session and poll its `down`/`armed` flags; the kernel owns the timer.
-    timers: BpfHashMap<MapData, u32, EchoState>,
+    timers: BpfHashMap<MapData, u32, DetectState>,
+    /// The XDP `CONTROL_TIMERS` map (key = discriminator) — the control-packet
+    /// expiration watchdog. Same seed/poll contract as `timers`.
+    ctrl_timers: BpfHashMap<MapData, u32, DetectState>,
     /// Refcount of originating sessions per local IP (map entry added on first,
     /// removed on last).
     ip_refs: HashMap<IpAddr, u32>,
     sessions: HashMap<u32, EchoSession>,
+    /// Active control-packet expiration watches, keyed by discriminator.
+    detects: HashMap<u32, DetectWatch>,
 }
 
 impl EchoEngine {
@@ -130,7 +174,8 @@ impl EchoEngine {
         iface: &str,
         local_ips: BpfHashMap<MapData, u32, u8>,
         local_ips_v6: BpfHashMap<MapData, In6Key, u8>,
-        timers: BpfHashMap<MapData, u32, EchoState>,
+        timers: BpfHashMap<MapData, u32, DetectState>,
+        ctrl_timers: BpfHashMap<MapData, u32, DetectState>,
     ) -> Result<Self> {
         Ok(Self {
             ifindex: if_nametoindex(iface)?,
@@ -139,8 +184,10 @@ impl EchoEngine {
             local_ips,
             local_ips_v6,
             timers,
+            ctrl_timers,
             ip_refs: HashMap::new(),
             sessions: HashMap::new(),
+            detects: HashMap::new(),
         })
     }
 
@@ -200,6 +247,8 @@ impl EchoEngine {
     /// Handle one stdin line from zebra-rs.
     ///   `echo-add <discr> <local-ip> <peer-ip> <tx-us> <detect-mult>`
     ///   `echo-del <discr>`
+    ///   `detect-add <discr> <detect-us>`
+    ///   `detect-del <discr>`
     pub fn handle_command(&mut self, line: &str) {
         if let Err(e) = self.try_command(line) {
             warn!("bfd echo sender: bad command {line:?}: {e}");
@@ -222,6 +271,15 @@ impl EchoEngine {
                 let discr: u32 = it.next().context("discr")?.parse()?;
                 self.del(discr);
             }
+            Some("detect-add") => {
+                let discr: u32 = it.next().context("discr")?.parse()?;
+                let detect_us: u64 = it.next().context("detect-us")?.parse()?;
+                self.detect_add(discr, detect_us);
+            }
+            Some("detect-del") => {
+                let discr: u32 = it.next().context("discr")?.parse()?;
+                self.detect_del(discr);
+            }
             other => bail!("unknown command {other:?}"),
         }
         Ok(())
@@ -242,14 +300,7 @@ impl EchoEngine {
         // Seed the kernel detector. The timer stays zeroed (uninitialized) until
         // XDP arms it on the first return; the kernel re-zeroes the timer region
         // on this update regardless. `detect_ns` is the re-arm delay.
-        let st = EchoState {
-            timer: [0, 0],
-            detect_ns: detect.as_nanos().min(u64::MAX as u128) as u64,
-            armed: 0,
-            down: 0,
-            _pad: [0; 6],
-        };
-        if let Err(e) = self.timers.insert(discr, st, 0) {
+        if let Err(e) = self.timers.insert(discr, DetectState::seed(detect), 0) {
             warn!("bfd echo sender: ECHO_TIMERS insert discr={discr}: {e}");
         }
         self.sessions.insert(
@@ -290,10 +341,71 @@ impl EchoEngine {
         debug!("bfd echo sender: del discr={discr}");
     }
 
-    /// Periodic work: transmit due Echoes and poll the kernel detector. Emits
-    /// `echo-down <discr>` (once per failure) to `out`. No-op until the socket
-    /// is open (i.e. until the first session originates).
+    /// Start (or retune) the control-packet expiration watchdog for `discr`.
+    /// Re-issuing `detect-add` doubles as an update: replacing the map element
+    /// cancels any armed `bpf_timer` (the kernel frees embedded timers on
+    /// update) and re-enters the bootstrap window, which the `added` reset
+    /// below re-covers.
+    fn detect_add(&mut self, discr: u32, detect_us: u64) {
+        let detect = Duration::from_micros(detect_us.max(1));
+        if let Err(e) = self.ctrl_timers.insert(discr, DetectState::seed(detect), 0) {
+            warn!("bfd detect: CONTROL_TIMERS insert discr={discr}: {e}");
+        }
+        self.detects.insert(
+            discr,
+            DetectWatch {
+                detect,
+                added: Instant::now(),
+                down: false,
+            },
+        );
+        debug!("bfd detect: add discr={discr} detect={detect_us}us");
+    }
+
+    /// Stop watching `discr`. Removing the map entry frees its embedded
+    /// `bpf_timer` — the kernel cancels any pending fire.
+    fn detect_del(&mut self, discr: u32) {
+        if self.detects.remove(&discr).is_some() {
+            let _ = self.ctrl_timers.remove(&discr);
+            debug!("bfd detect: del discr={discr}");
+        }
+    }
+
+    /// Poll the control-packet expiration watchdog: report `detect-down`
+    /// (once per failure) when a session's kernel timer fired, or when no
+    /// control packet armed it within the bootstrap window.
+    fn tick_detect(&mut self, out: &mut impl Write) {
+        let now = Instant::now();
+        for (discr, w) in self.detects.iter_mut() {
+            if w.down {
+                continue;
+            }
+            let fired = match self.ctrl_timers.get(discr, 0) {
+                Ok(st) => st.down != 0 || (st.armed == 0 && now.duration_since(w.added) > w.detect),
+                // Entry vanished (shouldn't happen between add and del): treat
+                // as a bootstrap timeout so we don't silently stop detecting.
+                Err(_) => now.duration_since(w.added) > w.detect,
+            };
+            if fired {
+                w.down = true;
+                let _ = writeln!(out, "detect-down {discr}");
+                let _ = out.flush();
+            }
+        }
+    }
+
+    /// Periodic work: poll the expiration watchdog, then transmit due Echoes
+    /// and poll the Echo detector. Emits `echo-down` / `detect-down <discr>`
+    /// (once per failure) to `out`.
     pub fn tick(&mut self, out: &mut impl Write) {
+        // The watchdog half needs no socket — poll it even when Echo is idle
+        // (or when CAP_NET_RAW is missing).
+        self.tick_detect(out);
+        if self.sessions.is_empty() {
+            // No originating Echo session ⇒ don't open (or poll) the
+            // AF_PACKET socket at all.
+            return;
+        }
         let Some((fd, if_mac)) = self.io() else {
             return;
         };
@@ -721,6 +833,19 @@ mod tests {
         let pl = ETH_HLEN + IP_HLEN + UDP_HLEN;
         frame[pl] ^= 0xff; // corrupt the magic
         assert_eq!(parse_return(&frame), None);
+    }
+
+    /// The userspace mirror must stay byte-identical to the eBPF `DetectState`
+    /// (32 bytes, 8-byte aligned, timer at offset 0) — the kernel locates the
+    /// embedded `bpf_timer` by the BTF of the eBPF side, and we read/write the
+    /// value as raw bytes.
+    #[test]
+    fn detect_state_layout() {
+        assert_eq!(core::mem::size_of::<DetectState>(), 32);
+        assert_eq!(core::mem::align_of::<DetectState>(), 8);
+        let st = DetectState::seed(Duration::from_micros(900_000));
+        assert_eq!(st.detect_ns, 900_000_000);
+        assert_eq!((st.armed, st.down), (0, 0));
     }
 
     #[test]

@@ -441,8 +441,9 @@ impl<V: OspfVersion> Ospf<V> {
             None => return,
         };
         // Echo role + intervals. `echo-mode` selects which half is active; the
-        // BFD instance further gates Echo to single-hop IPv4 with a live
-        // reflector, so this is inert for v3 (IPv6). No `echo-mode` ⇒ Echo off.
+        // BFD instance further gates Echo to single-hop with a live reflector.
+        // Both families work — v2 sessions run IPv4 Echo, v3 sessions IPv6
+        // Echo over the link-local pair. No `echo-mode` ⇒ Echo off.
         let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
             Some(mode) => (
                 mode,
@@ -478,6 +479,7 @@ impl<V: OspfVersion> Ospf<V> {
             echo_mode,
             required_min_echo_rx_us: echo_rx_us,
             echo_transmit_us: echo_tx_us,
+            detect_offload: eff.detect_offload,
             ..crate::bfd::session::SessionParams::default()
         };
         let desired_params = desired.map(|_| params);

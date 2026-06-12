@@ -106,6 +106,14 @@ pub struct SessionParams {
     /// [`EchoMode::transmits`]. Clamped up to the peer's advertised
     /// `Required Min Echo RX` at send time (RFC 5880 §6.8.9).
     pub echo_transmit_us: u32,
+    /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
+    /// per-interface XDP helper once the session is Up: the kernel re-arms a
+    /// per-session `bpf_timer` on every arriving control packet and reports
+    /// `detect-down` when they stop — immune to daemon scheduling latency.
+    /// Single-hop only. The userspace detection timer stays armed as a
+    /// stretched backstop while the watchdog is active; see
+    /// `Bfd::detect_offload_reconcile`.
+    pub detect_offload: bool,
 }
 
 impl Default for SessionParams {
@@ -129,6 +137,9 @@ impl Default for SessionParams {
             echo_mode: EchoMode::Off,
             required_min_echo_rx_us: 0,
             echo_transmit_us: 0,
+            // Expiration detection runs in userspace unless explicitly
+            // offloaded — arming the kernel watchdog needs the helper.
+            detect_offload: false,
         }
     }
 }
@@ -197,6 +208,15 @@ pub struct Session {
     /// `echo-add`/`echo-del` exactly on the edges; see
     /// `Bfd::echo_originate_reconcile`.
     pub echo_originating: bool,
+    /// Configured intent to offload expiration detection to the per-interface
+    /// XDP helper (from `SessionParams`; updated live on re-Subscribe like the
+    /// Echo fields).
+    pub detect_offload: bool,
+    /// Detection time (microseconds) currently programmed into the in-kernel
+    /// expiration watchdog — 0 while detection runs in userspace. Non-zero
+    /// means a `detect-add` for this discriminator is outstanding at the
+    /// helper; see `Bfd::detect_offload_reconcile`.
+    pub kernel_detect_us: u32,
 
     /// UDP destination port to send to (3784 single-hop, 4784 multi-hop).
     pub dst_port: u16,
@@ -267,6 +287,8 @@ impl Session {
             echo_transmit_us: params.echo_transmit_us,
             echo_ready: false,
             echo_originating: false,
+            detect_offload: params.detect_offload,
+            kernel_detect_us: 0,
             remote_min_tx_us: 0,
             remote_min_rx_us: 0,
             remote_detect_mult: 0,
