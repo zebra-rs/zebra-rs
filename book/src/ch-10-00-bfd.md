@@ -247,7 +247,9 @@ session, shared by all sessions on that link, and stopped when the last one
 goes away. It needs
 `cap_net_admin,cap_bpf` (load/attach XDP) and `cap_net_raw` (the originator's
 raw socket); the packaged install grants these. A node with no Echo configured
-runs no helper and advertises `Required Min Echo RX Interval = 0`.
+runs no helper and advertises `Required Min Echo RX Interval = 0`. Deployment,
+attach modes, and troubleshooting are covered in
+[The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md).
 
 Echo is enabled per attachment — on OSPFv2/v3 and IS-IS interfaces, and on
 single-hop eBGP neighbours, where `echo-mode` selects the role
@@ -310,7 +312,9 @@ Notes and guard-rails:
   kernel without XDP/`bpf_timer`), detection simply stays in userspace.
   A watchdog-only helper needs `cap_net_admin,cap_bpf` (no `cap_net_raw`
   — there is no transmit half; the daemon keeps sending its own control
-  packets).
+  packets). See
+  [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md) for
+  requirements and troubleshooting.
 
 It is enabled per attachment, with the same per-interface /
 per-neighbour + instance-level inheritance as `echo-mode` — see
