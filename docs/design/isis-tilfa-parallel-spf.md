@@ -1,6 +1,9 @@
 # TI-LFA Parallel SPF Computation — Design (IS-IS first)
 
-Status: DRAFT for review (2026-06-12). Branch: `ti-lfa-scaling`.
+Status: ACCEPTED (2026-06-12). Branch: `ti-lfa-scaling`.
+Decisions: rayon substrate; default mode `serial`; **no redundant SPF
+in any mode** — serial is the sequential 2-SPF-per-target loop, not the
+legacy 3-SPF path (see §6.0, §15).
 
 ## 1. Problem
 
@@ -104,8 +107,8 @@ Per target, the work decomposes into jobs:
 
 ## 5. Execution substrate
 
-**Recommendation: rayon** (new workspace dependency, `rayon = "1"`),
-used *inside* `compute_spf`:
+**Decision: rayon** (new workspace dependency, `rayon = "1"`), used
+*inside* `compute_spf`:
 
 - The global rayon pool (lazily built, `available_parallelism` threads)
   gives a **process-wide hard ceiling**: L1 + L2 runs, VRF instances,
@@ -135,23 +138,41 @@ nested `par_iter` is used, so there is no rayon-deadlock surface.
 
 ## 6. The modes
 
-A fourth implicit mode, `serial`, is the **default** and is the
-*unmodified current code path* (per-target `spf::tilfa`, 3·N SPFs) —
-zero behavior change until an operator opts in, and a true A/B baseline.
+Per the locked decisions, **no mode performs a redundant SPF**: the
+P-space SPF (pure waste by I1) is gone everywhere, replaced by the
+shared per-`x` filters. The legacy 3-SPF path survives only as
+`spf::tilfa` — the self-contained single-destination reference used as
+the equivalence-test oracle and by OSPF until its conversion (§13).
 
 All modes return the same `BTreeMap<usize, Vec<RepairPath>>`
 (equivalence guaranteed — §9).
 
-### 6.1 Conservative — task per destination
+### 6.0 Serial (default) — sequential, no fan-out
 
-Closest to today's structure, no shared SPF work between tasks:
+The per-target computation run as a plain loop on the `compute_spf`
+thread:
 
 ```text
-precompute  p_sets[x] = P(x) for each distinct x        (filters, serial, cheap)
-par over targets t:
+precompute  p_sets[x] = P(x) for each distinct x        (filters, cheap)
+for each target t:
     q  = q_space_vertices(graph, t.d, [t.x])            ← SPF 1
-    pc = spf_calc(graph, s, [t.x], full_path, Normal)   ← SPF 2 (recomputed per target — the simplicity tradeoff)
-    emit (t.d, repair_from_parts(graph, s, p_sets[t.x], q, pc.get(t.d)))
+    pc = spf_calc(graph, s, [t.x], full_path, Normal)   ← SPF 2
+    emit (t.d, repair_from_parts(graph, s, p_sets[t.x], q, pc[t.d]))
+```
+
+`2·N` SPFs, one thread, rayon never engaged (the global pool is not
+even spun up on a default config). Identical results to today at ~⅔ the
+CPU. The switch from the legacy 3-SPF loop happens when IS-IS moves to
+`tilfa_compute` (PR-B); PR-A itself changes no behavior.
+
+### 6.1 Conservative — task per destination
+
+The serial loop's body executed with `par_iter` — same closure, no
+shared SPF work between tasks:
+
+```text
+precompute  p_sets[x]                                    (as in serial)
+par over targets t:  same body as serial                 (2 SPFs per task; PC recomputed per target — the simplicity tradeoff)
 ```
 
 `2·N` SPFs; concurrency `min(N, pool)`; tasks share only read-only
@@ -197,10 +218,13 @@ a shared box. `K = 1` ≈ serial-with-dedup (useful baseline). Memory:
 
 | mode | SPFs | max concurrent SPFs | shared state | peak extra memory |
 |---|---|---|---|---|
-| serial (default) | `3N` | 1 | — | 1 tree (transient) |
+| serial (default) | `2N` | 1 | read-only P-sets | 1 tree + 1 set (transient) |
 | conservative | `2N` | `min(N, pool)` | read-only P-sets | `W·(tree+set)` |
 | aggressive | `N+|X|` | `min(N, pool)` | P-sets + `|X|` PC trees | `|X|` trees + `W` sets |
 | sharding(K) | `N+|X|` | `min(K, pool)` | per-shard PC memo | `K·(tree+set)` |
+
+`sharding(1)` is the lowest-CPU single-threaded configuration
+(`N+|X|` SPFs, full dedup, no concurrency).
 
 `pool` = rayon global pool width (≈ cores), `W = min(N, pool)`.
 
@@ -211,12 +235,15 @@ a shared box. `K = 1` ≈ serial-with-dedup (useful baseline). Memory:
 - `spf/calc.rs` — extract the post-SPF tail of `spf::tilfa`
   (calc.rs:534-579: ECMP loop, first-hop-link extraction, `intersect`,
   `make_repair_list`) into
-  `repair_from_parts(graph, s, p, q, d_path: &Path) -> Vec<RepairPath>`;
-  add `p_space_from_spf(spf_result, x) -> BTreeSet<usize>` (the filter
-  body of `p_space_vertices`). `spf::tilfa` is reimplemented on top of
-  both — its public signature and behavior are unchanged (existing unit
-  tests pin this). Derive `PartialEq/Eq` on `RepairPath` + `SrSegment`
-  for equivalence tests.
+  `repair_from_parts(graph, s, p, q, pc_paths: &[Vec<usize>],
+  first_hop_links: &HashSet<(usize, u32)>) -> Vec<RepairPath>`
+  (slice/set parameters rather than `&Path` so both `pc_paths()`'s
+  cloned output and a borrowed tree entry feed it); add
+  `p_space_from_spf(spf_result, s, x) -> BTreeSet<usize>` (the filter
+  body of `p_space_vertices`, which is reimplemented on top).
+  `spf::tilfa` is reimplemented on top of both — its public signature
+  and behavior are unchanged (existing unit tests pin this). Derive
+  `PartialEq/Eq` on `RepairPath` + `SrSegment` for equivalence tests.
 - `spf/tilfa_par.rs` (new) —
   ```rust
   pub enum TilfaComputeMode { Serial, Conservative, Aggressive, Sharding(u16) }  // Default = Serial
@@ -230,9 +257,9 @@ a shared box. `K = 1` ≈ serial-with-dedup (useful baseline). Memory:
       mode: TilfaComputeMode,
   ) -> (BTreeMap<usize, Vec<RepairPath>>, TilfaStats)
   ```
-  Serial arm loops `spf::tilfa` per target — bit-for-bit today's
-  behavior. Group/bin-pack helpers (`group_by_x`, `lpt_binpack`) live
-  here with unit tests.
+  Serial arm is the conservative closure run on a plain iterator (§6.0)
+  — rayon stays untouched on default configs. Group/bin-pack helpers
+  (`group_by_x`, `lpt_binpack`) live here with unit tests.
 
 ### 7.2 `src/isis`
 
@@ -313,12 +340,17 @@ All modes must produce identical `tilfa_result`:
 
 Tests:
 
-- `spf` unit: for each fixture (`tilfa_graph`, `isis_lan_graph`,
+- PR-A oracle tests (`spf/calc.rs`): assert
+  `p_space_vertices(g, s, x) == p_space_from_spf(spf(g, s, full), s, x)`
+  for every candidate `x` on all three fixtures (pins I1), and that the
+  decomposed pipeline (`p_space_from_spf` + `q_space_vertices` +
+  `spf_calc(x-excluded)` + `repair_from_parts`) equals `spf::tilfa`
+  per destination (pins I2 + the extraction).
+- `spf` unit (PR-B): for each fixture (`tilfa_graph`, `isis_lan_graph`,
   `mixed_lan_p2p_graph`) plus a batch of LCG-generated random graphs
   (no new dev-dependency; no parallel duplicate edges), derive targets
-  IS-IS-style and assert
-  `tilfa_compute(mode) == tilfa_compute(Serial)` for conservative,
-  aggressive, sharding `K ∈ {1, 2, 7}`.
+  IS-IS-style and assert every mode equals the `spf::tilfa` reference
+  loop — serial, conservative, aggressive, sharding `K ∈ {1, 2, 7}`.
 - Planner unit: grouping, LPT balance, `K >` group count, single group.
 - BDD: extend `bdd/tests/features/isis_tilfa.feature` (or a sibling
   `@isis_tilfa_parallel` feature reusing its topology) with scenarios
@@ -367,14 +399,16 @@ plus a `tracing::debug!` line per run with the same fields. Stats ride
 
 ## 12. Rollout (small PRs)
 
-1. **PR-A — spf refactor, no behavior change**: extract
+1. **PR-A — spf refactor, no behavior change** (+ this doc): extract
    `repair_from_parts` + `p_space_from_spf`, derive `PartialEq`;
-   `spf::tilfa` reimplemented on top; existing tests pin equivalence.
+   `spf::tilfa` reimplemented on top; existing tests + new oracle
+   tests pin equivalence.
 2. **PR-B — modes + IS-IS wiring**: rayon dep, `spf/tilfa_par.rs`
    (modes, stats, planner helpers, equivalence tests), IS-IS
    `tilfa_targets` split, `SpfInput/SpfOutput` plumbing, YANG + config
-   handlers + `parse()` tests, show output. Default `serial` → no
-   behavior change unless configured.
+   handlers + `parse()` tests, show output. Default `serial` = the
+   2-SPF sequential loop (§6.0) — results identical, ~⅓ less CPU, no
+   concurrency unless configured.
 3. **PR-C — BDD + perf harness** (+ cross-link this doc).
 4. **Later — OSPF series** (§13), then optional follow-ups (§14).
 
@@ -403,15 +437,14 @@ v2/v3 pattern. The two `spawn_blocking` SPF sites (ospf/inst.rs:4781,
   changed).
 - Worker panic hardening (§11).
 
-## 15. Open questions for review
+## 15. Decisions (resolved 2026-06-12)
 
-1. **Substrate**: rayon (recommended) vs dependency-free
-   `std::thread::scope` pool?
-2. **Default mode**: `serial` (recommended for first release — zero
-   behavior change, true baseline) vs `conservative` out of the box?
-3. **Conservative fidelity**: as specified it runs 2 SPFs per target
-   (P comes from I1). Keeping a literal 3-SPFs-per-target variant only
-   preserves a redundant SPF — recommend not.
-4. **Shards default/range**: `8` / `1..256` reasonable?
-5. **Stats granularity**: merge legacy+MT2 stats (proposed) or render
-   per-topology lines?
+1. **Substrate**: rayon.
+2. **Default mode**: `serial`.
+3. **No redundant calculation in any mode**: conservative runs 2 SPFs
+   per target, and the same applies everywhere — `serial` is the
+   sequential 2-SPF loop (§6.0), aggressive/sharding additionally dedup
+   PC by `x`. The legacy 3-SPF path survives only as the `spf::tilfa`
+   reference API (test oracle; OSPF until §13 lands).
+4. **Shards default/range**: `8` / `1..256` (unobjected).
+5. **Stats granularity**: legacy+MT2 merged (unobjected).
