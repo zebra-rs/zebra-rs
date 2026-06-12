@@ -138,10 +138,9 @@ pub enum Message {
     /// adjacency onto its repair — one atomic kernel group-replace
     /// per group, independent of prefix count. The sender's normal
     /// SPF reconvergence then supersedes the bridge.
-    // Constructed by RibClient::protect_switch; the protocol-side
-    // callers are the phase-3/4 slices. The `expect` forces this
-    // annotation's removal the moment the first hook lands.
-    #[expect(dead_code)]
+    // Constructed by RibClient::protect_switch, whose own
+    // expect(dead_code) (callers land in phase 3/4) roots it — and
+    // the construction inside keeps this variant live with it.
     ProtectSwitch {
         addr: IpAddr,
     },
