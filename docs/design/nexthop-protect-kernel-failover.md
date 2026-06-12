@@ -23,7 +23,7 @@ paths for protected routes.
 | 2 — switchover op | #1377 | `Message::ProtectSwitch` + `GroupProtect.active` + atomic group re-send; revert-on-reassert |
 | 3 — IS-IS hook | #1378 | `process_bfd_down` emits `ProtectSwitch` per failed nexthop addr before SPF; `@tilfa_bfd` BDD for the link-up failure class |
 | 4 — OSPF hook | #1379 | `process_bfd_event` (generic v2+v3) emits `ProtectSwitch` via `OspfVersion::prefix_ip`; `@ospfv2_bfd_frr` + `@ospfv3_bfd_frr` BDD |
-| 5 — ECMP leg-level replace | — | per-leg repair on `Multi` primaries |
+| 5 — ECMP leg eviction | #1380 | TI-LFA skips ECMP destinations (surviving legs are the protection), so the fast path evicts the BFD-dead leg from kernel ECMP groups; `@ecmp_bfd_evict` BDD |
 
 ## 1. Problem
 

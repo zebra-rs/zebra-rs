@@ -267,6 +267,38 @@ impl NexthopMap {
             .collect()
     }
 
+    /// ECMP groups eligible for leg eviction on a BFD-detected
+    /// failure of `(table_id, addr)`: every `Multi` whose LIVE
+    /// membership still carries a member uni at that address.
+    /// Returns `(multi_gid, member_gid)` pairs.
+    ///
+    /// TI-LFA deliberately computes no repair for SPF-level ECMP
+    /// destinations — the surviving legs ARE the protection — so for
+    /// Multi nexthops the fast path is eviction, not a repair swap.
+    /// This intentionally covers Multi groups shared with routes the
+    /// caller didn't know about: they lose the same dead leg, which
+    /// is the correct outcome (design doc, shared-group note).
+    pub fn protect_evict_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<(usize, usize)> {
+        self.groups
+            .iter()
+            .flatten()
+            .filter_map(|grp| {
+                let Group::Multi(multi) = grp else {
+                    return None;
+                };
+                for (m, _w) in multi.valid.iter() {
+                    if let Some(uni) = self.get_uni(*m)
+                        && uni.table_id == table_id
+                        && uni.addr == addr
+                    {
+                        return Some((multi.gid(), *m));
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.set.get(set) {
             let update = self.groups.get_mut(gid)?;

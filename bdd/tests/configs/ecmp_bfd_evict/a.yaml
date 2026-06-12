@@ -1,0 +1,29 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: a-s
+  ipv4:
+    address: 10.1.0.2/30
+- if-name: a-d
+  ipv4:
+    address: 10.3.0.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: a
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+    - if-name: a-s
+      ipv4:
+        enable: true
+      metric: 1
+      bfd:
+        enable: true
+    - if-name: a-d
+      ipv4:
+        enable: true
+      metric: 1

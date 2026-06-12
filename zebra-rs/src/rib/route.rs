@@ -1658,7 +1658,7 @@ pub async fn protect_switch(
     fib: &FibHandle,
     table_id: u32,
     addr: IpAddr,
-) -> usize {
+) -> (usize, usize) {
     let candidates = nmap.protect_switch_candidates(table_id, addr);
     let mut switched = 0;
     for gid in candidates {
@@ -1675,7 +1675,42 @@ pub async fn protect_switch(
         }
         switched += 1;
     }
-    switched
+
+    // ECMP leg eviction (phase 5): TI-LFA computes no repair for
+    // SPF-level ECMP destinations — the surviving legs are the
+    // protection — so for Multi groups the fast path is dropping the
+    // dead leg from the kernel membership, one atomic replace per
+    // group. The failed member is marked invalid exactly as the
+    // link-down path would mark it (BFD is just another down
+    // detector), so the sync passes don't resurrect the leg before
+    // SPF replaces these routes; across the failure the member and
+    // group drain via refcnt and are recreated fresh on recovery.
+    let evict = nmap.protect_evict_candidates(table_id, addr);
+    for (_, member_gid) in evict.iter() {
+        if let Some(member) = nmap.get_mut(*member_gid) {
+            member.set_valid(false);
+        }
+    }
+    let mut evicted = 0;
+    for (gid, member_gid) in evict {
+        let Some(Group::Multi(multi)) = nmap.get_mut(gid) else {
+            continue;
+        };
+        multi.valid.retain(|(m, _)| *m != member_gid);
+        if multi.valid.is_empty() {
+            // Last leg died: there is nothing usable to re-send, and
+            // deleting the group would cascade-remove its routes out
+            // from under the route sync. Mark it invalid and let the
+            // teardown-driven SPF replace the routes (same blackhole
+            // window as before phase 5).
+            multi.set_valid(false);
+            continue;
+        }
+        let snapshot = Group::Multi(multi.clone());
+        fib.nexthop_add(&snapshot).await;
+        evicted += 1;
+    }
+    (switched, evicted)
 }
 
 fn resolve_nexthop_member(
@@ -2897,6 +2932,71 @@ mod tests {
             !gp.is_installed(),
             "pending re-install so the sync pass re-sends the group"
         );
+    }
+
+    /// Phase 5: a BFD-dead leg makes its ECMP groups eviction
+    /// candidates, keyed by the leg's (table, addr); the leg itself
+    /// is marked invalid so the sync passes can't resurrect it.
+    #[test]
+    fn protect_evict_candidates_match_ecmp_groups() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{GroupTrait, NexthopUni};
+        use super::super::{Group, Nexthop, NexthopMap, NexthopMulti};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let mut leg_a = NexthopUni::new("10.1.0.2".parse().unwrap(), 10, vec![]);
+        leg_a.ifindex_origin = Some(10);
+        let mut leg_b = NexthopUni::new("10.2.0.2".parse().unwrap(), 10, vec![]);
+        leg_b.ifindex_origin = Some(20);
+        let multi = NexthopMulti {
+            metric: 10,
+            nexthops: vec![leg_a, leg_b],
+            ..Default::default()
+        };
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Multi(multi);
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+        let Nexthop::Multi(multi) = &entry.nexthop else {
+            panic!("still Multi");
+        };
+        let (a_gid, b_gid, multi_gid) = (multi.nexthops[0].gid, multi.nexthops[1].gid, multi.gid);
+        assert_ne!(multi_gid, 0, "ECMP group allocated");
+
+        let addr_a: std::net::IpAddr = "10.1.0.2".parse().unwrap();
+        assert_eq!(
+            nmap.protect_evict_candidates(0, addr_a),
+            vec![(multi_gid, a_gid)]
+        );
+        assert!(
+            nmap.protect_evict_candidates(254, addr_a).is_empty(),
+            "other tables unaffected"
+        );
+        assert!(
+            nmap.protect_evict_candidates(0, "10.9.9.9".parse().unwrap())
+                .is_empty(),
+            "other gateways unaffected"
+        );
+
+        // Simulate the eviction state change the async path performs.
+        nmap.get_mut(a_gid).unwrap().set_valid(false);
+        if let Some(Group::Multi(m)) = nmap.get_mut(multi_gid) {
+            m.valid.retain(|(g, _)| *g != a_gid);
+        }
+        // The dead leg left the LIVE membership: no longer a candidate
+        // (idempotence), and the surviving leg is intact.
+        assert!(nmap.protect_evict_candidates(0, addr_a).is_empty());
+        let Some(Group::Multi(m)) = nmap.get(multi_gid) else {
+            panic!("multi group survives");
+        };
+        assert_eq!(m.valid.len(), 1);
+        assert!(m.valid.iter().any(|(g, _)| *g == b_gid));
+        assert_eq!(m.set.len(), 2, "configured membership untouched");
     }
 
     /// Kernel 6.8 drops seg6-inline traffic routed through a nexthop
