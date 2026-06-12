@@ -52,6 +52,16 @@ module zebra-bgp-transport {
      site in `peer_connect`. Operators using the FRR vocabulary get
      the flat form without giving up the IETF tree.";
 
+  revision 2026-06-12 {
+    description
+      "Add per-neighbor `ip-transparent` (presence container): set
+       IP_TRANSPARENT / IPV6_TRANSPARENT on the neighbor's TCP socket
+       so the session can use a local address the host does not own
+       (paired with `update-source`).";
+    reference
+      "FRR 10.4 `neighbor X ip-transparent` (FRRouting/frr PR #18789).";
+  }
+
   revision 2026-06-09 {
     description
       "Add per-neighbor `port <1-65535>` (TCP destination port used to
@@ -216,6 +226,49 @@ module zebra-bgp-transport {
       reference
         "RFC 4271: A Border Gateway Protocol 4 (BGP-4), Section 8
          (TCP port 179).";
+    }
+
+    container ip-transparent {
+      ext:help "Allow this session to use a local address the host does not own (with update-source)";
+      presence "Set IP_TRANSPARENT on this neighbor's TCP socket";
+      description
+        "When present, set the IP_TRANSPARENT (IPv4) / IPV6_TRANSPARENT
+         (IPv6) socket option on this neighbor's TCP socket. The option
+         lets the session bind to — and emit packets from — a local
+         address that is not configured on the host: normally the kernel
+         rejects a bind() to a non-local address and refuses a non-local
+         source on output; IP_TRANSPARENT (which requires CAP_NET_ADMIN)
+         bypasses both checks. The source address itself comes from
+         `update-source`, so the two are used together: update-source
+         names the address the host does not own, ip-transparent makes
+         the kernel accept it. On the active connect path the option is
+         applied only when `update-source` is also configured (matching
+         FRR); without it there is nothing for the option to liberate.
+         The option is also folded onto the BGP listening sockets while
+         any neighbor of that address family has it, so a passively
+         accepted session destined to a non-local address (e.g. one
+         steered to the daemon with TPROXY-style policy routing) can be
+         answered.
+
+         Typical uses: running bgpd in a container that peers as a
+         loopback address not plumbed inside that netns; hitless
+         takeover of a keepalived/VRRP virtual IP (pre-bind on the
+         standby, establish instantly after failover); a
+         bump-in-the-wire box terminating BGP with addresses owned by
+         the devices around it.
+
+         The option only liberates the local socket — the operator must
+         still arrange for return traffic destined to the non-local
+         address to reach the daemon (an AnyIP-style `ip route add
+         local … dev lo`, TPROXY/fwmark policy routing, or — for a VIP —
+         the peer simply not routing here until the VIP is owned).
+
+         A change on a live session bounces it (FRR `peer_change_reset`):
+         the option must be on the socket before bind()/connect(), so
+         only a reconnect can apply it.";
+      reference
+        "FRR 10.4 `neighbor X ip-transparent` (FRRouting/frr PR #18789).
+         Linux ip(7) IP_TRANSPARENT; ipv6(7) IPV6_TRANSPARENT.";
     }
 
     container disable-connected-check {

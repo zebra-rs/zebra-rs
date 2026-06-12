@@ -51,9 +51,9 @@ use crate::config::{Args, ConfigOp};
 /// field-wise `explicit.or(group)` via [`resolve_knob`]; when both are
 /// `None` the per-knob default applies. Presence-style knobs
 /// (`ttl-security`, `as-override`, `remove-private-as`,
-/// `enforce-first-as`, `disable-connected-check`, `allowas-in`) can
-/// only be stated "on" — exactly the expressiveness the per-neighbor
-/// YANG has.
+/// `enforce-first-as`, `disable-connected-check`, `ip-transparent`,
+/// `allowas-in`) can only be stated "on" — exactly the expressiveness
+/// the per-neighbor YANG has.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InheritableKnobs {
     pub passive: Option<bool>,
@@ -64,6 +64,7 @@ pub struct InheritableKnobs {
     pub tcp_mss: Option<u16>,
     pub password: Option<String>,
     pub disable_connected_check: Option<bool>,
+    pub ip_transparent: Option<bool>,
     pub policy_in: Option<String>,
     pub policy_out: Option<String>,
     pub prefix_set_in: Option<String>,
@@ -382,6 +383,34 @@ pub fn config_neighbor_group_disable_connected_check(
             resolve_knob(groups, &peer.config, |k| k.disable_connected_check).unwrap_or(false);
         super::config::apply_disable_connected_check(peer, want)
     });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> ip-transparent`
+/// (presence container).
+///
+/// Stores the opinion and re-resolves every member through the same
+/// apply ritual as the per-neighbor callback (diff-gate, start,
+/// bounce-if-live), then reconciles the listener flag — the group
+/// opinion alone counts toward the per-AF union so a dynamic
+/// (listen-range) member finds IP_TRANSPARENT on the listener before
+/// it materializes.
+pub fn config_neighbor_group_ip_transparent(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .ip_transparent = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.ip_transparent).unwrap_or(false);
+        super::config::apply_ip_transparent(peer, want)
+    });
+    super::config::apply_ip_transparent_refresh_all(bgp);
     Some(())
 }
 
@@ -924,6 +953,7 @@ pub(super) fn apply_inherited(
         tcp_mss: resolve_knob(groups, &peer.config, |k| k.tcp_mss),
         password: resolve_knob(groups, &peer.config, |k| k.password.clone()),
         disable_connected_check: resolve_knob(groups, &peer.config, |k| k.disable_connected_check),
+        ip_transparent: resolve_knob(groups, &peer.config, |k| k.ip_transparent),
         policy_in: resolve_knob(groups, &peer.config, |k| k.policy_in.clone()),
         policy_out: resolve_knob(groups, &peer.config, |k| k.policy_out.clone()),
         prefix_set_in: resolve_knob(groups, &peer.config, |k| k.prefix_set_in.clone()),
@@ -947,6 +977,7 @@ pub(super) fn apply_inherited(
         tcp_mss,
         password,
         disable_connected_check,
+        ip_transparent,
         policy_in,
         policy_out,
         prefix_set_in,
@@ -972,6 +1003,11 @@ pub(super) fn apply_inherited(
         peer,
         disable_connected_check.unwrap_or(false),
     );
+    // No listener-refresh outcome flag needed: the listener union folds
+    // group opinions in directly, so a peer↔group binding change alone
+    // never alters it — only the knob callbacks / group delete do, and
+    // those reconcile the listeners themselves.
+    bounce |= super::config::apply_ip_transparent(peer, ip_transparent.unwrap_or(false));
     super::config::apply_passive(peer, passive.unwrap_or(false));
     super::config::apply_allowas_in(peer, allowas_in);
     super::config::apply_as_override(peer, as_override.unwrap_or(false));
@@ -1042,6 +1078,10 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     if mss_refresh {
         super::config::apply_tcp_mss_refresh_all(bgp);
     }
+    // Unconditional (cheap, idempotent): this sweep also serves the
+    // group-delete cascade, where a deleted `ip-transparent` opinion
+    // must drop out of the listener union.
+    super::config::apply_ip_transparent_refresh_all(bgp);
     for addr in md5_addrs {
         super::config::apply_md5_refresh_for(bgp, addr);
     }

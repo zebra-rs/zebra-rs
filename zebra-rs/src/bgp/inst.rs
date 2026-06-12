@@ -1834,6 +1834,11 @@ impl Bgp {
         // not clamp the listener, so a passively-accepted peer would
         // otherwise negotiate the default MSS.
         super::config::apply_tcp_mss_refresh_all(self);
+        // And the listener IP_TRANSPARENT union (`ip-transparent`
+        // knobs that were configured before the bind), so a
+        // TPROXY-steered passive session to a non-local address can be
+        // accepted and answered.
+        super::config::apply_ip_transparent_refresh_all(self);
 
         Ok(())
     }

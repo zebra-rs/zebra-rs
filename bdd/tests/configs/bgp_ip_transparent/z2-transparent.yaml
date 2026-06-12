@@ -1,0 +1,27 @@
+# z2 with `ip-transparent` added (full restatement of z2-base): the
+# IP_TRANSPARENT socket option lets the kernel accept the bind() to the
+# non-local update-source 10.255.0.99 and emit the SYN with that source,
+# so the session to 10.0.0.1 establishes — peering as an address this
+# host does not own (FRR 10.4 `neighbor X ip-transparent`).
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      update-source: 10.255.0.99
+      ip-transparent: {}
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.2.2.2/32

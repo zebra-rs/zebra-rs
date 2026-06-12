@@ -67,7 +67,14 @@ pub fn set_min_ttl(fd: RawFd, is_ipv4: bool, min: u8) -> io::Result<()> {
 }
 
 /// Thin `setsockopt(2)` wrapper for a single `c_int`-valued option.
-fn setsockopt_int(fd: RawFd, level: c_int, optname: c_int, value: c_int) -> io::Result<()> {
+/// Shared with the sibling per-session socket-option modules
+/// (`super::transparent`).
+pub(super) fn setsockopt_int(
+    fd: RawFd,
+    level: c_int,
+    optname: c_int,
+    value: c_int,
+) -> io::Result<()> {
     let rc = unsafe {
         libc::setsockopt(
             fd,
