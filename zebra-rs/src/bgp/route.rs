@@ -9018,13 +9018,17 @@ impl Bgp {
     }
 
     /// Withdraw a redistributed IPv6 unicast route (the v6 counterpart of
-    /// [`Bgp::route_redist_withdraw`]). The v6 Loc-RIB `remove_v6` keys on
-    /// `(prefix, ident)` rather than the `remote_id` the v4 path uses, so
-    /// a prefix redistributed from more than one source shares one
-    /// originated row — acceptable for the common single-source case.
-    pub fn route_redist_withdraw_v6(&mut self, prefix: Ipv6Net) {
+    /// [`Bgp::route_redist_withdraw`]). Like the v4 path and the labeled
+    /// twins, the Loc-RIB row is keyed on `(ident, remote_id)` where
+    /// `remote_id` is the per-source discriminator from
+    /// [`Bgp::redist_remote_id`] — this used to pass a literal `0`, which
+    /// matches no redistributed source (Connected=1, Static=2, …), so the
+    /// withdraw was a silent no-op and a deleted route stayed originated
+    /// and advertised until the daemon restarted.
+    pub fn route_redist_withdraw_v6(&mut self, rtype: crate::rib::RibType, prefix: Ipv6Net) {
         let ident = ORIGINATED_PEER;
-        let removed = self.local_rib.remove_v6(prefix, 0, ident);
+        let remote_id = Self::redist_remote_id(rtype);
+        let removed = self.local_rib.remove_v6(prefix, remote_id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
