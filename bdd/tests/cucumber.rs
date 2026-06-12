@@ -1734,6 +1734,48 @@ async fn kernel_route_eventually_contains(
     );
 }
 
+/// Poll the namespace's daemon log (`logs/<scoped>.log`, where
+/// `start_zebra_rs` pointed --log-file) for a substring. This is how a
+/// scenario asserts on internal events that leave no stable external
+/// state — e.g. the fast-reroute switchover, whose kernel effect is
+/// superseded by SPF reconvergence within milliseconds while the log
+/// line is durable. Stacked given/when/then so utility use anywhere in
+/// a scenario can't trip the cucumber-rs keyword-context skip.
+#[given(expr = "daemon log in namespace {string} should eventually contain {string}")]
+#[when(expr = "daemon log in namespace {string} should eventually contain {string}")]
+#[then(expr = "daemon log in namespace {string} should eventually contain {string}")]
+async fn daemon_log_eventually_contains(world: &mut World, namespace: String, needle: String) {
+    let scoped = world.ns(&namespace);
+    let path = format!("logs/{}.log", scoped);
+    const ATTEMPTS: u32 = 30;
+    let mut last_len = 0usize;
+    for i in 0..ATTEMPTS {
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        if content.contains(&needle) {
+            println!("✓ daemon log {} contains '{}'", path, needle);
+            return;
+        }
+        last_len = content.len();
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    let tail: String = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    panic!(
+        "daemon log {} ({} bytes) did not contain '{}' after {} attempts; last lines:\n{}",
+        path, last_len, needle, ATTEMPTS, tail
+    );
+}
+
 /// Negative sibling: poll until `ip route show <prefix>` returns
 /// nothing — the route has been withdrawn from the kernel FIB.
 #[then(expr = "kernel route {string} in namespace {string} should eventually be gone")]

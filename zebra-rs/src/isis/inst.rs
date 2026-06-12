@@ -2479,6 +2479,16 @@ impl Isis {
                 "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
             );
         }
+        // Capture the neighbour's nexthop addresses BEFORE the teardown
+        // removes the entry — these are the exact keys SPF used for this
+        // adjacency's routes (v4: interface addrs from TLV 132, v6: the
+        // link-locals from TLV 232), i.e. the addresses the RIB's
+        // protection groups key their primaries on.
+        let mut failed_nhops: Vec<std::net::IpAddr> = Vec::new();
+        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id) {
+            failed_nhops.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
+            failed_nhops.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
+        }
         // Tear the adjacency but keep the BFD session probing. This clears any
         // prior hold-down pin, so set the pin afterwards.
         nbr_hold_timer_expire(&mut link, level, sys_id, false);
@@ -2487,6 +2497,16 @@ impl Isis {
         // if the neighbour entry is absent from `nbrs` at that point (race:
         // BFD Up fires before the next IIH re-creates the entry).
         link.state.bfd_holddown_nbr.insert(*key, (level, sys_id));
+        drop(link);
+        // Fast-reroute switchover (kernel-failover phase 3): rewire the
+        // pre-installed protection groups onto their TI-LFA repairs NOW,
+        // before the LSP regeneration / SPF / per-prefix reinstall pipeline
+        // even starts. One message per failed nexthop address; the RIB
+        // no-ops when nothing is protected. Channel ordering guarantees
+        // this lands before the post-convergence route updates.
+        for addr in failed_nhops {
+            let _ = self.ctx.rib.protect_switch(addr);
+        }
     }
 
     /// BFD session came Up: lift any hold-down pin for the neighbour so the
