@@ -1677,10 +1677,14 @@ pub(super) fn config_redistribute_ospf_match_type(
 
 /// Families `table-map` accepts today. The YANG augment attaches the
 /// leaf to every afi-safi list entry, so filter at the callback —
-/// returning `None` surfaces as a commit failure. v4 unicast only
-/// until the policy-apply path grows a v6 NLRI form.
+/// returning `None` surfaces as a commit failure. v4 + v6 unicast;
+/// the labeled / VPN / EVPN families install through their own paths
+/// and have no table-map hook.
 fn table_map_afi_valid(afi_safi: &AfiSafi) -> bool {
-    matches!((afi_safi.afi, afi_safi.safi), (Afi::Ip, Safi::Unicast))
+    matches!(
+        (afi_safi.afi, afi_safi.safi),
+        (Afi::Ip, Safi::Unicast) | (Afi::Ip6, Safi::Unicast)
+    )
 }
 
 /// `ident` slot a table-map binding uses on the policy watch
@@ -3343,14 +3347,18 @@ mod table_map_ident_tests {
         assert_eq!(table_map_ident_decode(999), None);
     }
 
-    /// v4 unicast is the only family the callback accepts today; the
+    /// v4 + v6 unicast are the families the callback accepts; the
     /// YANG augment attaches the leaf to every afi-safi entry, so the
     /// gate is what rejects the rest at commit time.
     #[test]
-    fn afi_gate_is_v4_unicast_only() {
+    fn afi_gate_is_unicast_only() {
         assert!(table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::Unicast)));
-        assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip6, Safi::Unicast)));
+        assert!(table_map_afi_valid(&AfiSafi::new(Afi::Ip6, Safi::Unicast)));
         assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::MplsVpn)));
+        assert!(!table_map_afi_valid(&AfiSafi::new(
+            Afi::Ip,
+            Safi::MplsLabel
+        )));
     }
 }
 

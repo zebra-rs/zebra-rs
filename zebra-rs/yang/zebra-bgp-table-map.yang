@@ -44,9 +44,9 @@ module zebra-bgp-table-map {
          references. Unlike those, a table-map whose policy does NOT
          resolve denies every install for the family (FRR parity:
          a missing referenced route-map filters everything).
-       - ipv4 unicast only today; the Rust callback rejects other
-         families at commit time. ipv6 follows once the policy-apply
-         path grows a v6 NLRI form.";
+       - ipv4 and ipv6 unicast; the Rust callback rejects the
+         labeled / VPN / EVPN families at commit time (they install
+         through their own paths and have no table-map hook).";
 
   reference
     "FRR bgpd `table-map WORD` under `address-family` —

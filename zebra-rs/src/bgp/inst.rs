@@ -2928,17 +2928,33 @@ impl Bgp {
     /// disappeared).
     pub(super) fn table_map_resync(&mut self, afi_safi: bgp_packet::AfiSafi) {
         use bgp_packet::{Afi, Safi};
-        // v4 unicast only today, matching `table_map_afi_valid`.
-        if (afi_safi.afi, afi_safi.safi) != (Afi::Ip, Safi::Unicast) {
-            return;
-        }
-        let winners: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = self
-            .local_rib
-            .v4
-            .1
-            .iter()
-            .map(|(p, best)| (p, best.clone()))
-            .collect();
+        // Unicast families only, matching `table_map_afi_valid`.
+        let afi = match (afi_safi.afi, afi_safi.safi) {
+            (afi @ (Afi::Ip | Afi::Ip6), Safi::Unicast) => afi,
+            _ => return,
+        };
+        // Snapshot the winners first — building the `BgpTop` below
+        // takes `&mut local_rib`.
+        let winners_v4: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = if afi == Afi::Ip {
+            self.local_rib
+                .v4
+                .1
+                .iter()
+                .map(|(p, best)| (p, best.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let winners_v6: Vec<(ipnet::Ipv6Net, super::route::BgpRib)> = if afi == Afi::Ip6 {
+            self.local_rib
+                .v6
+                .1
+                .iter()
+                .map(|(p, best)| (p, best.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let top = super::peer::BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
@@ -2957,8 +2973,11 @@ impl Bgp {
             vrf_transport_v6: None,
             lu_labels: None,
         };
-        for (prefix, best) in &winners {
+        for (prefix, best) in &winners_v4 {
             super::route::fib_install_v4(&top, *prefix, std::slice::from_ref(best));
+        }
+        for (prefix, best) in &winners_v6 {
+            super::route::fib_install_v6(&top, *prefix, std::slice::from_ref(best));
         }
     }
 
