@@ -430,102 +430,102 @@ module exec {
           }
         }
       }
+    }
 
-      container ospf {
-        ext:help "OSPF commands";
-        presence "OSPF instance";
+    container ospf {
+      ext:help "OSPF commands";
+      presence "OSPF instance";
+      leaf interface {
+        ext:help "OSPF interface";
+        type empty;
+      }
+      container neighbor {
+        ext:help "OSPF neighbor";
+        presence "OSPF neighbor";
+        leaf detail {
+          type empty;
+        }
+      }
+      container database {
+        ext:help "OSPF database";
+        presence "OSPF ddtabase";
+        leaf detail {
+          type empty;
+        }
+      }
+      leaf route {
+        type empty;
+      }
+      leaf graph {
+        type empty;
+      }
+      leaf spf {
+        type empty;
+      }
+      leaf ti-lfa {
+        ext:help "OSPF TI-LFA per-destination repair paths (graph-level view)";
+        type empty;
+      }
+      container repair-list {
+        ext:help "OSPF TI-LFA repair-list";
+        presence "OSPF repair-list";
+        leaf detail {
+          ext:help "OSPF repair-list detail (per-segment label breakdown)";
+          type empty;
+        }
+      }
+      leaf flex-algo {
+        ext:help "OSPF Flexible Algorithm (RFC 9350) state";
+        type empty;
+      }
+      leaf segment-routing {
+        type empty;
+      }
+      leaf graceful-restart {
+        ext:help "OSPF graceful-restart helper status";
+        type empty;
+      }
+      leaf checkpoint {
+        ext:help "OSPF graceful-restart checkpoint (on-disk state)";
+        type empty;
+      }
+      list vrf {
+        // Per-VRF OSPFv2 show. `show ospf vrf <name> <cmd>` is
+        // redirected by the config manager (it strips the
+        // `vrf <name>` selector via `vrf_redirect_split`) into the
+        // per-VRF task's show channel registered as
+        // `"ospf:vrf:<name>"`. The stripped command renders via the
+        // child's existing handlers; a bare `... vrf <name>` maps to
+        // the summary (`show ospf`).
+        ext:help "Per-VRF OSPFv2 instance";
+        ext:presence "Show this VRF's OSPFv2 summary";
+        key name;
+        leaf name {
+          ext:help "VRF name";
+          ext:dynamic "rib:vrf";
+          type string;
+        }
         leaf interface {
-          ext:help "OSPF interface";
+          ext:help "OSPF interfaces in this VRF";
           type empty;
         }
         container neighbor {
-          ext:help "OSPF neighbor";
+          ext:help "OSPF neighbors in this VRF";
           presence "OSPF neighbor";
           leaf detail {
             type empty;
           }
         }
         container database {
-          ext:help "OSPF database";
-          presence "OSPF ddtabase";
+          ext:help "OSPF database in this VRF";
+          presence "OSPF database";
           leaf detail {
             type empty;
           }
         }
         leaf route {
+          ext:help "OSPF routes in this VRF";
           type empty;
-        }
-        leaf graph {
-          type empty;
-        }
-        leaf spf {
-          type empty;
-        }
-        leaf ti-lfa {
-          ext:help "OSPF TI-LFA per-destination repair paths (graph-level view)";
-          type empty;
-        }
-        container repair-list {
-          ext:help "OSPF TI-LFA repair-list";
-          presence "OSPF repair-list";
-          leaf detail {
-            ext:help "OSPF repair-list detail (per-segment label breakdown)";
-            type empty;
-          }
-        }
-        leaf flex-algo {
-          ext:help "OSPF Flexible Algorithm (RFC 9350) state";
-          type empty;
-        }
-        leaf segment-routing {
-          type empty;
-        }
-        leaf graceful-restart {
-          ext:help "OSPF graceful-restart helper status";
-          type empty;
-        }
-        leaf checkpoint {
-          ext:help "OSPF graceful-restart checkpoint (on-disk state)";
-          type empty;
-        }
-        list vrf {
-          // Per-VRF OSPFv2 show. `show ip ospf vrf <name> <cmd>` is
-          // redirected by the config manager (it strips the
-          // `vrf <name>` selector via `vrf_redirect_split`) into the
-          // per-VRF task's show channel registered as
-          // `"ospf:vrf:<name>"`. The stripped command renders via the
-          // child's existing handlers; a bare `... vrf <name>` maps to
-          // the summary (`show ip ospf`).
-          ext:help "Per-VRF OSPFv2 instance";
-          ext:presence "Show this VRF's OSPFv2 summary";
-          key name;
-          leaf name {
-            ext:help "VRF name";
-            ext:dynamic "rib:vrf";
-            type string;
-          }
-          leaf interface {
-            ext:help "OSPF interfaces in this VRF";
-            type empty;
-          }
-          container neighbor {
-            ext:help "OSPF neighbors in this VRF";
-            presence "OSPF neighbor";
-            leaf detail {
-              type empty;
-            }
-          }
-          container database {
-            ext:help "OSPF database in this VRF";
-            presence "OSPF database";
-            leaf detail {
-              type empty;
-            }
-          }
-          leaf route {
-            ext:help "OSPF routes in this VRF";
-            type empty;
-          }
         }
       }
     }

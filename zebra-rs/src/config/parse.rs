@@ -1283,6 +1283,72 @@ mod tests {
         );
     }
 
+    /// The OSPFv2 show tree moved from `show ip ospf …` to a
+    /// top-level `show ospf …` (matching `show isis`); the legacy
+    /// `ip` spellings must no longer parse. OSPFv3 keeps
+    /// `show ipv6 ospf …`. Pinned with parse() tests because the
+    /// vtyctl show surface is garbage-tolerant: an unwired grammar
+    /// returns empty output instead of erroring.
+    #[test]
+    fn show_ospf_moved_out_of_show_ip() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show ospf", "/show/ospf", vec![]),
+            ("show ospf interface", "/show/ospf/interface", vec![]),
+            ("show ospf neighbor", "/show/ospf/neighbor", vec![]),
+            (
+                "show ospf neighbor detail",
+                "/show/ospf/neighbor/detail",
+                vec![],
+            ),
+            ("show ospf database", "/show/ospf/database", vec![]),
+            ("show ospf route", "/show/ospf/route", vec![]),
+            ("show ospf ti-lfa", "/show/ospf/ti-lfa", vec![]),
+            (
+                "show ospf graceful-restart",
+                "/show/ospf/graceful-restart",
+                vec![],
+            ),
+            ("show ospf vrf blue", "/show/ospf/vrf", vec!["blue"]),
+            (
+                "show ospf vrf blue route",
+                "/show/ospf/vrf/route",
+                vec!["blue"],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+
+        // The legacy `show ip ospf …` spellings are gone.
+        for cmd in [
+            "show ip ospf",
+            "show ip ospf neighbor",
+            "show ip ospf route",
+            "show ip ospf vrf blue",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+
+        // OSPFv3 is untouched by the move.
+        let (code, _comps, _state) =
+            parse("show ipv6 ospf neighbor", entry.clone(), None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "`show ipv6 ospf neighbor` must still parse"
+        );
+    }
+
     /// `show bgp ipv4 <tab>` surfaces the union arms of the key —
     /// the value hints and the `summary` keyword — instead of an
     /// opaque `<value:union>` hint.

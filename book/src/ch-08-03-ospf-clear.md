@@ -22,11 +22,11 @@ Use it to force a clean re-synchronisation after a suspected
 database or SPF anomaly without restarting the daemon.
 
 The argument is the neighbor's **Router-ID** — the value shown in the
-`Neighbor ID` column of `show ip ospf neighbor` — *not* the neighbor's
+`Neighbor ID` column of `show ospf neighbor` — *not* the neighbor's
 interface address:
 
 ```
-zebra# show ip ospf neighbor
+zebra# show ospf neighbor
 Neighbor ID     Pri State      Up Time   Dead Time Address       Interface ...
 10.0.0.2         64 Full/  -   2m13s     38s       10.0.12.2     eth1 ...
 

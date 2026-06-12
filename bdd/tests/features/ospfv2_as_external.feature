@@ -69,16 +69,16 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
 
     # --- All areas install the external prefix with the E2 metric (20). ---
     # Same metric on every observer proves type-2: external-metric only.
-    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "a" should contain "[20]"
-    And show command "show ip ospf route" in namespace "c" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "c" should contain "[20]"
+    Then show command "show ospf route" in namespace "a" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "a" should contain "[20]"
+    And show command "show ospf route" in namespace "c" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "c" should contain "[20]"
     # e is in area 0.0.0.1 — needs Type-4 from ABR a to find ASBR b.
-    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "e" should contain "[20]"
+    And show command "show ospf route" in namespace "e" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "e" should contain "[20]"
     # f is in area 0.0.0.2 — needs Type-4 from ABR c to find ASBR b.
-    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "f" should contain "[20]"
+    And show command "show ospf route" in namespace "f" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "f" should contain "[20]"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"
@@ -128,18 +128,18 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
     # --- E1 metric varies by observer distance to ASBR b. ---
     # b is in area 0. a-b and c-b and d-b all cost 10, so cost-to-b = 10.
     # E1 metric from backbone routers = 10 (intra-cost) + 20 (ext-metric) = 30.
-    Then show command "show ip ospf route" in namespace "a" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "a" should contain "[30]"
-    And show command "show ip ospf route" in namespace "c" should contain "[30]"
-    And show command "show ip ospf route" in namespace "d" should contain "[30]"
+    Then show command "show ospf route" in namespace "a" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "a" should contain "[30]"
+    And show command "show ospf route" in namespace "c" should contain "[30]"
+    And show command "show ospf route" in namespace "d" should contain "[30]"
     # e reaches b via a (cost 10) + Type-4 from a (a's SPF cost to b = 10) = 20.
     # E1 metric from e = 20 + 20 = 40.
-    And show command "show ip ospf route" in namespace "e" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "e" should contain "[40]"
+    And show command "show ospf route" in namespace "e" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "e" should contain "[40]"
     # f reaches b via c (cost 10) + Type-4 from c (c's SPF cost to b = 10) = 20.
     # E1 metric from f = 20 + 20 = 40.
-    And show command "show ip ospf route" in namespace "f" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "f" should contain "[40]"
+    And show command "show ospf route" in namespace "f" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "f" should contain "[40]"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"

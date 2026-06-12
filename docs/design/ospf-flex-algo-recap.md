@@ -95,7 +95,7 @@ first. OSPFv2 follows the standard RI/Ext-Link/Ext-Prefix Opaque LSAs.
 | #1093 | FAD TLV origination (`build_fad`) |
 | #1094 | Per-link ASLA on Ext-Link LSA (`build_link_asla`) |
 | #1096 | Per-algo Prefix-SID origination (Ext-Prefix LSA) |
-| #1095 | Per-algo SPF compute + `show ip ospf flex-algo` |
+| #1095 | Per-algo SPF compute + `show ospf flex-algo` |
 | #1097 | Per-algo IPv4 RIB (in-memory) |
 | #1098 | Per-algo Prefix-SID kernel MPLS-ILM install |
 

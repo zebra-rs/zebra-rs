@@ -36,8 +36,8 @@ Feature: clear ospf neighbor resets an OSPFv2 adjacency
     And I wait 30 seconds
     # The adjacency is Full and OSPF has installed the route to o2's
     # loopback, so the /32 is reachable end-to-end.
-    Then show command "show ip ospf neighbor" in namespace "o1" should contain "10.0.0.2"
-    And show command "show ip ospf neighbor" in namespace "o1" should contain "Full"
+    Then show command "show ospf neighbor" in namespace "o1" should contain "10.0.0.2"
+    And show command "show ospf neighbor" in namespace "o1" should contain "Full"
     And ping from "o1" to "10.0.0.2" should succeed
 
     # Clear the specific neighbor by its Router-ID (the "Neighbor ID"
@@ -46,7 +46,7 @@ Feature: clear ospf neighbor resets an OSPFv2 adjacency
     When I run "clear ospf neighbor 10.0.0.2" in namespace "o1"
     And I wait 25 seconds
     # It rebuilt: Full again and the loopback is reachable ...
-    Then show command "show ip ospf neighbor" in namespace "o1" should contain "Full"
+    Then show command "show ospf neighbor" in namespace "o1" should contain "Full"
     And ping from "o1" to "10.0.0.2" should succeed
     # ... and the up-time reset to under 35s. Had the clear been a
     # no-op the neighbor would have aged ~55s by now (30 + 25 since it
@@ -58,7 +58,7 @@ Feature: clear ospf neighbor resets an OSPFv2 adjacency
     # (same kill path, id = None); verify it too recovers end-to-end.
     When I run "clear ospf neighbor" in namespace "o1"
     And I wait 25 seconds
-    Then show command "show ip ospf neighbor" in namespace "o1" should contain "Full"
+    Then show command "show ospf neighbor" in namespace "o1" should contain "Full"
     And ping from "o1" to "10.0.0.2" should succeed
 
     # Teardown.

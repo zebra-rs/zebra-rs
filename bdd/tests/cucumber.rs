@@ -1438,7 +1438,7 @@ async fn restore_bfd_control_packets(world: &mut World, namespace: String) {
     println!("✓ Restored BFD control packets (UDP/3784) in {}", scoped);
 }
 
-/// Parse the OSPF `show ip ospf neighbor` up-time string (the
+/// Parse the OSPF `show ospf neighbor` up-time string (the
 /// `format_uptime` output: "0m08s", "1h02m03s", "1d02h03m") into whole
 /// seconds. Any hours/days component is far past the thresholds this
 /// test uses, so the coarse conversion is sufficient.
@@ -1464,7 +1464,7 @@ fn parse_ospf_uptime(s: &str) -> Option<u64> {
 }
 
 /// Assert an OSPFv2 neighbor's up-time is below a bound, read from
-/// `vtyctl show -j "show ip ospf neighbor"`. A freshly (re)formed
+/// `vtyctl show -j "show ospf neighbor"`. A freshly (re)formed
 /// adjacency has a small up-time; this is the deterministic proof that
 /// `clear ospf neighbor` actually destroyed and re-learned the
 /// neighbor instance rather than leaving it untouched (whose up-time
@@ -1477,12 +1477,12 @@ async fn ospf_neighbor_uptime_under(
     max_secs: u64,
 ) {
     let scoped = world.ns(&namespace);
-    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip ospf neighbor"])
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ospf neighbor"])
         .await
-        .expect("Failed to run show ip ospf neighbor");
+        .expect("Failed to run show ospf neighbor");
     let nbrs: serde_json::Value = serde_json::from_str(&output).unwrap_or_else(|e| {
         panic!(
-            "show ip ospf neighbor -j in {} was not valid JSON: {}\nfull output:\n{}",
+            "show ospf neighbor -j in {} was not valid JSON: {}\nfull output:\n{}",
             scoped, e, output
         )
     });

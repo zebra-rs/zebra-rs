@@ -78,33 +78,33 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
 
     # --- Adjacencies are Full on every link (the NSSA links only come
     #     up when the N-bit matches between a and c / a and d). ---
-    Then show command "show ip ospf neighbor" in namespace "a" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.2"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.3"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.4"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "10.0.0.1"
+    Then show command "show ospf neighbor" in namespace "a" should contain "Full"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.2"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.3"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.4"
+    And show command "show ospf neighbor" in namespace "c" should contain "Full"
+    And show command "show ospf neighbor" in namespace "c" should contain "10.0.0.1"
 
     # --- Type-7 inside the NSSA: d (plain internal router) installs the
     #     external prefix straight from c's Type-7, E2 metric [20]. ---
-    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "d" should contain "[20]"
+    And show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "d" should contain "[20]"
 
     # --- The headline: Type-7 -> Type-5 translation at the ABR. b is in
     #     the backbone only, so it can learn 192.168.1.0/24 ONLY as a
     #     translated Type-5 (the Type-7 never leaves the NSSA). Same E2
     #     metric [20], carried verbatim across the translation. ---
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "b" should contain "[20]"
+    And show command "show ospf route" in namespace "b" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "b" should contain "[20]"
 
     # --- ABR default-originate: a injects a default Type-7 into the
     #     NSSA, so both internal routers hold a 0.0.0.0/0. ---
-    And show command "show ip ospf route" in namespace "c" should contain "0.0.0.0/0"
-    And show command "show ip ospf route" in namespace "d" should contain "0.0.0.0/0"
+    And show command "show ospf route" in namespace "c" should contain "0.0.0.0/0"
+    And show command "show ospf route" in namespace "d" should contain "0.0.0.0/0"
 
     # --- NSSA still accepts Type-3: d learns the backbone loopback as an
     #     inter-area summary (it is not totally stubby). ---
-    And show command "show ip ospf route" in namespace "d" should contain "10.0.0.2/32"
+    And show command "show ospf route" in namespace "d" should contain "10.0.0.2/32"
 
     # --- End-to-end reachability. ---
     # Backbone host b reaches the NSSA-internal external prefix: the
@@ -154,14 +154,14 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I wait 60 seconds
 
     # --- The default Type-7 is still injected, so d holds a 0.0.0.0/0. ---
-    Then show command "show ip ospf route" in namespace "d" should contain "0.0.0.0/0"
+    Then show command "show ospf route" in namespace "d" should contain "0.0.0.0/0"
     # --- But the Type-3 summary for the backbone loopback is gone: in a
     #     totally-NSSA the ABR originates no summaries into the area. ---
-    And show command "show ip ospf route" in namespace "d" should not contain "10.0.0.2/32"
+    And show command "show ospf route" in namespace "d" should not contain "10.0.0.2/32"
     # --- Type-7 still floods in-area, and translation still reaches the
     #     backbone — `no-summary` touches only the inbound Type-3 path. ---
-    And show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "b" should contain "192.168.1.0/24"
     # --- d reaches the backbone loopback purely via the default route. ---
     And ping from "d" to "10.0.0.2" should succeed
 
@@ -202,11 +202,11 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I wait 60 seconds
 
     # --- Intra-NSSA Type-7 install is unchanged: d still learns it. ---
-    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
+    Then show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
     # --- But with translation disabled the prefix never reaches the
     #     backbone: b has no Type-5 for it and externals are not
     #     summarized as Type-3, so b must NOT contain the prefix. ---
-    And show command "show ip ospf route" in namespace "b" should not contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "b" should not contain "192.168.1.0/24"
 
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
@@ -246,13 +246,13 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     And I wait 60 seconds
 
     # --- d: intra-NSSA Type-7, E1 metric = cost(d->c) 20 + ext 20 = 40. ---
-    Then show command "show ip ospf route" in namespace "d" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "d" should contain "[40]"
+    Then show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "d" should contain "[40]"
     # --- b: translated Type-5 advertised by ABR a, E1 metric =
     #     cost(b->a) 10 + ext 20 = 30. The differing metric (30 vs 40)
     #     is the proof E1's distance term survives translation. ---
-    And show command "show ip ospf route" in namespace "b" should contain "192.168.1.0/24"
-    And show command "show ip ospf route" in namespace "b" should contain "[30]"
+    And show command "show ospf route" in namespace "b" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "b" should contain "[30]"
 
     When I stop zebra-rs in namespace "a"
     And I stop zebra-rs in namespace "b"
