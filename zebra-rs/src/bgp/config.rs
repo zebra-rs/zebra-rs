@@ -1672,7 +1672,7 @@ pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     if op.is_set() {
         let new = args.string()?;
         let tm = bgp.local_rib.table_map.entry(afi_safi).or_default();
-        let prior = std::mem::replace(&mut tm.name, Some(new.clone()));
+        let prior = tm.name.replace(new.clone());
         policy_attach_msgs(
             &bgp.policy_tx,
             ident,
