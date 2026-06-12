@@ -483,7 +483,7 @@ impl BgpVrf {
                 super::super::update_group::flush_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
-                    &mut self.attr_store,
+                    &self.tx,
                     &group_id,
                     &self.interface_addrs,
                 );
@@ -492,7 +492,27 @@ impl BgpVrf {
                 super::super::update_group::flush_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
+                    &self.tx,
                     &group_id,
+                );
+            }
+            Message::FlushDoneIpv4(group_id, deltas) => {
+                super::super::update_group::flush_done_ipv4(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &self.tx,
+                    &group_id,
+                    deltas,
+                    &self.interface_addrs,
+                );
+            }
+            Message::FlushDoneIpv6(group_id, deltas) => {
+                super::super::update_group::flush_done_ipv6(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &self.tx,
+                    &group_id,
+                    deltas,
                 );
             }
             Message::BgpLs { .. } => {

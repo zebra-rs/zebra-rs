@@ -75,6 +75,19 @@ pub enum Message {
     /// bucket, and ship to each member with split-horizon pruning.
     FlushUpdateGroupIpv4(super::update_group::UpdateGroupId),
     FlushUpdateGroupIpv6(super::update_group::UpdateGroupId),
+    /// A blocking-pool worker finished an update-group flush
+    /// (sharding plan Phase A.2): merge the counter deltas, release
+    /// the group's in-flight latch, replay withdraws parked during
+    /// the flight, and re-run the flush if the debounce timer fired
+    /// while the job was out.
+    FlushDoneIpv4(
+        super::update_group::UpdateGroupId,
+        super::update_group::UpdateGroupCounters,
+    ),
+    FlushDoneIpv6(
+        super::update_group::UpdateGroupId,
+        super::update_group::UpdateGroupCounters,
+    ),
     /// BGP Link-State (RFC 9552) objects produced by the local IS-IS task
     /// and pushed over the IS-IS→BGP channel. `add` are originated into the
     /// `bgp_ls` Loc-RIB; `withdraw` are removed. The IS-IS producer diffs
@@ -1410,7 +1423,7 @@ impl Bgp {
                 super::update_group::flush_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
-                    &mut self.attr_store,
+                    &self.tx,
                     &group_id,
                     &self.interface_addrs,
                 );
@@ -1419,7 +1432,27 @@ impl Bgp {
                 super::update_group::flush_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
+                    &self.tx,
                     &group_id,
+                );
+            }
+            Message::FlushDoneIpv4(group_id, deltas) => {
+                super::update_group::flush_done_ipv4(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &self.tx,
+                    &group_id,
+                    deltas,
+                    &self.interface_addrs,
+                );
+            }
+            Message::FlushDoneIpv6(group_id, deltas) => {
+                super::update_group::flush_done_ipv6(
+                    &mut self.update_groups,
+                    &mut self.peers,
+                    &self.tx,
+                    &group_id,
+                    deltas,
                 );
             }
             Message::BgpLs { add, withdraw } => {
