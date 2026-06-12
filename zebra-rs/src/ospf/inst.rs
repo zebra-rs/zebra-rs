@@ -117,6 +117,20 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// primary. A protection-testing knob; no effect when
     /// `ti_lfa_enabled` is off (there is no repair to promote).
     pub fast_reroute_backup_as_primary: bool,
+    /// `/router/ospf/fast-reroute/ti-lfa/compute-mode` — how the
+    /// per-destination TI-LFA computation is scheduled (serial
+    /// default; conservative/aggressive/sharding fan out on the rayon
+    /// pool). Joined with `ti_lfa_compute_shards` at SPF-input build
+    /// time. Results are identical across modes.
+    pub ti_lfa_compute_mode: spf::TilfaComputeModeConfig,
+    /// `/router/ospf/fast-reroute/ti-lfa/compute-shards` — hard upper
+    /// bound on TI-LFA parallelism, consulted only in sharding mode.
+    /// Default 8, matching the YANG default.
+    pub ti_lfa_compute_shards: u16,
+    /// TI-LFA compute telemetry for the most recent SPF run, stamped
+    /// by `apply_spf_result` like `spf_duration` (last-area-wins).
+    /// None until TI-LFA runs (and cleared when it is disabled).
+    pub tilfa_stats: Option<spf::TilfaStats>,
     /// Per-destination TI-LFA repair paths from the most recent SPF
     /// (keyed by destination vertex id), mirror of `spf_result`'s
     /// single-area snapshot. Produced graph-only on the SPF worker;
@@ -1043,6 +1057,10 @@ impl Ospf<Ospfv2> {
             spf_result: None,
             graph: None,
             ti_lfa_enabled: false,
+            ti_lfa_compute_mode: spf::TilfaComputeModeConfig::default(),
+            // Matches the YANG `default 8` on compute-shards.
+            ti_lfa_compute_shards: 8,
+            tilfa_stats: None,
             fast_reroute_backup_as_primary: false,
             tilfa_result: None,
             spf_flex_algo: BTreeMap::new(),
@@ -5050,6 +5068,10 @@ impl Ospf<Ospfv3> {
             spf_result: None,
             graph: None,
             ti_lfa_enabled: false,
+            ti_lfa_compute_mode: spf::TilfaComputeModeConfig::default(),
+            // Matches the YANG `default 8` on compute-shards.
+            ti_lfa_compute_shards: 8,
+            tilfa_stats: None,
             fast_reroute_backup_as_primary: false,
             tilfa_result: None,
             spf_flex_algo: BTreeMap::new(),
@@ -10639,6 +10661,9 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
         graph,
         source,
         ti_lfa_enabled: top.ti_lfa_enabled,
+        tilfa_mode: top
+            .ti_lfa_compute_mode
+            .with_shards(top.ti_lfa_compute_shards),
         flex_algos,
     })
 }
@@ -10654,12 +10679,14 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
         source,
         spf_result,
         tilfa_result,
+        tilfa_stats,
         duration,
         last,
         flex_algos,
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
+    top.tilfa_stats = tilfa_stats;
     ospf_event_trace!(
         top.tracing,
         Spf,
@@ -11588,6 +11615,10 @@ struct SpfInput {
     /// `/router/ospf/fast-reroute/ti-lfa` snapshot. Gates the
     /// graph-only TI-LFA repair computation on the worker.
     ti_lfa_enabled: bool,
+    /// TI-LFA compute scheduling (`compute-mode` + `compute-shards`
+    /// joined), snapshotted from config at build time so a mid-run
+    /// change cleanly applies to the next run.
+    tilfa_mode: spf::TilfaComputeMode,
     /// One per configured Flex-Algorithm: its FAD-filtered graph and
     /// source vertex (None if the algo's graph had no source).
     flex_algos: Vec<FlexAlgoSpfInput>,
@@ -11612,6 +11643,10 @@ pub struct SpfOutput {
     /// disabled. Resolved to MPLS labels + stamped onto the RIB on the
     /// main task in `apply_spf_result`.
     tilfa_result: BTreeMap<usize, Vec<spf::RepairPath>>,
+    /// TI-LFA compute telemetry, None when TI-LFA is disabled.
+    /// Stamped onto `Ospf::tilfa_stats` for `show ospf` / `show
+    /// ospfv3 summary`.
+    tilfa_stats: Option<spf::TilfaStats>,
     duration: Duration,
     last: Instant,
     flex_algos: Vec<FlexAlgoSpfOutput>,
@@ -11655,6 +11690,9 @@ fn build_spf_input(top: &mut Ospf, area_id: Ipv4Addr) -> Option<SpfInput> {
         graph,
         source,
         ti_lfa_enabled: top.ti_lfa_enabled,
+        tilfa_mode: top
+            .ti_lfa_compute_mode
+            .with_shards(top.ti_lfa_compute_shards),
         flex_algos,
     })
 }
@@ -11667,6 +11705,7 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         graph,
         source,
         ti_lfa_enabled,
+        tilfa_mode,
         flex_algos,
     } = input;
     let start = Instant::now();
@@ -11676,10 +11715,11 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
     // when off, the SPF primary RIB still installs — only the repair
     // backups are skipped. Resolution to MPLS labels happens on the
     // main task in `apply_spf_result` (it needs the LSDB).
-    let tilfa_result = if ti_lfa_enabled {
-        tilfa_repair_path(&graph, source, &spf_result)
+    let (tilfa_result, tilfa_stats) = if ti_lfa_enabled {
+        let (result, stats) = tilfa_repair_path(&graph, source, &spf_result, tilfa_mode);
+        (result, Some(stats))
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), None)
     };
 
     let flex_algos = flex_algos
@@ -11703,6 +11743,7 @@ fn compute_spf(input: SpfInput) -> SpfOutput {
         source,
         spf_result,
         tilfa_result,
+        tilfa_stats,
         duration,
         last,
         flex_algos,
@@ -11720,12 +11761,14 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
         source,
         spf_result,
         tilfa_result,
+        tilfa_stats,
         duration,
         last,
         flex_algos,
     } = output;
     top.spf_duration = Some(duration);
     top.spf_last = Some(last);
+    top.tilfa_stats = tilfa_stats;
     ospf_event_trace!(
         top.tracing,
         Spf,

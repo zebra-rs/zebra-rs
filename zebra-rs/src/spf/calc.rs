@@ -339,6 +339,10 @@ pub fn p_space_from_spf(spf: &BTreeMap<usize, Path>, s: usize, x: &[usize]) -> B
         .collect::<BTreeSet<_>>()
 }
 
+/// Self-contained P-space (runs its own SPF). Test-only since the
+/// protocol pipelines moved to `tilfa_compute` + `p_space_from_spf`;
+/// kept as part of the [`tilfa`] reference implementation.
+#[allow(dead_code)]
 pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize> {
     let spf = spf(graph, s, &SpfOpt::full_path());
     p_space_from_spf(&spf, s, x)
@@ -358,6 +362,11 @@ pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize>
         .collect::<BTreeSet<_>>()
 }
 
+/// Single-destination PC-path extraction (runs its own x-excluded
+/// SPF). Test-only since the protocol pipelines moved to
+/// `tilfa_compute`, which shares one tree per protected node; kept as
+/// part of the [`tilfa`] reference implementation.
+#[allow(dead_code)]
 pub fn pc_paths(
     graph: &Graph,
     s: usize,
@@ -600,7 +609,9 @@ pub fn repair_from_parts(
 /// implementation and oracle for the parallel pipeline, which avoids
 /// the per-destination P-space SPF ([`p_space_from_spf`] over the
 /// primary SPF result) and shares the PC SPF across destinations
-/// behind the same protected node.
+/// behind the same protected node. Test-only since both the IS-IS
+/// and OSPF pipelines moved to `tilfa_compute`.
+#[allow(dead_code)]
 pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
     let p_vertices = p_space_vertices(graph, s, x);
     let q_vertices = q_space_vertices(graph, d, x);

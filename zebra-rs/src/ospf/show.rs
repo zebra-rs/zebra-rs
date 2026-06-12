@@ -517,6 +517,21 @@ fn show_ospf(
     if let Some(spf_duration) = ospf.spf_duration {
         writeln!(buf, " Last SPF duration {} usecs", spf_duration.as_micros())?;
     }
+    // TI-LFA compute telemetry for the same run (last-area-wins, like
+    // `spf_duration`). None while TI-LFA is disabled.
+    if let Some(stats) = &ospf.tilfa_stats {
+        writeln!(
+            buf,
+            " TI-LFA compute: targets={} mode={} workers={} spf{{q={} pc={} dedup-saved={}}} took {} usecs",
+            stats.targets,
+            stats.mode,
+            stats.width,
+            stats.q_spf,
+            stats.pc_spf,
+            stats.pc_deduped,
+            stats.duration.as_micros(),
+        )?;
+    }
     // Per-area offload gates. The instance-level `spf_last` /
     // `spf_duration` above reflect the most-recent area's run
     // (`apply_spf_result` stamps the instance fields unconditionally);

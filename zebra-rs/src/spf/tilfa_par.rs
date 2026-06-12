@@ -64,6 +64,39 @@ impl std::fmt::Display for TilfaComputeMode {
     }
 }
 
+/// YANG mirror of the `fast-reroute/ti-lfa/compute-mode` leaf
+/// (payload-free — the sharding count lives in the sibling
+/// `compute-shards` leaf; [`Self::with_shards`] joins them into the
+/// scheduler-facing [`TilfaComputeMode`]). Shared by the IS-IS and
+/// OSPF config layers, which carry the same two leaves.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, strum_macros::EnumString, strum_macros::Display,
+)]
+pub enum TilfaComputeModeConfig {
+    #[default]
+    #[strum(serialize = "serial")]
+    Serial,
+    #[strum(serialize = "conservative")]
+    Conservative,
+    #[strum(serialize = "aggressive")]
+    Aggressive,
+    #[strum(serialize = "sharding")]
+    Sharding,
+}
+
+impl TilfaComputeModeConfig {
+    /// Combine with the `compute-shards` leaf value into the
+    /// scheduler-facing mode (the count only matters for sharding).
+    pub fn with_shards(self, shards: u16) -> TilfaComputeMode {
+        match self {
+            TilfaComputeModeConfig::Serial => TilfaComputeMode::Serial,
+            TilfaComputeModeConfig::Conservative => TilfaComputeMode::Conservative,
+            TilfaComputeModeConfig::Aggressive => TilfaComputeMode::Aggressive,
+            TilfaComputeModeConfig::Sharding => TilfaComputeMode::Sharding(shards),
+        }
+    }
+}
+
 /// One TI-LFA computation target, as planned by the protocol caller
 /// (IS-IS: `isis::tilfa::tilfa_targets`): a destination vertex and
 /// the protected vertex `x` (its primary first-hop node).

@@ -417,6 +417,10 @@ struct Ospfv3SummaryJson {
     link_count: usize,
     spf_last_ms_ago: Option<u128>,
     spf_duration_us: Option<u128>,
+    /// TI-LFA compute telemetry for the most-recent run, preformatted
+    /// (`targets=… mode=… workers=… spf{…} took … us`). None until
+    /// TI-LFA runs (and cleared when it is disabled).
+    tilfa_compute: Option<String>,
     /// Per-area SPF-offload gates. The instance-level
     /// `spf_last_ms_ago` / `spf_duration_us` reflect the most-recent
     /// area's run; these tell automation which area's worker is still
@@ -444,6 +448,18 @@ fn show_ospfv3_summary(
         link_count: top.links.len(),
         spf_last_ms_ago: top.spf_last.map(|t| t.elapsed().as_millis()),
         spf_duration_us: top.spf_duration.map(|d| d.as_micros()),
+        tilfa_compute: top.tilfa_stats.as_ref().map(|s| {
+            format!(
+                "targets={} mode={} workers={} spf{{q={} pc={} dedup-saved={}}} took {} us",
+                s.targets,
+                s.mode,
+                s.width,
+                s.q_spf,
+                s.pc_spf,
+                s.pc_deduped,
+                s.duration.as_micros(),
+            )
+        }),
         spf_offload_gates,
     };
     let mut text = String::new();
@@ -456,6 +472,9 @@ fn show_ospfv3_summary(
     }
     if let Some(us) = summary.spf_duration_us {
         writeln!(text, "  SPF duration: {} us", us)?;
+    }
+    if let Some(tilfa) = &summary.tilfa_compute {
+        writeln!(text, "  TI-LFA compute: {}", tilfa)?;
     }
     if !summary.spf_offload_gates.is_empty() {
         writeln!(text, "  SPF offload gates:")?;

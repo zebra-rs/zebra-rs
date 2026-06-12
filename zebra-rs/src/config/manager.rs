@@ -1358,6 +1358,10 @@ mod yang_load_tests {
             "set router isis fast-reroute ti-lfa compute-mode aggressive",
             "set router isis fast-reroute ti-lfa compute-mode sharding",
             "set router isis fast-reroute ti-lfa compute-shards 4",
+            "set router ospf fast-reroute ti-lfa compute-mode aggressive",
+            "set router ospf fast-reroute ti-lfa compute-shards 4",
+            "set router ospfv3 fast-reroute ti-lfa compute-mode sharding",
+            "set router ospfv3 fast-reroute ti-lfa compute-shards 2",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(
