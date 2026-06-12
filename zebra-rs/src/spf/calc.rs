@@ -320,9 +320,14 @@ pub fn path_has_x(path: &[usize], x: &[usize]) -> bool {
     path.iter().any(|p| x.contains(p))
 }
 
-pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize> {
-    let spf = spf(graph, s, &SpfOpt::full_path());
-
+/// P-space of `s` w.r.t. the excluded set `x`, derived from an
+/// already-computed full-path SPF tree rooted at `s` on the
+/// *unmodified* graph. The SPF that `p_space_vertices` runs internally
+/// is byte-identical to the primary reachability SPF (same graph, same
+/// root, same `SpfOpt::full_path()`), so callers that already hold
+/// that result — the IS-IS/OSPF TI-LFA pipelines — can apply this
+/// filter per `x` instead of paying one extra SPF per destination.
+pub fn p_space_from_spf(spf: &BTreeMap<usize, Path>, s: usize, x: &[usize]) -> BTreeSet<usize> {
     spf.iter()
         .filter_map(|(vertex, path)| {
             if *vertex == s {
@@ -332,6 +337,11 @@ pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize>
             if has_valid_paths { Some(*vertex) } else { None }
         })
         .collect::<BTreeSet<_>>()
+}
+
+pub fn p_space_vertices(graph: &Graph, s: usize, x: &[usize]) -> BTreeSet<usize> {
+    let spf = spf(graph, s, &SpfOpt::full_path());
+    p_space_from_spf(&spf, s, x)
 }
 
 pub fn q_space_vertices(graph: &Graph, d: usize, x: &[usize]) -> BTreeSet<usize> {
@@ -391,7 +401,7 @@ pub fn intersect(
     intersects
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SrSegment {
     NodeSid(usize),
     /// Adjacency SID. `via` carries the IS-IS LAN pseudonode that
@@ -506,7 +516,7 @@ pub fn make_repair_list(pc_inter: &[Intersect], s: usize, graph: &Graph) -> Vec<
     sr_segments
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RepairPath {
     /// Immediate nexthop node id on the post-convergence path —
     /// what the FIB needs to look up the local egress (ifindex /
@@ -526,18 +536,24 @@ pub struct RepairPath {
     pub segs: Vec<SrSegment>,
 }
 
-pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
-    let p_vertices = p_space_vertices(graph, s, x);
-    let q_vertices = q_space_vertices(graph, d, x);
-
-    // Run a SPF to get PC paths.
-    let (mut pc_paths, first_hop_links) = pc_paths(graph, s, d, x);
-
-    // PCPaths.
+/// Build the TI-LFA repair paths for one destination from
+/// already-computed parts: the P-space / Q-space vertex sets and the
+/// destination's PC paths + first-hop links out of the x-excluded SPF
+/// tree. Contains no SPF — this is the "reduce" step shared by
+/// [`tilfa`] and the parallel TI-LFA pipeline, which computes the
+/// parts once per protected node `x` instead of once per destination.
+pub fn repair_from_parts(
+    graph: &Graph,
+    s: usize,
+    p_vertices: &BTreeSet<usize>,
+    q_vertices: &BTreeSet<usize>,
+    pc_paths: &[Vec<usize>],
+    first_hop_links: &HashSet<(usize, u32)>,
+) -> Vec<RepairPath> {
     let mut repair_paths = vec![];
 
     // PC Paths could be ECMP.
-    for path in &mut pc_paths {
+    for path in pc_paths {
         // Skip empty PC Paths.
         if path.is_empty() {
             continue;
@@ -563,7 +579,7 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
         // field of the surrounding adjacency and emits AdjSid(prev, d)
         // for the final hop as part of the loop; the caller must not
         // strip D from the path or that emission is lost.
-        let pc_inter = intersect(path, &p_vertices, &q_vertices);
+        let pc_inter = intersect(path, p_vertices, q_vertices);
 
         // Convert PC intersects into repair list.
         let segs = make_repair_list(&pc_inter, s, graph);
@@ -577,6 +593,29 @@ pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> 
         repair_paths.push(repair_path);
     }
     repair_paths
+}
+
+/// Self-contained single-destination TI-LFA: three SPFs (P-space,
+/// Q-space, PC-path) plus the repair-list reduce. Reference
+/// implementation and oracle for the parallel pipeline, which avoids
+/// the per-destination P-space SPF ([`p_space_from_spf`] over the
+/// primary SPF result) and shares the PC SPF across destinations
+/// behind the same protected node.
+pub fn tilfa(graph: &Graph, s: usize, d: usize, x: &[usize]) -> Vec<RepairPath> {
+    let p_vertices = p_space_vertices(graph, s, x);
+    let q_vertices = q_space_vertices(graph, d, x);
+
+    // Run a SPF to get PC paths.
+    let (pc_paths, first_hop_links) = pc_paths(graph, s, d, x);
+
+    repair_from_parts(
+        graph,
+        s,
+        &p_vertices,
+        &q_vertices,
+        &pc_paths,
+        &first_hop_links,
+    )
 }
 
 use std::fmt::Write;
@@ -1205,6 +1244,54 @@ mod tests {
             seg_disp(&graph, &repair.segs[2]),
             "AdjSid(R2, R3, via PN_R2_R3)"
         );
+    }
+
+    /// I1 oracle: the SPF that `p_space_vertices` runs internally is
+    /// byte-identical to the primary reachability SPF (same graph,
+    /// same root, same `SpfOpt::full_path()`), so P-space must be
+    /// reproducible by filtering an already-computed primary SPF
+    /// result. The TI-LFA pipeline relies on this to drop the
+    /// per-destination P-space SPF entirely.
+    #[test]
+    fn p_space_from_spf_matches_p_space_vertices() {
+        for graph in [tilfa_graph(), isis_lan_graph(), mixed_lan_p2p_graph()] {
+            let s = 0;
+            let primary = spf(&graph, s, &SpfOpt::full_path());
+            for x in graph.keys().copied().filter(|x| *x != s) {
+                assert_eq!(
+                    p_space_vertices(&graph, s, &[x]),
+                    p_space_from_spf(&primary, s, &[x]),
+                    "P-space mismatch for x={x}"
+                );
+            }
+        }
+    }
+
+    /// I2 oracle: the PC-path SPF depends on (s, x) only — extracting
+    /// each destination's entry from one x-excluded SPF tree and
+    /// running `repair_from_parts` must reproduce `tilfa()` exactly.
+    /// The TI-LFA pipeline relies on this to share one PC SPF across
+    /// all destinations behind the same protected node.
+    #[test]
+    fn decomposed_pipeline_matches_tilfa() {
+        for graph in [tilfa_graph(), isis_lan_graph(), mixed_lan_p2p_graph()] {
+            let s = 0;
+            let primary = spf(&graph, s, &SpfOpt::full_path());
+            for x in graph.keys().copied().filter(|x| *x != s) {
+                let p = p_space_from_spf(&primary, s, &[x]);
+                let pc_tree = spf_calc(&graph, s, &[x], &SpfOpt::full_path(), &SpfDirect::Normal);
+                for d in graph.keys().copied().filter(|d| *d != s) {
+                    let q = q_space_vertices(&graph, d, &[x]);
+                    let got = pc_tree
+                        .get(&d)
+                        .map(|dp| {
+                            repair_from_parts(&graph, s, &p, &q, &dp.paths, &dp.first_hop_links)
+                        })
+                        .unwrap_or_default();
+                    assert_eq!(got, tilfa(&graph, s, d, &[x]), "mismatch for d={d} x={x}");
+                }
+            }
+        }
     }
 
     /// Direct-neighbor case: D is a direct neighbor of S in the
