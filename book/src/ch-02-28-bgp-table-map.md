@@ -35,7 +35,10 @@ Typical uses:
 ## Configuration
 
 `table-map` takes the name of a [policy](ch-05-00-policy.md) and sits
-directly under the global `afi-safi` entry, bare-leaf FRR-style:
+directly under the global `afi-safi` entry, bare-leaf FRR-style. Each
+address family binds its own policy independently — `afi-safi ipv4
+table-map A` and `afi-safi ipv6 table-map B` never see each other's
+routes. The IPv4 walk-through first:
 
 ```yaml
 prefix-set:
@@ -96,6 +99,51 @@ Remember the [policy control flow](ch-05-01-policy-control-flow.md):
 a policy ends in an implicit deny, so a table-map consisting only of
 deny entries filters *everything* — close with a bare `permit` entry
 (number 30 above) for "and install the rest".
+
+### IPv6
+
+The IPv6 binding is the same shape under `afi-safi ipv6`, and the
+policy matches v6 prefix-sets — `prefix-set` entries are
+family-agnostic, so a dedicated v6 policy is just one whose sets hold
+v6 prefixes:
+
+```yaml
+prefix-set:
+- name: DENY6
+  prefixes:
+  - prefix: 2001:db8:100::/48
+policy:
+- name: TMAP6
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix: DENY6
+  - number: 20
+    action: permit
+router:
+  bgp:
+    afi-safi:
+    - name: ipv6
+      table-map: TMAP6
+```
+
+```
+set router bgp afi-safi ipv6 table-map TMAP6
+```
+
+With this on a router also carrying the IPv4 table-map above, the two
+filters operate side by side: `2001:db8:100::/48` stays out of the v6
+kernel table while every v4 install follows TMAP, and removing one
+binding leaves the other untouched. Verification is the v6 spelling
+of the same disagreement — the prefix is present in `show bgp ipv6`
+but absent from `ip -6 route show`, and a `set med` lands as the
+kernel metric:
+
+```
+$ ip -6 route show 2001:db8:200::/48
+2001:db8:200::/48 via 2001:db8:12::1 dev z2-z1 proto bgp metric 50
+```
 
 ## Semantics
 
