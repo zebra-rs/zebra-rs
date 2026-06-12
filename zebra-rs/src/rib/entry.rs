@@ -99,6 +99,9 @@ impl RibEntry {
             Nexthop::List(pro) => pro
                 .iter_unis()
                 .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
+            Nexthop::Protect(pro) => pro
+                .iter_unis()
+                .any(|nhop| nmap.get(nhop.gid).is_some_and(|group| group.is_valid())),
             _ => false,
         }
     }
@@ -115,15 +118,12 @@ impl RibEntry {
         }
         if let Nexthop::List(pro) = &mut self.nexthop {
             for member in pro.nexthops.iter_mut() {
-                match member {
-                    NexthopMember::Uni(uni) => uni_group_sync(uni, nmap, fib).await,
-                    NexthopMember::Multi(multi) => {
-                        for uni in multi.nexthops.iter_mut() {
-                            uni_group_sync(uni, nmap, fib).await;
-                        }
-                        multi_group_sync(multi, nmap, fib).await;
-                    }
-                }
+                member_group_sync(member, nmap, fib).await;
+            }
+        }
+        if let Nexthop::Protect(pro) = &mut self.nexthop {
+            for member in pro.members_mut() {
+                member_group_sync(member, nmap, fib).await;
             }
         }
     }
@@ -148,17 +148,31 @@ impl RibEntry {
             }
             Nexthop::List(pro) => {
                 for member in &pro.nexthops {
-                    match member {
-                        NexthopMember::Uni(uni) => {
-                            self.handle_nexthop_group(nmap, fib, uni.gid).await;
-                        }
-                        NexthopMember::Multi(multi) => {
-                            self.handle_nexthop_group(nmap, fib, multi.gid).await;
-                            for uni in &multi.nexthops {
-                                self.handle_nexthop_group(nmap, fib, uni.gid).await;
-                            }
-                        }
-                    }
+                    self.member_nexthop_unsync(member, nmap, fib).await;
+                }
+            }
+            Nexthop::Protect(pro) => {
+                for member in pro.members() {
+                    self.member_nexthop_unsync(member, nmap, fib).await;
+                }
+            }
+        }
+    }
+
+    async fn member_nexthop_unsync(
+        &self,
+        member: &NexthopMember,
+        nmap: &mut NexthopMap,
+        fib: &FibHandle,
+    ) {
+        match member {
+            NexthopMember::Uni(uni) => {
+                self.handle_nexthop_group(nmap, fib, uni.gid).await;
+            }
+            NexthopMember::Multi(multi) => {
+                self.handle_nexthop_group(nmap, fib, multi.gid).await;
+                for uni in &multi.nexthops {
+                    self.handle_nexthop_group(nmap, fib, uni.gid).await;
                 }
             }
         }
@@ -189,6 +203,18 @@ async fn uni_group_sync(uni: &NexthopUni, nmap: &mut NexthopMap, fib: &FibHandle
     }
     fib.nexthop_add(group).await;
     group.set_installed(true);
+}
+
+async fn member_group_sync(member: &mut NexthopMember, nmap: &mut NexthopMap, fib: &FibHandle) {
+    match member {
+        NexthopMember::Uni(uni) => uni_group_sync(uni, nmap, fib).await,
+        NexthopMember::Multi(multi) => {
+            for uni in multi.nexthops.iter_mut() {
+                uni_group_sync(uni, nmap, fib).await;
+            }
+            multi_group_sync(multi, nmap, fib).await;
+        }
+    }
 }
 
 async fn multi_group_sync(multi: &NexthopMulti, nmap: &mut NexthopMap, fib: &FibHandle) {
