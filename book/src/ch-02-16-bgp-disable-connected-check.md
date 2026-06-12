@@ -101,7 +101,7 @@ set router bgp neighbor 10.255.0.2 disable-connected-check
 `update-source` is normally configured alongside it so the session sources
 from the loopback the neighbor expects. If that source is an address the
 host does not even own (container peering, a VRRP VIP), you additionally
-need [`ip-transparent`](ch-02-28-bgp-ip-transparent.md) — the two knobs
+need [`ip-transparent`](ch-02-29-bgp-ip-transparent.md) — the two knobs
 solve complementary halves: this one lifts the *neighbor-side* connected
 check, ip-transparent lifts the kernel's *local-side* non-local-bind
 check.

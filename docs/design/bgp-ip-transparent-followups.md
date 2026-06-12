@@ -4,7 +4,7 @@ Snapshot as of `main` ≈ commit `756426bb` (PR #1388 merged,
 2026-06-12). The per-neighbor `ip-transparent` knob (FRR 10.4 parity,
 FRRouting/frr PR #18789) is shipped end-to-end: YANG → config →
 sockets → neighbor-group inheritance → show → BDD → book
-(`book/src/ch-02-28-bgp-ip-transparent.md`). This memo records the
+(`book/src/ch-02-29-bgp-ip-transparent.md`). This memo records the
 design decisions a future session would otherwise re-derive, and the
 deliberately deferred slices.
 
