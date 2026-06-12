@@ -1582,7 +1582,16 @@ impl Rib {
                 let n =
                     super::route::protect_switch(&mut self.nmap, &self.fib_handle, table_id, addr)
                         .await;
-                tracing::info!("ProtectSwitch {addr} table {table_id}: {n} group(s) rewired");
+                // Distinct info line ONLY when something actually moved —
+                // the BDD log assertion keys on this exact phrasing, so a
+                // zero-candidate no-op must not be able to satisfy it.
+                if n > 0 {
+                    tracing::info!(
+                        "ProtectSwitch {addr} table {table_id}: rewired {n} protection group(s) onto repairs"
+                    );
+                } else {
+                    tracing::debug!("ProtectSwitch {addr} table {table_id}: no eligible groups");
+                }
             }
             Message::NexthopUnregister { proto, nh } => {
                 self.nht.unregister(&proto, nh);
