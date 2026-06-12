@@ -226,9 +226,21 @@ pub fn update_timers(peer: &mut Peer) {
             // deliver a Connected event for a session the FSM just
             // tore down (e.g. Event::Stop while connecting).
             peer.task.connect = None;
-            peer.task.writer = None;
-            peer.task.reader = None;
+            // Flush, don't abort, the writer: the transition into
+            // Idle often *just queued* a NOTIFICATION (Bad Peer AS,
+            // FSM error, hold-timer expiry) on its channel. Dropping
+            // packet_tx closes the channel; the detached writer
+            // drains the queue onto the wire and exits, so the FIN
+            // follows the NOTIFICATION. Aborting it here sent the
+            // FIN *instead of* the NOTIFICATION — the peer never
+            // learned why the session died, and a `local-as dual-as`
+            // peer never saw the Bad Peer AS that tells it to retry
+            // under its other AS number.
             peer.packet_tx = None;
+            if let Some(writer) = peer.task.writer.take() {
+                writer.detach();
+            }
+            peer.task.reader = None;
             peer.primary_role = None;
             peer.primary_conn_id = None;
             // A pending §6.8 collision conn is meaningless once the
