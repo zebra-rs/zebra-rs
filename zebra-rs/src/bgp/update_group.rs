@@ -134,6 +134,13 @@ pub struct UpdateGroupSig {
     /// (the common case). See [`RemovePrivateAsKey`] for why the mode
     /// and the kept AS must shard the group.
     pub remove_private_as: Option<RemovePrivateAsKey>,
+    /// Per-neighbor `local-as` substitute active on the session (eBGP
+    /// only; `None` when off or while the dual-as fallback presents
+    /// the global AS). The egress prepend becomes `substitute, real`
+    /// — or just `substitute` with `replace_as` — so peers under a
+    /// different substitute (or none) cannot share canonical UPDATE
+    /// bytes. `(substitute, replace_as)`.
+    pub local_as_substitute: Option<(u32, bool)>,
     // Negotiated wire-format capabilities (intersection of cap_send
     // and cap_recv on the peer). Anything that changes encoded
     // UPDATE bytes belongs here.
@@ -267,6 +274,16 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
                 replace_as: rpa.replace_as,
                 keep_as: peer.remote_as,
             })
+        } else {
+            None
+        },
+        // local-as changes what the egress prepend writes; fold the
+        // active substitute and the replace-as modifier into the key
+        // (eBGP only — iBGP never prepends, so the substitute is a
+        // no-op there and must not split iBGP groups).
+        local_as_substitute: if peer.is_ebgp() {
+            peer.change_local_as()
+                .map(|asn| (asn, peer.config.local_as.is_some_and(|la| la.replace_as)))
         } else {
             None
         },
@@ -1085,6 +1102,7 @@ mod tests {
             prefix_set_out_name: None,
             as_override_target: None,
             remove_private_as: None,
+            local_as_substitute: None,
             as4_negotiated: true,
             extended_message: true,
             addpath_send: false,
@@ -1157,6 +1175,20 @@ mod tests {
             replace_as: false,
             keep_as: 65003,
         });
+        assert_ne!(a, c);
+
+        let mut a = base.clone();
+        a.local_as_substitute = Some((64999, false));
+        assert_ne!(base, a);
+
+        // A different substitute, or the same substitute with
+        // replace-as flipped, writes a different egress AS_PATH and
+        // must shard the group.
+        let mut b = a.clone();
+        b.local_as_substitute = Some((64998, false));
+        assert_ne!(a, b);
+        let mut c = a.clone();
+        c.local_as_substitute = Some((64999, true));
         assert_ne!(a, c);
 
         let mut a = base.clone();

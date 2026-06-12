@@ -400,6 +400,40 @@ pub struct RemovePrivateAs {
     pub replace_as: bool,
 }
 
+/// Per-neighbor `local-as` (zebra-bgp-local-as.yang): present a
+/// substitute AS number to this neighbor instead of the router's
+/// global AS — the RFC 7705 AS-migration tool. The bare form changes
+/// three planes of the session:
+///
+/// - OPEN: the My-AS field (and the AS4 capability) carry
+///   [`Self::as_number`];
+/// - outbound eBGP updates: the real AS is prepended first, then the
+///   substitute (the receiver sees `substitute, real, …`);
+/// - inbound updates from this peer: the substitute is prepended at
+///   ingress so the rest of the network still sees the path through
+///   the old AS.
+///
+/// The three boolean modifiers are independent, one per plane
+/// (`no_prepend` = inbound, `replace_as` = outbound, `dual_as` =
+/// session); FRR's CLI nests them but its northbound model does not.
+/// `None` on [`PeerConfig`] disables the feature. The substitute must
+/// differ from the router's global AS (config-callback-enforced).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LocalAs {
+    /// The substitute AS presented to this neighbor.
+    pub as_number: u32,
+    /// Inbound: skip the ingress prepend of the substitute AS on
+    /// routes received from this neighbor.
+    pub no_prepend: bool,
+    /// Outbound: prepend only the substitute AS, hiding the real AS.
+    pub replace_as: bool,
+    /// Session: allow the neighbor to peer with either the real AS or
+    /// the substitute — a Bad Peer AS NOTIFICATION makes the next OPEN
+    /// retry with the other AS number (see
+    /// [`Peer::local_as_dual_fallback`]).
+    pub dual_as: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub transport: PeerTransportConfig,
@@ -485,6 +519,10 @@ pub struct PeerConfig {
     /// that forwards routes without prepending its AS. Ignored for iBGP
     /// peers (which never prepend). Default `false`.
     pub enforce_first_as: bool,
+    /// Per-neighbor `local-as` (zebra-bgp-local-as.yang). `None` runs
+    /// the session under the router's global AS; `Some` presents the
+    /// substitute AS to this neighbor (see [`LocalAs`]).
+    pub local_as: Option<LocalAs>,
 }
 
 impl Default for PeerConfig {
@@ -512,6 +550,7 @@ impl Default for PeerConfig {
             as_override: false,
             remove_private_as: None,
             enforce_first_as: false,
+            local_as: None,
         }
     }
 }
@@ -707,6 +746,14 @@ pub struct Peer {
     pub remote_id: Ipv4Addr,
     pub local_as: u32,
     pub remote_as: u32,
+    /// `local-as … dual-as` runtime state: `true` after a Bad Peer AS
+    /// NOTIFICATION flipped the session back to the router's global AS
+    /// (the neighbor's `remote-as` no longer expects the substitute).
+    /// The next Bad Peer AS flips it again, so the session oscillates
+    /// between the two until one is accepted — FRR's retry scheme.
+    /// Only consulted while `config.local_as` has `dual_as` set; reset
+    /// whenever the `local-as` configuration changes.
+    pub local_as_dual_fallback: bool,
     /// Local BGP speaker's hostname snapshot used to populate the FQDN
     /// capability in OPEN. Set at peer creation from `Bgp::hostname()`
     /// and refreshed by the global hostname callback so that re-opened
@@ -880,6 +927,7 @@ impl Peer {
             router_id,
             local_as,
             remote_as,
+            local_as_dual_fallback: false,
             local_hostname,
             address,
             ctx,
@@ -1033,6 +1081,26 @@ impl Peer {
 
     pub fn is_ibgp(&self) -> bool {
         self.peer_type.is_ibgp()
+    }
+
+    /// The active `local-as` substitute for this session, if any.
+    /// `None` when the knob is off — and also while the `dual-as`
+    /// fallback has flipped the session to the router's global AS, so
+    /// every consumer (OPEN, ingress/egress prepends, update-group
+    /// signature) degrades to normal behavior in lockstep, mirroring
+    /// FRR's `peer->change_local_as` toggling.
+    pub fn change_local_as(&self) -> Option<u32> {
+        match self.config.local_as {
+            Some(la) if !(la.dual_as && self.local_as_dual_fallback) => Some(la.as_number),
+            _ => None,
+        }
+    }
+
+    /// The AS number this session presents in its OPEN (My-AS field
+    /// and AS4 capability): the `local-as` substitute when active, the
+    /// router's global AS otherwise.
+    pub fn open_local_as(&self) -> u32 {
+        self.change_local_as().unwrap_or(self.local_as)
     }
 
     /// Egress IP TTL / IPv6 Hop Limit for this session, per the BGP TTL
@@ -1745,8 +1813,23 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
     State::OpenConfirm
 }
 
-pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, _packet: NotificationPacket) -> State {
+pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: NotificationPacket) -> State {
     peer.counter[BgpType::Notification as usize].rcvd += 1;
+    // `local-as … dual-as` (RFC 7705 migration aid): a Bad Peer AS
+    // means the neighbor's `remote-as` expects the other one of our
+    // two AS numbers — flip which one the next OPEN presents. FRR
+    // retries the same way on this NOTIFICATION (bgp_packet.c).
+    if packet.code == NotifyCode::OpenMsgError
+        && packet.sub_code == u8::from(OpenError::BadPeerAS)
+        && peer.config.local_as.is_some_and(|la| la.dual_as)
+    {
+        peer.local_as_dual_fallback = !peer.local_as_dual_fallback;
+        tracing::info!(
+            peer = %peer.display_name(),
+            "bgp: Bad Peer AS with local-as dual-as — next OPEN presents AS {}",
+            peer.open_local_as(),
+        );
+    }
     // NOTIFICATION on the collision conn just kills that conn; the
     // primary session is unaffected.
     if conn == ConnTag::Collision
@@ -2302,7 +2385,7 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         bgp_cap.mp.insert(*afi_safi, cap);
     }
     if peer.config.four_octet {
-        let cap = CapAs4::new(peer.local_as);
+        let cap = CapAs4::new(peer.open_local_as());
         bgp_cap.as4 = Some(cap);
     }
     if peer.config.route_refresh {
@@ -2357,7 +2440,13 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
     peer.param_tx.hold_time = hold_time;
     peer.param_tx.keepalive = hold_time / 3;
 
-    let open = OpenPacket::new(header, peer.local_as as u16, hold_time, &router_id, bgp_cap);
+    let open = OpenPacket::new(
+        header,
+        peer.open_local_as() as u16,
+        hold_time,
+        &router_id,
+        bgp_cap,
+    );
     let bytes: BytesMut = open.into();
     bytes
 }
@@ -3250,6 +3339,55 @@ mod fsm_idle_hold_tests {
             State::Established,
             "stale NOTIFICATION must be ignored"
         );
+    }
+
+    /// `local-as … dual-as`: a Bad Peer AS NOTIFICATION toggles which
+    /// of the two AS numbers the next OPEN presents (substitute ⇄
+    /// global), and a second one toggles back. Without `dual-as` the
+    /// substitute is pinned.
+    #[tokio::test]
+    async fn bad_peer_as_notification_toggles_dual_as_fallback() {
+        let bad_peer_as = || {
+            NotificationPacket::new(
+                NotifyCode::OpenMsgError,
+                OpenError::BadPeerAS.into(),
+                Vec::new(),
+            )
+        };
+        let mut peer = test_peer(false);
+        peer.config.local_as = Some(LocalAs {
+            as_number: 64999,
+            no_prepend: false,
+            replace_as: false,
+            dual_as: true,
+        });
+        assert_eq!(peer.open_local_as(), 64999);
+
+        fsm_bgp_notification(&mut peer, ConnTag::Primary, bad_peer_as());
+        assert_eq!(peer.open_local_as(), 65001, "fallback to the global AS");
+        assert!(
+            peer.change_local_as().is_none(),
+            "substitute fully inactive"
+        );
+
+        fsm_bgp_notification(&mut peer, ConnTag::Primary, bad_peer_as());
+        assert_eq!(peer.open_local_as(), 64999, "second toggle flips back");
+
+        // A non-Bad-Peer-AS NOTIFICATION must not touch the state.
+        let cease = NotificationPacket::new(NotifyCode::Cease, 0, Vec::new());
+        fsm_bgp_notification(&mut peer, ConnTag::Primary, cease);
+        assert_eq!(peer.open_local_as(), 64999);
+
+        // Without dual-as the substitute is pinned.
+        peer.config.local_as = Some(LocalAs {
+            as_number: 64999,
+            no_prepend: false,
+            replace_as: false,
+            dual_as: false,
+        });
+        peer.local_as_dual_fallback = false;
+        fsm_bgp_notification(&mut peer, ConnTag::Primary, bad_peer_as());
+        assert_eq!(peer.open_local_as(), 64999);
     }
 
     /// A KEEPALIVE from a still-parked (unpromoted) collision conn is

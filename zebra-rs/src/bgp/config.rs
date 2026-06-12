@@ -19,7 +19,8 @@ use super::{
     BGP_PORT, Bgp,
     inst::Callback,
     peer::{
-        ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, PasswordEncoding, Peer, PeerType, RemovePrivateAs,
+        ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType,
+        RemovePrivateAs,
     },
     timer,
 };
@@ -786,6 +787,135 @@ fn config_enforce_first_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
     peer.config.enforce_first_as = want;
     false
+}
+
+/// Resolve the `local-as` entry the callbacks below may write to,
+/// enforcing the two commit-time rules from zebra-bgp-local-as.yang:
+/// the substitute must differ from the router's global AS (FRR's
+/// "Cannot have local-as same as BGP AS number"), and the list is
+/// single-instance — the YANG `max-elements 1` is not engine-enforced,
+/// so a second key is refused here with a warning and the
+/// first-configured entry wins (delete it before setting another).
+/// Returns the entry, seeded with all modifiers off when new, so the
+/// list-node and flag callbacks stay order-independent within a
+/// commit.
+fn local_as_entry(bgp_asn: u32, peer: &mut Peer, key: u32) -> Option<&mut LocalAs> {
+    if key == bgp_asn {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: cannot have local-as {key} same as the BGP AS number; ignoring",
+        );
+        return None;
+    }
+    if let Some(existing) = &peer.config.local_as
+        && existing.as_number != key
+    {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: local-as is single-instance (already {}); delete it before setting {key}",
+            existing.as_number,
+        );
+        return None;
+    }
+    Some(peer.config.local_as.get_or_insert(LocalAs {
+        as_number: key,
+        no_prepend: false,
+        replace_as: false,
+        dual_as: false,
+    }))
+}
+
+/// `set router bgp neighbor X local-as <ASN>` — the list node
+/// (zebra-bgp-local-as.yang): present the substitute AS to this
+/// neighbor. Creating or removing the entry changes the OPEN's My-AS
+/// field, so an already-running session is bounced with `Event::Stop`
+/// (the `clear ... hard` teardown) to renegotiate under the new AS; a
+/// peer still Idle picks it up on its first connect. The modifier
+/// leaves ride their own callbacks and do not bounce.
+fn config_local_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let key = args.u32();
+    let bgp_asn = bgp.asn;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        let changed = if op.is_set() {
+            let key = key?;
+            let before = peer.config.local_as;
+            local_as_entry(bgp_asn, peer, key)?;
+            peer.config.local_as != before
+        } else {
+            // Be liberal about the delete spelling: a keyed delete only
+            // removes the matching entry, an unkeyed one clears the lot
+            // (there is at most one).
+            match (key, peer.config.local_as) {
+                (Some(k), Some(existing)) if existing.as_number != k => false,
+                _ => peer.config.local_as.take().is_some(),
+            }
+        };
+        if !changed {
+            return Some(());
+        }
+        // The substitute the session presents changed — restart the
+        // dual-as retry state from the configured side.
+        peer.local_as_dual_fallback = false;
+        peer.start();
+        (peer.ident, !matches!(peer.state, super::peer::State::Idle))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// Shared body for the three `local-as` modifier leaves
+/// (`no-prepend` / `replace-as` / `dual-as`): boolean, default false,
+/// keyed by the list's AS number. A Set writes the flag (seeding the
+/// entry when the flag line lands before the list node within a
+/// commit); a Delete reverts it to false. No session bounce — the
+/// modifiers steer route processing and the retry policy, not the
+/// OPEN itself.
+fn config_local_as_flag(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    write: impl Fn(&mut LocalAs, bool),
+) -> Option<()> {
+    let addr = args.addr()?;
+    let key = args.u32()?;
+    let bgp_asn = bgp.asn;
+    let peer = bgp.peers.get_mut(&addr)?;
+    if op.is_set() {
+        let flag = args.boolean()?;
+        let entry = local_as_entry(bgp_asn, peer, key)?;
+        write(entry, flag);
+    } else {
+        // Revert to the default without seeding: a flag delete must
+        // not resurrect an entry the same commit already removed.
+        let entry = peer
+            .config
+            .local_as
+            .as_mut()
+            .filter(|la| la.as_number == key)?;
+        write(entry, false);
+    }
+    // Any local-as edit restarts the dual-as retry from the
+    // configured side.
+    peer.local_as_dual_fallback = false;
+    Some(())
+}
+
+fn config_local_as_no_prepend(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_local_as_flag(bgp, args, op, |la, v| la.no_prepend = v)
+}
+
+fn config_local_as_replace_as(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_local_as_flag(bgp, args, op, |la, v| la.replace_as = v)
+}
+
+fn config_local_as_dual_as(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_local_as_flag(bgp, args, op, |la, v| la.dual_as = v)
 }
 
 /// `set router bgp neighbor X bfd enable true|false` — flips the
@@ -3320,6 +3450,14 @@ impl Bgp {
         // left-most AS_PATH segment begins with the neighbor's own AS
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
+
+        // Per-neighbor local-as (zebra-bgp-local-as.yang): a
+        // single-entry list keyed by the substitute AS number, with
+        // three independent boolean modifier leaves.
+        self.callback_peer("/local-as", config_local_as);
+        self.callback_peer("/local-as/no-prepend", config_local_as_no_prepend);
+        self.callback_peer("/local-as/replace-as", config_local_as_replace_as);
+        self.callback_peer("/local-as/dual-as", config_local_as_dual_as);
     }
 }
 
