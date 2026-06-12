@@ -70,37 +70,19 @@ impl PeerMap {
         self.peers[idx].take()
     }
 
-    /// Iterate over peers keyed by remote address. Interface-keyed
-    /// peers (when they exist) are skipped — use [`Self::iter_all`]
-    /// for full iteration including those.
-    pub fn iter(&self) -> impl Iterator<Item = (&IpAddr, &Peer)> {
-        self.map.iter().filter_map(move |(key, &idx)| match key {
-            PeerKey::Addr(addr) => self.peers[idx].as_ref().map(|peer| (addr, peer)),
-            PeerKey::Interface(_) => None,
-        })
-    }
+    // NOTE: there is deliberately no addr-only `iter()`/`iter_mut()`.
+    // Both existed and were a recurring trap: they silently skipped
+    // `PeerKey::Interface` (IPv6 unnumbered) peers, which excluded
+    // those sessions from show output, config sweeps, and — worst —
+    // the entire incremental advertise fan-out. All-peers walks must
+    // use [`Self::iter_all`] / [`Self::iter_mut_all`]; addr-keyed
+    // lookups go through [`Self::get`] / [`Self::keys`].
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&IpAddr, &mut Peer)> {
-        let map = &self.map;
-        self.peers
-            .iter_mut()
-            .enumerate()
-            .filter_map(move |(idx, slot)| {
-                let peer = slot.as_mut()?;
-                map.iter()
-                    .find(|(_, mapped_idx)| **mapped_idx == idx)
-                    .and_then(|(key, _)| match key {
-                        PeerKey::Addr(addr) => Some((addr, peer)),
-                        PeerKey::Interface(_) => None,
-                    })
-            })
-    }
-
-    /// Iterate every peer regardless of key variant. Unlike
-    /// [`Self::iter`], this includes `PeerKey::Interface` (IPv6
-    /// unnumbered) peers — `show ip bgp neighbors` needs them so an
-    /// operator can observe an interface-keyed session whose remote
-    /// link-local address isn't something they can name.
+    /// Iterate every peer regardless of key variant, including
+    /// `PeerKey::Interface` (IPv6 unnumbered) peers — `show ip bgp
+    /// neighbors` needs them so an operator can observe an
+    /// interface-keyed session whose remote link-local address isn't
+    /// something they can name.
     pub fn iter_all(&self) -> impl Iterator<Item = (&PeerKey, &Peer)> {
         self.map
             .iter()
@@ -171,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_with_interface_key_does_not_appear_in_iter() {
+    fn iter_all_includes_interface_keyed_peers() {
         let mut m = PeerMap::new();
         let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
         m.insert(a, make_peer(a));
@@ -180,7 +162,6 @@ mod tests {
             make_peer(Ipv4Addr::UNSPECIFIED.into()),
         );
 
-        assert_eq!(m.iter().count(), 1, "addr-only iter skips interface peer");
         assert_eq!(m.iter_all().count(), 2, "iter_all includes interface peer");
         assert_eq!(m.iter_mut_all().count(), 2, "iter_mut_all includes both");
         assert_eq!(m.len(), 2);

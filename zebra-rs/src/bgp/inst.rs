@@ -864,7 +864,7 @@ impl Bgp {
         }
         self.hostname = value;
         let resolved = self.hostname();
-        for (_, peer) in self.peers.iter_mut() {
+        for (_, peer) in self.peers.iter_mut_all() {
             peer.local_hostname = resolved.clone();
         }
     }
@@ -1226,7 +1226,7 @@ impl Bgp {
         }
 
         self.router_id = router_id;
-        for (_, peer) in self.peers.iter_mut() {
+        for (_, peer) in self.peers.iter_mut_all() {
             peer.router_id = router_id;
         }
 
