@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -209,6 +209,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub watched_locator: Option<String>,
     pub sr_locator: Option<crate::rib::Locator>,
     pub sr_end_sid: Option<std::net::Ipv6Addr>,
+    /// ELIB function pool for End.X allocation — shared allocator
+    /// implementation with IS-IS (RFC 9352 reserves the same upper
+    /// half of the 16-bit function space).
+    pub elib: crate::isis::srv6::ElibPool,
+    /// Per-adjacency End.X SIDs, keyed like `lan_adj_sids` by
+    /// `(ifindex, neighbor router-id)`.
+    pub endx_sids: BTreeMap<(u32, Ipv4Addr), super::srv6::EndxSidState>,
     /// SR snapshot channel from the RIB (`SrSubscribe`); only the v3
     /// event loop polls it.
     pub sr_rx: UnboundedReceiver<crate::rib::RibSrRx>,
@@ -1046,6 +1053,8 @@ impl Ospf<Ospfv2> {
             watched_locator: None,
             sr_locator: None,
             sr_end_sid: None,
+            elib: crate::isis::srv6::ElibPool::new(),
+            endx_sids: BTreeMap::new(),
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
@@ -5051,6 +5060,8 @@ impl Ospf<Ospfv3> {
             watched_locator: None,
             sr_locator: None,
             sr_end_sid: None,
+            elib: crate::isis::srv6::ElibPool::new(),
+            endx_sids: BTreeMap::new(),
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             restarting: None,
@@ -5518,7 +5529,7 @@ impl Ospf<Ospfv3> {
         // address octets truncated to `ceil(prefix_len / 8)`,
         // then padded to a 32-bit boundary by
         // `ospfv3_prefix_wire_len`.
-        let prefixes: Vec<Ospfv3LinkLsaPrefix> = link
+        let mut prefixes: Vec<Ospfv3LinkLsaPrefix> = link
             .addr
             .iter()
             .filter(|a| a.prefix.addr().segments()[0] != 0xfe80)
@@ -5537,6 +5548,29 @@ impl Ospf<Ospfv3> {
                 }
             })
             .collect();
+
+        // RFC 5340 §4.4.3.8 LA-bit: additionally advertise each global
+        // interface address as a /128 host prefix. Peers use it as the
+        // SRv6 End.X nexthop — Linux's seg6local End.X cannot resolve
+        // a link-local nexthop correctly (it re-looks nh6 up with the
+        // packet's ingress iif, PR #1361), so the global is the only
+        // reliable kernel programming and OSPFv3 has no other channel
+        // that carries neighbor global addresses.
+        prefixes.extend(
+            link.addr
+                .iter()
+                .map(|a| a.prefix.addr())
+                .filter(|a| a.segments()[0] != 0xfe80)
+                .map(|addr| {
+                    let mut options = Ospfv3PrefixOptions::default();
+                    options.set_la(true);
+                    Ospfv3LinkLsaPrefix {
+                        prefix_length: 128,
+                        prefix_options: options,
+                        address_prefix: addr.octets().to_vec(),
+                    }
+                }),
+        );
 
         let body = Ospfv3LinkLsa {
             priority: link.priority(),
@@ -6849,6 +6883,26 @@ impl Ospf<Ospfv3> {
             Message::Retransmit(ifindex, router_id) => {
                 self.process_retransmit(ifindex, router_id);
             }
+            Message::Srv6EndxReconcile(ifindex) => {
+                // A Link-LSA landed on this interface — the neighbor's
+                // global /128 may have just become available. Sweep
+                // the link's Full neighbors so any installed End.X
+                // drifts its nexthop to the global.
+                let rids: Vec<Ipv4Addr> = self
+                    .links
+                    .get(&ifindex)
+                    .map(|l| {
+                        l.nbrs
+                            .values()
+                            .filter(|n| n.state == NfsmState::Full)
+                            .map(|n| n.ident.router_id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for rid in rids {
+                    self.reconcile_endx_sid(ifindex, rid);
+                }
+            }
             Message::DdRetransmit(ifindex, router_id) => {
                 self.process_dd_retransmit(ifindex, router_id);
             }
@@ -7326,7 +7380,8 @@ impl Ospf<Ospfv3> {
         // Build the (area, link_type, metric, my_iid, peer_iid,
         // peer_rid, subs) tuple if origination is warranted, else
         // fall through to the flush path.
-        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
+        let srv6 = self.srv6_active();
+        let build_inputs = if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
@@ -7345,18 +7400,30 @@ impl Ospf<Ospfv3> {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
                         let mut subs = Vec::new();
-                        if let Some(adjacency_sid) = link.config.adjacency_sid {
-                            subs.push(super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid));
-                        } else if let Some(label) =
-                            self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))
-                        {
-                            // No configured Adj-SID: advertise the SRLB
-                            // label allocated on the Full transition as
-                            // a local (V|L) Adj-SID — IS-IS-parity
-                            // dynamic allocation, no config needed.
-                            subs.push(super::srmpls::build_v3_p2p_adj_sub(
-                                &super::link::AdjacencySid::Absolute(*label),
-                            ));
+                        if self.segment_routing == SegmentRoutingMode::Mpls {
+                            if let Some(adjacency_sid) = link.config.adjacency_sid {
+                                subs.push(super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid));
+                            } else if let Some(label) =
+                                self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))
+                            {
+                                // No configured Adj-SID: advertise the SRLB
+                                // label allocated on the Full transition as
+                                // a local (V|L) Adj-SID — IS-IS-parity
+                                // dynamic allocation, no config needed.
+                                subs.push(super::srmpls::build_v3_p2p_adj_sub(
+                                    &super::link::AdjacencySid::Absolute(*label),
+                                ));
+                            }
+                        }
+                        // RFC 9513 §9.1: the SRv6 End.X SID for this
+                        // adjacency, carved from the locator on the
+                        // Full transition.
+                        if let (true, Some(locator), Some(endx)) = (
+                            srv6,
+                            self.sr_locator.as_ref(),
+                            self.endx_sids.get(&(ifindex, nbr.ident.router_id)),
+                        ) {
+                            subs.push(super::srv6::build_v3_endx_sub(locator, endx.addr));
                         }
                         if let Some(a) = asla.clone() {
                             subs.push(a);
@@ -7408,19 +7475,40 @@ impl Ospf<Ospfv3> {
                         // used to index `link.nbrs`), not the v6
                         // interface address — RFC 5340 keys v3
                         // neighbor state machines by router-id.
-                        let mut subs: Vec<_> = link
-                            .nbrs
-                            .values()
-                            .filter(|n| n.state == NfsmState::Full)
-                            .filter_map(|nbr| {
-                                let label =
-                                    *self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))?;
-                                Some(super::srmpls::build_v3_lan_adj_sub(
-                                    nbr.ident.router_id,
-                                    label,
-                                ))
-                            })
-                            .collect();
+                        let mut subs: Vec<_> = if self.segment_routing == SegmentRoutingMode::Mpls {
+                            link.nbrs
+                                .values()
+                                .filter(|n| n.state == NfsmState::Full)
+                                .filter_map(|nbr| {
+                                    let label =
+                                        *self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))?;
+                                    Some(super::srmpls::build_v3_lan_adj_sub(
+                                        nbr.ident.router_id,
+                                        label,
+                                    ))
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        // RFC 9513 §9.2: one LAN End.X SID per Full
+                        // neighbor on the segment.
+                        if srv6 && let Some(locator) = self.sr_locator.as_ref() {
+                            subs.extend(
+                                link.nbrs
+                                    .values()
+                                    .filter(|n| n.state == NfsmState::Full)
+                                    .filter_map(|nbr| {
+                                        let endx =
+                                            self.endx_sids.get(&(ifindex, nbr.ident.router_id))?;
+                                        Some(super::srv6::build_v3_lan_endx_sub(
+                                            locator,
+                                            nbr.ident.router_id,
+                                            endx.addr,
+                                        ))
+                                    }),
+                            );
+                        }
                         if let Some(a) = asla.clone() {
                             subs.push(a);
                         }
@@ -7570,6 +7658,7 @@ impl Ospf<Ospfv3> {
             });
             self.sr_locator = None;
             self.update_srv6_end_sid();
+            self.clear_all_endx_sids();
         }
         if let Some(next) = desired {
             let _ = self.ctx.rib.send(rib::Message::SrLocatorWatch {
@@ -7592,6 +7681,14 @@ impl Ospf<Ospfv3> {
                 }
                 self.sr_locator = locator;
                 self.update_srv6_end_sid();
+                // Locator snapshot churned: every End.X address
+                // computed against the previous prefix is stale. Drop
+                // them all, then sweep current Full neighbors so they
+                // re-allocate from the fresh pool (the sweep also
+                // covers adjacencies that reached Full before the
+                // locator resolved).
+                self.clear_all_endx_sids();
+                self.sweep_endx_sids();
                 self.srv6_originate_all_areas();
             }
             // OSPF's SRGB / SRLB are fixed constants today; no block
@@ -7693,6 +7790,235 @@ impl Ospf<Ospfv3> {
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(area_id, &lsa);
             }
+        }
+    }
+
+    /// The neighbor's global IPv6 address on `ifindex`, learned from
+    /// the LA-bit /128 prefixes in its Link-LSA. Falls back to `None`
+    /// when the Link-LSA hasn't arrived (or carries no global) — the
+    /// caller then uses the hello-source link-local, and the
+    /// Link-LSA-arrival reconcile upgrades the install later.
+    ///
+    /// The preference is the same Linux kernel constraint as IS-IS
+    /// (PR #1361): seg6local End.X resolves nh6 with iif = the
+    /// packet's ingress interface, so a link-local nexthop matches
+    /// fe80::/64 on the wrong link and blackholes.
+    fn neighbor_global_nh6(&self, ifindex: u32, nbr_router_id: Ipv4Addr) -> Option<Ipv6Addr> {
+        use ospf_packet::{OSPFV3_LINK_LSA_TYPE, Ospfv3LsBody};
+        let link = self.links.get(&ifindex)?;
+        let nbr = link.nbrs.get(&nbr_router_id)?;
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_LINK_LSA_TYPE, nbr.interface_id, nbr_router_id);
+        let lsa = link.lsdb.lookup_by_raw_key(key)?;
+        let Ospfv3LsBody::Link(body) = &lsa.body else {
+            return None;
+        };
+        body.prefixes.iter().find_map(|p| {
+            if !p.prefix_options.la() || p.prefix_length != 128 || p.address_prefix.len() < 16 {
+                return None;
+            }
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&p.address_prefix[..16]);
+            let addr = Ipv6Addr::from(octets);
+            (addr.segments()[0] != 0xfe80).then_some(addr)
+        })
+    }
+
+    /// Reconcile the End.X SID for one neighbor — the OSPFv3 port of
+    /// `isis::Neighbor::reconcile_endx_sid`. Eligible while SRv6 is
+    /// active and the neighbor is Full:
+    ///
+    /// - no SID yet → allocate an ELIB function, install the
+    ///   advertised SID (global nh6 preferred, hello link-local as
+    ///   fallback) plus the LIB twin for uSID locators, and
+    ///   re-originate the per-link E-Router-LSA;
+    /// - SID held but the preferred nexthop drifted (the neighbor's
+    ///   Link-LSA with its global /128 typically lands after Full) →
+    ///   delete-then-add both kernel entries with the new nexthop;
+    /// - not eligible → release.
+    pub fn reconcile_endx_sid(&mut self, ifindex: u32, nbr_router_id: Ipv4Addr) {
+        let eligible = self.srv6_active()
+            && self
+                .links
+                .get(&ifindex)
+                .and_then(|l| l.nbrs.get(&nbr_router_id))
+                .is_some_and(|n| n.state == NfsmState::Full);
+        if !eligible {
+            if self.release_endx_sid(ifindex, nbr_router_id) {
+                self.e_router_v3_lsa_originate(ifindex);
+            }
+            return;
+        }
+
+        let Some(locator) = self.sr_locator.clone() else {
+            return;
+        };
+        let Some(prefix) = locator.prefix else {
+            return;
+        };
+
+        // Preferred nexthop: the neighbor's global from its Link-LSA,
+        // else its hello-source link-local.
+        let nh6 = self
+            .neighbor_global_nh6(ifindex, nbr_router_id)
+            .or_else(|| {
+                self.links
+                    .get(&ifindex)
+                    .and_then(|l| l.nbrs.get(&nbr_router_id))
+                    .map(|n| n.ident.prefix.addr())
+            });
+
+        if let Some(state) = self.endx_sids.get(&(ifindex, nbr_router_id)).cloned() {
+            if state.nh6 == nh6 {
+                return;
+            }
+            // Nexthop drifted: reinstall both kernel entries. The
+            // advertised SID is unchanged, so no LSA re-origination.
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr: state.addr });
+            if let Some(lib) = state.lib_addr {
+                let _ = self.ctx.rib.send(rib::Message::SidDel { addr: lib });
+            }
+            let lib_addr = self.install_endx_kernel(ifindex, &locator, state.addr, nh6);
+            self.endx_sids.insert(
+                (ifindex, nbr_router_id),
+                super::srv6::EndxSidState {
+                    function: state.function,
+                    addr: state.addr,
+                    lib_addr,
+                    nh6,
+                },
+            );
+            return;
+        }
+
+        let Some(function) = self.elib.allocate() else {
+            return;
+        };
+        let Some(addr) = crate::isis::srv6::function_addr(prefix, function) else {
+            self.elib.release(function);
+            return;
+        };
+        let lib_addr = self.install_endx_kernel(ifindex, &locator, addr, nh6);
+        self.endx_sids.insert(
+            (ifindex, nbr_router_id),
+            super::srv6::EndxSidState {
+                function,
+                addr,
+                lib_addr,
+                nh6,
+            },
+        );
+        self.e_router_v3_lsa_originate(ifindex);
+    }
+
+    /// Send the SidAdd pair for an End.X: the advertised /128 (classic
+    /// End.X or uA) and, for uSID locators, the LIB twin at
+    /// block:function with the NEXT-CSID flavor (PR #1364 semantics).
+    /// Returns the LIB twin address when one was installed.
+    fn install_endx_kernel(
+        &self,
+        ifindex: u32,
+        locator: &crate::rib::Locator,
+        addr: Ipv6Addr,
+        nh6: Option<Ipv6Addr>,
+    ) -> Option<Ipv6Addr> {
+        use crate::rib::{
+            LocatorBehavior, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner,
+        };
+        let ifname = self
+            .links
+            .get(&ifindex)
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
+        let loc_name = self.watched_locator.clone().unwrap_or_default();
+        let (behavior, structure) = match locator.behavior {
+            Some(LocatorBehavior::Usid) => (SidBehavior::UA, locator.sid_structure()),
+            None => (SidBehavior::EndX, None),
+        };
+        let sid = Sid {
+            addr,
+            behavior,
+            context: SidContext::Interface(ifname.clone()),
+            owner: SidOwner::new("ospfv3", 0),
+            locator: loc_name.clone(),
+            allocation_type: SidAllocationType::Dynamic,
+            ifindex,
+            nh6,
+            structure,
+            table_id: 0,
+            segs: Vec::new(),
+        };
+        let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
+
+        if !matches!(locator.behavior, Some(LocatorBehavior::Usid)) {
+            return None;
+        }
+        let prefix = locator.prefix?;
+        let structure = locator.sid_structure()?;
+        // Extract the 16-bit function back out of the full SID — the
+        // bits right after the locator prefix.
+        let fun = ((u128::from(addr) >> (128 - prefix.prefix_len() as u32 - 16)) & 0xffff) as u16;
+        let lib = crate::isis::srv6::lib_addr(prefix, structure.lb_bits, fun)?;
+        let sid = Sid {
+            addr: lib,
+            behavior: SidBehavior::UALib,
+            context: SidContext::Interface(ifname),
+            owner: SidOwner::new("ospfv3", 0),
+            locator: loc_name,
+            allocation_type: SidAllocationType::Dynamic,
+            ifindex,
+            nh6,
+            structure: Some(structure),
+            table_id: 0,
+            segs: Vec::new(),
+        };
+        let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
+        Some(lib)
+    }
+
+    /// Release one neighbor's End.X SID (kernel entries + ELIB
+    /// function). Returns true when something was held.
+    fn release_endx_sid(&mut self, ifindex: u32, nbr_router_id: Ipv4Addr) -> bool {
+        let Some(state) = self.endx_sids.remove(&(ifindex, nbr_router_id)) else {
+            return false;
+        };
+        self.elib.release(state.function);
+        let _ = self.ctx.rib.send(rib::Message::SidDel { addr: state.addr });
+        if let Some(lib) = state.lib_addr {
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr: lib });
+        }
+        true
+    }
+
+    /// Withdraw every End.X SID and reset the ELIB pool — locator
+    /// changed or SRv6 unconfigured; every issued address is invalid.
+    /// The follow-up sweep re-allocates for current Full neighbors.
+    fn clear_all_endx_sids(&mut self) {
+        let keys: Vec<(u32, Ipv4Addr)> = self.endx_sids.keys().cloned().collect();
+        for (ifindex, rid) in keys {
+            self.release_endx_sid(ifindex, rid);
+        }
+        self.elib.reset();
+    }
+
+    /// Allocate End.X SIDs for every Full neighbor on every link —
+    /// the catch-up sweep after a locator resolves (adjacencies may
+    /// have reached Full before SRv6 was active). Enumerates ALL
+    /// links unconditionally: filtering on config/state here is the
+    /// PR #1358 disable-after-teardown trap.
+    fn sweep_endx_sids(&mut self) {
+        let pairs: Vec<(u32, Ipv4Addr)> = self
+            .links
+            .iter()
+            .flat_map(|(ifindex, link)| {
+                link.nbrs
+                    .values()
+                    .filter(|n| n.state == NfsmState::Full)
+                    .map(|n| (*ifindex, n.ident.router_id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (ifindex, rid) in pairs {
+            self.reconcile_endx_sid(ifindex, rid);
         }
     }
 
@@ -7825,6 +8151,15 @@ impl Ospf<Ospfv3> {
             // branch handles the gate, but it needs the call.
             self.network_intra_area_prefix_lsa_originate(ifindex);
         }
+
+        // SRv6 End.X follows the same Full lifecycle as the Adj-SID:
+        // allocate + advertise on the transition into Full, release on
+        // regression. Re-originate our Link-LSA too — it now carries
+        // our global /128 (LA-bit) so the peer can upgrade its End.X
+        // nexthop from our link-local to the global, and link-scope
+        // floods at interface-up reached nobody.
+        self.reconcile_endx_sid(ifindex, nbr_addr);
+        self.link_lsa_originate(ifindex);
 
         // SR-MPLS E-Router-LSA tracks the per-link P2P Adj-SID, which
         // is only meaningful while the link has a Full neighbor.
@@ -8350,6 +8685,13 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// Flood AS-scoped LSA through all normal areas, excluding source neighbor.
     /// (lsa, source_ifindex, source_nbr_addr)
     FloodAs(V::Lsa, u32, V::Addr),
+    /// A link-scope LSA (Link-LSA) was installed on this interface —
+    /// re-evaluate SRv6 End.X nexthops, because the neighbor's global
+    /// address (LA-bit /128 in its Link-LSA) may have just arrived
+    /// and the kernel End.X entry must drift from the link-local to
+    /// it (Linux resolves End.X nh6 by ingress iif — PR #1361).
+    /// v3-only; the v2 handler ignores it.
+    Srv6EndxReconcile(u32),
     /// Retransmit LSAs to a specific neighbor.
     /// (ifindex, nbr_addr)
     Retransmit(u32, Ipv4Addr),

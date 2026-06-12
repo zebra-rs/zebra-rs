@@ -63,6 +63,29 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     And kernel route "fcbb:bbbb:1::/48" in namespace "z1" should eventually contain "seg6local"
     And kernel route "2001:db8:f:2::" in namespace "z2" should eventually contain "seg6local"
 
+  Scenario: Each Full adjacency carves an End.X SID with a global nexthop
+    Given the test topology exists
+    # z1's uSID locator carves a uA for the adjacency plus its LIB
+    # twin (the block:function entry a NEXT-C-SID carrier hits after
+    # the uN shift); z2's classic locator carves a plain End.X.
+    Then show command "show segment-routing srv6 sid" in namespace "z1" should contain "uA"
+    And show command "show segment-routing srv6 sid" in namespace "z1" should contain "uA(LIB)"
+    And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End.X"
+    # The End.X SID is advertised on the Router-Link TLV of the
+    # per-link E-Router-LSA and floods to the peer.
+    And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 End.X SID Sub-TLV:"
+    And show command "show ospfv3 database detail" in namespace "z1" should contain "SRv6 End.X SID Sub-TLV:"
+    # The kernel entries forward to the NEIGHBOR'S GLOBAL address —
+    # learned from its Link-LSA LA-bit /128, upgraded from the
+    # hello link-local once that LSA arrives. Linux's seg6local
+    # End.X resolves nh6 by the packet's ingress interface, so a
+    # link-local nexthop would blackhole (the #1361 lesson).
+    And kernel route "fcbb:bbbb:1:e000::" in namespace "z1" should eventually contain "nh6 2001:db8:12::2"
+    And kernel route "2001:db8:f:2:e000::" in namespace "z2" should eventually contain "nh6 2001:db8:12::1"
+    # The uSID LIB twin installs as a block:function prefix with the
+    # NEXT-CSID flavor.
+    And kernel route "fcbb:bbbb:e000::/48" in namespace "z1" should eventually contain "flavors next-csid"
+
   Scenario: Removing the locator flushes the LSA and withdraws the SID
     Given the test topology exists
     When I apply command "delete router ospfv3 segment-routing srv6 locator LOC1" in namespace "z1"
@@ -70,7 +93,9 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # z1 stops originating: its registry row and kernel route go, and
     # the flushed LSA disappears from the peer too (MaxAge flood).
     Then show command "show segment-routing srv6 sid" in namespace "z1" should not contain "uN"
+    And show command "show segment-routing srv6 sid" in namespace "z1" should not contain "uA"
     And kernel route "fcbb:bbbb:1::/48" in namespace "z1" should eventually be gone
+    And kernel route "fcbb:bbbb:1:e000::" in namespace "z1" should eventually be gone
     And show command "show ospfv3 database detail" in namespace "z2" should not contain "SRv6 Locator TLV: fcbb:bbbb:1::/48"
     # z2's own origination is untouched.
     And show command "show ospfv3 database detail" in namespace "z2" should contain "SRv6 Locator TLV: 2001:db8:f:2::/64"
