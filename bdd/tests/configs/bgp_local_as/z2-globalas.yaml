@@ -1,0 +1,29 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The peer has migrated: remote-as now names z1's real global AS.
+    # z1 (dual-as) re-establishes under 65100 after one Bad Peer AS
+    # round trip.
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65100
+      transport:
+        passive-mode: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.2/32

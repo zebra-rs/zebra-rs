@@ -1,0 +1,31 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      # dual-as: z2 may peer with either 64999 or the global 65100.
+      # When z2 flips its remote-as to 65100, z1's OPEN with 64999
+      # draws a Bad Peer AS NOTIFICATION and the next attempt
+      # presents 65100 — the no-coordination migration step.
+      local-as:
+      - as-number: 64999
+        dual-as: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

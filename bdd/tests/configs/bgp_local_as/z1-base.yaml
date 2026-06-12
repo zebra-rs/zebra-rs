@@ -1,0 +1,29 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      # Bare local-as: the session presents AS 64999 (z2's remote-as
+      # only accepts 64999), egress prepends "64999 65100", ingress
+      # prepends 64999 to routes received from z2.
+      local-as:
+      - as-number: 64999
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

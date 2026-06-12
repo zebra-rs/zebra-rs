@@ -6,7 +6,9 @@ use tokio::task;
 
 #[derive(Debug)]
 pub struct Task<T> {
-    join_handle: task::JoinHandle<T>,
+    /// `None` after [`Task::detach`] — the abort-on-drop is disarmed
+    /// and the spawned future runs to completion in the background.
+    join_handle: Option<task::JoinHandle<T>>,
 }
 
 impl<T> Task<T> {
@@ -16,14 +18,27 @@ impl<T> Task<T> {
         Fut::Output: Send + 'static,
     {
         Task {
-            join_handle: task::spawn(future),
+            join_handle: Some(task::spawn(future)),
         }
+    }
+
+    /// Consume the handle without aborting the task: the spawned
+    /// future keeps running to completion in the background (tokio
+    /// detaches a task when its `JoinHandle` is dropped). Used where
+    /// a teardown must let the task finish in-flight work — e.g. a
+    /// BGP connection writer draining a queued NOTIFICATION onto the
+    /// wire before the socket closes; aborting it there sent the FIN
+    /// *instead of* the NOTIFICATION.
+    pub fn detach(mut self) {
+        let _ = self.join_handle.take();
     }
 }
 
 impl<T> Drop for Task<T> {
     fn drop(&mut self) {
-        self.join_handle.abort();
+        if let Some(join_handle) = &self.join_handle {
+            join_handle.abort();
+        }
     }
 }
 

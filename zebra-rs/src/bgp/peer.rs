@@ -1646,19 +1646,26 @@ fn close_collision(collision: CollisionConn, code: NotifyCode, sub_code: u8) {
     let notif = NotificationPacket::new(code, sub_code, Vec::new());
     let bytes: BytesMut = notif.into();
     let _ = collision.packet_tx.send(bytes);
-    // Dropping the CollisionConn drops packet_tx (writer task drains
-    // its channel and exits) and the reader/writer task handles
-    // (cancelling them).
-    drop(collision);
+    // Drop packet_tx to close the writer's channel, cancel the
+    // reader, and *detach* the writer so it drains the NOTIFICATION
+    // onto the wire and exits — dropping it would abort the task
+    // with the frame still queued, sending a bare FIN instead.
+    let CollisionConn { reader, writer, .. } = collision;
+    drop(reader);
+    writer.detach();
 }
 
-/// Tear down the primary connection in place (send NOTIFICATION first,
-/// then drop the reader/writer/packet_tx triple).
+/// Tear down the primary connection in place (send NOTIFICATION
+/// first, then release the reader/writer/packet_tx triple — the
+/// writer is detached, not aborted, so the NOTIFICATION drains onto
+/// the wire before the socket closes).
 fn close_primary(peer: &mut Peer, code: NotifyCode, sub_code: u8) {
     peer_send_notification(peer, code, sub_code, Vec::new());
     peer.packet_tx = None;
     peer.task.reader = None;
-    peer.task.writer = None;
+    if let Some(writer) = peer.task.writer.take() {
+        writer.detach();
+    }
     peer.primary_role = None;
     peer.primary_conn_id = None;
 }
@@ -3388,6 +3395,40 @@ mod fsm_idle_hold_tests {
         peer.local_as_dual_fallback = false;
         fsm_bgp_notification(&mut peer, ConnTag::Primary, bad_peer_as());
         assert_eq!(peer.open_local_as(), 64999);
+    }
+
+    /// A connection writer that is *detached* (the teardown path for
+    /// connections with a queued NOTIFICATION) must drain its channel
+    /// onto the wire before the socket closes — the receiver sees the
+    /// frame, then FIN. The abort path used to send a bare FIN with
+    /// the NOTIFICATION still queued, so the peer never learned why
+    /// the session died (and `local-as dual-as` never saw the Bad
+    /// Peer AS that drives its retry).
+    #[tokio::test]
+    async fn detached_writer_drains_queued_frames_before_fin() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        let (_read_half, write_half) = client.into_split();
+        let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
+        let writer = peer_start_writer(write_half, rx);
+
+        // Queue a frame, close the channel, detach — mirroring
+        // `close_primary` / the Idle-entry teardown ordering.
+        tx.send(BytesMut::from(&b"NOTIFICATION"[..])).unwrap();
+        drop(tx);
+        writer.detach();
+
+        // read_to_end returns only at FIN, so a successful read of the
+        // full frame proves frame-before-FIN ordering.
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(&buf[..], b"NOTIFICATION");
     }
 
     /// A KEEPALIVE from a still-parked (unpromoted) collision conn is

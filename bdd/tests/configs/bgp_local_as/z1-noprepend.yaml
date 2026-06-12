@@ -1,0 +1,30 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      # no-prepend: skip the ingress prepend — routes from z2 keep
+      # their original AS_PATH "65001" in z1's table. Egress is back
+      # to the bare two-AS form (apply-replace removes replace-as).
+      local-as:
+      - as-number: 64999
+        no-prepend: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32
