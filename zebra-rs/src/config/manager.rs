@@ -1331,6 +1331,56 @@ mod yang_load_tests {
         }
     }
 
+    /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
+    /// compute-mode <serial|conservative|aggressive|sharding>` plus
+    /// `compute-shards <1..256>`. Pinned because vtyctl apply is
+    /// garbage-tolerant — an unwired grammar silently no-ops instead
+    /// of erroring.
+    #[test]
+    fn isis_tilfa_compute_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router isis fast-reroute ti-lfa compute-mode serial",
+            "set router isis fast-reroute ti-lfa compute-mode conservative",
+            "set router isis fast-reroute ti-lfa compute-mode aggressive",
+            "set router isis fast-reroute ti-lfa compute-mode sharding",
+            "set router isis fast-reroute ti-lfa compute-shards 4",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        // An unknown mode keyword must not resolve to a settable path.
+        let (code, _comps, _state) = parse(
+            "set router isis fast-reroute ti-lfa compute-mode turbo",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "`compute-mode turbo` must not parse"
+        );
+    }
+
     /// `router bgp global router-id` is zebra-rs's rename of the IETF
     /// model's `global/identifier` leaf (vendored ietf-bgp edit), so the
     /// BGP surface matches every other router-id knob. The leaf lives in

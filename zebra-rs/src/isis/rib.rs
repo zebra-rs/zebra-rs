@@ -1085,6 +1085,11 @@ pub(super) struct SpfInput {
     /// run without borrowing `IsisTop`.
     lsp_map: LspMap,
     ti_lfa_enabled: bool,
+    /// How the TI-LFA computation is scheduled
+    /// (`fast-reroute ti-lfa compute-mode` / `compute-shards`),
+    /// snapshotted from config at build time so a mid-run change
+    /// cleanly applies to the next run.
+    tilfa_mode: spf::TilfaComputeMode,
     mt2: Option<Mt2Input>,
     flex_algos: Vec<FlexAlgoInput>,
 }
@@ -1109,6 +1114,10 @@ pub struct SpfOutput {
     adjacency_sids: BTreeMap<u32, IsisSysId>,
     spf_result: BTreeMap<usize, spf::Path>,
     tilfa_result: BTreeMap<usize, Vec<spf::RepairPath>>,
+    /// TI-LFA compute telemetry (legacy + MT2 merged), None when
+    /// TI-LFA is disabled. Stashed on `IsisTop::tilfa_stats[level]`
+    /// for `show isis spf`.
+    tilfa_stats: Option<spf::TilfaStats>,
     mt2: Option<Mt2Output>,
     flex_algos: Vec<FlexAlgoOutput>,
     /// Wall-clock time `compute_spf` spent running Dijkstra + TI-LFA.
@@ -1214,6 +1223,7 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
         adjacency_sids,
         lsp_map,
         ti_lfa_enabled: top.config.ti_lfa_enabled,
+        tilfa_mode: top.config.tilfa_compute_mode(),
         mt2,
         flex_algos,
     })
@@ -1230,6 +1240,7 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         adjacency_sids,
         lsp_map,
         ti_lfa_enabled,
+        tilfa_mode,
         mt2,
         flex_algos,
     } = input;
@@ -1246,8 +1257,12 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
     // TI-LFA repair path. Gated on `fast-reroute ti-lfa` — when the
     // knob is off we still install the primary RIB built from
     // `spf_result`, just without the per-destination repair list.
+    let mut tilfa_stats: Option<spf::TilfaStats> = None;
     let tilfa_result = if ti_lfa_enabled {
-        tilfa_repair_path(&legacy_graph, &lsp_map, source, &spf_result)
+        let (result, stats) =
+            tilfa_repair_path(&legacy_graph, &lsp_map, source, &spf_result, tilfa_mode);
+        tilfa_stats = Some(stats);
+        result
     } else {
         BTreeMap::new()
     };
@@ -1258,7 +1273,10 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
             Some(src) => {
                 let mt2_spf = spf::spf(&graph, src, &spf::SpfOpt::full_path());
                 let mt2_tilfa = if ti_lfa_enabled {
-                    tilfa_repair_path(&graph, &lsp_map, src, &mt2_spf)
+                    let (result, stats) =
+                        tilfa_repair_path(&graph, &lsp_map, src, &mt2_spf, tilfa_mode);
+                    tilfa_stats = Some(tilfa_stats.map_or(stats, |prev| prev.merge(stats)));
+                    result
                 } else {
                     BTreeMap::new()
                 };
@@ -1299,6 +1317,7 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
         adjacency_sids,
         spf_result,
         tilfa_result,
+        tilfa_stats,
         mt2,
         flex_algos,
         duration,
@@ -1317,6 +1336,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         adjacency_sids,
         spf_result,
         tilfa_result,
+        tilfa_stats,
         mt2,
         flex_algos,
         duration,
@@ -1329,6 +1349,9 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     // the RIB-publish work below isn't counted in `duration`.
     *top.spf_duration.get_mut(&level) = Some(duration);
     *top.spf_last.get_mut(&level) = Some(last);
+    // TI-LFA compute telemetry rides the same path; None (TI-LFA
+    // disabled) clears any stale stats from a previous enable.
+    *top.tilfa_stats.get_mut(&level) = tilfa_stats;
 
     // Build Adjacency ILM seed from the SIDs collected during graph build.
     let mut ilm = build_adjacency_ilm(top, level, &adjacency_sids);

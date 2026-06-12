@@ -7,6 +7,7 @@ use isis_packet::{IsLevel, Nsap};
 use strum_macros::{Display, EnumString};
 
 use crate::config::{Args, ConfigOp};
+use crate::spf;
 
 use super::Isis;
 use super::ifsm::has_level;
@@ -138,6 +139,14 @@ impl Isis {
             config_sr_srv6_locator,
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
+        self.callback_add(
+            "/router/isis/fast-reroute/ti-lfa/compute-mode",
+            config_ti_lfa_compute_mode,
+        );
+        self.callback_add(
+            "/router/isis/fast-reroute/ti-lfa/compute-shards",
+            config_ti_lfa_compute_shards,
+        );
         self.callback_add(
             "/router/isis/fast-reroute/backup-as-primary",
             config_fast_reroute_backup_as_primary,
@@ -477,6 +486,21 @@ pub struct IsisConfig {
     /// is false (no repair gets stamped in the first place).
     pub fast_reroute_backup_as_primary: bool,
 
+    /// /router/isis/fast-reroute/ti-lfa/compute-mode — how the
+    /// per-destination TI-LFA computation is scheduled (serial
+    /// default; conservative/aggressive/sharding fan out on the rayon
+    /// pool). Kept as the payload-free YANG mirror; the
+    /// `compute-shards` count joins in [`Self::tilfa_compute_mode`].
+    /// Results are identical across modes — only CPU scheduling
+    /// differs.
+    pub ti_lfa_compute_mode: TilfaComputeModeConfig,
+
+    /// /router/isis/fast-reroute/ti-lfa/compute-shards — the
+    /// operator's hard upper bound on TI-LFA parallelism, consulted
+    /// only when `compute-mode sharding` is set. Default 8, matching
+    /// the YANG default.
+    pub ti_lfa_compute_shards: u16,
+
     /// Instance-level BFD defaults (`router isis { bfd {} }`), inherited by
     /// every interface and overridden per interface (see
     /// [`super::link::LinkBfdConfig::resolve`]).
@@ -686,6 +710,23 @@ impl IsisAuthConfig {
     }
 }
 
+/// YANG mirror of `/router/isis/fast-reroute/ti-lfa/compute-mode`
+/// (payload-free — the sharding count lives in the sibling
+/// `compute-shards` leaf; [`IsisConfig::tilfa_compute_mode`] joins
+/// them into the scheduler-facing `spf::TilfaComputeMode`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, EnumString, Display)]
+pub enum TilfaComputeModeConfig {
+    #[default]
+    #[strum(serialize = "serial")]
+    Serial,
+    #[strum(serialize = "conservative")]
+    Conservative,
+    #[strum(serialize = "aggressive")]
+    Aggressive,
+    #[strum(serialize = "sharding")]
+    Sharding,
+}
+
 impl Default for IsisConfig {
     // Manual rather than derived because `gr_helper_enabled` defaults
     // to `true` (matches the YANG default for
@@ -721,6 +762,9 @@ impl Default for IsisConfig {
             sr_srv6_flex_algo_locators: Default::default(),
             ti_lfa_enabled: Default::default(),
             fast_reroute_backup_as_primary: Default::default(),
+            ti_lfa_compute_mode: Default::default(),
+            // Matches the YANG `default 8` on compute-shards.
+            ti_lfa_compute_shards: 8,
             mt_enabled: Default::default(),
             mt_topologies: Default::default(),
             networks_v4: Default::default(),
@@ -761,6 +805,20 @@ impl IsisConfig {
 
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
+    }
+
+    /// Combine the `compute-mode` and `compute-shards` leaves into the
+    /// scheduler-facing [`spf::TilfaComputeMode`], snapshotted into
+    /// `SpfInput` at graph-build time.
+    pub fn tilfa_compute_mode(&self) -> spf::TilfaComputeMode {
+        match self.ti_lfa_compute_mode {
+            TilfaComputeModeConfig::Serial => spf::TilfaComputeMode::Serial,
+            TilfaComputeModeConfig::Conservative => spf::TilfaComputeMode::Conservative,
+            TilfaComputeModeConfig::Aggressive => spf::TilfaComputeMode::Aggressive,
+            TilfaComputeModeConfig::Sharding => {
+                spf::TilfaComputeMode::Sharding(self.ti_lfa_compute_shards)
+            }
+        }
     }
 
     /// Resolve the hostname to advertise in TLV 137. Configured hostname
@@ -1337,6 +1395,41 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     // Recompute SPF so the RIB picks up repair paths (on enable) or
     // drops them (on disable) for every prefix in this instance.
+    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
+    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    Some(())
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode`. Picks how the
+/// TI-LFA computation is scheduled across cores (see
+/// `spf::TilfaComputeMode`). Results are identical across modes, so
+/// nothing advertised changes — no LSP re-origination. The SPF re-run
+/// makes the change observable immediately in `show isis spf` stats.
+fn config_ti_lfa_compute_mode(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prev = isis.config.tilfa_compute_mode();
+    isis.config.ti_lfa_compute_mode = if op.is_set() {
+        args.string()?.parse().ok()?
+    } else {
+        TilfaComputeModeConfig::default()
+    };
+    if isis.config.tilfa_compute_mode() == prev {
+        return Some(());
+    }
+    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
+    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    Some(())
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-shards`. Upper bound on
+/// TI-LFA parallelism; consulted only when `compute-mode sharding`
+/// is configured (the effective-mode comparison below keeps the SPF
+/// re-run suppressed otherwise).
+fn config_ti_lfa_compute_shards(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prev = isis.config.tilfa_compute_mode();
+    isis.config.ti_lfa_compute_shards = if op.is_set() { args.u16()? } else { 8 };
+    if isis.config.tilfa_compute_mode() == prev {
+        return Some(());
+    }
     let _ = isis.tx.send(Message::SpfCalc(Level::L1));
     let _ = isis.tx.send(Message::SpfCalc(Level::L2));
     Some(())
