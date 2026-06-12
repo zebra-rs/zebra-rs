@@ -1,0 +1,27 @@
+# z2 — classic-locator sibling: End SID at the locator base with the
+# classic RFC 8986 layout (behavior End, LB capped at 40).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: i1
+  ipv6:
+    address: 2001:db8:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: 2001:db8:f:2::/64
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      srv6:
+        locator: LOC2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: i1
+        enable: true
+        network-type: point-to-point

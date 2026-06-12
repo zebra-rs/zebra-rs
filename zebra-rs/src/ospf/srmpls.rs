@@ -297,6 +297,7 @@ pub fn e_router_v3_sr_info_lsa_build(
     router_id: Ipv4Addr,
     algos: Vec<Algo>,
     fads: Vec<Ospfv3FadTlv>,
+    srv6: bool,
 ) -> Ospfv3Lsa {
     let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv { algos });
     let sid_range = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
@@ -310,6 +311,14 @@ pub fn e_router_v3_sr_info_lsa_build(
 
     let mut tlvs = vec![sr_algo, sid_range, local_block];
     tlvs.extend(fads.into_iter().map(Ospfv3ExtTlv::Fad));
+    if srv6 {
+        // RFC 9513 §2 SRv6 Capabilities (RI TLV 20), riding this
+        // SR-info E-Router-LSA like the other RI-style TLVs. No O-bit
+        // support, no sub-TLVs — flags 0.
+        tlvs.push(Ospfv3ExtTlv::Srv6Capabilities(
+            ospf_packet::Ospfv3Srv6CapabilitiesTlv { flags: 0 },
+        ));
+    }
 
     let body = Ospfv3ELsaBody { tlvs };
 
@@ -678,6 +687,7 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 1),
             vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)],
             vec![fad.clone()],
+            false,
         );
         let Ospfv3LsBody::ERouter(body) = &lsa.body else {
             panic!("expected ERouter body");

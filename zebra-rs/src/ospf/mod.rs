@@ -53,6 +53,7 @@ pub mod flood;
 pub use flood::*;
 
 pub mod srmpls;
+pub mod srv6;
 
 pub mod tilfa;
 
