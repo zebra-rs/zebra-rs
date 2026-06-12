@@ -251,6 +251,18 @@ pub struct PeerTransportConfig {
     /// for multihop / GTSM sessions (they are never gated). Consulted by
     /// [`Peer::connected_check_ok`]. See `zebra-bgp-transport.yang`.
     pub disable_connected_check: bool,
+    /// `ip-transparent` (FRR 10.4): set IP_TRANSPARENT /
+    /// IPV6_TRANSPARENT on this neighbor's TCP socket so the session
+    /// can use a local address the host does not own. Applied on the
+    /// active connect socket before bind() (`peer_connect`, gated on
+    /// `update_source` being set — without a foreign source there is
+    /// nothing to liberate) and folded onto the shared listener while
+    /// any peer of the address family has it
+    /// (`config::apply_ip_transparent_refresh_all`). A change bounces a
+    /// live session (FRR `peer_change_reset`) — the option must precede
+    /// bind()/connect(). See `super::transparent` and
+    /// `zebra-bgp-transport.yang`.
+    pub ip_transparent: bool,
     // TCP MD5 (RFC 2385) shared secret. When Some, installed on the
     // listening socket (for the peer's address) and on the active
     // TcpSocket before connect(). The encoding determines how the
@@ -2089,6 +2101,9 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
     // `neighbor X port <1-65535>` — TCP destination port for the dial;
     // the IANA 179 unless overridden.
     let port = peer.config.transport.port.unwrap_or(BGP_PORT);
+    // `ip-transparent` — IP_TRANSPARENT before bind so a non-local
+    // `update-source` is accepted (see `peer_connect`).
+    let ip_transparent = peer.config.transport.ip_transparent;
     let ctx = peer.ctx.clone();
     Task::spawn(async move {
         let tx = tx.clone();
@@ -2115,6 +2130,7 @@ pub fn peer_start_connection(peer: &mut Peer) -> Task<()> {
             ao_key,
             ttl,
             tcp_mss,
+            ip_transparent,
         )
         .await;
         match result {
@@ -2138,6 +2154,7 @@ async fn peer_connect(
     ao_key: Option<super::auth::ResolvedAoKey>,
     ttl: u8,
     tcp_mss: Option<u16>,
+    ip_transparent: bool,
 ) -> std::io::Result<TcpStream> {
     // Address family of the source must match the remote when specified.
     if let Some(src) = update_source
@@ -2173,6 +2190,26 @@ async fn peer_connect(
             key.recv_id,
             key.include_tcp_options,
         )?;
+    }
+
+    // IP_TRANSPARENT must precede the bind: it is what makes the kernel
+    // accept a bind to the non-local `update-source` address and emit
+    // the SYN with that source. Gated on update-source being present —
+    // without a foreign source there is nothing to liberate (FRR's
+    // bgp_connect() applies the same both-flags gate). NOT best-effort:
+    // a failure (no CAP_NET_ADMIN) is surfaced as a dial failure,
+    // because the bind below would fail with EADDRNOTAVAIL anyway and
+    // this error names the actual cause.
+    if ip_transparent && update_source.is_some() {
+        super::transparent::set_ip_transparent(socket.as_raw_fd(), remote.is_ipv4(), true)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    peer = %remote.ip(),
+                    error = %e,
+                    "bgp: failed to set IP_TRANSPARENT before connect \
+                     (CAP_NET_ADMIN required); cannot dial from a non-local update-source",
+                );
+            })?;
     }
 
     if let Some(src) = update_source {

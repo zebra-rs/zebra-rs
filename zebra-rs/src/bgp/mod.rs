@@ -34,6 +34,8 @@ pub mod ttl;
 
 pub mod mss;
 
+pub mod transparent;
+
 pub mod policy;
 pub use policy::*;
 

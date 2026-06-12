@@ -1598,6 +1598,41 @@ mod yang_load_tests {
         );
     }
 
+    /// `neighbor X ip-transparent` (zebra-bgp-transport.yang) must be a
+    /// settable path on the neighbor and on the neighbor-group (the
+    /// group reuses the transport grouping via `uses`). Guards against
+    /// the silent-augment-drop name collision described on the
+    /// disable-connected-check test above.
+    #[test]
+    fn bgp_neighbor_ip_transparent_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 10.0.0.1 ip-transparent",
+            "set router bgp neighbor-group G ip-transparent",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be a valid path — a silent name collision \
+                 with an ietf-bgp leaf would show up here as a parse failure",
+            );
+        }
+    }
+
     /// `neighbor X port <1-65535>` and the instance-level
     /// `router bgp port <0-65535>` (zebra-bgp-transport.yang) must both
     /// be settable paths. The neighbor leaf's range starts at 1, so

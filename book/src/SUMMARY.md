@@ -28,6 +28,7 @@
   - [Well-Known Communities](ch-02-24-bgp-well-known-communities.md)
   - [Table-Map (Policy at the BGP→RIB Install Point)](ch-02-28-bgp-table-map.md)
   - [disable-connected-check](ch-02-16-bgp-disable-connected-check.md)
+  - [ip-transparent (non-local update-source)](ch-02-28-bgp-ip-transparent.md)
   - [SRv6 Encapsulation Type (per-neighbor)](ch-02-17-bgp-srv6-encapsulation-type.md)
   - [Timer Configuration](ch-02-03-bgp-timers.md)
   - [L3VPN and Per-VRF Labels](ch-02-04-bgp-l3vpn.md)

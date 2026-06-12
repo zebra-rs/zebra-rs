@@ -162,6 +162,9 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     // current minimum without the per-leaf `/tcp-mss` delete firing (the
     // same gap `clear_peer_listener_auth` covers for MD5/AO).
     apply_tcp_mss_refresh_all(bgp);
+    // Same reconciliation for the listener IP_TRANSPARENT union — the
+    // deleted peer may have been the last one holding the flag.
+    apply_ip_transparent_refresh_all(bgp);
     Some(())
 }
 
@@ -2310,6 +2313,112 @@ pub(super) fn apply_disable_connected_check(peer: &mut Peer, want: bool) -> bool
     !matches!(peer.state, super::peer::State::Idle)
 }
 
+/// `[no] router bgp neighbor <addr> ip-transparent` (presence container,
+/// FRR 10.4 PR #18789) — set IP_TRANSPARENT / IPV6_TRANSPARENT on this
+/// neighbor's TCP socket so the session can use a local address the
+/// host does not own (the address itself comes from `update-source`;
+/// the two are used together). Consumed at connect time by
+/// `peer_connect` (before bind, gated on update-source — FRR's
+/// both-flags gate) and reconciled onto the shared listeners by
+/// [`apply_ip_transparent_refresh_all`] so a TPROXY-steered passive
+/// session to a non-local address can be answered. Like the sibling
+/// TTL knobs, a change on a live session bounces it (`Event::Stop`,
+/// FRR `peer_change_reset`): the option must be on the socket before
+/// bind()/connect(), so only a reconnect can apply it. An Idle peer
+/// picks it up on its first connect.
+fn config_ip_transparent(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        // Record the verbatim statement (a presence flag: presence
+        // means "on"), then resolve through the neighbor-group
+        // precedence: the explicit statement wins, a Delete falls back
+        // to the group's opinion (or the off default).
+        peer.config.knobs_explicit.ip_transparent = op.is_set().then_some(true);
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.ip_transparent
+        })
+        .unwrap_or(false);
+        (peer.ident, apply_ip_transparent(peer, want))
+    };
+    // Reconcile the listeners unconditionally — cheap, idempotent, and
+    // immune to the diff-gate (the per-AF union may change even when
+    // this peer's resolved value did not, e.g. a redundant statement
+    // after a group flip).
+    apply_ip_transparent_refresh_all(bgp);
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// Write a resolved `ip-transparent` value onto the peer, preserving
+/// the per-neighbor ritual: the no-change diff-gate, `start()` for a
+/// dormant peer, and the bounce-if-live decision (returned to the
+/// caller, which owns the `Event::Stop` send — only an established /
+/// in-progress session needs the explicit bounce; bouncing an Idle peer
+/// here could race the idle-hold timer `start()` just armed and strand
+/// it). Shared by the per-neighbor callback and the neighbor-group
+/// sweep.
+pub(super) fn apply_ip_transparent(peer: &mut Peer, want: bool) -> bool {
+    if peer.config.transport.ip_transparent == want {
+        // No actual change — don't disturb a live session.
+        return false;
+    }
+    peer.config.transport.ip_transparent = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
+}
+
+/// Reconcile IP_TRANSPARENT / IPV6_TRANSPARENT on the shared BGP
+/// listeners: set while any neighbor of the address family resolves
+/// `ip-transparent` on, cleared when none does. A listening socket
+/// carries one flag for all peers, so this is the per-AF union — the
+/// option is inert for ordinary inbound connections, it only also
+/// permits TPROXY-steered connections destined to non-local addresses
+/// to be accepted and answered. A neighbor-group opinion counts toward
+/// both families: a dynamic (listen-range) member inherits it and must
+/// find the flag on the listener *before* its SYN arrives — i.e.
+/// before any member peer exists. Safe to call repeatedly; silent when
+/// a listener fd is not bound yet — `listen()` re-runs it once the
+/// bind completes.
+pub(super) fn apply_ip_transparent_refresh_all(bgp: &mut Bgp) {
+    let mut want_v4 = false;
+    let mut want_v6 = false;
+    for (_, peer) in bgp.peers.iter_all() {
+        if peer.config.transport.ip_transparent {
+            if peer.address.is_ipv4() {
+                want_v4 = true;
+            } else {
+                want_v6 = true;
+            }
+        }
+    }
+    if bgp
+        .neighbor_groups
+        .values()
+        .any(|g| g.knobs.ip_transparent == Some(true))
+    {
+        want_v4 = true;
+        want_v6 = true;
+    }
+    for (fd, is_v4, want) in [
+        (bgp.listen_fd_v4, true, want_v4),
+        (bgp.listen_fd_v6, false, want_v6),
+    ] {
+        let Some(fd) = fd else { continue };
+        if let Err(e) = super::transparent::set_ip_transparent(fd, is_v4, want) {
+            tracing::warn!(
+                error = %e,
+                want,
+                "bgp: failed to set IP_TRANSPARENT on BGP listener (CAP_NET_ADMIN required)",
+            );
+        }
+    }
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -2693,6 +2802,10 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_disable_connected_check,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/ip-transparent",
+            super::neighbor_group::config_neighbor_group_ip_transparent,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/passive",
             super::neighbor_group::config_neighbor_group_passive,
         );
@@ -2936,6 +3049,10 @@ impl Bgp {
         // zebra-bgp-transport.yang. Exempts a single-hop eBGP neighbor from
         // the directly-connected-network check (Peer::connected_check_ok).
         self.callback_peer("/disable-connected-check", config_disable_connected_check);
+        // FRR 10.4 `neighbor X ip-transparent` from
+        // zebra-bgp-transport.yang: IP_TRANSPARENT on the session socket
+        // so a non-local `update-source` can be used.
+        self.callback_peer("/ip-transparent", config_ip_transparent);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -4033,6 +4150,106 @@ mod neighbor_group_wiring_tests {
             drain_stop_events(&mut bgp).len(),
             1,
             "disabling on a live session must bounce it",
+        );
+    }
+
+    /// `ip-transparent` is a presence flag with FRR `peer_change_reset`
+    /// semantics: Set/Delete toggle it, a change to a live session is
+    /// bounced (the option must be on the socket before bind/connect),
+    /// and a no-op set does not bounce.
+    #[tokio::test]
+    async fn ip_transparent_toggles_field_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "set must enable the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "enabling on a live session must bounce it",
+        );
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "delete must clear the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "disabling on a live session must bounce it",
+        );
+    }
+
+    /// The group spelling of `ip-transparent` propagates to members
+    /// through the explicit-wins resolution: a group Set flips a member
+    /// without its own statement; the member's explicit statement keeps
+    /// it on across a group Delete.
+    #[tokio::test]
+    async fn neighbor_group_ip_transparent_inherits_and_explicit_wins() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        super::super::neighbor_group::config_neighbor_group_ip_transparent(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "a member without its own statement must inherit the group's flag",
+        );
+
+        // An explicit per-neighbor statement survives the group losing
+        // its opinion.
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        super::super::neighbor_group::config_neighbor_group_ip_transparent(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "the explicit per-neighbor flag must outlive the group opinion",
         );
     }
 

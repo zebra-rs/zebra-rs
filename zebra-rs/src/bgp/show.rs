@@ -1822,6 +1822,11 @@ struct Neighbor<'a> {
     /// e.g. a loopback, may be dialed at TTL 1). Mirrors
     /// `peer.config.transport.disable_connected_check`.
     disable_connected_check: bool,
+    /// `ip-transparent` (FRR 10.4): when true, IP_TRANSPARENT /
+    /// IPV6_TRANSPARENT is set on the session socket so a non-local
+    /// `update-source` address can be used. Mirrors
+    /// `peer.config.transport.ip_transparent`.
+    ip_transparent: bool,
     /// Name of the IOS-XR-style `neighbor-group` this peer inherits
     /// from, if any. `remote_as_inherited` says whether the peer's
     /// `remote_as` actually came off the group (vs. an explicit
@@ -2015,6 +2020,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
             None
         },
         disable_connected_check: peer.config.transport.disable_connected_check,
+        ip_transparent: peer.config.transport.ip_transparent,
         neighbor_group: peer.config.neighbor_group.clone(),
         remote_as_inherited: peer.config.remote_as_inherited,
         nd_discovered_secs_ago,
@@ -2248,6 +2254,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         writeln!(
             out,
             "  Connected-network check disabled (eBGP peer may be unconnected at TTL 1)"
+        )?;
+    }
+
+    if neighbor.ip_transparent {
+        writeln!(
+            out,
+            "  IP transparent enabled (session may use a non-local update-source address)"
         )?;
     }
 
@@ -3554,6 +3567,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             tcp_mss: None,
             tcp_mss_synced: None,
             disable_connected_check: false,
+            ip_transparent: false,
             neighbor_group: None,
             remote_as_inherited: false,
             nd_discovered_secs_ago: None,
@@ -4067,6 +4081,8 @@ struct NeighborGroupKnobsJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     disable_connected_check: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ip_transparent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy_in: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_out: Option<String>,
@@ -4101,6 +4117,7 @@ impl NeighborGroupKnobsJson {
             tcp_mss: k.tcp_mss,
             password: k.password.as_ref().map(|_| true),
             disable_connected_check: k.disable_connected_check,
+            ip_transparent: k.ip_transparent,
             policy_in: k.policy_in.clone(),
             policy_out: k.policy_out.clone(),
             prefix_set_in: k.prefix_set_in.clone(),
@@ -4290,6 +4307,9 @@ fn show_bgp_neighbor_group_detail(
     }
     if k.disable_connected_check == Some(true) {
         writeln!(buf, "  Disable-connected-check: enabled")?;
+    }
+    if k.ip_transparent == Some(true) {
+        writeln!(buf, "  IP-transparent: enabled")?;
     }
     // Policy: emit one combined line listing configured directions.
     {
