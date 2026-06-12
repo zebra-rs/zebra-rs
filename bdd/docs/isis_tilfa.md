@@ -44,10 +44,13 @@ through the r-plane rather than a plain loop-free alternate.
 | SR-MPLS labels and a TI-LFA repair are installed on the source | |
 | Source reaches the destination over the primary path | |
 | Fast-reroute survives the primary link failure (s-n1) | |
+| TI-LFA compute-mode aggressive computes the same repair in parallel | |
+| TI-LFA compute-mode sharding bounds parallelism and still protects | |
 | no-php sets the P (no-PHP) flag and makes the penultimate hop swap | |
 | no-local-prefix-sid suppresses only the local Prefix-SID in the LFIB | |
 | Deleting segment-routing mpls clears all MPLS ILM entries | |
 | lsp-mtu above the link MTU is flagged on the source's interfaces | |
 | lsp-mtu above the link MTU drops s's LSP so n1 never learns the new prefix | |
 | Lowering lsp-mtu under the link MTU lets s's LSP flood to n1 | |
+| Promoted backup actually forwards over the SR-MPLS repair | |
 | Teardown topology | |

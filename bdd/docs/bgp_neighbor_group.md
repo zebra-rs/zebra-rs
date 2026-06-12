@@ -32,6 +32,7 @@ unit tests in #764.
 - z1-1.yaml: AS 65001, neighbor-group "RR" with remote-as 65002,
 - z1-2.yaml: same shape, but RR's remote-as is 65099 (wrong) —
 - z2-1.yaml: plain AS 65002 peer to 192.168.0.1 remote-as 65001.
+- z1-3.yaml / z2-2.yaml: GTSM round — z1 inherits ttl-security
 
 ## Test Scenarios
 
@@ -41,4 +42,5 @@ unit tests in #764.
 | Inheritance — peer with only a neighbor-group reference establishes | |
 | Reactive sweep — changing the group's remote-as drops the session | |
 | Reactive sweep — restoring the group's remote-as brings it back | |
+| Inherited ttl-security — group GTSM interoperates with a per-neighbor GTSM far end | |
 | Teardown topology | |

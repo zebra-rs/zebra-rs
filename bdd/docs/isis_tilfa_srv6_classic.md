@@ -1,4 +1,4 @@
-# IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
+# IS-IS TI-LFA fast-reroute over SRv6 classic (full) SIDs with BGP L3 service traffic
 
 ## Overview
 
@@ -10,12 +10,15 @@ End.X SIDs, SRH-inserted), so that when the primary link fails the
 source still reaches the destination — including BGP-carried SRv6
 service traffic between LAN segments behind the source and the
 destination.
-This is the SRv6 sibling of @isis_tilfa (same eight-router topology
-and metrics, IPv6-only). Differences from the SR-MPLS version:
-- every IS-IS circuit is `network-type point-to-point`;
-- `segment-routing srv6 locator LOCx` replaces `segment-routing
-- the TI-LFA repair resolves to an SRv6 SID list — End SID of the
-- s and d each have a stub LAN segment (a host namespace e1 / e2);
+This is the classic-SID sibling of @tilfa_srv6 (same eight-router
+topology, metrics and addressing). The only configuration difference
+is the locator: `behavior usid` is omitted, so every router's
+locator fcbb:bbbb:X::/48 allocates SIDs in the classic RFC 8986
+full-SID layout instead of the RFC 9800 NEXT-C-SID (micro-SID)
+format. Observable consequences this feature pins:
+- `show segment-routing srv6 sid` lists the node SID as `End` and
+- the End SID is the locator network address installed as a /128
+- everything else is unchanged: the repair is still an SRH
 The metrics are tuned so a simple LFA is impossible: s reaches d via
 s-n1 (cost 2); protecting the s-n1 link requires an SR repair tunnel
 through the r-plane rather than a plain loop-free alternate.
@@ -45,8 +48,8 @@ through the r-plane rather than a plain loop-free alternate.
 
 | Scenario | Result |
 |----------|--------|
-| Build the SRv6 TI-LFA topology and confirm IS-IS + BGP | |
-| SRv6 End/End.X SIDs exist and a TI-LFA SRv6 repair is installed | |
+| Build the classic-SID SRv6 TI-LFA topology and confirm IS-IS + BGP | |
+| Classic SRv6 End/End.X SIDs exist and a TI-LFA SRv6 repair is installed | |
 | BGP carries the LAN prefixes as SRv6 End.DT6 service routes | |
 | Fast-reroute survives the primary link failure (s-n1) | |
 | Promoted backup actually forwards over the SRv6 repair | |
