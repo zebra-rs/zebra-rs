@@ -1502,17 +1502,17 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        let (code, _comps, _state) = parse(
+        for cmd in [
             "set router bgp afi-safi ipv4 table-map RIB-FILTER",
-            entry,
-            None,
-            State::new(),
-        );
-        assert_eq!(
-            code,
-            ExecCode::Success,
-            "table-map must parse as a settable path"
-        );
+            "set router bgp afi-safi ipv6 table-map RIB-FILTER",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "table-map must parse as a settable path: {cmd}"
+            );
+        }
     }
 
     /// The `neighbor-group` list inherits the per-neighbor knob set

@@ -124,9 +124,13 @@ where an unresolved name passes routes through unchanged. Deleting
 the `table-map` — not just fixing the name — is what restores
 unfiltered installs.
 
-**Scope.** IPv4 unicast on the global instance today; committing a
-`table-map` under another address family is rejected. IPv6 follows
-once the policy engine grows a v6 match path.
+**Scope.** IPv4 and IPv6 unicast on the global instance, each family
+bound independently (`afi-safi ipv4 table-map A`,
+`afi-safi ipv6 table-map B`) — a binding never touches the other
+family's installs. Committing a `table-map` under the labeled / VPN /
+EVPN families is rejected; they install through their own paths. For
+IPv6, `set med` works as for IPv4; the `set next-hop` rewrite is
+IPv4-only for now.
 
 ## Verification
 

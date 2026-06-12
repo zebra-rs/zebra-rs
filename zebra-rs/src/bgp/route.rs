@@ -351,30 +351,37 @@ fn select_fib_entry_v4(
     }
 }
 
-/// Run the v4-unicast `table-map` over a best path about to be FIB-
-/// installed. Pass-through when no binding exists for the family.
-/// With a binding: an unresolved policy denies everything (FRR
-/// parity), a policy deny returns `None` (the caller's withdraw
-/// branch reconciles the FIB), and a permit returns a rewritten
-/// *copy* of the `BgpRib` — the Loc-RIB original and what peers see
-/// are never touched. Useful set clauses at install time are
-/// `set med` (-> RIB metric) and `set next-hop`; others execute
-/// harmlessly on the discarded copy.
-fn table_map_apply_v4<'a>(
+/// Run the family's `table-map` over a best path about to be FIB-
+/// installed. The family is the prefix's: `IpNet::V4` consults the
+/// v4-unicast binding, `IpNet::V6` the v6-unicast one. Pass-through
+/// when no binding exists for the family. With a binding: an
+/// unresolved policy denies everything (FRR parity), a policy deny
+/// returns `None` (the caller's withdraw branch reconciles the FIB),
+/// and a permit returns a rewritten *copy* of the `BgpRib` — the
+/// Loc-RIB original and what peers see are never touched. Useful set
+/// clauses at install time are `set med` (-> RIB metric) and
+/// `set next-hop` (v4 routes; the v6 next-hop rewrite waits on the
+/// same plumbing as `policy in/out`); others execute harmlessly on
+/// the discarded copy.
+fn table_map_apply<'a>(
     table_map: &BTreeMap<AfiSafi, BgpTableMap>,
     router_id: Ipv4Addr,
-    prefix: Ipv4Net,
+    prefix: IpNet,
     best: Option<&'a BgpRib>,
 ) -> Option<std::borrow::Cow<'a, BgpRib>> {
     use std::borrow::Cow;
-    let Some(tm) = table_map.get(&AfiSafi::new(Afi::Ip, Safi::Unicast)) else {
+    let afi = match prefix {
+        IpNet::V4(_) => Afi::Ip,
+        IpNet::V6(_) => Afi::Ip6,
+    };
+    let Some(tm) = table_map.get(&AfiSafi::new(afi, Safi::Unicast)) else {
         return best.map(Cow::Borrowed);
     };
     let best = best?;
     // Bound name doesn't resolve to a policy: deny-all.
     let policy = tm.policy.as_ref()?;
-    let nlri = Ipv4Nlri { id: 0, prefix };
-    let decision = policy_list_apply(policy, &nlri, (*best.attr).clone(), best.weight, router_id)?;
+    let decision =
+        policy_list_apply_net(policy, prefix, (*best.attr).clone(), best.weight, router_id)?;
     let mut mapped = best.clone();
     // Transient install-time copy — never enters the attr store or
     // the Loc-RIB, so a free-floating Arc is fine.
@@ -398,10 +405,10 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
         .vrf_transport_v4
         .and_then(|m| m.get(&prefix))
         .map(|v| v.as_slice());
-    let best = table_map_apply_v4(
+    let best = table_map_apply(
         &bgp.local_rib.table_map,
         *bgp.router_id,
-        prefix,
+        IpNet::V4(prefix),
         selected.first(),
     );
     let best = best.as_deref();
@@ -561,8 +568,14 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
         .vrf_transport_v6
         .and_then(|m| m.get(&prefix))
         .map(|v| v.as_slice());
-    match selected
-        .first()
+    let best = table_map_apply(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        IpNet::V6(prefix),
+        selected.first(),
+    );
+    match best
+        .as_deref()
         .and_then(|b| select_fib_entry_v6(b, transport))
     {
         Some(rib_entry) => {
@@ -7418,13 +7431,33 @@ pub fn policy_list_apply(
     weight: u32,
     local_addr: Ipv4Addr,
 ) -> Option<PolicyDecision> {
+    policy_list_apply_net(
+        policy_list,
+        IpNet::V4(nlri.prefix),
+        bgp_attr,
+        weight,
+        local_addr,
+    )
+}
+
+/// Family-generic core of [`policy_list_apply`]: the prefix arrives
+/// as an `IpNet` so the same entry walk serves IPv4 and IPv6 routes
+/// (`PrefixSet::matches` is already dual-stack). The v6 table-map is
+/// the first v6 consumer; per-peer v6 policy can join later.
+pub fn policy_list_apply_net(
+    policy_list: &PolicyList,
+    prefix: IpNet,
+    bgp_attr: BgpAttr,
+    weight: u32,
+    local_addr: Ipv4Addr,
+) -> Option<PolicyDecision> {
     use crate::policy::{PolicyAction, SetNextHop};
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
     };
     for (_, entry) in policy_list.entry.iter() {
-        if !entry_matches(entry, nlri, &decision.attr, decision.weight) {
+        if !entry_matches(entry, prefix, &decision.attr, decision.weight) {
             continue;
         }
         match entry.action {
@@ -7493,12 +7526,12 @@ pub fn policy_list_apply(
 
 fn entry_matches(
     entry: &crate::policy::PolicyEntry,
-    nlri: &Ipv4Nlri,
+    prefix: IpNet,
     bgp_attr: &BgpAttr,
     weight: u32,
 ) -> bool {
     if let Some(prefix_set) = &entry.prefix_set
-        && !prefix_set.matches(nlri.prefix)
+        && !prefix_set.matches(prefix)
     {
         return false;
     }
@@ -10451,24 +10484,24 @@ mod color_aware_nht_tests {
 /// `table-map` semantics at the BGP-to-RIB install seam
 /// (zebra-bgp-table-map.yang): no binding passes through, an
 /// unresolved binding denies everything (FRR parity), a policy deny
-/// filters, and permit-side set clauses rewrite only the install-time
-/// copy — never the Loc-RIB original.
+/// filters, permit-side set clauses rewrite only the install-time
+/// copy — never the Loc-RIB original — and the v4/v6 bindings are
+/// consulted strictly by the prefix's family.
 #[cfg(test)]
 mod table_map_tests {
     use std::borrow::Cow;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
 
     use bgp_packet::{Afi, AfiSafi, BgpAttr, BgpNexthop, Med, Safi};
-    use ipnet::Ipv4Net;
 
     use super::*;
     use crate::policy::{NumericSet, PolicyAction, PolicyList, PrefixSet};
 
-    fn binding(policy: Option<PolicyList>) -> BTreeMap<AfiSafi, BgpTableMap> {
+    fn binding(afi: Afi, policy: Option<PolicyList>) -> BTreeMap<AfiSafi, BgpTableMap> {
         let mut map = BTreeMap::new();
         map.insert(
-            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            AfiSafi::new(afi, Safi::Unicast),
             BgpTableMap {
                 name: Some("TM".into()),
                 policy,
@@ -10494,34 +10527,61 @@ mod table_map_tests {
         )
     }
 
-    fn p(s: &str) -> Ipv4Net {
-        Ipv4Net::from_str(s).unwrap()
+    fn rib_v6_with_med(med: Option<u32>) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv6(Ipv6Addr::from_str("2001:db8::1").unwrap()));
+        attr.med = med.map(|m| Med { med: m });
+        BgpRib::new(
+            1,
+            Ipv4Addr::new(192, 0, 2, 1),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    fn p(s: &str) -> IpNet {
+        IpNet::from_str(s).unwrap()
+    }
+
+    /// Deny-everything policy: a single deny entry plus nothing else,
+    /// so any prefix that reaches it is filtered.
+    fn deny_all_list() -> PolicyList {
+        let mut list = PolicyList::default();
+        list.entry(10).action = PolicyAction::Deny;
+        list
     }
 
     #[test]
     fn no_binding_passes_through() {
         let map = BTreeMap::new();
         let best = rib_with_med(Some(7));
-        let out = table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
+        let out = table_map_apply(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
             .expect("no binding must not filter");
         assert!(
             matches!(out, Cow::Borrowed(_)),
             "pass-through must not clone the winner"
         );
         assert!(
-            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), None).is_none(),
+            table_map_apply(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), None).is_none(),
             "no winner stays no winner"
         );
     }
 
     #[test]
     fn unresolved_policy_denies_all() {
-        let map = binding(None);
-        let best = rib_with_med(None);
-        assert!(
-            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best)).is_none(),
-            "a bound but unresolved table-map filters every install (FRR parity)"
-        );
+        for (afi, prefix) in [(Afi::Ip, p("10.0.0.0/8")), (Afi::Ip6, p("2001:db8::/32"))] {
+            let map = binding(afi, None);
+            let best = rib_with_med(None);
+            assert!(
+                table_map_apply(&map, Ipv4Addr::UNSPECIFIED, prefix, Some(&best)).is_none(),
+                "a bound but unresolved table-map filters every install (FRR parity)"
+            );
+        }
     }
 
     #[test]
@@ -10529,21 +10589,20 @@ mod table_map_tests {
         // seq 10: deny 10.0.0.0/8 (and longer); seq 20: permit any.
         let mut list = PolicyList::default();
         let mut pset = PrefixSet::default();
-        pset.entry(p("10.0.0.0/8").into());
+        pset.entry(p("10.0.0.0/8"));
         let entry = list.entry(10);
         entry.prefix_set = Some(pset);
         entry.action = PolicyAction::Deny;
         let _ = list.entry(20);
-        let map = binding(Some(list));
+        let map = binding(Afi::Ip, Some(list));
         let best = rib_with_med(None);
 
         assert!(
-            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.1.0.0/16"), Some(&best))
-                .is_none(),
+            table_map_apply(&map, Ipv4Addr::UNSPECIFIED, p("10.1.0.0/16"), Some(&best)).is_none(),
             "denied prefix must not install"
         );
         assert!(
-            table_map_apply_v4(
+            table_map_apply(
                 &map,
                 Ipv4Addr::UNSPECIFIED,
                 p("192.168.0.0/16"),
@@ -10558,10 +10617,10 @@ mod table_map_tests {
     fn set_med_rewrites_install_copy_only() {
         let mut list = PolicyList::default();
         list.entry(10).med = Some(NumericSet::Set(50));
-        let map = binding(Some(list));
+        let map = binding(Afi::Ip, Some(list));
         let best = rib_with_med(Some(7));
 
-        let out = table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
+        let out = table_map_apply(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
             .expect("permit");
         assert_eq!(
             out.attr.med.as_ref().map(|m| m.med),
@@ -10572,6 +10631,93 @@ mod table_map_tests {
             best.attr.med.as_ref().map(|m| m.med),
             Some(7),
             "Loc-RIB original is untouched"
+        );
+    }
+
+    #[test]
+    fn v6_policy_deny_filters_matching_prefix_only() {
+        // seq 10: deny 2001:db8::/32 (and longer); seq 20: permit any.
+        let mut list = PolicyList::default();
+        let mut pset = PrefixSet::default();
+        pset.entry(p("2001:db8::/32"));
+        let entry = list.entry(10);
+        entry.prefix_set = Some(pset);
+        entry.action = PolicyAction::Deny;
+        let _ = list.entry(20);
+        let map = binding(Afi::Ip6, Some(list));
+        let best = rib_v6_with_med(None);
+
+        assert!(
+            table_map_apply(
+                &map,
+                Ipv4Addr::UNSPECIFIED,
+                p("2001:db8:1::/48"),
+                Some(&best)
+            )
+            .is_none(),
+            "denied v6 prefix must not install"
+        );
+        assert!(
+            table_map_apply(
+                &map,
+                Ipv4Addr::UNSPECIFIED,
+                p("2001:dead::/32"),
+                Some(&best)
+            )
+            .is_some(),
+            "non-matching v6 prefix falls through to the permit entry"
+        );
+    }
+
+    #[test]
+    fn v6_set_med_rewrites_install_copy_only() {
+        let mut list = PolicyList::default();
+        list.entry(10).med = Some(NumericSet::Set(50));
+        let map = binding(Afi::Ip6, Some(list));
+        let best = rib_v6_with_med(Some(7));
+
+        let out = table_map_apply(&map, Ipv4Addr::UNSPECIFIED, p("2001:db8::/32"), Some(&best))
+            .expect("permit");
+        assert_eq!(
+            out.attr.med.as_ref().map(|m| m.med),
+            Some(50),
+            "install copy carries the rewritten MED"
+        );
+        assert_eq!(
+            best.attr.med.as_ref().map(|m| m.med),
+            Some(7),
+            "Loc-RIB original is untouched"
+        );
+    }
+
+    #[test]
+    fn bindings_are_per_family() {
+        // A deny-all bound to v4-unicast must not touch v6 installs,
+        // and vice versa.
+        let v4_map = binding(Afi::Ip, Some(deny_all_list()));
+        let v6_best = rib_v6_with_med(None);
+        assert!(
+            table_map_apply(
+                &v4_map,
+                Ipv4Addr::UNSPECIFIED,
+                p("2001:db8::/32"),
+                Some(&v6_best)
+            )
+            .is_some(),
+            "a v4-only binding must pass v6 installs through"
+        );
+
+        let v6_map = binding(Afi::Ip6, Some(deny_all_list()));
+        let v4_best = rib_with_med(None);
+        assert!(
+            table_map_apply(
+                &v6_map,
+                Ipv4Addr::UNSPECIFIED,
+                p("10.0.0.0/8"),
+                Some(&v4_best)
+            )
+            .is_some(),
+            "a v6-only binding must pass v4 installs through"
         );
     }
 }
