@@ -236,6 +236,11 @@ pub struct OspfLinkBfdConfig {
     /// Advertised Required Min Echo RX Interval (milliseconds)
     /// (`receive` / `both`). `None` ⇒ inherit / [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
+    /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
+    /// per-interface XDP helper once the session is Up — detection immune to
+    /// daemon scheduling latency. `None` ⇒ inherit (hard default `false`:
+    /// detection in userspace).
+    pub detect_offload: Option<bool>,
 }
 
 /// The effective BFD settings for one interface after merging its
@@ -248,6 +253,7 @@ pub struct ResolvedBfd {
     pub echo_mode: Option<EchoMode>,
     pub echo_transmit_ms: u32,
     pub echo_receive_ms: u32,
+    pub detect_offload: bool,
 }
 
 impl OspfLinkBfdConfig {
@@ -270,6 +276,10 @@ impl OspfLinkBfdConfig {
                 .echo_receive_ms
                 .or(default.echo_receive_ms)
                 .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            detect_offload: self
+                .detect_offload
+                .or(default.detect_offload)
+                .unwrap_or(false),
         }
     }
 }
@@ -688,6 +698,7 @@ mod bfd_resolve_tests {
             echo_mode: Some(EchoMode::Receive),
             echo_transmit_ms: Some(100),
             echo_receive_ms: None, // → hard default 50
+            detect_offload: Some(true),
         };
 
         // Interface that sets nothing → inherits everything from the default.
@@ -697,16 +708,20 @@ mod bfd_resolve_tests {
         assert_eq!(inherit.echo_mode, Some(EchoMode::Receive));
         assert_eq!(inherit.echo_transmit_ms, 100);
         assert_eq!(inherit.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+        assert!(inherit.detect_offload, "inherits the instance default");
 
-        // Interface overrides: opt out of the blanket enable, change echo role.
+        // Interface overrides: opt out of the blanket enable, change echo
+        // role, opt out of the instance-wide detect offload.
         let override_link = OspfLinkBfdConfig {
             enable: Some(false),
             echo_mode: Some(EchoMode::Both),
+            detect_offload: Some(false),
             ..OspfLinkBfdConfig::default()
         };
         let eff = override_link.resolve(&default);
         assert!(!eff.enable, "per-interface enable=false opts out");
         assert_eq!(eff.echo_mode, Some(EchoMode::Both));
+        assert!(!eff.detect_offload, "per-interface override wins");
         // Unset leaves still inherit the instance default.
         assert_eq!(eff.min_neighbor_state, NbrStateThreshold::Full);
         assert_eq!(eff.echo_transmit_ms, 100);
@@ -722,6 +737,7 @@ mod bfd_resolve_tests {
         assert_eq!(eff.echo_mode, None);
         assert_eq!(eff.echo_transmit_ms, DEFAULT_ECHO_INTERVAL_MS);
         assert_eq!(eff.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
+        assert!(!eff.detect_offload, "hard default: userspace detection");
     }
 }
 

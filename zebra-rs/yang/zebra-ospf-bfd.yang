@@ -51,8 +51,21 @@ module zebra-ospf-bfd {
      neighbors are directly connected, so the session is always
      single-hop (UDP/3784, GTSM TTL=255) — there is no multihop knob.
 
-     OSPFv3 BFD runs over IPv6 link-local; Echo (single-hop IPv4) is
-     accepted for v3 but inert.";
+     OSPFv3 BFD runs over IPv6 link-local; Echo works there too — the
+     XDP helper reflects and originates both IPv4 and IPv6 Echo.";
+
+  revision 2026-06-12 {
+    description
+      "Add `detect-offload`: offload control-packet expiration detection
+       (the RFC 5880 §6.8.4 detection timer) to the per-interface
+       XDP/eBPF helper once the session is Up. Also correct the stale
+       `echo-mode` descriptions: Echo supports IPv6 (OSPFv3 link-local
+       sessions) since the helper gained the v6 reflect/originate paths;
+       it is no longer 'inert for v3'.";
+    reference
+      "RFC 5880 §6.8.4 (Calculating the Detection Time); RFC 5881 §5
+       (GTSM).";
+  }
 
   revision 2026-06-01 {
     description
@@ -132,9 +145,9 @@ module zebra-ospf-bfd {
       description
         "Enable the BFD Echo function (RFC 5880 §6.4) on this interface's
          single-hop sessions, choosing which half (or both) is active.
-         Backed by the per-interface `xdp-bfd-echo` XDP/eBPF helper.
-         Single-hop IPv4 only: honoured for OSPFv2, inert for OSPFv3
-         (IPv6). Absent ⇒ Echo off.";
+         Backed by the per-interface `xdp-bfd-echo` XDP/eBPF helper,
+         which handles both address families: IPv4 on OSPFv2, IPv6 (the
+         link-local pair) on OSPFv3. Absent ⇒ Echo off.";
     }
 
     leaf echo-transmit-interval {
@@ -155,6 +168,20 @@ module zebra-ospf-bfd {
         "Value advertised as `Required Min Echo RX Interval` (echo-mode
          `receive` / `both`) — the rate at which we tell the peer it may
          loop Echo back. Hard default 50 ms when unset.";
+    }
+
+    leaf detect-offload {
+      ext:help "Offload expiration detection to the XDP helper (kernel)";
+      type boolean;
+      description
+        "Once the session is Up, detect missing control packets in the
+         kernel: the per-interface XDP/eBPF helper re-arms a per-session
+         timer on every arriving BFD control packet (UDP/3784, TTL 255)
+         and drives the session Down with Control Detection Time Expired
+         when they stop (RFC 5880 §6.8.4) — immune to daemon scheduling
+         latency. The userspace detection timer stays armed as a
+         stretched backstop. Single-hop sessions only. Absent ⇒ false
+         (detection in userspace).";
     }
   }
 

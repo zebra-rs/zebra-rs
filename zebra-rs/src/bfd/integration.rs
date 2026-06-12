@@ -76,6 +76,7 @@ async fn two_instances_reach_up() {
         echo_mode: EchoMode::Off,
         required_min_echo_rx_us: 0,
         echo_transmit_us: 0,
+        detect_offload: false,
     };
 
     bfd_a.subscribe("test".into(), loopback_key(), params(port_b), tx_a);

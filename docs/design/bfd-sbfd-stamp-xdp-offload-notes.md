@@ -125,6 +125,47 @@ BFD Echo は本質的に「ローカルが送出 → リモートのフォワー
 
 ---
 
+## 2b. 標準 BFD 制御パケットの expiration 監視オフロード（2026-06-12 実装）
+
+§1 末尾の「XDP の現実的な使いどころ = RX 側の detect-timer リセット・liveness
+喪失の高速検知」をそのまま実装したもの。Echo originator の `bpf_timer` 検知
+（§2）と同じ機構を、**UDP/3784 の標準 BFD 制御パケット**に適用する。
+
+- **XDP 側は純粋な観測者**: 制御パケットを TTL/HopLimit==255（GTSM, RFC 5881
+  §5）・version==1 だけ確認し、Your Discriminator で `CONTROL_TIMERS`
+  (BTF map, 値は Echo と共通の `DetectState`) を引いて `bpf_timer` を再アーム、
+  フレームは**必ず `XDP_PASS`**。FSM・Poll/Final・パラメータ再交渉はすべて
+  従来どおりデーモンが処理する（liveness タイミングだけがカーネルに移る）。
+  Echo reflector と違いパケット書き換えが無いので、検証器対策も不要だった。
+- **確立後のみアーム**: 確立前はリモートが `Your Discriminator = 0` を送るため
+  マップのキーにできない。zebra-rs は Up 遷移で `detect-add <discr>
+  <detect-us>`、Up を離れたら `detect-del` をヘルパー stdin に送る
+  （`Bfd::detect_offload_reconcile`、Echo の reconcile と同形）。再交渉で
+  detection time が変わったら `detect-add` を再送（マップ要素の置換 =
+  旧タイマーはカーネルが cancel）。
+- **userspace タイマーはバックストップに格下げ**: ウォッチドッグがアーム中は
+  4 倍（`DETECT_BACKSTOP_FACTOR`）に伸ばして保持。ヘルパー死亡
+  （`Message::HelperGone`）で即 1 倍に戻す。偽 Down（デーモンが
+  スケジュールアウトしてソケットキューに溜まったのに userspace タイマーが
+  先に発火）と検知遅延の両方を排除でき、attack 的な短い検知時間
+  （sub-10ms 級）を正直に張れるようになる。
+- **送信側はオフロードしない**: 自分の制御パケット送信はデーモンのまま。
+  デーモンが完全に停止すれば相手側の検知で落ちる（こちらの RX 検知だけが
+  カーネル化される）。
+- **スコープ**: single-hop のみ（ヘルパーは per-ifindex アタッチ。multihop は
+  入口 IF が固定でなく GTSM 床も 255 未満）。認証付きセッションは将来 BFD
+  auth が入った場合オフロード禁止にすること（XDP では MD5/SHA1 を検証
+  できない）。
+- **設定**: OSPF の `bfd { detect-offload true; }`（per-interface /
+  instance-level、echo-mode と同じ継承）。IS-IS / BGP への展開は echo-mode
+  と同様にフォローアップ。
+- **検証**: `scripts/veth-detect-test.sh` — 600ms 検知で 150ms 間隔の制御
+  パケットを 1.2 秒流し（早発 = bootstrap fallback 発火で FAIL、つまり XDP
+  再アームの実証）、停止後 ~600ms で `detect-down` が来るのを確認。
+  2026-06-12 ラボ PASS。
+
+---
+
 ## 3. S-BFD (Seamless BFD) 概要
 
 - **RFC 7880 (2016)。** classic BFD のハンドシェイク（Down→Init→Up の三方向）を排除した派生。

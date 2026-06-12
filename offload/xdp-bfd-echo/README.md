@@ -1,12 +1,15 @@
-# xdp-bfd-echo — XDP BFD Echo datapath (reflector + originator)
+# xdp-bfd-echo — XDP BFD datapath (Echo reflector + originator, expiration watchdog)
 
 An XDP/eBPF program (with an [aya](https://aya-rs.dev/) userspace loader) that
 reflects **BFD Echo** frames (UDP **3785**, RFC 5880 §6.4 / RFC 5881 §4) in the
-data plane. **zebra-rs spawns and supervises it automatically** — one instance
-per interface — when the BFD Echo function is enabled on a single-hop IPv4
-session (e.g. `router ospf area 0 interface X bfd { echo-mode receive; }`), so a
-peer (FRR `echo-mode`, IOS, …) can run BFD Echo against zebra-rs. It can also be
-run standalone for testing (see [Run](#run)).
+data plane, and hosts the **control-packet expiration watchdog** — standard
+async-mode detection (RFC 5880 §6.8.4) offloaded to a kernel `bpf_timer` (see
+[Expiration watchdog](#expiration-watchdog-control-packets)). **zebra-rs spawns
+and supervises it automatically** — one instance per interface — when the BFD
+Echo function or `detect-offload` is enabled on a single-hop session (e.g.
+`router ospf area 0 interface X bfd { echo-mode receive; }`), so a peer (FRR
+`echo-mode`, IOS, …) can run BFD Echo against zebra-rs. It can also be run
+standalone for testing (see [Run](#run)).
 
 A matching IPv4 UDP/3785 frame is reflected back out the same interface
 (`XDP_TX`), acting as a **forwarding-plane hop**: swap the Ethernet
@@ -128,6 +131,14 @@ The namespace is required: if both veth ends share a namespace the kernel
 delivers `10.123.0.2 -> 10.123.0.1` locally via loopback and the frame never
 crosses the wire, so the XDP hook never fires.
 
+The expiration watchdog has its own end-to-end test — it arms a 600 ms watch,
+streams valid BFD control packets (each must re-arm the kernel timer; a
+premature `detect-down` fails the run), stops, and expects `detect-down`:
+
+```sh
+sudo bash scripts/veth-detect-test.sh
+```
+
 **Pass criteria:** the sent `udp/3785` frame reappears *inbound* on the sender's
 veth with the Ethernet source/destination swapped (`tcpdump -e` shows the swap;
 it even decodes as `BFD, Echo`), and the reflector logs `BFD Echo udp/3785
@@ -223,6 +234,32 @@ Beyond reflecting, the helper also *originates* Echo when zebra-rs asks it to
   softirq and sets a `down` flag; the helper polls it and emits `echo-down`. A
   userspace timeout covers the bootstrap window before the first return arms the
   timer.
+
+## Expiration watchdog (control packets)
+
+The same mechanism times **standard BFD control packets** (UDP/3784) once a
+session is Up, driven by two more line-protocol verbs:
+
+- `detect-add <discr> <detect-us>` / `detect-del <discr>` from zebra-rs
+  (re-issuing `detect-add` updates the detection time); `detect-down <discr>`
+  back when the watchdog fires.
+- The XDP program **observes** each control packet — TTL/Hop-Limit must be 255
+  (GTSM, RFC 5881 §5), version 1, Your Discriminator non-zero and present in
+  the `CONTROL_TIMERS` map — re-arms that session's `bpf_timer`, and always
+  `XDP_PASS`es the frame: the daemon still runs the full FSM on every packet,
+  only the liveness timing lives in the kernel. If control packets stop for
+  the programmed detection time (RFC 5880 §6.8.4), the timer fires in softirq
+  and the helper reports `detect-down`.
+- Why: detection neither false-fires because the daemon was scheduled out
+  behind a full socket queue, nor waits on its event loop — which is what
+  makes aggressive (sub-10 ms) detection times honest. zebra-rs keeps its
+  userspace detection timer armed as a stretched backstop and reverts to it if
+  the helper dies. Armed only for Up sessions: before establishment the peer
+  may send `Your Discriminator = 0`, which the map can't key. Single-hop only
+  (the program attaches per interface; multihop ingress isn't bound to one).
+- Enable per OSPF interface (or instance-wide) with
+  `bfd { detect-offload true; }`; `show bfd peers` then reports
+  `Detection runs in: kernel/XDP (600ms)`.
 
 ## Limitations / follow-ups
 
