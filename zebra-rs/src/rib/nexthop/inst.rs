@@ -188,6 +188,15 @@ impl NexthopMember {
 pub struct NexthopProtect {
     pub primary: NexthopMember,
     pub backup: NexthopMember,
+
+    // Kernel id of the protection indirection group (a 1-member
+    // NHA_GROUP holding the primary) that protected routes reference
+    // instead of the member's own gid — the handle the phase-2
+    // switchover swaps. 0 = no indirection: producers always emit 0
+    // and the resolver allocates one only for a Uni primary (groups
+    // can't nest, so a Multi primary's ECMP group is itself the
+    // switch point). See docs/design/nexthop-protect-kernel-failover.md.
+    pub gid: usize,
 }
 
 impl NexthopProtect {
@@ -329,6 +338,7 @@ mod tests {
         let pro = NexthopProtect {
             primary: NexthopMember::Multi(multi),
             backup: NexthopMember::Uni(mk_uni("10.0.0.5", 21)),
+            gid: 0,
         };
         let addrs: Vec<_> = pro.iter_unis().map(|u| u.addr.to_string()).collect();
         assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.2", "10.0.0.5"]);
@@ -339,6 +349,7 @@ mod tests {
         let pro = NexthopProtect {
             primary: NexthopMember::Uni(mk_uni("10.0.0.1", 20)),
             backup: NexthopMember::Uni(mk_uni("10.0.0.5", 21)),
+            gid: 0,
         };
         let roles: Vec<bool> = pro.roles().iter().map(|(_, b)| *b).collect();
         assert_eq!(roles, vec![false, true]);

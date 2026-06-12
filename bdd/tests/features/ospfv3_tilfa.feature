@@ -170,9 +170,14 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     When I apply command "set router ospfv3 fast-reroute backup-as-primary" in namespace "s"
     And I wait 5 seconds
     # d's loopback route now has the label-stack repair as its best
-    # kernel entry, out the repair egress s-n2.
+    # kernel entry, out the repair egress s-n2. The protected primary
+    # references a protection indirection group (nexthop-protect
+    # phase 1), and iproute2 renders v6 group routes on two lines —
+    # route attrs (proto/metric) on the first, nexthop detail (dev)
+    # on the continuation — so assert the two halves separately.
     Then kernel route "2001:db8::8" in namespace "s" should eventually contain "encap mpls"
-    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "proto ospf metric 2"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
     # End-to-end over the repair: dies if any label hop on the
     # s-n2-r1-r2-r3-d repair path fails to swap/pop/forward.
     And ping from "s" to "2001:db8::8" should succeed

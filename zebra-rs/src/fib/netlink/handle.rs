@@ -139,7 +139,32 @@ fn fmt_group_for_trace(group: &Group) -> String {
                 members.join(", ")
             )
         }
+        Group::Protect(p) => format!(
+            "Group::Protect{{gid={} primary={} backup={} valid={} installed={}}}",
+            p.gid(),
+            p.primary_gid,
+            p.backup_gid,
+            p.is_valid(),
+            p.is_installed(),
+        ),
     }
+}
+
+/// The primary member of a `NexthopProtect` as the `Nexthop` the
+/// per-route install/delete paths consume. When the resolver
+/// allocated a protection indirection group, the route must reference
+/// *its* gid instead of the member's own — that id is the handle the
+/// switchover swaps. Only the gid changes; address, metric, and encap
+/// stay the member's (and on `use_nhid == false` kernels the gid is
+/// never read, so this is inert there).
+fn protect_primary_nexthop(pro: &crate::rib::nexthop::NexthopProtect) -> Nexthop {
+    let mut nh = pro.primary.as_nexthop();
+    if pro.gid != 0
+        && let Nexthop::Uni(u) = &mut nh
+    {
+        u.gid = pro.gid;
+    }
+    nh
 }
 
 /// Modern rtnetlink multicast group for nexthop objects
@@ -519,13 +544,17 @@ impl FibHandle {
             }
             Nexthop::Protect(pro) => {
                 // Primary and backup install as two kernel routes at
-                // their own metrics, exactly like the List members.
+                // their own metrics. The primary references the
+                // protection indirection group (when allocated) so a
+                // future membership swap rewires every protected
+                // prefix at once; the backup keeps its member gid.
                 let mut ok = true;
-                for member in pro.members() {
-                    ok &= self
-                        .route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
-                        .await;
-                }
+                ok &= self
+                    .route_ipv4_add_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                    .await;
+                ok &= self
+                    .route_ipv4_add_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
                 ok
             }
             _ => true,
@@ -653,10 +682,12 @@ impl FibHandle {
                 }
             }
             Nexthop::Protect(pro) => {
-                for member in pro.members() {
-                    self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop(), table_id)
-                        .await;
-                }
+                // Mirror the add path: the primary route was keyed to
+                // the indirection gid, so the delete must name it too.
+                self.route_ipv4_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                    .await;
+                self.route_ipv4_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
             }
         }
     }
@@ -903,13 +934,17 @@ impl FibHandle {
             }
             Nexthop::Protect(pro) => {
                 // Primary and backup install as two kernel routes at
-                // their own metrics, exactly like the List members.
+                // their own metrics. The primary references the
+                // protection indirection group (when allocated) so a
+                // future membership swap rewires every protected
+                // prefix at once; the backup keeps its member gid.
                 let mut ok = true;
-                for member in pro.members() {
-                    ok &= self
-                        .route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
-                        .await;
-                }
+                ok &= self
+                    .route_ipv6_add_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                    .await;
+                ok &= self
+                    .route_ipv6_add_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
                 ok
             }
             _ => true,
@@ -1057,10 +1092,12 @@ impl FibHandle {
                 }
             }
             Nexthop::Protect(pro) => {
-                for member in pro.members() {
-                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
-                        .await;
-                }
+                // Mirror the add path: the primary route was keyed to
+                // the indirection gid, so the delete must name it too.
+                self.route_ipv6_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                    .await;
+                self.route_ipv6_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                    .await;
             }
         }
     }
@@ -1237,6 +1274,29 @@ impl FibHandle {
                     vec.push(grp);
                 }
                 let attr = NexthopAttribute::Group(vec);
+                msg.attributes.push(attr);
+            }
+            Group::Protect(pro) => {
+                // Protection indirection: a 1-member mpath group
+                // holding the primary. Same encoding as Multi —
+                // GroupType 0, kernel weight is value+1 so 0 = 1.
+                gid = pro.gid();
+                refcnt = pro.refcnt();
+
+                msg.header.address_family = AddressFamily::Unspec;
+
+                let attr = NexthopAttribute::Id(pro.gid() as u32);
+                msg.attributes.push(attr);
+
+                let attr = NexthopAttribute::GroupType(0);
+                msg.attributes.push(attr);
+
+                let grp = NexthopGroup {
+                    id: pro.primary_gid as u32,
+                    weight: 0,
+                    ..Default::default()
+                };
+                let attr = NexthopAttribute::Group(vec![grp]);
                 msg.attributes.push(attr);
             }
         }

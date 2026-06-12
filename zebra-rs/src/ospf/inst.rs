@@ -11928,7 +11928,11 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
         if members.len() == 2 {
             let backup = members.pop().unwrap();
             let primary = members.pop().unwrap();
-            rib::Nexthop::Protect(rib::NexthopProtect { primary, backup })
+            rib::Nexthop::Protect(rib::NexthopProtect {
+                primary,
+                backup,
+                gid: 0,
+            })
         } else {
             rib::Nexthop::List(rib::NexthopList { nexthops: members })
         }
