@@ -21,6 +21,14 @@ pub enum PolicyType {
     PrefixSetOut,
     PolicyListIn,
     PolicyListOut,
+    /// A BGP per-AFI `table-map` binding (zebra-bgp-table-map.yang).
+    /// Rides the same policy-list watch registry as
+    /// `PolicyListIn`/`Out`, but `ident` encodes the AFI/SAFI rather
+    /// than a peer index, and `Register` always answers — even with
+    /// `policy_list: None` — because an unresolved table-map is
+    /// deny-all (FRR parity) and the subscriber needs the definitive
+    /// answer to resync its FIB installs exactly once.
+    TableMap,
     /// Subscription to a named `/key-chains/key-chain <name>`. The
     /// inner `KeyChainScope` lets the subscribed protocol
     /// demultiplex updates back to the right per-link / per-neighbor
@@ -311,15 +319,21 @@ impl Policy {
                         };
                         self.watch_prefix.entry(name).or_default().push(watch);
                     }
-                    PolicyType::PolicyListIn | PolicyType::PolicyListOut => {
-                        if let Some(policy_list) = self.policy_config.config.get(&name)
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut | PolicyType::TableMap => {
+                        // Peer policies only answer when the list
+                        // exists (absent = permit-all, nothing to
+                        // replay). A table-map answers even with
+                        // `None`: unresolved is deny-all, and the
+                        // subscriber resyncs on the reply.
+                        let policy_list = self.policy_config.config.get(&name).cloned();
+                        if (policy_list.is_some() || policy_type == PolicyType::TableMap)
                             && let Some(tx) = self.clients.get(&proto)
                         {
                             let msg = PolicyRx::PolicyList {
                                 name: name.clone(),
                                 ident,
                                 policy_type,
-                                policy_list: Some(policy_list.clone()),
+                                policy_list,
                             };
                             let _ = tx.send(msg);
                         }
@@ -359,7 +373,9 @@ impl Policy {
             } => {
                 let map = match policy_type {
                     PolicyType::PrefixSetIn | PolicyType::PrefixSetOut => &mut self.watch_prefix,
-                    PolicyType::PolicyListIn | PolicyType::PolicyListOut => &mut self.watch_policy,
+                    PolicyType::PolicyListIn | PolicyType::PolicyListOut | PolicyType::TableMap => {
+                        &mut self.watch_policy
+                    }
                     PolicyType::KeyChain(_) => &mut self.watch_keychain,
                 };
                 if let Some(watches) = map.get_mut(&name) {

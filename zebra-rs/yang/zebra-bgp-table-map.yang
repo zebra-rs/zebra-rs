@@ -1,0 +1,84 @@
+module zebra-bgp-table-map {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-table-map";
+  prefix "zbtm";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP table-map: gate and rewrite BGP best paths at the point they
+     are installed from BGP into the RIB. A policy deny keeps the
+     route out of the RIB; permit-side set clauses rewrite only the
+     installed entry (MED -> RIB metric, next-hop). The BGP Loc-RIB
+     and advertisements to peers are unaffected either way.
+
+     Resulting config shape (FRR-parity bare form):
+
+       router bgp {
+         afi-safi ipv4 {
+           table-map RIB-FILTER;
+         }
+       }
+
+     Modeling notes:
+       - `table-map` is a plain string (not a leafref to /policy/name)
+         so it can be staged before the policy is committed — same
+         convention as the redistribute and `srv6 / locator`
+         references. Unlike those, a table-map whose policy does NOT
+         resolve denies every install for the family (FRR parity:
+         a missing referenced route-map filters everything).
+       - ipv4 unicast only today; the Rust callback rejects other
+         families at commit time. ipv6 follows once the policy-apply
+         path grows a v6 NLRI form.";
+
+  reference
+    "FRR bgpd `table-map WORD` under `address-family` —
+     bgp_route.c (config) / bgp_zebra.c bgp_table_map_apply()
+     (announce-time filter and metric/tag rewrite).";
+
+  grouping bgp-afi-safi-table-map {
+    description
+      "Attached to every global afi-safi list entry.";
+    leaf table-map {
+      type string;
+      description
+        "Name of a top-level `policy` applied to best paths at
+         BGP-to-RIB install time.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Attach the table-map leaf to the global afi-safi list in the
+       candidate-set subtree.";
+    uses bgp-afi-safi-table-map;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp afi-safi ipv4 table-map` is path-valid.";
+    uses bgp-afi-safi-table-map;
+  }
+}
