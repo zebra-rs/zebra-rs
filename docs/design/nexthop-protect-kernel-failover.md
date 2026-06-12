@@ -158,17 +158,50 @@ come later if ever needed.)
 
 ### ECMP primaries
 
-Kernel groups can't nest, so a `Multi` primary's ECMP group **is** the
-switch point — no extra indirection:
+Kernel groups can't nest — `valid_group_nh`
+(net/ipv4/nexthop.c:1228) rejects both hash-threshold and resilient
+groups as members — so a `Multi` primary's ECMP group **is** the
+switch point, with no extra indirection. What shipped in phase 5
+(#1380) is **leg eviction**: `REPLACE Gmulti {leg1, leg2} → {leg2}`
+on a BFD-dead leg, while leg link-down stays autonomous (the kernel
+shrinks the group itself). The deeper design space is in
+**§7. ECMP protection design space** — the nesting ban costs nothing
+functionally, because flat membership editing expresses every
+protection semantic.
 
-- leg-level BFD down: `REPLACE Gmulti {leg1, leg2} → {repair1, leg2}`
-  (per-primary repair, correct TI-LFA semantics);
-- leg link down stays autonomous (kernel shrinks the group).
+Caveat (intended behavior since #1380): a `Multi` group is keyed by
+member set and may be shared by unprotected routes with the same
+ECMP set; editing its membership rewires those too. For eviction
+that is the correct outcome — the leg is dead for everyone.
 
-Caveat for phase 5: a `Multi` group is keyed by member set and may be
-shared by unprotected routes with the same ECMP set; replacing its
-members rewires those too. Semantically acceptable (they lose a dead
-leg) but must be called out in the phase-5 PR.
+### Why an indirection group, not a value-overwrite of the primary
+
+A natural-looking alternative to `Gp` is rewriting the primary
+nexthop object in place (`RTM_NEWNEXTHOP` REPLACE of nhid 10 with the
+backup's gateway/encap) — also one atomic message rewiring every
+referencing route. Rejected because the protected thing is the
+*(primary, backup) pair*, while a nexthop object's id is an
+*identity shared by every consumer of that value*:
+
+1. one primary can carry several per-destination repairs (TI-LFA is
+   per-destination): pairs (10,11) and (10,12) need to switch to
+   *different* targets — value-overwrite of nhid 10 can only pick
+   one; pair-keyed `Gp`'s switch independently;
+2. nhid 10 is shared by unprotected routes, other protocols'
+   routes, and ECMP groups holding it as a leg (kernel members
+   reference by id) — overwriting hijacks them all;
+3. `NexthopMap` dedup keys are value-based (`(table, addr)`,
+   `(addr, labels)`): after an overwrite the daemon's gid 10 means
+   "10.0.0.2" while the kernel object forwards elsewhere — every
+   resolve during the failure window installs routes onto a lying
+   object;
+4. auditability: post-overwrite, nhid 10 and nhid 11 have identical
+   contents and no trace of which is switched;
+   `ip nexthop show id <Gp>` showing the backup member IS the audit
+   trail.
+
+Same pattern as FRR's PIC path-list indirection: separate the
+identity routes bind to from the value that changes at failover.
 
 ## 4. Data-model changes (phase 1–2)
 
@@ -233,3 +266,54 @@ leg) but must be called out in the phase-5 PR.
   ip6tables-style drop (the BFD hold-down pattern from the IS-IS BFD
   series) asserting forwarding is restored via the repair label stack
   *before* IGP reconvergence rewrites the FIB.
+
+## 7. ECMP protection design space (post-phase-5 notes, 2026-06-12)
+
+The group-nesting ban looks like a limitation but isn't: the
+indirection group's value is "a stable identity with atomically
+editable membership", and an ECMP primary already IS one. Every
+protection semantic is expressible by flat `NLM_F_REPLACE` edits on
+the ECMP group itself:
+
+| Failure | Flat edit on `Gmulti` | Semantics |
+| --- | --- | --- |
+| one leg dies, no per-leg repair | `{leg1,leg2} → {leg2}` | eviction — survivors carry (shipped, #1380) |
+| one leg dies, leg has a repair | `{leg1,leg2} → {repair1,leg2}` | per-leg repair swap — a repair is a Uni, a legal member; inherit the dead leg's weight to preserve UCMP shares |
+| all legs die (BFD-detected) | `{legs…} → {repair}` | whole-group failover; would close the blackhole window phase 5 leaves to SPF |
+| all legs die (link-down) | none needed | kernel flushes members → empty group + routes deleted → `metric+1` shadow forwards |
+
+Rows 2–3 have **no producer**: TI-LFA deliberately computes no repair
+for SPF-level ECMP destinations (`ospf/tilfa.rs` skips
+`nexthops.len() != 1`) because equal-cost survivors are loop-free
+alternates by construction, so `Multi` primaries never carry a
+Protect pair. The mechanism is ready if the IGPs ever stamp per-leg
+repairs.
+
+Known costs of flat editing, with fixes if ever needed:
+
+- **shared-group blast radius** — `Gmulti` is deduped by member set,
+  so edits also rewire unprotected routes sharing the set. Correct
+  for eviction; debatable for a repair swap. Fix: stop deduplicating
+  protected ECMP groups — a private group per protected set, keyed
+  `(member_set, backup_set)` like `fetch_protect`.
+- **flow reshuffle on edit** — hash-threshold groups recompute
+  bounds, disturbing ~1/N of surviving flows. Fix: create protected
+  ECMP groups as resilient (`NHA_RES_GROUP`); buckets stay pinned and
+  only the dead member's buckets migrate.
+- **no zero-weight standby** — member weight minimum is 1 (wire
+  encoding `weight-1` in a u8), so a "parked" repair member would
+  carry ~1/256 of steady-state flows. Not a viable protection shape.
+
+Escalation ladder beyond flat editing (none needed so far):
+
+1. **Binding-SID-style indirection** — route → single labeled Uni →
+   ILM / local SID fans out to the ECMP; the route-level protected
+   object becomes a wrappable Uni again. Natural in SR networks;
+   costs a label layer per packet and a state layer per install.
+2. **eBPF/XDP dataplane** — map-based `{legs, repairs, active}` with
+   in-place atomic flips; the `offload/` infrastructure exists.
+   Maximum freedom, maximum maintenance.
+3. **Upstream kernel work** — native backup members in nexthop
+   groups (FRR's zebra dataplane model and SAI both already model
+   this; netlink simply never grew it). The better long-term fix
+   than a depth-1 nesting allowance.
