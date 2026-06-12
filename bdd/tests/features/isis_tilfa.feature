@@ -179,6 +179,28 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     Then show command "show isis interface detail" in namespace "s" should not contain "exceeds interface MTU"
     And show command "show isis route" in namespace "n1" should contain "100.99.0.1/32"
 
+  Scenario: Promoted backup actually forwards over the SR-MPLS repair
+    Given the test topology exists
+    # `backup-as-primary` swaps the metric-sort offset so each TI-LFA
+    # repair installs as the active route and the SPF primary demotes
+    # to metric+1; `clear isis spf` recomputes and reinstalls with the
+    # flag applied. Traffic is pinned onto the repair label stack while
+    # every link stays up — proving the repair genuinely forwards,
+    # which the link-failure scenario cannot (by ping time SPF has
+    # already reconverged onto a plain post-convergence primary).
+    # s is running s-lspmtu-ok.yaml here, which keeps segment-routing
+    # mpls + fast-reroute ti-lfa, so the repair is still computed.
+    When I apply command "set router isis fast-reroute backup-as-primary" in namespace "s"
+    And I run "clear isis spf" in namespace "s"
+    # d's loopback route now has the label-stack repair as its best
+    # kernel entry: out the repair egress s-n2 at metric 12 (2 path +
+    # 10 for d's loopback prefix), demoted plain primary behind at 13.
+    Then kernel route "10.0.0.8" in namespace "s" should eventually contain "encap mpls"
+    And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2 proto isis metric 12"
+    # End-to-end over the repair: dies if any label hop on the repair
+    # path fails to swap/pop/forward.
+    And ping from "s" to "10.0.0.8" should succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"
