@@ -460,18 +460,19 @@ fn repair_segments_to_mpls_labels(
     Some(labels)
 }
 
-/// Per-destination TI-LFA repair computation. For every destination
-/// in `spf_result` that isn't `source` and has a single primary
-/// first-hop (ECMP at the SPF level is skipped — see PR #547 for the
-/// design rationale), call `spf::tilfa()` to compute the post-conv
-/// repair list. The returned map is keyed by destination vertex id.
-pub(super) fn tilfa_repair_path(
+/// Plan the TI-LFA targets from the primary SPF result: every
+/// destination that isn't `source`, has a single primary first-hop
+/// (ECMP at the SPF level is skipped — see PR #547 for the design
+/// rationale), and isn't a pseudonode, paired with the protected
+/// vertex X. Pure planning — the SPF work happens in
+/// `spf::tilfa_compute`.
+pub(super) fn tilfa_targets(
     graph: &spf::Graph,
     lsp_map: &LspMap,
     source: usize,
     spf_result: &BTreeMap<usize, spf::Path>,
-) -> BTreeMap<usize, Vec<spf::RepairPath>> {
-    let mut tilfa_result = BTreeMap::new();
+) -> Vec<spf::TilfaTarget> {
+    let mut targets = Vec::new();
 
     for (d, path) in spf_result.iter() {
         // Source is skipped.
@@ -497,8 +498,10 @@ pub(super) fn tilfa_repair_path(
         // `first[1]` so LAN matches P2P's node-protection model, and
         // so that a destination equal to the physical neighbor is
         // skipped via the empty-modified-SPF path (same as P2P, where
-        // `d == x` makes `spf::tilfa` return `vec![]`).
-        let first = &path.paths[0];
+        // `d == x` yields no PC path and an empty repair list).
+        let Some(first) = path.paths.first() else {
+            continue;
+        };
         if first.is_empty() {
             continue;
         }
@@ -511,12 +514,25 @@ pub(super) fn tilfa_repair_path(
             first[0]
         };
 
-        let repair_paths = spf::tilfa(graph, source, *d, &[x]);
-        if !repair_paths.is_empty() {
-            tilfa_result.insert(*d, repair_paths);
-        }
+        targets.push(spf::TilfaTarget { d: *d, x });
     }
-    tilfa_result
+    targets
+}
+
+/// Per-destination TI-LFA repair computation: plan the targets, then
+/// hand them to `spf::tilfa_compute`, which schedules the P/Q/PC SPF
+/// jobs per the configured compute mode (serial by default). The
+/// returned map is keyed by destination vertex id; destinations with
+/// no computable repair are absent.
+pub(super) fn tilfa_repair_path(
+    graph: &spf::Graph,
+    lsp_map: &LspMap,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+    mode: spf::TilfaComputeMode,
+) -> (BTreeMap<usize, Vec<spf::RepairPath>>, spf::TilfaStats) {
+    let targets = tilfa_targets(graph, lsp_map, source, spf_result);
+    spf::tilfa_compute(graph, source, spf_result, &targets, mode)
 }
 
 /// Carrier metadata for a uN: the identifier is the locator-node

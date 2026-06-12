@@ -651,10 +651,211 @@ fn write_first_hop_links(buf: &mut String, links: &HashSet<(usize, u32)>) {
     let _ = writeln!(buf, "  first_hop_links: {:?}", sorted);
 }
 
+/// Shared test topologies for the TI-LFA unit tests here and in
+/// `spf::tilfa_par`. Test-only.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) fn tilfa_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+
+        // Insert vertices
+        let vertices = [
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
+        ];
+
+        for vertex in vertices.iter() {
+            graph.insert(vertex.id, vertex.clone());
+        }
+
+        // Define links
+        let links = vec![
+            // S
+            (0, 1, 1),    // N1
+            (0, 2, 1),    // N2
+            (0, 3, 1000), // N3
+            // N1
+            (1, 0, 1), // S
+            (1, 4, 1), // R1
+            (1, 5, 1), // R2
+            (1, 7, 1), // D
+            // N2
+            (2, 0, 1), // S
+            (2, 4, 1), // R1
+            // N3
+            (3, 0, 1000), // S
+            (3, 4, 1000), // R1
+            // R1
+            (4, 1, 1),    // N1
+            (4, 2, 1),    // N2
+            (4, 3, 1000), // N3
+            (4, 5, 1000), // R2
+            // R2
+            (5, 1, 1),    // N1
+            (5, 4, 1000), // R1
+            (5, 6, 1000), // R3
+            // R3
+            (6, 5, 1000), // R2
+            (6, 7, 1),    // D
+            // D
+            (7, 1, 1), // N1
+            (7, 6, 1), // R3
+        ];
+
+        // Insert links into vertices
+        for (from, to, cost) in links {
+            graph
+                .get_mut(&from)
+                .unwrap()
+                .olinks
+                .push(Link::new(from, to, cost));
+            graph
+                .get_mut(&to)
+                .unwrap()
+                .ilinks
+                .push(Link::new(from, to, cost));
+        }
+        graph
+    }
+
+    /// Attach a pseudonode (one per IS-IS LAN) to the graph.
+    ///
+    /// `members` is a list of (router_id, router-side cost). For each
+    /// member the helper appends:
+    ///   router → PN  with the router's interface cost
+    ///   PN     → router  with cost 0  (always — IS-IS LAN modelling)
+    /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
+    /// works the same as for P2P links.
+    pub(crate) fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
+        graph.insert(pn_id, Vertex::new_pseudo_node(name, pn_id));
+        for &(rtr, cost) in members {
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .olinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .ilinks
+                .push(Link::new(rtr, pn_id, cost));
+            graph
+                .get_mut(&pn_id)
+                .unwrap()
+                .olinks
+                .push(Link::new(pn_id, rtr, 0));
+            graph
+                .get_mut(&rtr)
+                .unwrap()
+                .ilinks
+                .push(Link::new(pn_id, rtr, 0));
+        }
+    }
+
+    /// Same systems as `tilfa_graph()`, but each underlying point-to-point
+    /// link is rebuilt as an IS-IS LAN with one pseudonode (ids 8..=18).
+    /// SPF cost between any two routers is preserved by construction.
+    pub(crate) fn isis_lan_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+
+        for r in [
+            Vertex::new_node("S", 0),
+            Vertex::new_node("N1", 1),
+            Vertex::new_node("N2", 2),
+            Vertex::new_node("N3", 3),
+            Vertex::new_node("R1", 4),
+            Vertex::new_node("R2", 5),
+            Vertex::new_node("R3", 6),
+            Vertex::new_node("D", 7),
+        ] {
+            graph.insert(r.id, r);
+        }
+
+        // 11 LANs, one pseudonode each. Costs mirror tilfa_graph().
+        add_lan(&mut graph, 8, "PN_S_N1", &[(0, 1), (1, 1)]);
+        add_lan(&mut graph, 9, "PN_S_N2", &[(0, 1), (2, 1)]);
+        add_lan(&mut graph, 10, "PN_S_N3", &[(0, 1000), (3, 1000)]);
+        add_lan(&mut graph, 11, "PN_N1_R1", &[(1, 1), (4, 1)]);
+        add_lan(&mut graph, 12, "PN_N1_R2", &[(1, 1), (5, 1)]);
+        add_lan(&mut graph, 13, "PN_N1_D", &[(1, 1), (7, 1)]);
+        add_lan(&mut graph, 14, "PN_N2_R1", &[(2, 1), (4, 1)]);
+        add_lan(&mut graph, 15, "PN_N3_R1", &[(3, 1000), (4, 1000)]);
+        add_lan(&mut graph, 16, "PN_R1_R2", &[(4, 1000), (5, 1000)]);
+        add_lan(&mut graph, 17, "PN_R2_R3", &[(5, 1000), (6, 1000)]);
+        add_lan(&mut graph, 18, "PN_R3_D", &[(6, 1), (7, 1)]);
+
+        graph
+    }
+
+    /// Mixed LAN/P2P topology drawn from a live IS-IS LSDB
+    /// ("TI-LFA Draft with Link#"). Reproduces the scenario where the
+    /// only LANs sit between {s,n2}, {s,n1}, {n2,r1}, {r1,n1}, and the
+    /// r1↔r2 / r2↔r3 / r3↔d links are point-to-point. SPF cost from s:
+    /// every LAN crossing costs s=10 / others=1; P2P r1↔r2 and r2↔r3
+    /// are metric 1000; n1↔r2, n1↔d, r3↔d are metric 1. With X=n1,
+    /// r1 has equal-cost paths from s with and without n1 — required
+    /// to land r1 in P-space and trigger the pending_via leak below.
+    pub(crate) fn mixed_lan_p2p_graph() -> Graph {
+        let mut graph = BTreeMap::new();
+        for v in [
+            Vertex::new_node("s", 0),
+            Vertex::new_node("n1", 1),
+            Vertex::new_node("n2", 2),
+            Vertex::new_node("r1", 3),
+            Vertex::new_node("r2", 4),
+            Vertex::new_node("r3", 5),
+            Vertex::new_node("d", 6),
+        ] {
+            graph.insert(v.id, v);
+        }
+
+        // LANs (DIS-based pseudonode naming matches the LSDB).
+        add_lan(&mut graph, 7, "s.04", &[(0, 10), (2, 1)]);
+        add_lan(&mut graph, 8, "n1.03", &[(1, 1), (0, 10)]);
+        add_lan(&mut graph, 9, "n2.04", &[(2, 1), (3, 1)]);
+        add_lan(&mut graph, 10, "r1.04", &[(3, 1), (1, 1)]);
+
+        // P2P links (symmetric metric in both directions).
+        let p2p = [(1, 4, 1), (1, 6, 1), (3, 4, 1000), (4, 5, 1000), (5, 6, 1)];
+        for &(a, b, cost) in &p2p {
+            graph
+                .get_mut(&a)
+                .unwrap()
+                .olinks
+                .push(Link::new(a, b, cost));
+            graph
+                .get_mut(&b)
+                .unwrap()
+                .ilinks
+                .push(Link::new(a, b, cost));
+            graph
+                .get_mut(&b)
+                .unwrap()
+                .olinks
+                .push(Link::new(b, a, cost));
+            graph
+                .get_mut(&a)
+                .unwrap()
+                .ilinks
+                .push(Link::new(b, a, cost));
+        }
+        graph
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
+    use super::fixtures::*;
     use super::*;
 
     // RFC 9855 §5 TI-LFA topology, modelled as all-LAN. Each
@@ -856,144 +1057,6 @@ mod tests {
         assert_eq!(n.cost, 20);
         assert_eq!(n.paths.len(), 1);
         assert_eq!(*n.paths.first().unwrap(), vec![1, 3]);
-    }
-
-    fn tilfa_graph() -> Graph {
-        let mut graph = BTreeMap::new();
-
-        // Insert vertices
-        let vertices = [
-            Vertex::new_node("S", 0),
-            Vertex::new_node("N1", 1),
-            Vertex::new_node("N2", 2),
-            Vertex::new_node("N3", 3),
-            Vertex::new_node("R1", 4),
-            Vertex::new_node("R2", 5),
-            Vertex::new_node("R3", 6),
-            Vertex::new_node("D", 7),
-        ];
-
-        for vertex in vertices.iter() {
-            graph.insert(vertex.id, vertex.clone());
-        }
-
-        // Define links
-        let links = vec![
-            // S
-            (0, 1, 1),    // N1
-            (0, 2, 1),    // N2
-            (0, 3, 1000), // N3
-            // N1
-            (1, 0, 1), // S
-            (1, 4, 1), // R1
-            (1, 5, 1), // R2
-            (1, 7, 1), // D
-            // N2
-            (2, 0, 1), // S
-            (2, 4, 1), // R1
-            // N3
-            (3, 0, 1000), // S
-            (3, 4, 1000), // R1
-            // R1
-            (4, 1, 1),    // N1
-            (4, 2, 1),    // N2
-            (4, 3, 1000), // N3
-            (4, 5, 1000), // R2
-            // R2
-            (5, 1, 1),    // N1
-            (5, 4, 1000), // R1
-            (5, 6, 1000), // R3
-            // R3
-            (6, 5, 1000), // R2
-            (6, 7, 1),    // D
-            // D
-            (7, 1, 1), // N1
-            (7, 6, 1), // R3
-        ];
-
-        // Insert links into vertices
-        for (from, to, cost) in links {
-            graph
-                .get_mut(&from)
-                .unwrap()
-                .olinks
-                .push(Link::new(from, to, cost));
-            graph
-                .get_mut(&to)
-                .unwrap()
-                .ilinks
-                .push(Link::new(from, to, cost));
-        }
-        graph
-    }
-
-    /// Attach a pseudonode (one per IS-IS LAN) to the graph.
-    ///
-    /// `members` is a list of (router_id, router-side cost). For each
-    /// member the helper appends:
-    ///   router → PN  with the router's interface cost
-    ///   PN     → router  with cost 0  (always — IS-IS LAN modelling)
-    /// olinks/ilinks stay symmetric so reverse SPF (used by Q-space)
-    /// works the same as for P2P links.
-    fn add_lan(graph: &mut Graph, pn_id: usize, name: &str, members: &[(usize, u32)]) {
-        graph.insert(pn_id, Vertex::new_pseudo_node(name, pn_id));
-        for &(rtr, cost) in members {
-            graph
-                .get_mut(&rtr)
-                .unwrap()
-                .olinks
-                .push(Link::new(rtr, pn_id, cost));
-            graph
-                .get_mut(&pn_id)
-                .unwrap()
-                .ilinks
-                .push(Link::new(rtr, pn_id, cost));
-            graph
-                .get_mut(&pn_id)
-                .unwrap()
-                .olinks
-                .push(Link::new(pn_id, rtr, 0));
-            graph
-                .get_mut(&rtr)
-                .unwrap()
-                .ilinks
-                .push(Link::new(pn_id, rtr, 0));
-        }
-    }
-
-    /// Same systems as `tilfa_graph()`, but each underlying point-to-point
-    /// link is rebuilt as an IS-IS LAN with one pseudonode (ids 8..=18).
-    /// SPF cost between any two routers is preserved by construction.
-    fn isis_lan_graph() -> Graph {
-        let mut graph = BTreeMap::new();
-
-        for r in [
-            Vertex::new_node("S", 0),
-            Vertex::new_node("N1", 1),
-            Vertex::new_node("N2", 2),
-            Vertex::new_node("N3", 3),
-            Vertex::new_node("R1", 4),
-            Vertex::new_node("R2", 5),
-            Vertex::new_node("R3", 6),
-            Vertex::new_node("D", 7),
-        ] {
-            graph.insert(r.id, r);
-        }
-
-        // 11 LANs, one pseudonode each. Costs mirror tilfa_graph().
-        add_lan(&mut graph, 8, "PN_S_N1", &[(0, 1), (1, 1)]);
-        add_lan(&mut graph, 9, "PN_S_N2", &[(0, 1), (2, 1)]);
-        add_lan(&mut graph, 10, "PN_S_N3", &[(0, 1000), (3, 1000)]);
-        add_lan(&mut graph, 11, "PN_N1_R1", &[(1, 1), (4, 1)]);
-        add_lan(&mut graph, 12, "PN_N1_R2", &[(1, 1), (5, 1)]);
-        add_lan(&mut graph, 13, "PN_N1_D", &[(1, 1), (7, 1)]);
-        add_lan(&mut graph, 14, "PN_N2_R1", &[(2, 1), (4, 1)]);
-        add_lan(&mut graph, 15, "PN_N3_R1", &[(3, 1000), (4, 1000)]);
-        add_lan(&mut graph, 16, "PN_R1_R2", &[(4, 1000), (5, 1000)]);
-        add_lan(&mut graph, 17, "PN_R2_R3", &[(5, 1000), (6, 1000)]);
-        add_lan(&mut graph, 18, "PN_R3_D", &[(6, 1), (7, 1)]);
-
-        graph
     }
 
     fn seg_disp(graph: &Graph, seg: &SrSegment) -> String {
@@ -1452,61 +1515,6 @@ mod tests {
             BTreeSet::from([(1, 10)]),
             "B must inherit A's first_hop_links (root→A link_id), not the A→B link's id"
         );
-    }
-
-    /// Mixed LAN/P2P topology drawn from a live IS-IS LSDB
-    /// ("TI-LFA Draft with Link#"). Reproduces the scenario where the
-    /// only LANs sit between {s,n2}, {s,n1}, {n2,r1}, {r1,n1}, and the
-    /// r1↔r2 / r2↔r3 / r3↔d links are point-to-point. SPF cost from s:
-    /// every LAN crossing costs s=10 / others=1; P2P r1↔r2 and r2↔r3
-    /// are metric 1000; n1↔r2, n1↔d, r3↔d are metric 1. With X=n1,
-    /// r1 has equal-cost paths from s with and without n1 — required
-    /// to land r1 in P-space and trigger the pending_via leak below.
-    fn mixed_lan_p2p_graph() -> Graph {
-        let mut graph = BTreeMap::new();
-        for v in [
-            Vertex::new_node("s", 0),
-            Vertex::new_node("n1", 1),
-            Vertex::new_node("n2", 2),
-            Vertex::new_node("r1", 3),
-            Vertex::new_node("r2", 4),
-            Vertex::new_node("r3", 5),
-            Vertex::new_node("d", 6),
-        ] {
-            graph.insert(v.id, v);
-        }
-
-        // LANs (DIS-based pseudonode naming matches the LSDB).
-        add_lan(&mut graph, 7, "s.04", &[(0, 10), (2, 1)]);
-        add_lan(&mut graph, 8, "n1.03", &[(1, 1), (0, 10)]);
-        add_lan(&mut graph, 9, "n2.04", &[(2, 1), (3, 1)]);
-        add_lan(&mut graph, 10, "r1.04", &[(3, 1), (1, 1)]);
-
-        // P2P links (symmetric metric in both directions).
-        let p2p = [(1, 4, 1), (1, 6, 1), (3, 4, 1000), (4, 5, 1000), (5, 6, 1)];
-        for &(a, b, cost) in &p2p {
-            graph
-                .get_mut(&a)
-                .unwrap()
-                .olinks
-                .push(Link::new(a, b, cost));
-            graph
-                .get_mut(&b)
-                .unwrap()
-                .ilinks
-                .push(Link::new(a, b, cost));
-            graph
-                .get_mut(&b)
-                .unwrap()
-                .olinks
-                .push(Link::new(b, a, cost));
-            graph
-                .get_mut(&a)
-                .unwrap()
-                .ilinks
-                .push(Link::new(b, a, cost));
-        }
-        graph
     }
 
     /// Regression: `make_repair_list` used to leak `pending_via`
