@@ -1,0 +1,181 @@
+module zebra-bgp-local-as {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-local-as";
+  prefix "zbla";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "FRR-style per-neighbor `local-as` knob.
+
+     Present a different AS number to one neighbor than the router's
+     configured AS — the classic AS-migration tool: after an
+     acquisition the router moves into the new backbone AS, but an
+     external peer that has not yet updated its `remote-as` keeps
+     seeing the old AS:
+
+       router bgp {
+         global { as 65100; }
+         neighbor 192.168.1.3 {
+           remote-as 65001;
+           local-as 64999;                    // bare form
+         }
+         neighbor 192.168.1.4 {
+           remote-as 65002;
+           local-as 64999 {
+             no-prepend true;                 // inbound: don't add 64999
+             replace-as true;                 // outbound: only 64999
+             dual-as true;                    // peer may use 65100 too
+           }
+         }
+       }
+
+     Effect of the bare form on a session with local-as N:
+
+       - OPEN: the My-AS field (and the AS4 capability) carry N.
+       - Outbound eBGP updates: the AS_PATH gets the real AS
+         prepended, then N — the receiver sees `N, 65100, ...`.
+       - Inbound updates from this peer: N is prepended at ingress,
+         so iBGP peers and other neighbors see the path through N
+         and loop detection via the old AS keeps working.
+
+     Three independent boolean modifiers (FRR nests them in its CLI
+     for IOS compatibility, but they act on different planes — FRR's
+     own northbound model also keeps them independent):
+
+       - `no-prepend` (inbound): skip the ingress prepend of N on
+         routes received from this neighbor.
+       - `replace-as` (outbound): prepend only N, not the real AS.
+       - `dual-as` (session): allow the neighbor to peer with either
+         the real AS or N; after a Bad Peer AS NOTIFICATION the next
+         OPEN retries with the other AS number.
+
+     The AS number must differ from the router's global AS (the
+     config callback rejects it, matching FRR's 'Cannot have local-as
+     same as BGP AS number'). The node is modeled as a list keyed by
+     the AS number so the CLI reads `local-as 64999 [flags]` exactly
+     like FRR, but it is semantically single-instance: the config
+     callback refuses a second entry with a warning (max-elements is
+     not engine-enforced).
+
+     NOTE: the IETF model (ietf-bgp-common) ships a plain `local-as`
+     leaf on the neighbor. zebra-rs removes that leaf from its
+     vendored copy — it cannot carry the modifiers, and a same-named
+     augment is forbidden by RFC 7950 §7.17 — and owns the name with
+     this list instead (same pattern as remove-private-as).";
+
+  revision 2026-06-12 {
+    description "Initial revision.";
+    reference
+      "FRR `neighbor X local-as ASNUM [no-prepend [replace-as [dual-as]]]`.
+       RFC 7705: Autonomous System Migration Mechanisms and Their
+       Effects on the BGP AS_PATH Attribute.";
+  }
+
+  grouping bgp-neighbor-local-as-extension {
+    description
+      "FRR-style `local-as` on a BGP neighbor: a single-entry list
+       keyed by the substitute AS number, with three independent
+       boolean modifiers.";
+
+    list local-as {
+      key "as-number";
+      max-elements 1;
+      ext:help "Present a different AS number to this neighbor";
+      description
+        "Use this AS number instead of the router's global AS when
+         talking to this neighbor. Single-instance: a second entry is
+         rejected by the config callback.";
+
+      leaf as-number {
+        type inet:as-number;
+        ext:help "AS number to present (must differ from the router AS)";
+        description
+          "The substitute AS number. Used in the OPEN My-AS field and
+           prepended on both directions of the session (see the
+           modifiers). Must differ from the router's global AS.";
+      }
+
+      leaf no-prepend {
+        ext:help "Do not prepend the local-as to routes received from this neighbor";
+        type boolean;
+        default "false";
+        description
+          "Inbound modifier: when true, do not prepend the substitute
+           AS to the AS_PATH of routes received from this neighbor.
+           Defaults are not carried into the entry tree, so the config
+           callback treats an absent leaf as false.";
+      }
+
+      leaf replace-as {
+        ext:help "Prepend only the local-as (hide the real AS) on outbound updates";
+        type boolean;
+        default "false";
+        description
+          "Outbound modifier: when true, prepend only the substitute
+           AS to updates sent to this neighbor, instead of the real
+           AS followed by the substitute AS. Defaults are not carried
+           into the entry tree, so the config callback treats an
+           absent leaf as false.";
+      }
+
+      leaf dual-as {
+        ext:help "Accept the session under either the real AS or the local-as";
+        type boolean;
+        default "false";
+        description
+          "Session modifier: when true, allow the neighbor to peer
+           using either the router's global AS or the substitute AS.
+           On a Bad Peer AS notification the next OPEN is retried
+           with the other AS number. Defaults are not carried into
+           the entry tree, so the config callback treats an absent
+           leaf as false.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach local-as to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-local-as-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X local-as [...]` is path-valid.";
+    uses bgp-neighbor-local-as-extension;
+  }
+}

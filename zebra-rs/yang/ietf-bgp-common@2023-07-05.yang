@@ -256,14 +256,15 @@ submodule ietf-bgp-common {
       description
         "AS number of the peer.";
     }
-    leaf local-as {
-      type inet:as-number;
-      description
-        "The local autonomous system number that is to be used when
-         establishing sessions with the remote peer or peer group, if
-         this differs from the global BGP router autonomous system
-         number.";
-    }
+    // local-as: removed from the vendored IETF model so zebra-rs can
+    // own the name as an FRR-style single-entry list keyed by the
+    // substitute AS number (zebra-bgp-local-as.yang). The plain leaf
+    // cannot carry the no-prepend / replace-as / dual-as modifiers,
+    // and an augment can't add a same-named node over this leaf
+    // (RFC 7950 §7.17). See the zebra module.
+    //  leaf local-as {
+    //    type inet:as-number;
+    //  }
     // remove-private-as: removed from the vendored IETF model so
     // zebra-rs can own the name as an FRR-style presence container
     // (zebra-bgp-remove-private-as.yang). The IANA identityref typedef
