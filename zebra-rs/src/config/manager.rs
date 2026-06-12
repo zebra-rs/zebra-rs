@@ -1562,6 +1562,59 @@ mod yang_load_tests {
         );
     }
 
+    /// `neighbor X local-as <ASN> [no-prepend|replace-as|dual-as <bool>]`
+    /// (zebra-bgp-local-as.yang) owns a name the vendored ietf-bgp-common
+    /// used to define as a plain leaf; that leaf is deleted from the
+    /// vendored copy because a same-named augment is silently dropped
+    /// (RFC 7950 §7.17) and `load_mode` would not notice. Pin the
+    /// concrete paths: the list form parses, and a bare boolean-less
+    /// flag (the old `type empty` spelling) does not.
+    #[test]
+    fn bgp_neighbor_local_as_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 10.0.0.1 local-as 64999",
+            "set router bgp neighbor 10.0.0.1 local-as 64999 no-prepend true",
+            "set router bgp neighbor 10.0.0.1 local-as 64999 replace-as true",
+            "set router bgp neighbor 10.0.0.1 local-as 64999 dual-as true",
+            "set router bgp neighbor 10.0.0.1 local-as 64999 no-prepend false",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd} — \
+                 a silent name collision with the (removed) ietf-bgp-common \
+                 local-as leaf would show up here as a parse failure"
+            );
+        }
+
+        let (code, _comps, _state) = parse(
+            "set router bgp neighbor 10.0.0.1 local-as 64999 no-prepend",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "the modifiers are boolean leaves — the value-less spelling must not parse",
+        );
+    }
+
     /// `neighbor X port <1-65535>` and the instance-level
     /// `router bgp port <0-65535>` (zebra-bgp-transport.yang) must both
     /// be settable paths. The neighbor leaf's range starts at 1, so

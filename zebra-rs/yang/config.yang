@@ -96,6 +96,10 @@ module config {
     prefix zbef;
   }
 
+  import zebra-bgp-local-as {
+    prefix zbla;
+  }
+
   import zebra-bgp-timer {
     prefix zbtm;
   }
