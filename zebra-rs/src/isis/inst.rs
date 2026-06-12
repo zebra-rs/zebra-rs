@@ -272,6 +272,11 @@ pub struct Isis {
     /// None until the first SPF completes for the level. Surfaced by
     /// `show isis spf` as "Last SPF: N s ago".
     pub spf_last: Levels<Option<std::time::Instant>>,
+    /// TI-LFA compute telemetry for the most recent SPF run (legacy +
+    /// MT2 merged), written by `apply_spf_result` from
+    /// `SpfOutput::tilfa_stats`. None until TI-LFA runs (and cleared
+    /// when it is disabled). Surfaced by `show isis spf`.
+    pub tilfa_stats: Levels<Option<spf::TilfaStats>>,
     /// LSP-gen coalescing slot. None means no run is currently pending;
     /// Some(Timer) means a LspGenFire is armed and additional
     /// LspOriginate events will fold into the same run.
@@ -528,6 +533,8 @@ pub struct IsisTop<'a> {
     pub spf_duration: &'a mut Levels<Option<std::time::Duration>>,
     /// Last SPF completion instant per level — see `Isis::spf_last`.
     pub spf_last: &'a mut Levels<Option<std::time::Instant>>,
+    /// Last TI-LFA compute telemetry per level — see `Isis::tilfa_stats`.
+    pub tilfa_stats: &'a mut Levels<Option<spf::TilfaStats>>,
     pub graph: &'a mut Levels<Option<spf::Graph>>,
     pub spf_result: &'a mut Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub tilfa_result: &'a mut Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
@@ -670,6 +677,7 @@ impl Isis {
                 spf_pending: Levels::<bool>::default(),
                 spf_duration: Levels::<Option<std::time::Duration>>::default(),
                 spf_last: Levels::<Option<std::time::Instant>>::default(),
+                tilfa_stats: Levels::<Option<spf::TilfaStats>>::default(),
                 lsp_gen_timer: Levels::<Option<Timer>>::default(),
                 lsp_gen_throttle: Levels::<Throttle>::default(),
                 lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
@@ -2589,6 +2597,7 @@ impl Isis {
             spf_pending: &mut self.spf_pending,
             spf_duration: &mut self.spf_duration,
             spf_last: &mut self.spf_last,
+            tilfa_stats: &mut self.tilfa_stats,
             graph: &mut self.graph,
             spf_result: &mut self.spf_result,
             tilfa_result: &mut self.tilfa_result,

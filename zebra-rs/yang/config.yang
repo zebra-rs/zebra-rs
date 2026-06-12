@@ -44,6 +44,10 @@ module config {
     prefix zbr;
   }
 
+  import zebra-bgp-table-map {
+    prefix zbtm;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }
@@ -1512,6 +1516,38 @@ module config {
             // SR-MPLS labels, so segment-routing/mpls must also be
             // enabled for the repair to install in the dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
+
+            leaf compute-mode {
+              ext:help "How the TI-LFA computation is scheduled";
+              // Execution scheduling for the per-destination TI-LFA
+              // computation (design: docs/design/isis-tilfa-parallel-
+              // spf.md). Results are identical across modes — only
+              // CPU usage and wall-clock differ. `serial` runs on the
+              // SPF worker thread; `conservative` fans out one task
+              // per destination; `aggressive` additionally shares the
+              // PC-path SPF across destinations behind the same
+              // protected node; `sharding` is the aggressive work
+              // split into at most `compute-shards` parallel shards.
+              type enumeration {
+                enum serial;
+                enum conservative;
+                enum aggressive;
+                enum sharding;
+              }
+              default "serial";
+            }
+
+            leaf compute-shards {
+              ext:help "Max parallel TI-LFA shards (sharding mode)";
+              // Hard upper bound on TI-LFA parallelism, consulted
+              // only when `compute-mode sharding` is set. Lets an
+              // operator reserve cores for other daemons on a shared
+              // box.
+              type uint16 {
+                range "1..256";
+              }
+              default "8";
+            }
           }
           container backup-as-primary {
             // Swap the metric-sort offset between the SPF primary

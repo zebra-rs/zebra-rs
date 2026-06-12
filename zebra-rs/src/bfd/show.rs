@@ -219,6 +219,9 @@ struct BfdPeerDetailJson {
     /// scheduled; 0 until the first tick or while transmission is suspended.
     actual_transmit_interval_us: u32,
     detection_time_us: u32,
+    /// Detection time programmed into the in-kernel (XDP) expiration
+    /// watchdog; 0 while detection runs in userspace.
+    kernel_detection_time_us: u32,
     /// `Required Min Echo RX Interval` we advertise (0 = disabled). Non-zero
     /// only while the XDP reflector is up on a single-hop session.
     echo_receive_interval_us: u32,
@@ -270,6 +273,7 @@ fn detail_json(key: &SessionKey, s: &Session) -> BfdPeerDetailJson {
         negotiated_transmit_interval_us: s.tx_interval_us(),
         actual_transmit_interval_us: s.actual_tx_us,
         detection_time_us: s.detection_time_us(),
+        kernel_detection_time_us: s.kernel_detect_us,
         echo_receive_interval_us: s.advertised_echo_rx_us(),
         echo_transmission_interval_us: s.echo_transmit_interval_us(),
         echo_transmit_active: s.echo_originating,
@@ -366,6 +370,15 @@ fn render_detail(buf: &mut String, key: &SessionKey, s: &Session) -> fmt::Result
         ms(detect)
     };
     writeln!(buf, "            Detection timeout: {}", detect)?;
+    // Where expiration detection runs: in the XDP helper's bpf_timer
+    // (kernel, with the userspace timer as a stretched backstop) or in
+    // userspace as usual.
+    let detect_where = if s.kernel_detect_us > 0 {
+        format!("kernel/XDP ({})", ms(s.kernel_detect_us))
+    } else {
+        "userspace".to_string()
+    };
+    writeln!(buf, "            Detection runs in: {}", detect_where)?;
     writeln!(
         buf,
         "            Echo receive interval: {}",

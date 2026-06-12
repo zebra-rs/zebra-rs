@@ -1,0 +1,28 @@
+# z2 (AS 65002) — the transparent end, WITHOUT `ip-transparent` yet. It
+# dials z1 (10.0.0.1, on the connected subnet) sourcing the session from
+# 10.255.0.99 — an address z2 does not own. Without IP_TRANSPARENT the
+# kernel refuses the bind() to the non-local update-source, every dial
+# fails, and the session must stay down: the negative half of the BDD.
+# The return-path policy routing (fwmark → table 100 local) is installed
+# by the harness step, so the socket option is the only missing piece.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      update-source: 10.255.0.99
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.2.2.2/32

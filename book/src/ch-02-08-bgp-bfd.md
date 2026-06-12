@@ -40,6 +40,10 @@ overridden per neighbour (see [Instance-level defaults](#instance-level-defaults
 Control-packet intervals use the BFD defaults (300 ms / ×3 ⇒ ~900 ms
 detection) and are not currently tunable — see
 [Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
+In-kernel expiration detection
+([`detect-offload`](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload))
+is not yet configurable on BGP neighbours — the OSPF knob landed first;
+the BGP leaf is a planned follow-up.
 
 ## Single-hop vs multi-hop — inferred by default
 
@@ -54,8 +58,9 @@ keys multi-hop off the `ebgp-multihop` setting; the two agree on the
 common directly-connected eBGP and iBGP cases.) On a point-to-point
 link the distinction is moot — the session is single-hop either way.
 
-zebra-rs does not yet have an `ebgp-multihop` knob, so **eBGP over
-loopbacks** needs the hop mode forced explicitly:
+zebra-rs does have an `ebgp-multihop` transport knob (for the BGP TCP
+session's TTL), but the BFD hop-mode inference does not read it — so
+**eBGP over loopbacks** still needs the BFD hop mode forced explicitly:
 
 ```
 router bgp {
@@ -86,7 +91,8 @@ but Echo is **single-hop only** (RFC 5883 multihop has no Echo), so it applies
 an iBGP or multihop-eBGP neighbour the `echo-mode` leaf is accepted but inert.
 Within that constraint it works like the OSPF/IS-IS form — `transmit` originates,
 `receive` advertises + reflects, `both` does both, via the per-interface
-`xdp-bfd-echo` helper:
+`xdp-bfd-echo` helper. IPv4 and IPv6 neighbours are covered alike (the Echo
+session uses the same addresses as the control session):
 
 ```
 router bgp {

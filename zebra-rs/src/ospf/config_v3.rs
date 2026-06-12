@@ -13,9 +13,10 @@ use super::area::{AreaTypeKind, ExternalMetricType, NssaTranslatorRole, RedistEn
 use super::config::{
     Callback, apply_link_enable_transition, area_no_summary_set, area_nssa_default_originate_set,
     area_nssa_suppress_fa_set, area_nssa_translator_role_set, area_type_set,
-    config_ospf_bfd_echo_mode, config_ospf_bfd_echo_receive_interval,
-    config_ospf_bfd_echo_transmit_interval, config_ospf_bfd_enable,
-    config_ospf_bfd_min_neighbor_state, config_ospf_interface_bfd_echo_mode,
+    config_ospf_bfd_detect_offload, config_ospf_bfd_echo_mode,
+    config_ospf_bfd_echo_receive_interval, config_ospf_bfd_echo_transmit_interval,
+    config_ospf_bfd_enable, config_ospf_bfd_min_neighbor_state,
+    config_ospf_interface_bfd_detect_offload, config_ospf_interface_bfd_echo_mode,
     config_ospf_interface_bfd_echo_receive_interval,
     config_ospf_interface_bfd_echo_transmit_interval, config_ospf_interface_bfd_enable,
     config_ospf_interface_bfd_min_neighbor_state, link_should_enable, ospf_link_get_mut_by_name,
@@ -86,6 +87,10 @@ impl Ospf<Ospfv3> {
                 "/area/interface/bfd/echo-receive-interval",
                 config_ospf_interface_bfd_echo_receive_interval,
             ),
+            (
+                "/area/interface/bfd/detect-offload",
+                config_ospf_interface_bfd_detect_offload,
+            ),
             // Instance-level `router ospfv3 { bfd { ... } }` defaults.
             ("/bfd/enable", config_ospf_bfd_enable),
             (
@@ -101,6 +106,7 @@ impl Ospf<Ospfv3> {
                 "/bfd/echo-receive-interval",
                 config_ospf_bfd_echo_receive_interval,
             ),
+            ("/bfd/detect-offload", config_ospf_bfd_detect_offload),
             (
                 "/area/interface/network-type",
                 config_ospfv3_interface_network_type,

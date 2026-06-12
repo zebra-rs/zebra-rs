@@ -2897,6 +2897,22 @@ fn write_spf_status_banner(isis: &Isis, buf: &mut String) {
                 );
             }
         }
+        // TI-LFA compute telemetry for the same run (legacy + MT2
+        // merged). None while TI-LFA is disabled or before the first
+        // protected run, so the block stays quiet in the common case.
+        if let Some(stats) = isis.tilfa_stats.get(&level) {
+            let _ = writeln!(
+                buf,
+                "      ti-lfa: targets={} mode={} workers={} spf{{q={} pc={} dedup-saved={}}} took {}",
+                stats.targets,
+                stats.mode,
+                stats.width,
+                stats.q_spf,
+                stats.pc_spf,
+                stats.pc_deduped,
+                format_compute_duration(stats.duration),
+            );
+        }
     }
 }
 

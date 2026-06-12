@@ -1834,6 +1834,11 @@ impl Bgp {
         // not clamp the listener, so a passively-accepted peer would
         // otherwise negotiate the default MSS.
         super::config::apply_tcp_mss_refresh_all(self);
+        // And the listener IP_TRANSPARENT union (`ip-transparent`
+        // knobs that were configured before the bind), so a
+        // TPROXY-steered passive session to a non-local address can be
+        // accepted and answered.
+        super::config::apply_ip_transparent_refresh_all(self);
 
         Ok(())
     }
@@ -2847,11 +2852,32 @@ impl Bgp {
                 }
             }
             policy::PolicyRx::PolicyList {
-                name: _,
+                name,
                 ident,
                 policy_type,
                 policy_list,
             } => {
+                // Table-map bindings aren't peer-scoped — `ident`
+                // encodes the AFI/SAFI — so route them before the
+                // peer lookup. The refresh step is a FIB resync, not
+                // a soft-reconfiguration: table-map never changes
+                // best-path or what peers are advertised.
+                if policy_type == policy::PolicyType::TableMap {
+                    let Some(afi_safi) = super::config::table_map_ident_decode(ident) else {
+                        return;
+                    };
+                    let Some(tm) = self.local_rib.table_map.get_mut(&afi_safi) else {
+                        return;
+                    };
+                    // Drop a stale in-flight push from a name the
+                    // operator has since rebound away from.
+                    if tm.name.as_deref() != Some(name.as_str()) {
+                        return;
+                    }
+                    tm.policy = policy_list;
+                    self.table_map_resync(afi_safi);
+                    return;
+                }
                 let Some(peer) = self.peers.get_mut_by_idx(ident) else {
                     return;
                 };
@@ -2883,6 +2909,50 @@ impl Bgp {
                 }
                 super::config::apply_ao_refresh_all(self);
             }
+        }
+    }
+
+    /// Re-run the FIB install for every Loc-RIB winner of `afi_safi`
+    /// after a `table-map` binding or its policy content changed.
+    /// Install-only sweep: best-path selection and egress attributes
+    /// are unaffected by table-map, so nothing is re-advertised. The
+    /// `Selected` side of the Loc-RIB table is authoritative for
+    /// "currently has a winner" — prefixes absent from it have no FIB
+    /// state to reconcile (their withdraw fired when the winner
+    /// disappeared).
+    pub(super) fn table_map_resync(&mut self, afi_safi: bgp_packet::AfiSafi) {
+        use bgp_packet::{Afi, Safi};
+        // v4 unicast only today, matching `table_map_afi_valid`.
+        if (afi_safi.afi, afi_safi.safi) != (Afi::Ip, Safi::Unicast) {
+            return;
+        }
+        let winners: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = self
+            .local_rib
+            .v4
+            .1
+            .iter()
+            .map(|(p, best)| (p, best.clone()))
+            .collect();
+        let top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            lu_labels: None,
+        };
+        for (prefix, best) in &winners {
+            super::route::fib_install_v4(&top, *prefix, std::slice::from_ref(best));
         }
     }
 

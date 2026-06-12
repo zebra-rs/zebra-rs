@@ -82,9 +82,15 @@ pub struct EchoReflectors {
     by_ifindex: HashMap<u32, Reflector>,
     bin: PathBuf,
     mode: String,
-    /// Cloned into each child's IPC task to deliver `echo-down` into the BFD
-    /// event loop as [`Message::EchoDown`].
+    /// Cloned into each child's IPC task to deliver `echo-down` /
+    /// `detect-down` / `HelperGone` into the BFD event loop.
     main_tx: UnboundedSender<Message>,
+    /// Test-only readiness override: tests can't spawn a real helper child
+    /// (no interface, no binary), so the readiness-gated paths (Echo
+    /// advertisement, expiration-watchdog arming) would be untestable
+    /// without it.
+    #[cfg(test)]
+    ready_override: std::collections::HashSet<u32>,
 }
 
 impl EchoReflectors {
@@ -94,6 +100,8 @@ impl EchoReflectors {
             bin: resolve_bin(),
             mode: std::env::var(MODE_ENV).unwrap_or_else(|_| "auto".to_string()),
             main_tx,
+            #[cfg(test)]
+            ready_override: std::collections::HashSet::new(),
         }
     }
 
@@ -136,8 +144,13 @@ impl EchoReflectors {
     }
 
     /// Whether the reflector for `ifindex` is confirmed running — the gate for
-    /// honestly advertising a non-zero echo-rx on sessions over this interface.
+    /// honestly advertising a non-zero echo-rx on sessions over this interface
+    /// and for arming the in-kernel expiration watchdog.
     pub fn is_ready(&mut self, ifindex: u32) -> bool {
+        #[cfg(test)]
+        if self.ready_override.contains(&ifindex) {
+            return true;
+        }
         self.by_ifindex
             .get_mut(&ifindex)
             .map(Reflector::is_alive)
@@ -149,6 +162,19 @@ impl EchoReflectors {
     #[cfg(test)]
     pub fn refcount(&self, ifindex: u32) -> u32 {
         self.by_ifindex.get(&ifindex).map_or(0, |r| r.refcount)
+    }
+
+    /// Test-only: pretend the helper on `ifindex` is up, so tests can drive
+    /// the readiness-gated paths without spawning a child.
+    #[cfg(test)]
+    pub fn set_ready_for_test(&mut self, ifindex: u32) {
+        self.ready_override.insert(ifindex);
+    }
+
+    /// Test-only: undo [`Self::set_ready_for_test`] (simulates helper death).
+    #[cfg(test)]
+    pub fn clear_ready_for_test(&mut self, ifindex: u32) {
+        self.ready_override.remove(&ifindex);
     }
 
     fn spawn(&self, ifindex: u32) -> Reflector {
@@ -184,6 +210,7 @@ impl EchoReflectors {
                         let (tx, rx) = mpsc::unbounded_channel::<String>();
                         let task = Task::spawn(child_io(
                             ifname.clone(),
+                            ifindex,
                             stdin,
                             stdout,
                             rx,
@@ -218,12 +245,16 @@ impl EchoReflectors {
     }
 }
 
-/// Per-child IPC task: forwards `echo-down <discr>` from the helper's stdout
-/// into the event loop, and writes queued command lines to its stdin. Ends when
-/// the child's stdout closes (child gone) or the command sender is dropped
-/// (reflector released).
+/// Per-child IPC task: forwards `echo-down` / `detect-down <discr>` events
+/// from the helper's stdout into the event loop, and writes queued command
+/// lines to its stdin. Ends when the child's stdout closes (child gone) or the
+/// command sender is dropped (reflector released) — either way it reports
+/// [`Message::HelperGone`] so sessions counting on the in-kernel expiration
+/// watchdog revert to userspace detection (a no-op after a normal release,
+/// which disarms sessions first).
 async fn child_io(
     ifname: String,
+    ifindex: u32,
     mut stdin: ChildStdin,
     stdout: ChildStdout,
     mut cmd_rx: UnboundedReceiver<String>,
@@ -234,8 +265,8 @@ async fn child_io(
         tokio::select! {
             line = lines.next_line() => match line {
                 Ok(Some(l)) => {
-                    if let Some(discr) = parse_echo_down(&l) {
-                        let _ = main_tx.send(Message::EchoDown { discr });
+                    if let Some(event) = parse_helper_event(&l) {
+                        let _ = main_tx.send(event);
                     }
                 }
                 _ => break,
@@ -253,16 +284,22 @@ async fn child_io(
             },
         }
     }
+    let _ = main_tx.send(Message::HelperGone { ifindex });
     bfd_debug!("bfd echo: IPC task for {ifname} ended");
 }
 
-/// Parse a `echo-down <discr>` event line from the helper.
-fn parse_echo_down(line: &str) -> Option<u32> {
+/// Parse one event line from the helper: `echo-down <discr>` (its Echo
+/// detection fired) or `detect-down <discr>` (the in-kernel control-packet
+/// expiration watchdog fired).
+fn parse_helper_event(line: &str) -> Option<Message> {
     let mut it = line.split_whitespace();
-    if it.next() != Some("echo-down") {
-        return None;
+    let verb = it.next()?;
+    let discr: u32 = it.next()?.parse().ok()?;
+    match verb {
+        "echo-down" => Some(Message::EchoDown { discr }),
+        "detect-down" => Some(Message::DetectDown { discr }),
+        _ => None,
     }
-    it.next()?.parse().ok()
 }
 
 /// Resolve the reflector binary path: `$ZEBRA_XDP_BFD_ECHO_BIN`, else the dev
@@ -328,6 +365,21 @@ mod tests {
         let mut r = EchoReflectors::new(tx);
         r.release(12345); // must not panic / underflow
         assert!(r.by_ifindex.is_empty());
+    }
+
+    #[test]
+    fn helper_event_lines_parse() {
+        assert!(matches!(
+            parse_helper_event("echo-down 42"),
+            Some(Message::EchoDown { discr: 42 })
+        ));
+        assert!(matches!(
+            parse_helper_event("detect-down 7"),
+            Some(Message::DetectDown { discr: 7 })
+        ));
+        assert!(parse_helper_event("detect-down").is_none());
+        assert!(parse_helper_event("detect-down nope").is_none());
+        assert!(parse_helper_event("bogus 1").is_none());
     }
 
     #[test]

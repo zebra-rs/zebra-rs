@@ -1421,6 +1421,58 @@ async fn drop_bfd_control_packets(world: &mut World, namespace: String) {
     );
 }
 
+/// Make a namespace deliver inbound TCP destined to addresses it does not
+/// own: mark all inbound TCP in mangle PREROUTING, send marked packets to
+/// routing table 100, and give that table a single `local default dev lo`
+/// route — the TPROXY-style policy-routing recipe from FRR's
+/// bgp_tcp_ip_transparent topotest. With this in place, the only thing
+/// still standing between a `neighbor X update-source <foreign-addr>` BGP
+/// session and Established is IP_TRANSPARENT on the socket (the kernel's
+/// bind / source-address checks) — which is exactly what `ip-transparent`
+/// must provide, so the feature is isolated as the discriminating knob.
+/// Per-netns iptables rules, ip rules and routing tables vanish with the
+/// namespace, so no cleanup step is needed.
+#[given(expr = "I enable transparent return-path routing in namespace {string}")]
+#[when(expr = "I enable transparent return-path routing in namespace {string}")]
+async fn enable_transparent_return_path(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(
+        &scoped,
+        "iptables",
+        &[
+            "-t",
+            "mangle",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "-j",
+            "MARK",
+            "--set-mark",
+            "0x100",
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("Failed to install transparent mangle MARK rule: {}", e));
+    netns::exec_in_netns(
+        &scoped,
+        "ip",
+        &["rule", "add", "fwmark", "0x100", "lookup", "100"],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("Failed to add fwmark ip rule: {}", e));
+    netns::exec_in_netns(
+        &scoped,
+        "ip",
+        &[
+            "route", "add", "local", "default", "dev", "lo", "table", "100",
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("Failed to add local default route in table 100: {}", e));
+    println!("✓ Transparent return-path routing enabled in {}", scoped);
+}
+
 /// Remove the BFD-control drop rules installed by the step above (both address
 /// families), letting the session re-establish and IS-IS lift the hold-down.
 #[when(expr = "I restore bfd control packets in namespace {string}")]

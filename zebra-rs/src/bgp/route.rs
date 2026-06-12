@@ -351,6 +351,37 @@ fn select_fib_entry_v4(
     }
 }
 
+/// Run the v4-unicast `table-map` over a best path about to be FIB-
+/// installed. Pass-through when no binding exists for the family.
+/// With a binding: an unresolved policy denies everything (FRR
+/// parity), a policy deny returns `None` (the caller's withdraw
+/// branch reconciles the FIB), and a permit returns a rewritten
+/// *copy* of the `BgpRib` — the Loc-RIB original and what peers see
+/// are never touched. Useful set clauses at install time are
+/// `set med` (-> RIB metric) and `set next-hop`; others execute
+/// harmlessly on the discarded copy.
+fn table_map_apply_v4<'a>(
+    table_map: &BTreeMap<AfiSafi, BgpTableMap>,
+    router_id: Ipv4Addr,
+    prefix: Ipv4Net,
+    best: Option<&'a BgpRib>,
+) -> Option<std::borrow::Cow<'a, BgpRib>> {
+    use std::borrow::Cow;
+    let Some(tm) = table_map.get(&AfiSafi::new(Afi::Ip, Safi::Unicast)) else {
+        return best.map(Cow::Borrowed);
+    };
+    let best = best?;
+    // Bound name doesn't resolve to a policy: deny-all.
+    let policy = tm.policy.as_ref()?;
+    let nlri = Ipv4Nlri { id: 0, prefix };
+    let decision = policy_list_apply(policy, &nlri, (*best.attr).clone(), best.weight, router_id)?;
+    let mut mapped = best.clone();
+    // Transient install-time copy — never enters the attr store or
+    // the Loc-RIB, so a free-floating Arc is fine.
+    mapped.attr = Arc::new(decision.attr);
+    Some(Cow::Owned(mapped))
+}
+
 /// Reconcile the kernel FIB state for `prefix` with the BGP best-path
 /// outcome. `selected` is the `select_best_path` return: at most one
 /// `BgpRib` after best-path selection. Empty means every candidate
@@ -367,7 +398,13 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
         .vrf_transport_v4
         .and_then(|m| m.get(&prefix))
         .map(|v| v.as_slice());
-    let best = selected.first();
+    let best = table_map_apply_v4(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        prefix,
+        selected.first(),
+    );
+    let best = best.as_deref();
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport));
     match entry {
         Some(mut rib_entry) => {
@@ -1537,6 +1574,24 @@ impl LocalRibBgpLsTable {
     }
 }
 
+/// Per-AFI `table-map` binding (zebra-bgp-table-map.yang
+/// `router bgp afi-safi <af> table-map <name>`): a policy applied to
+/// best paths at BGP-to-RIB install time only. Deny keeps the route
+/// out of the FIB; permit-side set clauses rewrite the installed
+/// entry (MED -> metric, next-hop) without touching the Loc-RIB or
+/// what peers are advertised.
+#[derive(Debug, Default, Clone)]
+pub struct BgpTableMap {
+    /// Configured policy name (the `table-map` leaf value).
+    pub name: Option<String>,
+    /// Resolved snapshot, pushed by the policy actor via
+    /// `PolicyRx::PolicyList` (`PolicyType::TableMap`). `None` while
+    /// the name doesn't resolve — which denies every install for the
+    /// family (FRR parity: a missing referenced route-map filters
+    /// everything).
+    pub policy: Option<PolicyList>,
+}
+
 #[derive(Debug, Default)]
 pub struct LocalRib {
     pub v4: LocalRibTable<Ipv4Net>,
@@ -1575,6 +1630,14 @@ pub struct LocalRib {
     /// table keyed by `BgpLsNlri`; the v4/v6 prefix distinction lives inside
     /// the NLRI, so one table holds Node, Link, and Prefix objects.
     pub bgp_ls: LocalRibBgpLsTable,
+
+    /// Per-AFI `table-map` bindings (zebra-bgp-table-map.yang).
+    /// Lives here — like `sr_policy_local` — so both the config
+    /// callbacks (`&mut Bgp`) and `fib_install_v4`/`v6` (`BgpTop`)
+    /// reach it without threading a new `BgpTop` field. Per-VRF
+    /// tasks own a separate `LocalRib` whose map stays empty, so
+    /// VRF installs are unaffected until table-map grows VRF config.
+    pub table_map: BTreeMap<AfiSafi, BgpTableMap>,
 }
 
 impl LocalRib {
@@ -10381,6 +10444,134 @@ mod color_aware_nht_tests {
         assert_eq!(
             resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
             Some(17128)
+        );
+    }
+}
+
+/// `table-map` semantics at the BGP-to-RIB install seam
+/// (zebra-bgp-table-map.yang): no binding passes through, an
+/// unresolved binding denies everything (FRR parity), a policy deny
+/// filters, and permit-side set clauses rewrite only the install-time
+/// copy — never the Loc-RIB original.
+#[cfg(test)]
+mod table_map_tests {
+    use std::borrow::Cow;
+    use std::net::Ipv4Addr;
+    use std::str::FromStr;
+
+    use bgp_packet::{Afi, AfiSafi, BgpAttr, BgpNexthop, Med, Safi};
+    use ipnet::Ipv4Net;
+
+    use super::*;
+    use crate::policy::{NumericSet, PolicyAction, PolicyList, PrefixSet};
+
+    fn binding(policy: Option<PolicyList>) -> BTreeMap<AfiSafi, BgpTableMap> {
+        let mut map = BTreeMap::new();
+        map.insert(
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            BgpTableMap {
+                name: Some("TM".into()),
+                policy,
+            },
+        );
+        map
+    }
+
+    fn rib_with_med(med: Option<u32>) -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        attr.med = med.map(|m| Med { med: m });
+        BgpRib::new(
+            1,
+            Ipv4Addr::new(192, 0, 2, 1),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    fn p(s: &str) -> Ipv4Net {
+        Ipv4Net::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn no_binding_passes_through() {
+        let map = BTreeMap::new();
+        let best = rib_with_med(Some(7));
+        let out = table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
+            .expect("no binding must not filter");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "pass-through must not clone the winner"
+        );
+        assert!(
+            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), None).is_none(),
+            "no winner stays no winner"
+        );
+    }
+
+    #[test]
+    fn unresolved_policy_denies_all() {
+        let map = binding(None);
+        let best = rib_with_med(None);
+        assert!(
+            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best)).is_none(),
+            "a bound but unresolved table-map filters every install (FRR parity)"
+        );
+    }
+
+    #[test]
+    fn policy_deny_filters_matching_prefix_only() {
+        // seq 10: deny 10.0.0.0/8 (and longer); seq 20: permit any.
+        let mut list = PolicyList::default();
+        let mut pset = PrefixSet::default();
+        pset.entry(p("10.0.0.0/8").into());
+        let entry = list.entry(10);
+        entry.prefix_set = Some(pset);
+        entry.action = PolicyAction::Deny;
+        let _ = list.entry(20);
+        let map = binding(Some(list));
+        let best = rib_with_med(None);
+
+        assert!(
+            table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.1.0.0/16"), Some(&best))
+                .is_none(),
+            "denied prefix must not install"
+        );
+        assert!(
+            table_map_apply_v4(
+                &map,
+                Ipv4Addr::UNSPECIFIED,
+                p("192.168.0.0/16"),
+                Some(&best)
+            )
+            .is_some(),
+            "non-matching prefix falls through to the permit entry"
+        );
+    }
+
+    #[test]
+    fn set_med_rewrites_install_copy_only() {
+        let mut list = PolicyList::default();
+        list.entry(10).med = Some(NumericSet::Set(50));
+        let map = binding(Some(list));
+        let best = rib_with_med(Some(7));
+
+        let out = table_map_apply_v4(&map, Ipv4Addr::UNSPECIFIED, p("10.0.0.0/8"), Some(&best))
+            .expect("permit");
+        assert_eq!(
+            out.attr.med.as_ref().map(|m| m.med),
+            Some(50),
+            "install copy carries the rewritten MED"
+        );
+        assert_eq!(
+            best.attr.med.as_ref().map(|m| m.med),
+            Some(7),
+            "Loc-RIB original is untouched"
         );
     }
 }

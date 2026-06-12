@@ -71,6 +71,10 @@ impl Ospf {
             "/area/interface/bfd/echo-receive-interval",
             config_ospf_interface_bfd_echo_receive_interval,
         );
+        self.ospf_add(
+            "/area/interface/bfd/detect-offload",
+            config_ospf_interface_bfd_detect_offload,
+        );
         // Instance-level `router ospf { redistribute connected ... }`.
         self.ospf_add("/redistribute/connected", config_ospf_redist_connected);
         self.ospf_add(
@@ -96,6 +100,7 @@ impl Ospf {
             "/bfd/echo-receive-interval",
             config_ospf_bfd_echo_receive_interval,
         );
+        self.ospf_add("/bfd/detect-offload", config_ospf_bfd_detect_offload);
         self.ospf_add(
             "/area/interface/network-type",
             config_ospf_interface_network_type,
@@ -855,6 +860,30 @@ pub(super) fn config_ospf_interface_bfd_echo_receive_interval<V: OspfVersion>(
     Some(())
 }
 
+/// `interface <if> bfd detect-offload <bool>` — offload control-packet
+/// expiration detection to the per-interface XDP helper once the session is
+/// Up (RFC 5880 §6.8.4 evaluated in-kernel). Reconciles the link; the BFD
+/// instance arms/disarms the watchdog on live sessions.
+pub(super) fn config_ospf_interface_bfd_detect_offload<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let offload = args.boolean()?;
+
+    let ifindex = {
+        let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+        // `None` ⇒ inherit the instance-level `bfd { detect-offload }`;
+        // `Some(false)` explicitly opts this interface out.
+        link.config.bfd.detect_offload = op.is_set().then_some(offload);
+        link.index
+    };
+    ospf.bfd_reconcile_link(ifindex);
+    Some(())
+}
+
 /// `interface <if> bfd min-neighbor-state <two-way|full>` — the NFSM
 /// state at which the session is started/torn down. Default `two-way`
 /// (FRR-style). Reconciles existing neighbors so a live flip takes
@@ -961,6 +990,19 @@ pub(super) fn config_ospf_bfd_echo_receive_interval<V: OspfVersion>(
 ) -> Option<()> {
     let interval = args.u32()?;
     ospf.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    ospf.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router ospf bfd detect-offload <bool>` — instance default for offloading
+/// expiration detection to the XDP helper (overridable per interface).
+pub(super) fn config_ospf_bfd_detect_offload<V: OspfVersion>(
+    ospf: &mut Ospf<V>,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let offload = args.boolean()?;
+    ospf.bfd.detect_offload = op.is_set().then_some(offload);
     ospf.bfd_reconcile_all();
     Some(())
 }

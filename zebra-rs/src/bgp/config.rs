@@ -162,6 +162,9 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     // current minimum without the per-leaf `/tcp-mss` delete firing (the
     // same gap `clear_peer_listener_auth` covers for MD5/AO).
     apply_tcp_mss_refresh_all(bgp);
+    // Same reconciliation for the listener IP_TRANSPARENT union — the
+    // deleted peer may have been the last one holding the flag.
+    apply_ip_transparent_refresh_all(bgp);
     Some(())
 }
 
@@ -414,9 +417,10 @@ pub(super) fn apply_peer_policy_ref(
         policy::PolicyType::PolicyListOut => &mut peer.policy_list.get_mut(&InOut::Output).name,
         policy::PolicyType::PrefixSetIn => &mut peer.prefix_set.get_mut(&InOut::Input).name,
         policy::PolicyType::PrefixSetOut => &mut peer.prefix_set.get_mut(&InOut::Output).name,
-        // Key-chain subscriptions ride a different registry and never
-        // reach this helper.
-        policy::PolicyType::KeyChain(_) => return,
+        // Key-chain subscriptions ride a different registry, and
+        // table-map subscriptions are AFI-scoped rather than
+        // peer-scoped; neither reaches this helper.
+        policy::PolicyType::KeyChain(_) | policy::PolicyType::TableMap => return,
     };
     let prior = match &want {
         Some(n) => slot.replace(n.clone()),
@@ -1627,6 +1631,74 @@ pub(super) fn config_redistribute_ospf_match_type(
     )
 }
 
+/// Families `table-map` accepts today. The YANG augment attaches the
+/// leaf to every afi-safi list entry, so filter at the callback —
+/// returning `None` surfaces as a commit failure. v4 unicast only
+/// until the policy-apply path grows a v6 NLRI form.
+fn table_map_afi_valid(afi_safi: &AfiSafi) -> bool {
+    matches!((afi_safi.afi, afi_safi.safi), (Afi::Ip, Safi::Unicast))
+}
+
+/// `ident` slot a table-map binding uses on the policy watch
+/// registry: there's no peer behind it, so the AFI/SAFI itself is
+/// encoded. The codec already spans v6 for the follow-up.
+pub(super) fn table_map_ident(afi_safi: &AfiSafi) -> Option<usize> {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => Some(0),
+        (Afi::Ip6, Safi::Unicast) => Some(1),
+        _ => None,
+    }
+}
+
+pub(super) fn table_map_ident_decode(ident: usize) -> Option<AfiSafi> {
+    match ident {
+        0 => Some(AfiSafi::new(Afi::Ip, Safi::Unicast)),
+        1 => Some(AfiSafi::new(Afi::Ip6, Safi::Unicast)),
+        _ => None,
+    }
+}
+
+/// `router bgp afi-safi <af> table-map <policy>`
+/// (zebra-bgp-table-map.yang). Stores the binding on
+/// `local_rib.table_map`, (un)registers the policy watch via
+/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
+/// resync to the `PolicyRx` reply — always sent for
+/// `PolicyType::TableMap`, even when the name doesn't resolve — so
+/// the FIB flips exactly once, on the definitive answer. Delete
+/// resyncs immediately (nothing will reply).
+pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if !table_map_afi_valid(&afi_safi) {
+        return None;
+    }
+    let ident = table_map_ident(&afi_safi)?;
+    if op.is_set() {
+        let new = args.string()?;
+        let tm = bgp.local_rib.table_map.entry(afi_safi).or_default();
+        let prior = tm.name.replace(new.clone());
+        policy_attach_msgs(
+            &bgp.policy_tx,
+            ident,
+            policy::PolicyType::TableMap,
+            prior,
+            Some(new),
+        );
+    } else {
+        let Some(tm) = bgp.local_rib.table_map.remove(&afi_safi) else {
+            return Some(());
+        };
+        policy_attach_msgs(
+            &bgp.policy_tx,
+            ident,
+            policy::PolicyType::TableMap,
+            tm.name,
+            None,
+        );
+        bgp.table_map_resync(afi_safi);
+    }
+    Some(())
+}
+
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -2241,6 +2313,112 @@ pub(super) fn apply_disable_connected_check(peer: &mut Peer, want: bool) -> bool
     !matches!(peer.state, super::peer::State::Idle)
 }
 
+/// `[no] router bgp neighbor <addr> ip-transparent` (presence container,
+/// FRR 10.4 PR #18789) — set IP_TRANSPARENT / IPV6_TRANSPARENT on this
+/// neighbor's TCP socket so the session can use a local address the
+/// host does not own (the address itself comes from `update-source`;
+/// the two are used together). Consumed at connect time by
+/// `peer_connect` (before bind, gated on update-source — FRR's
+/// both-flags gate) and reconciled onto the shared listeners by
+/// [`apply_ip_transparent_refresh_all`] so a TPROXY-steered passive
+/// session to a non-local address can be answered. Like the sibling
+/// TTL knobs, a change on a live session bounces it (`Event::Stop`,
+/// FRR `peer_change_reset`): the option must be on the socket before
+/// bind()/connect(), so only a reconnect can apply it. An Idle peer
+/// picks it up on its first connect.
+fn config_ip_transparent(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        // Record the verbatim statement (a presence flag: presence
+        // means "on"), then resolve through the neighbor-group
+        // precedence: the explicit statement wins, a Delete falls back
+        // to the group's opinion (or the off default).
+        peer.config.knobs_explicit.ip_transparent = op.is_set().then_some(true);
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.ip_transparent
+        })
+        .unwrap_or(false);
+        (peer.ident, apply_ip_transparent(peer, want))
+    };
+    // Reconcile the listeners unconditionally — cheap, idempotent, and
+    // immune to the diff-gate (the per-AF union may change even when
+    // this peer's resolved value did not, e.g. a redundant statement
+    // after a group flip).
+    apply_ip_transparent_refresh_all(bgp);
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// Write a resolved `ip-transparent` value onto the peer, preserving
+/// the per-neighbor ritual: the no-change diff-gate, `start()` for a
+/// dormant peer, and the bounce-if-live decision (returned to the
+/// caller, which owns the `Event::Stop` send — only an established /
+/// in-progress session needs the explicit bounce; bouncing an Idle peer
+/// here could race the idle-hold timer `start()` just armed and strand
+/// it). Shared by the per-neighbor callback and the neighbor-group
+/// sweep.
+pub(super) fn apply_ip_transparent(peer: &mut Peer, want: bool) -> bool {
+    if peer.config.transport.ip_transparent == want {
+        // No actual change — don't disturb a live session.
+        return false;
+    }
+    peer.config.transport.ip_transparent = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
+}
+
+/// Reconcile IP_TRANSPARENT / IPV6_TRANSPARENT on the shared BGP
+/// listeners: set while any neighbor of the address family resolves
+/// `ip-transparent` on, cleared when none does. A listening socket
+/// carries one flag for all peers, so this is the per-AF union — the
+/// option is inert for ordinary inbound connections, it only also
+/// permits TPROXY-steered connections destined to non-local addresses
+/// to be accepted and answered. A neighbor-group opinion counts toward
+/// both families: a dynamic (listen-range) member inherits it and must
+/// find the flag on the listener *before* its SYN arrives — i.e.
+/// before any member peer exists. Safe to call repeatedly; silent when
+/// a listener fd is not bound yet — `listen()` re-runs it once the
+/// bind completes.
+pub(super) fn apply_ip_transparent_refresh_all(bgp: &mut Bgp) {
+    let mut want_v4 = false;
+    let mut want_v6 = false;
+    for (_, peer) in bgp.peers.iter_all() {
+        if peer.config.transport.ip_transparent {
+            if peer.address.is_ipv4() {
+                want_v4 = true;
+            } else {
+                want_v6 = true;
+            }
+        }
+    }
+    if bgp
+        .neighbor_groups
+        .values()
+        .any(|g| g.knobs.ip_transparent == Some(true))
+    {
+        want_v4 = true;
+        want_v6 = true;
+    }
+    for (fd, is_v4, want) in [
+        (bgp.listen_fd_v4, true, want_v4),
+        (bgp.listen_fd_v6, false, want_v6),
+    ] {
+        let Some(fd) = fd else { continue };
+        if let Err(e) = super::transparent::set_ip_transparent(fd, is_v4, want) {
+            tracing::warn!(
+                error = %e,
+                want,
+                "bgp: failed to set IP_TRANSPARENT on BGP listener (CAP_NET_ADMIN required)",
+            );
+        }
+    }
+}
+
 fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = if let Some(addr) = args.v4addr() {
         IpAddr::V4(addr)
@@ -2624,6 +2802,10 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_disable_connected_check,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/ip-transparent",
+            super::neighbor_group::config_neighbor_group_ip_transparent,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/passive",
             super::neighbor_group::config_neighbor_group_passive,
         );
@@ -2867,6 +3049,10 @@ impl Bgp {
         // zebra-bgp-transport.yang. Exempts a single-hop eBGP neighbor from
         // the directly-connected-network check (Peer::connected_check_ok).
         self.callback_peer("/disable-connected-check", config_disable_connected_check);
+        // FRR 10.4 `neighbor X ip-transparent` from
+        // zebra-bgp-transport.yang: IP_TRANSPARENT on the session socket
+        // so a non-local `update-source` can be used.
+        self.callback_peer("/ip-transparent", config_ip_transparent);
         self.callback_peer("/tcp-md5/password", config_peer_tcp_md5_password);
         self.callback_peer("/tcp-md5/encoding", config_peer_tcp_md5_encoding);
         // FRR / IOS-XR flat alias from zebra-bgp-password.yang. Same
@@ -3029,6 +3215,10 @@ impl Bgp {
             config_redistribute_ospf_match_type,
         );
 
+        // Per-AFI table-map (zebra-bgp-table-map.yang): policy gate /
+        // rewrite at BGP-to-RIB install time.
+        self.callback_add("/router/bgp/afi-safi/table-map", config_table_map);
+
         // Applying policy.
         self.callback_peer("/policy/in", config_policy_in);
         self.callback_peer("/policy/out", config_policy_out);
@@ -3077,6 +3267,41 @@ impl Bgp {
         // left-most AS_PATH segment begins with the neighbor's own AS
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
+    }
+}
+
+#[cfg(test)]
+mod table_map_ident_tests {
+    use super::*;
+
+    /// The watch `ident` must survive the round trip for every family
+    /// the codec covers — a drift here silently misroutes `PolicyRx`
+    /// pushes and the table-map never refreshes.
+    #[test]
+    fn ident_roundtrip() {
+        for afi_safi in [
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+        ] {
+            let ident = table_map_ident(&afi_safi).expect("codec covers the family");
+            assert_eq!(table_map_ident_decode(ident), Some(afi_safi));
+        }
+        assert_eq!(
+            table_map_ident(&AfiSafi::new(Afi::Ip, Safi::MplsVpn)),
+            None,
+            "uncovered families must not register a watch"
+        );
+        assert_eq!(table_map_ident_decode(999), None);
+    }
+
+    /// v4 unicast is the only family the callback accepts today; the
+    /// YANG augment attaches the leaf to every afi-safi entry, so the
+    /// gate is what rejects the rest at commit time.
+    #[test]
+    fn afi_gate_is_v4_unicast_only() {
+        assert!(table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::Unicast)));
+        assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip6, Safi::Unicast)));
+        assert!(!table_map_afi_valid(&AfiSafi::new(Afi::Ip, Safi::MplsVpn)));
     }
 }
 
@@ -3925,6 +4150,106 @@ mod neighbor_group_wiring_tests {
             drain_stop_events(&mut bgp).len(),
             1,
             "disabling on a live session must bounce it",
+        );
+    }
+
+    /// `ip-transparent` is a presence flag with FRR `peer_change_reset`
+    /// semantics: Set/Delete toggle it, a change to a live session is
+    /// bounced (the option must be on the socket before bind/connect),
+    /// and a no-op set does not bounce.
+    #[tokio::test]
+    async fn ip_transparent_toggles_field_and_bounces_live_session() {
+        use crate::bgp::peer::State;
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "set must enable the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "enabling on a live session must bounce it",
+        );
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a no-op set must not bounce the session",
+        );
+
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "delete must clear the flag",
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "disabling on a live session must bounce it",
+        );
+    }
+
+    /// The group spelling of `ip-transparent` propagates to members
+    /// through the explicit-wins resolution: a group Set flips a member
+    /// without its own statement; the member's explicit statement keeps
+    /// it on across a group Delete.
+    #[tokio::test]
+    async fn neighbor_group_ip_transparent_inherits_and_explicit_wins() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.1", "65001"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        let _ = drain_stop_events(&mut bgp);
+
+        super::super::neighbor_group::config_neighbor_group_ip_transparent(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "a member without its own statement must inherit the group's flag",
+        );
+
+        // An explicit per-neighbor statement survives the group losing
+        // its opinion.
+        config_ip_transparent(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        super::super::neighbor_group::config_neighbor_group_ip_transparent(
+            &mut bgp,
+            arg_words(&["G"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .transport
+                .ip_transparent,
+            "the explicit per-neighbor flag must outlive the group opinion",
         );
     }
 

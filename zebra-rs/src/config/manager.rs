@@ -1331,6 +1331,56 @@ mod yang_load_tests {
         }
     }
 
+    /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
+    /// compute-mode <serial|conservative|aggressive|sharding>` plus
+    /// `compute-shards <1..256>`. Pinned because vtyctl apply is
+    /// garbage-tolerant — an unwired grammar silently no-ops instead
+    /// of erroring.
+    #[test]
+    fn isis_tilfa_compute_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router isis fast-reroute ti-lfa compute-mode serial",
+            "set router isis fast-reroute ti-lfa compute-mode conservative",
+            "set router isis fast-reroute ti-lfa compute-mode aggressive",
+            "set router isis fast-reroute ti-lfa compute-mode sharding",
+            "set router isis fast-reroute ti-lfa compute-shards 4",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        // An unknown mode keyword must not resolve to a settable path.
+        let (code, _comps, _state) = parse(
+            "set router isis fast-reroute ti-lfa compute-mode turbo",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "`compute-mode turbo` must not parse"
+        );
+    }
+
     /// `router bgp global router-id` is zebra-rs's rename of the IETF
     /// model's `global/identifier` leaf (vendored ietf-bgp edit), so the
     /// BGP surface matches every other router-id knob. The leaf lives in
@@ -1426,6 +1476,42 @@ mod yang_load_tests {
             code,
             ExecCode::Success,
             "the pre-flatten `neighbor-groups` container level must no longer parse",
+        );
+    }
+
+    /// `table-map <name>` (zebra-bgp-table-map.yang) sits bare,
+    /// FRR-style, directly under the global afi-safi list entry —
+    /// no wrapping container. Pin the spelling so an augment-path
+    /// slip is caught here, not at daemon startup. (Only the `set`
+    /// spelling is pinnable: `delete` completion resolves against
+    /// the running config tree, not the schema, so it Nomatches in
+    /// this harness — same for every delete-subtree augment.)
+    #[test]
+    fn bgp_table_map_parses() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let (code, _comps, _state) = parse(
+            "set router bgp afi-safi ipv4 table-map RIB-FILTER",
+            entry,
+            None,
+            State::new(),
+        );
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "table-map must parse as a settable path"
         );
     }
 
@@ -1613,6 +1699,41 @@ mod yang_load_tests {
             ExecCode::Success,
             "the modifiers are boolean leaves — the value-less spelling must not parse",
         );
+    }
+
+    /// `neighbor X ip-transparent` (zebra-bgp-transport.yang) must be a
+    /// settable path on the neighbor and on the neighbor-group (the
+    /// group reuses the transport grouping via `uses`). Guards against
+    /// the silent-augment-drop name collision described on the
+    /// disable-connected-check test above.
+    #[test]
+    fn bgp_neighbor_ip_transparent_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 10.0.0.1 ip-transparent",
+            "set router bgp neighbor-group G ip-transparent",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be a valid path — a silent name collision \
+                 with an ietf-bgp leaf would show up here as a parse failure",
+            );
+        }
     }
 
     /// `neighbor X port <1-65535>` and the instance-level

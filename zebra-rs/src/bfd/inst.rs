@@ -108,9 +108,10 @@ impl Default for ClientReqChannel {
 pub enum ClientReq {
     /// Register interest in `key`. If no session yet exists for that
     /// key, BFD creates one using `params`; otherwise the existing
-    /// session is reused and the Echo-affecting fields of `params` are
-    /// applied to it live (`Bfd::update_echo_params`) — so clients
-    /// re-send `Subscribe` to push `bfd { echo-* }` config changes.
+    /// session is reused and the offload-affecting fields of `params`
+    /// (Echo roles + detect-offload) are applied to it live
+    /// (`Bfd::update_offload_params`) — so clients re-send `Subscribe`
+    /// to push `bfd { echo-* | detect-offload }` config changes.
     /// State-change events for the session are forwarded to `notifier`
     /// until the matching [`ClientReq::Unsubscribe`] arrives.
     Subscribe {
@@ -123,6 +124,12 @@ pub enum ClientReq {
     /// unsubscribes, BFD tears the session down.
     Unsubscribe { client: ClientId, key: SessionKey },
 }
+
+/// While the in-kernel expiration watchdog owns detection for a session, its
+/// userspace detection timer stays armed at this multiple of the real
+/// detection time — a backstop that fires only if the helper/kernel path
+/// failed without us noticing. Restored to 1× whenever the watchdog disarms.
+const DETECT_BACKSTOP_FACTOR: u32 = 4;
 
 /// Holds the per-session timer task and its command channel. Dropping
 /// the `Task` aborts the timer loop; the `cmd_tx` is used to update
@@ -154,12 +161,24 @@ pub enum Message {
     /// jittered interval (RFC 5880 §6.8.7) the timer just scheduled, stored on
     /// the session for `show bfd peers` ("actual with jitter").
     TxTick { key: SessionKey, actual_tx_us: u32 },
-    /// Detection timer fired for `key`.
+    /// Detection timer fired for `key`. With the in-kernel expiration
+    /// watchdog armed this is the stretched *backstop* firing (helper dead or
+    /// wedged); otherwise it is the primary RFC 5880 §6.8.4 detection.
     DetectExpired { key: SessionKey },
     /// The per-interface helper reported that our originated Echo for the
     /// session with this local discriminator stopped returning (Echo detection
     /// timeout). Drives the session Down with `EchoFunctionFailed`.
     EchoDown { discr: u32 },
+    /// The per-interface helper reported that the in-kernel expiration
+    /// watchdog fired for this local discriminator: no control packet arrived
+    /// at the interface within the programmed detection time (RFC 5880 §6.8.4
+    /// evaluated in XDP/`bpf_timer`). Drives the same transition as the
+    /// userspace detection timer.
+    DetectDown { discr: u32 },
+    /// The IPC channel to the helper on `ifindex` closed (child died or was
+    /// released). Sessions still counting on its kernel watchdog revert to
+    /// userspace detection.
+    HelperGone { ifindex: u32 },
 }
 
 /// Lifecycle events emitted by the instance for clients (tests today,
@@ -333,12 +352,12 @@ impl Bfd {
 
     /// Add `client` as a subscriber on `key`. Creates the underlying
     /// session if it does not yet exist; otherwise the session is
-    /// reused and the Echo-affecting fields of `params` are applied to
-    /// it live (see [`Self::update_echo_params`]) — clients re-drive
-    /// `Subscribe` from their `bfd {}` config callbacks, so a commit
-    /// that flips `echo-mode` lands here. If the session is already
-    /// Up, the new subscriber is informed via an immediate synthetic
-    /// [`BfdEvent::StateChange`].
+    /// reused and the offload-affecting fields of `params` are applied
+    /// to it live (see [`Self::update_offload_params`]) — clients
+    /// re-drive `Subscribe` from their `bfd {}` config callbacks, so a
+    /// commit that flips `echo-mode` or `detect-offload` lands here. If
+    /// the session is already Up, the new subscriber is informed via an
+    /// immediate synthetic [`BfdEvent::StateChange`].
     pub fn subscribe(
         &mut self,
         client: ClientId,
@@ -347,13 +366,14 @@ impl Bfd {
         notifier: UnboundedSender<BfdEvent>,
     ) {
         // Lazy create the session on the first subscriber. Subsequent
-        // Subscribes reuse the existing session, applying only the Echo
-        // params — where several clients share a session the last
-        // writer wins (control-plane timing stays create-time-only).
+        // Subscribes reuse the existing session, applying only the
+        // offload params (Echo + detect-offload) — where several clients
+        // share a session the last writer wins (control-plane timing
+        // stays create-time-only).
         if self.sessions.get_by_key(&key).is_none() {
             self.add_session(key, params);
         } else {
-            self.update_echo_params(&key, &params);
+            self.update_offload_params(&key, &params);
         }
         // Mirror the current state to the new subscriber so it can
         // act on already-Up sessions without waiting for the next
@@ -394,13 +414,15 @@ impl Bfd {
     pub fn add_session(&mut self, key: SessionKey, params: SessionParams) -> u32 {
         let disc = self.sessions.insert(key, params);
 
-        // Echo is single-hop only; both IPv4 and IPv6 are handled (the XDP helper
-        // reflects either family). Any active Echo role needs the per-interface
-        // helper: `receive` reflects a peer's Echo, `transmit` sends + detects
-        // ours. Bring it up and mark the session `echo_ready` once the child is
-        // confirmed running — until then we advertise 0 (an honest promise to
-        // actually loop Echo back).
-        if !params.echo_mode.is_off() && !key.multihop {
+        // Echo and the expiration watchdog are single-hop only; both IPv4 and
+        // IPv6 are handled (the XDP helper reflects/observes either family).
+        // Any active Echo role or a detect-offload intent needs the
+        // per-interface helper: `receive` reflects a peer's Echo, `transmit`
+        // sends + detects ours, `detect-offload` times the peer's control
+        // packets in-kernel. Bring it up and mark the session `echo_ready`
+        // once the child is confirmed running — until then we advertise 0 (an
+        // honest promise to actually loop Echo back).
+        if (!params.echo_mode.is_off() || params.detect_offload) && !key.multihop {
             self.reflectors.acquire(key.ifindex);
             let ready = self.reflectors.is_ready(key.ifindex);
             if ready && let Some(s) = self.sessions.get_by_key_mut(&key) {
@@ -432,29 +454,32 @@ impl Bfd {
         disc
     }
 
-    /// Apply the Echo-affecting fields of `params` to an existing session —
-    /// the runtime path for `bfd { echo-mode | echo-*-interval }` config
-    /// changes, which clients re-drive via `Subscribe` on commit. Control
-    /// timing (`desired_min_tx_us` / `required_min_rx_us` / `detect_mult`)
-    /// stays create-time-only: a live change would need an RFC 5880 §6.8.3
-    /// Poll Sequence, and every client wires only the Echo fields today.
+    /// Apply the offload-affecting fields of `params` — the Echo roles and
+    /// the expiration-detect offload intent — to an existing session: the
+    /// runtime path for `bfd { echo-mode | echo-*-interval | detect-offload }`
+    /// config changes, which clients re-drive via `Subscribe` on commit.
+    /// Control timing (`desired_min_tx_us` / `required_min_rx_us` /
+    /// `detect_mult`) stays create-time-only: a live change would need an
+    /// RFC 5880 §6.8.3 Poll Sequence, and every client wires only these
+    /// fields today.
     ///
-    /// The reflector-helper refcount tracks "Echo configured on this
-    /// single-hop session" (the `add_session` / `remove_session` predicate),
-    /// so it is adjusted here on every off↔on edge to stay symmetric while
-    /// `echo_mode` mutates.
-    fn update_echo_params(&mut self, key: &SessionKey, params: &SessionParams) {
+    /// The reflector-helper refcount tracks "Echo or detect-offload
+    /// configured on this single-hop session" (the `add_session` /
+    /// `remove_session` predicate), so it is adjusted here on every off↔on
+    /// edge to stay symmetric while the fields mutate.
+    fn update_offload_params(&mut self, key: &SessionKey, params: &SessionParams) {
         let Some(s) = self.sessions.get_by_key(key) else {
             return;
         };
         if s.echo_mode == params.echo_mode
             && s.required_min_echo_rx_us == params.required_min_echo_rx_us
             && s.echo_transmit_us == params.echo_transmit_us
+            && s.detect_offload == params.detect_offload
         {
             return;
         }
-        let was_active = !s.echo_mode.is_off() && !key.multihop;
-        let now_active = !params.echo_mode.is_off() && !key.multihop;
+        let was_active = (!s.echo_mode.is_off() || s.detect_offload) && !key.multihop;
+        let now_active = (!params.echo_mode.is_off() || params.detect_offload) && !key.multihop;
         // A change to the transmit role or rate invalidates a running
         // originator: stop it now, while the helper is guaranteed alive
         // (originating ⇒ `was_active` ⇒ we still hold a reflector
@@ -477,6 +502,7 @@ impl Bfd {
             s.echo_mode = params.echo_mode;
             s.required_min_echo_rx_us = params.required_min_echo_rx_us;
             s.echo_transmit_us = params.echo_transmit_us;
+            s.detect_offload = params.detect_offload;
             s.echo_ready = ready;
             if restart {
                 s.echo_originating = false;
@@ -488,8 +514,12 @@ impl Bfd {
         // transmitted, so a role drop always sets `restart`). The new
         // advertised echo-rx goes out on the next periodic control Tx.
         self.echo_originate_reconcile(*key);
-        // Release last: if this was the interface's final Echo session the
-        // helper is torn down, so any `echo-del` had to precede it.
+        // Likewise re-aim the expiration watchdog: arms it on a gained
+        // detect-offload (session already Up), disarms on a dropped one —
+        // and the disarm's `detect-del` must precede the release below.
+        self.detect_offload_reconcile(*key);
+        // Release last: if this was the interface's final helper session the
+        // child is torn down, so any `echo-del`/`detect-del` had to precede it.
         if was_active && !now_active {
             self.reflectors.release(key.ifindex);
         }
@@ -502,19 +532,24 @@ impl Bfd {
             let _ = h.cmd_tx.send(TimerCmd::Shutdown);
         }
         let removed = self.sessions.remove(key);
-        // Mirror the `add_session` acquire predicate exactly. `echo_mode` can
-        // mutate at runtime (`update_echo_params`), but that path adjusts the
-        // reflector refcount on every off↔on edge, so releasing on the
-        // *current* mode stays symmetric.
+        // Mirror the `add_session` acquire predicate exactly. The fields can
+        // mutate at runtime (`update_offload_params`), but that path adjusts
+        // the reflector refcount on every off↔on edge, so releasing on the
+        // *current* values stays symmetric.
         if let Some(s) = &removed
-            && !s.echo_mode.is_off()
+            && (!s.echo_mode.is_off() || s.detect_offload)
             && !s.key.multihop
         {
-            // Stop any originator first, while the helper is still alive — the
-            // release below may be the last reference and tear the child down.
+            // Stop any originator / armed watchdog first, while the helper is
+            // still alive — the release below may be the last reference and
+            // tear the child down.
             if s.echo_originating {
                 self.reflectors
                     .send_command(s.key.ifindex, format!("echo-del {}", s.local_disc));
+            }
+            if s.kernel_detect_us > 0 {
+                self.reflectors
+                    .send_command(s.key.ifindex, format!("detect-del {}", s.local_disc));
             }
             self.reflectors.release(s.key.ifindex);
         }
@@ -558,6 +593,8 @@ impl Bfd {
                     Message::TxTick { key, actual_tx_us } => self.on_tx_tick(key, actual_tx_us),
                     Message::DetectExpired { key } => self.on_detect_expired(key),
                     Message::EchoDown { discr } => self.on_echo_down(discr),
+                    Message::DetectDown { discr } => self.on_detect_down(discr),
+                    Message::HelperGone { ifindex } => self.on_helper_gone(ifindex),
                 },
                 // BFD's only config is the top-level `bfd { tracing }` flag;
                 // every other commit broadcast is drained here (we register as
@@ -647,7 +684,7 @@ impl Bfd {
             }
         }
 
-        let (change, new_tx_us, new_detect_us, new_detect_mult) = {
+        let (change, new_tx_us, new_detect_us, new_detect_mult, offloaded) = {
             let session = self
                 .sessions
                 .get_by_key_mut(&key)
@@ -658,16 +695,25 @@ impl Bfd {
                 session.tx_interval_us(),
                 session.detection_time_us(),
                 session.detect_mult,
+                session.kernel_detect_us > 0,
             )
         };
 
         // Every valid Rx must reset the detection timer (RFC 5880
         // §6.8.4). When intervals are also negotiated freshly, the
         // Update command implicitly does the reset as part of arming.
+        // While the in-kernel expiration watchdog owns detection, the
+        // userspace timer is only a backstop — keep it stretched so the
+        // kernel verdict (or its absence) always wins.
         if let Some(h) = self.timer_handles.get(&key) {
+            let detection_time_us = if offloaded {
+                new_detect_us.saturating_mul(DETECT_BACKSTOP_FACTOR)
+            } else {
+                new_detect_us
+            };
             let _ = h.cmd_tx.send(TimerCmd::Update {
                 tx_interval_us: new_tx_us,
-                detection_time_us: new_detect_us,
+                detection_time_us,
                 detect_mult: new_detect_mult,
             });
         }
@@ -696,6 +742,9 @@ impl Bfd {
         // (Re)evaluate the §6.8.9 originate gate: a transition to/from Up, or a
         // freshly-learned non-zero peer echo-rx, can start or stop our Echo.
         self.echo_originate_reconcile(key);
+        // Likewise the expiration watchdog: arm on the Up transition, disarm
+        // on leaving Up, retune when negotiation changed the detection time.
+        self.detect_offload_reconcile(key);
     }
 
     /// Find an existing session that matches an incoming packet whose
@@ -781,6 +830,9 @@ impl Bfd {
         if let Some(change) = change {
             self.notify_state_change(key, change);
         }
+        // If the kernel watchdog was armed, this was the backstop firing —
+        // the session left Up either way, so disarm it.
+        self.detect_offload_reconcile(key);
     }
 
     /// The per-interface helper reported that our originated Echo for the
@@ -799,6 +851,119 @@ impl Bfd {
             self.notify_state_change(key, change);
         }
         self.echo_originate_reconcile(key);
+        self.detect_offload_reconcile(key);
+    }
+
+    /// The per-interface helper reported that the in-kernel expiration
+    /// watchdog fired for the session with local discriminator `discr`: no
+    /// control packet arrived at the interface within the programmed
+    /// detection time (RFC 5880 §6.8.4, evaluated in XDP/`bpf_timer`). Drive
+    /// the same `DetectExpired` transition as the userspace detection timer
+    /// (Down, `ControlDetectionTimeExpired`), then reconcile: the session
+    /// left Up, so the watchdog disarms and Echo stops originating.
+    fn on_detect_down(&mut self, discr: u32) {
+        let Some(key) = self.sessions.get_by_disc(discr).map(|s| s.key) else {
+            return;
+        };
+        let change = self
+            .sessions
+            .get_by_key_mut(&key)
+            .and_then(|s| s.handle_event(Event::DetectExpired));
+        if let Some(change) = change {
+            self.notify_state_change(key, change);
+        }
+        self.echo_originate_reconcile(key);
+        self.detect_offload_reconcile(key);
+    }
+
+    /// The helper's IPC channel on `ifindex` closed — the child died or was
+    /// released. Any session still counting on its kernel watchdog reverts to
+    /// userspace detection: the reconcile sees the helper not-ready, clears
+    /// the armed marker, and restores the unstretched detection timer. The
+    /// normal release paths disarm sessions *before* dropping the last
+    /// reference, so this only acts after an unexpected death.
+    fn on_helper_gone(&mut self, ifindex: u32) {
+        let armed: Vec<SessionKey> = self
+            .sessions
+            .iter()
+            .filter(|(k, s)| k.ifindex == ifindex && s.kernel_detect_us > 0)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in armed {
+            bfd_warn!(
+                ?key,
+                ifindex,
+                "bfd: xdp helper gone; session reverts to userspace detection",
+            );
+            self.detect_offload_reconcile(key);
+        }
+    }
+
+    /// Arm, retune, or disarm the in-kernel expiration watchdog for `key` —
+    /// the XDP helper's `CONTROL_TIMERS` `bpf_timer`, re-armed by every
+    /// control packet arriving for our discriminator (see
+    /// `offload/xdp-bfd-echo`). Mirrors [`Self::echo_originate_reconcile`]:
+    /// the desired kernel detection time is compared to the armed one
+    /// (`Session::kernel_detect_us`) and `detect-add`/`detect-del` are sent
+    /// exactly on the edges; a changed value re-sends `detect-add`, which the
+    /// helper applies as an update.
+    ///
+    /// Armed only while the session is **Up** — before establishment the
+    /// peer may send `Your Discriminator = 0`, which the XDP program cannot
+    /// key — and only single-hop: the helper attaches per interface, and
+    /// multihop ingress isn't bound to one (its TTL floor is also below the
+    /// GTSM 255 the observer requires). While armed, the userspace detection
+    /// timer is stretched to a backstop ([`DETECT_BACKSTOP_FACTOR`]) so the
+    /// kernel verdict normally wins; on disarm it is restored to primary.
+    fn detect_offload_reconcile(&mut self, key: SessionKey) {
+        let Some(s) = self.sessions.get_by_key(&key) else {
+            return;
+        };
+        let gates_open = s.detect_offload
+            && !s.key.multihop
+            && s.local_state == bfd_packet::State::Up
+            && s.detection_time_us() > 0;
+        let (ifindex, discr, armed_us) = (s.key.ifindex, s.local_disc, s.kernel_detect_us);
+        // The helper must be confirmed running before we hand detection to it
+        // (and stretch the userspace timer on that promise).
+        let want_us = if gates_open && self.reflectors.is_ready(ifindex) {
+            self.sessions
+                .get_by_key(&key)
+                .map_or(0, |s| s.detection_time_us())
+        } else {
+            0
+        };
+        if want_us == armed_us {
+            return;
+        }
+        if want_us > 0 {
+            self.reflectors
+                .send_command(ifindex, format!("detect-add {discr} {want_us}"));
+        } else {
+            self.reflectors
+                .send_command(ifindex, format!("detect-del {discr}"));
+        }
+        // Re-aim the userspace detection timer for the new role: stretched
+        // backstop while the kernel watchdog is armed, primary (1×) when not.
+        // `Update` also re-arms the detection deadline, which is harmless —
+        // this path runs right after a state change or a received packet.
+        if let Some(h) = self.timer_handles.get(&key)
+            && let Some(s) = self.sessions.get_by_key(&key)
+        {
+            let detection_time_us = if want_us > 0 {
+                s.detection_time_us().saturating_mul(DETECT_BACKSTOP_FACTOR)
+            } else {
+                s.detection_time_us()
+            };
+            let _ = h.cmd_tx.send(TimerCmd::Update {
+                tx_interval_us: s.tx_interval_us(),
+                detection_time_us,
+                detect_mult: s.detect_mult,
+            });
+        }
+        if let Some(s) = self.sessions.get_by_key_mut(&key) {
+            s.kernel_detect_us = want_us;
+        }
     }
 
     /// RFC 5880 §6.8.9 — start or stop *originating* Echo for `key` based on the
@@ -1494,5 +1659,167 @@ mod tests {
             Some(2),
             "both clients stay subscribed",
         );
+    }
+
+    // ---- expiration-detect offload (`Bfd::detect_offload_reconcile`) --------
+
+    fn detect_params() -> SessionParams {
+        SessionParams {
+            detect_offload: true,
+            ..SessionParams::default()
+        }
+    }
+
+    /// Force the watchdog gates open: session Up with remote timing learned
+    /// (default 300 ms × 3 ⇒ a 900 ms detection time).
+    fn force_up_with_remote_timing(bfd: &mut Bfd, key: &SessionKey) {
+        let s = bfd.sessions.get_by_key_mut(key).unwrap();
+        s.local_state = bfd_packet::State::Up;
+        s.remote_detect_mult = 3;
+        s.remote_min_tx_us = 300_000;
+    }
+
+    /// A single-hop subscribe with detect-offload configured refcounts the
+    /// per-interface helper even with Echo off; the last unsubscribe
+    /// releases it. Multihop never does.
+    #[tokio::test]
+    async fn detect_offload_refcounts_reflector() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(30);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx);
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+        bfd.unsubscribe("ospf", &key);
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 0);
+
+        let mut mh_key = echo_key(31);
+        mh_key.multihop = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("bgp".into(), mh_key, detect_params(), tx);
+        assert_eq!(
+            bfd.reflectors.refcount(ECHO_TEST_IFINDEX),
+            0,
+            "multihop never brings the helper up",
+        );
+    }
+
+    /// The watchdog arms only while Up with the helper confirmed running,
+    /// carries the negotiated detection time, retunes when negotiation
+    /// changes it, and disarms when the session leaves Up.
+    #[tokio::test]
+    async fn detect_offload_arms_retunes_and_disarms() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(32);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx);
+
+        // Up but helper not confirmed → stays in userspace.
+        force_up_with_remote_timing(&mut bfd, &key);
+        bfd.detect_offload_reconcile(key);
+        assert_eq!(
+            bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us,
+            0,
+            "no arming on an unconfirmed helper",
+        );
+
+        // Helper confirmed → arm with the negotiated detection time.
+        bfd.reflectors.set_ready_for_test(ECHO_TEST_IFINDEX);
+        bfd.detect_offload_reconcile(key);
+        assert_eq!(
+            bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us,
+            900_000,
+        );
+
+        // Renegotiation (peer slows to 500 ms) retunes the armed value.
+        bfd.sessions.get_by_key_mut(&key).unwrap().remote_min_tx_us = 500_000;
+        bfd.detect_offload_reconcile(key);
+        assert_eq!(
+            bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us,
+            1_500_000,
+        );
+
+        // Leaving Up disarms.
+        bfd.sessions.get_by_key_mut(&key).unwrap().local_state = bfd_packet::State::Down;
+        bfd.detect_offload_reconcile(key);
+        assert_eq!(bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us, 0);
+    }
+
+    /// `detect-down` from the helper (the kernel watchdog fired) drives the
+    /// session Down with ControlDetectionTimeExpired — the same transition as
+    /// the userspace detection timer — and the watchdog disarms.
+    #[tokio::test]
+    async fn detect_down_drives_session_down() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(33);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx);
+        bfd.reflectors.set_ready_for_test(ECHO_TEST_IFINDEX);
+        force_up_with_remote_timing(&mut bfd, &key);
+        bfd.detect_offload_reconcile(key);
+        let disc = bfd.sessions.get_by_key(&key).unwrap().local_disc;
+        assert!(bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us > 0);
+
+        bfd.on_detect_down(disc);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(s.local_state, bfd_packet::State::Down);
+        assert_eq!(s.local_diag, bfd_packet::Diag::ControlDetectionTimeExpired);
+        assert_eq!(s.kernel_detect_us, 0, "watchdog disarmed on Down");
+    }
+
+    /// Helper death (`HelperGone`) reverts armed sessions to userspace
+    /// detection without touching their state.
+    #[tokio::test]
+    async fn helper_gone_reverts_to_userspace_detection() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(34);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx);
+        bfd.reflectors.set_ready_for_test(ECHO_TEST_IFINDEX);
+        force_up_with_remote_timing(&mut bfd, &key);
+        bfd.detect_offload_reconcile(key);
+        assert!(bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us > 0);
+
+        bfd.reflectors.clear_ready_for_test(ECHO_TEST_IFINDEX);
+        bfd.on_helper_gone(ECHO_TEST_IFINDEX);
+
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert_eq!(s.kernel_detect_us, 0, "reverted to userspace detection");
+        assert_eq!(
+            s.local_state,
+            bfd_packet::State::Up,
+            "session state untouched by the revert",
+        );
+    }
+
+    /// Re-subscribing with detect-offload turned off disarms a live watchdog
+    /// and releases the helper reference (and vice versa for turning it on).
+    #[tokio::test]
+    async fn resubscribe_flips_detect_offload_live() {
+        let mut bfd = fresh_bfd();
+        let key = echo_key(35);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx);
+        bfd.reflectors.set_ready_for_test(ECHO_TEST_IFINDEX);
+        force_up_with_remote_timing(&mut bfd, &key);
+        bfd.detect_offload_reconcile(key);
+        assert!(bfd.sessions.get_by_key(&key).unwrap().kernel_detect_us > 0);
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
+
+        // Turn it off live.
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, SessionParams::default(), tx2);
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert!(!s.detect_offload);
+        assert_eq!(s.kernel_detect_us, 0, "watchdog disarmed");
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 0);
+
+        // And back on: re-acquires and re-arms on the still-Up session.
+        let (tx3, _rx3) = mpsc::unbounded_channel();
+        bfd.subscribe("ospf".into(), key, detect_params(), tx3);
+        let s = bfd.sessions.get_by_key(&key).unwrap();
+        assert!(s.detect_offload);
+        assert_eq!(s.kernel_detect_us, 900_000, "re-armed live");
+        assert_eq!(bfd.reflectors.refcount(ECHO_TEST_IFINDEX), 1);
     }
 }
