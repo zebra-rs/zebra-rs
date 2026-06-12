@@ -59,6 +59,10 @@
 
 - [Bidirectional Forwarding Detection (BFD)](ch-10-00-bfd.md)
 
+## Fast Reroute
+
+- [Fast Failover: TI-LFA + BFD (NexthopProtect)](ch-12-00-nexthop-protect.md)
+
 ## Performance Measurement
 
 - [Link Delay Measurement (TWAMP Light / STAMP)](ch-09-00-twamp-stamp.md)
