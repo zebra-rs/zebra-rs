@@ -147,6 +147,30 @@ Feature: OSPFv2 TI-LFA fast-reroute over SR-MPLS
     # Primary restored once the adjacency re-forms.
     Then ping from "s" to "10.0.0.8" should succeed
 
+  Scenario: Promoted backup actually forwards over the SR-MPLS repair
+    Given the test topology exists
+    # `backup-as-primary` swaps the metric-sort offset so each TI-LFA
+    # repair installs as the active route and the SPF primary demotes
+    # to metric+1; the toggle re-runs SPF itself. Traffic is pinned
+    # onto the repair label stack while every link stays up — proving
+    # the repair tunnel genuinely forwards, which the link-failure
+    # scenario cannot (by ping time SPF has already reconverged onto a
+    # plain post-convergence primary). Must run before the s-nofrr /
+    # s-nosr scenarios strip the repair machinery from s.
+    When I apply command "set router ospf fast-reroute backup-as-primary" in namespace "s"
+    And I wait 5 seconds
+    # d's loopback route now has the label-stack repair as its best
+    # kernel entry, out the repair egress s-n2.
+    Then kernel route "10.0.0.8" in namespace "s" should eventually contain "encap mpls"
+    And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    # End-to-end over the repair: dies if any label hop on the repair
+    # path fails to swap/pop/forward.
+    And ping from "s" to "10.0.0.8" should succeed
+    # Restore install-side ordering for the scenarios that follow.
+    When I apply command "delete router ospf fast-reroute backup-as-primary" in namespace "s"
+    And I wait 5 seconds
+    Then ping from "s" to "10.0.0.8" should succeed
+
   Scenario: Disabling fast-reroute clears the repair-list
     Given the test topology exists
     # s still holds TI-LFA backups from the previous scenarios.
