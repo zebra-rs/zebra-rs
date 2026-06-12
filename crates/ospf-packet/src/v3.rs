@@ -1825,7 +1825,17 @@ pub enum Ospfv3SubTlv {
     AdjSid(Ospfv3AdjSidSubTlv),
     LanAdjSid(Ospfv3LanAdjSidSubTlv),
     Asla(Ospfv3AslaSubTlv),
-    Unknown { typ: u16, value: Vec<u8> },
+    /// RFC 9513 §9.1 — SRv6 End.X SID (Extended-LSA sub-TLV 31).
+    Srv6EndXSid(Ospfv3Srv6EndXSidSubTlv),
+    /// RFC 9513 §9.2 — SRv6 LAN End.X SID (Extended-LSA sub-TLV 32).
+    Srv6LanEndXSid(Ospfv3Srv6LanEndXSidSubTlv),
+    /// RFC 9513 §10 — SRv6 SID Structure (Extended-LSA sub-TLV 30,
+    /// nested under the End.X / LAN End.X sub-TLVs).
+    Srv6SidStructure(Ospfv3Srv6SidStructure),
+    Unknown {
+        typ: u16,
+        value: Vec<u8>,
+    },
 }
 
 impl Ospfv3SubTlv {
@@ -1835,6 +1845,9 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::AdjSid(s) => s.value_len() as usize,
             Ospfv3SubTlv::LanAdjSid(s) => s.value_len() as usize,
             Ospfv3SubTlv::Asla(s) => s.value_len(),
+            Ospfv3SubTlv::Srv6EndXSid(s) => s.value_len() as usize,
+            Ospfv3SubTlv::Srv6LanEndXSid(s) => s.value_len() as usize,
+            Ospfv3SubTlv::Srv6SidStructure(s) => s.value_len() as usize,
             Ospfv3SubTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
@@ -1846,6 +1859,9 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::AdjSid(s) => (OSPFV3_SUB_TLV_ADJ_SID, s.value_len()),
             Ospfv3SubTlv::LanAdjSid(s) => (OSPFV3_SUB_TLV_LAN_ADJ_SID, s.value_len()),
             Ospfv3SubTlv::Asla(s) => (OSPFV3_SUB_TLV_ASLA, s.value_len() as u16),
+            Ospfv3SubTlv::Srv6EndXSid(s) => (OSPFV3_SUB_TLV_SRV6_ENDX_SID, s.value_len()),
+            Ospfv3SubTlv::Srv6LanEndXSid(s) => (OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID, s.value_len()),
+            Ospfv3SubTlv::Srv6SidStructure(s) => (OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE, s.value_len()),
             Ospfv3SubTlv::Unknown { typ, value } => (*typ, value.len() as u16),
         };
         buf.put_u16(typ);
@@ -1855,6 +1871,9 @@ impl Ospfv3SubTlv {
             Ospfv3SubTlv::AdjSid(s) => s.emit(buf),
             Ospfv3SubTlv::LanAdjSid(s) => s.emit(buf),
             Ospfv3SubTlv::Asla(s) => s.emit(buf),
+            Ospfv3SubTlv::Srv6EndXSid(s) => s.emit(buf),
+            Ospfv3SubTlv::Srv6LanEndXSid(s) => s.emit(buf),
+            Ospfv3SubTlv::Srv6SidStructure(s) => s.emit(buf),
             Ospfv3SubTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         let value_len = value_len as usize;
@@ -1885,6 +1904,18 @@ impl Ospfv3SubTlv {
             OSPFV3_SUB_TLV_ASLA => {
                 let (_, s) = Ospfv3AslaSubTlv::parse_be(value)?;
                 Ospfv3SubTlv::Asla(s)
+            }
+            OSPFV3_SUB_TLV_SRV6_ENDX_SID => {
+                let (_, s) = Ospfv3Srv6EndXSidSubTlv::parse_be(value)?;
+                Ospfv3SubTlv::Srv6EndXSid(s)
+            }
+            OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID => {
+                let (_, s) = Ospfv3Srv6LanEndXSidSubTlv::parse_be(value)?;
+                Ospfv3SubTlv::Srv6LanEndXSid(s)
+            }
+            OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE => {
+                let (_, s) = Ospfv3Srv6SidStructure::parse_be(value)?;
+                Ospfv3SubTlv::Srv6SidStructure(s)
             }
             _ => Ospfv3SubTlv::Unknown {
                 typ,
@@ -2537,7 +2568,15 @@ pub enum Ospfv3ExtTlv {
     SidLabelRange(Ospfv3SidLabelRangeTlv),
     SrLocalBlock(Ospfv3SrLocalBlockTlv),
     Fad(Ospfv3FadTlv),
-    Unknown { typ: u16, value: Vec<u8> },
+    /// RFC 9513 §2 — SRv6 Capabilities (RI TLV 20). Rides the SR-info
+    /// E-Router-LSA alongside SR-Algorithm / SRGB / SRLB, the same
+    /// in-house convention those RI TLVs already use (no standalone
+    /// Router Information LSA in this implementation).
+    Srv6Capabilities(Ospfv3Srv6CapabilitiesTlv),
+    Unknown {
+        typ: u16,
+        value: Vec<u8>,
+    },
 }
 
 impl Ospfv3ExtTlv {
@@ -2552,6 +2591,7 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SidLabelRange(t) => t.value_len(),
             Ospfv3ExtTlv::SrLocalBlock(t) => t.value_len(),
             Ospfv3ExtTlv::Fad(t) => t.value_len(),
+            Ospfv3ExtTlv::Srv6Capabilities(t) => t.value_len() as usize,
             Ospfv3ExtTlv::Unknown { value, .. } => value.len(),
         };
         4 + ((value_len + 3) & !3)
@@ -2565,6 +2605,9 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SidLabelRange(t) => (OSPFV3_EXT_TLV_SID_LABEL_RANGE, t.value_len()),
             Ospfv3ExtTlv::SrLocalBlock(t) => (OSPFV3_EXT_TLV_LOCAL_BLOCK, t.value_len()),
             Ospfv3ExtTlv::Fad(t) => (OSPFV3_EXT_TLV_FAD, t.value_len()),
+            Ospfv3ExtTlv::Srv6Capabilities(t) => {
+                (OSPFV3_EXT_TLV_SRV6_CAPABILITIES, t.value_len() as usize)
+            }
             Ospfv3ExtTlv::Unknown { typ, value } => (*typ, value.len()),
         };
         buf.put_u16(typ);
@@ -2576,6 +2619,7 @@ impl Ospfv3ExtTlv {
             Ospfv3ExtTlv::SidLabelRange(t) => t.emit(buf),
             Ospfv3ExtTlv::SrLocalBlock(t) => t.emit(buf),
             Ospfv3ExtTlv::Fad(t) => t.emit(buf),
+            Ospfv3ExtTlv::Srv6Capabilities(t) => t.emit(buf),
             Ospfv3ExtTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         // Pad to 4-byte alignment.
@@ -2614,6 +2658,10 @@ impl Ospfv3ExtTlv {
             OSPFV3_EXT_TLV_FAD => {
                 let (_, t) = Ospfv3FadTlv::parse_be(value)?;
                 Ospfv3ExtTlv::Fad(t)
+            }
+            OSPFV3_EXT_TLV_SRV6_CAPABILITIES => {
+                let (_, t) = Ospfv3Srv6CapabilitiesTlv::parse_be(value)?;
+                Ospfv3ExtTlv::Srv6Capabilities(t)
             }
             _ => Ospfv3ExtTlv::Unknown {
                 typ,
@@ -2687,6 +2735,10 @@ pub enum Ospfv3LsBody {
     EAsExternal(Ospfv3ELsaBody),
     ELink(Ospfv3ELsaBody),
     EIntraAreaPrefix(Ospfv3ELsaBody),
+    /// RFC 9513 §7 SRv6 Locator LSA — function code 42, area scope.
+    /// Own top-level TLV namespace (the "OSPFv3 SRv6 Locator LSA
+    /// TLVs" registry), not the Extended-LSA TLV space.
+    Srv6Locator(Ospfv3Srv6LocatorLsa),
     /// Unrecognised LS Type — bytes preserved verbatim.
     Unknown(Vec<u8>),
 }
@@ -2710,6 +2762,7 @@ impl Ospfv3LsBody {
             | Ospfv3LsBody::EAsExternal(b)
             | Ospfv3LsBody::ELink(b)
             | Ospfv3LsBody::EIntraAreaPrefix(b) => b.emit(buf),
+            Ospfv3LsBody::Srv6Locator(b) => b.emit(buf),
             Ospfv3LsBody::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -2784,6 +2837,10 @@ impl Ospfv3LsBody {
             OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => {
                 let (rest, b) = Ospfv3ELsaBody::parse_be(input)?;
                 Ok((rest, Ospfv3LsBody::EIntraAreaPrefix(b)))
+            }
+            OSPFV3_SRV6_LOCATOR_LSA_TYPE => {
+                let (rest, b) = Ospfv3Srv6LocatorLsa::parse_be(input)?;
+                Ok((rest, Ospfv3LsBody::Srv6Locator(b)))
             }
             _ => Ok((&[][..], Ospfv3LsBody::Unknown(input.to_vec()))),
         }
@@ -2956,6 +3013,497 @@ impl ParseBe<Ospfv3LsAck> for Ospfv3LsAck {
         let (input, lsa_headers) = many0_complete(Ospfv3LsaHeader::parse_be).parse(input)?;
         Ok((input, Ospfv3LsAck { lsa_headers }))
     }
+}
+
+// ---------------------------------------------------------------------
+// RFC 9513 — OSPFv3 Extensions for SRv6
+// ---------------------------------------------------------------------
+
+/// SRv6 Locator LSA (RFC 9513 §7): U-bit set (flood even when
+/// unrecognised), area scope, LSA function code 42.
+pub const OSPFV3_SRV6_LOCATOR_LSA_TYPE: u16 = 0xA02A;
+
+/// SRv6 Capabilities TLV (RFC 9513 §2) — RI TLV type 20, carried in
+/// this implementation's SR-info E-Router-LSA (see `Ospfv3ExtTlv`).
+pub const OSPFV3_EXT_TLV_SRV6_CAPABILITIES: u16 = 20;
+
+/// Extended-LSA sub-TLV types (RFC 9513 §§9-10).
+pub const OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE: u16 = 30;
+pub const OSPFV3_SUB_TLV_SRV6_ENDX_SID: u16 = 31;
+pub const OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID: u16 = 32;
+
+/// SRv6 Locator LSA's own TLV / sub-TLV registries (RFC 9513 §13).
+pub const OSPFV3_SRV6_LOCATOR_TLV: u16 = 1;
+pub const OSPFV3_SRV6_LOCATOR_SUB_TLV_END_SID: u16 = 1;
+pub const OSPFV3_SRV6_LOCATOR_SUB_TLV_SID_STRUCTURE: u16 = 10;
+
+/// O-flag of the SRv6 Capabilities TLV (RFC 9513 §2): the router
+/// supports the O-bit in the Segment Routing Header.
+pub const OSPFV3_SRV6_CAP_FLAG_O: u16 = 0x4000;
+
+/// SRv6 Capabilities TLV (RFC 9513 §2).
+///
+/// Wire layout: `Flags (2) | Reserved (2)` followed by optional
+/// sub-TLVs (none defined today; preserved verbatim is unnecessary —
+/// senders we interop with emit none, and RFC 9513 defines none).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Ospfv3Srv6CapabilitiesTlv {
+    pub flags: u16,
+}
+
+impl Ospfv3Srv6CapabilitiesTlv {
+    pub fn value_len(&self) -> u16 {
+        4
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.flags);
+        buf.put_u16(0); // reserved
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u16(input)?;
+        let (input, _reserved) = be_u16(input)?;
+        Ok((input, Self { flags }))
+    }
+}
+
+/// SRv6 SID Structure (RFC 9513 §10): how the 128-bit SID splits into
+/// Locator-Block / Locator-Node / Function / Argument lengths. The
+/// same 4-octet body appears in two registries — Extended-LSA
+/// sub-TLV 30 (under End.X / LAN End.X) and Locator-LSA sub-TLV 10
+/// (under the End SID); one struct serves both homes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Ospfv3Srv6SidStructure {
+    pub lb_len: u8,
+    pub ln_len: u8,
+    pub fun_len: u8,
+    pub arg_len: u8,
+}
+
+impl Ospfv3Srv6SidStructure {
+    pub fn value_len(&self) -> u16 {
+        4
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.lb_len);
+        buf.put_u8(self.ln_len);
+        buf.put_u8(self.fun_len);
+        buf.put_u8(self.arg_len);
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, lb_len) = be_u8(input)?;
+        let (input, ln_len) = be_u8(input)?;
+        let (input, fun_len) = be_u8(input)?;
+        let (input, arg_len) = be_u8(input)?;
+        Ok((
+            input,
+            Self {
+                lb_len,
+                ln_len,
+                fun_len,
+                arg_len,
+            },
+        ))
+    }
+}
+
+/// SRv6 End.X SID sub-TLV (RFC 9513 §9.1) — per-adjacency SID on a
+/// Router-Link TLV of the E-Router-LSA. The endpoint behavior is the
+/// raw IANA "SRv6 Endpoint Behaviors" codepoint (protocol-neutral;
+/// the daemon maps it through `isis_packet::Behavior`).
+///
+/// Wire: `Behavior (2) | Flags (1) | Rsv (1) | Algo (1) | Weight (1) |
+/// Rsv (2) | SID (16)` + nested sub-TLVs (SID Structure, type 30).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3Srv6EndXSidSubTlv {
+    pub behavior: u16,
+    pub flags: u8,
+    pub algo: u8,
+    pub weight: u8,
+    pub sid: Ipv6Addr,
+    pub subs: Vec<Ospfv3SubTlv>,
+}
+
+impl Ospfv3Srv6EndXSidSubTlv {
+    pub fn value_len(&self) -> u16 {
+        let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        24 + subs as u16
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.behavior);
+        buf.put_u8(self.flags);
+        buf.put_u8(0); // reserved1
+        buf.put_u8(self.algo);
+        buf.put_u8(self.weight);
+        buf.put_u16(0); // reserved2
+        buf.put_slice(&self.sid.octets());
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, behavior) = be_u16(input)?;
+        let (input, flags) = be_u8(input)?;
+        let (input, _rsv1) = be_u8(input)?;
+        let (input, algo) = be_u8(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, _rsv2) = be_u16(input)?;
+        let (mut input, sid) = parse_ipv6_sid(input)?;
+        let mut subs = Vec::new();
+        while !input.is_empty() {
+            let (rest, sub) = Ospfv3SubTlv::parse_be(input)?;
+            subs.push(sub);
+            input = rest;
+        }
+        Ok((
+            input,
+            Self {
+                behavior,
+                flags,
+                algo,
+                weight,
+                sid,
+                subs,
+            },
+        ))
+    }
+}
+
+/// SRv6 LAN End.X SID sub-TLV (RFC 9513 §9.2) — the broadcast / NBMA
+/// sibling: same body as End.X plus the Neighbor Router-ID that
+/// identifies which LAN member the adjacency points at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3Srv6LanEndXSidSubTlv {
+    pub behavior: u16,
+    pub flags: u8,
+    pub algo: u8,
+    pub weight: u8,
+    pub neighbor_router_id: Ipv4Addr,
+    pub sid: Ipv6Addr,
+    pub subs: Vec<Ospfv3SubTlv>,
+}
+
+impl Ospfv3Srv6LanEndXSidSubTlv {
+    pub fn value_len(&self) -> u16 {
+        let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        28 + subs as u16
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u16(self.behavior);
+        buf.put_u8(self.flags);
+        buf.put_u8(0); // reserved1
+        buf.put_u8(self.algo);
+        buf.put_u8(self.weight);
+        buf.put_u16(0); // reserved2
+        buf.put_slice(&self.neighbor_router_id.octets());
+        buf.put_slice(&self.sid.octets());
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, behavior) = be_u16(input)?;
+        let (input, flags) = be_u8(input)?;
+        let (input, _rsv1) = be_u8(input)?;
+        let (input, algo) = be_u8(input)?;
+        let (input, weight) = be_u8(input)?;
+        let (input, _rsv2) = be_u16(input)?;
+        let (input, neighbor_router_id) = Ipv4Addr::parse_be(input)?;
+        let (mut input, sid) = parse_ipv6_sid(input)?;
+        let mut subs = Vec::new();
+        while !input.is_empty() {
+            let (rest, sub) = Ospfv3SubTlv::parse_be(input)?;
+            subs.push(sub);
+            input = rest;
+        }
+        Ok((
+            input,
+            Self {
+                behavior,
+                flags,
+                algo,
+                weight,
+                neighbor_router_id,
+                sid,
+                subs,
+            },
+        ))
+    }
+}
+
+/// Sub-TLVs of the SRv6 Locator TLV — RFC 9513's own sub-registry
+/// (NOT the Extended-LSA sub-TLV space): End SID is type 1 here and
+/// the SID Structure is type 10. Types 2-5 (forwarding address,
+/// route tag, prefix source) are preserved as `Unknown`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ospfv3Srv6LocatorSubTlv {
+    EndSid(Ospfv3Srv6EndSidSubTlv),
+    SidStructure(Ospfv3Srv6SidStructure),
+    Unknown { typ: u16, value: Vec<u8> },
+}
+
+impl Ospfv3Srv6LocatorSubTlv {
+    fn wire_len(&self) -> usize {
+        let value_len = match self {
+            Ospfv3Srv6LocatorSubTlv::EndSid(s) => s.value_len() as usize,
+            Ospfv3Srv6LocatorSubTlv::SidStructure(s) => s.value_len() as usize,
+            Ospfv3Srv6LocatorSubTlv::Unknown { value, .. } => value.len(),
+        };
+        4 + ((value_len + 3) & !3)
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, value_len) = match self {
+            Ospfv3Srv6LocatorSubTlv::EndSid(s) => {
+                (OSPFV3_SRV6_LOCATOR_SUB_TLV_END_SID, s.value_len())
+            }
+            Ospfv3Srv6LocatorSubTlv::SidStructure(s) => {
+                (OSPFV3_SRV6_LOCATOR_SUB_TLV_SID_STRUCTURE, s.value_len())
+            }
+            Ospfv3Srv6LocatorSubTlv::Unknown { typ, value } => (*typ, value.len() as u16),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(value_len);
+        match self {
+            Ospfv3Srv6LocatorSubTlv::EndSid(s) => s.emit(buf),
+            Ospfv3Srv6LocatorSubTlv::SidStructure(s) => s.emit(buf),
+            Ospfv3Srv6LocatorSubTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
+        let value_len = value_len as usize;
+        let pad = ((value_len + 3) & !3) - value_len;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        let parsed = match typ {
+            OSPFV3_SRV6_LOCATOR_SUB_TLV_END_SID => {
+                let (_, s) = Ospfv3Srv6EndSidSubTlv::parse_be(value)?;
+                Ospfv3Srv6LocatorSubTlv::EndSid(s)
+            }
+            OSPFV3_SRV6_LOCATOR_SUB_TLV_SID_STRUCTURE => {
+                let (_, s) = Ospfv3Srv6SidStructure::parse_be(value)?;
+                Ospfv3Srv6LocatorSubTlv::SidStructure(s)
+            }
+            _ => Ospfv3Srv6LocatorSubTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            },
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
+    }
+}
+
+/// SRv6 End SID sub-TLV (RFC 9513 §8) — the locator's node SID,
+/// nested in the SRv6 Locator TLV. Wire: `Flags (1) | Rsv (1) |
+/// Behavior (2) | SID (16)` + sub-TLVs (SID Structure, type 10 in
+/// the locator registry).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3Srv6EndSidSubTlv {
+    pub flags: u8,
+    pub behavior: u16,
+    pub sid: Ipv6Addr,
+    pub subs: Vec<Ospfv3Srv6LocatorSubTlv>,
+}
+
+impl Ospfv3Srv6EndSidSubTlv {
+    pub fn value_len(&self) -> u16 {
+        let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        20 + subs as u16
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.flags);
+        buf.put_u8(0); // reserved
+        buf.put_u16(self.behavior);
+        buf.put_slice(&self.sid.octets());
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u8(input)?;
+        let (input, _rsv) = be_u8(input)?;
+        let (input, behavior) = be_u16(input)?;
+        let (mut input, sid) = parse_ipv6_sid(input)?;
+        let mut subs = Vec::new();
+        while !input.is_empty() {
+            let (rest, sub) = Ospfv3Srv6LocatorSubTlv::parse_be(input)?;
+            subs.push(sub);
+            input = rest;
+        }
+        Ok((
+            input,
+            Self {
+                flags,
+                behavior,
+                sid,
+                subs,
+            },
+        ))
+    }
+}
+
+/// SRv6 Locator TLV (RFC 9513 §7.1) — one locator prefix with its
+/// route type / algorithm / metric and the End SIDs allocated from
+/// it. The locator prefix is encoded like every other v3 prefix:
+/// `ceil(locator_length / 32) * 4` octets, zero-padded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ospfv3Srv6LocatorTlv {
+    pub route_type: u8,
+    pub algorithm: u8,
+    pub locator_length: u8,
+    pub prefix_options: u8,
+    pub metric: u32,
+    pub locator: Ipv6Addr,
+    pub subs: Vec<Ospfv3Srv6LocatorSubTlv>,
+}
+
+impl Ospfv3Srv6LocatorTlv {
+    pub fn value_len(&self) -> u16 {
+        let subs: usize = self.subs.iter().map(|s| s.wire_len()).sum();
+        (8 + ospfv3_prefix_wire_len(self.locator_length) + subs) as u16
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.route_type);
+        buf.put_u8(self.algorithm);
+        buf.put_u8(self.locator_length);
+        buf.put_u8(self.prefix_options);
+        buf.put_u32(self.metric);
+        let wire = ospfv3_prefix_wire_len(self.locator_length);
+        buf.put_slice(&self.locator.octets()[..wire]);
+        for sub in &self.subs {
+            sub.emit(buf);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, route_type) = be_u8(input)?;
+        let (input, algorithm) = be_u8(input)?;
+        let (input, locator_length) = be_u8(input)?;
+        let (input, prefix_options) = be_u8(input)?;
+        let (input, metric) = be_u32(input)?;
+        let wire = ospfv3_prefix_wire_len(locator_length);
+        let (mut input, raw) = take(wire)(input)?;
+        let mut octets = [0u8; 16];
+        octets[..wire].copy_from_slice(raw);
+        let locator = Ipv6Addr::from(octets);
+        let mut subs = Vec::new();
+        while !input.is_empty() {
+            let (rest, sub) = Ospfv3Srv6LocatorSubTlv::parse_be(input)?;
+            subs.push(sub);
+            input = rest;
+        }
+        Ok((
+            input,
+            Self {
+                route_type,
+                algorithm,
+                locator_length,
+                prefix_options,
+                metric,
+                locator,
+                subs,
+            },
+        ))
+    }
+}
+
+/// Top-level TLVs of the SRv6 Locator LSA (its own registry; type 1
+/// is the only one defined).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ospfv3Srv6LocatorLsaTlv {
+    Locator(Ospfv3Srv6LocatorTlv),
+    Unknown { typ: u16, value: Vec<u8> },
+}
+
+impl Ospfv3Srv6LocatorLsaTlv {
+    fn emit(&self, buf: &mut BytesMut) {
+        let (typ, value_len) = match self {
+            Ospfv3Srv6LocatorLsaTlv::Locator(t) => (OSPFV3_SRV6_LOCATOR_TLV, t.value_len()),
+            Ospfv3Srv6LocatorLsaTlv::Unknown { typ, value } => (*typ, value.len() as u16),
+        };
+        buf.put_u16(typ);
+        buf.put_u16(value_len);
+        match self {
+            Ospfv3Srv6LocatorLsaTlv::Locator(t) => t.emit(buf),
+            Ospfv3Srv6LocatorLsaTlv::Unknown { value, .. } => buf.put_slice(value),
+        }
+        let value_len = value_len as usize;
+        let pad = ((value_len + 3) & !3) - value_len;
+        for _ in 0..pad {
+            buf.put_u8(0);
+        }
+    }
+
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, typ) = be_u16(input)?;
+        let (input, len) = be_u16(input)?;
+        let len = len as usize;
+        let (input, value) = take(len)(input)?;
+        let parsed = match typ {
+            OSPFV3_SRV6_LOCATOR_TLV => {
+                let (_, t) = Ospfv3Srv6LocatorTlv::parse_be(value)?;
+                Ospfv3Srv6LocatorLsaTlv::Locator(t)
+            }
+            _ => Ospfv3Srv6LocatorLsaTlv::Unknown {
+                typ,
+                value: value.to_vec(),
+            },
+        };
+        let padded = (len + 3) & !3;
+        let (input, _) = take(padded - len)(input)?;
+        Ok((input, parsed))
+    }
+}
+
+/// SRv6 Locator LSA body (RFC 9513 §7) — a TLV stream like the
+/// Extended LSAs, but in its own TLV namespace.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Ospfv3Srv6LocatorLsa {
+    pub tlvs: Vec<Ospfv3Srv6LocatorLsaTlv>,
+}
+
+impl Ospfv3Srv6LocatorLsa {
+    pub fn emit(&self, buf: &mut BytesMut) {
+        for tlv in &self.tlvs {
+            tlv.emit(buf);
+        }
+    }
+
+    pub fn parse_be(mut input: &[u8]) -> IResult<&[u8], Self> {
+        let mut tlvs = Vec::new();
+        while !input.is_empty() {
+            let (rest, tlv) = Ospfv3Srv6LocatorLsaTlv::parse_be(input)?;
+            tlvs.push(tlv);
+            input = rest;
+        }
+        Ok((input, Self { tlvs }))
+    }
+}
+
+/// Take 16 octets as an SRv6 SID.
+fn parse_ipv6_sid(input: &[u8]) -> IResult<&[u8], Ipv6Addr> {
+    let (input, raw) = take(16usize)(input)?;
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(raw);
+    Ok((input, Ipv6Addr::from(octets)))
 }
 
 #[cfg(test)]
@@ -4715,5 +5263,149 @@ mod tests {
             subs: Vec::new(),
         };
         assert!(!asla.is_flex_algo());
+    }
+
+    // ---- RFC 9513 SRv6 codec round-trips ----------------------------
+
+    #[test]
+    fn srv6_capabilities_tlv_roundtrip() {
+        let tlv = Ospfv3ExtTlv::Srv6Capabilities(Ospfv3Srv6CapabilitiesTlv {
+            flags: OSPFV3_SRV6_CAP_FLAG_O,
+        });
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        // Type 20, length 4, flags, reserved.
+        assert_eq!(buf.len(), 8);
+        let (rest, parsed) = Ospfv3ExtTlv::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed, tlv);
+    }
+
+    #[test]
+    fn srv6_locator_lsa_roundtrip() {
+        // A uSID locator (fcbb:bbbb:5::/48) advertising its End SID
+        // (= locator base, behavior uN/EndCSID = 48) with the SID
+        // structure both at the End-SID level and the locator level.
+        let structure = Ospfv3Srv6SidStructure {
+            lb_len: 32,
+            ln_len: 16,
+            fun_len: 16,
+            arg_len: 0,
+        };
+        let end_sid = Ospfv3Srv6EndSidSubTlv {
+            flags: 0,
+            behavior: 48,
+            sid: "fcbb:bbbb:5::".parse().unwrap(),
+            subs: vec![Ospfv3Srv6LocatorSubTlv::SidStructure(structure)],
+        };
+        let locator = Ospfv3Srv6LocatorTlv {
+            route_type: 1,
+            algorithm: 0,
+            locator_length: 48,
+            prefix_options: 0,
+            metric: 0,
+            locator: "fcbb:bbbb:5::".parse().unwrap(),
+            subs: vec![Ospfv3Srv6LocatorSubTlv::EndSid(end_sid)],
+        };
+        let body = Ospfv3Srv6LocatorLsa {
+            tlvs: vec![Ospfv3Srv6LocatorLsaTlv::Locator(locator)],
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        let (rest, parsed) = Ospfv3Srv6LocatorLsa::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed, body);
+
+        // The /48 locator must encode as 8 prefix octets (ceil(48/32)*4),
+        // not the full 16: TLV header 4 + fixed 8 + prefix 8 = 20, then
+        // the End SID sub-TLV: header 4 + fixed 20 + nested structure 8.
+        assert_eq!(buf.len(), 4 + 8 + 8 + 4 + 20 + 8);
+    }
+
+    #[test]
+    fn srv6_locator_lsa_parses_via_ls_body_dispatch() {
+        let locator = Ospfv3Srv6LocatorTlv {
+            route_type: 1,
+            algorithm: 0,
+            locator_length: 64,
+            prefix_options: 0,
+            metric: 10,
+            locator: "2001:db8:0:5::".parse().unwrap(),
+            subs: vec![],
+        };
+        let body = Ospfv3Srv6LocatorLsa {
+            tlvs: vec![Ospfv3Srv6LocatorLsaTlv::Locator(locator)],
+        };
+        let mut buf = BytesMut::new();
+        body.emit(&mut buf);
+        let (_, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_SRV6_LOCATOR_LSA_TYPE).unwrap();
+        match parsed {
+            Ospfv3LsBody::Srv6Locator(b) => assert_eq!(b, body),
+            other => panic!("expected Srv6Locator body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srv6_endx_sid_sub_tlv_roundtrip() {
+        let endx = Ospfv3SubTlv::Srv6EndXSid(Ospfv3Srv6EndXSidSubTlv {
+            behavior: 43, // End.X with NEXT-CSID (uA)
+            flags: 0,
+            algo: 0,
+            weight: 0,
+            sid: "fcbb:bbbb:5:e003::".parse().unwrap(),
+            subs: vec![Ospfv3SubTlv::Srv6SidStructure(Ospfv3Srv6SidStructure {
+                lb_len: 32,
+                ln_len: 16,
+                fun_len: 16,
+                arg_len: 0,
+            })],
+        });
+        let mut buf = BytesMut::new();
+        endx.emit(&mut buf);
+        let (rest, parsed) = Ospfv3SubTlv::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed, endx);
+    }
+
+    #[test]
+    fn srv6_lan_endx_sid_sub_tlv_roundtrip() {
+        let lan = Ospfv3SubTlv::Srv6LanEndXSid(Ospfv3Srv6LanEndXSidSubTlv {
+            behavior: 5, // classic End.X
+            flags: 0,
+            algo: 0,
+            weight: 10,
+            neighbor_router_id: Ipv4Addr::new(10, 0, 0, 5),
+            sid: "2001:db8:5:e000::".parse().unwrap(),
+            subs: vec![],
+        });
+        let mut buf = BytesMut::new();
+        lan.emit(&mut buf);
+        let (rest, parsed) = Ospfv3SubTlv::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed, lan);
+    }
+
+    #[test]
+    fn srv6_locator_unknown_sub_tlv_preserved() {
+        // Route-Tag (locator sub-TLV 3) is not modeled — it must
+        // survive a parse/emit cycle verbatim inside the locator.
+        let locator = Ospfv3Srv6LocatorTlv {
+            route_type: 1,
+            algorithm: 0,
+            locator_length: 48,
+            prefix_options: 0,
+            metric: 0,
+            locator: "fcbb:bbbb:7::".parse().unwrap(),
+            subs: vec![Ospfv3Srv6LocatorSubTlv::Unknown {
+                typ: 3,
+                value: vec![0, 0, 0, 99],
+            }],
+        };
+        let tlv = Ospfv3Srv6LocatorLsaTlv::Locator(locator);
+        let mut buf = BytesMut::new();
+        tlv.emit(&mut buf);
+        let (rest, parsed) = Ospfv3Srv6LocatorLsaTlv::parse_be(&buf).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed, tlv);
     }
 }

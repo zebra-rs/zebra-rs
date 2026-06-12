@@ -86,6 +86,7 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_GRACE_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
         OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        OSPFV3_SRV6_LOCATOR_LSA_TYPE,
     };
     match ls_type {
         OSPFV3_ROUTER_LSA_TYPE => "Router-LSA",
@@ -98,6 +99,7 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => "Intra-Area-Prefix-LSA",
         OSPFV3_GRACE_LSA_TYPE => "Grace-LSA",
         OSPFV3_E_ROUTER_LSA_TYPE => "E-Router-LSA",
+        OSPFV3_SRV6_LOCATOR_LSA_TYPE => "SRv6-Locator-LSA",
         OSPFV3_E_NETWORK_LSA_TYPE => "E-Network-LSA",
         OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE => "E-Inter-Area-Prefix-LSA",
         OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE => "E-Inter-Area-Router-LSA",
@@ -961,6 +963,9 @@ fn write_lsa_detail(
                 writeln!(out, "  Restart Reason: {:?}", reason)?;
             }
         }
+        Ospfv3LsBody::Srv6Locator(b) => {
+            write_srv6_locator_body(out, b)?;
+        }
         Ospfv3LsBody::Unknown(bytes) => {
             writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
         }
@@ -1069,6 +1074,60 @@ fn write_v3_asla_sub(
     Ok(())
 }
 
+/// Render an RFC 9513 SRv6 Locator LSA body TLV-by-TLV.
+fn write_srv6_locator_body(
+    out: &mut String,
+    body: &ospf_packet::Ospfv3Srv6LocatorLsa,
+) -> Result<(), std::fmt::Error> {
+    use ospf_packet::{Ospfv3Srv6LocatorLsaTlv, Ospfv3Srv6LocatorSubTlv};
+    for tlv in &body.tlvs {
+        match tlv {
+            Ospfv3Srv6LocatorLsaTlv::Locator(loc) => {
+                writeln!(
+                    out,
+                    "  SRv6 Locator TLV: {}/{}",
+                    loc.locator, loc.locator_length
+                )?;
+                writeln!(out, "    Route Type: {}", loc.route_type)?;
+                writeln!(out, "    Algorithm: {}", loc.algorithm)?;
+                writeln!(out, "    Metric: {}", loc.metric)?;
+                for sub in &loc.subs {
+                    match sub {
+                        Ospfv3Srv6LocatorSubTlv::EndSid(es) => {
+                            writeln!(out, "    SRv6 End SID Sub-TLV:")?;
+                            writeln!(out, "      Endpoint Behavior: {}", es.behavior)?;
+                            writeln!(out, "      SID: {}", es.sid)?;
+                            for s2 in &es.subs {
+                                if let Ospfv3Srv6LocatorSubTlv::SidStructure(st) = s2 {
+                                    writeln!(
+                                        out,
+                                        "      SID Structure: LB {} LN {} Fun {} Arg {}",
+                                        st.lb_len, st.ln_len, st.fun_len, st.arg_len
+                                    )?;
+                                }
+                            }
+                        }
+                        Ospfv3Srv6LocatorSubTlv::SidStructure(st) => {
+                            writeln!(
+                                out,
+                                "    SID Structure Sub-TLV: LB {} LN {} Fun {} Arg {}",
+                                st.lb_len, st.ln_len, st.fun_len, st.arg_len
+                            )?;
+                        }
+                        Ospfv3Srv6LocatorSubTlv::Unknown { typ, value } => {
+                            writeln!(out, "    Unknown Sub-TLV: type={} len={}", typ, value.len())?;
+                        }
+                    }
+                }
+            }
+            Ospfv3Srv6LocatorLsaTlv::Unknown { typ, value } => {
+                writeln!(out, "  Unknown TLV: type={} len={}", typ, value.len())?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render one RFC 8362 sub-TLV nested under a Router-Link or
 /// Intra-Area-Prefix TLV.
 fn write_v3_sub_tlv(
@@ -1103,6 +1162,36 @@ fn write_v3_sub_tlv(
         }
         Ospfv3SubTlv::Asla(asla) => {
             write_v3_asla_sub(out, asla)?;
+        }
+        Ospfv3SubTlv::Srv6EndXSid(endx) => {
+            writeln!(out, "    SRv6 End.X SID Sub-TLV:")?;
+            writeln!(out, "      Endpoint Behavior: {}", endx.behavior)?;
+            writeln!(out, "      Flags: 0x{:02x}", endx.flags)?;
+            writeln!(out, "      Algorithm: {}", endx.algo)?;
+            writeln!(out, "      Weight: {}", endx.weight)?;
+            writeln!(out, "      SID: {}", endx.sid)?;
+            for sub in &endx.subs {
+                write_v3_sub_tlv(out, sub)?;
+            }
+        }
+        Ospfv3SubTlv::Srv6LanEndXSid(lan) => {
+            writeln!(out, "    SRv6 LAN End.X SID Sub-TLV:")?;
+            writeln!(out, "      Endpoint Behavior: {}", lan.behavior)?;
+            writeln!(out, "      Flags: 0x{:02x}", lan.flags)?;
+            writeln!(out, "      Algorithm: {}", lan.algo)?;
+            writeln!(out, "      Weight: {}", lan.weight)?;
+            writeln!(out, "      Neighbor Router ID: {}", lan.neighbor_router_id)?;
+            writeln!(out, "      SID: {}", lan.sid)?;
+            for sub in &lan.subs {
+                write_v3_sub_tlv(out, sub)?;
+            }
+        }
+        Ospfv3SubTlv::Srv6SidStructure(st) => {
+            writeln!(
+                out,
+                "    SRv6 SID Structure Sub-TLV: LB {} LN {} Fun {} Arg {}",
+                st.lb_len, st.ln_len, st.fun_len, st.arg_len
+            )?;
         }
         Ospfv3SubTlv::Unknown { typ, value } => {
             writeln!(out, "    Unknown Sub-TLV: type={} len={}", typ, value.len())?;
@@ -1217,6 +1306,9 @@ fn write_ext_lsa_body(
                         }
                     }
                 }
+            }
+            Ospfv3ExtTlv::Srv6Capabilities(cap) => {
+                writeln!(out, "  SRv6 Capabilities TLV: Flags: 0x{:04x}", cap.flags)?;
             }
             Ospfv3ExtTlv::Unknown { typ, value } => {
                 writeln!(out, "  Unknown TLV: type={} len={}", typ, value.len())?;
@@ -2049,7 +2141,7 @@ mod tests {
             OSPFV3_E_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
             OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
             OSPFV3_E_LINK_LSA_TYPE, OSPFV3_E_NETWORK_LSA_TYPE, OSPFV3_E_ROUTER_LSA_TYPE,
-            OSPFV3_GRACE_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE,
+            OSPFV3_GRACE_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_SRV6_LOCATOR_LSA_TYPE,
         };
         assert_eq!(ls_type_name(OSPFV3_ROUTER_LSA_TYPE), "Router-LSA");
         assert_eq!(ls_type_name(OSPFV3_NETWORK_LSA_TYPE), "Network-LSA");
@@ -2070,6 +2162,10 @@ mod tests {
         );
         assert_eq!(ls_type_name(OSPFV3_GRACE_LSA_TYPE), "Grace-LSA");
         assert_eq!(ls_type_name(OSPFV3_E_ROUTER_LSA_TYPE), "E-Router-LSA");
+        assert_eq!(
+            ls_type_name(OSPFV3_SRV6_LOCATOR_LSA_TYPE),
+            "SRv6-Locator-LSA"
+        );
         assert_eq!(ls_type_name(OSPFV3_E_NETWORK_LSA_TYPE), "E-Network-LSA");
         assert_eq!(
             ls_type_name(OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE),
