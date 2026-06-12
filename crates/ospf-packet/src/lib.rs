@@ -37,5 +37,13 @@ pub use v3::{
     Ospfv3SrLocalBlockTlv, Ospfv3SubTlv, ospfv3_compute_checksum, ospfv3_prefix_wire_len,
     ospfv3_verify_checksum, parse_v3,
 };
+pub use v3::{
+    OSPFV3_EXT_TLV_SRV6_CAPABILITIES, OSPFV3_SRV6_CAP_FLAG_O, OSPFV3_SRV6_LOCATOR_LSA_TYPE,
+    OSPFV3_SRV6_LOCATOR_SUB_TLV_END_SID, OSPFV3_SRV6_LOCATOR_SUB_TLV_SID_STRUCTURE,
+    OSPFV3_SRV6_LOCATOR_TLV, OSPFV3_SUB_TLV_SRV6_ENDX_SID, OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID,
+    OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE, Ospfv3Srv6CapabilitiesTlv, Ospfv3Srv6EndSidSubTlv,
+    Ospfv3Srv6EndXSidSubTlv, Ospfv3Srv6LanEndXSidSubTlv, Ospfv3Srv6LocatorLsa,
+    Ospfv3Srv6LocatorLsaTlv, Ospfv3Srv6LocatorSubTlv, Ospfv3Srv6LocatorTlv, Ospfv3Srv6SidStructure,
+};
 
 pub use packet_utils::many0_complete;
