@@ -2851,6 +2851,7 @@ mod tests {
         entry.nexthop = Nexthop::Protect(NexthopProtect {
             primary: NexthopMember::Uni(primary),
             backup: NexthopMember::Uni(backup),
+            gid: 0,
         });
 
         let mut nmap = NexthopMap::default();

@@ -96,6 +96,11 @@ closed that gap:
    direct member reference, pre-phase-1 behavior). Phase 2's SRv6
    switchover therefore needs one of: kernel fix upstream, encap-mode
    repairs, or per-prefix `RTM_NEWROUTE` replace for the SRv6 subset.
+   Note the gate is two-sided: a *plain* primary with an SRv6 *backup*
+   (normal-mode ospfv3 SRv6 TI-LFA, #1375) gets its indirection group
+   in phase 1, but phase 2 must NOT group-swap it onto the seg6
+   member — that swap would re-create the black-hole. The swap path
+   has to check the backup's encap and fall back to route replace.
 2. **IPv6 group routes render with continuation lines.** `ip -6 route`
    prints `<prefix> nhid G proto X metric M` on line 1 and
    `nexthop ... dev D weight 1` on line 2 (IPv4 stays one line). Any
