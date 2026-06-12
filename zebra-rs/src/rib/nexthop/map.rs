@@ -221,6 +221,52 @@ impl NexthopMap {
         self.get_mut(gid)
     }
 
+    /// Protection groups eligible for a fast-reroute switchover onto
+    /// their repair because their ACTIVE side rides the failed
+    /// primary `(table_id, addr)`. Pure selection — the caller flips
+    /// the state and issues the kernel replace. A candidate must:
+    ///
+    ///   - still be on its primary (an already-switched group has
+    ///     nothing left to protect with),
+    ///   - have a Uni backup member (a Multi backup can't be a group
+    ///     member — kernel groups don't nest; deferred to the ECMP
+    ///     phase),
+    ///   - have a non-SRv6 backup (kernel 6.8 black-holes seg6
+    ///     members inside groups — see the design doc; that subset
+    ///     waits for SPF reconvergence exactly as before phase 2),
+    ///   - have that backup's kernel object alive (valid +
+    ///     installed), or the swap would point routes at nothing.
+    pub fn protect_switch_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<usize> {
+        self.groups
+            .iter()
+            .flatten()
+            .filter_map(|grp| {
+                let Group::Protect(pro) = grp else {
+                    return None;
+                };
+                if pro.active != super::ProtectActive::Primary {
+                    return None;
+                }
+                let primary = self.get_uni(pro.primary_gid)?;
+                if primary.table_id != table_id || primary.addr != addr {
+                    return None;
+                }
+                let backup = self.get_uni(pro.backup_gid)?;
+                if !backup.segs.is_empty() {
+                    tracing::info!(
+                        "protect_switch: gid {} skipped — seg6 backup can't join a group",
+                        pro.gid(),
+                    );
+                    return None;
+                }
+                if !backup.is_valid() || !backup.is_installed() {
+                    return None;
+                }
+                Some(pro.gid())
+            })
+            .collect()
+    }
+
     pub fn fetch_multi(&mut self, set: &BTreeSet<(usize, u8)>) -> Option<&mut Group> {
         let gid = if let Some(&gid) = self.set.get(set) {
             let update = self.groups.get_mut(gid)?;

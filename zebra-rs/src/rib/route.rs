@@ -14,8 +14,9 @@ use super::nexthop::NexthopUni;
 use super::tracing::{rib_interface, rib_nexthop, rib_route};
 use super::{
     Group, GroupTrait, Message, NexthopList, NexthopMap, NexthopMember, NexthopMulti,
-    NexthopProtect, RibEntries, RibType,
+    NexthopProtect, ProtectActive, RibEntries, RibType,
 };
+use std::net::IpAddr;
 
 /// Hold-down policy for kernel-driven address recovery.
 ///
@@ -1198,7 +1199,9 @@ async fn protect_groups_sync(nmap: &mut NexthopMap, fib: &FibHandle) {
     let mut cache: Vec<(usize, bool)> = Vec::new();
     for (idx, nhop) in nmap.groups.iter().enumerate() {
         if let Some(Group::Protect(pro)) = nhop {
-            let valid = nmap.get(pro.primary_gid).is_some_and(|g| g.is_valid());
+            // Validity follows whichever member the kernel group
+            // holds — after a switchover that's the repair.
+            let valid = nmap.get(pro.active_gid()).is_some_and(|g| g.is_valid());
             cache.push((idx, valid));
         }
     }
@@ -1624,9 +1627,55 @@ fn resolve_nexthop_protect(pro: &mut NexthopProtect, nmap: &mut NexthopMap) {
     let Some(group) = nmap.fetch_protect(primary_gid, backup_gid) else {
         return;
     };
+    if let Group::Protect(gp) = &mut *group
+        && gp.active == ProtectActive::Switched
+    {
+        // The producer re-asserted this pair, so it believes the
+        // primary is healthy again (post-flap SPF). Revert: clearing
+        // `installed` makes the next protect_group_sync re-send the
+        // group with the primary as member — NLM_F_REPLACE makes
+        // that the atomic swap back. (A pre-failure route add racing
+        // the switchover can revert early; the SPF output right
+        // behind it settles the question either way.)
+        gp.active = ProtectActive::Primary;
+        gp.set_installed(false);
+    }
     group.set_valid(primary_valid);
     group.refcnt_inc();
     pro.gid = group.gid();
+}
+
+/// Fast-reroute switchover (phase 2 of the kernel-failover design):
+/// rewire every protection indirection group whose primary rides the
+/// failed `(table_id, addr)` adjacency onto its repair — one atomic
+/// `RTM_NEWNEXTHOP` replace per group, O(protected adjacencies) and
+/// independent of how many prefixes reference each group. SPF
+/// reconvergence then replaces the routes at its own pace; a re-add
+/// of the same (primary, backup) pair reverts the group (see
+/// `resolve_nexthop_protect`). Returns how many groups switched.
+pub async fn protect_switch(
+    nmap: &mut NexthopMap,
+    fib: &FibHandle,
+    table_id: u32,
+    addr: IpAddr,
+) -> usize {
+    let candidates = nmap.protect_switch_candidates(table_id, addr);
+    let mut switched = 0;
+    for gid in candidates {
+        let Some(Group::Protect(pro)) = nmap.get_mut(gid) else {
+            continue;
+        };
+        pro.active = ProtectActive::Switched;
+        let snapshot = Group::Protect(pro.clone());
+        // CREATE|REPLACE on the same id = atomic membership swap.
+        fib.nexthop_add(&snapshot).await;
+        if let Some(group) = nmap.get_mut(gid) {
+            group.set_installed(true);
+            group.set_valid(true);
+        }
+        switched += 1;
+    }
+    switched
 }
 
 fn resolve_nexthop_member(
@@ -2682,6 +2731,172 @@ mod tests {
         };
         assert_eq!(pro_a.gid, pro_b.gid, "same (primary, backup) pair dedupes");
         assert_eq!(nmap.get(pro_b.gid).unwrap().refcnt(), 2);
+    }
+
+    /// Phase 2: candidate selection for the switchover walks only
+    /// protection groups whose ACTIVE primary rides the failed
+    /// (table, addr) adjacency and whose repair is actually usable.
+    #[test]
+    fn protect_switch_candidates_match_and_gate() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{GroupTrait, NexthopProtect, NexthopUni, ProtectActive};
+        use super::super::{Group, Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let mut primary = NexthopUni::new("10.0.0.1".parse().unwrap(), 20, vec![]);
+        primary.ifindex_origin = Some(10);
+        let mut backup = NexthopUni::new("10.0.0.5".parse().unwrap(), 21, vec![]);
+        backup.ifindex_origin = Some(20);
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Uni(primary),
+            backup: NexthopMember::Uni(backup),
+            gid: 0,
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("still Protect");
+        };
+        let (pro_gid, backup_gid) = match (&pro.backup, pro.gid) {
+            (NexthopMember::Uni(b), gid) => (gid, b.gid),
+            _ => panic!("backup stays Uni"),
+        };
+
+        // Repair not yet installed in the kernel: not a candidate.
+        let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(nmap.protect_switch_candidates(0, addr).is_empty());
+
+        // Live repair: candidate, keyed by the primary's (table, addr).
+        nmap.get_mut(backup_gid).unwrap().set_installed(true);
+        assert_eq!(nmap.protect_switch_candidates(0, addr), vec![pro_gid]);
+        assert!(
+            nmap.protect_switch_candidates(0, "10.0.0.9".parse().unwrap())
+                .is_empty(),
+            "other gateways unaffected"
+        );
+        assert!(
+            nmap.protect_switch_candidates(254, addr).is_empty(),
+            "other tables unaffected"
+        );
+
+        // Already switched: nothing left to protect with.
+        if let Some(Group::Protect(gp)) = nmap.get_mut(pro_gid) {
+            gp.active = ProtectActive::Switched;
+        }
+        assert!(nmap.protect_switch_candidates(0, addr).is_empty());
+    }
+
+    /// Phase 2: a seg6 repair can't join a kernel group (6.8
+    /// black-holes it), so such pairs are never switchover candidates
+    /// — they wait for SPF reconvergence as before.
+    #[test]
+    fn protect_switch_candidates_skip_seg6_backup() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{GroupTrait, NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop_v6;
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+
+        let mut primary = NexthopUni::new("fe80::1".parse().unwrap(), 2, vec![]);
+        primary.ifindex_origin = Some(10);
+        let mut backup = NexthopUni::new("fe80::2".parse().unwrap(), 3, vec![]);
+        backup.ifindex_origin = Some(20);
+        backup.segs = vec!["fcbb:bbbb:8::".parse().unwrap()];
+        backup.encap_type = Some(isis_packet::srv6::EncapType::HInsert);
+        let mut entry = RibEntry::new(RibType::Ospf);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Uni(primary),
+            backup: NexthopMember::Uni(backup),
+            gid: 0,
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop_v6(&mut entry, &table, &mut nmap, 254);
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("still Protect");
+        };
+        assert_ne!(pro.gid, 0, "plain primary still gets its group");
+        let NexthopMember::Uni(b) = &pro.backup else {
+            panic!("backup Uni");
+        };
+        nmap.get_mut(b.gid).unwrap().set_installed(true);
+        assert!(
+            nmap.protect_switch_candidates(254, "fe80::1".parse().unwrap())
+                .is_empty(),
+            "seg6 backup must never be swapped into the group"
+        );
+    }
+
+    /// Phase 2: a switched group encodes the repair as its kernel
+    /// member, and a producer re-adding the same pair (post-flap SPF)
+    /// reverts it to the primary with a pending re-install.
+    #[test]
+    fn protect_switch_flips_active_and_reassert_reverts() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{GroupTrait, NexthopProtect, NexthopUni, ProtectActive};
+        use super::super::{Group, Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let mk_entry = || {
+            let mut primary = NexthopUni::new("10.0.0.1".parse().unwrap(), 20, vec![]);
+            primary.ifindex_origin = Some(10);
+            let mut backup = NexthopUni::new("10.0.0.5".parse().unwrap(), 21, vec![]);
+            backup.ifindex_origin = Some(20);
+            let mut entry = RibEntry::new(RibType::Isis);
+            entry.nexthop = Nexthop::Protect(NexthopProtect {
+                primary: NexthopMember::Uni(primary),
+                backup: NexthopMember::Uni(backup),
+                gid: 0,
+            });
+            entry
+        };
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        let mut entry = mk_entry();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("still Protect");
+        };
+        let (primary_gid, backup_gid) = match (&pro.primary, &pro.backup) {
+            (NexthopMember::Uni(p), NexthopMember::Uni(b)) => (p.gid, b.gid),
+            _ => panic!("members stay Uni"),
+        };
+
+        // Simulate the switchover state flip.
+        let Some(Group::Protect(gp)) = nmap.get_mut(pro.gid) else {
+            panic!("protect group");
+        };
+        assert_eq!(gp.active_gid(), primary_gid, "steady state holds primary");
+        gp.active = ProtectActive::Switched;
+        gp.set_installed(true);
+        assert_eq!(gp.active_gid(), backup_gid, "switched state holds repair");
+
+        // Same pair re-added (the producer believes the primary is
+        // healthy again): the group reverts and queues a re-install.
+        let pro_gid = pro.gid;
+        let mut entry2 = mk_entry();
+        rib_resolve_nexthop(&mut entry2, &table, &mut nmap, 0);
+        let Some(Group::Protect(gp)) = nmap.get_mut(pro_gid) else {
+            panic!("protect group");
+        };
+        assert_eq!(gp.active, ProtectActive::Primary, "reassert reverts");
+        assert!(
+            !gp.is_installed(),
+            "pending re-install so the sync pass re-sends the group"
+        );
     }
 
     /// Kernel 6.8 drops seg6-inline traffic routed through a nexthop

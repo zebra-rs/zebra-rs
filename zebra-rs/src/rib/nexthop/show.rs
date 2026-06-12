@@ -60,16 +60,18 @@ pub fn nexthop_show(rib: &Rib, _args: Args, _json: bool) -> String {
                 }
             }
             Group::Protect(pro) => {
-                // Indirection group for a protected primary: the
-                // member list is the primary; the backup is what the
-                // switchover would swap in.
+                // Indirection group for a protected primary. The `*`
+                // marks the active member — the one the kernel group
+                // currently holds; the switchover swaps it.
+                let active = pro.active_gid();
                 for (role, gid) in [("primary", pro.primary_gid), ("backup", pro.backup_gid)] {
+                    let marker = if gid == active { "*" } else { " " };
                     if let Some(Group::Uni(uni)) = rib.nmap.get(gid) {
-                        write!(buf, "  {} [{}] ", role, gid).unwrap();
+                        write!(buf, " {}{} [{}] ", marker, role, gid).unwrap();
                         write_via(&mut buf, uni);
                         writeln!(buf, ", {}", rib.link_name(uni.ifindex().unwrap_or(0))).unwrap();
                     } else {
-                        writeln!(buf, "  {} [{}]", role, gid).unwrap();
+                        writeln!(buf, " {}{} [{}]", marker, role, gid).unwrap();
                     }
                 }
             }

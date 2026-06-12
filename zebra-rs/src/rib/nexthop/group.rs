@@ -205,20 +205,30 @@ impl GroupTrait for GroupMulti {
     }
 }
 
+/// Which member a protection indirection group currently holds in
+/// the kernel: the SPF primary, or (after a fast-reroute switchover)
+/// the TI-LFA repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectActive {
+    Primary,
+    Switched,
+}
+
 /// Kernel indirection group for a protected primary (see
 /// `docs/design/nexthop-protect-kernel-failover.md`). Installs as a
-/// single-member `NHA_GROUP` containing `primary_gid`; protected
-/// routes reference this gid instead of the member's, so the phase-2
-/// switchover can move every route onto `backup_gid` with one atomic
-/// `RTM_NEWNEXTHOP` replace. Valid iff the primary member's group is
-/// valid — on link down the kernel flushes the member, the emptied
-/// group, and the routes referencing it (probe-validated), leaving
-/// the metric-offset shadow route forwarding.
+/// single-member `NHA_GROUP` containing the active member's object;
+/// protected routes reference this gid instead of the member's, so
+/// the switchover can move every route onto `backup_gid` with one
+/// atomic `RTM_NEWNEXTHOP` replace. Valid iff the active member's
+/// group is valid — on link down the kernel flushes the member, the
+/// emptied group, and the routes referencing it (probe-validated),
+/// leaving the metric-offset shadow route forwarding.
 #[derive(Debug, Clone)]
 pub struct GroupProtect {
     common: GroupCommon,
     pub primary_gid: usize,
     pub backup_gid: usize,
+    pub active: ProtectActive,
 }
 
 impl GroupProtect {
@@ -227,6 +237,17 @@ impl GroupProtect {
             common: GroupCommon::new(gid),
             primary_gid,
             backup_gid,
+            active: ProtectActive::Primary,
+        }
+    }
+
+    /// The member gid the kernel group currently holds (or should
+    /// hold on the next install): primary in steady state, backup
+    /// after a switchover.
+    pub fn active_gid(&self) -> usize {
+        match self.active {
+            ProtectActive::Primary => self.primary_gid,
+            ProtectActive::Switched => self.backup_gid,
         }
     }
 }

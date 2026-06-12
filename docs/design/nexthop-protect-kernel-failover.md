@@ -20,7 +20,7 @@ paths for protected routes.
 | ----- | -- | ---------- |
 | 0 — `Nexthop::Protect` RIB shape | #1370, #1373 | explicit primary/backup pair, producers + consumers, v6 resolver fix |
 | 1 — indirection group | #1374 | `Group::Protect` + `NexthopProtect.gid`; protected v4/v6 routes reference a 1-member kernel group; behavior-neutral |
-| 2 — switchover op | — | `FibHandle::protect_switch` + `Message::ProtectSwitch` + nmap state |
+| 2 — switchover op | #1377 | `Message::ProtectSwitch` + `GroupProtect.active` + atomic group re-send; revert-on-reassert |
 | 3 — IS-IS hook | — | BFD/adjacency-down emits `ProtectSwitch` before SPF; BDD for the link-up failure class |
 | 4 — OSPF hook | — | v2 + v3, same shape |
 | 5 — ECMP leg-level replace | — | per-leg repair on `Multi` primaries |
@@ -172,16 +172,29 @@ leg) but must be called out in the phase-5 PR.
   mirroring `NexthopMulti.gid`. `gid == 0` means "no kernel
   indirection" (Multi primary, or `use_nhid` off).
 - `NexthopMap` gains `Group::Protect(GroupProtect)`:
-  `GroupCommon` + `primary_gid` + `backup_gid`, keyed via
+  `GroupCommon` + `primary_gid` + `backup_gid` +
+  `active: Primary | Switched` (phase 2), keyed via
   `fetch_protect((primary_gid, backup_gid))`. Holds refcnts on both
-  members so GC ordering is safe. Phase 2 adds the
-  `active: Primary | Switched` state.
+  members so GC ordering is safe.
 - Resolver (`rib_resolve_nexthop{,_v6}` Protect blocks): after
   resolving both members, allocate `Gp` when the primary is `Uni`.
 - `FibHandle::nexthop_add`: `Group::Protect` arm installs a 1-member
-  `NHA_GROUP` (same encoding as `Multi`, one entry). Install order:
-  members first, then `Gp` (`nexthop_sync` ordering); delete in
-  reverse (`nexthop_unsync`).
+  `NHA_GROUP` (same encoding as `Multi`, one entry) holding the
+  ACTIVE member. Install order: members first, then `Gp`
+  (`nexthop_sync` ordering); delete in reverse (`nexthop_unsync`).
+  There is no separate `protect_switch` FIB method: the install
+  request already carries `NLM_F_REPLACE`, so re-sending the group
+  after an `active` flip IS the atomic switchover.
+- Switchover flow (phase 2): `Message::ProtectSwitch { addr }`
+  (table-scoped) → `route::protect_switch` walks
+  `protect_switch_candidates` (active primary matches the failed
+  adjacency, backup is a live non-seg6 Uni) → flips
+  `active = Switched` → re-sends the group. Revert is driven by the
+  producer: re-adding the same (primary, backup) pair —
+  the post-flap SPF — resets `active` to `Primary` with a pending
+  re-install, and the next sync re-sends the group with the primary
+  member (same REPLACE mechanics). Validity in the sync passes
+  follows the active member.
 - `route_ipv{4,6}_add/del` Protect arm: the primary route's `Nhid`
   becomes `pro.gid` (when non-zero) instead of the member gid; the
   shadow route is unchanged. With `use_nhid` off, everything stays

@@ -140,10 +140,11 @@ fn fmt_group_for_trace(group: &Group) -> String {
             )
         }
         Group::Protect(p) => format!(
-            "Group::Protect{{gid={} primary={} backup={} valid={} installed={}}}",
+            "Group::Protect{{gid={} primary={} backup={} active={:?} valid={} installed={}}}",
             p.gid(),
             p.primary_gid,
             p.backup_gid,
+            p.active,
             p.is_valid(),
             p.is_installed(),
         ),
@@ -1278,8 +1279,12 @@ impl FibHandle {
             }
             Group::Protect(pro) => {
                 // Protection indirection: a 1-member mpath group
-                // holding the primary. Same encoding as Multi —
-                // GroupType 0, kernel weight is value+1 so 0 = 1.
+                // holding the ACTIVE member (primary in steady state,
+                // repair after a switchover). Same encoding as Multi —
+                // GroupType 0, kernel weight is value+1 so 0 = 1. The
+                // request carries NLM_F_REPLACE, so re-sending after
+                // an `active` flip IS the atomic switchover: every
+                // route referencing this gid moves in one message.
                 gid = pro.gid();
                 refcnt = pro.refcnt();
 
@@ -1292,7 +1297,7 @@ impl FibHandle {
                 msg.attributes.push(attr);
 
                 let grp = NexthopGroup {
-                    id: pro.primary_gid as u32,
+                    id: pro.active_gid() as u32,
                     weight: 0,
                     ..Default::default()
                 };
