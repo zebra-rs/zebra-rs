@@ -118,7 +118,12 @@ Feature: OSPFv3 TI-LFA fast-reroute over SRv6
     # d's loopback now has the SRH-insert repair as its best kernel
     # entry, out the repair egress s-n2 at metric 2, demoted plain
     # primary behind it at 3.
-    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    # The promoted SRv6 repair is the protected primary and references
+    # a protection indirection group; iproute2 renders v6 group routes
+    # on two lines (route attrs on the first, nexthop detail on the
+    # continuation), so assert the two halves separately.
+    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "proto ospf metric 2"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "segs 2 ["
     # End-to-end over the carrier-encoded repair: dies if any uN/uA
     # hop (or the LIB twin install) fails to forward.

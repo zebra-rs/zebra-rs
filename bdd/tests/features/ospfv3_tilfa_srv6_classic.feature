@@ -118,7 +118,12 @@ Feature: OSPFv3 TI-LFA fast-reroute over SRv6 classic (full) SIDs
     # all installed with neighbor-global nexthops) forwards.
     When I apply command "set router ospfv3 fast-reroute backup-as-primary" in namespace "s"
     And I wait 5 seconds
-    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto ospf metric 2"
+    # The promoted SRv6 repair is the protected primary and references
+    # a protection indirection group; iproute2 renders v6 group routes
+    # on two lines (route attrs on the first, nexthop detail on the
+    # continuation), so assert the two halves separately.
+    Then kernel route "2001:db8::8" in namespace "s" should eventually contain "proto ospf metric 2"
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2"
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "segs 4 ["
     And ping from "s" to "2001:db8::8" should eventually succeed
     # Restore install-side ordering.

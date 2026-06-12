@@ -229,13 +229,15 @@ impl NexthopMap {
     ///   - still be on its primary (an already-switched group has
     ///     nothing left to protect with),
     ///   - have a Uni backup member (a Multi backup can't be a group
-    ///     member — kernel groups don't nest; deferred to the ECMP
-    ///     phase),
-    ///   - have a non-SRv6 backup (kernel 6.8 black-holes seg6
-    ///     members inside groups — see the design doc; that subset
-    ///     waits for SPF reconvergence exactly as before phase 2),
+    ///     member — kernel groups don't nest; ECMP primaries are
+    ///     served by leg eviction instead),
     ///   - have that backup's kernel object alive (valid +
     ///     installed), or the swap would point routes at nothing.
+    ///
+    /// SRv6 backups are eligible like any other: seg6 lwtunnel
+    /// members forward correctly through groups (the earlier
+    /// "inline-in-group black-hole" claim was refuted by kfree_skb
+    /// drop-reason tracing — see the design doc correction).
     pub fn protect_switch_candidates(&self, table_id: u32, addr: IpAddr) -> Vec<usize> {
         self.groups
             .iter()
@@ -252,13 +254,6 @@ impl NexthopMap {
                     return None;
                 }
                 let backup = self.get_uni(pro.backup_gid)?;
-                if !backup.segs.is_empty() {
-                    tracing::info!(
-                        "protect_switch: gid {} skipped — seg6 backup can't join a group",
-                        pro.gid(),
-                    );
-                    return None;
-                }
                 if !backup.is_valid() || !backup.is_installed() {
                     return None;
                 }

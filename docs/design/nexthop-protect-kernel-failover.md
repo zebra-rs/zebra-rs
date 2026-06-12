@@ -84,30 +84,34 @@ The first probes validated netlink acceptance and **rendering**, not
 end-to-end traffic through encap'd members. The phase-1 BDD run
 closed that gap:
 
-1. **seg6 `mode inline` members black-hole inside groups.** Object
-   creation, grouping, route install, and `ip route get` all succeed,
-   but the dataplane never transmits: a tcpdump probe shows the SRH
-   packet egress with a direct `nhid <member>` reference and **zero
-   packets** via `nhid <group{member}>`. seg6 `mode encap` members DO
-   forward through a group (traffic-verified), as do MPLS members
-   (BDD `@isis_tilfa` backup-as-primary ping rides `Gp{mpls}`).
-   zebra-rs SRv6 TI-LFA repairs are inline, so **SRv6-encap'd
-   primaries are excluded from indirection** (`pro.gid` stays 0,
-   direct member reference, pre-phase-1 behavior). Phase 2's SRv6
-   switchover therefore needs one of: kernel fix upstream, encap-mode
-   repairs, or per-prefix `RTM_NEWROUTE` replace for the SRv6 subset.
-   Note the gate is two-sided: a *plain* primary with an SRv6 *backup*
-   (normal-mode ospfv3 SRv6 TI-LFA, #1375) gets its indirection group
-   in phase 1, but phase 2 must NOT group-swap it onto the seg6
-   member — that swap would re-create the black-hole. The swap path
-   has to check the backup's encap and fall back to route replace.
+1. **[REFUTED 2026-06-12 — see correction below]** ~~seg6 `mode
+   inline` members black-hole inside groups~~. The original claim
+   rested on a single tcpdump that captured zero packets and was
+   never reproduced. A later deep dive (kernel source walk +
+   `skb:kfree_skb` drop-reason tracing on the live 6.8 kernel)
+   showed group-wrapped inline members emit byte-identical SRH
+   packets to direct references, and the atomic group-replace ONTO
+   an inline member works under live traffic. The kernel makes this
+   structural: the lwtstate lives on the member `fib6_nh`
+   (`nh_info->fib6_nh.fib_nh_lws`) and `ip6_rt_init_dst`
+   (net/ipv6/route.c) copies it from the SELECTED member identically
+   for group and direct lookups — no group-conditional branch can
+   lose it. The seg6 exclusions added on the back of the bad probe
+   (phase-1 primary gate, phase-2 backup gate) are REMOVED; SRv6
+   TI-LFA gets the same kernel fast path as MPLS. Post-mortem: the
+   BDD failure that seeded the theory was finding 2 below (the
+   rendering split), and the "confirming" 100%-loss pings were
+   meaningless — a sandbox peer can't answer SRH-routed echoes, so
+   loss is 100% even when forwarding works. Silent-drop claims
+   require drop-reason tracing plus a reproduced capture.
 2. **IPv6 group routes render with continuation lines.** `ip -6 route`
    prints `<prefix> nhid G proto X metric M` on line 1 and
    `nexthop ... dev D weight 1` on line 2 (IPv4 stays one line). Any
    text assertion expecting `dev D proto X metric M` as one substring
-   breaks. Moot for SRv6 after the exclusion above; still relevant to
-   v6+MPLS protected primaries (OSPFv3/IS-IS v6 TI-LFA) — sweep
-   `bdd/` route asserts when phase 1 lands, per the show-grammar rule.
+   breaks. Applies to every wrapped v6 primary — MPLS and (after the
+   un-exclusion) SRv6 alike — sweep `bdd/` route asserts per the
+   show-grammar rule; the combined asserts in the four SRv6 tilfa
+   features were split when the exclusion was removed.
 
 ## 3. Design
 
@@ -207,11 +211,10 @@ leg) but must be called out in the phase-5 PR.
 
 ## 5. Constraints
 
-- **SRv6 primaries are NOT wrapped** (see Phase-1 BDD findings):
-  kernel 6.8 black-holes seg6-inline traffic routed through a group.
-  `resolve_nexthop_protect` skips members with a non-empty `segs`.
 - **seg6local** can't ride nexthop objects (existing constraint) —
-  irrelevant: local-SID installs aren't protected routes.
+  irrelevant: local-SID installs aren't protected routes. (SRv6
+  *encap'd* primaries and backups participate fully — the temporary
+  exclusion is gone, see the corrected Phase-1 findings.)
 - `show nexthop` should render `Group::Protect` (+ active member from
   phase 2). Route show output is unchanged; RIB/kernel divergence
   during a switchover is bounded by SPF reconvergence.
