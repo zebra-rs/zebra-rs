@@ -126,25 +126,35 @@ pub(super) fn build_repair_path_srv6(
     rp: &spf::RepairPath,
 ) -> Option<RepairPathSrv6> {
     let lsp_map = top.lsp_map.get(&level);
-    let mut segs: Vec<Ipv6Addr> = Vec::with_capacity(rp.segs.len());
+    let mut parts: Vec<RepairSeg> = Vec::with_capacity(rp.segs.len());
     for (idx, seg) in rp.segs.iter().enumerate() {
         let resolved = match seg {
             spf::SrSegment::NodeSid(v) => lsp_map
                 .resolve(*v)
-                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id).copied()),
+                .and_then(|sys_id| top.srv6_end_map.get(&level).get(sys_id).cloned())
+                .map(|info| RepairSeg {
+                    sid: info.sid,
+                    landing: *v,
+                    csid: csid_bits_end(&info),
+                }),
             spf::SrSegment::AdjSid(from, to, via) => {
-                srv6_endx_sid_for_link(top, level, *from, *to, *via)
+                srv6_endx_sid_for_link(top, level, *from, *to, *via).map(|endx| RepairSeg {
+                    sid: endx.sid,
+                    landing: *to,
+                    csid: csid_bits_endx(&endx, *from),
+                })
             }
         };
-        let Some(sid) = resolved else {
+        let Some(part) = resolved else {
             tracing::debug!(
                 "[tilfa] {level:?} repair segment[{idx}] {seg:?} failed to resolve to an SRv6 \
-                 SID; dropping repair list (partial: {segs:?})"
+                 SID; dropping repair list (partial: {parts:?})"
             );
             return None;
         };
-        segs.push(sid);
+        parts.push(part);
     }
+    let segs = pack_carriers(&parts);
 
     let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
     let link = top.links.get(&ifindex)?;
@@ -177,6 +187,25 @@ pub(super) fn build_repair_path_srv6(
     })
 }
 
+/// SRv6 End.X SID as advertised in an IS-reach sub-TLV: the SID plus
+/// the endpoint behavior and SID structure the carrier packer needs.
+#[derive(Debug, Clone)]
+struct Srv6EndXInfo {
+    sid: Ipv6Addr,
+    behavior: isis_packet::Behavior,
+    structure: Option<isis_packet::IsisSub2SidStructure>,
+}
+
+fn endx_structure(sub2s: &[isis_packet::IsisSub2Tlv]) -> Option<isis_packet::IsisSub2SidStructure> {
+    sub2s.iter().find_map(|s2| {
+        if let isis_packet::IsisSub2Tlv::SidStructure(st) = s2 {
+            Some(st.clone())
+        } else {
+            None
+        }
+    })
+}
+
 /// Look up the SRv6 End.X SID `from` advertises for the link to `to`
 /// — the SRv6 sibling of `adj_sid_label_for_link`. For LAN
 /// adjacencies (`via_pseudonode = Some(pn)`) the IS Reach entry's
@@ -190,7 +219,7 @@ fn srv6_endx_sid_for_link(
     from_vertex: usize,
     to_vertex: usize,
     via_pseudonode: Option<usize>,
-) -> Option<Ipv6Addr> {
+) -> Option<Srv6EndXInfo> {
     let from_sys = *top.lsp_map.get(&level).resolve(from_vertex)?;
     let target_neighbor_id = if let Some(via_v) = via_pseudonode {
         *top.lsp_map.get(&level).resolve_neighbor(via_v)?
@@ -218,14 +247,22 @@ fn srv6_endx_sid_for_link(
                 for sub in &entry.subs {
                     match sub {
                         neigh::IsisSubTlv::Srv6EndXSid(endx) => {
-                            return Some(endx.sid);
+                            return Some(Srv6EndXInfo {
+                                sid: endx.sid,
+                                behavior: endx.behavior,
+                                structure: endx_structure(&endx.sub2s),
+                            });
                         }
                         neigh::IsisSubTlv::Srv6LanEndXSid(lan_endx) => {
                             let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
                                 continue;
                             };
                             if &lan_endx.system_id == to_sys {
-                                return Some(lan_endx.sid);
+                                return Some(Srv6EndXInfo {
+                                    sid: lan_endx.sid,
+                                    behavior: lan_endx.behavior,
+                                    structure: endx_structure(&lan_endx.sub2s),
+                                });
                             }
                         }
                         _ => {}
@@ -479,4 +516,376 @@ pub(super) fn tilfa_repair_path(
         }
     }
     tilfa_result
+}
+
+/// One resolved SRv6 repair segment plus the NEXT-C-SID metadata the
+/// carrier packer needs. `sid` is always the full advertised address,
+/// usable verbatim when the segment can't ride in a carrier.
+#[derive(Debug)]
+struct RepairSeg {
+    sid: Ipv6Addr,
+    /// Vertex the packet sits on once this segment is consumed —
+    /// the SID's owner for an End/uN, the adjacency's far end for an
+    /// End.X/uA. Drives the LIB-continuity check below.
+    landing: usize,
+    /// `Some` when the SID was advertised with a NEXT-C-SID behavior
+    /// and a usable structure; `None` forces full-SID encoding.
+    csid: Option<CsidBits>,
+}
+
+/// The bits a segment contributes to a uSID carrier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CsidBits {
+    /// The shared uSID block — the SID's first `lb` bits, masked.
+    block: u128,
+    lb: u8,
+    /// The identifier consumed at the owner: locator-node bits for a
+    /// uN, function bits for a uA. Right-aligned value.
+    id: u128,
+    width: u8,
+    /// For a uA: the vertex that owns the adjacency. A LIB identifier
+    /// is only locally significant, so it may only follow a segment
+    /// that lands the packet on its owner; `None` for a uN, which is
+    /// globally routable via the locator prefix.
+    lib_owner: Option<usize>,
+}
+
+fn sid_bits(sid: Ipv6Addr, start: u32, width: u32) -> u128 {
+    if width == 0 || start + width > 128 {
+        return 0;
+    }
+    (u128::from(sid) >> (128 - start - width)) & ((1u128 << width) - 1)
+}
+
+fn sid_block(sid: Ipv6Addr, lb: u8) -> u128 {
+    if lb == 0 {
+        return 0;
+    }
+    u128::from(sid) & (u128::MAX << (128 - lb as u32))
+}
+
+/// Carrier metadata for a uN: the identifier is the locator-node
+/// portion (bits `[lb, lb+ln)`).
+fn csid_bits_end(info: &super::srv6::Srv6EndSidInfo) -> Option<CsidBits> {
+    if !info.behavior.is_end_next_csid() {
+        return None;
+    }
+    let st = info.structure.as_ref()?;
+    let (lb, ln) = (st.lb_len as u32, st.ln_len as u32);
+    if ln == 0 || lb + ln > 128 {
+        return None;
+    }
+    Some(CsidBits {
+        block: sid_block(info.sid, st.lb_len),
+        lb: st.lb_len,
+        id: sid_bits(info.sid, lb, ln),
+        width: st.ln_len,
+        lib_owner: None,
+    })
+}
+
+/// Carrier metadata for a uA: the identifier is the function portion
+/// (bits `[lb+ln, lb+ln+fun)`); the node bits are implicit because a
+/// packed uA only becomes active once the packet sits on its owner.
+fn csid_bits_endx(endx: &Srv6EndXInfo, owner: usize) -> Option<CsidBits> {
+    if !endx.behavior.is_endx_next_csid() {
+        return None;
+    }
+    let st = endx.structure.as_ref()?;
+    let (lb, ln, fun) = (st.lb_len as u32, st.ln_len as u32, st.fun_len as u32);
+    if fun == 0 || lb + ln + fun > 128 {
+        return None;
+    }
+    Some(CsidBits {
+        block: sid_block(endx.sid, st.lb_len),
+        lb: st.lb_len,
+        id: sid_bits(endx.sid, lb + ln, fun),
+        width: st.fun_len,
+        lib_owner: Some(owner),
+    })
+}
+
+/// In-progress uSID carrier: block bits up front, identifiers appended
+/// left-to-right in traversal order, zero-padded tail (the zero
+/// remainder is what triggers each node's end-of-carrier fallback).
+struct Carrier {
+    val: u128,
+    block: u128,
+    lb: u8,
+    /// Next free bit position (starts at `lb`).
+    pos: u32,
+    /// Identifiers packed so far — a single-id carrier is re-emitted
+    /// as the segment's full SID instead (identical forwarding, and it
+    /// doesn't depend on the owner having LIB entries installed).
+    ids: u8,
+    first_sid: Ipv6Addr,
+}
+
+impl Carrier {
+    fn flush(self, out: &mut Vec<Ipv6Addr>) {
+        if self.ids == 1 {
+            out.push(self.first_sid);
+        } else {
+            out.push(Ipv6Addr::from(self.val));
+        }
+    }
+}
+
+/// Pack a resolved SRv6 repair list into NEXT-C-SID carriers (RFC
+/// 9800). Consecutive segments whose SIDs were advertised with uSID
+/// behaviors and a shared locator block collapse into one 128-bit
+/// carrier — block + 16-bit identifiers — instead of one full SID per
+/// SRH segment. Anything that can't ride a carrier (classic behavior,
+/// no structure, zero identifier, block change, LIB continuity break,
+/// carrier full) is emitted as its full SID; mixed lists degrade
+/// per-segment, never wholesale.
+fn pack_carriers(parts: &[RepairSeg]) -> Vec<Ipv6Addr> {
+    let mut out: Vec<Ipv6Addr> = Vec::with_capacity(parts.len());
+    let mut cur: Option<Carrier> = None;
+    let mut prev_landing: Option<usize> = None;
+
+    for part in parts {
+        let packable = part.csid.as_ref().filter(|c| {
+            // A zero identifier would read as end-of-carrier on the
+            // wire; never pack one. LIB (uA) identifiers additionally
+            // require the previous segment to land on their owner —
+            // that holds across carrier boundaries and full-SID
+            // predecessors alike, since either way the packet sits on
+            // the owner when the identifier becomes active.
+            c.id != 0 && c.lib_owner.is_none_or(|owner| prev_landing == Some(owner))
+        });
+        match packable {
+            Some(c) => {
+                let fits = cur.as_ref().is_some_and(|car| {
+                    car.block == c.block && car.lb == c.lb && car.pos + c.width as u32 <= 128
+                });
+                if !fits {
+                    if let Some(car) = cur.take() {
+                        car.flush(&mut out);
+                    }
+                    cur = Some(Carrier {
+                        val: c.block,
+                        block: c.block,
+                        lb: c.lb,
+                        pos: c.lb as u32,
+                        ids: 0,
+                        first_sid: part.sid,
+                    });
+                }
+                let car = cur.as_mut().expect("carrier was just ensured");
+                car.val |= c.id << (128 - car.pos - c.width as u32);
+                car.pos += c.width as u32;
+                car.ids += 1;
+            }
+            None => {
+                if let Some(car) = cur.take() {
+                    car.flush(&mut out);
+                }
+                out.push(part.sid);
+            }
+        }
+        prev_landing = Some(part.landing);
+    }
+    if let Some(car) = cur.take() {
+        car.flush(&mut out);
+    }
+    out
+}
+
+#[cfg(test)]
+mod carrier_tests {
+    use super::*;
+
+    fn st(lb: u8, ln: u8, fun: u8) -> isis_packet::IsisSub2SidStructure {
+        isis_packet::IsisSub2SidStructure {
+            lb_len: lb,
+            ln_len: ln,
+            fun_len: fun,
+            arg_len: 0,
+        }
+    }
+
+    fn un(sid: &str, landing: usize) -> RepairSeg {
+        let info = crate::isis::srv6::Srv6EndSidInfo {
+            sid: sid.parse().unwrap(),
+            behavior: isis_packet::Behavior::EndCSID,
+            structure: Some(st(32, 16, 16)),
+        };
+        RepairSeg {
+            sid: info.sid,
+            landing,
+            csid: csid_bits_end(&info),
+        }
+    }
+
+    fn ua(sid: &str, owner: usize, landing: usize) -> RepairSeg {
+        let endx = Srv6EndXInfo {
+            sid: sid.parse().unwrap(),
+            behavior: isis_packet::Behavior::EndXCSID,
+            structure: Some(st(32, 16, 16)),
+        };
+        RepairSeg {
+            sid: endx.sid,
+            landing,
+            csid: csid_bits_endx(&endx, owner),
+        }
+    }
+
+    fn classic(sid: &str, landing: usize) -> RepairSeg {
+        RepairSeg {
+            sid: sid.parse().unwrap(),
+            landing,
+            csid: None,
+        }
+    }
+
+    // The observed @tilfa_srv6 repair: uN(r1) + uA(r1->r2) + uA(r2->r3)
+    // collapses into one carrier — block, node id, two functions.
+    #[test]
+    fn packs_un_ua_ua_into_one_carrier() {
+        let parts = [
+            un("fcbb:bbbb:5::", 1),
+            ua("fcbb:bbbb:5:e003::", 1, 2),
+            ua("fcbb:bbbb:6:e002::", 2, 3),
+        ];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec!["fcbb:bbbb:5:e003:e002::".parse::<Ipv6Addr>().unwrap()]
+        );
+    }
+
+    // A classic segment splits the list: carrier, full SID, and the
+    // trailing uA can't pack (its owner isn't where the previous
+    // segment lands the packet for LIB purposes — it is, actually, so
+    // it opens a fresh single-id carrier and re-emits its full SID).
+    #[test]
+    fn classic_segment_breaks_the_carrier() {
+        let parts = [
+            un("fcbb:bbbb:5::", 1),
+            ua("fcbb:bbbb:5:e003::", 1, 2),
+            classic("2001:db8:9::1", 3),
+            ua("fcbb:bbbb:7:e001::", 3, 4),
+        ];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:5:e003::".parse::<Ipv6Addr>().unwrap(),
+                "2001:db8:9::1".parse().unwrap(),
+                "fcbb:bbbb:7:e001::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // A lone uN stays in its advertised full form (identical bytes for
+    // a single-id carrier, but the rule also covers the lone-uA case).
+    #[test]
+    fn single_segment_is_emitted_as_full_sid() {
+        let parts = [un("fcbb:bbbb:5::", 1)];
+        assert_eq!(
+            pack_carriers(&parts),
+            vec!["fcbb:bbbb:5::".parse::<Ipv6Addr>().unwrap()]
+        );
+    }
+
+    // A uA whose owner is NOT where the previous segment lands cannot
+    // be packed (its LIB identifier would be looked up on the wrong
+    // node) — it falls back to the full, globally-routable SID.
+    #[test]
+    fn ua_without_continuity_falls_back_to_full_sid() {
+        let parts = [un("fcbb:bbbb:5::", 1), ua("fcbb:bbbb:7:e001::", 3, 4)];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:5::".parse::<Ipv6Addr>().unwrap(),
+                "fcbb:bbbb:7:e001::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // A leading uA (no predecessor) must stay full-SID: the initial DA
+    // is routed by the IGP and a LIB identifier is not routable.
+    #[test]
+    fn leading_ua_stays_full_sid() {
+        let parts = [ua("fcbb:bbbb:5:e003::", 1, 2), un("fcbb:bbbb:6::", 2)];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:5:e003::".parse::<Ipv6Addr>().unwrap(),
+                "fcbb:bbbb:6::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // A different locator block starts a new carrier.
+    #[test]
+    fn block_change_splits_carriers() {
+        let parts = [
+            un("fcbb:bbbb:5::", 1),
+            un("fcbb:bbbb:6::", 2),
+            un("fcbb:cccc:7::", 3),
+            un("fcbb:cccc:8::", 4),
+        ];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:5:6::".parse::<Ipv6Addr>().unwrap(),
+                "fcbb:cccc:7:8::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // Capacity: a 32-bit block fits six 16-bit identifiers; the
+    // seventh spills into a second carrier.
+    #[test]
+    fn full_carrier_spills_into_a_second() {
+        let parts: Vec<RepairSeg> = (1..=7)
+            .map(|i| un(&format!("fcbb:bbbb:{i}::"), i))
+            .collect();
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:1:2:3:4:5:6".parse::<Ipv6Addr>().unwrap(),
+                "fcbb:bbbb:7::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // Zero identifiers would read as end-of-carrier on the wire; they
+    // are never packed.
+    #[test]
+    fn zero_identifier_is_never_packed() {
+        let parts = [un("fcbb:bbbb:5::", 1), un("fcbb:bbbb::", 2)];
+        let segs = pack_carriers(&parts);
+        assert_eq!(
+            segs,
+            vec![
+                "fcbb:bbbb:5::".parse::<Ipv6Addr>().unwrap(),
+                "fcbb:bbbb::".parse().unwrap(),
+            ]
+        );
+    }
+
+    // Classic behaviors (no NEXT-C-SID) never produce carrier bits, so
+    // the classic-SID feature keeps its one-SID-per-segment encoding.
+    #[test]
+    fn classic_behavior_yields_no_csid_bits() {
+        let info = crate::isis::srv6::Srv6EndSidInfo {
+            sid: "fcbb:bbbb:5::".parse().unwrap(),
+            behavior: isis_packet::Behavior::End,
+            structure: Some(st(40, 8, 16)),
+        };
+        assert_eq!(csid_bits_end(&info), None);
+        let endx = Srv6EndXInfo {
+            sid: "fcbb:bbbb:5:e003::".parse().unwrap(),
+            behavior: isis_packet::Behavior::EndX,
+            structure: Some(st(40, 8, 16)),
+        };
+        assert_eq!(csid_bits_endx(&endx, 1), None);
+    }
 }

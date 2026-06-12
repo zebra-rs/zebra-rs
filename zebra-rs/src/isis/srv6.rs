@@ -89,6 +89,38 @@ pub fn function_addr(prefix: Ipv6Net, function: u16) -> Option<Ipv6Addr> {
     Some(Ipv6Addr::from(base | ((function as u128) << shift)))
 }
 
+/// Build the LIB (compressed-shape) address of a uA: the 16-bit
+/// function placed immediately after the locator BLOCK — no
+/// locator-node bits. This is how the uA appears as the carrier's
+/// active uSID after the owner's uN shift, so it's the address the
+/// flavored End.X FIB twin anchors at. Returns `None` when the block
+/// is too long to fit a 16-bit function.
+///
+/// Example: locator fcbb:bbbb:5::/48 (LB 32) + 0xE003 →
+/// fcbb:bbbb:e003:: — note the node id (5) is gone.
+pub fn lib_addr(prefix: Ipv6Net, lb_bits: u8, function: u16) -> Option<Ipv6Addr> {
+    let lb = lb_bits as u32;
+    if lb + 16 > 128 {
+        return None;
+    }
+    let base: u128 = u128::from(prefix.network());
+    let block_mask: u128 = if lb == 0 { 0 } else { u128::MAX << (128 - lb) };
+    let shift = 128 - lb - 16;
+    Some(Ipv6Addr::from(
+        (base & block_mask) | ((function as u128) << shift),
+    ))
+}
+
+/// A peer's SRv6 End SID as learned from its SRv6 Locator TLV —
+/// the SID plus the endpoint behavior and SID structure needed to
+/// decide NEXT-C-SID carrier membership when encoding repair lists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Srv6EndSidInfo {
+    pub sid: Ipv6Addr,
+    pub behavior: isis_packet::Behavior,
+    pub structure: Option<isis_packet::IsisSub2SidStructure>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +153,29 @@ mod tests {
         pool.reset();
         assert_eq!(pool.allocate(), Some(0xE000));
         assert!(!pool.is_used(0xE001));
+    }
+
+    // The LIB form drops the locator-node bits: function right after
+    // the block, exactly where a carrier exposes it post-uN-shift.
+    #[test]
+    fn lib_addr_places_function_after_block() {
+        let prefix: Ipv6Net = "fcbb:bbbb:5::/48".parse().unwrap();
+        let sid = lib_addr(prefix, 32, 0xE003).unwrap();
+        assert_eq!(sid, "fcbb:bbbb:e003::".parse::<Ipv6Addr>().unwrap());
+    }
+
+    // Host bits beyond the block must not leak into the LIB address.
+    #[test]
+    fn lib_addr_masks_node_bits_out_of_the_block() {
+        let prefix: Ipv6Net = "fcbb:bbbb:ffff::/48".parse().unwrap();
+        let sid = lib_addr(prefix, 32, 0x0001).unwrap();
+        assert_eq!(sid, "fcbb:bbbb:1::".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn lib_addr_rejects_block_too_long_for_function() {
+        let prefix: Ipv6Net = "fcbb::/128".parse().unwrap();
+        assert_eq!(lib_addr(prefix, 120, 0xE000), None);
     }
 
     #[test]

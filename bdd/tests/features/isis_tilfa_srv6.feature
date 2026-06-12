@@ -120,6 +120,9 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     # for each IPv6-capable adjacency.
     Then show command "show segment-routing srv6 sid" in namespace "s" should contain "uN"
     And show command "show segment-routing srv6 sid" in namespace "s" should contain "uA"
+    # Each uA also installs its LIB twin — the block:function prefix
+    # entry a NEXT-C-SID carrier hits after the local uN shift.
+    And show command "show segment-routing srv6 sid" in namespace "s" should contain "uA(LIB)"
     # The s-n1-protected IPv6 routes carry a pre-computed TI-LFA repair
     # expressed as an SRv6 SID list, installed by SRH insertion: the
     # repair segments are transit End/End.X SIDs, so the original
@@ -179,6 +182,10 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     # 10 for d's loopback prefix), demoted plain primary behind at 13.
     Then kernel route "2001:db8::8" in namespace "s" should eventually contain "mode inline"
     And kernel route "2001:db8::8" in namespace "s" should eventually contain "dev s-n2 proto isis metric 12"
+    # NEXT-C-SID compression: the three repair uSIDs (uN of the P node
+    # plus two uAs) ride one 128-bit carrier, so the inserted SRH is
+    # carrier + original destination — 2 segments, not 4.
+    And kernel route "2001:db8::8" in namespace "s" should eventually contain "segs 2 ["
     # End-to-end over the repair: the IGP loopback path and the
     # BGP/SRv6 LAN-to-LAN service traffic, whose H.Encaps outer
     # destination resolves via the promoted locator route. These die

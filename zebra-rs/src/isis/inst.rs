@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::*;
@@ -199,7 +199,7 @@ pub struct Isis {
     /// sub-TLV `IsisSubSrv6EndSid` carried inside each peer's LSP
     /// (parallel to label_map for SR-MPLS). Used by TI-LFA to
     /// assemble the SRH segment list for a 1-segment repair.
-    pub srv6_end_map: Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
+    pub srv6_end_map: Levels<BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>,
 
     /// Per-peer Flex-Algorithm Definition store. Outer key is peer
     /// sys-id; inner key is the algo identifier (128..=255). Populated
@@ -487,7 +487,7 @@ pub struct IsisTop<'a> {
     pub mt2_reach_map_v6: &'a mut Levels<ReachMapV6>,
     pub mt_membership: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
-    pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, Ipv6Addr>>,
+    pub srv6_end_map: &'a mut Levels<BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>,
     /// Per-peer FAD store (see `Isis::peer_fad`). Threaded through
     /// IsisTop so the LSDB rebuild path can populate it from peer
     /// Router Capability TLVs.
@@ -645,7 +645,7 @@ impl Isis {
                 mt2_reach_map_v6: Levels::<ReachMapV6>::default(),
                 mt_membership: Levels::<BTreeMap<IsisSysId, BTreeSet<MtId>>>::default(),
                 label_map: Levels::<IsisLabelMap>::default(),
-                srv6_end_map: Levels::<BTreeMap<IsisSysId, Ipv6Addr>>::default(),
+                srv6_end_map: Levels::<BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>::default(),
                 peer_fad: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>,
                 >::default(),

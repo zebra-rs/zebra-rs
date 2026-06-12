@@ -215,6 +215,22 @@ fn sid_route_target(
             )
         }
         SidBehavior::UA => (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr),
+        // LIB twin of a uA: a block:function prefix entry that matches
+        // the uA when it is the carrier's *active* uSID (post-uN-shift
+        // DA). /(LB+Fun) with the NEXT-CSID flavor — verified live on
+        // 6.8 (shift while uSIDs remain, classic End.X at end-of-
+        // carrier).
+        SidBehavior::UALib => {
+            let plen = structure
+                .map(|s| s.lb_bits.saturating_add(s.fun_bits))
+                .unwrap_or(128);
+            (
+                RouteHeader::RT_TABLE_MAIN,
+                RouteType::Unicast,
+                plen,
+                mask_v6(addr, plen),
+            )
+        }
         // End.DT4 / End.DT6 / End.DT46 are terminal decap+lookup
         // actions. Same FIB shape as End.X — a /128 host route in
         // table=main with kind=Unicast, pointed at sr0 by the static

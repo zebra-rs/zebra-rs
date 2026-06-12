@@ -31,6 +31,15 @@ pub enum SidBehavior {
     /// forwarding as End.X with the additional uSID shift; carries a
     /// [`SidStructure`].
     UA,
+    /// LIB twin of a uA — the same adjacency cross-connect anchored at
+    /// `block:function` (no locator-node bits), which is how the uA
+    /// appears as the *active* uSID inside a NEXT-C-SID carrier after
+    /// the owner's uN shift. Installs as a /(LB+Fun) prefix with the
+    /// NEXT-CSID flavor (shift while uSIDs remain, classic End.X
+    /// fallback at end-of-carrier). Only locally significant — every
+    /// node reuses the same LIB function space. Dynamic-only; not a
+    /// config-facing behavior.
+    UALib,
     /// End.DT4 — RFC 8986 §4.6. Decapsulates and looks up the inner
     /// IPv4 packet in a configured table. Today only operator-
     /// configured static routes use it; the table-id arg isn't
@@ -60,6 +69,7 @@ impl fmt::Display for SidBehavior {
             Self::EndX => write!(f, "End.X"),
             Self::UN => write!(f, "uN"),
             Self::UA => write!(f, "uA"),
+            Self::UALib => write!(f, "uA(LIB)"),
             Self::EndDT4 => write!(f, "End.DT4"),
             Self::EndDT6 => write!(f, "End.DT6"),
             Self::EndDT46 => write!(f, "End.DT46"),
@@ -79,6 +89,8 @@ impl FromStr for SidBehavior {
             "End" => Ok(Self::End),
             "End.X" => Ok(Self::EndX),
             "uN" => Ok(Self::UN),
+            // UALib is deliberately absent: it is derived from a uA at
+            // install time, never named in config.
             "uA" => Ok(Self::UA),
             "End.DT4" => Ok(Self::EndDT4),
             "End.DT6" => Ok(Self::EndDT6),
@@ -229,6 +241,15 @@ impl Sid {
             | SidBehavior::EndDT46
             | SidBehavior::EndB6Encap => {
                 Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
+            }
+            SidBehavior::UALib => {
+                let plen = self
+                    .structure
+                    .map(|s| s.lb_bits.saturating_add(s.fun_bits))
+                    .unwrap_or(128);
+                let masked = mask_v6(self.addr, plen);
+                Ipv6Net::new(masked, plen)
+                    .unwrap_or_else(|_| Ipv6Net::new(self.addr, 128).expect("/128 is always valid"))
             }
             SidBehavior::UN => {
                 let plen = self
