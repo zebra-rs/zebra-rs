@@ -1334,8 +1334,8 @@ module config {
             }
             description
               "Instance-default BFD Echo role for every interface
-               (RFC 5880 §6.4; single-hop IPv4). Overridable per
-               interface; absent ⇒ Echo off.";
+               (RFC 5880 §6.4; single-hop, IPv4 or IPv6). Overridable
+               per interface; absent ⇒ Echo off.";
           }
           leaf echo-transmit-interval {
             ext:help "Default Echo transmit interval (ms)";
@@ -1346,6 +1346,15 @@ module config {
             ext:help "Default advertised Required Min Echo RX (ms)";
             type uint32;
             units "milliseconds";
+          }
+          leaf detect-offload {
+            ext:help "Default: offload expiration detection to XDP (kernel)";
+            type boolean;
+            description
+              "Instance default for offloading control-packet expiration
+               detection (RFC 5880 §6.8.4) to the per-interface XDP/eBPF
+               helper once a session is Up. Overridable per interface;
+               absent ⇒ false (detection in userspace).";
           }
         }
 
@@ -2056,9 +2065,10 @@ module config {
               }
               description
                 "Enable the BFD Echo function (RFC 5880 §6.4) on this
-                 interface's single-hop IPv4 adjacencies, choosing which
-                 half is active. Backed by the per-interface `xdp-bfd-echo`
-                 helper. Overrides the instance default; absent ⇒ inherit.";
+                 interface's single-hop adjacencies (IPv4, or IPv6 over
+                 the link-local pair), choosing which half is active.
+                 Backed by the per-interface `xdp-bfd-echo` helper.
+                 Overrides the instance default; absent ⇒ inherit.";
             }
             leaf echo-transmit-interval {
               ext:help "Echo transmit interval (ms)";
@@ -2075,6 +2085,20 @@ module config {
               description
                 "Advertised Required Min Echo RX (echo-mode
                  `receive`/`both`). Hard default 50 ms when unset.";
+            }
+            leaf detect-offload {
+              ext:help "Offload expiration detection to the XDP helper (kernel)";
+              type boolean;
+              description
+                "Once the session is Up, detect missing BFD control
+                 packets in the kernel: the per-interface XDP/eBPF helper
+                 re-arms a per-session timer on every arriving control
+                 packet (UDP/3784, TTL 255) and drives the session Down
+                 with Control Detection Time Expired when they stop
+                 (RFC 5880 §6.8.4) — immune to daemon scheduling latency.
+                 The userspace detection timer stays armed as a stretched
+                 backstop. Overrides the instance default; absent ⇒
+                 inherit (false: detection in userspace).";
             }
           }
 

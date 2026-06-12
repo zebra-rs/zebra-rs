@@ -35,14 +35,11 @@ interface, overridden per interface (see
 | `echo-mode` | `transmit` \| `receive` \| `both` | _(off)_ | Enable the [BFD Echo function](ch-10-00-bfd.md#echo-function) on this interface's single-hop adjacencies (IPv4 or IPv6). |
 | `echo-transmit-interval` | uint (ms) | `50` | Rate we originate Echo at (`transmit` / `both`). |
 | `echo-receive-interval` | uint (ms) | `50` | Advertised Required Min Echo RX (`receive` / `both`). |
+| `detect-offload` | boolean | `false` | [Offload expiration detection](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload) to the in-kernel (XDP) watchdog once the session is Up. |
 
 Control-packet intervals use the BFD defaults (300 ms / ×3 ⇒ ~900 ms
 detection) and are not currently tunable — see
 [Tuning intervals](ch-10-00-bfd.md#tuning-intervals) in the overview.
-In-kernel expiration detection
-([`detect-offload`](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload))
-is not yet configurable on IS-IS attachments — the OSPF knob landed
-first; the IS-IS leaf is a planned follow-up.
 
 A session is subscribed when the adjacency comes **Up** and
 unsubscribed when it goes down. Both IPv4 and IPv6 adjacencies are
@@ -90,6 +87,29 @@ router isis {
       echo-mode both;
       echo-transmit-interval 50;
       echo-receive-interval 50;
+    }
+  }
+}
+```
+
+## Offloading expiration detection
+
+`detect-offload true` moves the RFC 5880 §6.8.4 detection timer into the
+kernel via the same per-interface `xdp-bfd-echo` helper that backs Echo:
+the XDP program re-arms a per-session timer on every arriving control
+packet and the expiry fires in softirq, immune to daemon scheduling
+latency. The adjacency teardown on expiry — and the
+[hold-down](#hold-down-while-bfd-is-down) that follows — work exactly as
+with userspace detection. See
+[the overview](ch-10-00-bfd.md#offloading-expiration-detection-detect-offload)
+for the mechanism and guard-rails.
+
+```
+router isis {
+  interface eth0 {
+    bfd {
+      enable true;
+      detect-offload true;   // expiration detection in kernel/XDP
     }
   }
 }

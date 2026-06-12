@@ -60,6 +60,7 @@
 ## Failure Detection
 
 - [Bidirectional Forwarding Detection (BFD)](ch-10-00-bfd.md)
+  - [The XDP/eBPF Data-Plane Helper](ch-10-01-bfd-xdp-helper.md)
 
 ## Fast Reroute
 

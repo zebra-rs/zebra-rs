@@ -311,6 +311,11 @@ pub struct PeerBfdConfig {
     /// Advertised Required Min Echo RX (ms); `None` ⇒
     /// [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
+    /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
+    /// per-interface XDP helper once the session is Up. Single-hop only —
+    /// inert on multihop sessions (the helper attaches per interface).
+    /// `None` ⇒ inherit (hard default `false`: detection in userspace).
+    pub detect_offload: Option<bool>,
 }
 
 /// FRR default Echo interval (ms) — the hard default for the Echo intervals
@@ -326,12 +331,14 @@ pub struct ResolvedPeerBfd {
     pub echo_mode: Option<EchoMode>,
     pub echo_transmit_ms: u32,
     pub echo_receive_ms: u32,
+    pub detect_offload: bool,
 }
 
 impl PeerBfdConfig {
     /// Resolve `self` (per-neighbor) over `default` (instance-level
     /// `router bgp { bfd {} }`), per leaf, for the inheritable bits
-    /// (enable + Echo). Hop-mode / min-ttl stay per-neighbor (read directly).
+    /// (enable + Echo + detect-offload). Hop-mode / min-ttl stay
+    /// per-neighbor (read directly).
     pub fn resolve(&self, default: &PeerBfdConfig) -> ResolvedPeerBfd {
         ResolvedPeerBfd {
             enable: self.enable.or(default.enable).unwrap_or(false),
@@ -344,6 +351,10 @@ impl PeerBfdConfig {
                 .echo_receive_ms
                 .or(default.echo_receive_ms)
                 .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            detect_offload: self
+                .detect_offload
+                .or(default.detect_offload)
+                .unwrap_or(false),
         }
     }
 }

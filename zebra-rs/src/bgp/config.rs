@@ -826,15 +826,28 @@ pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
         } else {
             255 // GTSM (RFC 5881 §5): single-hop accepts only TTL 255.
         };
+        // Key single-hop sessions by the connected interface when we know it
+        // (from `RibRx::AddrAdd`): the per-interface XDP helper — the Echo
+        // reflector and the expiration watchdog — attaches by ifindex, so an
+        // ifindex-0 key can never bring it up. Unknown (no address info yet,
+        // or a v6 link-local peer) falls back to 0 — the session still works,
+        // helper-backed features stay off; the `RibRx::AddrAdd` hook
+        // re-reconciles once the interface is learned. Multihop has no single
+        // egress interface.
+        let ifindex = if multihop {
+            0
+        } else {
+            bgp.connected_subnets.ifindex_for(addr).unwrap_or(0)
+        };
         let key = SessionKey {
             local,
             remote: addr,
-            ifindex: 0,
+            ifindex,
             multihop,
         };
         // Echo is single-hop only (RFC 5883 multihop has no Echo), so it's
         // requested only for non-multihop neighbors; the BFD instance gates it
-        // further to IPv4 with a live reflector.
+        // further to a live reflector (both address families work).
         let (echo_mode, echo_rx_us, echo_tx_us) = match eff.echo_mode {
             Some(mode) if !multihop => (
                 mode,
@@ -853,6 +866,10 @@ pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
             echo_mode,
             required_min_echo_rx_us: echo_rx_us,
             echo_transmit_us: echo_tx_us,
+            // Like Echo, the expiration watchdog is single-hop only (the XDP
+            // helper attaches per interface) — keep the params honest rather
+            // than relying on the BFD instance's own multihop gate.
+            detect_offload: eff.detect_offload && !multihop,
             // Detect-mult still comes from the defaults; the peer's `bfd
             // profile` is stored but not yet resolved (a separate follow-up
             // needing cross-task BfdConfig access).
@@ -1000,12 +1017,30 @@ fn config_peer_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     bfd_apply(bgp, addr)
 }
 
+/// `set router bgp neighbor X bfd detect-offload <bool>` — offload
+/// control-packet expiration detection (RFC 5880 §6.8.4) to the
+/// per-interface XDP helper once the session is Up. Single-hop only
+/// (inert on multihop sessions).
+fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let offload = args.boolean()?;
+    {
+        let peer = bgp.peers.get_mut(&addr)?;
+        // `None` ⇒ inherit `router bgp { bfd { detect-offload } }`;
+        // `Some(false)` explicitly opts this neighbor out.
+        peer.config.bfd.detect_offload = op.is_set().then_some(offload);
+    }
+    bfd_apply(bgp, addr)
+}
+
 /// Re-reconcile BFD for every neighbor — used by the instance-level
 /// `router bgp { bfd {} }` callbacks, whose defaults (notably a blanket
-/// `enable`) affect neighbors that set nothing of their own. `bfd_apply` is a
-/// per-neighbor reconcile that diffs against the recorded session key, so this
-/// is just a fan-out.
-fn bfd_reconcile_all(bgp: &mut Bgp) {
+/// `enable`) affect neighbors that set nothing of their own, and by the
+/// `RibRx::AddrAdd`/`AddrDel` handlers, whose connected-interface knowledge
+/// feeds the single-hop session key's ifindex. `bfd_apply` is a per-neighbor
+/// reconcile that diffs against the recorded session key, so this is just a
+/// fan-out (a no-op per neighbor when nothing changed).
+pub(super) fn bfd_reconcile_all(bgp: &mut Bgp) {
     let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
     for addr in addrs {
         bfd_apply(bgp, addr);
@@ -1042,6 +1077,15 @@ fn config_bgp_bfd_echo_tx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
 fn config_bgp_bfd_echo_rx(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let interval = args.u32()?;
     bgp.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    Some(())
+}
+
+/// `router bgp bfd detect-offload <bool>` — instance default for offloading
+/// expiration detection to the XDP helper (overridable per neighbor).
+fn config_bgp_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let offload = args.boolean()?;
+    bgp.bfd.detect_offload = op.is_set().then_some(offload);
+    bfd_reconcile_all(bgp);
     Some(())
 }
 
@@ -3071,6 +3115,7 @@ impl Bgp {
         self.callback_peer("/bfd/echo-mode", config_peer_bfd_echo_mode);
         self.callback_peer("/bfd/echo-transmit-interval", config_peer_bfd_echo_tx);
         self.callback_peer("/bfd/echo-receive-interval", config_peer_bfd_echo_rx);
+        self.callback_peer("/bfd/detect-offload", config_peer_bfd_detect_offload);
         // Instance-level `router bgp { bfd { ... } }` defaults.
         self.callback_add("/router/bgp/bfd/enable", config_bgp_bfd_enable);
         self.callback_add("/router/bgp/bfd/echo-mode", config_bgp_bfd_echo_mode);
@@ -3081,6 +3126,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/bfd/echo-receive-interval",
             config_bgp_bfd_echo_rx,
+        );
+        self.callback_add(
+            "/router/bgp/bfd/detect-offload",
+            config_bgp_bfd_detect_offload,
         );
         self.callback_peer("/tcp-ao/key-chain", config_peer_tcp_ao_key_chain);
         self.callback_peer(
@@ -3427,6 +3476,75 @@ mod bfd_wiring_tests {
                 assert!(!key.multihop, "eBGP without override is single-hop");
                 assert_eq!(params.dst_port, BFD_SINGLE_HOP_PORT);
                 assert_eq!(params.min_ttl, 255);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// A single-hop session is keyed by the connected interface once the
+    /// covering address is known, and `detect-offload` rides the params —
+    /// both feed the per-interface XDP helper. An address learned AFTER
+    /// `bfd enable` re-keys the session (unsubscribe + resubscribe).
+    #[tokio::test]
+    async fn single_hop_key_carries_connected_ifindex_and_detect_offload() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        bgp.peers.get_mut(&addr).unwrap().peer_type = PeerType::EBGP;
+
+        // Enable before any address knowledge → ifindex 0, helper-less.
+        config_peer_bfd_detect_offload(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set);
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        match bfd_rx.try_recv().expect("initial subscribe") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert_eq!(key.ifindex, 0, "no connected info yet");
+                assert!(params.detect_offload, "knob rides the params");
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+
+        // The covering interface address arrives → re-keyed onto ifindex 3.
+        let net: ipnet::Ipv4Net = "10.0.0.1/24".parse().unwrap();
+        bgp.connected_subnets.record(&crate::rib::link::LinkAddr {
+            addr: ipnet::IpNet::V4(net),
+            ifindex: 3,
+            secondary: false,
+            config: false,
+            fib: true,
+        });
+        bfd_reconcile_all(&mut bgp);
+
+        match bfd_rx
+            .try_recv()
+            .expect("re-key unsubscribes the stale key")
+        {
+            ClientReq::Unsubscribe { key, .. } => assert_eq!(key.ifindex, 0),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        match bfd_rx.try_recv().expect("re-key resubscribes") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert_eq!(key.ifindex, 3, "keyed by the connected interface");
+                assert!(params.detect_offload);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+    }
+
+    /// `detect-offload` is single-hop only: a multihop session keeps
+    /// `detect_offload: false` in its params (and ifindex 0) even when the
+    /// leaf is set — mirroring the Echo gate.
+    #[tokio::test]
+    async fn detect_offload_inert_on_multihop() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.6"]), ConfigOp::Set).unwrap();
+        // Default peer type is iBGP ⇒ inferred multihop.
+        config_peer_bfd_detect_offload(&mut bgp, arg_words(&["10.0.0.6", "true"]), ConfigOp::Set);
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.6", "true"]), ConfigOp::Set).unwrap();
+        match bfd_rx.try_recv().expect("subscribe") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert!(key.multihop);
+                assert_eq!(key.ifindex, 0, "multihop has no single egress");
+                assert!(!params.detect_offload, "inert on multihop");
             }
             other => panic!("expected Subscribe, got {other:?}"),
         }

@@ -338,13 +338,18 @@ pub struct LinkBfdConfig {
     pub enable: Option<bool>,
     /// BFD Echo role for adjacencies on this interface
     /// (`transmit` / `receive` / `both`); `None` ⇒ inherit (off if unset
-    /// everywhere). Single-hop IPv4 only — inert on IPv6-only adjacencies.
+    /// everywhere). Single-hop only; both families (an IPv6-only adjacency
+    /// runs Echo over the two ends' link-locals).
     pub echo_mode: Option<EchoMode>,
     /// Echo transmit interval (ms); `None` ⇒ [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_transmit_ms: Option<u32>,
     /// Advertised Required Min Echo RX (ms); `None` ⇒
     /// [`DEFAULT_ECHO_INTERVAL_MS`].
     pub echo_receive_ms: Option<u32>,
+    /// Offload control-packet expiration detection (RFC 5880 §6.8.4) to the
+    /// per-interface XDP helper once the session is Up. `None` ⇒ inherit
+    /// (hard default `false`: detection in userspace).
+    pub detect_offload: Option<bool>,
 }
 
 /// FRR default Echo interval (ms) — the hard default for the transmit/receive
@@ -360,6 +365,7 @@ pub struct ResolvedBfd {
     pub echo_mode: Option<EchoMode>,
     pub echo_transmit_ms: u32,
     pub echo_receive_ms: u32,
+    pub detect_offload: bool,
 }
 
 impl LinkBfdConfig {
@@ -376,6 +382,10 @@ impl LinkBfdConfig {
                 .echo_receive_ms
                 .or(default.echo_receive_ms)
                 .unwrap_or(DEFAULT_ECHO_INTERVAL_MS),
+            detect_offload: self
+                .detect_offload
+                .or(default.detect_offload)
+                .unwrap_or(false),
         }
     }
 }
@@ -982,6 +992,21 @@ pub fn config_bfd_echo_receive_interval(
     Some(())
 }
 
+/// `interface X bfd detect-offload <bool>` — offload control-packet expiration
+/// detection (RFC 5880 §6.8.4) to the per-interface XDP helper once the
+/// session is Up. Overrides the instance default; the BFD instance arms /
+/// disarms the in-kernel watchdog on live sessions.
+pub fn config_bfd_detect_offload(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let offload = args.boolean()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+    // `None` ⇒ inherit `router isis { bfd { detect-offload } }`; `Some(false)`
+    // explicitly opts this interface out.
+    link.config.bfd.detect_offload = op.is_set().then_some(offload);
+    isis.bfd_reconcile_all();
+    Some(())
+}
+
 // ---- instance-level `router isis { bfd { ... } }` defaults ------------------
 
 /// `router isis bfd enable <bool>` — blanket-enable BFD on every IS-IS
@@ -1021,6 +1046,15 @@ pub fn config_isis_bfd_echo_receive_interval(
 ) -> Option<()> {
     let interval = args.u32()?;
     isis.config.bfd.echo_receive_ms = op.is_set().then_some(interval);
+    isis.bfd_reconcile_all();
+    Some(())
+}
+
+/// `router isis bfd detect-offload <bool>` — instance default for offloading
+/// expiration detection to the XDP helper (overridable per interface).
+pub fn config_isis_bfd_detect_offload(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let offload = args.boolean()?;
+    isis.config.bfd.detect_offload = op.is_set().then_some(offload);
     isis.bfd_reconcile_all();
     Some(())
 }
@@ -2333,6 +2367,7 @@ mod bfd_config_tests {
             enable: Some(true), // blanket
             echo_mode: Some(EchoMode::Receive),
             echo_transmit_ms: Some(100),
+            detect_offload: Some(true),
             ..LinkBfdConfig::default()
         };
         // Interface sets nothing → inherits.
@@ -2341,16 +2376,22 @@ mod bfd_config_tests {
         assert_eq!(inherit.echo_mode, Some(EchoMode::Receive));
         assert_eq!(inherit.echo_transmit_ms, 100);
         assert_eq!(inherit.echo_receive_ms, DEFAULT_ECHO_INTERVAL_MS);
-        // Interface overrides: opt out + change role.
+        assert!(inherit.detect_offload, "inherits the instance default");
+        // Interface overrides: opt out + change role + keep detection local.
         let over = LinkBfdConfig {
             enable: Some(false),
             echo_mode: Some(EchoMode::Both),
+            detect_offload: Some(false),
             ..LinkBfdConfig::default()
         };
         let eff = over.resolve(&default);
         assert!(!eff.enable);
         assert_eq!(eff.echo_mode, Some(EchoMode::Both));
         assert_eq!(eff.echo_transmit_ms, 100); // still inherits
+        assert!(!eff.detect_offload, "per-interface override wins");
+        // Unset everywhere → hard default off (userspace detection).
+        let bare = LinkBfdConfig::default().resolve(&LinkBfdConfig::default());
+        assert!(!bare.detect_offload);
     }
 }
 
