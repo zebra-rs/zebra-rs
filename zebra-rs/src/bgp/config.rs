@@ -799,7 +799,7 @@ pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
 /// Returns the entry, seeded with all modifiers off when new, so the
 /// list-node and flag callbacks stay order-independent within a
 /// commit.
-fn local_as_entry<'a>(bgp_asn: u32, peer: &'a mut Peer, key: u32) -> Option<&'a mut LocalAs> {
+fn local_as_entry(bgp_asn: u32, peer: &mut Peer, key: u32) -> Option<&mut LocalAs> {
     if key == bgp_asn {
         tracing::warn!(
             peer = %peer.display_name(),
