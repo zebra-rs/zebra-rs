@@ -97,6 +97,17 @@ fn fmt_nexthop_for_trace(nh: &Nexthop) -> String {
                 .collect();
             format!("List[{}]", members.join(", "))
         }
+        Nexthop::Protect(p) => {
+            let fmt_member = |m: &NexthopMember| match m {
+                NexthopMember::Uni(u) => format!("Uni{}", fmt_uni(u)),
+                NexthopMember::Multi(mm) => fmt_multi(mm),
+            };
+            format!(
+                "Protect[primary={} backup={}]",
+                fmt_member(&p.primary),
+                fmt_member(&p.backup)
+            )
+        }
         Nexthop::Link(ifindex) => format!("Link(ifindex={ifindex})"),
     }
 }
@@ -506,6 +517,17 @@ impl FibHandle {
                 }
                 ok
             }
+            Nexthop::Protect(pro) => {
+                // Primary and backup install as two kernel routes at
+                // their own metrics, exactly like the List members.
+                let mut ok = true;
+                for member in pro.members() {
+                    ok &= self
+                        .route_ipv4_add_uni(prefix, entry, &member.as_nexthop(), table_id)
+                        .await;
+                }
+                ok
+            }
             _ => true,
         }
     }
@@ -626,6 +648,12 @@ impl FibHandle {
             }
             Nexthop::List(list) => {
                 for member in &list.nexthops {
+                    self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop(), table_id)
+                        .await;
+                }
+            }
+            Nexthop::Protect(pro) => {
+                for member in pro.members() {
                     self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
@@ -873,6 +901,17 @@ impl FibHandle {
                 }
                 ok
             }
+            Nexthop::Protect(pro) => {
+                // Primary and backup install as two kernel routes at
+                // their own metrics, exactly like the List members.
+                let mut ok = true;
+                for member in pro.members() {
+                    ok &= self
+                        .route_ipv6_add_uni(prefix, entry, &member.as_nexthop(), table_id)
+                        .await;
+                }
+                ok
+            }
             _ => true,
         }
     }
@@ -1013,6 +1052,12 @@ impl FibHandle {
             }
             Nexthop::List(list) => {
                 for member in &list.nexthops {
+                    self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
+                        .await;
+                }
+            }
+            Nexthop::Protect(pro) => {
+                for member in pro.members() {
                     self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }

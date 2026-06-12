@@ -10860,7 +10860,7 @@ fn backup_v3_to_nexthop_uni(backup: &RepairPathMplsV3, metric: u32) -> rib::Next
 /// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. Flattens the
 /// primaries and (when present) their TI-LFA repair backups into one
 /// Vec at distinct metrics; `build_rib_nexthop` groups by metric and
-/// dispatches Uni / Multi / List. Mirrors v2's `make_rib_entry`.
+/// dispatches Uni / Multi / Protect. Mirrors v2's `make_rib_entry`.
 fn make_rib6_entry(route: &SpfRouteV3) -> rib::entry::RibEntry {
     let offset_metric = route.metric.saturating_add(BACKUP_METRIC_OFFSET);
     let (primary_metric, backup_metric) = if route.backup_as_primary {
@@ -11388,7 +11388,7 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
 
     // Flatten primaries and (when present) their TI-LFA repair backups
     // into one Vec at distinct metrics; `build_rib_nexthop` groups by
-    // metric and dispatches Uni / Multi / List from there.
+    // metric and dispatches Uni / Multi / Protect from there.
     //
     // `backup_as_primary` flips the offset: when set, the repair
     // installs at route.metric (sorted first) and the SPF primary at
@@ -11423,11 +11423,15 @@ fn make_rib_entry(route: &SpfRoute) -> rib::entry::RibEntry {
 //   - 0 groups          -> Nexthop::default()
 //   - 1 group, 1 nhop   -> Nexthop::Uni
 //   - 1 group, N nhops  -> Nexthop::Multi (ECMP)
-//   - >1 groups         -> Nexthop::List, one member per metric.
+//   - 2 groups          -> Nexthop::Protect: the lower-metric group is
+//                          the primary, the offset group the TI-LFA
+//                          backup.
 //
 // Mirrors IS-IS's `build_rib_nexthop`. With TI-LFA off every nhop sits
 // at route.metric, so only the first three arms fire; a stamped backup
-// adds a second metric group and produces a List (primary then repair).
+// adds the second metric group. The caller only ever feeds two
+// distinct metrics, so >2 groups can't happen — the List fallback is
+// defensive.
 fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
     if nhops.is_empty() {
         return rib::Nexthop::default();
@@ -11448,7 +11452,7 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
             })
         }
     } else {
-        let members: Vec<_> = groups
+        let mut members: Vec<_> = groups
             .into_iter()
             .map(|(metric, mut grp)| {
                 if grp.len() == 1 {
@@ -11462,7 +11466,13 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
                 }
             })
             .collect();
-        rib::Nexthop::List(rib::NexthopList { nexthops: members })
+        if members.len() == 2 {
+            let backup = members.pop().unwrap();
+            let primary = members.pop().unwrap();
+            rib::Nexthop::Protect(rib::NexthopProtect { primary, backup })
+        } else {
+            rib::Nexthop::List(rib::NexthopList { nexthops: members })
+        }
     }
 }
 

@@ -1363,18 +1363,27 @@ fn nexthop_force_reinstall(nexthop: &Nexthop, nmap: &mut NexthopMap) {
         }
         Nexthop::List(list) => {
             for member in &list.nexthops {
-                match member {
-                    NexthopMember::Uni(uni) => force(nmap, uni.gid),
-                    NexthopMember::Multi(multi) => {
-                        force(nmap, multi.gid);
-                        for uni in &multi.nexthops {
-                            force(nmap, uni.gid);
-                        }
-                    }
-                }
+                member_force_reinstall(member, nmap);
+            }
+        }
+        Nexthop::Protect(pro) => {
+            for member in pro.members() {
+                member_force_reinstall(member, nmap);
             }
         }
         _ => {}
+    }
+
+    fn member_force_reinstall(member: &NexthopMember, nmap: &mut NexthopMap) {
+        match member {
+            NexthopMember::Uni(uni) => force(nmap, uni.gid),
+            NexthopMember::Multi(multi) => {
+                force(nmap, multi.gid);
+                for uni in &multi.nexthops {
+                    force(nmap, uni.gid);
+                }
+            }
+        }
     }
 }
 
@@ -1419,6 +1428,24 @@ fn entry_resolve(entry: &mut RibEntry, nmap: &NexthopMap, _ifdown: bool) {
                 nexthop_uni_resolve(uni, nmap);
             }
             for uni in list.iter_unis() {
+                if uni.valid {
+                    entry.metric = uni.metric;
+                    entry.valid = uni.valid;
+                    return;
+                }
+            }
+            entry.metric = 0;
+            entry.valid = false;
+        }
+        // Primary first, then the repair — the first valid leaf wins,
+        // so the entry stays at the primary's metric while the
+        // primary's group is alive and falls back to the repair's
+        // when it is not.
+        Nexthop::Protect(pro) => {
+            for uni in pro.iter_unis_mut() {
+                nexthop_uni_resolve(uni, nmap);
+            }
+            for uni in pro.iter_unis() {
                 if uni.valid {
                     entry.metric = uni.metric;
                     entry.valid = uni.valid;
@@ -1512,25 +1539,40 @@ fn rib_resolve_nexthop(
         // `gid` at 0, which makes the FIB install fail with ENODEV
         // (Nhid(0)) at RTM_NEWROUTE time.
         for member in pro.nexthops.iter_mut() {
-            match member {
-                NexthopMember::Uni(uni) => {
-                    let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
-                }
-                NexthopMember::Multi(multi) => {
-                    let mut set = BTreeSet::<(usize, u8)>::new();
-                    for uni in multi.nexthops.iter_mut() {
-                        let valid = resolve_nexthop_uni(uni, nmap, table, table_id);
-                        if valid {
-                            set.insert((uni.gid, uni.weight));
-                        }
-                    }
-                    resolve_nexthop_multi(multi, nmap, set);
-                }
-            }
+            resolve_nexthop_member(member, nmap, table, table_id);
+        }
+    }
+    if let Nexthop::Protect(pro) = &mut entry.nexthop {
+        // Same member-wise walk as List, for the same Nhid(0) reason.
+        for member in pro.members_mut() {
+            resolve_nexthop_member(member, nmap, table, table_id);
         }
     }
     // If one of nexthop is valid, the entry is valid.
     entry.set_valid(entry.is_valid_nexthop(nmap));
+}
+
+fn resolve_nexthop_member(
+    member: &mut NexthopMember,
+    nmap: &mut NexthopMap,
+    table: &PrefixMap<Ipv4Net, RibEntries>,
+    table_id: u32,
+) {
+    match member {
+        NexthopMember::Uni(uni) => {
+            let _ = resolve_nexthop_uni(uni, nmap, table, table_id);
+        }
+        NexthopMember::Multi(multi) => {
+            let mut set = BTreeSet::<(usize, u8)>::new();
+            for uni in multi.nexthops.iter_mut() {
+                let valid = resolve_nexthop_uni(uni, nmap, table, table_id);
+                if valid {
+                    set.insert((uni.gid, uni.weight));
+                }
+            }
+            resolve_nexthop_multi(multi, nmap, set);
+        }
+    }
 }
 
 fn rib_rtype(entries: &[RibEntry], rtype: RibType) -> Option<usize> {
@@ -1638,6 +1680,8 @@ fn rib_replace_system(
             // For connected routes, only replace if the interface index matches
             e.ifindex == entry.ifindex
         }
+        // System (kernel) routes are never primary+backup protected.
+        Nexthop::Protect(_) => false,
     };
     // println!("replace {}", replace);
     if replace {
@@ -1907,6 +1951,8 @@ fn rib_replace_system_v6(
             // For connected routes, only replace if the interface index matches
             e.ifindex == entry.ifindex
         }
+        // System (kernel) routes are never primary+backup protected.
+        Nexthop::Protect(_) => false,
     };
     if replace {
         return rib_replace_v6(table, prefix, entry.rtype);
@@ -2422,5 +2468,57 @@ mod tests {
         for leg in &multi_member.nexthops {
             assert!(leg.gid != 0, "each leg also gets a gid");
         }
+    }
+
+    /// `Nexthop::Protect` twin of the test above: the ECMP primary
+    /// member must get its kernel-side Multi group allocated, and the
+    /// Uni backup its own group, when the IGPs hand the RIB a
+    /// primary+repair pair.
+    #[test]
+    fn protect_with_nested_multi_resolves_multi_gid() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember, NexthopMulti};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop;
+        use ipnet::Ipv4Net;
+        use prefix_trie::PrefixMap;
+
+        let leg_a = NexthopUni::new("10.0.0.1".parse().unwrap(), 1011, vec![]);
+        let leg_b = NexthopUni::new("10.0.0.2".parse().unwrap(), 1011, vec![]);
+        let multi = NexthopMulti {
+            metric: 1011,
+            nexthops: vec![leg_a, leg_b],
+            ..Default::default()
+        };
+        let backup = NexthopUni::new("10.0.0.3".parse().unwrap(), 1012, vec![]);
+
+        let mut entry = RibEntry::new(RibType::Isis);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Multi(multi),
+            backup: NexthopMember::Uni(backup),
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv4Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop(&mut entry, &table, &mut nmap, 0);
+
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("entry.nexthop should still be Protect");
+        };
+        let NexthopMember::Multi(multi_member) = &pro.primary else {
+            panic!("primary Multi preserved");
+        };
+        assert!(
+            multi_member.gid != 0,
+            "primary Multi must get a kernel-side group allocated (gid != 0)"
+        );
+        for leg in &multi_member.nexthops {
+            assert!(leg.gid != 0, "each leg also gets a gid");
+        }
+        let NexthopMember::Uni(backup_uni) = &pro.backup else {
+            panic!("backup Uni preserved");
+        };
+        assert!(backup_uni.gid != 0, "backup Uni gets its own group");
     }
 }

@@ -222,6 +222,11 @@ fn first_v4_nexthop(nh: &Nexthop) -> Option<std::net::Ipv4Addr> {
                 })
             }
         }),
+        // Redistribute the protected (primary) path, never the repair.
+        Nexthop::Protect(p) => p.primary.iter_unis().next().and_then(|u| match u.addr {
+            std::net::IpAddr::V4(a) => Some(a),
+            _ => None,
+        }),
         Nexthop::Link(_) => None,
     }
 }
@@ -247,6 +252,11 @@ fn first_v6_nexthop(nh: &Nexthop) -> Option<std::net::Ipv6Addr> {
                     _ => None,
                 })
             }
+        }),
+        // Redistribute the protected (primary) path, never the repair.
+        Nexthop::Protect(p) => p.primary.iter_unis().next().and_then(|u| match u.addr {
+            std::net::IpAddr::V6(a) => Some(a),
+            _ => None,
         }),
         Nexthop::Link(_) => None,
     }

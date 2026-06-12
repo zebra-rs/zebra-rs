@@ -412,11 +412,11 @@ impl<F: IsisRibFamily> PartialEq for SpfNexthop<F> {
 }
 
 /// Sort offset between the primary nhop's metric and its TI-LFA
-/// backup's metric inside a `NexthopList`. The value is RIB-internal
-/// and never reaches the wire — it only governs the metric-sort that
-/// puts the primary at `.nexthops[0]`. See the design discussion that
-/// landed PR #489: blanket `+1` keeps show output legible and avoids
-/// `u32::MAX` sentinels.
+/// backup's metric inside a `NexthopProtect`. The value is RIB-internal
+/// and never reaches the wire — it only governs the metric grouping
+/// that makes the lower-metric group the `primary` member. See the
+/// design discussion that landed PR #489: blanket `+1` keeps show
+/// output legible and avoids `u32::MAX` sentinels.
 pub const BACKUP_METRIC_OFFSET: u32 = 1;
 
 pub type DiffResult<'a, F> = spf::TableDiffResult<'a, <F as IsisRibFamily>::Prefix, SpfRoute<F>>;
@@ -461,7 +461,7 @@ fn make_rib_entry<F: IsisRibFamily>(route: &SpfRoute<F>, level: Level) -> rib::e
     rib.metric = route.metric;
     // Flatten primaries and (when present) their TI-LFA repair backups
     // into a single Vec at distinct metrics; build_rib_nexthop groups
-    // them by metric and routes Multi-vs-List dispatch from there.
+    // them by metric and routes Multi-vs-Protect dispatch from there.
     //
     // `backup_as_primary` flips the metric-sort offset: when set, the
     // repair installs at route.metric (sorted first) and the SPF
@@ -496,15 +496,19 @@ fn make_rib_entry<F: IsisRibFamily>(route: &SpfRoute<F>, level: Level) -> rib::e
 //   - 0 groups          -> Nexthop::default()
 //   - 1 group, 1 nhop   -> Nexthop::Uni
 //   - 1 group, N nhops  -> Nexthop::Multi (ECMP)
-//   - >1 groups         -> Nexthop::List, one member per metric:
+//   - 2 groups          -> Nexthop::Protect, the lower-metric group as
+//                          the primary and the offset group as the
+//                          TI-LFA backup:
 //                            * single-nhop group -> NexthopMember::Uni
 //                            * multi-nhop group  -> NexthopMember::Multi
 //
-// Today every caller passes all primaries at route.metric, so only
-// the first three arms fire. The grouped-List arm is the slot TI-LFA
-// repair install will populate when it appends backup nhops at
-// primary.metric + 1; ECMP-primary + ECMP-backup naturally collapses
-// to a List of two Multi members.
+// Without TI-LFA every nhop sits at route.metric, so only the first
+// three arms fire. A stamped backup adds the second metric group
+// (primary.metric + BACKUP_METRIC_OFFSET, or swapped under
+// backup-as-primary); ECMP-primary + ECMP-backup naturally collapses
+// to a Protect of two Multi members. The caller only ever feeds two
+// distinct metrics, so >2 groups can't happen — the List fallback is
+// defensive.
 fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
     if nhops.is_empty() {
         return rib::Nexthop::default();
@@ -525,7 +529,7 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
             })
         }
     } else {
-        let members: Vec<_> = groups
+        let mut members: Vec<_> = groups
             .into_iter()
             .map(|(metric, mut grp)| {
                 if grp.len() == 1 {
@@ -539,7 +543,13 @@ fn build_rib_nexthop(nhops: Vec<rib::NexthopUni>) -> rib::Nexthop {
                 }
             })
             .collect();
-        rib::Nexthop::List(rib::NexthopList { nexthops: members })
+        if members.len() == 2 {
+            let backup = members.pop().unwrap();
+            let primary = members.pop().unwrap();
+            rib::Nexthop::Protect(rib::NexthopProtect { primary, backup })
+        } else {
+            rib::Nexthop::List(rib::NexthopList { nexthops: members })
+        }
     }
 }
 
@@ -1936,27 +1946,25 @@ mod tests {
     }
 
     #[test]
-    fn build_rib_nexthop_mixed_metric_yields_list_sorted() {
-        // Mixed metrics signal primary + backup — Nexthop::List is
-        // the FRR slot TI-LFA fills, sorted ascending so .nexthops[0]
-        // is the primary. Singleton-per-metric groups become Uni
-        // members.
+    fn build_rib_nexthop_mixed_metric_yields_protect() {
+        // Mixed metrics signal primary + backup — Nexthop::Protect
+        // with the lower-metric group as the primary member.
+        // Singleton-per-metric groups become Uni members.
         let primary = mk_uni("10.0.0.1", 20);
         let backup = mk_uni("10.0.0.5", 21);
-        // Insert backup first to exercise sort.
+        // Insert backup first to exercise the metric grouping.
         let nh = build_rib_nexthop(vec![backup.clone(), primary.clone()]);
-        let rib::Nexthop::List(list) = nh else {
-            panic!("expected List, got {nh:?}");
+        let rib::Nexthop::Protect(pro) = nh else {
+            panic!("expected Protect, got {nh:?}");
         };
-        assert_eq!(list.nexthops.len(), 2);
-        assert_eq!(list.nexthops[0], rib::NexthopMember::Uni(primary));
-        assert_eq!(list.nexthops[1], rib::NexthopMember::Uni(backup));
+        assert_eq!(pro.primary, rib::NexthopMember::Uni(primary));
+        assert_eq!(pro.backup, rib::NexthopMember::Uni(backup));
     }
 
     #[test]
-    fn build_rib_nexthop_ecmp_primary_plus_ecmp_backup_yields_list_of_multi() {
+    fn build_rib_nexthop_ecmp_primary_plus_ecmp_backup_yields_protect_of_multi() {
         // Two ECMP primaries at metric 20 + two backups at metric 21
-        // collapse into a List of two Multi members: one per metric
+        // collapse into a Protect of two Multi members: one per metric
         // group, ECMP-aware. This is the shape TI-LFA emits when
         // both the primary and the post-convergence path are
         // multi-pathed.
@@ -1966,19 +1974,18 @@ mod tests {
         let b2 = mk_uni("10.0.0.6", 21);
         // Insert mixed order to exercise BTreeMap grouping + sort.
         let nh = build_rib_nexthop(vec![b1.clone(), p1.clone(), b2.clone(), p2.clone()]);
-        let rib::Nexthop::List(list) = nh else {
-            panic!("expected List, got {nh:?}");
+        let rib::Nexthop::Protect(pro) = nh else {
+            panic!("expected Protect, got {nh:?}");
         };
-        assert_eq!(list.nexthops.len(), 2);
 
-        let rib::NexthopMember::Multi(primary_grp) = &list.nexthops[0] else {
-            panic!("expected Multi primary, got {:?}", list.nexthops[0]);
+        let rib::NexthopMember::Multi(primary_grp) = &pro.primary else {
+            panic!("expected Multi primary, got {:?}", pro.primary);
         };
         assert_eq!(primary_grp.metric, 20);
         assert_eq!(primary_grp.nexthops.len(), 2);
 
-        let rib::NexthopMember::Multi(backup_grp) = &list.nexthops[1] else {
-            panic!("expected Multi backup, got {:?}", list.nexthops[1]);
+        let rib::NexthopMember::Multi(backup_grp) = &pro.backup else {
+            panic!("expected Multi backup, got {:?}", pro.backup);
         };
         assert_eq!(backup_grp.metric, 21);
         assert_eq!(backup_grp.nexthops.len(), 2);
@@ -2077,11 +2084,11 @@ mod tests {
     }
 
     #[test]
-    fn make_rib_entry_with_mpls_backup_yields_list_at_metric_plus_one() {
-        // SpfNexthop with backup -> List([primary at 20, backup at 21]).
-        // Verifies BACKUP_METRIC_OFFSET + the flat_map plumbing in
-        // make_rib_entry feed build_rib_nexthop a mixed-metric Vec
-        // that collapses to a sorted List.
+    fn make_rib_entry_with_mpls_backup_yields_protect_at_metric_plus_one() {
+        // SpfNexthop with backup -> Protect(primary at 20, backup at
+        // 21). Verifies BACKUP_METRIC_OFFSET + the flat_map plumbing
+        // in make_rib_entry feed build_rib_nexthop a mixed-metric Vec
+        // that collapses to a Protect.
         let primary_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
         let backup_addr: Ipv4Addr = "10.0.0.5".parse().unwrap();
         let mut nhops = BTreeMap::new();
@@ -2109,19 +2116,18 @@ mod tests {
         };
         let entry = make_rib_entry(&route, Level::L2);
 
-        let rib::Nexthop::List(list) = &entry.nexthop else {
-            panic!("expected List, got {:?}", entry.nexthop);
+        let rib::Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("expected Protect, got {:?}", entry.nexthop);
         };
-        assert_eq!(list.nexthops.len(), 2);
 
-        let rib::NexthopMember::Uni(p) = &list.nexthops[0] else {
-            panic!("expected Uni primary, got {:?}", list.nexthops[0]);
+        let rib::NexthopMember::Uni(p) = &pro.primary else {
+            panic!("expected Uni primary, got {:?}", pro.primary);
         };
         assert_eq!(p.metric, 20);
         assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
 
-        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
-            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        let rib::NexthopMember::Uni(b) = &pro.backup else {
+            panic!("expected Uni backup, got {:?}", pro.backup);
         };
         assert_eq!(b.metric, 21);
         assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
@@ -2161,21 +2167,20 @@ mod tests {
         };
         let entry = make_rib_entry(&route, Level::L2);
 
-        let rib::Nexthop::List(list) = &entry.nexthop else {
-            panic!("expected List, got {:?}", entry.nexthop);
+        let rib::Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("expected Protect, got {:?}", entry.nexthop);
         };
-        assert_eq!(list.nexthops.len(), 2);
 
-        // First member is the backup (now at the lower metric).
-        let rib::NexthopMember::Uni(b) = &list.nexthops[0] else {
-            panic!("expected Uni backup, got {:?}", list.nexthops[0]);
+        // The repair takes the primary slot (now at the lower metric).
+        let rib::NexthopMember::Uni(b) = &pro.primary else {
+            panic!("expected Uni repair, got {:?}", pro.primary);
         };
         assert_eq!(b.metric, 20);
         assert_eq!(b.addr, std::net::IpAddr::V4(backup_addr));
 
-        // Second member is the SPF primary (now at metric+offset).
-        let rib::NexthopMember::Uni(p) = &list.nexthops[1] else {
-            panic!("expected Uni primary, got {:?}", list.nexthops[1]);
+        // The SPF primary takes the backup slot (at metric+offset).
+        let rib::NexthopMember::Uni(p) = &pro.backup else {
+            panic!("expected Uni SPF-primary, got {:?}", pro.backup);
         };
         assert_eq!(p.metric, 21);
         assert_eq!(p.addr, std::net::IpAddr::V4(primary_addr));
@@ -2253,12 +2258,11 @@ mod tests {
         };
         let entry = make_rib_entry::<V6>(&route, Level::L1);
 
-        let rib::Nexthop::List(list) = &entry.nexthop else {
-            panic!("expected List, got {:?}", entry.nexthop);
+        let rib::Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("expected Protect, got {:?}", entry.nexthop);
         };
-        assert_eq!(list.nexthops.len(), 2);
-        let rib::NexthopMember::Uni(b) = &list.nexthops[1] else {
-            panic!("expected Uni backup, got {:?}", list.nexthops[1]);
+        let rib::NexthopMember::Uni(b) = &pro.backup else {
+            panic!("expected Uni backup, got {:?}", pro.backup);
         };
         assert_eq!(b.metric, 21);
         assert_eq!(b.segs, vec![end_sid, endx_sid]);

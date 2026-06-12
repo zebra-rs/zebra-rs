@@ -112,6 +112,7 @@ pub enum Nexthop {
     Uni(NexthopUni),
     Multi(NexthopMulti),
     List(NexthopList),
+    Protect(NexthopProtect),
 }
 
 impl Default for Nexthop {
@@ -125,11 +126,12 @@ pub struct NexthopList {
     pub nexthops: Vec<NexthopMember>,
 }
 
-// A path within a NexthopList. Uni is a single nexthop at one metric
-// (the only shape produced today, since every existing caller is the
-// inter-protocol merge that combines two single-nexthop entries at
-// different distances). Multi is an ECMP group at one shared metric —
-// the slot TI-LFA's "ECMP primary + per-primary repair" install fills.
+// A path within a NexthopList or NexthopProtect. Uni is a single
+// nexthop at one metric (NexthopList's only shape today, since its
+// remaining caller is the inter-protocol merge that combines two
+// single-nexthop entries at different distances). Multi is an ECMP
+// group at one shared metric — the slot TI-LFA's "ECMP primary +
+// per-primary repair" install fills via NexthopProtect.
 // `#[serde(untagged)]` so JSON output preserves the pre-refactor flat
 // shape: each member serializes as its inner type.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -155,6 +157,67 @@ impl NexthopMember {
             Self::Uni(u) => Nexthop::Uni(u.clone()),
             Self::Multi(m) => Nexthop::Multi(m.clone()),
         }
+    }
+
+    /// Walk this member's `NexthopUni` leaves: a Uni yields itself,
+    /// a Multi yields each ECMP leg in turn.
+    pub fn iter_unis(&self) -> std::slice::Iter<'_, NexthopUni> {
+        match self {
+            Self::Uni(u) => std::slice::from_ref(u).iter(),
+            Self::Multi(m) => m.nexthops.iter(),
+        }
+    }
+
+    /// Mutable counterpart of `iter_unis`, used by the resolver.
+    pub fn iter_unis_mut(&mut self) -> std::slice::IterMut<'_, NexthopUni> {
+        match self {
+            Self::Uni(u) => std::slice::from_mut(u).iter_mut(),
+            Self::Multi(m) => m.nexthops.iter_mut(),
+        }
+    }
+}
+
+/// A primary path with its TI-LFA repair. Where `NexthopList` is an
+/// ordered set of paths at distinct metrics whose roles are inferred
+/// from sort position (member 0 = primary), the two roles here are
+/// explicit fields. Produced by the IS-IS / OSPF TI-LFA install; the
+/// backup goes into the kernel alongside the primary at a higher
+/// route metric and takes over when the primary's nexthop group is
+/// invalidated. Either member may be an ECMP group (`Multi`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NexthopProtect {
+    pub primary: NexthopMember,
+    pub backup: NexthopMember,
+}
+
+impl NexthopProtect {
+    /// Members in install order with their protection role, as
+    /// `(member, is_backup)`. Keeps the role decision in one place
+    /// for the show / JSON renderers.
+    pub fn roles(&self) -> [(&NexthopMember, bool); 2] {
+        [(&self.primary, false), (&self.backup, true)]
+    }
+
+    /// Members in install order, primary first.
+    pub fn members(&self) -> [&NexthopMember; 2] {
+        [&self.primary, &self.backup]
+    }
+
+    /// Mutable counterpart of `members`.
+    pub fn members_mut(&mut self) -> [&mut NexthopMember; 2] {
+        [&mut self.primary, &mut self.backup]
+    }
+
+    /// Walk every `NexthopUni` leaf, primary member first.
+    pub fn iter_unis(&self) -> impl Iterator<Item = &NexthopUni> + '_ {
+        self.primary.iter_unis().chain(self.backup.iter_unis())
+    }
+
+    /// Mutable counterpart of `iter_unis`, used by the resolver.
+    pub fn iter_unis_mut(&mut self) -> impl Iterator<Item = &mut NexthopUni> + '_ {
+        self.primary
+            .iter_unis_mut()
+            .chain(self.backup.iter_unis_mut())
     }
 }
 
@@ -251,6 +314,36 @@ mod tests {
         };
         let addrs: Vec<_> = list.iter_unis().map(|u| u.addr.to_string()).collect();
         assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.5", "10.0.0.6"]);
+    }
+
+    #[test]
+    fn protect_iter_unis_walks_primary_then_backup() {
+        // ECMP primary + Uni backup: leaves come out primary-first so
+        // the resolver's "first valid uni wins" keeps preferring the
+        // primary, matching the sorted NexthopList behavior.
+        let multi = NexthopMulti {
+            metric: 20,
+            nexthops: vec![mk_uni("10.0.0.1", 20), mk_uni("10.0.0.2", 20)],
+            ..Default::default()
+        };
+        let pro = NexthopProtect {
+            primary: NexthopMember::Multi(multi),
+            backup: NexthopMember::Uni(mk_uni("10.0.0.5", 21)),
+        };
+        let addrs: Vec<_> = pro.iter_unis().map(|u| u.addr.to_string()).collect();
+        assert_eq!(addrs, vec!["10.0.0.1", "10.0.0.2", "10.0.0.5"]);
+    }
+
+    #[test]
+    fn protect_roles_tags_backup_member() {
+        let pro = NexthopProtect {
+            primary: NexthopMember::Uni(mk_uni("10.0.0.1", 20)),
+            backup: NexthopMember::Uni(mk_uni("10.0.0.5", 21)),
+        };
+        let roles: Vec<bool> = pro.roles().iter().map(|(_, b)| *b).collect();
+        assert_eq!(roles, vec![false, true]);
+        assert_eq!(pro.roles()[0].0, &pro.primary);
+        assert_eq!(pro.roles()[1].0, &pro.backup);
     }
 
     #[test]

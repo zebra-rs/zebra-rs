@@ -4,7 +4,10 @@ use serde_json::Value;
 
 use crate::{
     config::{Args, Builder},
-    rib::{Label, Nexthop, nexthop::NexthopList, nexthop::NexthopMember, nexthop::NexthopUni},
+    rib::{
+        Label, Nexthop,
+        nexthop::{NexthopList, NexthopMember, NexthopProtect, NexthopUni},
+    },
 };
 
 use super::{
@@ -106,11 +109,11 @@ pub struct NexthopJson {
     pub weight: Option<u8>,
     pub metric: Option<u32>,
     pub mpls_labels: Vec<Value>,
-    /// True when this nexthop is a backup entry inside a
-    /// `Nexthop::List`: anything in the list beyond the first
-    /// member (the primary at the lowest metric) is a TI-LFA-style
-    /// repair path. Omitted from JSON when false so non-FRR routes
-    /// keep their pre-flag schema.
+    /// True when this nexthop is a repair path: the `backup` member
+    /// of a `Nexthop::Protect`, or anything beyond the first member
+    /// (the primary at the lowest metric) in a `Nexthop::List`.
+    /// Omitted from JSON when false so non-FRR routes keep their
+    /// pre-flag schema.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub backup: bool,
 }
@@ -198,30 +201,18 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
             .enumerate()
             .flat_map(|(idx, member)| {
                 let is_backup = idx > 0;
-                let unis: Vec<&NexthopUni> = match member {
-                    NexthopMember::Uni(u) => vec![u],
-                    NexthopMember::Multi(m) => m.nexthops.iter().collect(),
-                };
-                unis.into_iter().map(move |uni| NexthopJson {
-                    address: Some(uni.addr.to_string()),
-                    interface: rib.link_name(uni.ifindex().unwrap_or(0)),
-                    weight: Some(uni.weight),
-                    metric: Some(uni.metric),
-                    mpls_labels: uni
-                        .mpls
-                        .iter()
-                        .map(|label| match label {
-                            Label::Implicit(l) => serde_json::json!({
-                                "label": l,
-                                "label_type": "implicit"
-                            }),
-                            Label::Explicit(l) => serde_json::json!({
-                                "label": l
-                            }),
-                        })
-                        .collect(),
-                    backup: is_backup,
-                })
+                member
+                    .iter_unis()
+                    .map(move |uni| nexthop_uni_to_json(rib, uni, is_backup))
+            })
+            .collect(),
+        Nexthop::Protect(pro) => pro
+            .roles()
+            .into_iter()
+            .flat_map(|(member, is_backup)| {
+                member
+                    .iter_unis()
+                    .map(move |uni| nexthop_uni_to_json(rib, uni, is_backup))
             })
             .collect(),
     };
@@ -243,6 +234,32 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
         metric: e.metric,
         nexthops,
         interface_name,
+    }
+}
+
+/// One `NexthopUni` leaf as JSON, with its protection role. Shared by
+/// the `Nexthop::List` and `Nexthop::Protect` arms of the IPv4 / IPv6
+/// JSON converters.
+fn nexthop_uni_to_json(rib: &Rib, uni: &NexthopUni, is_backup: bool) -> NexthopJson {
+    NexthopJson {
+        address: Some(uni.addr.to_string()),
+        interface: rib.link_name(uni.ifindex().unwrap_or(0)),
+        weight: Some(uni.weight),
+        metric: Some(uni.metric),
+        mpls_labels: uni
+            .mpls
+            .iter()
+            .map(|label| match label {
+                Label::Implicit(l) => serde_json::json!({
+                    "label": l,
+                    "label_type": "implicit"
+                }),
+                Label::Explicit(l) => serde_json::json!({
+                    "label": l
+                }),
+            })
+            .collect(),
+        backup: is_backup,
     }
 }
 
@@ -324,30 +341,18 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
             .enumerate()
             .flat_map(|(idx, member)| {
                 let is_backup = idx > 0;
-                let unis: Vec<&NexthopUni> = match member {
-                    NexthopMember::Uni(u) => vec![u],
-                    NexthopMember::Multi(m) => m.nexthops.iter().collect(),
-                };
-                unis.into_iter().map(move |uni| NexthopJson {
-                    address: Some(uni.addr.to_string()),
-                    interface: rib.link_name(uni.ifindex().unwrap_or(0)),
-                    weight: Some(uni.weight),
-                    metric: Some(uni.metric),
-                    mpls_labels: uni
-                        .mpls
-                        .iter()
-                        .map(|label| match label {
-                            Label::Implicit(l) => serde_json::json!({
-                                "label": l,
-                                "label_type": "implicit"
-                            }),
-                            Label::Explicit(l) => serde_json::json!({
-                                "label": l
-                            }),
-                        })
-                        .collect(),
-                    backup: is_backup,
-                })
+                member
+                    .iter_unis()
+                    .map(move |uni| nexthop_uni_to_json(rib, uni, is_backup))
+            })
+            .collect(),
+        Nexthop::Protect(pro) => pro
+            .roles()
+            .into_iter()
+            .flat_map(|(member, is_backup)| {
+                member
+                    .iter_unis()
+                    .map(move |uni| nexthop_uni_to_json(rib, uni, is_backup))
             })
             .collect(),
     };
@@ -396,10 +401,10 @@ pub fn rib_entry_show(
     write!(buf, "{} {}", e.selected(), prefix)?;
     let bracket_col = buf.len() + 1;
 
-    // `Nexthop::List` prints a per-path bracket in its own arm (each
-    // repair path can carry a different metric), so skip the shared
-    // route-level bracket for it.
-    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_)) {
+    // `Nexthop::List` / `Nexthop::Protect` print a per-path bracket in
+    // their own arm (each repair path can carry a different metric),
+    // so skip the shared route-level bracket for them.
+    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_) | Nexthop::Protect(_)) {
         write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
     }
 
@@ -461,6 +466,9 @@ pub fn rib_entry_show(
             Nexthop::List(pro) => {
                 write_nexthop_list(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
             }
+            Nexthop::Protect(pro) => {
+                write_nexthop_protect(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
+            }
         }
     }
     Ok(buf)
@@ -483,10 +491,10 @@ pub fn rib_entry_show_v6(
     write!(buf, "{} {}", e.selected(), prefix)?;
     let bracket_col = buf.len() + 1;
 
-    // `Nexthop::List` prints a per-path bracket in its own arm (each
-    // repair path can carry a different metric), so skip the shared
-    // route-level bracket for it.
-    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_)) {
+    // `Nexthop::List` / `Nexthop::Protect` print a per-path bracket in
+    // their own arm (each repair path can carry a different metric),
+    // so skip the shared route-level bracket for them.
+    if !e.is_connected() && !matches!(e.nexthop, Nexthop::List(_) | Nexthop::Protect(_)) {
         write!(buf, " [{}/{}]", &e.distance, &e.metric).unwrap();
     }
 
@@ -570,19 +578,16 @@ pub fn rib_entry_show_v6(
             Nexthop::List(pro) => {
                 write_nexthop_list(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
             }
+            Nexthop::Protect(pro) => {
+                write_nexthop_protect(&mut buf, rib, e, pro, marker_col, bracket_col, &uptime);
+            }
         }
     }
     Ok(buf)
 }
 
 /// Render the `Nexthop::List` arm shared by the IPv4 and IPv6 one-line
-/// route views. Each path prints on its own line carrying its own
-/// `[distance/metric]` bracket — the metric is per-nexthop, so a TI-LFA
-/// repair path can advertise a higher cost than the primary. Backup
-/// paths (every member past the first) drop the FIB `*>` marker for a
-/// `?` repair marker in the same column, e.g.:
-///   L2 *> 10.0.0.0/24 [0/100] via 10.211.55.1, enp0s5, 00:04:15
-///      *?             [0/1002] via 10.211.55.1, enp0s5, 00:04:15
+/// route views: every member past the first is a backup.
 fn write_nexthop_list(
     buf: &mut String,
     rib: &Rib,
@@ -592,17 +597,52 @@ fn write_nexthop_list(
     bracket_col: usize,
     uptime: &str,
 ) {
+    let members: Vec<(&NexthopMember, bool)> = pro
+        .nexthops
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| (m, idx > 0))
+        .collect();
+    write_protected_paths(buf, rib, e, &members, marker_col, bracket_col, uptime);
+}
+
+/// `Nexthop::Protect` sibling: the roles come off the struct's fields
+/// instead of the sort position.
+fn write_nexthop_protect(
+    buf: &mut String,
+    rib: &Rib,
+    e: &RibEntry,
+    pro: &NexthopProtect,
+    marker_col: usize,
+    bracket_col: usize,
+    uptime: &str,
+) {
+    write_protected_paths(buf, rib, e, &pro.roles(), marker_col, bracket_col, uptime);
+}
+
+/// Render a primary-plus-repair path set in the one-line route views.
+/// Each path prints on its own line carrying its own
+/// `[distance/metric]` bracket — the metric is per-nexthop, so a TI-LFA
+/// repair path can advertise a higher cost than the primary. Backup
+/// paths drop the FIB `*>` marker for a `?` repair marker in the same
+/// column, e.g.:
+///   L2 *> 10.0.0.0/24 [0/100] via 10.211.55.1, enp0s5, 00:04:15
+///      *?             [0/1002] via 10.211.55.1, enp0s5, 00:04:15
+fn write_protected_paths(
+    buf: &mut String,
+    rib: &Rib,
+    e: &RibEntry,
+    members: &[(&NexthopMember, bool)],
+    marker_col: usize,
+    bracket_col: usize,
+    uptime: &str,
+) {
     // Backups keep the route's FIB state in the marker column and add a
     // `?` to flag the repair path: `*? ` (FIB) or ` ? ` (not).
     let backup_marker = if e.fib { "*? " } else { " ? " };
     let mut row = 0;
-    for (member_idx, member) in pro.nexthops.iter().enumerate() {
-        let is_backup = member_idx > 0;
-        let unis: Vec<&NexthopUni> = match member {
-            NexthopMember::Uni(u) => vec![u],
-            NexthopMember::Multi(m) => m.nexthops.iter().collect(),
-        };
-        for uni in unis {
+    for (member, is_backup) in members {
+        for uni in member.iter_unis() {
             if row == 0 {
                 // First path shares the line already carrying the tag,
                 // FIB marker and prefix; just append its bracket.
@@ -610,8 +650,8 @@ fn write_nexthop_list(
             } else {
                 // Continuation path: rebuild the marker and bracket
                 // columns so each line shows its own [distance/metric]
-                // aligned under the first, with backups marked by `>>`.
-                let marker = if is_backup { backup_marker } else { "" };
+                // aligned under the first, with backups marked by `?`.
+                let marker = if *is_backup { backup_marker } else { "" };
                 buf.push_str(&list_continuation_prefix(
                     marker_col,
                     bracket_col,
@@ -702,10 +742,16 @@ fn fmt_srv6_segs(segs: &[std::net::Ipv6Addr]) -> String {
 /// offset convention. Plain `Nexthop::Uni` / `Multi` callers always
 /// pass index 0.
 fn fmt_protection_role(idx: usize) -> &'static str {
-    if idx == 0 {
-        "Protected"
-    } else {
+    protection_role(idx > 0)
+}
+
+/// Protection role from an explicit backup flag — the `Nexthop::
+/// Protect` form, where the role is a field rather than a position.
+fn protection_role(is_backup: bool) -> &'static str {
+    if is_backup {
         "Backup (TI-LFA)"
+    } else {
+        "Protected"
     }
 }
 
@@ -759,6 +805,7 @@ fn entry_has_mpls(e: &RibEntry) -> bool {
             NexthopMember::Uni(u) => uni_has(u),
             NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
         }),
+        Nexthop::Protect(p) => p.iter_unis().any(uni_has),
         Nexthop::Link(_) => false,
     }
 }
@@ -776,6 +823,7 @@ fn entry_has_srv6(e: &RibEntry) -> bool {
             NexthopMember::Uni(u) => uni_has(u),
             NexthopMember::Multi(mm) => mm.nexthops.iter().any(uni_has),
         }),
+        Nexthop::Protect(p) => p.iter_unis().any(uni_has),
         Nexthop::Link(_) => false,
     }
 }
@@ -857,13 +905,16 @@ fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
         Nexthop::List(list) => {
             for (idx, member) in list.nexthops.iter().enumerate() {
                 let role = fmt_protection_role(idx);
-                match member {
-                    NexthopMember::Uni(u) => write_descriptor_block_v4(buf, rib, u, role),
-                    NexthopMember::Multi(m) => {
-                        for u in m.nexthops.iter() {
-                            write_descriptor_block_v4(buf, rib, u, role);
-                        }
-                    }
+                for u in member.iter_unis() {
+                    write_descriptor_block_v4(buf, rib, u, role);
+                }
+            }
+        }
+        Nexthop::Protect(pro) => {
+            for (member, is_backup) in pro.roles() {
+                let role = protection_role(is_backup);
+                for u in member.iter_unis() {
+                    write_descriptor_block_v4(buf, rib, u, role);
                 }
             }
         }
@@ -884,13 +935,16 @@ fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, nh: &Nexthop) {
         Nexthop::List(list) => {
             for (idx, member) in list.nexthops.iter().enumerate() {
                 let role = fmt_protection_role(idx);
-                match member {
-                    NexthopMember::Uni(u) => write_descriptor_block_v6(buf, rib, u, role),
-                    NexthopMember::Multi(m) => {
-                        for u in m.nexthops.iter() {
-                            write_descriptor_block_v6(buf, rib, u, role);
-                        }
-                    }
+                for u in member.iter_unis() {
+                    write_descriptor_block_v6(buf, rib, u, role);
+                }
+            }
+        }
+        Nexthop::Protect(pro) => {
+            for (member, is_backup) in pro.roles() {
+                let role = protection_role(is_backup);
+                for u in member.iter_unis() {
+                    write_descriptor_block_v6(buf, rib, u, role);
                 }
             }
         }

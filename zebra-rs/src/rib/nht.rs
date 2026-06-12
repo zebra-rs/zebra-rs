@@ -201,6 +201,7 @@ fn entry_unis(nexthop: &Nexthop) -> Vec<&NexthopUni> {
         Nexthop::Uni(u) => vec![u],
         Nexthop::Multi(m) => m.nexthops.iter().collect(),
         Nexthop::List(l) => l.iter_unis().collect(),
+        Nexthop::Protect(p) => p.iter_unis().collect(),
         _ => Vec::new(),
     }
 }
