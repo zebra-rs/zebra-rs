@@ -132,9 +132,9 @@ PRs land.
 
 | Step | Title | Depends on | Status |
 |---|---|---|---|
-| 0.1 | Bench harness + baseline profile | — | ⏳ |
-| A.1 | Flush job extraction (pure function) | — | ⏳ |
-| A.2 | Flush offload to worker | A.1 | ⏳ |
+| 0.1 | Bench harness + baseline profile | — | PR #1406 |
+| A.1 | Flush job extraction (pure function) | — | PR #1408 |
+| A.2 | Flush offload to worker | A.1 | PR #1411 (stacked on #1408) |
 | B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ⏳ |
 | B.2 | Shard message protocol + label sub-blocks | B.1 | ⏳ |
 | B.3 | Spawn shard task at N=1 | B.2 | ⏳ |
@@ -374,14 +374,23 @@ roughly double the egress work. Both are exactly the costs that shard
 (per-prefix re-election) and update-worker (egress encode) parallelism
 attack.
 
-Per-step results (same matrix) land here as A.2 / B.5 / C.4 complete:
+Per-step results (same matrix) land here as A.2 / B.5 / C.4 complete.
+Re-running the matrix on the unchanged baseline binary showed ~10%
+run-to-run variance (announce counts vary 2× with best-path-flip
+timing), so single-run deltas below that are noise.
 
 | Step | 4×100k | 8×100k | 4×500k |
 |---|---|---|---|
 | Baseline | 1.564s | 4.556s | 8.147s |
-| A.2 | | | |
+| A.2 (PR #1411, 2 runs) | 1.64–1.76s | 4.65–4.70s | 7.55s |
 | B.5 (N=1) | | | |
 | C.4 (best) | | | |
+
+A.2 reading: parity within noise at the 100k scales, ~7% at 2M paths.
+Expected — A.2 offloads the per-group encode, whose cost scales with
+member fan-out, and this matrix has only 2 receivers. The structural
+win is the freed main loop; C.2 (update-workers) is where egress
+parallelism actually pays.
 
 ## 10. Caveats & out of scope
 
