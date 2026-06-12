@@ -1,0 +1,27 @@
+# Phase 2: RA on, interface-keyed neighbor declared, one initial
+# network. adv-interval is pinned to 1s: the route this feature
+# injects AFTER the session is Established reaches the peer through
+# the update-group debounce flush, and the eBGP default of 30s would
+# outlive the scenario waits. (The initial network below rides the
+# route_sync dump instead and never needed the timer.)
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

@@ -1,0 +1,22 @@
+# Phase 2 for z2 — mirror of z1-full.yaml with the AS numbers swapped.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.2/32

@@ -2408,16 +2408,16 @@ fn route_advertise_to_addpath(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
         .filter(|(_, p)| p.opt.is_add_path_send(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
 
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
@@ -2485,16 +2485,16 @@ fn route_withdraw_from_addpath(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
         .filter(|(_, p)| p.opt.is_add_path_send(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
 
         if let Some(ref rd) = rd {
             peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
@@ -2584,7 +2584,7 @@ pub(super) fn route_advertise_to_peers(
     // Get the new best path (last entry in selected vector)
     let new_best = selected.last();
 
-    // Collect peer addresses that need updates to avoid borrow checker issues
+    // Collect peer idents that need updates to avoid borrow checker issues
     let (afi, safi) = if rd.is_some() {
         (Afi::Ip, Safi::MplsVpn)
     } else {
@@ -2592,12 +2592,12 @@ pub(super) fn route_advertise_to_peers(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
         .filter(|(_, p)| !p.opt.is_add_path_send(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
     // Per-call memo: outcome cached per update-group id for the
@@ -2607,8 +2607,8 @@ pub(super) fn route_advertise_to_peers(
     // is always run on a non-source peer).
     let mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome> = BTreeMap::new();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
 
         let add_path = peer.opt.is_add_path_send(afi, safi);
         let group_id = peer.update_group_id.get(&afi_safi).cloned();
@@ -2848,15 +2848,15 @@ pub fn route_withdraw_evpn_to_peers(
     prefix: EvpnPrefix,
     peers: &mut PeerMap,
 ) {
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let route = evpn_route_from_prefix(&rd, &prefix, 0);
         // Drop a queued advertise for the same route from the peer's
         // cache so flush_evpn doesn't ship a now-stale add after we
@@ -2943,15 +2943,15 @@ pub fn route_advertise_evpn_to_peers(
         return;
     };
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
 
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
@@ -4751,15 +4751,15 @@ fn srpolicy_reflect(
     };
     let (source_ibgp, source_rid) = (src.is_ibgp(), src.remote_id);
 
-    let dests: Vec<IpAddr> = peers
-        .iter()
+    let dests: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.ident != source_ident)
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
-    for daddr in dests {
-        let Some(peer) = peers.get_mut(&daddr) else {
+    for ident in dests {
+        let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
         };
         let Some(out_attr) = super::sr_policy::reflect_attr(
@@ -4795,15 +4795,15 @@ fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &m
         return;
     };
     let source_ibgp = src.is_ibgp();
-    let dests: Vec<IpAddr> = peers
-        .iter()
+    let dests: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.ident != source_ident)
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
-    for daddr in dests {
-        let Some(peer) = peers.get_mut(&daddr) else {
+    for ident in dests {
+        let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
         };
         if !super::sr_policy::reflect_withdraw_to(
@@ -5032,12 +5032,12 @@ pub(super) fn srpolicy_origin_sync(bgp: &mut Bgp, name: &str) {
 }
 
 /// Addresses of established peers that negotiated SAFI 73 for `afi`.
-fn srpolicy_peer_addrs(bgp: &Bgp, afi: Afi) -> Vec<IpAddr> {
+fn srpolicy_peer_idents(bgp: &Bgp, afi: Afi) -> Vec<usize> {
     bgp.peers
-        .iter()
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect()
 }
 
@@ -5046,8 +5046,8 @@ fn srpolicy_peer_addrs(bgp: &Bgp, afi: Afi) -> Vec<IpAddr> {
 pub(super) fn srpolicy_origin_reach(bgp: &mut Bgp, nlri: SrPolicyNlri, attr: BgpAttr) {
     let afi = nlri.afi();
     let nhop = IpAddr::V4(bgp.router_id);
-    for paddr in srpolicy_peer_addrs(bgp, afi) {
-        let Some(peer) = bgp.peers.get_mut(&paddr) else {
+    for ident in srpolicy_peer_idents(bgp, afi) {
+        let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -5069,8 +5069,8 @@ pub(super) fn srpolicy_origin_reach(bgp: &mut Bgp, nlri: SrPolicyNlri, attr: Bgp
 /// Withdraw one local SR Policy NLRI from every established SAFI-73 peer.
 pub(super) fn srpolicy_origin_withdraw(bgp: &mut Bgp, nlri: SrPolicyNlri) {
     let afi = nlri.afi();
-    for paddr in srpolicy_peer_addrs(bgp, afi) {
-        let Some(peer) = bgp.peers.get_mut(&paddr) else {
+    for ident in srpolicy_peer_idents(bgp, afi) {
+        let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -5323,15 +5323,15 @@ pub fn route_advertise_flowspec_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
 
         let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path) else {
@@ -5349,15 +5349,15 @@ pub fn route_advertise_flowspec_to_peers(
 /// Withdraw a flow spec from every peer to which it was advertised
 /// (tracked via Adj-RIB-Out), sending one MP_UNREACH UPDATE each.
 pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &mut PeerMap) {
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         // Only withdraw what we actually advertised (skips the source
         // peer and any peer the announce-side policy suppressed).
         let advertised = {
@@ -6886,16 +6886,16 @@ pub(super) fn route_advertise_to_peers_v6(
     let (afi, safi) = (Afi::Ip6, Safi::Unicast);
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
         .filter(|(_, p)| !p.opt.is_add_path_send(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let add_path = peer.opt.is_add_path_send(afi, safi);
         let group_id = peer.update_group_id.get(&afi_safi).cloned();
 
@@ -6981,15 +6981,15 @@ pub(super) fn route_advertise_to_peers_vpnv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
                 // RFC 9494 §4.3: stale routes only go to LLGR peers.
@@ -7209,15 +7209,15 @@ pub(super) fn route_advertise_to_peers_labelv4(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip, Safi::MplsLabel);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
                 // RFC 9494 §4.3: stale routes only go to LLGR peers.
@@ -7265,15 +7265,15 @@ pub(super) fn route_advertise_to_peers_labelv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsLabel);
 
-    let peer_addrs: Vec<IpAddr> = peers
-        .iter()
+    let peer_idents: Vec<usize> = peers
+        .iter_all()
         .filter(|(_, p)| p.state.is_established())
         .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(addr, _)| *addr)
+        .map(|(_, p)| p.ident)
         .collect();
 
-    for peer_addr in peer_addrs {
-        let peer = peers.get_mut(&peer_addr).expect("peer exists");
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
                 // RFC 9494 §4.3: stale routes only go to LLGR peers.
