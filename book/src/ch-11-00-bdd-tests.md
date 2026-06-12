@@ -85,7 +85,7 @@ live topology directly — the namespaces are named `<feature-tag>_<node>`:
 
 ```sh
 sudo ip netns list
-sudo ip netns exec ospf_clear_neighbor_o1 vtyctl show "show ip ospf neighbor"
+sudo ip netns exec ospf_clear_neighbor_o1 vtyctl show "show ospf neighbor"
 sudo ip netns exec ospf_clear_neighbor_o1 ip route
 ```
 

@@ -54,21 +54,21 @@ Feature: OSPFv2 stub area drops Type-5 AS-External while keeping inter-area rout
 
     # --- Adjacencies are Full (the stub link only comes up when the
     #     E-bit matches between a and c). ---
-    Then show command "show ip ospf neighbor" in namespace "a" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.2"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.3"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "10.0.0.1"
+    Then show command "show ospf neighbor" in namespace "a" should contain "Full"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.2"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.3"
+    And show command "show ospf neighbor" in namespace "c" should contain "Full"
+    And show command "show ospf neighbor" in namespace "c" should contain "10.0.0.1"
 
     # --- The backbone router a installs the Type-5 external. ---
-    And show command "show ip ospf route" in namespace "a" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "a" should contain "192.168.1.0/24"
 
     # --- The stub router c learns the backbone loopback as an inter-area
     #     Type-3 summary (stub still floods Type-3 inward). ---
-    And show command "show ip ospf route" in namespace "c" should contain "10.0.0.2/32"
+    And show command "show ospf route" in namespace "c" should contain "10.0.0.2/32"
     # --- But c must NOT learn the Type-5 external: stub areas exclude
     #     AS-External, and externals are not re-advertised as Type-3. ---
-    And show command "show ip ospf route" in namespace "c" should not contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "c" should not contain "192.168.1.0/24"
 
     # --- Reachability across the area boundary works (Type-3); the ABR,
     #     which holds the Type-5, reaches the external. ---

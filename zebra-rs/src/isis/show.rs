@@ -297,7 +297,7 @@ fn show_isis_graceful_restart(
 
 /// `show isis checkpoint` — read the on-disk graceful-restart
 /// checkpoint and pretty-print its summary. Mirrors
-/// `show ip ospf checkpoint`. JSON mode emits the full CBOR-decoded
+/// `show ospf checkpoint`. JSON mode emits the full CBOR-decoded
 /// struct via serde for ops inspection; the text mode is a
 /// human-friendly summary keyed off the same fields.
 fn show_isis_checkpoint(

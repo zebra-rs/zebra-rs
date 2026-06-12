@@ -62,7 +62,7 @@ impl Default for GracefulRestartConfig {
 ///     flooded through the area; see `lsdb_snapshot`.
 ///
 /// `reason`, `grace_period`, `entered_at` are populated for the
-/// `show ip ospf graceful-restart` output (`show.rs`).
+/// `show ospf graceful-restart` output (`show.rs`).
 /// `expire_timer` holds the drop-handle for the grace-period timer;
 /// Tokio's runtime is the only consumer.
 #[derive(Debug)]

@@ -17,7 +17,7 @@ pub fn spawn_ospf(config: &ConfigManager) {
     // `"ospf"` is the default-instance proto label; per-VRF children
     // get `"ospf:vrf:<name>"`. `rib_subscriber` + `config.tx` let the
     // default task mint per-VRF RIB subscriptions and (de)register
-    // `show ip ospf vrf <name>`.
+    // `show ospf vrf <name>`.
     // BFD is eager-spawned before OSPF in `commit_config`, so this
     // handle is live; threaded in so per-interface `bfd` can subscribe.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();

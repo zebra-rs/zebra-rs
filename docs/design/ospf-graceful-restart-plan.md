@@ -91,7 +91,7 @@ config-surface change.
 3. Mirror in `crates/ospf-packet/src/v3.rs`: function code 11,
    link-local flooding scope `0x0008`; same first two sub-TLVs
    (no v3 IP Interface Address — RFC 5187 §2.1).
-4. Decode-only `show ip ospf database opaque-link` /
+4. Decode-only `show ospf database opaque-link` /
    `show ipv6 ospf database link` rendering (mirror existing
    `show_router_info_detail` shape in `show.rs:1282`).
 5. Fixture decode tests under `crates/ospf-packet/tests/`. Use
@@ -142,7 +142,7 @@ human-readable Grace LSA when one is in the LSDB.
 6. **`gr_helper` capability bit.** Set in
    `srmpls.rs:router_info_lsa_build` when helper mode is
    enabled (Phase 4 config).
-7. **`show ip ospf graceful-restart`** — per-interface +
+7. **`show ospf graceful-restart`** — per-interface +
    per-neighbor helper status table, exit-reason history (small
    ring buffer on the area or instance).
 

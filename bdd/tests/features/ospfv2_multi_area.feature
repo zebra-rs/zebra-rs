@@ -85,20 +85,20 @@ Feature: OSPFv2 multi-area routing across two Area Border Routers
     And I wait 60 seconds
 
     # --- Adjacencies are Full (backbone + both area uplinks). ---
-    Then show command "show ip ospf neighbor" in namespace "a" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "a" should contain "10.0.0.5"
-    And show command "show ip ospf neighbor" in namespace "e" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "e" should contain "10.0.0.1"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "Full"
-    And show command "show ip ospf neighbor" in namespace "c" should contain "10.0.0.6"
+    Then show command "show ospf neighbor" in namespace "a" should contain "Full"
+    And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.5"
+    And show command "show ospf neighbor" in namespace "e" should contain "Full"
+    And show command "show ospf neighbor" in namespace "e" should contain "10.0.0.1"
+    And show command "show ospf neighbor" in namespace "c" should contain "Full"
+    And show command "show ospf neighbor" in namespace "c" should contain "10.0.0.6"
 
     # --- Inter-area routes are installed (a prefix that is ONLY reachable
     #     across an area boundary, so its presence proves Type-3 import). ---
     # e (area 1) learns c (backbone) and f (area 2) as inter-area routes.
-    And show command "show ip ospf route" in namespace "e" should contain "10.0.0.3/32"
-    And show command "show ip ospf route" in namespace "e" should contain "10.0.0.6/32"
+    And show command "show ospf route" in namespace "e" should contain "10.0.0.3/32"
+    And show command "show ospf route" in namespace "e" should contain "10.0.0.6/32"
     # f (area 2) learns e (area 1) the same way.
-    And show command "show ip ospf route" in namespace "f" should contain "10.0.0.5/32"
+    And show command "show ospf route" in namespace "f" should contain "10.0.0.5/32"
 
     # --- Inter-area reachability end to end. ---
     # Area 1 host e to area 2 host f and back — the headline cross-area ping.
@@ -114,9 +114,9 @@ Feature: OSPFv2 multi-area routing across two Area Border Routers
     # (d's a-d address 10.0.14.2) at [20]; with the default cost 10 the
     # direct link would instead win at [10], so "[20] via 10.0.14.2" only
     # appears when the configured cost is honored.
-    And show command "show ip ospf route" in namespace "a" should contain "[20] via 10.0.14.2"
+    And show command "show ospf route" in namespace "a" should contain "[20] via 10.0.14.2"
     # Mirror proof for the cost-20 c-d link (d's c-d address 10.0.34.2).
-    And show command "show ip ospf route" in namespace "c" should contain "[20] via 10.0.34.2"
+    And show command "show ospf route" in namespace "c" should contain "[20] via 10.0.34.2"
 
     # Teardown.
     When I stop zebra-rs in namespace "a"

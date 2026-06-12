@@ -112,7 +112,7 @@ the same value:
 
 ```
 # show interface          → live kernel MTU
-# show ip ospf interface  → "ifindex 2, MTU 1400 bytes, BW 0 Mbit ..."
+# show ospf interface  → "ifindex 2, MTU 1400 bytes, BW 0 Mbit ..."
 # show isis interface detail → "Type: ..., SNPA: ..., MTU: 1400"
 ```
 

@@ -188,7 +188,7 @@ module configure {
       // Juniper-style `clear ospf neighbor [<router-id>]`. The bare
       // (presence) form resets every OSPFv2 adjacency on the
       // instance; with a value it resets only the neighbor whose OSPF
-      // Router-ID (the "Neighbor ID" column in `show ip ospf
+      // Router-ID (the "Neighbor ID" column in `show ospf
       // neighbor`) matches. The Router-ID is a dotted-quad, so the
       // arg type is `inet:ipv4-address`; the runtime matches it
       // against `Neighbor.ident.router_id`, not the interface address.

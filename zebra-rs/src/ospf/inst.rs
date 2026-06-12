@@ -122,13 +122,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// (keyed by destination vertex id), mirror of `spf_result`'s
     /// single-area snapshot. Produced graph-only on the SPF worker;
     /// resolved to MPLS labels + stamped onto the RIB on the main task.
-    /// Read by `show ip ospf ti-lfa`. `None` until the first run with
+    /// Read by `show ospf ti-lfa`. `None` until the first run with
     /// TI-LFA enabled.
     pub tilfa_result: Option<BTreeMap<usize, Vec<spf::RepairPath>>>,
     /// Per-Flexible-Algorithm SPF trees (RFC 9350), keyed by algo id
     /// (128..=255 from `flex_algo.config`). `None` for an algo whose
     /// per-algo graph had no source this cycle. Recomputed each SPF
-    /// run alongside `spf_result`; read by `show ip ospf flex-algo`.
+    /// run alongside `spf_result`; read by `show ospf flex-algo`.
     pub spf_flex_algo: BTreeMap<u8, Option<BTreeMap<usize, Path>>>,
     /// Per-Flexible-Algorithm IPv4 RIB, keyed by algo id. Each prefix
     /// carries the per-algo SPF nexthops + the prefix's per-algo
@@ -595,7 +595,7 @@ impl<V: OspfVersion> Ospf<V> {
     /// Reset OSPF adjacencies on operator request (`clear ospf
     /// neighbor [<router-id>]`). `None` resets every neighbor on
     /// every link; `Some(id)` resets only the neighbor whose OSPF
-    /// Router-ID (the "Neighbor ID" column in `show ip ospf
+    /// Router-ID (the "Neighbor ID" column in `show ospf
     /// neighbor`) is `id`. We match on `ident.router_id`, but key the
     /// `Message::Nfsm` teardown by the `nbrs` map key (the interface
     /// source IP for v2) the handler looks the neighbor up by.
@@ -625,7 +625,7 @@ impl<V: OspfVersion> Ospf<V> {
 
     /// Candidate completions for `ext:dynamic "ospf:neighbor"` — the
     /// current neighbor Router-IDs (the "Neighbor ID" column in
-    /// `show ip ospf neighbor`), since `clear ospf neighbor
+    /// `show ospf neighbor`), since `clear ospf neighbor
     /// <router-id>` matches on the Router-ID, not the interface
     /// address. Deduped + sorted via `BTreeSet` (a Router-ID can
     /// appear on more than one link via parallel adjacencies).
@@ -9009,7 +9009,7 @@ fn build_rib_from_spf(
     // empty (directly-attached) nexthops, mirroring v3's
     // `build_rib6_from_spf`. The kernel's connected route (admin 0)
     // wins over the OSPF route (admin 110) in the FIB, so this only
-    // changes `show ip ospf route` — bringing it into parity with FRR.
+    // changes `show ospf route` — bringing it into parity with FRR.
     for (node, nhops) in spf_result {
         let is_self = *node == source;
 
@@ -11076,7 +11076,7 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
 
     // Store the SPF result, graph, and TI-LFA repair lists on the
     // instance (single last-computed-area snapshot, like spf_result).
-    // `show ip ospf ti-lfa` renders tilfa_result against graph.
+    // `show ospf ti-lfa` renders tilfa_result against graph.
     top.spf_results.insert(area_id, spf_result.clone());
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
@@ -11097,7 +11097,7 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
     }
     top.rib_flex_algo = rib_flex_algo;
 
-    // Per-algo SPF trees, for `show ip ospf flex-algo`. Per-algo
+    // Per-algo SPF trees, for `show ospf flex-algo`. Per-algo
     // Prefix-SID MPLS-ILM install is a follow-up.
     top.spf_flex_algo = flex_algos
         .into_iter()

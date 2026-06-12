@@ -13,7 +13,7 @@ use crate::spf;
 use super::ifsm::IfsmState;
 use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
 
-// JSON output structs for show ip ospf interface.
+// JSON output structs for show ospf interface.
 #[derive(Serialize)]
 struct OspfInterfaceJson {
     name: String,
@@ -46,7 +46,7 @@ struct OspfInterfaceJson {
     adjacent_count: usize,
 }
 
-// JSON output structs for show ip ospf neighbor.
+// JSON output structs for show ospf neighbor.
 #[derive(Serialize)]
 struct OspfNeighborJson {
     neighbor_id: String,
@@ -61,7 +61,7 @@ struct OspfNeighborJson {
     db_summary_list: usize,
 }
 
-// JSON output structs for show ip ospf neighbor detail.
+// JSON output structs for show ospf neighbor detail.
 #[derive(Serialize)]
 struct OspfNeighborDetailJson {
     neighbor_id: String,
@@ -89,7 +89,7 @@ struct OspfNeighborDetailJson {
     ls_retransmission_list: usize,
 }
 
-// JSON output structs for show ip ospf database.
+// JSON output structs for show ospf database.
 #[derive(Serialize)]
 struct OspfDatabaseJson {
     router_id: String,
@@ -116,7 +116,7 @@ struct OspfLsaSummaryJson {
     link_count: Option<usize>,
 }
 
-// JSON output structs for show ip ospf database detail.
+// JSON output structs for show ospf database detail.
 #[derive(Serialize)]
 struct OspfDatabaseDetailJson {
     router_id: String,
@@ -168,37 +168,37 @@ struct OspfNetworkLsaDetailJson {
 impl Ospf {
     pub fn show_build(&mut self) {
         self.show_cb = Builder::<ShowCallback>::default()
-            .path("/show/ip/ospf")
+            .path("/show/ospf")
             .set(show_ospf)
-            .path("/show/ip/ospf/interface")
+            .path("/show/ospf/interface")
             .set(show_ospf_interface)
-            .path("/show/ip/ospf/neighbor")
+            .path("/show/ospf/neighbor")
             .set(show_ospf_neighbor)
-            .path("/show/ip/ospf/neighbor/detail")
+            .path("/show/ospf/neighbor/detail")
             .set(show_ospf_neighbor_detail)
-            .path("/show/ip/ospf/database")
+            .path("/show/ospf/database")
             .set(show_ospf_database)
-            .path("/show/ip/ospf/database/detail")
+            .path("/show/ospf/database/detail")
             .set(show_ospf_database_detail)
-            .path("/show/ip/ospf/route")
+            .path("/show/ospf/route")
             .set(show_ospf_route)
-            .path("/show/ip/ospf/spf")
+            .path("/show/ospf/spf")
             .set(show_ospf_spf)
-            .path("/show/ip/ospf/flex-algo")
+            .path("/show/ospf/flex-algo")
             .set(show_ospf_flex_algo)
-            .path("/show/ip/ospf/graph")
+            .path("/show/ospf/graph")
             .set(show_ospf_graph)
-            .path("/show/ip/ospf/ti-lfa")
+            .path("/show/ospf/ti-lfa")
             .set(show_ospf_tilfa)
-            .path("/show/ip/ospf/repair-list")
+            .path("/show/ospf/repair-list")
             .set(show_ospf_repair_list)
-            .path("/show/ip/ospf/repair-list/detail")
+            .path("/show/ospf/repair-list/detail")
             .set(show_ospf_repair_list_detail)
-            .path("/show/ip/ospf/segment-routing")
+            .path("/show/ospf/segment-routing")
             .set(show_ospf_segment_routing)
-            .path("/show/ip/ospf/graceful-restart")
+            .path("/show/ospf/graceful-restart")
             .set(show_ospf_graceful_restart)
-            .path("/show/ip/ospf/checkpoint")
+            .path("/show/ospf/checkpoint")
             .set(show_ospf_checkpoint)
             .map();
     }
@@ -1331,7 +1331,7 @@ fn show_ospf_database_detail(
 /// Brief-format hold-remaining cell. For self-originated entries
 /// the refresh-remaining is appended in parentheses, e.g.
 /// `3581s (1781s)`. Reads the actual `Timer::remaining()` so a
-/// missing or wrong timer surfaces in `show ip ospf database`
+/// missing or wrong timer surfaces in `show ospf database`
 /// rather than being masked by a derived value.
 fn fmt_hold(lsa: &super::lsdb::Lsa) -> String {
     let hold = match lsa.hold_remaining() {
@@ -1353,7 +1353,7 @@ fn fmt_hold(lsa: &super::lsdb::Lsa) -> String {
 /// remaining (every entry) and refresh timer remaining (only
 /// self-originated entries). Reads `Timer::remaining()` directly
 /// so any miscalculation or missing-timer bug surfaces in
-/// `show ip ospf database` instead of being silently masked.
+/// `show ospf database` instead of being silently masked.
 fn write_timer_remaining(
     out: &mut String,
     lsa: &super::lsdb::Lsa,
@@ -1695,7 +1695,7 @@ fn show_ospf_spf(
     Ok(buf)
 }
 
-/// `show ip ospf flex-algo` — for each configured Flexible Algorithm
+/// `show ospf flex-algo` — for each configured Flexible Algorithm
 /// (RFC 9350): its local definition plus the FAD-filtered per-algo SPF
 /// tree (the routers reachable under that algorithm's constraints).
 fn show_ospf_flex_algo(
@@ -2005,8 +2005,8 @@ fn show_ospf_graph(
 }
 
 // ---------------------------------------------------------------------
-// TI-LFA (RFC 9490) show commands: `show ip ospf ti-lfa` (graph-level
-// per-destination repair lists) and `show ip ospf repair-list` (the
+// TI-LFA (RFC 9490) show commands: `show ospf ti-lfa` (graph-level
+// per-destination repair lists) and `show ospf repair-list` (the
 // repair backups actually stamped onto the installed RIB).
 // ---------------------------------------------------------------------
 
@@ -2098,7 +2098,7 @@ fn collect_ospf_repair_rows(ospf: &Ospf) -> Vec<RepairRowJson> {
     rows
 }
 
-/// `show ip ospf repair-list` — the TI-LFA repair backups installed on
+/// `show ospf repair-list` — the TI-LFA repair backups installed on
 /// the RIB, one line per protected prefix with its primary and repair
 /// next-hops and the SR-MPLS repair label stack.
 fn show_ospf_repair_list(
@@ -2137,7 +2137,7 @@ fn show_ospf_repair_list(
     Ok(buf)
 }
 
-/// `show ip ospf repair-list detail` — same rows as `repair-list`, but
+/// `show ospf repair-list detail` — same rows as `repair-list`, but
 /// expanded with per-segment label breakdown and the egress ifindex /
 /// metric of each leg.
 fn show_ospf_repair_list_detail(
@@ -2206,7 +2206,7 @@ struct TilfaJson {
     destinations: Vec<TilfaDestJson>,
 }
 
-/// `show ip ospf ti-lfa` — the graph-level per-destination repair
+/// `show ospf ti-lfa` — the graph-level per-destination repair
 /// paths from the most recent SPF (before RIB stamping), each as a
 /// first-hop plus the SR segment list. Useful for confirming the
 /// algorithm produced a repair even when label resolution later
@@ -2292,7 +2292,7 @@ fn show_ospf_tilfa(
     Ok(buf)
 }
 
-/// `show ip ospf graceful-restart` (RFC 3623 helper status).
+/// `show ospf graceful-restart` (RFC 3623 helper status).
 /// Renders the instance-wide policy followed by a per-neighbor
 /// table of currently-active helper sessions. Plain-text only
 /// for now — the JSON shape can land in 2c-iii alongside
@@ -2356,7 +2356,7 @@ fn show_ospf_graceful_restart(
     Ok(buf)
 }
 
-/// `show ip ospf checkpoint` — debug entry for the
+/// `show ospf checkpoint` — debug entry for the
 /// graceful-restart storage layer. Reads the on-disk checkpoint
 /// at the default path and pretty-prints a summary so operators
 /// / tests can verify the write side without unpacking CBOR

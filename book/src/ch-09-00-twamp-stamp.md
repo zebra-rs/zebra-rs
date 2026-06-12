@@ -185,14 +185,14 @@ The advertised metrics appear in the link-state database dumps:
 
 - `show isis database` renders the RFC 8570 sub-TLVs (inline and inside
   the ASLA) on each reach entry.
-- `show ip ospf database detail` renders the ASLA sub-sub-TLVs on the
+- `show ospf database detail` renders the ASLA sub-sub-TLVs on the
   Extended-Link Opaque LSA.
 
 The per-algorithm result — including the metric-type and the
 delay-weighted shortest paths — is shown by:
 
 - `show isis flex-algo`
-- `show ip ospf flex-algo`
+- `show ospf flex-algo`
 
 ## The measurement plane
 
