@@ -2426,7 +2426,43 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         bgp_cap.fqdn = Some(CapFqdn::new(name, ""));
     }
     for (key, addpath) in peer.config.addpath.iter() {
-        bgp_cap.addpath.insert(*key, addpath.clone());
+        // RFC 7911 §3: a negotiated Send obliges us to stamp a path-id
+        // on every NLRI of that family. Only IPv4 unicast and VPNv4
+        // have the per-path advertise pipeline, so withhold the Send
+        // half for every other family — advertising it would negotiate
+        // a session we then feed malformed (id-less withdraw) or no
+        // (excluded-from-fan-out) UPDATEs. The Receive half is
+        // family-generic and passes through.
+        let value = if super::cap::addpath_send_implemented(key.afi, key.safi) {
+            addpath.clone()
+        } else {
+            match addpath.send_receive {
+                AddPathSendReceive::Send => {
+                    tracing::warn!(
+                        afi = %key.afi,
+                        safi = %key.safi,
+                        "add-path send is not implemented for this family; \
+                         capability not advertised"
+                    );
+                    continue;
+                }
+                AddPathSendReceive::SendReceive => {
+                    tracing::warn!(
+                        afi = %key.afi,
+                        safi = %key.safi,
+                        "add-path send is not implemented for this family; \
+                         advertising receive only"
+                    );
+                    AddPathValue {
+                        afi: key.afi,
+                        safi: key.safi,
+                        send_receive: AddPathSendReceive::Receive,
+                    }
+                }
+                _ => addpath.clone(),
+            }
+        };
+        bgp_cap.addpath.insert(*key, value);
     }
     for (key, sub) in peer.config.sub.iter() {
         if let Some(_restart_time) = sub.graceful_restart {

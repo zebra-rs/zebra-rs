@@ -86,15 +86,134 @@ pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
     }
 }
 
+/// Families whose advertise plane actually implements the AddPath
+/// *send* direction — per-candidate fan-out with allocated path-ids on
+/// reach AND withdraw (`route_advertise_to_addpath` /
+/// `route_withdraw_from_addpath`). RFC 7911 §3 makes negotiated Send a
+/// hard wire contract: every NLRI of that family must then carry a
+/// path identifier, so a family without the full per-path pipeline
+/// must not negotiate Send at all. The other families today either
+/// exclude AddPath peers from their only advertise path (IPv6 unicast)
+/// or half-stamp ids (reach with `local_id`, withdraw with 0 — which
+/// encodes as *no* path-id field: a malformed MP_UNREACH on an
+/// AddPath session) — VPNv6, EVPN, labeled-unicast. Receive is
+/// unaffected: parsing path-ids is family-generic (`ParseOption`).
+pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
+    matches!(
+        (afi, safi),
+        (Afi::Ip, Safi::Unicast) | (Afi::Ip, Safi::MplsVpn)
+    )
+}
+
 pub fn cap_addpath_recv(bgp_cap: &BgpCap, opt: &mut ParseOption, configs: &AfiSafis<AddPathValue>) {
     for (_, cap) in bgp_cap.addpath.iter() {
         for (_, config) in configs.iter() {
             if cap.afi == config.afi && cap.safi == config.safi {
-                let send = cap.send_receive.is_receive() && config.send_receive.is_send();
+                // Send is additionally gated on the family having a
+                // real per-path advertise pipeline. The OPEN we sent
+                // already withheld Send for these families (see the
+                // capability build in `peer.rs`), so this also keeps
+                // the negotiated state honest against a remote that
+                // offers Receive regardless.
+                let implemented = addpath_send_implemented(cap.afi, cap.safi);
+                let send =
+                    cap.send_receive.is_receive() && config.send_receive.is_send() && implemented;
+                if cap.send_receive.is_receive() && config.send_receive.is_send() && !implemented {
+                    tracing::warn!(
+                        afi = %cap.afi,
+                        safi = %cap.safi,
+                        "add-path send is configured but not implemented for this family; \
+                         negotiating receive-only"
+                    );
+                }
                 let recv = cap.send_receive.is_send() && config.send_receive.is_receive();
                 let afi_safi = AfiSafi::new(cap.afi, cap.safi);
                 opt.add_path.insert(afi_safi, Direct { recv, send });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bgp_packet::AddPathSendReceive;
+
+    fn addpath_cap(afi: Afi, safi: Safi, dir: AddPathSendReceive) -> AddPathValue {
+        AddPathValue {
+            afi,
+            safi,
+            send_receive: dir,
+        }
+    }
+
+    /// Negotiated AddPath *send* is gated on the family having the
+    /// per-path advertise pipeline. A VPNv6 (or any unimplemented
+    /// family) `add-path send` config against a peer offering Receive
+    /// must come out send=false — RFC 7911 §3 would otherwise oblige
+    /// us to path-id every NLRI of a family whose withdraw path can't.
+    #[test]
+    fn addpath_send_negotiates_only_for_implemented_families() {
+        let mut bgp_cap = BgpCap::default();
+        let mut configs: AfiSafis<AddPathValue> = AfiSafis::new();
+        for (afi, safi) in [
+            (Afi::Ip, Safi::Unicast),
+            (Afi::Ip, Safi::MplsVpn),
+            (Afi::Ip6, Safi::Unicast),
+            (Afi::Ip6, Safi::MplsVpn),
+        ] {
+            let key = AfiSafi::new(afi, safi);
+            // Peer offers both directions; we configure send-receive.
+            bgp_cap
+                .addpath
+                .insert(key, addpath_cap(afi, safi, AddPathSendReceive::SendReceive));
+            configs.insert(key, addpath_cap(afi, safi, AddPathSendReceive::SendReceive));
+        }
+
+        let mut opt = ParseOption::default();
+        cap_addpath_recv(&bgp_cap, &mut opt, &configs);
+
+        // Implemented families negotiate send.
+        assert!(opt.is_add_path_send(Afi::Ip, Safi::Unicast));
+        assert!(opt.is_add_path_send(Afi::Ip, Safi::MplsVpn));
+        // Unimplemented families are masked to receive-only.
+        assert!(!opt.is_add_path_send(Afi::Ip6, Safi::Unicast));
+        assert!(!opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn));
+        // Receive negotiates for every family (parsing is generic).
+        for (afi, safi) in [
+            (Afi::Ip, Safi::Unicast),
+            (Afi::Ip, Safi::MplsVpn),
+            (Afi::Ip6, Safi::Unicast),
+            (Afi::Ip6, Safi::MplsVpn),
+        ] {
+            let key = AfiSafi::new(afi, safi);
+            assert!(
+                opt.add_path.get(&key).is_some_and(|d| d.recv),
+                "receive must negotiate for {afi} {safi}"
+            );
+        }
+    }
+
+    /// The supported-set itself, pinned: exactly IPv4 unicast + VPNv4
+    /// today. Growing it is deliberate — it must come WITH the
+    /// per-candidate advertise/withdraw twins for the new family.
+    #[test]
+    fn addpath_send_implemented_set_is_v4_unicast_and_vpnv4() {
+        assert!(addpath_send_implemented(Afi::Ip, Safi::Unicast));
+        assert!(addpath_send_implemented(Afi::Ip, Safi::MplsVpn));
+        for (afi, safi) in [
+            (Afi::Ip6, Safi::Unicast),
+            (Afi::Ip6, Safi::MplsVpn),
+            (Afi::L2vpn, Safi::Evpn),
+            (Afi::Ip, Safi::MplsLabel),
+            (Afi::Ip6, Safi::MplsLabel),
+            (Afi::Ip, Safi::Flowspec),
+            (Afi::Ip6, Safi::Flowspec),
+        ] {
+            assert!(
+                !addpath_send_implemented(afi, safi),
+                "{afi} {safi} has no per-path advertise pipeline"
+            );
         }
     }
 }
