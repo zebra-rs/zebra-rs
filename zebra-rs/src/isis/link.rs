@@ -141,7 +141,8 @@ pub struct LinkTop<'a> {
     pub mt_membership:
         &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::collections::BTreeSet<MtId>>>,
     pub label_map: &'a mut Levels<IsisLabelMap>,
-    pub srv6_end_map: &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::net::Ipv6Addr>>,
+    pub srv6_end_map:
+        &'a mut Levels<std::collections::BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>,
     pub peer_fad: &'a mut Levels<
         std::collections::BTreeMap<
             IsisSysId,

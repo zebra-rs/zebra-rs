@@ -79,6 +79,44 @@ pub enum Behavior {
     Resv(u16),
 }
 
+impl Behavior {
+    /// RFC 9800 NEXT-C-SID flavor of End (uN), any PSP/USP/USD
+    /// combination. A SID advertised with one of these consumes a
+    /// locator-node-sized identifier from a uSID carrier.
+    pub fn is_end_next_csid(&self) -> bool {
+        use Behavior::*;
+        matches!(
+            self,
+            EndCSID
+                | EndCSIDPSP
+                | EndCSIDUSP
+                | EndCSIDPSPUSP
+                | EndCSIDUSD
+                | EndCSIDPSPUSD
+                | EndCSIDUSPUSD
+                | EndCSIDPSPUSPUSD
+        )
+    }
+
+    /// RFC 9800 NEXT-C-SID flavor of End.X (uA), any PSP/USP/USD
+    /// combination. A SID advertised with one of these consumes a
+    /// function-sized identifier from a uSID carrier.
+    pub fn is_endx_next_csid(&self) -> bool {
+        use Behavior::*;
+        matches!(
+            self,
+            EndXCSID
+                | EndXCSIDPSP
+                | EndXCSIDUSP
+                | EndXCSIDPSPUSP
+                | EndXCSIDUSD
+                | EndXCSIDPSPUSD
+                | EndXCSIDUSPUSD
+                | EndXCSIDPSPUSPUSD
+        )
+    }
+}
+
 impl From<Behavior> for u16 {
     fn from(typ: Behavior) -> Self {
         use Behavior::*;

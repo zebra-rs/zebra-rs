@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Args;
 use crate::context::Timer;
-use crate::isis::srv6::{ElibPool, function_addr};
+use crate::isis::srv6::{ElibPool, function_addr, lib_addr};
 use crate::rib;
 use crate::rib::MacAddr;
 use crate::rib::{Locator, Sid, SidAllocationType, SidBehavior, SidContext, SidOwner};
@@ -51,6 +51,13 @@ pub struct Neighbor {
     /// registry). `None` until the locator is resolved and the first
     /// allocator pass picks a function.
     pub endx_sid: Option<(u16, Ipv6Addr)>,
+
+    /// LIB twin of the End.X SID — the `block:function` prefix entry
+    /// that matches the uA when it is a NEXT-C-SID carrier's active
+    /// uSID (post-uN-shift DA). Only allocated for uSID locators;
+    /// `None` for classic. Tracked so release / nexthop-drift handle
+    /// both kernel entries in lockstep.
+    pub endx_lib_sid: Option<Ipv6Addr>,
 
     /// The nexthop the installed End.X SID currently forwards to.
     /// Tracked separately from `endx_sid` because the SID address is
@@ -96,6 +103,7 @@ impl Neighbor {
             hold_time: 0,
             network_type,
             endx_sid: None,
+            endx_lib_sid: None,
             endx_installed_nh6: None,
             gr: AdjGrState::default(),
             created: true,
@@ -216,7 +224,7 @@ impl Neighbor {
         // global is preferred over the link-local.
         let nh6 = self.endx_nh6();
 
-        if let Some((_, addr)) = self.endx_sid {
+        if let Some((function, addr)) = self.endx_sid {
             // SID already allocated. The SID address never changes for
             // the life of the adjacency, but the preferred nexthop can
             // (the neighbor's first Hello often carries only the
@@ -226,9 +234,12 @@ impl Neighbor {
             if self.endx_installed_nh6 == nh6 {
                 return;
             }
-            let sid = self.endx_sid_entry(ifname, locator, loc_name, addr, nh6);
+            let sid = self.endx_sid_entry(ifname, locator, loc_name.clone(), addr, nh6);
             let _ = rib_client.send(rib::Message::SidDel { addr });
             let _ = rib_client.send(rib::Message::SidAdd { sid });
+            self.reconcile_endx_lib_sid(
+                ifname, locator, loc_name, prefix, function, nh6, rib_client,
+            );
             self.endx_installed_nh6 = nh6;
             // The advertised SID is unchanged — no LSP re-origination.
             return;
@@ -243,11 +254,58 @@ impl Neighbor {
             elib.release(function);
             return;
         };
-        let sid = self.endx_sid_entry(ifname, locator, loc_name, addr, nh6);
+        let sid = self.endx_sid_entry(ifname, locator, loc_name.clone(), addr, nh6);
         let _ = rib_client.send(rib::Message::SidAdd { sid });
+        self.reconcile_endx_lib_sid(ifname, locator, loc_name, prefix, function, nh6, rib_client);
         self.endx_sid = Some((function, addr));
         self.endx_installed_nh6 = nh6;
         self.reoriginate_endx_if_up();
+    }
+
+    /// (Re-)install the LIB twin of this neighbor's uA — the
+    /// `block:function` prefix entry a NEXT-C-SID carrier hits after
+    /// the local uN shift. No-op (beyond clearing any stale twin) for
+    /// classic locators: only uSID SIDs ride in carriers. Never
+    /// advertised — the LSP carries the full uA; the twin is pure
+    /// local FIB plumbing, so no LSP re-origination either.
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_endx_lib_sid(
+        &mut self,
+        ifname: &str,
+        locator: &Locator,
+        loc_name: String,
+        prefix: ipnet::Ipv6Net,
+        function: u16,
+        nh6: Option<Ipv6Addr>,
+        rib_client: &crate::rib::client::RibClient,
+    ) {
+        if let Some(addr) = self.endx_lib_sid.take() {
+            let _ = rib_client.send(rib::Message::SidDel { addr });
+        }
+        if !matches!(locator.behavior, Some(crate::rib::LocatorBehavior::Usid)) {
+            return;
+        }
+        let Some(structure) = locator.sid_structure() else {
+            return;
+        };
+        let Some(addr) = lib_addr(prefix, structure.lb_bits, function) else {
+            return;
+        };
+        let sid = Sid {
+            addr,
+            behavior: SidBehavior::UALib,
+            context: SidContext::Interface(ifname.to_string()),
+            owner: SidOwner::new("isis", 0),
+            locator: loc_name,
+            allocation_type: SidAllocationType::Dynamic,
+            ifindex: self.ifindex,
+            nh6,
+            structure: Some(structure),
+            table_id: 0,
+            segs: Vec::new(),
+        };
+        let _ = rib_client.send(rib::Message::SidAdd { sid });
+        self.endx_lib_sid = Some(addr);
     }
 
     /// Build the RIB registry entry for this neighbor's End.X SID.
@@ -290,6 +348,9 @@ impl Neighbor {
         if let Some((function, addr)) = self.endx_sid.take() {
             elib.release(function);
             self.endx_installed_nh6 = None;
+            let _ = rib_client.send(rib::Message::SidDel { addr });
+        }
+        if let Some(addr) = self.endx_lib_sid.take() {
             let _ = rib_client.send(rib::Message::SidDel { addr });
         }
     }

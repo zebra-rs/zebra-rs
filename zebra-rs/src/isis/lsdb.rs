@@ -1,6 +1,5 @@
 use std::collections::btree_map::{Iter, Values};
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv6Addr;
 use std::time::{Duration, Instant};
 
 use ipnet::Ipv4Net;
@@ -180,7 +179,7 @@ pub(super) struct SysStateRefs<'a> {
     pub reach_v6: &'a mut ReachMapV6,
     pub mt_membership: &'a mut BTreeMap<IsisSysId, BTreeSet<MtId>>,
     pub mt2_reach_v6: &'a mut ReachMapV6,
-    pub srv6_end_map: &'a mut BTreeMap<IsisSysId, Ipv6Addr>,
+    pub srv6_end_map: &'a mut BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>,
     /// Per-peer Flex-Algorithm Definition store. Outer key is peer
     /// sys-id, inner key is the FAD's `flex_algorithm` field
     /// (128..=255). RFC 9350 §5.1 places FADs inside Router
@@ -436,7 +435,7 @@ pub(super) fn rebuild_sys_state(
     let mut v4_entries: Vec<IsisTlvExtIpReachEntry> = Vec::new();
     let mut v6_entries: Vec<IsisTlvIpv6ReachEntry> = Vec::new();
     let mut mt2_v6_entries: Vec<IsisTlvIpv6ReachEntry> = Vec::new();
-    let mut end_sid: Option<Ipv6Addr> = None;
+    let mut end_sid: Option<super::srv6::Srv6EndSidInfo> = None;
 
     for f in &frags {
         for tlv in &f.tlvs {
@@ -450,7 +449,21 @@ pub(super) fn rebuild_sys_state(
                     'outer: for locator in &t.locators {
                         for sub in &locator.subs {
                             if let prefix::IsisSubTlv::Srv6EndSid(es) = sub {
-                                end_sid = Some(es.sid);
+                                // Keep behavior + SID structure alongside the
+                                // address: the TI-LFA encoder needs them to
+                                // decide NEXT-C-SID carrier membership.
+                                let structure = es.sub2s.iter().find_map(|s2| {
+                                    if let isis_packet::IsisSub2Tlv::SidStructure(st) = s2 {
+                                        Some(st.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                                end_sid = Some(super::srv6::Srv6EndSidInfo {
+                                    sid: es.sid,
+                                    behavior: es.behavior,
+                                    structure,
+                                });
                                 break 'outer;
                             }
                         }
@@ -803,7 +816,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
@@ -917,7 +931,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
@@ -991,7 +1006,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
@@ -1108,7 +1124,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
@@ -1207,7 +1224,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();
@@ -1295,7 +1313,8 @@ mod tests {
         let mut reach_v6 = ReachMapV6::default();
         let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
         let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, Ipv6Addr> = BTreeMap::new();
+        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
+            BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
         let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
             BTreeMap::new();

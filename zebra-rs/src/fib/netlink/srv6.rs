@@ -119,7 +119,7 @@ fn build_srh(segments: &[Ipv6Addr]) -> Ipv6SrHdr {
 fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
     match behavior {
         SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
-        SidBehavior::EndX | SidBehavior::UA => Seg6LocalAction::EndX,
+        SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
         SidBehavior::EndDT6 => Seg6LocalAction::EndDt6,
         SidBehavior::EndDT46 => Seg6LocalAction::EndDt46,
@@ -149,20 +149,22 @@ fn build_seg6local_flavors(
     behavior: SidBehavior,
     structure: Option<SidStructure>,
 ) -> Option<RouteSeg6LocalIpTunnel> {
-    if !matches!(behavior, SidBehavior::UN) {
-        return None;
-    }
+    // Nflen is the width of the uSID identifier being consumed at this
+    // entry — the bits the kernel shifts out to expose the next uSID.
+    // Lblen is the shared block portion that stays put. For uN that
+    // identifier is the locator-node id (LN); for the LIB twin of a uA
+    // it is the function. The remaining bits to the right are the
+    // carrier's pending uSIDs.
+    let nflen = match behavior {
+        SidBehavior::UN => structure?.ln_bits,
+        SidBehavior::UALib => structure?.fun_bits,
+        _ => return None,
+    };
     let s = structure?;
-    // Nflen is the *node* portion of a uSID — the bits the kernel
-    // shifts on each hop to expose the next uSID identifier. The
-    // function bits belong to the uSID that's being consumed (they
-    // pick the action), not to the next one's position, so they don't
-    // count toward the shift width. Lblen is the shared block portion
-    // that stays put.
     Some(RouteSeg6LocalIpTunnel::Flavors(vec![
         Seg6LocalFlavors::Operation(Seg6LocalFlavorOps::NextCsid),
         Seg6LocalFlavors::Lblen(s.lb_bits),
-        Seg6LocalFlavors::Nflen(s.ln_bits),
+        Seg6LocalFlavors::Nflen(nflen),
     ]))
 }
 
@@ -195,7 +197,10 @@ fn build_seg6local_lwtunnel(
 ) -> Option<Vec<RouteLwTunnelEncap>> {
     let mut attrs: Vec<RouteSeg6LocalIpTunnel> =
         vec![RouteSeg6LocalIpTunnel::Action(seg6local_action(behavior))];
-    if matches!(behavior, SidBehavior::EndX | SidBehavior::UA) {
+    if matches!(
+        behavior,
+        SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib
+    ) {
         let nh = nh6?;
         attrs.push(RouteSeg6LocalIpTunnel::Nh6(nh));
     }
