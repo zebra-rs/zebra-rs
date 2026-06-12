@@ -42,8 +42,7 @@ use super::network::{read_packet, write_packet};
 use super::nfsm::{NfsmEvent, ospf_nfsm};
 use super::socket::ospf_socket_ipv4;
 use super::tilfa::{
-    RepairPathMpls, RepairPathMplsV3, build_repair_path_mpls, build_repair_path_mpls_v3,
-    tilfa_repair_path,
+    RepairPathMpls, build_repair_path_mpls, build_repair_path_mpls_v3, tilfa_repair_path,
 };
 use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv3};
@@ -9345,7 +9344,7 @@ pub struct SpfNexthopV3 {
     /// TI-LFA second pass; `None` otherwise (ILM/adjacency nexthops,
     /// ECMP, TI-LFA off, or unresolved). v3 sibling of
     /// `SpfNexthop::backup`.
-    pub backup: Option<RepairPathMplsV3>,
+    pub backup: Option<super::tilfa::RepairBackupV3>,
 }
 
 /// v3 sibling of `SpfIlm`. Same role -- one entry in the SR-MPLS
@@ -10911,7 +10910,15 @@ fn build_rib6_from_spf(
             let Some(repair) = tilfa_result.get(&dest).and_then(|paths| paths.first()) else {
                 continue;
             };
-            let Some(backup) = build_repair_path_mpls_v3(top, area, repair) else {
+            // SRv6 repair when the locator is active (RFC 9513 SID
+            // list, H.Insert); SR-MPLS label stack otherwise.
+            let backup = if top.srv6_active() {
+                super::tilfa::build_repair_path_srv6_v3(top, area, repair)
+                    .map(super::tilfa::RepairBackupV3::Srv6)
+            } else {
+                build_repair_path_mpls_v3(top, area, repair).map(super::tilfa::RepairBackupV3::Mpls)
+            };
+            let Some(backup) = backup else {
                 continue;
             };
             if let Some(nhop) = route.nhops.values_mut().next() {
@@ -11290,14 +11297,23 @@ fn nhop_v3_to_nexthop_uni(
 /// A v3 TI-LFA repair as a backup `NexthopUni`: the repair's v6
 /// link-local, the resolved SR-MPLS label stack, and the egress
 /// ifindex, at `metric`. v3 sibling of `backup_to_nexthop_uni`.
-fn backup_v3_to_nexthop_uni(backup: &RepairPathMplsV3, metric: u32) -> rib::NexthopUni {
-    let mut uni = rib::NexthopUni::new(
-        std::net::IpAddr::V6(backup.addr),
-        metric,
-        backup.labels.clone(),
-    );
-    uni.ifindex_origin = (backup.ifindex != 0).then_some(backup.ifindex);
-    uni
+fn backup_v3_to_nexthop_uni(backup: &super::tilfa::RepairBackupV3, metric: u32) -> rib::NexthopUni {
+    use super::tilfa::RepairBackupV3;
+    match backup {
+        RepairBackupV3::Mpls(b) => {
+            let mut uni =
+                rib::NexthopUni::new(std::net::IpAddr::V6(b.addr), metric, b.labels.clone());
+            uni.ifindex_origin = (b.ifindex != 0).then_some(b.ifindex);
+            uni
+        }
+        RepairBackupV3::Srv6(b) => {
+            let mut uni = rib::NexthopUni::new(std::net::IpAddr::V6(b.addr), metric, vec![]);
+            uni.ifindex_origin = (b.ifindex != 0).then_some(b.ifindex);
+            uni.segs = b.segs.clone();
+            uni.encap_type = Some(b.encap);
+            uni
+        }
+    }
 }
 
 /// Build a `rib::entry::RibEntry` from a `SpfRouteV3`. Flattens the

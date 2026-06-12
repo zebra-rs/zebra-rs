@@ -1,0 +1,45 @@
+# r2 — SRv6 sibling of configs/ospfv3_tilfa: SR-MPLS and
+# Prefix-SIDs replaced by a uSID locator; same costs and topology.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::6/128
+- if-name: r2-n1
+  ipv6:
+    address: 2001:db8:7::2/64
+- if-name: r2-r1
+  ipv6:
+    address: 2001:db8:8::2/64
+- if-name: r2-r3
+  ipv6:
+    address: 2001:db8:9::1/64
+segment-routing:
+  locator:
+  - name: LOC6
+    prefix: fcbb:bbbb:6::/48
+    behavior: usid
+router:
+  ospfv3:
+    router-id: 10.0.0.6
+    segment-routing:
+      srv6:
+        locator: LOC6
+    fast-reroute:
+      ti-lfa: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: r2-n1
+        enable: true
+        network-type: point-to-point
+        cost: 1
+      - if-name: r2-r1
+        enable: true
+        network-type: point-to-point
+        cost: 1000
+      - if-name: r2-r3
+        enable: true
+        network-type: point-to-point
+        cost: 1000

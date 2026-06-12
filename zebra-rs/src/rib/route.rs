@@ -2080,6 +2080,8 @@ fn rib_resolve_nexthop_v6(
     entry.set_valid(entry.is_valid_nexthop(nmap));
 }
 
+/// v6 sibling of `resolve_nexthop_member`: resolve one List / Protect
+/// member, allocating the kernel-side Multi group for ECMP members.
 fn resolve_nexthop_member_v6(
     member: &mut NexthopMember,
     nmap: &mut NexthopMap,
@@ -2591,5 +2593,53 @@ mod tests {
             panic!("backup Uni preserved");
         };
         assert!(backup_uni.gid != 0, "backup Uni gets its own group");
+    }
+
+    /// Sibling of the test above with the SRv6 TI-LFA member shape:
+    /// a link-local primary plus a seg6-encap (H.Insert carrier)
+    /// backup must resolve both members and validate the entry, or
+    /// the protected route never installs.
+    #[test]
+    fn protect_v6_with_seg6_backup_resolves_and_validates() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMap, NexthopMember};
+        use super::super::{RibEntries, RibType};
+        use super::rib_resolve_nexthop_v6;
+        use ipnet::Ipv6Net;
+        use prefix_trie::PrefixMap;
+
+        let mut primary = NexthopUni::new("fe80::1".parse().unwrap(), 2, vec![]);
+        primary.ifindex_origin = Some(10);
+        let mut backup = NexthopUni::new("fe80::2".parse().unwrap(), 3, vec![]);
+        backup.ifindex_origin = Some(11);
+        backup.segs = vec!["fcbb:bbbb:5:e003:e002::".parse().unwrap()];
+        backup.encap_type = Some(isis_packet::srv6::EncapType::HInsert);
+
+        let mut entry = RibEntry::new(RibType::Ospf);
+        entry.nexthop = Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Uni(primary),
+            backup: NexthopMember::Uni(backup),
+        });
+
+        let mut nmap = NexthopMap::default();
+        let table: PrefixMap<Ipv6Net, RibEntries> = PrefixMap::new();
+        rib_resolve_nexthop_v6(&mut entry, &table, &mut nmap, 254);
+
+        let Nexthop::Protect(pro) = &entry.nexthop else {
+            panic!("entry.nexthop should still be Protect");
+        };
+        let NexthopMember::Uni(p) = &pro.primary else {
+            panic!("primary Uni preserved");
+        };
+        let NexthopMember::Uni(b) = &pro.backup else {
+            panic!("backup Uni preserved");
+        };
+        assert!(p.gid != 0, "primary resolves to a group");
+        assert!(b.gid != 0, "seg6 backup resolves to its own group");
+        assert!(
+            entry.is_valid(),
+            "a Protect route with resolvable members must validate"
+        );
     }
 }
