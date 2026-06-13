@@ -138,6 +138,12 @@ pub struct ShardUpdateV4 {
     /// unicast (`rd = None`).
     pub vrf_transit_only: bool,
     pub decision: Option<PolicyDecision>,
+    /// RIB sharding Phase C: when `true`, the shard applies inbound policy
+    /// itself (on `attr`) instead of using `decision` — moving the policy
+    /// walk off the main task into the parallel shard. Set by the N>1
+    /// ingest; `false` on the synchronous (N=1) path, where main already
+    /// computed `decision`.
+    pub compute_policy: bool,
 }
 
 /// Payload of [`ShardMsg::UpdateV6`]. Mirrors [`ShardUpdateV4`]: `attr`
@@ -280,6 +286,7 @@ mod tests {
                 attr: bgp_packet::BgpAttr::default(),
                 weight: 100,
             }),
+            compute_policy: false,
         });
         match msg {
             ShardMsg::UpdateV4(u) => {

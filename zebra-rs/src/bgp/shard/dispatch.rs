@@ -74,6 +74,7 @@ impl BgpShard {
             nexthop_reachable,
             vrf_transit_only,
             decision,
+            compute_policy,
         } = u;
 
         // The message owns the pre-policy attr; move it straight into
@@ -93,6 +94,23 @@ impl BgpShard {
         rib.enhe_egress = enhe_egress;
         // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
         self.adj_in_mut(ident).add(rd, nlri.prefix, rib.clone());
+
+        // RIB sharding Phase C: at N>1 the shard applies inbound policy
+        // itself, off the main task. Minimal default-permit until per-peer
+        // policy replication (`PolicyReplace`) lands — correct for the
+        // no-policy workload; configured policy is a follow-up.
+        let decision = if compute_policy {
+            crate::bgp::route::apply_policy_net(
+                &Default::default(),
+                &Default::default(),
+                peer_router_id,
+                ipnet::IpNet::V4(nlri.prefix),
+                (*rib.attr).clone(),
+                0,
+            )
+        } else {
+            decision
+        };
 
         let Some(decision) = decision else {
             // Inbound policy denied: drop any Loc-RIB row from this peer.
@@ -522,6 +540,7 @@ mod tests {
             nexthop_reachable: true,
             vrf_transit_only: false,
             decision: permit.then(|| PolicyDecision { attr, weight: 100 }),
+            compute_policy: false,
         })
     }
 

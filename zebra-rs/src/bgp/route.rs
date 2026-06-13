@@ -2202,6 +2202,31 @@ pub fn route_ipv4_update_batch(
     };
     let stale = stale || attr_has_llgr_stale(attr);
 
+    // N>1 (RIB sharding Phase C): inbound policy runs in the shard, so
+    // there is no main-side `par_iter` here — just fan each prefix's
+    // raw-attr table op out to its shard. Best-path + advertise then
+    // happen asynchronously on the event loop (`process_shard_result`).
+    if shards.is_some() {
+        for nlri in prefixes {
+            route_ipv4_update_decided(
+                peer_ident,
+                peer_router_id,
+                typ,
+                nlri,
+                None,
+                None,
+                attr,
+                None,
+                None,
+                None,
+                bgp,
+                shards,
+                stale,
+            );
+        }
+        return;
+    }
+
     let decisions: Vec<(Ipv4Nlri, Option<PolicyDecision>)> = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
         let prefix_cfg = peer.prefix_set.get(&InOut::Input);
@@ -2361,11 +2386,46 @@ fn route_ipv4_update_decided(
         None => super::nht::NhtDep::V4(nlri.prefix),
     };
 
-    // For an accepted route main resolves the parts it owns before the
-    // shard takes the table op: next-hop reachability (skipped for ENHE,
-    // whose v4 NEXT_HOP is ignored — RFC 8950 §4) and the Inter-AS
-    // Option AB transit flag. `import_attr` is kept for the VPNv4
-    // import-withdraw dispatch (the rib moves into the shard).
+    // N-shard (N>1): v4-unicast (rd == None) fans out to the worker pool
+    // by prefix hash. Phase C runs inbound policy IN the shard, so main
+    // only resolves NHT on the raw attr (policy rarely rewrites the
+    // next-hop; exact NHT-in-shard is a follow-up) and ships the raw-attr
+    // table op with `compute_policy`. The best-path delta returns
+    // asynchronously on the event loop (`process_shard_result`) — no
+    // inline advertise job. VPNv4 (rd == Some) stays on the synchronous
+    // shard (its transit label needs main's central allocator, which
+    // can't be borrowed across the thread boundary).
+    if let Some(pool) = shards
+        && rd.is_none()
+    {
+        let nexthop_reachable = if enhe_egress.is_none() {
+            nht_track_received_attr(bgp, attr, dep.clone())
+        } else {
+            true
+        };
+        let msg = ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: peer_ident,
+            rd,
+            nlri: nlri.clone(),
+            peer_router_id,
+            typ,
+            attr: attr.clone(),
+            label,
+            nexthop,
+            enhe_egress,
+            stale,
+            nexthop_reachable,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: true,
+        });
+        pool.dispatch(pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr())), msg);
+        return Vec::new();
+    }
+
+    // N=1: main resolves NHT + the Inter-AS Option AB transit flag on the
+    // (already-computed) decision, then the synchronous shard applies it.
+    // `import_attr` feeds the VPNv4 import-withdraw dispatch.
     let (nexthop_reachable, vrf_transit_only, import_attr) = match &decision {
         Some(d) => {
             let reachable = if enhe_egress.is_none() {
@@ -2382,9 +2442,6 @@ fn route_ipv4_update_decided(
         }
         None => (true, false, attr.clone()),
     };
-
-    // The table op (Adj-RIB-In + policy decision → intern + VPNv4 transit
-    // label + Loc-RIB + best-path).
     let msg = ShardMsg::UpdateV4(ShardUpdateV4 {
         ident: peer_ident,
         rd,
@@ -2399,23 +2456,8 @@ fn route_ipv4_update_decided(
         nexthop_reachable,
         vrf_transit_only,
         decision,
+        compute_policy: false,
     });
-
-    // N-shard (N>1): v4-unicast (rd == None) fans out to the worker pool
-    // by prefix hash; the best-path delta returns asynchronously on the
-    // event loop's result arm (`process_shard_result`), so there is no
-    // inline advertise job here. VPNv4 (rd == Some) stays on the
-    // synchronous shard — its transit label needs main's central
-    // allocator, which can't be borrowed across the thread boundary.
-    if let Some(pool) = shards
-        && rd.is_none()
-    {
-        let idx = pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr()));
-        pool.dispatch(idx, msg);
-        return Vec::new();
-    }
-
-    // N=1: synchronous dispatch + inline post-work (unchanged).
     let deltas = bgp
         .shard
         .handle(msg, bgp.central_label_alloc.as_deref_mut());
