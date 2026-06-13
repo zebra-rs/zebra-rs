@@ -14,13 +14,13 @@
 //! registration, advertise fan-out, and FIB install stay in main and
 //! run off the returned delta (see [`super::msg`]).
 
-use bgp_packet::{Ipv4Nlri, RouteDistinguisher};
+use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::context::Task;
 
 use super::BgpShard;
-use super::msg::{ShardMsg, ShardOut, ShardUpdateV4};
+use super::msg::{ShardMsg, ShardOut, ShardUpdateV4, ShardUpdateV6};
 use super::super::route::BgpRib;
 
 /// One unit of work for the shard task: a message plus an optional
@@ -98,6 +98,10 @@ impl BgpShard {
             ShardMsg::WithdrawV4 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
             }
+            ShardMsg::UpdateV6(u) => self.handle_update_v6(u),
+            ShardMsg::WithdrawV6 { ident, rd, nlri } => {
+                vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
+            }
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
@@ -121,6 +125,7 @@ impl BgpShard {
             nexthop,
             enhe_egress,
             stale,
+            nexthop_reachable,
             vrf_transit_only,
             decision,
         } = u;
@@ -148,6 +153,9 @@ impl BgpShard {
 
         rib.attr = self.intern(decision.attr);
         rib.weight = decision.weight;
+        // Main resolved next-hop reachability via NHT; gate the row with
+        // it before best-path (it's a tiebreaker / FIB-eligibility input).
+        rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
         if let Some(rd) = rd {
             // VPNv4 transit local label (Inter-AS Option B). Drawn from
@@ -189,6 +197,87 @@ impl BgpShard {
         };
         let survivor_nexthops = self.candidate_nexthops_v4(rd, nlri.prefix);
         ShardOut::BestPathV4 {
+            ident,
+            rd,
+            prefix: nlri,
+            selected,
+            replaced: extra_replaced,
+            survivor_nexthops,
+        }
+    }
+
+    /// Shard half of `route_ipv6_update`. The v6 ingest path has no
+    /// inbound policy, so the carried attribute is final: store
+    /// Adj-RIB-In (un-interned), intern it for the Loc-RIB, gate with
+    /// main's NHT result, update, and report the best-path delta.
+    fn handle_update_v6(&mut self, u: ShardUpdateV6) -> Vec<ShardOut> {
+        let ShardUpdateV6 {
+            ident,
+            rd,
+            nlri,
+            peer_router_id,
+            typ,
+            attr,
+            label,
+            nexthop,
+            stale,
+            nexthop_reachable,
+            vrf_transit_only,
+        } = u;
+
+        let mut rib = BgpRib::new(
+            ident,
+            peer_router_id,
+            typ,
+            nlri.id,
+            0,
+            &attr,
+            label,
+            nexthop,
+            stale,
+        );
+        match rd {
+            Some(rd) => self.adj_in_mut(ident).add_v6vpn(rd, nlri.prefix, rib.clone()),
+            None => self.adj_in_mut(ident).add_v6(nlri.prefix, rib.clone()),
+        };
+        rib.attr = self.intern(attr);
+        rib.nexthop_reachable = nexthop_reachable;
+        rib.vrf_transit_only = vrf_transit_only;
+        let (replaced, selected, _next_id) = match rd {
+            Some(rd) => self.update_v6vpn(rd, nlri.prefix, rib),
+            None => self.update_v6(nlri.prefix, rib),
+        };
+        let survivor_nexthops = self.candidate_nexthops_v6(rd, nlri.prefix);
+        vec![ShardOut::BestPathV6 {
+            ident,
+            rd,
+            prefix: nlri,
+            selected,
+            replaced,
+            survivor_nexthops,
+        }]
+    }
+
+    /// v6 counterpart of [`Self::best_path_delta_v4`].
+    fn best_path_delta_v6(
+        &mut self,
+        ident: usize,
+        rd: Option<RouteDistinguisher>,
+        nlri: Ipv6Nlri,
+        mut extra_replaced: Vec<BgpRib>,
+    ) -> ShardOut {
+        if extra_replaced.is_empty() {
+            extra_replaced = match rd {
+                Some(rd) => self.remove_v6vpn(rd, nlri.prefix, nlri.id, ident),
+                None => self.remove_v6(nlri.prefix, nlri.id, ident),
+            };
+        }
+        let selected = match rd {
+            Some(rd) => self.select_best_path_vpn_v6(&rd, nlri.prefix),
+            None => self.select_best_path_v6(nlri.prefix),
+        };
+        let survivor_nexthops = self.candidate_nexthops_v6(rd, nlri.prefix);
+        ShardOut::BestPathV6 {
             ident,
             rd,
             prefix: nlri,
@@ -241,6 +330,41 @@ impl BgpShard {
                 }
                 None => (Vec::new(), Vec::new()),
             };
+        let (v6, v6vpn): (Vec<Ipv6Nlri>, Vec<(RouteDistinguisher, Ipv6Nlri)>) =
+            match self.adj_in(ident) {
+                Some(a) => {
+                    let v6 = a
+                        .v6
+                        .0
+                        .iter()
+                        .flat_map(|(p, ribs)| {
+                            ribs.iter().map(move |r| Ipv6Nlri {
+                                id: r.remote_id,
+                                prefix: *p,
+                            })
+                        })
+                        .collect();
+                    let v6vpn = a
+                        .v6vpn
+                        .iter()
+                        .flat_map(|(rd, t)| {
+                            t.0.iter().flat_map(move |(p, ribs)| {
+                                ribs.iter().map(move |r| {
+                                    (
+                                        *rd,
+                                        Ipv6Nlri {
+                                            id: r.remote_id,
+                                            prefix: *p,
+                                        },
+                                    )
+                                })
+                            })
+                        })
+                        .collect();
+                    (v6, v6vpn)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
         for nlri in v4 {
             // Re-select after removing this peer's row: another peer may
             // now win the prefix (then main re-advertises), or the
@@ -249,6 +373,12 @@ impl BgpShard {
         }
         for (rd, nlri) in v4vpn {
             out.push(self.best_path_delta_v4(ident, Some(rd), nlri, Vec::new()));
+        }
+        for nlri in v6 {
+            out.push(self.best_path_delta_v6(ident, None, nlri, Vec::new()));
+        }
+        for (rd, nlri) in v6vpn {
+            out.push(self.best_path_delta_v6(ident, Some(rd), nlri, Vec::new()));
         }
         self.adj_in_drop(ident);
         out
@@ -287,9 +417,51 @@ mod tests {
             nexthop: None,
             enhe_egress: None,
             stale: false,
+            nexthop_reachable: true,
             vrf_transit_only: false,
             decision: permit.then(|| PolicyDecision { attr, weight: 100 }),
         })
+    }
+
+    fn v6(s: &str) -> Ipv6Nlri {
+        Ipv6Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        }
+    }
+
+    fn update_v6(ident: usize, prefix: &str) -> ShardMsg {
+        let mut attr = BgpAttr::default();
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+        ShardMsg::UpdateV6(ShardUpdateV6 {
+            ident,
+            rd: None,
+            nlri: v6(prefix),
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+            typ: BgpRibType::EBGP,
+            attr,
+            label: None,
+            nexthop: None,
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+        })
+    }
+
+    #[test]
+    fn update_v6_installs_and_peer_down_withdraws() {
+        let mut shard = BgpShard::default();
+        // v6 has no inbound policy — the route always installs.
+        let out = shard.handle(update_v6(4, "2001:db8:1::/64"));
+        assert_eq!(shard.v6.0.len(), 1);
+        assert_eq!(shard.adj_in(4).unwrap().v6.0.len(), 1);
+        assert!(matches!(&out[..], [ShardOut::BestPathV6 { selected, .. }] if selected.len() == 1));
+        // Peer down sweeps the v6 route too (handle_peer_down covers v6).
+        let down = shard.handle(ShardMsg::PeerDown { ident: 4 });
+        assert_eq!(down.len(), 1);
+        assert!(matches!(&down[..], [ShardOut::BestPathV6 { selected, .. }] if selected.is_empty()));
+        assert!(shard.v6.0.is_empty());
+        assert!(shard.adj_in(4).is_none());
     }
 
     #[test]

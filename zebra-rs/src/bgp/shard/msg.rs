@@ -37,7 +37,7 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 
-use bgp_packet::{Ipv4Nlri, Label, RouteDistinguisher};
+use bgp_packet::{Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher};
 
 use super::super::route::{BgpRib, BgpRibType, PolicyDecision, VpnNexthop};
 
@@ -64,6 +64,20 @@ pub enum ShardMsg {
         ident: usize,
         rd: Option<RouteDistinguisher>,
         nlri: Ipv4Nlri,
+    },
+
+    /// A received IPv6-unicast (`rd = None`) or VPNv6 (`rd = Some`)
+    /// route. Unlike v4 there is no inbound-policy stage (the v6
+    /// ingest path has none today), so the carried `attr` is final:
+    /// the shard stores it in Adj-RIB-In + Loc-RIB and replies with
+    /// [`ShardOut::BestPathV6`].
+    UpdateV6(ShardUpdateV6),
+
+    /// Withdraw of an IPv6 / VPNv6 prefix.
+    WithdrawV6 {
+        ident: usize,
+        rd: Option<RouteDistinguisher>,
+        nlri: Ipv6Nlri,
     },
 
     /// A peer left Established: the shard drops the peer's Adj-RIB-In
@@ -103,12 +117,38 @@ pub struct ShardUpdateV4 {
     pub nexthop: Option<VpnNexthop>,
     pub enhe_egress: Option<(std::net::Ipv6Addr, u32)>,
     pub stale: bool,
+    /// Next-hop reachability main resolved via NHT before sending (it
+    /// owns `nexthop_cache`); the shard gates the Loc-RIB row with it
+    /// before best-path. `true` when main has no NHT view (matches
+    /// `BgpRib::new`'s default).
+    pub nexthop_reachable: bool,
     /// Inter-AS Option AB: main computed (against its VRF-import view)
     /// that an `inter-as-hybrid` VRF imports this VPNv4 route, so the
     /// shard marks the Loc-RIB row transit-only. Always `false` for
     /// unicast (`rd = None`).
     pub vrf_transit_only: bool,
     pub decision: Option<PolicyDecision>,
+}
+
+/// Payload of [`ShardMsg::UpdateV6`]. The v6 ingest path has no inbound
+/// policy, so `attr` is the final attribute (stored both in Adj-RIB-In,
+/// un-interned via `BgpRib::new`, and — re-interned — in the Loc-RIB).
+#[derive(Debug)]
+pub struct ShardUpdateV6 {
+    pub ident: usize,
+    pub rd: Option<RouteDistinguisher>,
+    pub nlri: Ipv6Nlri,
+    pub peer_router_id: Ipv4Addr,
+    pub typ: BgpRibType,
+    pub attr: bgp_packet::BgpAttr,
+    /// VPNv6 service label (`None` for plain v6 unicast).
+    pub label: Option<Label>,
+    pub nexthop: Option<VpnNexthop>,
+    pub stale: bool,
+    /// See [`ShardUpdateV4::nexthop_reachable`].
+    pub nexthop_reachable: bool,
+    /// Inter-AS Option AB for VPNv6 (see [`ShardUpdateV4::vrf_transit_only`]).
+    pub vrf_transit_only: bool,
 }
 
 /// Shard → main. The result of applying a [`ShardMsg`]: the best-path
@@ -132,6 +172,16 @@ pub enum ShardOut {
         /// after the update — read by main's NHT untrack so it doesn't
         /// release a next-hop another path still needs. Computed by the
         /// shard (it owns the Loc-RIB) since main can't see the table.
+        survivor_nexthops: BTreeSet<IpAddr>,
+    },
+
+    /// IPv6 / VPNv6 counterpart of [`Self::BestPathV4`].
+    BestPathV6 {
+        ident: usize,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Nlri,
+        selected: Vec<BgpRib>,
+        replaced: Vec<BgpRib>,
         survivor_nexthops: BTreeSet<IpAddr>,
     },
 }
@@ -162,6 +212,7 @@ mod tests {
             nexthop: None,
             enhe_egress: None,
             stale: false,
+            nexthop_reachable: true,
             vrf_transit_only: false,
             decision: Some(PolicyDecision {
                 attr: bgp_packet::BgpAttr::default(),
@@ -194,7 +245,9 @@ mod tests {
             replaced: vec![],
             survivor_nexthops: BTreeSet::new(),
         };
-        let ShardOut::BestPathV4 { selected, .. } = out;
+        let ShardOut::BestPathV4 { selected, .. } = out else {
+            panic!("expected BestPathV4");
+        };
         assert!(selected.is_empty(), "empty winners ⇒ withdraw");
     }
 }
