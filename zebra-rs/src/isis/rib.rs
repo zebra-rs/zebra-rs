@@ -1010,8 +1010,9 @@ fn build_rib_from_spf<F: IsisRibFamily>(
 
 // Walk the LSDB and collect SysIds whose Protocols-Supported TLV (TLV 129)
 // includes the IPv6 NLPID (0x8E). Used by strict NLPID gating in
-// build_rib_from_spf_v6.
-fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
+// build_rib_from_spf_v6 and by show.rs to mirror that gate in the
+// SPF-tree renderers.
+pub(super) fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
     let ipv6_proto: u8 = IsisProto::Ipv6.into();
     let mut set = BTreeSet::new();
     for (lsp_id, lsa) in lsdb.iter() {

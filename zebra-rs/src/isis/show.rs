@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use ipnet::{Ipv4Net, Ipv6Net};
-use isis_packet::{IsisProto, IsisSysId, IsisTlv, Nsap};
+use isis_packet::{IsisSysId, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
 use super::Hostname;
 use super::lsdb::Lsdb;
-use super::rib::{IsisRibFamily, SpfNexthop, SpfRoute, V4, V6};
+use super::rib::{IsisRibFamily, SpfNexthop, SpfRoute, V4, V6, ipv6_capable_set};
 use super::tilfa::{RepairPathMpls, RepairPathSrv6};
 use super::{Isis, inst::ShowCallback};
 
@@ -972,7 +972,7 @@ fn spf_tree_json(
     mt2_mode: bool,
 ) -> Vec<TopoVertexJson> {
     let ipv6_capable = if ipv6 && !mt2_mode {
-        Some(ipv6_capable_set_show(isis, level))
+        Some(ipv6_capable_set(isis.lsdb.get(level)))
     } else {
         None
     };
@@ -1335,21 +1335,6 @@ fn ifname_for_neighbor(isis: &Isis, level: &Level, sys_id: &IsisSysId) -> String
     String::from("-")
 }
 
-fn ipv6_capable_set_show(isis: &Isis, level: &Level) -> BTreeSet<IsisSysId> {
-    let ipv6_proto: u8 = IsisProto::Ipv6.into();
-    let mut set = BTreeSet::new();
-    for (lsp_id, lsa) in isis.lsdb.get(level).iter() {
-        for tlv in &lsa.lsp.tlvs {
-            if let IsisTlv::ProtoSupported(ps) = tlv
-                && ps.nlpids.contains(&ipv6_proto)
-            {
-                set.insert(lsp_id.sys_id());
-            }
-        }
-    }
-    set
-}
-
 #[allow(clippy::too_many_arguments)]
 fn write_spf_tree(
     buf: &mut String,
@@ -1390,7 +1375,7 @@ fn write_spf_tree(
     // already filtered to MT-2-capable peers (TLV 229 is the
     // stricter signal), so the NLPID gate is redundant — skip it.
     let ipv6_capable = if ipv6 && !mt2_mode {
-        Some(ipv6_capable_set_show(isis, level))
+        Some(ipv6_capable_set(isis.lsdb.get(level)))
     } else {
         None
     };
