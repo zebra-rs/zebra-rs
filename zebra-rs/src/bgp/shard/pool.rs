@@ -25,7 +25,7 @@ use std::net::IpAddr;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::{BgpShard, ShardMsg, ShardOut};
 
@@ -72,22 +72,22 @@ impl ShardWorker {
 }
 
 /// N shard worker threads plus the channels that drive them. Lives on the
-/// main task: dispatch by [`ShardPool::shard_of`]; results arrive on
-/// [`ShardPool::results`], which the main event loop `select!`s on.
+/// main task: dispatch by [`ShardPool::shard_of`]; results funnel into the
+/// `UnboundedReceiver` the caller holds (on `Bgp`), which the main event
+/// loop `select!`s on.
 pub struct ShardPool {
     n: usize,
     inboxes: Vec<Sender<ShardMsg>>,
-    /// Best-path deltas from all shards, multiplexed. Drained by main.
-    pub results: UnboundedReceiver<ShardResult>,
     handles: Vec<JoinHandle<()>>,
 }
 
 impl ShardPool {
-    /// Spawn `shards.len()` worker threads, one per [`BgpShard`].
-    pub fn spawn(shards: Vec<BgpShard>) -> Self {
+    /// Spawn `shards.len()` worker threads, one per [`BgpShard`]. Every
+    /// worker's [`ShardResult`]s are funnelled into `results` (the
+    /// receiver lives on the main task, drained by its event loop).
+    pub fn spawn(shards: Vec<BgpShard>, results: UnboundedSender<ShardResult>) -> Self {
         let n = shards.len();
         assert!(n >= 1, "shard pool needs at least one shard");
-        let (res_tx, res_rx) = unbounded_channel();
         let mut inboxes = Vec::with_capacity(n);
         let mut handles = Vec::with_capacity(n);
         for (idx, shard) in shards.into_iter().enumerate() {
@@ -97,7 +97,7 @@ impl ShardPool {
                 idx,
                 shard,
                 inbox: rx,
-                results: res_tx.clone(),
+                results: results.clone(),
             };
             let handle = std::thread::Builder::new()
                 .name(format!("bgp-shard-{idx}"))
@@ -108,7 +108,6 @@ impl ShardPool {
         Self {
             n,
             inboxes,
-            results: res_rx,
             handles,
         }
     }
@@ -177,7 +176,8 @@ mod tests {
 
     #[tokio::test]
     async fn pool_round_trips_a_message() {
-        let mut pool = ShardPool::spawn(vec![BgpShard::default()]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = ShardPool::spawn(vec![BgpShard::default()], tx);
         assert_eq!(pool.n(), 1);
         // Routing helper: every prefix maps to shard 0 at n=1.
         let idx = pool.shard_of("198.51.100.7".parse().unwrap());
@@ -185,7 +185,7 @@ mod tests {
         // A control message round-trips through the worker thread; an
         // empty shard has nothing to clean, so the reply carries no delta.
         pool.dispatch(idx, ShardMsg::PeerDown { ident: 7 });
-        let res = pool.results.recv().await.expect("worker reply");
+        let res = rx.recv().await.expect("worker reply");
         assert_eq!(res.shard, 0);
         assert!(res.out.is_empty());
         pool.shutdown();
