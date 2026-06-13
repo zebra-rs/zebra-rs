@@ -2948,10 +2948,32 @@ fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
         &bgp.policy_tx,
         peer_ident,
         policy::PolicyType::KeyChain(policy::KeyChainScope::BgpNeighbor),
-        prior,
-        new,
+        prior.clone(),
+        new.clone(),
     );
     apply_ao_refresh_all(bgp);
+
+    // A key-chain change resets the session, like the TCP-MD5 password
+    // path: the AO MKT is installed on the listener / active-connect
+    // socket at accept/dial time, so a session authenticated under the
+    // old key-chain would otherwise survive a new, removed, or
+    // mismatched one until the hold timer eventually expires. Bounce a
+    // live session with `Event::Stop` (the `clear … hard` teardown); an
+    // Idle peer picks the new key-chain up on its first connect.
+    // (A *content* change within the same chain — key rotation — flows
+    // through the policy `KeyChain` path, not this callback.)
+    if prior != new {
+        let live = bgp
+            .peers
+            .get(&addr)
+            .is_some_and(|p| !matches!(p.state, super::peer::State::Idle));
+        if live {
+            let _ = bgp.tx.try_send(super::inst::Message::Event(
+                peer_ident,
+                super::peer::Event::Stop,
+            ));
+        }
+    }
     Some(())
 }
 
