@@ -1,0 +1,18 @@
+[package]
+name = "bgp-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Synthetic BGP load generator for zebra-rs convergence benchmarks"
+
+[dependencies]
+anyhow.workspace = true
+bgp-packet = { path = "../../crates/bgp-packet" }
+bytes = "1"
+clap.workspace = true
+ipnet = "2.10"
+tokio.workspace = true
+
+[lints]
+workspace = true
