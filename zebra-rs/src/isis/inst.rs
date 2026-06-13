@@ -427,6 +427,19 @@ pub struct Isis {
     /// [`Self::event_loop`]. Events are logged and drive adjacency
     /// teardown on `BfdEvent::Down`.
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
+    /// Handle into the STAMP instance's client-request channel — used
+    /// by [`Self::stamp_reconcile_link`] to (un)subscribe measurement
+    /// sessions for `te-metric measurement` interfaces. Same capture
+    /// contract as `bfd_client_tx`; `None` for per-VRF children
+    /// (sessions are default-VRF only in Phase 1).
+    pub stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
+    /// Sender half of the per-instance `StampEvent` channel, handed to
+    /// STAMP as the `notifier` on every `Subscribe`.
+    pub stamp_event_tx: UnboundedSender<crate::stamp::client::StampEvent>,
+    /// Receive half drained by the event loop; `MetricUpdate`s land in
+    /// [`Self::process_stamp_event`], which stores the measured
+    /// te-metric on the link and re-originates.
+    pub stamp_event_rx: UnboundedReceiver<crate::stamp::client::StampEvent>,
     /// Snapshot of `/key-chains/key-chain <name>` entries the policy
     /// actor has pushed to this IS-IS instance via
     /// `PolicyRx::KeyChain`. The canonical map lives in
@@ -604,6 +617,7 @@ impl Isis {
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
         bgp_tx: Option<mpsc::Sender<crate::bgp::inst::Message>>,
         policy_tx: UnboundedSender<crate::policy::Message>,
         proto_label: String,
@@ -627,6 +641,7 @@ impl Isis {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+        let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
         let mut isis =
             Self {
                 tx,
@@ -710,10 +725,13 @@ impl Isis {
                 srlg_config: SrlgGroupBuilder::new(),
                 srlg_groups: BTreeMap::new(),
                 bfd_client_tx,
+                stamp_client_tx,
                 bgp_tx,
                 bgp_ls_advertised: std::collections::BTreeMap::new(),
                 bfd_event_tx,
                 bfd_event_rx,
+                stamp_event_tx,
+                stamp_event_rx,
                 key_chains: BTreeMap::new(),
                 policy_tx,
                 policy_rx: policy_chan.rx,
@@ -751,6 +769,11 @@ impl Isis {
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
             self.commit_srlg();
+            // Reconcile STAMP measurement sessions against the
+            // just-committed config — one robust hook covers every
+            // config path that can flip a session (measurement
+            // enable/interval, network-type, afi enable, ...).
+            self.stamp_reconcile_all();
             // Reconcile the local Prefix-SID ILM against the just-committed
             // config. This is what withdraws the pop entry when
             // `prefix-sid` / `segment-routing mpls` is removed or
@@ -1843,6 +1866,9 @@ impl Isis {
             Message::BfdUnsubscribe(key) => {
                 self.process_bfd_unsubscribe(key);
             }
+            Message::StampReconcile(ifindex) => {
+                self.stamp_reconcile_link(ifindex);
+            }
             Message::GrRestartExit => {
                 // Drain window elapsed. The supervisor (systemd /
                 // operator) is trusted to restart us. Kernel routes
@@ -1994,6 +2020,148 @@ impl Isis {
             client: "isis".to_string(),
             key,
         });
+    }
+
+    /// Re-evaluate the STAMP measurement session for every interface —
+    /// the `ConfigOp::CommitEnd` hook, so any committed change that can
+    /// flip a session (measurement enable/interval, network-type, afi
+    /// enable, ...) is reconciled without per-callback wiring.
+    pub(crate) fn stamp_reconcile_all(&mut self) {
+        if self.stamp_client_tx.is_none() {
+            return;
+        }
+        let ifindexes: Vec<u32> = self.links.iter().map(|(ifindex, _)| *ifindex).collect();
+        for ifindex in ifindexes {
+            self.stamp_reconcile_link(ifindex);
+        }
+    }
+
+    /// Diff the measurement session this link *should* hold (config
+    /// enabled ∧ P2P circuit ∧ an Up adjacency ∧ an IPv4 address pair)
+    /// against the tracked subscription, and (un)subscribe on the
+    /// edges only. Tearing a session down also clears the link's
+    /// measured values — they must not survive into the next adjacency
+    /// (or stay advertised after a disable) — and re-originates.
+    pub(crate) fn stamp_reconcile_link(&mut self, ifindex: u32) {
+        if self.stamp_client_tx.is_none() {
+            return;
+        }
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+
+        // Desired session for the current config + adjacency state.
+        // Same v4 selection as `bfd_reconcile_all`: first interface
+        // address × first address of the first Up neighbor (P2P has at
+        // most one neighbor per level).
+        let desired = if link.config.te_metric_measurement.enabled() && link.is_p2p() {
+            let local_v4 = link.state.v4addr.first().map(|p| p.addr());
+            let remote_v4 = [Level::L1, Level::L2].iter().find_map(|level| {
+                link.state
+                    .nbrs
+                    .get(level)
+                    .values()
+                    .find(|nbr| nbr.state == NfsmState::Up)
+                    .and_then(|nbr| nbr.addr4.keys().next().copied())
+            });
+            match (local_v4, remote_v4) {
+                (Some(local), Some(remote)) => Some((
+                    crate::stamp::session::SessionKey {
+                        local: std::net::IpAddr::V4(local),
+                        remote: std::net::IpAddr::V4(remote),
+                        ifindex,
+                    },
+                    link.config.te_metric_measurement.resolve(),
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if desired == link.state.stamp_session {
+            return;
+        }
+        let stale = link.state.stamp_session;
+        if let Some((key, _)) = stale {
+            self.stamp_unsubscribe(key);
+        }
+        if let Some((key, params)) = desired {
+            self.stamp_subscribe(key, params);
+        }
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        link.state.stamp_session = desired;
+        // A torn-down session's measured values are stale the moment
+        // the subscription ends — clear and re-advertise (static
+        // config, if any, takes back over via `te_metric_effective`).
+        if stale.is_some() && link.state.measured_te_metric != super::link::LinkTeMetric::default()
+        {
+            link.state.measured_te_metric = super::link::LinkTeMetric::default();
+            let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+            let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+        }
+    }
+
+    fn stamp_subscribe(
+        &self,
+        key: crate::stamp::session::SessionKey,
+        params: crate::stamp::session::SessionParams,
+    ) {
+        let Some(tx) = self.stamp_client_tx.as_ref() else {
+            return;
+        };
+        let _ = tx.send(crate::stamp::client::ClientReq::Subscribe {
+            client: self.proto_label.clone(),
+            key,
+            params,
+            notifier: self.stamp_event_tx.clone(),
+        });
+    }
+
+    fn stamp_unsubscribe(&self, key: crate::stamp::session::SessionKey) {
+        let Some(tx) = self.stamp_client_tx.as_ref() else {
+            return;
+        };
+        let _ = tx.send(crate::stamp::client::ClientReq::Unsubscribe {
+            client: self.proto_label.clone(),
+            key,
+        });
+    }
+
+    /// A damped STAMP export arrived: store the measured values on the
+    /// link and re-originate so the RFC 8570 sub-TLVs (and flex-algo
+    /// metric-type-1 SPF inputs) reflect them. A `None` snapshot
+    /// clears — the sub-TLVs are withdrawn unless static config backs
+    /// them ([`super::link::IsisLink::te_metric_effective`]).
+    pub(crate) fn process_stamp_event(&mut self, event: crate::stamp::client::StampEvent) {
+        let crate::stamp::client::StampEvent::MetricUpdate { key, snapshot } = event;
+        let Some(link) = self.links.get_mut(&key.ifindex) else {
+            return;
+        };
+        // Only the tracked session may write — a late event from a
+        // just-unsubscribed key must not resurrect stale values.
+        if link.state.stamp_session.map(|(k, _)| k) != Some(key) {
+            return;
+        }
+        link.state.measured_te_metric = match snapshot {
+            Some(snap) => super::link::LinkTeMetric {
+                unidirectional_delay: Some(snap.avg),
+                min_delay: Some(snap.min),
+                max_delay: Some(snap.max),
+                delay_variation: Some(snap.variation),
+                loss: None,
+            },
+            None => super::link::LinkTeMetric::default(),
+        };
+        tracing::info!(
+            ifindex = key.ifindex,
+            ?snapshot,
+            "isis: stamp metric update applied"
+        );
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 
     fn process_lsp_originate(&mut self, level: Level, seq_floor: Option<u32>) {
@@ -2339,6 +2507,9 @@ impl Isis {
                 }
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
+                }
+                Some(event) = self.stamp_event_rx.recv() => {
+                    self.process_stamp_event(event);
                 }
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg);
@@ -2990,6 +3161,12 @@ pub enum Message {
     /// the interface had `bfd { enable }` removed; release the BFD
     /// session by sending `ClientReq::Unsubscribe`.
     BfdUnsubscribe(crate::bfd::session::SessionKey),
+    /// Something that can flip this interface's STAMP measurement
+    /// session changed at runtime (an NFSM transition to/from Up,
+    /// adjacency teardown). The handler re-runs
+    /// [`Isis::stamp_reconcile_link`]; config-driven changes go
+    /// through the `CommitEnd` `stamp_reconcile_all` instead.
+    StampReconcile(u32),
 }
 
 impl Display for Message {
@@ -3031,6 +3208,9 @@ impl Display for Message {
             }
             Message::BfdUnsubscribe(key) => {
                 write!(f, "[Message::BfdUnsubscribe({:?})]", key.remote)
+            }
+            Message::StampReconcile(ifindex) => {
+                write!(f, "[Message::StampReconcile({})]", ifindex)
             }
             Message::LspSeqWrapClear(level, frag_id) => {
                 write!(f, "[Message::LspSeqWrapClear({}, frag={})]", level, frag_id)
@@ -3112,6 +3292,7 @@ mod bfd_wiring_tests {
             ctx,
             rib_rx,
             Some(bfd_client_tx),
+            /* stamp_client_tx */ None,
             None,
             policy_tx,
             "isis".to_string(),
@@ -3167,6 +3348,7 @@ mod bfd_wiring_tests {
             ctx,
             rib_rx,
             None,
+            /* stamp_client_tx */ None,
             None,
             policy_tx,
             "isis".to_string(),

@@ -302,10 +302,18 @@ pub struct LinkConfig {
     /// Statically configured RFC 8570 TE link metrics (unidirectional
     /// delay, min/max delay, delay variation, link loss) for this link,
     /// from /router/isis/interface/<name>/te-metric. Emitted as
-    /// sub-TLVs on the link's Extended IS Reachability entry. A future
-    /// performance-measurement (TWAMP/STAMP) task will populate the
-    /// same fields dynamically.
+    /// sub-TLVs on the link's Extended IS Reachability entry. Merged
+    /// with the measured values (static wins per field) by
+    /// [`IsisLink::te_metric_effective`].
     pub te_metric: LinkTeMetric,
+
+    /// STAMP measurement config for this link, from
+    /// /router/isis/interface/<name>/te-metric/measurement. When
+    /// enabled (and the circuit is P2P with an Up adjacency carrying a
+    /// v4 pair), `Isis::stamp_reconcile_link` keeps a measurement
+    /// session subscribed; its damped exports land in
+    /// `LinkState::measured_te_metric`.
+    pub te_metric_measurement: crate::stamp::session::MeasurementConfig,
 
     /// Per-Flex-Algorithm Prefix-SID for this link's IPv4 address(es).
     /// Populated from
@@ -439,6 +447,19 @@ impl LinkTeMetric {
             }));
         }
         subs
+    }
+
+    /// Per-field merge of `self` (static config) over `fallback`
+    /// (measured values): a configured field always wins, an
+    /// unconfigured one takes the measurement.
+    pub fn merged_over(&self, fallback: &LinkTeMetric) -> LinkTeMetric {
+        LinkTeMetric {
+            unidirectional_delay: self.unidirectional_delay.or(fallback.unidirectional_delay),
+            min_delay: self.min_delay.or(fallback.min_delay),
+            max_delay: self.max_delay.or(fallback.max_delay),
+            delay_variation: self.delay_variation.or(fallback.delay_variation),
+            loss: self.loss.or(fallback.loss),
+        }
     }
 }
 
@@ -657,6 +678,20 @@ pub struct LinkState {
 
     // TODO: need to fix.
     pub hello: Levels<Option<IsisPdu>>,
+
+    /// Last STAMP measurement exported for this link (all fields
+    /// `None` when no measurement is active or the last export was a
+    /// clear). Merged under the static config per field by
+    /// [`IsisLink::te_metric_effective`].
+    pub measured_te_metric: LinkTeMetric,
+
+    /// The STAMP subscription this link currently holds, tracked so
+    /// `Isis::stamp_reconcile_link` can diff desired-vs-actual and
+    /// only (un)subscribe on a real change.
+    pub stamp_session: Option<(
+        crate::stamp::session::SessionKey,
+        crate::stamp::session::SessionParams,
+    )>,
 }
 
 impl LinkState {
@@ -724,6 +759,26 @@ impl IsisLink {
         });
 
         Ok(is_link)
+    }
+
+    /// Same circuit-type resolution as [`LinkTop::is_p2p`]: explicit
+    /// `network-type` config wins, otherwise the kernel POINTOPOINT
+    /// interface flag decides.
+    pub fn is_p2p(&self) -> bool {
+        if let Some(network_type) = self.config.network_type {
+            return network_type == NetworkType::P2p;
+        }
+        (self.flags & LinkFlags::Pointopoint) == LinkFlags::Pointopoint
+    }
+
+    /// The TE metrics this link advertises: statically configured
+    /// values win over measured ones, per field — an operator override
+    /// never gets clobbered by measurement, while unconfigured fields
+    /// track the live measurement (or fall silent when it clears).
+    pub fn te_metric_effective(&self) -> LinkTeMetric {
+        self.config
+            .te_metric
+            .merged_over(&self.state.measured_te_metric)
     }
 }
 
@@ -1305,6 +1360,51 @@ pub fn config_te_delay_variation(isis: &mut Isis, args: Args, op: ConfigOp) -> O
 
 pub fn config_te_loss(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
     config_te_metric(isis, args, op, |t, v| t.loss = v)
+}
+
+// `/router/isis/interface/<ifname>/te-metric/measurement/*` — the
+// STAMP measurement block. Callbacks only mutate the config mirror;
+// the session itself is reconciled by `Isis::stamp_reconcile_all` on
+// `ConfigOp::CommitEnd` (one robust hook covers enable flips, interval
+// changes, and every other config path that can affect a session —
+// network-type, afi enable, ...). The disable path's measured-value
+// clear + re-origination also lives in the reconcile.
+fn config_te_measurement(
+    isis: &mut Isis,
+    mut args: Args,
+    set: impl FnOnce(&mut crate::stamp::session::MeasurementConfig, &mut Args) -> Option<()>,
+) -> Option<()> {
+    let ifname = args.string()?;
+    let link = isis.links.get_mut_by_name(&ifname)?;
+    set(&mut link.config.te_metric_measurement, &mut args)
+}
+
+pub fn config_te_measurement_enable(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        let value = args.boolean()?;
+        m.enable = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+pub fn config_te_measurement_interval(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        let value = args.u32()?;
+        m.interval_ms = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+pub fn config_te_measurement_damping_period(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        let value = args.u32()?;
+        m.damping_period_secs = op.is_set().then_some(value);
+        Some(())
+    })
 }
 
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -2465,5 +2565,41 @@ mod te_metric_tests {
     fn default_is_empty() {
         assert!(LinkTeMetric::default().sub_tlvs().is_empty());
         assert_eq!(LinkConfig::default().te_metric, LinkTeMetric::default());
+    }
+
+    /// `merged_over` (the [`IsisLink::te_metric_effective`] core):
+    /// static config wins per field, measured fills the gaps, and a
+    /// cleared measurement leaves only the static fields.
+    #[test]
+    fn merged_over_static_wins_measured_fills() {
+        let config = LinkTeMetric {
+            min_delay: Some(500), // operator override
+            loss: Some(3),
+            ..Default::default()
+        };
+        let measured = LinkTeMetric {
+            unidirectional_delay: Some(120),
+            min_delay: Some(100),
+            max_delay: Some(150),
+            delay_variation: Some(10),
+            loss: None,
+        };
+        let effective = config.merged_over(&measured);
+        assert_eq!(effective.min_delay, Some(500), "config wins");
+        assert_eq!(effective.unidirectional_delay, Some(120), "measured fills");
+        assert_eq!(effective.max_delay, Some(150));
+        assert_eq!(effective.delay_variation, Some(10));
+        assert_eq!(effective.loss, Some(3));
+
+        // Measurement cleared (D8): only static fields remain.
+        let effective = config.merged_over(&LinkTeMetric::default());
+        assert_eq!(
+            effective,
+            LinkTeMetric {
+                min_delay: Some(500),
+                loss: Some(3),
+                ..Default::default()
+            }
+        );
     }
 }
