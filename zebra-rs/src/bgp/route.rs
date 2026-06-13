@@ -3444,7 +3444,16 @@ pub fn route_ipv6_update(
     {
         rib.vrf_transit_only = true;
     }
-    let (replaced, selected, _next_id) = match rd {
+    // VPNv6 AddPath needs the just-updated path plus its allocated
+    // `local_id` to advertise it as one of several candidates; keep a
+    // clone (cheap Arc bump) only for VPNv6 — v6-unicast AddPath is a
+    // separate family with no twin yet.
+    let rib_addpath = if rd.is_some() {
+        Some(rib.clone())
+    } else {
+        None
+    };
+    let (replaced, selected, next_id) = match rd {
         Some(rd) => bgp.shard.update_v6vpn(rd, nlri.prefix, rib),
         None => bgp.shard.update_v6(nlri.prefix, rib),
     };
@@ -3507,6 +3516,13 @@ pub fn route_ipv6_update(
             }
             if !selected.is_empty() {
                 route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
+            }
+            // AddPath members get the just-updated candidate path itself
+            // (with its allocated local_id), independent of whether it
+            // won best-path.
+            if let Some(mut rib_ap) = rib_addpath {
+                rib_ap.local_id = next_id;
+                route_advertise_to_peers_vpnv6_addpath(rd, nlri.prefix, &rib_ap, bgp, peers);
             }
         }
     }
@@ -3582,6 +3598,11 @@ pub fn route_ipv6_withdraw(
             // Empty `selected` → MP_UNREACH to PE peers; a replacement
             // winner → re-advertise. Both handled by the helper.
             route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
+            // AddPath members: withdraw exactly the path that left (by
+            // its local_id); any remaining candidates stay advertised.
+            if let Some(gone) = removed.first() {
+                route_withdraw_vpnv6_addpath(rd, nlri.prefix, gone, peers);
+            }
         }
         None => {
             let removed = bgp.shard.remove_v6(nlri.prefix, nlri.id, ident);
@@ -6853,7 +6874,10 @@ pub(super) fn route_advertise_to_peers_vpnv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
 
-    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
+    // Best-path only, to the non-AddPath members. AddPath peers receive
+    // every candidate path (each with its own path-id) through
+    // [`route_advertise_to_peers_vpnv6_addpath`] instead.
+    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -6889,6 +6913,74 @@ pub(super) fn route_advertise_to_peers_vpnv6(
                 route_withdraw_vpnv6(peer, rd, prefix, 0);
             }
         }
+    }
+}
+
+/// VPNv6 AddPath twin of [`route_advertise_to_peers_vpnv6`] — the v6
+/// counterpart of the `rd.is_some()` branch of
+/// [`route_advertise_to_addpath`]. Called once per changed candidate
+/// path with that path's `rib` (its `local_id` already stamped), it
+/// advertises the path — not just the best — to every AddPath-Send
+/// member, each NLRI carrying the path-id (RFC 7911 §3). Split-horizon
+/// excludes the path's own source peer.
+pub(super) fn route_advertise_to_peers_vpnv6_addpath(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
+
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        // Split-horizon: never reflect a path back to the peer that
+        // sourced it.
+        if rib.ident == peer.ident {
+            continue;
+        }
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
+        let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(attr);
+        // RTC: skip without withdrawing when the peer's IPv6
+        // route-target constraint set doesn't admit this route.
+        if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            continue;
+        }
+        let vpnv6_nlri = Vpnv6Nlri {
+            label: rib.label.unwrap_or_default(),
+            rd,
+            nlri,
+        };
+        peer.send_vpnv6(vpnv6_nlri, attr, true);
+    }
+}
+
+/// VPNv6 AddPath withdraw twin — emit an MP_UNREACH carrying the
+/// withdrawn path's `local_id` to every AddPath-Send member, and drop
+/// the matching entry from each peer's pending cache. The other paths
+/// for the prefix stay advertised (they carry different path-ids).
+pub(super) fn route_withdraw_vpnv6_addpath(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    removed: &BgpRib,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
+
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        peer.cache_remove_vpnv6(rd, prefix, removed.local_id);
+        route_withdraw_vpnv6(peer, rd, prefix, removed.local_id);
     }
 }
 

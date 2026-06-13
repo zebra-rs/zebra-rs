@@ -400,3 +400,49 @@ entirely with the membership-index snapshots
 (`established_idents` / `established_plain_idents` /
 `established_addpath_idents`), so the table's line numbers and
 "AddPath handling" column describe the pre-refactor code.
+
+## 10. AddPath Send completion (B3 follow-through)
+
+B3 was first contained by *masking*: `addpath_send_implemented()`
+refused to negotiate AddPath Send for any family without a
+per-candidate advertise/withdraw twin (originally v4-unicast + VPNv4
+only). The follow-through is to *build* the twins so AddPath Send is
+supported everywhere it's meaningful. Target: every advertise family
+**except RTC** (`(Ip|Ip6, Rtc)` — Route Target Constraint NLRI carry
+no per-path semantics).
+
+**Invariant:** a family joins the `addpath_send_implemented()`
+allowlist in the SAME change that adds its twin — never before, or B3
+reopens (RFC 7911 §3 binds every NLRI of a negotiated family to a
+path-id, so a half-wired family emits malformed/ineffective
+withdraws).
+
+Each family follows the proven v4/VPNv4 twin shape:
+- split the existing best-path advertise to `established_plain_idents`;
+- add a per-candidate reach twin over `established_addpath_idents`
+  (one call per changed path, NLRI stamped `id = rib.local_id`);
+- add a withdraw twin keyed on `removed.local_id`;
+- wire both into the family's update / withdraw (and soft-out, where
+  one exists) call sites — clone the inbound `rib` before it moves
+  into the Loc-RIB `update`, carry `next_id`.
+
+Per-family status / notes:
+- **VPNv6** — DONE: `route_advertise_to_peers_vpnv6_addpath` /
+  `route_withdraw_vpnv6_addpath`; reuses `send_vpnv6` /
+  `cache_remove_vpnv6` (id rides in the NLRI, cache keys on it); no
+  soft-out path for VPNv6. Closest analog to VPNv4.
+- **EVPN** — TODO: reuses `send_evpn`; EVPN *does* have a soft-out
+  (`route_soft_out_peer_table_evpn`) that needs the twin too. Route id
+  lives on each `EvpnRoute` variant.
+- **LU-v4 / LU-v6** — TODO: no per-peer cache today (direct
+  `send_packet`); the twin loops candidates and emits one UPDATE each
+  with the path-id, or adds a small cache mirroring the VPN shape.
+- **IPv6-unicast** — separate family (group-cache shape like
+  v4-unicast, not the VPN per-peer cache); subsumed by B1 historically,
+  worth a twin too but not in the user's named set.
+
+No end-to-end AddPath BDD exists yet (true for v4/VPNv4 too) — the
+families are control-plane-validated (cap negotiation +
+`addpath_send_implemented` unit tests + full suite). A multi-path
+topology BDD asserting two paths arrive with distinct path-ids is a
+worthwhile cross-cutting follow-up for all AddPath families.
