@@ -107,7 +107,11 @@ impl BgpShard {
             // LabelBlockLow lands (B.3 follow-up).
             rib.local_label = self.labels.label_vpn_v4(None, rd, nlri.prefix);
         }
-        let (replaced, selected, _next_id) = self.update(rd, nlri.prefix, rib);
+        // Snapshot the row (for AddPath advertise) and stamp the
+        // `local_id` the update assigns to it.
+        let mut added = rib.clone();
+        let (replaced, selected, next_id) = self.update(rd, nlri.prefix, rib);
+        added.local_id = next_id;
         let survivor_nexthops = self.candidate_nexthops_v4(rd, nlri.prefix);
         vec![ShardOut::BestPathV4 {
             ident,
@@ -115,6 +119,7 @@ impl BgpShard {
             prefix: nlri,
             selected,
             replaced,
+            added: Some(added),
             survivor_nexthops,
         }]
     }
@@ -146,6 +151,7 @@ impl BgpShard {
             prefix: nlri,
             selected,
             replaced: extra_replaced,
+            added: None,
             survivor_nexthops,
         }
     }

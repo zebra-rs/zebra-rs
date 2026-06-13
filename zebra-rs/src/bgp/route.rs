@@ -17,7 +17,7 @@ use super::cap::CapAfiMap;
 use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::shard::msg::ShardUpdateV6;
+use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::{Bgp, InOut, Message};
 
@@ -2077,158 +2077,136 @@ pub fn route_ipv4_update(
         return;
     }
 
-    // Create BGP RIB with weight value 0. We are going to include BgpNexthop as
-    // part of BgpAttr. Since we want to consolidate BGP updates.
     let stale = stale || attr_has_llgr_stale(attr);
-    let mut rib = BgpRib::new(
-        peer_ident,
-        peer_router_id,
-        typ,
-        nlri.id,
-        0,
-        attr,
-        label,
-        nexthop,
-        stale,
-    );
-    rib.enhe_egress = enhe_egress;
 
-    // Register to peer's AdjRibIn and update stats
+    // Inbound policy (main-owned). Weight starts at 0 — a `set weight`
+    // clause may override it. `None` ⇒ denied.
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        bgp.shard
-            .adj_in_mut(peer.ident)
-            .add(rd, nlri.prefix, rib.clone());
-
-        // Apply policy. Carry the rib's current weight (0 here,
-        // since this is the first time the route enters the local
-        // RIB) so any `set weight NUM` clause in the in-policy can
-        // override it.
-        route_apply_policy_in(peer, nlri, attr.clone(), rib.weight)
+        route_apply_policy_in(peer, nlri, attr.clone(), 0)
     };
 
-    // Perform BGP Path selection.
-    let Some(decision) = decision else {
-        route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
-        return;
-    };
-    rib.attr = bgp.shard.intern(decision.attr);
-    rib.weight = decision.weight;
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V4(nlri.prefix),
     };
-    // RFC 8950 §4: an ENHE route's v4 NEXT_HOP attribute is to be
-    // ignored — don't NHT-track it (it's typically the sender's
-    // router-id, unreachable over a link-local-only topology, and
-    // tracking it would gate the route out of the FIB forever). The
-    // real next-hop is the MP_REACH v6 link-local pinned to the
-    // egress interface; the RIB's origin-pinned resolution already
-    // gates that install on the link being up.
-    if rib.enhe_egress.is_none() {
-        nht_track_received(bgp, &mut rib, dep.clone());
-    }
-    // VPNv4 transit (Inter-AS Option B): allocate a per-(RD,prefix) local
-    // label. A received VPNv4 route is never self-originated, so it is
-    // always a transit FEC; if we later re-advertise it with next-hop-self
-    // (eBGP, or iBGP+next-hop-self), the peer sends us this label and the
-    // swap ILM below forwards it down the LSP. `None` until a dynamic block
-    // is granted (advertise the received label as a fallback until then).
-    if let Some(rd) = rd {
-        rib.local_label =
-            bgp.shard
-                .labels
-                .label_vpn_v4(bgp.central_label_alloc.as_deref_mut(), rd, nlri.prefix);
-    }
-    // Inter-AS Option AB: a received VPNv4 route an `inter-as-hybrid` VRF
-    // imports is relayed only by that VRF's re-export (Originated,
-    // next-hop-self), never transparently — mark it so the advertise path
-    // suppresses it, otherwise the same prefix would reach a peer under
-    // several RDs and thrash the prefix-keyed VRF import.
-    if rd.is_some()
-        && !rib.is_originated()
-        && let Some(disp) = bgp.vrf_import
-        && super::inst::rt_imported_by_hybrid_vrf_v4(disp.rib_known_vrfs, &rib.attr.ecom)
-    {
-        rib.vrf_transit_only = true;
-    }
-    let (replaced, selected, next_id) = bgp.shard.update(rd, nlri.prefix, rib.clone());
-    // If this update changed the path's next-hop, the displaced row's
-    // old next-hop is no longer tracked by it; release it (unless
-    // another surviving path still uses it). Survivors are read *after*
-    // the update, so the new next-hop is in the set and an unchanged
-    // next-hop is correctly skipped.
-    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.shard.candidate_nexthops_v4(rd, nlri.prefix);
-        nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
-    }
 
-    // Per-VRF best-path → global VPNv4 export. The hook only
-    // fires for IPv4 unicast (rd==None) inside a VRF task
-    // (`vrf_export` is Some). Empty `selected` after an update
-    // means the new candidate didn't survive best-path and there
-    // are no remaining winners — translate to a WithdrawExport so
-    // the global instance drops the row.
-    if rd.is_none()
-        && let Some(exporter) = bgp.vrf_export
-    {
-        if let Some(winner) = selected.first() {
-            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr);
+    // For an accepted route main resolves the parts it owns before the
+    // shard takes the table op: next-hop reachability (skipped for ENHE,
+    // whose v4 NEXT_HOP is ignored — RFC 8950 §4) and the Inter-AS
+    // Option AB transit flag. `import_attr` is kept for the VPNv4
+    // import-withdraw dispatch (the rib moves into the shard).
+    let (nexthop_reachable, vrf_transit_only, import_attr) = match &decision {
+        Some(d) => {
+            let reachable = if enhe_egress.is_none() {
+                nht_track_received_attr(bgp, &d.attr, dep.clone())
+            } else {
+                true
+            };
+            let transit = rd.is_some()
+                && peer_ident != ORIGINATED_PEER
+                && bgp.vrf_import.is_some_and(|disp| {
+                    super::inst::rt_imported_by_hybrid_vrf_v4(disp.rib_known_vrfs, &d.attr.ecom)
+                });
+            (reachable, transit, d.attr.clone())
+        }
+        None => (true, false, attr.clone()),
+    };
+
+    // Hand the table op (Adj-RIB-In + policy decision → intern + VPNv4
+    // transit label + Loc-RIB + best-path) to the shard; act on the
+    // returned delta.
+    let deltas = bgp.shard.handle(
+        ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: peer_ident,
+            rd,
+            nlri: nlri.clone(),
+            peer_router_id,
+            typ,
+            attr: attr.clone(),
+            label,
+            nexthop,
+            enhe_egress,
+            stale,
+            nexthop_reachable,
+            vrf_transit_only,
+            decision,
+        }),
+        bgp.central_label_alloc.as_deref_mut(),
+    );
+
+    for delta in deltas {
+        let ShardOut::BestPathV4 {
+            rd,
+            prefix,
+            selected,
+            replaced,
+            added,
+            survivor_nexthops,
+            ..
+        } = delta
+        else {
+            continue;
+        };
+        // Release displaced next-hops (survivors computed by the shard).
+        if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+            nht_untrack_withdrawn(bgp, &replaced, &survivor_nexthops, dep.clone());
+        }
+        // Per-VRF VPNv4 export (rd == None, inside a VRF task).
+        if rd.is_none()
+            && let Some(exporter) = bgp.vrf_export
+        {
+            if let Some(winner) = selected.first() {
+                super::vrf::vrf_emit_export(exporter, prefix.prefix, &winner.attr);
+            } else {
+                super::vrf::vrf_emit_withdraw(exporter, prefix.prefix);
+            }
+        }
+        // Global v4vpn best-path → per-VRF import (rd == Some, global).
+        if let Some(rd) = rd
+            && let Some(dispatcher) = bgp.vrf_import
+        {
+            if let Some(winner) = selected.first() {
+                let (label, transport) = vpn_import_transport(bgp, winner);
+                super::vrf::dispatch_import_v4(
+                    dispatcher,
+                    rd,
+                    prefix.prefix,
+                    &winner.attr,
+                    label,
+                    transport,
+                    None,
+                );
+            } else {
+                super::vrf::dispatch_withdraw_import_v4(
+                    dispatcher,
+                    rd,
+                    prefix.prefix,
+                    &import_attr,
+                    None,
+                );
+            }
+        }
+        // Kernel FIB (unicast) / swap-ILM reconcile (VPNv4).
+        if rd.is_none() {
+            fib_install_v4(bgp, prefix.prefix, &selected);
         } else {
-            super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
+            reconcile_swap_ilm(bgp.rib_client, bgp.nexthop_cache.as_deref(), selected.first());
+        }
+        // Advertise the new best (an empty `selected` withdraws).
+        route_advertise_to_peers(rd, prefix.prefix, &selected, peer_ident, bgp, peers);
+        // AddPath: advertise the added path, or withdraw removed ones.
+        match &added {
+            Some(added) => {
+                route_advertise_to_addpath(rd, prefix.prefix, added, peer_ident, bgp, peers);
+            }
+            None => {
+                for removed in &replaced {
+                    route_withdraw_from_addpath(rd, prefix.prefix, removed, peer_ident, bgp, peers);
+                }
+            }
         }
     }
-
-    // Global v4vpn best-path → per-VRF import. Inverse of the
-    // export hook above: when an incoming VPNv4 route becomes the
-    // global best-path winner, fan out to every VRF whose
-    // `import_rts_v4` intersects the route's RT extcomms.
-    // `vrf_import` is `Some(...)` only in the global Bgp task;
-    // per-VRF runtimes never receive VPNv4 NLRI directly.
-    if let Some(rd) = rd
-        && let Some(dispatcher) = bgp.vrf_import
-    {
-        if let Some(winner) = selected.first() {
-            let (label, transport) = vpn_import_transport(bgp, winner);
-            super::vrf::dispatch_import_v4(
-                dispatcher,
-                rd,
-                nlri.prefix,
-                &winner.attr,
-                label,
-                transport,
-                None,
-            );
-        } else {
-            // best-path stripped the candidate; flood withdraw
-            // using the *new* attr (the one just rejected) so
-            // the matching-VRF set still resolves the same way.
-            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &rib.attr, None);
-        }
-    }
-
-    // Plain IPv4 unicast best-path winners are installed to the kernel
-    // FIB via RIB. VPNv4 lives in `shard.v4vpn`; a transit ASBR with
-    // no importing VRF installs no IP route, but it does program a swap
-    // ILM for the local label it advertises with next-hop-self (Inter-AS
-    // Option B) — `reconcile_swap_ilm` is a no-op when no local label was
-    // allocated or the next-hop hasn't resolved yet.
-    if rd.is_none() {
-        fib_install_v4(bgp, nlri.prefix, &selected);
-    } else {
-        reconcile_swap_ilm(
-            bgp.rib_client,
-            bgp.nexthop_cache.as_deref(),
-            selected.first(),
-        );
-    }
-
-    // Advertise to peers if best path changed.
-    if !selected.is_empty() {
-        route_advertise_to_peers(rd, nlri.prefix, &selected, peer_ident, bgp, peers);
-    }
-    rib.local_id = next_id;
-    route_advertise_to_addpath(rd, nlri.prefix, &rib, peer_ident, bgp, peers);
 }
 
 fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {

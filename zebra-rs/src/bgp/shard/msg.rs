@@ -213,6 +213,12 @@ pub enum ShardOut {
         prefix: Ipv4Nlri,
         selected: Vec<BgpRib>,
         replaced: Vec<BgpRib>,
+        /// The row just added to the Loc-RIB, with its assigned
+        /// `local_id` — `Some` on an accepted update, `None` on a
+        /// withdraw / policy-deny. AddPath advertises this specific
+        /// path (best or not); a `None` with non-empty `replaced` is a
+        /// path removal that AddPath peers must be withdrawn from.
+        added: Option<BgpRib>,
         /// Distinct BGP next-hops still in use by surviving candidates
         /// after the update — read by main's NHT untrack so it doesn't
         /// release a next-hop another path still needs. Computed by the
@@ -297,6 +303,7 @@ mod tests {
             prefix: v4("10.0.0.0/24"),
             selected: vec![],
             replaced: vec![],
+            added: None,
             survivor_nexthops: BTreeSet::new(),
         };
         let ShardOut::BestPathV4 { selected, .. } = out else {
