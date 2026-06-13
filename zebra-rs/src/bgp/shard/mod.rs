@@ -30,6 +30,7 @@ pub mod msg;
 pub use msg::{ShardMsg, ShardOut};
 
 pub mod dispatch;
+pub mod pool;
 
 /// Labels a shard carves from the central allocator per refill (RIB
 /// sharding B.2). A shard mints local labels in the per-route hot
