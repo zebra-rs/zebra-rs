@@ -102,6 +102,7 @@ pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
     matches!(
         (afi, safi),
         (Afi::Ip, Safi::Unicast)
+            | (Afi::Ip6, Safi::Unicast)
             | (Afi::Ip, Safi::MplsVpn)
             | (Afi::Ip6, Safi::MplsVpn)
             | (Afi::L2vpn, Safi::Evpn)
@@ -153,7 +154,7 @@ mod tests {
     }
 
     /// Negotiated AddPath *send* is gated on the family having the
-    /// per-path advertise pipeline. A VPNv6 (or any unimplemented
+    /// per-path advertise pipeline. An RTC (or any unimplemented
     /// family) `add-path send` config against a peer offering Receive
     /// must come out send=false — RFC 7911 §3 would otherwise oblige
     /// us to path-id every NLRI of a family whose withdraw path can't.
@@ -166,6 +167,9 @@ mod tests {
             (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::Unicast),
             (Afi::Ip6, Safi::MplsVpn),
+            // RTC stays excluded by design — its NLRI carry no per-path
+            // semantics, so send must never negotiate for it.
+            (Afi::Ip, Safi::Rtc),
         ] {
             let key = AfiSafi::new(afi, safi);
             // Peer offers both directions; we configure send-receive.
@@ -180,16 +184,18 @@ mod tests {
 
         // Implemented families negotiate send.
         assert!(opt.is_add_path_send(Afi::Ip, Safi::Unicast));
+        assert!(opt.is_add_path_send(Afi::Ip6, Safi::Unicast));
         assert!(opt.is_add_path_send(Afi::Ip, Safi::MplsVpn));
         assert!(opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn));
         // Unimplemented families are masked to receive-only.
-        assert!(!opt.is_add_path_send(Afi::Ip6, Safi::Unicast));
+        assert!(!opt.is_add_path_send(Afi::Ip, Safi::Rtc));
         // Receive negotiates for every family (parsing is generic).
         for (afi, safi) in [
             (Afi::Ip, Safi::Unicast),
             (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::Unicast),
             (Afi::Ip6, Safi::MplsVpn),
+            (Afi::Ip, Safi::Rtc),
         ] {
             let key = AfiSafi::new(afi, safi);
             assert!(
@@ -201,15 +207,15 @@ mod tests {
 
     /// The supported-set itself, pinned. Growing it is deliberate —
     /// each family must be added WITH its per-candidate
-    /// advertise/withdraw twins (VPNv6, EVPN, and labeled-unicast v4/v6
-    /// each landed alongside theirs). IPv6 unicast is the remaining
-    /// unicast family (separate group-cache shape); RTC is the one
-    /// family that stays excluded by design (its NLRI carry no per-path
-    /// semantics).
+    /// advertise/withdraw twins. Every advertise family is now
+    /// implemented; only RTC stays excluded by design (its NLRI carry
+    /// no per-path semantics) along with the exact-match families
+    /// (flowspec) that have no candidate set.
     #[test]
     fn addpath_send_implemented_set() {
         for (afi, safi) in [
             (Afi::Ip, Safi::Unicast),
+            (Afi::Ip6, Safi::Unicast),
             (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::MplsVpn),
             (Afi::L2vpn, Safi::Evpn),
@@ -222,7 +228,6 @@ mod tests {
             );
         }
         for (afi, safi) in [
-            (Afi::Ip6, Safi::Unicast),
             (Afi::Ip, Safi::Flowspec),
             (Afi::Ip6, Safi::Flowspec),
             (Afi::Ip, Safi::Rtc),
@@ -230,7 +235,7 @@ mod tests {
         ] {
             assert!(
                 !addpath_send_implemented(afi, safi),
-                "{afi} {safi} has no per-path advertise pipeline yet"
+                "{afi} {safi} has no per-path advertise pipeline"
             );
         }
     }

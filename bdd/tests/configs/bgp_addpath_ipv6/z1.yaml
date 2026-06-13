@@ -1,0 +1,24 @@
+interface:
+- if-name: i1
+  ipv6:
+    address: 2001:db8::1/64
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65003
+    afi-safi:
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:beef::/64

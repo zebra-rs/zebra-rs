@@ -449,10 +449,15 @@ Per-family status / notes:
   the ids that fell out (selected empty ⇒ withdraw all). So the stale
   "no Adj-RIB-Out yet" comment is now half-true: plain peers still
   direct-send without tracking; AddPath peers track in `v4lu`/`v6lu`.
-- **IPv6-unicast** — separate family (group-cache shape like
-  v4-unicast, not the VPN per-peer cache); subsumed by B1 historically,
-  worth a twin too but not in the user's named set. The only family
-  besides RTC still without AddPath Send.
+- **IPv6-unicast** — DONE: internal plain/AddPath split inside
+  `route_advertise_to_peers_v6` (no call-site changes, and v6 unicast
+  has no soft-out, so the inline `None` arm is the only withdraw site).
+  Reach is bucketed into the AddPath-signature update-group cache via
+  `send_ipv6` (group-cache shape, like v4-unicast); the withdraw uses
+  the per-peer `adj_out.v6` table (already present, previously unused
+  for the out direction) to diff advertised path-ids against the
+  candidate set. With this **every advertise family except RTC has
+  AddPath Send** — the supported set the user asked for.
 
 Wire coverage: `@bgp_addpath_ipv4` is the first end-to-end AddPath BDD
 (two paths for one prefix arrive at the receiver). It exercises the
