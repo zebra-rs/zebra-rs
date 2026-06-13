@@ -460,9 +460,21 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: LocalRib,
-    /// Shard-scope Loc-RIB tables (unicast/LU/VPN) — see
-    /// [`super::shard::BgpShard`] for the sharding-plan partition.
+    /// Shard-scope Loc-RIB tables (unicast/LU/VPN). During the B.3
+    /// wiring this is becoming a *read mirror*: the authoritative copy
+    /// moves into the shard task ([`shard_handle`]), and the route
+    /// pipeline updates this from the task's `BestPath` deltas while
+    /// the sync read paths (show / flowspec / soft-out) keep reading it
+    /// here. See [`super::shard::BgpShard`] for the partition.
+    ///
+    /// [`shard_handle`]: Self::shard_handle
     pub shard: BgpShard,
+    /// Handle to the shard task that owns the authoritative shard-scope
+    /// Loc-RIB (RIB sharding B.3). `None` until `event_loop` spawns it
+    /// (the spawn needs a tokio runtime). The route pipeline sends
+    /// ingest through this and applies the replies to `shard` (the
+    /// mirror).
+    pub shard_handle: Option<super::shard::BgpShardHandle>,
     /// `router bgp port <0-65535>`: TCP port the BGP listener binds
     /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
     /// listening entirely — no server socket is open, so every session
@@ -776,6 +788,7 @@ impl Bgp {
             rx,
             local_rib: LocalRib::default(),
             shard: BgpShard::default(),
+            shard_handle: None,
             ctx,
             rib_rx,
             nexthop_cache: super::nht::NexthopCache::default(),
@@ -3015,6 +3028,14 @@ impl Bgp {
         // labels; a VRF spawned before it lands takes label 0 and is
         // reconciled on arrival.
         self.request_label_block();
+        // Spawn the shard task (RIB sharding B.3). It owns the
+        // authoritative shard-scope Loc-RIB; `self.shard` is the read
+        // mirror the route pipeline keeps in step from the task's
+        // deltas. Seeded with no label block yet — `LabelBlockLow`
+        // refills once `vrf_label_alloc` is granted.
+        if self.shard_handle.is_none() {
+            self.shard_handle = Some(super::shard::spawn_bgp_shard(None));
+        }
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
         }
