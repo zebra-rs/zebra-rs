@@ -848,7 +848,19 @@ impl Isis {
     }
 
     pub fn addr_add(&mut self, addr: LinkAddr) {
-        // println!("ISIS: AddrAdd {} {}", addr.addr, addr.ifindex);
+        self.addr_update(addr, true);
+    }
+
+    pub fn addr_del(&mut self, addr: LinkAddr) {
+        self.addr_update(addr, false);
+    }
+
+    /// Shared body of `addr_add` / `addr_del`: route the prefix to
+    /// the link's per-family address list (v4 skipping loopbacks, v6
+    /// split into link-local vs global), apply the add/remove, and
+    /// re-originate the Hello so the interface-address TLVs track the
+    /// kernel.
+    fn addr_update(&mut self, addr: LinkAddr, add: bool) {
         let Some(link) = self.links.get_mut(&addr.ifindex) else {
             return;
         };
@@ -856,24 +868,16 @@ impl Isis {
         match addr.addr {
             IpNet::V4(prefix) => {
                 if !prefix.addr().is_loopback() {
-                    // Push only when prefix does not exist
-                    if !link.state.v4addr.contains(&prefix) {
-                        link.state.v4addr.push(prefix);
-                    }
+                    addr_list_update(&mut link.state.v4addr, prefix, add);
                 }
             }
             IpNet::V6(prefix) => {
-                if prefix.addr().is_unicast_link_local() {
-                    // Push only when prefix does not exist
-                    if !link.state.v6laddr.contains(&prefix) {
-                        link.state.v6laddr.push(prefix);
-                    }
+                let list = if prefix.addr().is_unicast_link_local() {
+                    &mut link.state.v6laddr
                 } else {
-                    // Push only when prefix does not exist
-                    if !link.state.v6addr.contains(&prefix) {
-                        link.state.v6addr.push(prefix);
-                    }
-                }
+                    &mut link.state.v6addr
+                };
+                addr_list_update(list, prefix, add);
             }
         }
 
@@ -882,31 +886,17 @@ impl Isis {
             let _ = self.tx.send(msg);
         }
     }
+}
 
-    pub fn addr_del(&mut self, addr: LinkAddr) {
-        let Some(link) = self.links.get_mut(&addr.ifindex) else {
-            return;
-        };
-
-        match addr.addr {
-            IpNet::V4(prefix) => {
-                if !prefix.addr().is_loopback() {
-                    link.state.v4addr.retain(|p| p != &prefix);
-                }
-            }
-            IpNet::V6(prefix) => {
-                if prefix.addr().is_unicast_link_local() {
-                    link.state.v6laddr.retain(|p| p != &prefix);
-                } else {
-                    link.state.v6addr.retain(|p| p != &prefix);
-                }
-            }
+/// Ensure `item` is present in (add) or absent from (remove) `list`
+/// — an order-preserving Vec used as a small set.
+fn addr_list_update<T: PartialEq>(list: &mut Vec<T>, item: T, add: bool) {
+    if add {
+        if !list.contains(&item) {
+            list.push(item);
         }
-
-        if link.config.enabled() {
-            let msg = Message::Ifsm(IfsmEvent::HelloOriginate, addr.ifindex, None);
-            let _ = self.tx.send(msg);
-        }
+    } else {
+        list.retain(|p| p != &item);
     }
 }
 
