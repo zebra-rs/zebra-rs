@@ -34,7 +34,8 @@
 //! for the same prefix is processed after it; the per-prefix Loc-RIB
 //! state stays consistent because the shard is the single writer.
 
-use std::net::Ipv4Addr;
+use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr};
 
 use bgp_packet::{Ipv4Nlri, Label, RouteDistinguisher};
 
@@ -66,9 +67,11 @@ pub enum ShardMsg {
     },
 
     /// A peer left Established: the shard drops the peer's Adj-RIB-In
-    /// slice across every sharded family and replies with the
-    /// per-prefix withdrawals main must fan out (closing the
-    /// "new SAFI forgot a route_clean block" bug-class, #1329).
+    /// slice across every sharded family and replies with a
+    /// [`ShardOut::BestPathV4`] per contributed prefix — re-electing
+    /// any surviving path (another peer may now win) or signalling a
+    /// withdraw (empty winners). Centralizing the sweep here closes the
+    /// "new SAFI forgot a route_clean block" bug-class (#1329).
     PeerDown { ident: usize },
 
     /// Render a sharded Loc-RIB table for a `show` command — the
@@ -100,6 +103,11 @@ pub struct ShardUpdateV4 {
     pub nexthop: Option<VpnNexthop>,
     pub enhe_egress: Option<(std::net::Ipv6Addr, u32)>,
     pub stale: bool,
+    /// Inter-AS Option AB: main computed (against its VRF-import view)
+    /// that an `inter-as-hybrid` VRF imports this VPNv4 route, so the
+    /// shard marks the Loc-RIB row transit-only. Always `false` for
+    /// unicast (`rd = None`).
+    pub vrf_transit_only: bool,
     pub decision: Option<PolicyDecision>,
 }
 
@@ -110,23 +118,21 @@ pub struct ShardUpdateV4 {
 #[derive(Debug)]
 pub enum ShardOut {
     /// Best-path outcome for an IPv4 / VPNv4 prefix after an
-    /// [`ShardMsg::UpdateV4`] / [`ShardMsg::WithdrawV4`]. `selected`
-    /// are the new winners (empty ⇒ the prefix is gone — withdraw);
-    /// `replaced` are the rows displaced by the update, for NHT
-    /// untrack.
+    /// [`ShardMsg::UpdateV4`], [`ShardMsg::WithdrawV4`], or a
+    /// [`ShardMsg::PeerDown`] sweep. `selected` are the new winners
+    /// (empty ⇒ the prefix is gone — main withdraws); `replaced` are
+    /// the rows displaced, for NHT untrack.
     BestPathV4 {
         ident: usize,
         rd: Option<RouteDistinguisher>,
         prefix: Ipv4Nlri,
         selected: Vec<BgpRib>,
         replaced: Vec<BgpRib>,
-    },
-
-    /// A per-prefix withdrawal produced by [`ShardMsg::PeerDown`] —
-    /// main fans out the MP_UNREACH and tears down any FIB install.
-    WithdrawV4 {
-        rd: Option<RouteDistinguisher>,
-        prefix: Ipv4Nlri,
+        /// Distinct BGP next-hops still in use by surviving candidates
+        /// after the update — read by main's NHT untrack so it doesn't
+        /// release a next-hop another path still needs. Computed by the
+        /// shard (it owns the Loc-RIB) since main can't see the table.
+        survivor_nexthops: BTreeSet<IpAddr>,
     },
 }
 
@@ -156,6 +162,7 @@ mod tests {
             nexthop: None,
             enhe_egress: None,
             stale: false,
+            vrf_transit_only: false,
             decision: Some(PolicyDecision {
                 attr: bgp_packet::BgpAttr::default(),
                 weight: 100,
@@ -185,12 +192,9 @@ mod tests {
             prefix: v4("10.0.0.0/24"),
             selected: vec![],
             replaced: vec![],
+            survivor_nexthops: BTreeSet::new(),
         };
-        match out {
-            ShardOut::BestPathV4 { selected, .. } => {
-                assert!(selected.is_empty(), "empty winners ⇒ withdraw");
-            }
-            _ => panic!("wrong variant"),
-        }
+        let ShardOut::BestPathV4 { selected, .. } = out;
+        assert!(selected.is_empty(), "empty winners ⇒ withdraw");
     }
 }

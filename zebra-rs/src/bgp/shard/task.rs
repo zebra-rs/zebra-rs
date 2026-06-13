@@ -1,0 +1,352 @@
+//! The shard task: owns a [`BgpShard`] and applies [`ShardMsg`]s to
+//! it, replying with [`ShardOut`] deltas (RIB sharding plan B.3).
+//!
+//! At N=1 main drives the task with an await-reply request:
+//! [`BgpShardHandle::request`] sends one message and awaits the
+//! resulting deltas, so the route pipeline stays linear (the shard
+//! call replaces the old inline `bgp.shard.…`). At N>1 (C.1) main
+//! fires a message per shard and joins the replies — the same handle,
+//! scatter-gather.
+//!
+//! The applied logic is the *shard half* of the route pipeline:
+//! Adj-RIB-In store, attribute intern, Loc-RIB update + best-path,
+//! and the per-route label. The peer checks, inbound policy, NHT
+//! registration, advertise fan-out, and FIB install stay in main and
+//! run off the returned delta (see [`super::msg`]).
+
+use bgp_packet::{Ipv4Nlri, RouteDistinguisher};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::context::Task;
+
+use super::BgpShard;
+use super::msg::{ShardMsg, ShardOut, ShardUpdateV4};
+use super::super::route::BgpRib;
+
+/// One unit of work for the shard task: a message plus an optional
+/// reply channel. Route-bearing messages carry a `reply`; fire-and-
+/// forget control (`Shutdown`) leaves it `None`.
+struct ShardReq {
+    msg: ShardMsg,
+    reply: Option<oneshot::Sender<Vec<ShardOut>>>,
+}
+
+/// Main's handle to the shard task — the inbound channel plus the
+/// task's abort-on-drop guard. Mirrors `BgpVrfHandle`.
+pub struct BgpShardHandle {
+    tx: mpsc::UnboundedSender<ShardReq>,
+    #[allow(dead_code)] // held for abort-on-drop; the task ends on Shutdown
+    task: Task<()>,
+}
+
+impl BgpShardHandle {
+    /// Send a route-bearing message and await its deltas. The shard's
+    /// reply never depends on main making further progress, so this
+    /// can't deadlock the event loop. Returns empty if the task is
+    /// gone (treated as "no delta").
+    pub async fn request(&self, msg: ShardMsg) -> Vec<ShardOut> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ShardReq {
+                msg,
+                reply: Some(reply_tx),
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Fire a control message with no reply (e.g. `Shutdown`).
+    pub fn send(&self, msg: ShardMsg) {
+        let _ = self.tx.send(ShardReq { msg, reply: None });
+    }
+}
+
+/// Spawn the shard task at N=1. `labels` seeds the shard's per-route
+/// label sub-block (a block carved from the central allocator by main
+/// at startup); `None` leaves it empty until a block is granted.
+pub fn spawn_bgp_shard(label_block: Option<(u32, u32)>) -> BgpShardHandle {
+    let (tx, mut rx) = mpsc::unbounded_channel::<ShardReq>();
+    let task = Task::spawn(async move {
+        let mut shard = BgpShard::default();
+        if let Some((start, end)) = label_block {
+            shard.labels.seed_block(start, end);
+        }
+        while let Some(req) = rx.recv().await {
+            if matches!(req.msg, ShardMsg::Shutdown) {
+                break;
+            }
+            let out = shard.handle(req.msg);
+            if let Some(reply) = req.reply {
+                let _ = reply.send(out);
+            }
+        }
+    });
+    BgpShardHandle { tx, task }
+}
+
+impl BgpShard {
+    /// Apply one message to the shard's owned state, returning the
+    /// deltas main must act on. `Show` / `Shutdown` are handled by the
+    /// task loop / show path and return nothing here.
+    pub fn handle(&mut self, msg: ShardMsg) -> Vec<ShardOut> {
+        match msg {
+            ShardMsg::UpdateV4(u) => self.handle_update_v4(u),
+            ShardMsg::WithdrawV4 { ident, rd, nlri } => {
+                vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
+            }
+            ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
+            ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
+        }
+    }
+
+    /// Shard half of `route_ipv4_update`: store Adj-RIB-In (pre-policy,
+    /// un-interned like `BgpRib::new`), and — if main's policy-in
+    /// permitted the route — intern the post-policy attribute, mint the
+    /// VPNv4 transit label, update the Loc-RIB, and report the
+    /// best-path delta. A denied route (`decision == None`) keeps its
+    /// Adj-RIB-In entry but withdraws any prior Loc-RIB row.
+    fn handle_update_v4(&mut self, u: ShardUpdateV4) -> Vec<ShardOut> {
+        let ShardUpdateV4 {
+            ident,
+            rd,
+            nlri,
+            peer_router_id,
+            typ,
+            attr,
+            label,
+            nexthop,
+            enhe_egress,
+            stale,
+            vrf_transit_only,
+            decision,
+        } = u;
+
+        let mut rib = BgpRib::new(
+            ident,
+            peer_router_id,
+            typ,
+            nlri.id,
+            0,
+            &attr,
+            label,
+            nexthop,
+            stale,
+        );
+        rib.enhe_egress = enhe_egress;
+        // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
+        self.adj_in_mut(ident).add(rd, nlri.prefix, rib.clone());
+
+        let Some(decision) = decision else {
+            // Inbound policy denied: drop any Loc-RIB row from this peer.
+            let removed = self.remove(rd, nlri.prefix, nlri.id, ident);
+            return vec![self.best_path_delta_v4(ident, rd, nlri, removed)];
+        };
+
+        rib.attr = self.intern(decision.attr);
+        rib.weight = decision.weight;
+        rib.vrf_transit_only = vrf_transit_only;
+        if let Some(rd) = rd {
+            // VPNv4 transit local label (Inter-AS Option B). Drawn from
+            // the shard's own sub-block; `None` central refill until
+            // LabelBlockLow lands (B.3 follow-up).
+            rib.local_label = self.labels.label_vpn_v4(None, rd, nlri.prefix);
+        }
+        let (replaced, selected, _next_id) = self.update(rd, nlri.prefix, rib);
+        let survivor_nexthops = self.candidate_nexthops_v4(rd, nlri.prefix);
+        vec![ShardOut::BestPathV4 {
+            ident,
+            rd,
+            prefix: nlri,
+            selected,
+            replaced,
+            survivor_nexthops,
+        }]
+    }
+
+    /// Build a [`ShardOut::BestPathV4`] after removing a prefix from
+    /// the Loc-RIB: re-select the winners and report the displaced
+    /// rows + surviving next-hops. `extra_replaced` folds in rows the
+    /// caller already removed (the policy-deny path).
+    fn best_path_delta_v4(
+        &mut self,
+        ident: usize,
+        rd: Option<RouteDistinguisher>,
+        nlri: Ipv4Nlri,
+        mut extra_replaced: Vec<BgpRib>,
+    ) -> ShardOut {
+        // For an explicit withdraw the caller passes an empty
+        // `extra_replaced`; remove this peer's contribution here.
+        if extra_replaced.is_empty() {
+            extra_replaced = self.remove(rd, nlri.prefix, nlri.id, ident);
+        }
+        let selected = match rd {
+            Some(rd) => self.select_best_path_vpn(&rd, nlri.prefix),
+            None => self.select_best_path(nlri.prefix),
+        };
+        let survivor_nexthops = self.candidate_nexthops_v4(rd, nlri.prefix);
+        ShardOut::BestPathV4 {
+            ident,
+            rd,
+            prefix: nlri,
+            selected,
+            replaced: extra_replaced,
+            survivor_nexthops,
+        }
+    }
+
+    /// Drop a departed peer's Adj-RIB-In slice and withdraw every IPv4
+    /// route it contributed — the shard half of `route_clean` for the
+    /// v4 families. Returns one withdrawal per affected prefix for main
+    /// to fan out + tear down in the FIB.
+    fn handle_peer_down(&mut self, ident: usize) -> Vec<ShardOut> {
+        let mut out = Vec::new();
+        // Collect the peer's received v4 prefixes from its Adj-RIB-In
+        // slice (unicast + VPNv4), then withdraw each from the Loc-RIB.
+        let (v4, v4vpn): (Vec<Ipv4Nlri>, Vec<(RouteDistinguisher, Ipv4Nlri)>) =
+            match self.adj_in(ident) {
+                Some(a) => {
+                    let v4 = a
+                        .v4
+                        .0
+                        .iter()
+                        .flat_map(|(p, ribs)| {
+                            ribs.iter().map(move |r| Ipv4Nlri {
+                                id: r.remote_id,
+                                prefix: *p,
+                            })
+                        })
+                        .collect();
+                    let v4vpn = a
+                        .v4vpn
+                        .iter()
+                        .flat_map(|(rd, t)| {
+                            t.0.iter().flat_map(move |(p, ribs)| {
+                                ribs.iter().map(move |r| {
+                                    (
+                                        *rd,
+                                        Ipv4Nlri {
+                                            id: r.remote_id,
+                                            prefix: *p,
+                                        },
+                                    )
+                                })
+                            })
+                        })
+                        .collect();
+                    (v4, v4vpn)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+        for nlri in v4 {
+            // Re-select after removing this peer's row: another peer may
+            // now win the prefix (then main re-advertises), or the
+            // prefix is gone (empty winners ⇒ main withdraws).
+            out.push(self.best_path_delta_v4(ident, None, nlri, Vec::new()));
+        }
+        for (rd, nlri) in v4vpn {
+            out.push(self.best_path_delta_v4(ident, Some(rd), nlri, Vec::new()));
+        }
+        self.adj_in_drop(ident);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::super::route::{BgpRibType, PolicyDecision};
+    use bgp_packet::{BgpAttr, BgpNexthop};
+
+    fn v4(s: &str) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        }
+    }
+
+    fn attr_with_nh(nh: &str) -> BgpAttr {
+        let mut a = BgpAttr::default();
+        a.nexthop = Some(BgpNexthop::Ipv4(nh.parse().unwrap()));
+        a
+    }
+
+    fn update_v4(ident: usize, prefix: &str, nh: &str, permit: bool) -> ShardMsg {
+        let attr = attr_with_nh(nh);
+        ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident,
+            rd: None,
+            nlri: v4(prefix),
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+            typ: BgpRibType::EBGP,
+            attr: attr.clone(),
+            label: None,
+            nexthop: None,
+            enhe_egress: None,
+            stale: false,
+            vrf_transit_only: false,
+            decision: permit.then(|| PolicyDecision { attr, weight: 100 }),
+        })
+    }
+
+    #[test]
+    fn update_v4_installs_and_reports_best_path() {
+        let mut shard = BgpShard::default();
+        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        // Loc-RIB got the route.
+        assert_eq!(shard.v4.0.len(), 1);
+        // Adj-RIB-In stored the received route under the peer.
+        assert_eq!(shard.adj_in(1).unwrap().v4.0.len(), 1);
+        // The delta names the winner.
+        match &out[..] {
+            [ShardOut::BestPathV4 { selected, .. }] => {
+                assert_eq!(selected.len(), 1, "one best path");
+            }
+            _ => panic!("expected one BestPathV4, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn denied_update_keeps_adj_in_but_withdraws_loc_rib() {
+        let mut shard = BgpShard::default();
+        // First a permitted route from peer 1.
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        assert_eq!(shard.v4.0.len(), 1);
+        // Peer 1 re-sends the same prefix but policy now denies it.
+        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", false));
+        // Adj-RIB-In still holds it (for soft-reconfig); Loc-RIB drops it.
+        assert_eq!(shard.adj_in(1).unwrap().v4.0.len(), 1);
+        assert!(shard.v4.0.is_empty(), "denied route left no Loc-RIB winner");
+        match &out[..] {
+            [ShardOut::BestPathV4 { selected, .. }] => {
+                assert!(selected.is_empty(), "no winner ⇒ main withdraws");
+            }
+            _ => panic!("expected BestPathV4 withdraw, got {out:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_down_withdraws_all_its_routes_and_drops_slice() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(7, "10.0.0.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(7, "10.0.1.0/24", "192.0.2.1", true));
+        assert_eq!(shard.v4.0.len(), 2);
+        let out = shard.handle(ShardMsg::PeerDown { ident: 7 });
+        // One BestPathV4 per contributed prefix, each an empty-winner
+        // withdraw (peer 7 was the only contributor).
+        assert_eq!(out.len(), 2, "one delta per contributed prefix");
+        assert!(
+            out.iter().all(|o| matches!(
+                o,
+                ShardOut::BestPathV4 { selected, .. } if selected.is_empty()
+            )),
+            "every prefix withdrawn (no surviving winner)"
+        );
+        // select_best_path pruned the now-empty Loc-RIB keys.
+        assert!(shard.v4.0.is_empty(), "Loc-RIB emptied");
+        assert!(shard.adj_in(7).is_none(), "peer's adj-in slice dropped");
+    }
+}
