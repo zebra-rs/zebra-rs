@@ -1,9 +1,11 @@
 # BGP RIB Sharding (Juniper-style)
 
-Status: **Plan proposed** — applicability analysis (§1–4) written
-2026-06-12; step-by-step delivery plan (§5–8) added same day. Not
-locked yet — open decisions in §8 need a ruling before Phase B starts.
-Phase 0 and Phase A can start immediately.
+Status: **Phase 0 + Phase A merged** — applicability analysis (§1–4)
+and delivery plan (§5–8) written 2026-06-12 (merged via PR #1402);
+bench harness (0.1, PR #1406) and the two flush-offload steps (A.1 PR
+#1408, A.2 PR #1416 — replaces auto-closed #1411) merged 2026-06-12,
+rebased on the peer-separation work (#1403/#1413/#1414). Open
+decisions in §8 still need a ruling before Phase B starts.
 
 Source: "BGP RIB Sharding" — Ravindran Thangarajah, Juniper Networks,
 2022-10-24.
@@ -132,9 +134,9 @@ PRs land.
 
 | Step | Title | Depends on | Status |
 |---|---|---|---|
-| 0.1 | Bench harness + baseline profile | — | ⏳ |
-| A.1 | Flush job extraction (pure function) | — | ⏳ |
-| A.2 | Flush offload to worker | A.1 | ⏳ |
+| 0.1 | Bench harness + baseline profile | — | merged (PR #1406) |
+| A.1 | Flush job extraction (pure function) | — | merged (PR #1408) |
+| A.2 | Flush offload to worker | A.1 | merged (PR #1416) |
 | B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ⏳ |
 | B.2 | Shard message protocol + label sub-blocks | B.1 | ⏳ |
 | B.3 | Spawn shard task at N=1 | B.2 | ⏳ |
@@ -345,11 +347,52 @@ consider flipping the default.
 
 ## 9. Performance record
 
-Baseline and per-step numbers land here as Phase 0/A/C complete.
+Harness: `tools/bgp-bench` (Phase 0.1, PR #1406). Methodology: N eBGP
+senders blast the same `--prefixes` set (RIB-FIB ratio = N), 2 eBGP
+receivers count re-advertisements; convergence = blast start → last
+announce at the slowest receiver (3s quiet window, excluded from the
+number). Daemon config: `no-fib-install true`, MRAI 1s both peer
+types (±1s quantization floor).
 
-| Scenario | Config | Baseline | A.2 | B.5 (N=1) | C.4 (best) |
+Machine: 5-vCPU VM (model not exposed), 31 GB RAM, Linux
+6.8.0-124-generic. Flamegraph pending: `perf_event_paranoid=4` blocks
+unprivileged perf on this box and user namespaces are restricted —
+thread-level attribution needs a root run (recipe in the bench
+README). The single-task serialization claim in §3 rests on code
+structure, not yet on a profile.
+
+Baseline, branch point `41a1d07d` (2026-06-12):
+
+| senders × prefixes | paths in | convergence | unique pfx/s | paths/s in | daemon RSS |
 |---|---|---|---|---|---|
-| TBD (0.1) | | | | | |
+| 4 × 100k | 400k | 1.564s | 64.0k | ~256k | 789 MB |
+| 8 × 100k | 800k | 4.556s | 21.9k | ~176k | 1.43 GB |
+| 4 × 500k | 2.0M | 8.147s | 61.4k | ~245k | 3.69 GB |
+
+Observations: per-path throughput *drops* as candidates-per-prefix
+rise (8-sender row), and the 4×500k run re-advertised 1.17M NLRIs for
+500k prefixes — best-path flips between senders' paths during ingest
+roughly double the egress work. Both are exactly the costs that shard
+(per-prefix re-election) and update-worker (egress encode) parallelism
+attack.
+
+Per-step results (same matrix) land here as A.2 / B.5 / C.4 complete.
+Re-running the matrix on the unchanged baseline binary showed ~10%
+run-to-run variance (announce counts vary 2× with best-path-flip
+timing), so single-run deltas below that are noise.
+
+| Step | 4×100k | 8×100k | 4×500k |
+|---|---|---|---|
+| Baseline | 1.564s | 4.556s | 8.147s |
+| A.2 (PR #1416, 2 runs) | 1.64–1.76s | 4.65–4.70s | 7.55s |
+| B.5 (N=1) | | | |
+| C.4 (best) | | | |
+
+A.2 reading: parity within noise at the 100k scales, ~7% at 2M paths.
+Expected — A.2 offloads the per-group encode, whose cost scales with
+member fan-out, and this matrix has only 2 receivers. The structural
+win is the freed main loop; C.2 (update-workers) is where egress
+parallelism actually pays.
 
 ## 10. Caveats & out of scope
 
