@@ -16,9 +16,9 @@ use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 use super::cap::CapAfiMap;
 use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
-use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
+use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
 use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -1903,7 +1903,7 @@ pub fn route_apply_policy_out_evpn(
 }
 
 pub fn route_apply_policy_out(
-    peer: &mut Peer,
+    peer: &Peer,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
@@ -2075,10 +2075,23 @@ pub fn route_ipv4_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         route_apply_policy_in(peer, nlri, attr.clone(), 0)
     };
-    route_ipv4_update_decided(
-        peer_ident, peer_router_id, typ, nlri, rd, label, attr, nexthop, enhe_egress, decision, bgp,
-        peers, stale,
+    let jobs = route_ipv4_update_decided(
+        peer_ident,
+        peer_router_id,
+        typ,
+        nlri,
+        rd,
+        label,
+        attr,
+        nexthop,
+        enhe_egress,
+        decision,
+        bgp,
+        stale,
     );
+    for job in jobs {
+        apply_ipv4_advertise_job(job, peer_ident, BTreeMap::new(), bgp, peers);
+    }
 }
 
 /// Per-attr inbound checks shared by every prefix in an UPDATE (AS-path
@@ -2156,18 +2169,127 @@ pub fn route_ipv4_update_batch(
             .collect()
     };
 
+    // Phase A (serial): Loc-RIB update per prefix. The table op +
+    // best-path + FIB/VRF run on the single shard; collect the resulting
+    // advertise jobs without running the (out-policy) advertise yet.
+    let mut jobs: Vec<Ipv4AdvertiseJob> = Vec::new();
     for (nlri, decision) in decisions {
-        route_ipv4_update_decided(
-            peer_ident, peer_router_id, typ, &nlri, None, None, attr, None, None, decision, bgp,
-            peers, stale,
-        );
+        jobs.extend(route_ipv4_update_decided(
+            peer_ident,
+            peer_router_id,
+            typ,
+            &nlri,
+            None,
+            None,
+            attr,
+            None,
+            None,
+            decision,
+            bgp,
+            stale,
+        ));
     }
+
+    // Phase B (parallel): precompute each job's per-group advertise
+    // outcome. The out-policy prefix-set walk — the convergence hot spot
+    // under a large policy — is pure over the route + the group's config,
+    // so it fans out across prefixes.
+    let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
+
+    // Phase C (serial): apply each job's advertise off the precomputed
+    // outcomes; cache / adj-out / send mutate shared state in NLRI order.
+    for (job, memo) in jobs.into_iter().zip(memos) {
+        apply_ipv4_advertise_job(job, peer_ident, memo, bgp, peers);
+    }
+}
+
+/// Parallel precompute of per-group advertise outcomes for a batch of
+/// IPv4 advertise jobs (C.2). Returns one memo per job, in `jobs` order,
+/// each mapping an update-group id to the outcome a clean (non-source,
+/// non-LLGR) member of that group would produce. The serial apply
+/// consumes these via the pre-seeded memo; per-peer split-horizon / LLGR
+/// suppression and any no-group peers still resolve inline.
+fn precompute_ipv4_advertise_outcomes(
+    jobs: &[Ipv4AdvertiseJob],
+    bgp: &BgpTop,
+    peers: &PeerMap,
+) -> Vec<BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>> {
+    use rayon::prelude::*;
+
+    let (afi, safi) = (Afi::Ip, Safi::Unicast);
+    let afi_safi = AfiSafi::new(afi, safi);
+
+    // Established plain-unicast peers grouped by update-group id, built
+    // once (the peer set is fixed for the batch). Each group records its
+    // member idents and a representative `add_path` (uniform per group).
+    let mut groups: BTreeMap<super::update_group::UpdateGroupId, (Vec<usize>, bool)> =
+        BTreeMap::new();
+    for ident in peers.established_plain_idents(afi, safi) {
+        let Some(peer) = peers.get_by_idx(ident) else {
+            continue;
+        };
+        let Some(gid) = peer.update_group_id.get(&afi_safi).cloned() else {
+            continue; // no-group peer: resolved inline in the apply
+        };
+        let add_path = peer.opt.is_add_path_send(afi, safi);
+        groups
+            .entry(gid)
+            .or_insert_with(|| (Vec::new(), add_path))
+            .0
+            .push(ident);
+    }
+
+    jobs.par_iter()
+        .map(|job| {
+            let mut memo = BTreeMap::new();
+            // VPNv4 (rd) keeps its inline path; a withdraw has no outcome.
+            if job.rd.is_some() {
+                return memo;
+            }
+            let Some(best) = job.selected.last() else {
+                return memo;
+            };
+            for (gid, (members, add_path)) in groups.iter() {
+                // Canonical member: the first established, non-source,
+                // non-LLGR peer — the one the serial memo computes on.
+                let canonical = members.iter().copied().find(|&idx| {
+                    peers.get_by_idx(idx).is_some_and(|p| {
+                        best.ident != p.ident
+                            && !llgr_blocks_advertisement(best.stale, &p.cap_recv, afi, safi)
+                    })
+                });
+                if let Some(idx) = canonical {
+                    let peer = peers.get_by_idx(idx).expect("peer exists");
+                    let outcome =
+                        compute_advertise_outcome(peer, &job.prefix, best, bgp, *add_path);
+                    memo.insert(gid.clone(), outcome);
+                }
+            }
+            memo
+        })
+        .collect()
+}
+
+/// One IPv4 advertise job produced by a Loc-RIB best-path delta: the
+/// surviving paths to advertise (empty = withdraw) plus the AddPath
+/// added/removed deltas. `route_ipv4_update_decided` returns these after
+/// doing the NHT / VRF / FIB post-work it owns; the caller runs the
+/// (out-policy) advertise, either inline or — for the batch — after a
+/// parallel precompute of the per-group outcomes.
+struct Ipv4AdvertiseJob {
+    rd: Option<RouteDistinguisher>,
+    prefix: Ipv4Net,
+    selected: Vec<BgpRib>,
+    added: Option<BgpRib>,
+    replaced: Vec<BgpRib>,
 }
 
 /// The post-policy half of `route_ipv4_update`: with the inbound
 /// decision already computed, resolve NHT + transit, hand the table op
-/// to the shard, and run the FIB / VRF / advertise post-work off the
-/// delta. Shared by the single-prefix and batch entry points.
+/// to the shard, and run the FIB / VRF post-work off the delta. The
+/// advertise is deferred to the returned [`Ipv4AdvertiseJob`]s so the
+/// batch path can parallelize the out-policy. Shared by the
+/// single-prefix and batch entry points.
 #[allow(clippy::too_many_arguments)]
 fn route_ipv4_update_decided(
     peer_ident: usize,
@@ -2181,9 +2303,8 @@ fn route_ipv4_update_decided(
     enhe_egress: Option<(Ipv6Addr, u32)>,
     decision: Option<PolicyDecision>,
     bgp: &mut BgpTop,
-    peers: &mut PeerMap,
     stale: bool,
-) {
+) -> Vec<Ipv4AdvertiseJob> {
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V4(nlri.prefix),
@@ -2233,6 +2354,7 @@ fn route_ipv4_update_decided(
         bgp.central_label_alloc.as_deref_mut(),
     );
 
+    let mut jobs = Vec::new();
     for delta in deltas {
         let ShardOut::BestPathV4 {
             rd,
@@ -2289,19 +2411,51 @@ fn route_ipv4_update_decided(
         if rd.is_none() {
             fib_install_v4(bgp, prefix.prefix, &selected);
         } else {
-            reconcile_swap_ilm(bgp.rib_client, bgp.nexthop_cache.as_deref(), selected.first());
+            reconcile_swap_ilm(
+                bgp.rib_client,
+                bgp.nexthop_cache.as_deref(),
+                selected.first(),
+            );
         }
-        // Advertise the new best (an empty `selected` withdraws).
-        route_advertise_to_peers(rd, prefix.prefix, &selected, peer_ident, bgp, peers);
-        // AddPath: advertise the added path, or withdraw removed ones.
-        match &added {
-            Some(added) => {
-                route_advertise_to_addpath(rd, prefix.prefix, added, peer_ident, bgp, peers);
-            }
-            None => {
-                for removed in &replaced {
-                    route_withdraw_from_addpath(rd, prefix.prefix, removed, peer_ident, bgp, peers);
-                }
+        // Defer the advertise (out-policy + AddPath) to the caller so the
+        // batch path can precompute the per-group outcomes in parallel.
+        jobs.push(Ipv4AdvertiseJob {
+            rd,
+            prefix: prefix.prefix,
+            selected,
+            added,
+            replaced,
+        });
+    }
+    jobs
+}
+
+/// Run one [`Ipv4AdvertiseJob`]'s advertise: the out-policy fan-out (an
+/// empty `selected` withdraws) plus the AddPath added/removed deltas.
+/// `memo` is the per-group outcome map — empty for the single-prefix
+/// path (computed inline) or parallel-precomputed for the batch.
+fn apply_ipv4_advertise_job(
+    job: Ipv4AdvertiseJob,
+    source_ident: usize,
+    memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let Ipv4AdvertiseJob {
+        rd,
+        prefix,
+        selected,
+        added,
+        replaced,
+    } = job;
+    route_advertise_to_peers_memo(rd, prefix, &selected, source_ident, bgp, peers, memo);
+    match &added {
+        Some(added) => {
+            route_advertise_to_addpath(rd, prefix, added, source_ident, bgp, peers);
+        }
+        None => {
+            for removed in &replaced {
+                route_withdraw_from_addpath(rd, prefix, removed, source_ident, bgp, peers);
             }
         }
     }
@@ -2451,10 +2605,10 @@ enum AdvertiseOutcome {
 /// signature fields, so the result is identical for every other
 /// non-source member of the same update-group.
 fn compute_advertise_outcome(
-    peer: &mut Peer,
+    peer: &Peer,
     prefix: &Ipv4Net,
     best: &BgpRib,
-    bgp: &mut BgpTop,
+    bgp: &BgpTop,
     add_path: bool,
 ) -> AdvertiseOutcome {
     if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
@@ -2494,9 +2648,36 @@ pub(super) fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     selected: &[BgpRib],
+    source_peer: usize,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    // Non-batch callers run the out-policy inline (empty pre-seeded memo).
+    route_advertise_to_peers_memo(
+        rd,
+        prefix,
+        selected,
+        source_peer,
+        bgp,
+        peers,
+        BTreeMap::new(),
+    );
+}
+
+/// Body of [`route_advertise_to_peers`] with the per-group outcome memo
+/// supplied by the caller. The IPv4 batch path (C.2) pre-seeds this map
+/// with out-policy outcomes computed in parallel across prefixes, so the
+/// expensive prefix-set walk never runs on the serial advertise loop;
+/// other callers pass an empty map and the outcome is computed inline on
+/// the first clean (non-source, non-LLGR) group member, exactly as before.
+fn route_advertise_to_peers_memo(
+    rd: Option<RouteDistinguisher>,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
     _source_peer: usize,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
+    mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>,
 ) {
     // Get the new best path (last entry in selected vector)
     let new_best = selected.last();
@@ -2511,12 +2692,15 @@ pub(super) fn route_advertise_to_peers(
 
     let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
 
-    // Per-call memo: outcome cached per update-group id for the
-    // span of this advertisement only. Members of the same group
-    // share the post-policy outcome (modulo split-horizon, which is
-    // checked per-peer before lookup so the canonical computation
-    // is always run on a non-source peer).
-    let mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome> = BTreeMap::new();
+    // Per-call memo: outcome cached per update-group id for the span of
+    // this advertisement only. Members of the same group share the
+    // post-policy outcome (modulo split-horizon, which is checked
+    // per-peer before lookup so the canonical computation is always run
+    // on a non-source peer). The map may arrive pre-seeded from a
+    // parallel precompute; `bumped` decouples the group-counter bump
+    // (once per group, on first clean consumer) from where the outcome
+    // was computed.
+    let mut bumped: BTreeSet<super::update_group::UpdateGroupId> = BTreeSet::new();
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -2540,15 +2724,25 @@ pub(super) fn route_advertise_to_peers(
             }
             Some(best) => match group_id.as_ref() {
                 Some(gid) => {
-                    if let Some(cached) = memo.get(gid) {
-                        cached.clone()
-                    } else {
-                        let outcome = compute_advertise_outcome(peer, &prefix, best, bgp, add_path);
+                    // Outcome from the (possibly parallel-precomputed)
+                    // memo, else computed inline on this clean peer.
+                    let outcome = match memo.get(gid) {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let outcome =
+                                compute_advertise_outcome(peer, &prefix, best, bgp, add_path);
+                            memo.insert(gid.clone(), outcome.clone());
+                            outcome
+                        }
+                    };
+                    // Bump the group counters once, on the first clean
+                    // (non-source, non-LLGR) consumer of this group —
+                    // independent of whether the outcome was precomputed.
+                    if bumped.insert(gid.clone()) {
                         let denied = matches!(outcome, AdvertiseOutcome::Withdraw);
-                        memo.insert(gid.clone(), outcome.clone());
                         bump_group_counters_on_miss(bgp, afi_safi, gid, denied);
-                        outcome
                     }
+                    outcome
                 }
                 None => compute_advertise_outcome(peer, &prefix, best, bgp, add_path),
             },
@@ -6493,10 +6687,10 @@ fn llgr_blocks_advertisement(
 }
 
 pub fn route_update_ipv4(
-    peer: &mut Peer,
+    peer: &Peer,
     prefix: &Ipv4Net,
     rib: &BgpRib,
-    bgp: &mut BgpTop,
+    bgp: &BgpTop,
     add_path: bool,
 ) -> Option<(Ipv4Nlri, BgpAttr)> {
     // Split-horizon: Don't send route back to the peer that sent it
