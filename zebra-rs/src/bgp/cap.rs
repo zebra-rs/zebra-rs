@@ -101,7 +101,10 @@ pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
 pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
     matches!(
         (afi, safi),
-        (Afi::Ip, Safi::Unicast) | (Afi::Ip, Safi::MplsVpn) | (Afi::Ip6, Safi::MplsVpn)
+        (Afi::Ip, Safi::Unicast)
+            | (Afi::Ip, Safi::MplsVpn)
+            | (Afi::Ip6, Safi::MplsVpn)
+            | (Afi::L2vpn, Safi::Evpn)
     )
 }
 
@@ -196,16 +199,16 @@ mod tests {
 
     /// The supported-set itself, pinned. Growing it is deliberate —
     /// each family must be added WITH its per-candidate
-    /// advertise/withdraw twins (VPNv6 landed alongside its
-    /// `route_advertise_to_peers_vpnv6_addpath` twin). EVPN and
-    /// labeled-unicast v4/v6 are the remaining families to wire up;
-    /// RTC is the one family that stays excluded by design.
+    /// advertise/withdraw twins (VPNv6 and EVPN each landed alongside
+    /// theirs). Labeled-unicast v4/v6 are the remaining families to
+    /// wire up; RTC is the one family that stays excluded by design.
     #[test]
     fn addpath_send_implemented_set() {
         for (afi, safi) in [
             (Afi::Ip, Safi::Unicast),
             (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::MplsVpn),
+            (Afi::L2vpn, Safi::Evpn),
         ] {
             assert!(
                 addpath_send_implemented(afi, safi),
@@ -214,7 +217,6 @@ mod tests {
         }
         for (afi, safi) in [
             (Afi::Ip6, Safi::Unicast),
-            (Afi::L2vpn, Safi::Evpn),
             (Afi::Ip, Safi::MplsLabel),
             (Afi::Ip6, Safi::MplsLabel),
             (Afi::Ip, Safi::Flowspec),
