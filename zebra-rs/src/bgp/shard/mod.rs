@@ -29,8 +29,7 @@ use super::vrf::VrfLabelAllocator;
 pub mod msg;
 pub use msg::{ShardMsg, ShardOut};
 
-pub mod task;
-pub use task::{BgpShardHandle, spawn_bgp_shard};
+pub mod dispatch;
 
 /// Labels a shard carves from the central allocator per refill (RIB
 /// sharding B.2). A shard mints local labels in the per-route hot
@@ -156,12 +155,6 @@ impl ShardLabelPool {
         Some(label)
     }
 
-    /// Seed the sub-block with a `[start, end)` range carved from the
-    /// central allocator — used by the shard task at spawn so it has a
-    /// block to draw from before the first `LabelBlockLow` refill.
-    pub fn seed_block(&mut self, start: u32, end: u32) {
-        self.pool.extend(start, end);
-    }
 }
 
 #[derive(Debug, Default)]

@@ -1,98 +1,38 @@
-//! The shard task: owns a [`BgpShard`] and applies [`ShardMsg`]s to
-//! it, replying with [`ShardOut`] deltas (RIB sharding plan B.3).
+//! [`BgpShard::handle`] — the shard's message dispatcher (RIB sharding
+//! plan B.3, sync-dispatch form).
 //!
-//! At N=1 main drives the task with an await-reply request:
-//! [`BgpShardHandle::request`] sends one message and awaits the
-//! resulting deltas, so the route pipeline stays linear (the shard
-//! call replaces the old inline `bgp.shard.…`). At N>1 (C.1) main
-//! fires a message per shard and joins the replies — the same handle,
-//! scatter-gather.
-//!
-//! The applied logic is the *shard half* of the route pipeline:
-//! Adj-RIB-In store, attribute intern, Loc-RIB update + best-path,
-//! and the per-route label. The peer checks, inbound policy, NHT
+//! The route pipeline applies ingest to the shard-scope Loc-RIB by
+//! building a [`ShardMsg`], calling [`BgpShard::handle`] synchronously,
+//! and acting on the returned [`ShardOut`] delta — instead of poking
+//! the tables inline. `handle` is the *shard half* of the pipeline:
+//! Adj-RIB-In store, attribute intern, Loc-RIB update + best-path, and
+//! the per-route label. The peer checks, inbound policy, NHT
 //! registration, advertise fan-out, and FIB install stay in main and
-//! run off the returned delta (see [`super::msg`]).
+//! run off the delta (see [`super::msg`]).
+//!
+//! This keeps the table ops behind the same protocol a future shard
+//! *task* would speak, so C.1 (real N>1 parallelism) is a mechanical
+//! cutover — `shard.handle(msg)` becomes `shard_handle.request(msg)
+//! .await` — without re-deriving the pipeline split.
 
 use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
-use tokio::sync::{mpsc, oneshot};
-
-use crate::context::Task;
 
 use super::BgpShard;
 use super::msg::{LuNlri, ShardMsg, ShardOut, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
 use super::super::route::BgpRib;
-
-/// One unit of work for the shard task: a message plus an optional
-/// reply channel. Route-bearing messages carry a `reply`; fire-and-
-/// forget control (`Shutdown`) leaves it `None`.
-struct ShardReq {
-    msg: ShardMsg,
-    reply: Option<oneshot::Sender<Vec<ShardOut>>>,
-}
-
-/// Main's handle to the shard task — the inbound channel plus the
-/// task's abort-on-drop guard. Mirrors `BgpVrfHandle`.
-pub struct BgpShardHandle {
-    tx: mpsc::UnboundedSender<ShardReq>,
-    #[allow(dead_code)] // held for abort-on-drop; the task ends on Shutdown
-    task: Task<()>,
-}
-
-impl BgpShardHandle {
-    /// Send a route-bearing message and await its deltas. The shard's
-    /// reply never depends on main making further progress, so this
-    /// can't deadlock the event loop. Returns empty if the task is
-    /// gone (treated as "no delta").
-    pub async fn request(&self, msg: ShardMsg) -> Vec<ShardOut> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ShardReq {
-                msg,
-                reply: Some(reply_tx),
-            })
-            .is_err()
-        {
-            return Vec::new();
-        }
-        reply_rx.await.unwrap_or_default()
-    }
-
-    /// Fire a control message with no reply (e.g. `Shutdown`).
-    pub fn send(&self, msg: ShardMsg) {
-        let _ = self.tx.send(ShardReq { msg, reply: None });
-    }
-}
-
-/// Spawn the shard task at N=1. `labels` seeds the shard's per-route
-/// label sub-block (a block carved from the central allocator by main
-/// at startup); `None` leaves it empty until a block is granted.
-pub fn spawn_bgp_shard(label_block: Option<(u32, u32)>) -> BgpShardHandle {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ShardReq>();
-    let task = Task::spawn(async move {
-        let mut shard = BgpShard::default();
-        if let Some((start, end)) = label_block {
-            shard.labels.seed_block(start, end);
-        }
-        while let Some(req) = rx.recv().await {
-            if matches!(req.msg, ShardMsg::Shutdown) {
-                break;
-            }
-            let out = shard.handle(req.msg);
-            if let Some(reply) = req.reply {
-                let _ = reply.send(out);
-            }
-        }
-    });
-    BgpShardHandle { tx, task }
-}
+use super::super::vrf::VrfLabelAllocator;
 
 impl BgpShard {
     /// Apply one message to the shard's owned state, returning the
-    /// deltas main must act on. `Show` / `Shutdown` are handled by the
-    /// task loop / show path and return nothing here.
-    pub fn handle(&mut self, msg: ShardMsg) -> Vec<ShardOut> {
+    /// deltas main must act on. `central` is the central MPLS label
+    /// allocator, borrowed for the Labeled-Unicast label-mint refill
+    /// (`None` on paths that mint no label). `Show` / `Shutdown` carry
+    /// no table op and return nothing here.
+    pub fn handle(
+        &mut self,
+        msg: ShardMsg,
+        central: Option<&mut VrfLabelAllocator>,
+    ) -> Vec<ShardOut> {
         match msg {
             ShardMsg::UpdateV4(u) => self.handle_update_v4(u),
             ShardMsg::WithdrawV4 { ident, rd, nlri } => {
@@ -102,7 +42,7 @@ impl BgpShard {
             ShardMsg::WithdrawV6 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
             }
-            ShardMsg::UpdateLu(u) => self.handle_update_lu(u),
+            ShardMsg::UpdateLu(u) => self.handle_update_lu(u, central),
             ShardMsg::WithdrawLu { ident, nlri } => {
                 vec![self.best_path_delta_lu(ident, nlri, Vec::new())]
             }
@@ -294,7 +234,11 @@ impl BgpShard {
     /// Shard half of `route_labelv4_update` / `route_labelv6_update`.
     /// No inbound policy; the shard mints a per-prefix local label from
     /// its own sub-block (`None` central refill until LabelBlockLow).
-    fn handle_update_lu(&mut self, u: ShardUpdateLu) -> Vec<ShardOut> {
+    fn handle_update_lu(
+        &mut self,
+        u: ShardUpdateLu,
+        central: Option<&mut VrfLabelAllocator>,
+    ) -> Vec<ShardOut> {
         let ShardUpdateLu {
             ident,
             nlri,
@@ -324,12 +268,12 @@ impl BgpShard {
         rib.nexthop_reachable = nexthop_reachable;
         let (replaced, selected, survivor_nexthops) = match &nlri {
             LuNlri::V4(n) => {
-                rib.local_label = self.labels.label_lu_v4(None, n.prefix);
+                rib.local_label = self.labels.label_lu_v4(central, n.prefix);
                 let (replaced, selected, _) = self.update_v4lu(n.prefix, rib);
                 (replaced, selected, self.candidate_nexthops_v4lu(n.prefix))
             }
             LuNlri::V6(n) => {
-                rib.local_label = self.labels.label_lu_v6(None, n.prefix);
+                rib.local_label = self.labels.label_lu_v6(central, n.prefix);
                 let (replaced, selected, _) = self.update_v6lu(n.prefix, rib);
                 (replaced, selected, self.candidate_nexthops_v6lu(n.prefix))
             }
@@ -576,16 +520,17 @@ mod tests {
     #[test]
     fn update_lu_v4_installs_and_mints_local_label() {
         let mut shard = BgpShard::default();
-        // Seed a label sub-block so the shard can mint a local label.
-        shard.labels.seed_block(1000, 2000);
-        let out = shard.handle(update_lu_v4(2, "10.0.0.0/24", 50));
+        // The shard mints a local label by carving a chunk from the
+        // central pool (>= SHARD_LABEL_CHUNK so the carve succeeds).
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let out = shard.handle(update_lu_v4(2, "10.0.0.0/24", 50), Some(&mut central));
         assert_eq!(shard.v4lu.0.len(), 1);
-        // The Loc-RIB row carries a local label minted from the block.
+        // The Loc-RIB row carries a local label minted from the pool.
         let row = shard.v4lu.0.values().next().unwrap().first().unwrap();
-        assert_eq!(row.local_label, Some(1000), "minted from the sub-block");
+        assert_eq!(row.local_label, Some(1000), "minted from the central pool");
         assert!(matches!(&out[..], [ShardOut::BestPathLu { selected, .. }] if selected.len() == 1));
         // Peer down withdraws it (and re-elects if another peer had it).
-        let down = shard.handle(ShardMsg::PeerDown { ident: 2 });
+        let down = shard.handle(ShardMsg::PeerDown { ident: 2 }, None);
         assert!(matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty()));
         assert!(shard.v4lu.0.is_empty());
     }
@@ -594,12 +539,12 @@ mod tests {
     fn update_v6_installs_and_peer_down_withdraws() {
         let mut shard = BgpShard::default();
         // v6 has no inbound policy — the route always installs.
-        let out = shard.handle(update_v6(4, "2001:db8:1::/64"));
+        let out = shard.handle(update_v6(4, "2001:db8:1::/64"), None);
         assert_eq!(shard.v6.0.len(), 1);
         assert_eq!(shard.adj_in(4).unwrap().v6.0.len(), 1);
         assert!(matches!(&out[..], [ShardOut::BestPathV6 { selected, .. }] if selected.len() == 1));
         // Peer down sweeps the v6 route too (handle_peer_down covers v6).
-        let down = shard.handle(ShardMsg::PeerDown { ident: 4 });
+        let down = shard.handle(ShardMsg::PeerDown { ident: 4 }, None);
         assert_eq!(down.len(), 1);
         assert!(matches!(&down[..], [ShardOut::BestPathV6 { selected, .. }] if selected.is_empty()));
         assert!(shard.v6.0.is_empty());
@@ -609,7 +554,7 @@ mod tests {
     #[test]
     fn update_v4_installs_and_reports_best_path() {
         let mut shard = BgpShard::default();
-        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true), None);
         // Loc-RIB got the route.
         assert_eq!(shard.v4.0.len(), 1);
         // Adj-RIB-In stored the received route under the peer.
@@ -627,10 +572,10 @@ mod tests {
     fn denied_update_keeps_adj_in_but_withdraws_loc_rib() {
         let mut shard = BgpShard::default();
         // First a permitted route from peer 1.
-        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true), None);
         assert_eq!(shard.v4.0.len(), 1);
         // Peer 1 re-sends the same prefix but policy now denies it.
-        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", false));
+        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", false), None);
         // Adj-RIB-In still holds it (for soft-reconfig); Loc-RIB drops it.
         assert_eq!(shard.adj_in(1).unwrap().v4.0.len(), 1);
         assert!(shard.v4.0.is_empty(), "denied route left no Loc-RIB winner");
@@ -645,10 +590,10 @@ mod tests {
     #[test]
     fn peer_down_withdraws_all_its_routes_and_drops_slice() {
         let mut shard = BgpShard::default();
-        shard.handle(update_v4(7, "10.0.0.0/24", "192.0.2.1", true));
-        shard.handle(update_v4(7, "10.0.1.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(7, "10.0.0.0/24", "192.0.2.1", true), None);
+        shard.handle(update_v4(7, "10.0.1.0/24", "192.0.2.1", true), None);
         assert_eq!(shard.v4.0.len(), 2);
-        let out = shard.handle(ShardMsg::PeerDown { ident: 7 });
+        let out = shard.handle(ShardMsg::PeerDown { ident: 7 }, None);
         // One BestPathV4 per contributed prefix, each an empty-winner
         // withdraw (peer 7 was the only contributor).
         assert_eq!(out.len(), 2, "one delta per contributed prefix");
