@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use bgp_packet::AfiSafi;
+use bgp_packet::{Afi, AfiSafi, Safi};
 
 use super::membership::PeerMembership;
 use super::peer::Peer;
@@ -93,6 +93,36 @@ impl PeerMap {
     /// [`Self::get_mut_by_idx`].
     pub fn membership(&self) -> &PeerMembership {
         &self.membership
+    }
+
+    /// Snapshot of every Established peer that negotiated `(afi,
+    /// safi)` — both AddPath-send and plain members. The fan-out
+    /// idiom: iterate this, re-look-up mutably via
+    /// [`Self::get_mut_by_idx`].
+    pub fn established_idents(&self, afi: Afi, safi: Safi) -> Vec<usize> {
+        self.membership
+            .family(afi, safi)
+            .map(|fam| fam.iter_all().collect())
+            .unwrap_or_default()
+    }
+
+    /// Established `(afi, safi)` peers WITHOUT AddPath Send — the
+    /// best-path-only pipeline's audience.
+    pub fn established_plain_idents(&self, afi: Afi, safi: Safi) -> Vec<usize> {
+        self.membership
+            .family(afi, safi)
+            .map(|fam| fam.plain.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Established `(afi, safi)` peers WITH AddPath Send negotiated —
+    /// the per-candidate pipeline's audience (every NLRI to them
+    /// carries a path-id, RFC 7911 §3).
+    pub fn established_addpath_idents(&self, afi: Afi, safi: Safi) -> Vec<usize> {
+        self.membership
+            .family(afi, safi)
+            .map(|fam| fam.addpath_tx.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// (Re)compute `idx`'s family membership from its negotiated
@@ -347,6 +377,54 @@ mod tests {
         assert!(
             m.membership().family(Afi::Ip, Safi::MplsVpn).is_none(),
             "non-negotiated family must not be enrolled"
+        );
+    }
+
+    /// The fan-out entry points: `established_addpath_idents` /
+    /// `established_plain_idents` partition the family,
+    /// `established_idents` is their union, and a family nobody
+    /// negotiated yields an empty Vec (not a panic).
+    #[test]
+    fn established_ident_snapshots_partition_by_addpath() {
+        let mut m = PeerMap::new();
+
+        let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+        let mut peer = make_peer(a);
+        peer.state = State::Established;
+        negotiate(&mut peer, Afi::Ip, Safi::Unicast, true);
+        m.insert(a, peer);
+        let a_idx = m.get(&a).unwrap().ident;
+        m.membership_enroll(a_idx);
+
+        let b: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        let mut peer = make_peer(b);
+        peer.state = State::Established;
+        negotiate(&mut peer, Afi::Ip, Safi::Unicast, false);
+        m.insert(b, peer);
+        let b_idx = m.get(&b).unwrap().ident;
+        m.membership_enroll(b_idx);
+
+        assert_eq!(
+            m.established_addpath_idents(Afi::Ip, Safi::Unicast),
+            vec![a_idx]
+        );
+        assert_eq!(
+            m.established_plain_idents(Afi::Ip, Safi::Unicast),
+            vec![b_idx]
+        );
+        let mut all = m.established_idents(Afi::Ip, Safi::Unicast);
+        all.sort_unstable();
+        assert_eq!(all, vec![a_idx, b_idx]);
+
+        // A family nobody negotiated: every snapshot is empty.
+        assert!(m.established_idents(Afi::Ip6, Safi::Unicast).is_empty());
+        assert!(
+            m.established_plain_idents(Afi::Ip6, Safi::Unicast)
+                .is_empty()
+        );
+        assert!(
+            m.established_addpath_idents(Afi::Ip6, Safi::Unicast)
+                .is_empty()
         );
     }
 

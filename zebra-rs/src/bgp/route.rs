@@ -2408,13 +2408,7 @@ fn route_advertise_to_addpath(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .filter(|(_, p)| p.opt.is_add_path_send(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -2485,13 +2479,7 @@ fn route_withdraw_from_addpath(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .filter(|(_, p)| p.opt.is_add_path_send(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -2592,13 +2580,7 @@ pub(super) fn route_advertise_to_peers(
     };
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .filter(|(_, p)| !p.opt.is_add_path_send(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
 
     // Per-call memo: outcome cached per update-group id for the
     // span of this advertisement only. Members of the same group
@@ -2848,12 +2830,7 @@ pub fn route_withdraw_evpn_to_peers(
     prefix: EvpnPrefix,
     peers: &mut PeerMap,
 ) {
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(Afi::L2vpn, Safi::Evpn);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -2943,12 +2920,7 @@ pub fn route_advertise_evpn_to_peers(
         return;
     };
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(Afi::L2vpn, Safi::Evpn))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(Afi::L2vpn, Safi::Evpn);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -4790,13 +4762,8 @@ fn srpolicy_reflect(
     };
     let (source_ibgp, source_rid) = (src.is_ibgp(), src.remote_id);
 
-    let dests: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.ident != source_ident)
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let mut dests: Vec<usize> = peers.established_idents(afi, Safi::SrTePolicy);
+    dests.retain(|&ident| ident != source_ident);
     for ident in dests {
         let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
@@ -4834,13 +4801,8 @@ fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &m
         return;
     };
     let source_ibgp = src.is_ibgp();
-    let dests: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.ident != source_ident)
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let mut dests: Vec<usize> = peers.established_idents(afi, Safi::SrTePolicy);
+    dests.retain(|&ident| ident != source_ident);
     for ident in dests {
         let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
@@ -5070,14 +5032,9 @@ pub(super) fn srpolicy_origin_sync(bgp: &mut Bgp, name: &str) {
     }
 }
 
-/// Addresses of established peers that negotiated SAFI 73 for `afi`.
+/// Idents of established peers that negotiated SAFI 73 for `afi`.
 fn srpolicy_peer_idents(bgp: &Bgp, afi: Afi) -> Vec<usize> {
-    bgp.peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, Safi::SrTePolicy))
-        .map(|(_, p)| p.ident)
-        .collect()
+    bgp.peers.established_idents(afi, Safi::SrTePolicy)
 }
 
 /// Advertise one local SR Policy NLRI + attribute to every established
@@ -5362,12 +5319,7 @@ pub fn route_advertise_flowspec_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(afi, Safi::Flowspec);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -5388,12 +5340,7 @@ pub fn route_advertise_flowspec_to_peers(
 /// Withdraw a flow spec from every peer to which it was advertised
 /// (tracked via Adj-RIB-Out), sending one MP_UNREACH UPDATE each.
 pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &mut PeerMap) {
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, Safi::Flowspec))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(afi, Safi::Flowspec);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -6947,13 +6894,7 @@ pub(super) fn route_advertise_to_peers_v6(
     let (afi, safi) = (Afi::Ip6, Safi::Unicast);
     let afi_safi = AfiSafi::new(afi, safi);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .filter(|(_, p)| !p.opt.is_add_path_send(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -7042,12 +6983,7 @@ pub(super) fn route_advertise_to_peers_vpnv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -7270,12 +7206,7 @@ pub(super) fn route_advertise_to_peers_labelv4(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip, Safi::MplsLabel);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -7326,12 +7257,7 @@ pub(super) fn route_advertise_to_peers_labelv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsLabel);
 
-    let peer_idents: Vec<usize> = peers
-        .iter_all()
-        .filter(|(_, p)| p.state.is_established())
-        .filter(|(_, p)| p.is_afi_safi(afi, safi))
-        .map(|(_, p)| p.ident)
-        .collect();
+    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
