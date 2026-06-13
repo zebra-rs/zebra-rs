@@ -1811,21 +1811,42 @@ pub fn route_apply_policy_in(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.prefix_set.get(&InOut::Input);
-    if config.name.is_some() {
-        let Some(prefix_set) = &config.prefix_set else {
+    apply_policy_in_pure(
+        peer.prefix_set.get(&InOut::Input),
+        peer.policy_list.get(&InOut::Input),
+        peer.router_id,
+        nlri,
+        bgp_attr,
+        weight,
+    )
+}
+
+/// Pure inbound-policy evaluation: matches `nlri` against the peer's
+/// input prefix-set + policy-list snapshots and returns the decision.
+/// Takes the resolved config by reference (not `&mut Peer`) and mutates
+/// nothing, so the batch ingest path can run it in parallel across a
+/// packet's prefixes (RIB sharding C.1).
+pub fn apply_policy_in_pure(
+    prefix_cfg: &super::PrefixSetValue,
+    policy_cfg: &super::PolicyListValue,
+    router_id: Ipv4Addr,
+    nlri: &Ipv4Nlri,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    if prefix_cfg.name.is_some() {
+        let Some(prefix_set) = &prefix_cfg.prefix_set else {
             return None;
         };
         if !prefix_set.matches(nlri.prefix) {
             return None;
         }
     }
-    let config = peer.policy_list.get(&InOut::Input);
-    if config.name.is_some() {
-        let Some(policy_list) = &config.policy_list else {
+    if policy_cfg.name.is_some() {
+        let Some(policy_list) = &policy_cfg.policy_list else {
             return None;
         };
-        return policy_list_apply(policy_list, nlri, bgp_attr, weight, peer.router_id);
+        return policy_list_apply(policy_list, nlri, bgp_attr, weight, router_id);
     }
     Some(PolicyDecision {
         attr: bgp_attr,
@@ -2042,81 +2063,127 @@ pub fn route_ipv4_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
-    // Validate and extract peer information in a separate scope to release the borrow
-    let (peer_ident, peer_router_id, typ, should_process) = {
-        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-
-        // RFC 4271: Drop update if local AS appears in AS_PATH (loop detection for EBGP)
-        // This prevents routing loops by detecting if the route has already passed through this AS
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            eprintln!(
-                "Dropping update for {} from peer {} - local AS {} found in AS_PATH",
-                nlri.prefix, peer.address, peer.local_as
-            );
-            return;
-        }
-
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
-            eprintln!(
-                "Dropping update for {} from peer {} - enforce-first-as: AS_PATH does not start with {}",
-                nlri.prefix, peer.address, peer.remote_as
-            );
-            return;
-        }
-
-        // RFC 4456: Drop update if ORIGINATOR_ID matches local router ID. This
-        // prevents routing loops in route reflection scenarios. This happens before
-        // the route store in AdjRibIn.
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            eprintln!(
-                "Dropping update for {} from peer {} - ORIGINATOR_ID {} matches local router ID",
-                nlri.prefix, peer.address, originator_id.id
-            );
-            return;
-        }
-
-        // RFC 4456: Drop update if local router ID is in CLUSTER_LIST. This
-        // prevents routing loops in route reflection scenarios when the route
-        // has already passed through this route reflector.
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            eprintln!(
-                "Dropping update for {} from peer {} - local router ID {} found in CLUSTER_LIST",
-                nlri.prefix, peer.address, bgp.router_id
-            );
-            return;
-        }
-
-        // Identify peer_type
-        let typ = if peer.is_ibgp() {
-            BgpRibType::IBGP
-        } else {
-            BgpRibType::EBGP
-        };
-
-        (peer.ident, peer.remote_id, typ, true)
+    let checks = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        inbound_attr_checks(peer, attr, bgp.router_id)
     };
-
-    if !should_process {
+    let Some((peer_ident, peer_router_id, typ)) = checks else {
         return;
-    }
-
+    };
     let stale = stale || attr_has_llgr_stale(attr);
-
-    // Inbound policy (main-owned). Weight starts at 0 — a `set weight`
-    // clause may override it. `None` ⇒ denied.
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         route_apply_policy_in(peer, nlri, attr.clone(), 0)
     };
+    route_ipv4_update_decided(
+        peer_ident, peer_router_id, typ, nlri, rd, label, attr, nexthop, enhe_egress, decision, bgp,
+        peers, stale,
+    );
+}
 
+/// Per-attr inbound checks shared by every prefix in an UPDATE (AS-path
+/// loop, enforce-first-as, route-reflection). Returns the peer identity
+/// or `None` if the UPDATE is dropped; the batch path runs it once.
+fn inbound_attr_checks(
+    peer: &Peer,
+    attr: &BgpAttr,
+    local_router_id: &Ipv4Addr,
+) -> Option<(usize, Ipv4Addr, BgpRibType)> {
+    if let Some(ref aspath) = attr.aspath
+        && aspath_own_as_loop(peer, aspath)
+    {
+        return None;
+    }
+    if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
+        return None;
+    }
+    if let Some(ref originator_id) = attr.originator_id
+        && originator_id.id == *local_router_id
+    {
+        return None;
+    }
+    if let Some(ref cluster_list) = attr.cluster_list
+        && cluster_list.list.contains(local_router_id)
+    {
+        return None;
+    }
+    let typ = if peer.is_ibgp() {
+        BgpRibType::IBGP
+    } else {
+        BgpRibType::EBGP
+    };
+    Some((peer.ident, peer.remote_id, typ))
+}
+
+/// Parallel ingest for a packet's plain IPv4-unicast NLRIs (RIB
+/// sharding C.1). The prefixes share one attribute and inbound policy
+/// is pure (read-only on the peer's policy snapshot), so the per-prefix
+/// policy walk — the serial bottleneck under heavy policy — fans out
+/// across cores with rayon. The Loc-RIB writes + advertise then run
+/// serially in NLRI order off the decisions.
+pub fn route_ipv4_update_batch(
+    ident: usize,
+    prefixes: &[Ipv4Nlri],
+    attr: &BgpAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
+    use rayon::prelude::*;
+
+    let checks = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        inbound_attr_checks(peer, attr, bgp.router_id)
+    };
+    let Some((peer_ident, peer_router_id, typ)) = checks else {
+        return;
+    };
+    let stale = stale || attr_has_llgr_stale(attr);
+
+    let decisions: Vec<(Ipv4Nlri, Option<PolicyDecision>)> = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        let prefix_cfg = peer.prefix_set.get(&InOut::Input);
+        let policy_cfg = peer.policy_list.get(&InOut::Input);
+        let router_id = peer.router_id;
+        prefixes
+            .par_iter()
+            .map(|nlri| {
+                (
+                    nlri.clone(),
+                    apply_policy_in_pure(prefix_cfg, policy_cfg, router_id, nlri, attr.clone(), 0),
+                )
+            })
+            .collect()
+    };
+
+    for (nlri, decision) in decisions {
+        route_ipv4_update_decided(
+            peer_ident, peer_router_id, typ, &nlri, None, None, attr, None, None, decision, bgp,
+            peers, stale,
+        );
+    }
+}
+
+/// The post-policy half of `route_ipv4_update`: with the inbound
+/// decision already computed, resolve NHT + transit, hand the table op
+/// to the shard, and run the FIB / VRF / advertise post-work off the
+/// delta. Shared by the single-prefix and batch entry points.
+#[allow(clippy::too_many_arguments)]
+fn route_ipv4_update_decided(
+    peer_ident: usize,
+    peer_router_id: Ipv4Addr,
+    typ: BgpRibType,
+    nlri: &Ipv4Nlri,
+    rd: Option<RouteDistinguisher>,
+    label: Option<Label>,
+    attr: &BgpAttr,
+    nexthop: Option<VpnNexthop>,
+    enhe_egress: Option<(Ipv6Addr, u32)>,
+    decision: Option<PolicyDecision>,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    stale: bool,
+) {
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V4(nlri.prefix),
@@ -5349,11 +5416,9 @@ pub fn route_from_peer(
             route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, true);
         }
     } else if let Some(bgp_attr) = &packet.bgp_attr {
-        for update in packet.ipv4_update.iter() {
-            route_ipv4_update(
-                peer_id, update, None, None, bgp_attr, None, None, bgp, peers, false,
-            );
-        }
+        // Plain IPv4-unicast ingest goes through the batch path, which
+        // fans the per-prefix inbound-policy walk across cores (C.1).
+        route_ipv4_update_batch(peer_id, &packet.ipv4_update, bgp_attr, bgp, peers, false);
     }
 
     for withdraw in packet.ipv4_withdraw.iter() {
