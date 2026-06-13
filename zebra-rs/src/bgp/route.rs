@@ -2109,10 +2109,10 @@ pub fn route_ipv4_update(
     // swap ILM below forwards it down the LSP. `None` until a dynamic block
     // is granted (advertise the received label as a fallback until then).
     if let Some(rd) = rd {
-        rib.local_label = bgp
-            .lu_labels
-            .as_mut()
-            .and_then(|ll| ll.label_vpn_v4(rd, nlri.prefix));
+        rib.local_label =
+            bgp.shard
+                .labels
+                .label_vpn_v4(bgp.central_label_alloc.as_deref_mut(), rd, nlri.prefix);
     }
     // Inter-AS Option AB: a received VPNv4 route an `inter-as-hybrid` VRF
     // imports is relayed only by that VRF's re-export (Originated,
@@ -3269,11 +3269,7 @@ pub fn route_ipv4_withdraw(
         // keeps the same per-(RD,prefix) label, whose ILM is reconciled
         // for the (possibly new) winner's received label / transport.
         if selected.is_empty() {
-            if let Some(local) = bgp
-                .lu_labels
-                .as_mut()
-                .and_then(|ll| ll.free_vpn_v4(rd, nlri.prefix))
-            {
+            if let Some(local) = bgp.shard.labels.free_vpn_v4(rd, nlri.prefix) {
                 ilm_swap_remove(bgp.rib_client, local);
             }
         } else {
@@ -3704,9 +3700,9 @@ pub fn route_labelv4_update(
     // dynamic block is granted yet — advertise the received label until
     // then.
     rib.local_label = bgp
-        .lu_labels
-        .as_mut()
-        .and_then(|ll| ll.label_v4(lu.nlri.prefix));
+        .shard
+        .labels
+        .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
     let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v4lu(lu.nlri.prefix);
@@ -3798,9 +3794,9 @@ pub fn route_labelv6_update(
     let dep = super::nht::NhtDep::V6lu(lu.nlri.prefix);
     nht_track_received(bgp, &mut rib, dep.clone());
     rib.local_label = bgp
-        .lu_labels
-        .as_mut()
-        .and_then(|ll| ll.label_v6(lu.nlri.prefix));
+        .shard
+        .labels
+        .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
     let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v6lu(lu.nlri.prefix);
@@ -3849,10 +3845,7 @@ pub fn route_labelv4_withdraw(
     // ILM. (A surviving winner keeps the same per-prefix label, whose ILM
     // `fib_install_labelv4` reconciles below.)
     if selected.is_empty()
-        && let Some(local) = bgp
-            .lu_labels
-            .as_mut()
-            .and_then(|ll| ll.free_v4(nlri.prefix))
+        && let Some(local) = bgp.shard.labels.free_lu_v4(nlri.prefix)
     {
         ilm_swap_remove(bgp.rib_client, local);
     }
@@ -3894,10 +3887,7 @@ pub fn route_labelv6_withdraw(
     }
     let selected = bgp.shard.select_best_path_v6lu(nlri.prefix);
     if selected.is_empty()
-        && let Some(local) = bgp
-            .lu_labels
-            .as_mut()
-            .and_then(|ll| ll.free_v6(nlri.prefix))
+        && let Some(local) = bgp.shard.labels.free_lu_v6(nlri.prefix)
     {
         ilm_swap_remove(bgp.rib_client, local);
     }
@@ -8369,7 +8359,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         // An originated route lacks a v4 NEXT_HOP attribute, so when
@@ -8414,7 +8404,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path(prefix);
@@ -8480,7 +8470,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         fib_install_v6(&bgp_ref, prefix, &selected);
@@ -8512,7 +8502,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
@@ -8563,7 +8553,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -8600,7 +8590,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
@@ -8656,7 +8646,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         fib_install_labelv6(
@@ -8691,7 +8681,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
@@ -8779,7 +8769,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         // Same logic as `route_add`: the redistributed BGP route has
@@ -8822,7 +8812,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path(prefix);
@@ -8897,7 +8887,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         fib_install_v6(&bgp_ref, prefix, &selected);
@@ -8937,7 +8927,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
@@ -8995,7 +8985,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         // Reconcile the FIB: a self-originated winner withdraws any BGP
@@ -9033,7 +9023,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
@@ -9093,7 +9083,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         fib_install_labelv6(
@@ -9129,7 +9119,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
@@ -9266,7 +9256,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         if !selected.is_empty() {
@@ -9385,7 +9375,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         if !selected.is_empty() {
@@ -9491,7 +9481,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
 
         if !selected.is_empty() {
