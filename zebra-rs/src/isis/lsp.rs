@@ -947,7 +947,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     .nbrs
                     .get(&level)
                     .values()
-                    .flat_map(|nbr| nbr.addr6.keys().copied())
+                    .flat_map(|nbr| nbr.addr6.iter().copied())
                     .next();
                 if let (Some(local_v6), Some(remote_v6)) = (local_v6, remote_v6) {
                     for chunk in values.chunks(IsisTlvIpv6Srlg::MAX_VALUES_PER_TLV) {

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -17,7 +17,7 @@ use crate::rib::{Locator, Sid, SidAllocationType, SidBehavior, SidContext, SidOw
 use super::adj::AdjGrState;
 use super::link::NetworkType;
 use super::nfsm::NfsmState;
-use super::{Isis, Level, Message, NeighborAddr4, NeighborAddr6};
+use super::{Isis, Level, Message, NeighborAddr4};
 
 // IS-IS Neighbor
 #[derive(Debug)]
@@ -38,7 +38,7 @@ pub struct Neighbor {
     pub proto: Option<IsisTlvProtoSupported>,
     // Addrs
     pub addr4: BTreeMap<Ipv4Addr, NeighborAddr4>,
-    pub addr6: BTreeMap<Ipv6Addr, NeighborAddr6>,
+    pub addr6: BTreeSet<Ipv6Addr>,
     pub addr6l: Vec<Ipv6Addr>,
     pub mac: Option<MacAddr>,
     //
@@ -93,7 +93,7 @@ impl Neighbor {
             ifindex,
             state: NfsmState::Down,
             addr4: BTreeMap::new(),
-            addr6: BTreeMap::new(),
+            addr6: BTreeSet::new(),
             addr6l: Vec::new(),
             mac,
             proto: None,
@@ -151,8 +151,7 @@ impl Neighbor {
     /// resolves via the connected prefix to the correct egress link.
     fn endx_nh6(&self) -> Option<Ipv6Addr> {
         self.addr6
-            .keys()
-            .next()
+            .first()
             .copied()
             .or_else(|| self.addr6l.first().copied())
     }
@@ -523,8 +522,8 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
     if !nbr.addr6.is_empty() {
         writeln!(buf, "    IPv6 Prefixes")?;
     }
-    for value in nbr.addr6.values() {
-        writeln!(buf, "      {}", value.addr)?;
+    for addr in nbr.addr6.iter() {
+        writeln!(buf, "      {}", addr)?;
     }
 
     writeln!(buf)?;
@@ -560,10 +559,10 @@ fn neighbor_to_detail(top: &Isis, nbr: &Neighbor, level: Level) -> NeighborDetai
     let ipv6_link_locals = nbr.addr6l.iter().map(|addr| addr.to_string()).collect();
     let ipv6_prefixes = nbr
         .addr6
-        .values()
-        .map(|value| IpPrefix {
-            address: value.addr.to_string(),
-            label: value.label,
+        .iter()
+        .map(|addr| IpPrefix {
+            address: addr.to_string(),
+            label: None,
         })
         .collect();
 
@@ -689,7 +688,7 @@ mod tests {
         assert_eq!(nbr.endx_nh6(), Some(ll));
 
         // Global learned later → preferred over the link-local.
-        nbr.addr6.insert(global, NeighborAddr6::new(global));
+        nbr.addr6.insert(global);
         assert_eq!(nbr.endx_nh6(), Some(global));
     }
 }
