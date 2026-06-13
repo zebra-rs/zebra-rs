@@ -349,6 +349,20 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// the event loop into [`Ospf::process_bfd_event`].
     pub bfd_event_tx: UnboundedSender<crate::bfd::inst::BfdEvent>,
     pub bfd_event_rx: UnboundedReceiver<crate::bfd::inst::BfdEvent>,
+
+    /// STAMP client handle, captured at spawn (STAMP is eager-spawned
+    /// before OSPF). Used by [`Ospf::stamp_reconcile_link`] to
+    /// (un)subscribe per-link measurement sessions for `te-metric
+    /// measurement` interfaces. `None` for per-VRF children (sessions
+    /// are default-VRF only in Phase 1) or if STAMP failed to start.
+    /// Only v2 ever subscribes — the v3 config tree has no
+    /// measurement block.
+    pub stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
+    /// Notifier STAMP fans `MetricUpdate`s back on; cloned into every
+    /// Subscribe. The receiver is drained by the v2 event loop into
+    /// [`Ospf::process_stamp_event`].
+    pub stamp_event_tx: UnboundedSender<crate::stamp::client::StampEvent>,
+    pub stamp_event_rx: UnboundedReceiver<crate::stamp::client::StampEvent>,
 }
 
 // OSPF inteface structure which points out upper layer struct members.
@@ -561,6 +575,114 @@ impl<V: OspfVersion> Ospf<V> {
         for nbr_addr in nbrs {
             self.bfd_reconcile_nbr(ifindex, nbr_addr);
         }
+    }
+
+    /// Diff the STAMP measurement session this link *should* hold
+    /// (measurement enabled ∧ point-to-point ∧ a Full neighbor ∧ an
+    /// IPv4 address pair — `V::bfd_addrs` yields link-locals on v3, so
+    /// the v4 gate keeps v3 inert on top of it having no measurement
+    /// YANG) against the tracked subscription, and (un)subscribe on
+    /// the edges only. Tearing a session down also clears the link's
+    /// measured values — they must not survive into the next adjacency
+    /// or outlive a disable. Returns `true` when measured values were
+    /// cleared, so the (version-specific) caller re-originates the
+    /// Extended-Link LSA.
+    pub(crate) fn stamp_reconcile_link(&mut self, ifindex: u32) -> bool {
+        if self.stamp_client_tx.is_none() {
+            return false;
+        }
+        let Some(link) = self.links.get(&ifindex) else {
+            return false;
+        };
+
+        let desired = if link.config.te_metric_measurement.enabled()
+            && link.network_type == super::link::OspfNetworkType::PointToPoint
+        {
+            link.nbrs
+                .values()
+                .find(|n| n.state == NfsmState::Full)
+                .and_then(|nbr| V::bfd_addrs(&link.addr, nbr))
+                .and_then(|(local, remote)| match (local, remote) {
+                    (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_)) => Some((
+                        crate::stamp::session::SessionKey {
+                            local,
+                            remote,
+                            ifindex,
+                        },
+                        link.config.te_metric_measurement.resolve(),
+                    )),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+
+        if desired == link.stamp_session {
+            return false;
+        }
+        let stale = link.stamp_session;
+        let Some(client_tx) = self.stamp_client_tx.as_ref() else {
+            return false;
+        };
+        if let Some((key, _)) = stale {
+            let _ = client_tx.send(crate::stamp::client::ClientReq::Unsubscribe {
+                client: V::PROTO.to_string(),
+                key,
+            });
+        }
+        if let Some((key, params)) = desired {
+            let _ = client_tx.send(crate::stamp::client::ClientReq::Subscribe {
+                client: V::PROTO.to_string(),
+                key,
+                params,
+                notifier: self.stamp_event_tx.clone(),
+            });
+        }
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return false;
+        };
+        link.stamp_session = desired;
+        // A torn-down session's measured values are stale the moment
+        // the subscription ends — clear them; static config (if any)
+        // takes back over via `te_metric_effective`.
+        if stale.is_some() && link.measured_te_metric != super::link::LinkTeMetric::default() {
+            link.measured_te_metric = super::link::LinkTeMetric::default();
+            return true;
+        }
+        false
+    }
+
+    /// Store a damped STAMP export on its link. Returns the ifindex
+    /// when the link's measured values changed (the version-specific
+    /// caller re-originates), `None` for stale/unknown sessions.
+    pub(crate) fn stamp_apply_metric_update(
+        &mut self,
+        event: crate::stamp::client::StampEvent,
+    ) -> Option<u32> {
+        let crate::stamp::client::StampEvent::MetricUpdate { key, snapshot } = event;
+        let link = self.links.get_mut(&key.ifindex)?;
+        // Only the tracked session may write — a late event from a
+        // just-unsubscribed key must not resurrect stale values.
+        if link.stamp_session.map(|(k, _)| k) != Some(key) {
+            return None;
+        }
+        link.measured_te_metric = match snapshot {
+            Some(snap) => super::link::LinkTeMetric {
+                unidirectional_delay: Some(snap.avg),
+                min_delay: Some(snap.min),
+                max_delay: Some(snap.max),
+                delay_variation: Some(snap.variation),
+                loss: None,
+            },
+            None => super::link::LinkTeMetric::default(),
+        };
+        tracing::info!(
+            ifindex = key.ifindex,
+            ?snapshot,
+            "{}: stamp metric update applied",
+            V::PROTO,
+        );
+        Some(key.ifindex)
     }
 
     /// React to a BFD session state change. On Down, tear the matching
@@ -1020,9 +1142,11 @@ impl Ospf<Ospfv2> {
         rib_subscriber: RibSubscriber,
         config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+        let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
@@ -1110,6 +1234,9 @@ impl Ospf<Ospfv2> {
             bfd_client_tx,
             bfd_event_tx,
             bfd_event_rx,
+            stamp_client_tx,
+            stamp_event_tx,
+            stamp_event_rx,
         };
         ospf.callback_build();
         ospf.show_build();
@@ -1973,15 +2100,17 @@ impl Ospf<Ospfv2> {
         {
             let our_addr = addr.prefix.addr();
             // Per-link ASLA carrying this link's flex-algo affinity
-            // (RFC 9492 / RFC 9350 §6.3) and any static RFC 7471 TE
-            // metrics, independent of Adj-SID: a link with affinity or
-            // TE metrics but no Adj-SID still originates an Extended-Link
+            // (RFC 9492 / RFC 9350 §6.3) and the RFC 7471 TE metrics,
+            // independent of Adj-SID: a link with affinity or TE
+            // metrics but no Adj-SID still originates an Extended-Link
             // LSA so peers can run the FAD constraints / read the
-            // metrics.
+            // metrics. The metrics are the static-over-measured merge:
+            // STAMP measurement fills any field the operator left
+            // unconfigured.
             let asla = super::flex_algo::build_link_asla(
                 &link.config.affinity,
                 &self.affinity_map,
-                link.config.te_metric.asla_sub_subs(),
+                link.te_metric_effective().asla_sub_subs(),
             );
             match link.network_type {
                 OspfNetworkType::PointToPoint => {
@@ -3505,6 +3634,31 @@ impl Ospf<Ospfv2> {
                 .tx
                 .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
         }
+
+        // The Full neighbor (if it was one) is gone — release the STAMP
+        // measurement session (diff-gated no-op when none exists).
+        self.stamp_reconcile_and_originate(ifindex);
+    }
+
+    /// v2 wrapper around the generic [`Self::stamp_reconcile_link`]:
+    /// when the reconcile cleared measured values, refresh the
+    /// Extended-Link Opaque LSA so the stale sub-TLVs are withdrawn.
+    pub(crate) fn stamp_reconcile_and_originate(&mut self, ifindex: u32) {
+        if self.stamp_reconcile_link(ifindex) {
+            self.ext_link_lsa_originate(ifindex);
+        }
+    }
+
+    /// A damped STAMP export arrived: store the measured values on the
+    /// link and refresh the Extended-Link Opaque LSA so the RFC 7471
+    /// sub-TLVs (and flex-algo metric-type-1 SPF inputs) reflect them.
+    /// A `None` snapshot clears — the sub-TLVs are withdrawn unless
+    /// static config backs them
+    /// ([`super::link::OspfLink::te_metric_effective`]).
+    pub(crate) fn process_stamp_event(&mut self, event: crate::stamp::client::StampEvent) {
+        if let Some(ifindex) = self.stamp_apply_metric_update(event) {
+            self.ext_link_lsa_originate(ifindex);
+        }
     }
 
     /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1).
@@ -4723,6 +4877,10 @@ impl Ospf<Ospfv2> {
                         // threshold (the reconcile reads the now-current
                         // neighbor state, so it covers both 2-Way and Full).
                         self.bfd_reconcile_nbr(index, src);
+                        // Likewise the STAMP measurement session, which is
+                        // gated on a Full neighbor (and tears down the
+                        // moment Full is lost).
+                        self.stamp_reconcile_and_originate(index);
                     }
                 }
             }
@@ -4933,6 +5091,9 @@ impl Ospf<Ospfv2> {
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
                 }
+                Some(event) = self.stamp_event_rx.recv() => {
+                    self.process_stamp_event(event);
+                }
             }
         }
     }
@@ -5003,9 +5164,11 @@ impl Ospf<Ospfv3> {
         rib_subscriber: RibSubscriber,
         config_tx: tokio::sync::mpsc::Sender<crate::config::Message>,
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
+        stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
     ) -> Self {
         let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+        let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
 
         let policy_chan = crate::policy::PolicyRxChannel::new();
         let _ = policy_tx.send(crate::policy::Message::Subscribe {
@@ -5121,6 +5284,9 @@ impl Ospf<Ospfv3> {
             bfd_client_tx,
             bfd_event_tx,
             bfd_event_rx,
+            stamp_client_tx,
+            stamp_event_tx,
+            stamp_event_rx,
         };
         ospf.tracing.proto = Ospfv3::PROTO;
         ospf.callback_build();
