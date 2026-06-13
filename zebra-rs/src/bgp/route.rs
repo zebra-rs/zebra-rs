@@ -1821,11 +1821,46 @@ pub fn route_apply_policy_in(
     )
 }
 
-/// Pure inbound-policy evaluation: matches `nlri` against the peer's
-/// input prefix-set + policy-list snapshots and returns the decision.
-/// Takes the resolved config by reference (not `&mut Peer`) and mutates
-/// nothing, so the batch ingest path can run it in parallel across a
-/// packet's prefixes (RIB sharding C.1).
+/// Family- and direction-generic policy evaluation. The prefix arrives
+/// as an `IpNet`, so the same per-direction prefix-set match + policy-list
+/// walk + default-permit serves IPv4 and IPv6 in BOTH directions — the
+/// caller picks the direction by passing the Input or Output config
+/// snapshots. `PrefixSet::matches` and `policy_list_apply_net` are both
+/// already dual-stack, so no per-family code is needed here.
+///
+/// Mutates nothing (takes config by reference, not `&mut Peer`), so the
+/// batch ingest / advertise paths can run it in parallel across a
+/// packet's prefixes (RIB sharding C.1 / C.2).
+pub fn apply_policy_net(
+    prefix_cfg: &super::PrefixSetValue,
+    policy_cfg: &super::PolicyListValue,
+    router_id: Ipv4Addr,
+    prefix: IpNet,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    if prefix_cfg.name.is_some() {
+        let Some(prefix_set) = &prefix_cfg.prefix_set else {
+            return None;
+        };
+        if !prefix_set.matches(prefix) {
+            return None;
+        }
+    }
+    if policy_cfg.name.is_some() {
+        let Some(policy_list) = &policy_cfg.policy_list else {
+            return None;
+        };
+        return policy_list_apply_net(policy_list, prefix, bgp_attr, weight, router_id);
+    }
+    Some(PolicyDecision {
+        attr: bgp_attr,
+        weight,
+    })
+}
+
+/// Inbound-policy evaluation for an IPv4 NLRI: the v4 projection of
+/// [`apply_policy_net`].
 pub fn apply_policy_in_pure(
     prefix_cfg: &super::PrefixSetValue,
     policy_cfg: &super::PolicyListValue,
@@ -1834,24 +1869,14 @@ pub fn apply_policy_in_pure(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    if prefix_cfg.name.is_some() {
-        let Some(prefix_set) = &prefix_cfg.prefix_set else {
-            return None;
-        };
-        if !prefix_set.matches(nlri.prefix) {
-            return None;
-        }
-    }
-    if policy_cfg.name.is_some() {
-        let Some(policy_list) = &policy_cfg.policy_list else {
-            return None;
-        };
-        return policy_list_apply(policy_list, nlri, bgp_attr, weight, router_id);
-    }
-    Some(PolicyDecision {
-        attr: bgp_attr,
+    apply_policy_net(
+        prefix_cfg,
+        policy_cfg,
+        router_id,
+        IpNet::V4(nlri.prefix),
+        bgp_attr,
         weight,
-    })
+    )
 }
 
 /// Inbound policy entry point for an EVPN route. Mirrors
@@ -1902,39 +1927,61 @@ pub fn route_apply_policy_out_evpn(
     })
 }
 
+/// Outbound-policy evaluation for an IPv4 NLRI: the v4 / Output
+/// projection of [`apply_policy_net`]. `set next-hop self` anchors on
+/// the session's local router-id (`peer.router_id`).
 pub fn route_apply_policy_out(
     peer: &Peer,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.prefix_set.get(&InOut::Output);
-    if config.name.is_some() {
-        let Some(prefix_set) = &config.prefix_set else {
-            return None;
-        };
-        if !prefix_set.matches(nlri.prefix) {
-            return None;
-        }
-    }
-    let config = peer.policy_list.get(&InOut::Output);
-    if config.name.is_some() {
-        let Some(policy_list) = &config.policy_list else {
-            return None;
-        };
-        // For `set next-hop self` on an outbound advertisement,
-        // the local-router-id of the session is the natural
-        // "self" anchor. We pass `peer.router_id` here for
-        // both directions; outbound is the typical use case.
-        return policy_list_apply(policy_list, nlri, bgp_attr, weight, peer.router_id);
-    } else {
-        // Temporary comment out.
-        // return None;
-    }
-    Some(PolicyDecision {
-        attr: bgp_attr,
+    apply_policy_net(
+        peer.prefix_set.get(&InOut::Output),
+        peer.policy_list.get(&InOut::Output),
+        peer.router_id,
+        IpNet::V4(nlri.prefix),
+        bgp_attr,
         weight,
-    })
+    )
+}
+
+/// Inbound-policy evaluation for an IPv6 NLRI: the v6 / Input projection
+/// of [`apply_policy_net`]. Before this, the v6 ingest applied no
+/// per-neighbor inbound policy — v6 route-maps / prefix-lists were
+/// silently ignored.
+pub fn route_apply_policy_in_v6(
+    peer: &Peer,
+    nlri: &Ipv6Nlri,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    apply_policy_net(
+        peer.prefix_set.get(&InOut::Input),
+        peer.policy_list.get(&InOut::Input),
+        peer.router_id,
+        IpNet::V6(nlri.prefix),
+        bgp_attr,
+        weight,
+    )
+}
+
+/// Outbound-policy evaluation for an IPv6 NLRI: the v6 / Output
+/// projection of [`apply_policy_net`].
+pub fn route_apply_policy_out_v6(
+    peer: &Peer,
+    nlri: &Ipv6Nlri,
+    bgp_attr: BgpAttr,
+    weight: u32,
+) -> Option<PolicyDecision> {
+    apply_policy_net(
+        peer.prefix_set.get(&InOut::Output),
+        peer.policy_list.get(&InOut::Output),
+        peer.router_id,
+        IpNet::V6(nlri.prefix),
+        bgp_attr,
+        weight,
+    )
 }
 
 /// Next-Hop Tracking for a received route: register its BGP next-hop
@@ -3694,26 +3741,41 @@ pub fn route_ipv6_update(
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
+
+    // Inbound policy: per-peer v6 route-map / prefix-list. The decision
+    // carries the post-policy attribute; `None` means the route was
+    // denied, so the shard withdraws any prior Loc-RIB row. (Reaches
+    // parity with the v4 ingest — v6 previously applied no per-neighbor
+    // inbound policy.)
+    let decision = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        route_apply_policy_in_v6(peer, nlri, attr.clone(), 0)
+    };
+
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V6(nlri.prefix),
     };
-    // Main owns NHT (the shard has no `nexthop_cache`): register the
-    // next-hop and resolve reachability to gate the shard's row.
-    let nexthop_reachable = nht_track_received_attr(bgp, attr, dep.clone());
-    // Inter-AS Option AB (VPNv6): a hybrid VRF importing this route makes
-    // it transit-only — relayed only via the VRF re-export.
-    let vrf_transit_only = rd.is_some()
-        && peer_ident != ORIGINATED_PEER
-        && bgp.vrf_import.is_some_and(|disp| {
-            super::inst::rt_imported_by_hybrid_vrf_v6(disp.rib_known_vrfs, &attr.ecom)
-        });
-    // The rib moves into the shard; keep the attr for the VPNv6
-    // import-withdraw dispatch below.
-    let import_attr = attr.clone();
+    // Main owns NHT (the shard has no `nexthop_cache`): resolve
+    // reachability on the POST-policy next-hop (policy may rewrite it),
+    // and compute the Inter-AS Option AB (VPNv6) transit flag against the
+    // post-policy communities; a denied route resolves nothing.
+    // `import_attr` feeds the VPNv6 import-withdraw dispatch below.
+    let (nexthop_reachable, vrf_transit_only, import_attr) = match &decision {
+        Some(d) => {
+            let reachable = nht_track_received_attr(bgp, &d.attr, dep.clone());
+            let transit = rd.is_some()
+                && peer_ident != ORIGINATED_PEER
+                && bgp.vrf_import.is_some_and(|disp| {
+                    super::inst::rt_imported_by_hybrid_vrf_v6(disp.rib_known_vrfs, &d.attr.ecom)
+                });
+            (reachable, transit, d.attr.clone())
+        }
+        None => (true, false, attr.clone()),
+    };
 
-    // Hand the table op (Adj-RIB-In + intern + Loc-RIB + best-path) to
-    // the shard; act on the returned best-path delta.
+    // Hand the table op (Adj-RIB-In + policy decision → intern + Loc-RIB
+    // + best-path) to the shard; act on the returned best-path delta.
     let deltas = bgp.shard.handle(
         ShardMsg::UpdateV6(ShardUpdateV6 {
             ident: peer_ident,
@@ -3727,6 +3789,7 @@ pub fn route_ipv6_update(
             stale,
             nexthop_reachable,
             vrf_transit_only,
+            decision,
         }),
         None,
     );
@@ -7061,7 +7124,15 @@ pub(super) fn route_advertise_to_peers_v6(
                 else {
                     continue;
                 };
-                let attr = bgp.attr_store.intern(attr);
+                // Outbound policy: per-peer v6 route-map / prefix-list. A
+                // denied route is suppressed (never advertised, so there
+                // is nothing to withdraw). Reaches parity with the v4
+                // advertise — v6 previously applied no out-policy.
+                let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
+                else {
+                    continue;
+                };
+                let attr = bgp.attr_store.intern(decision.attr);
                 let source_ident = best.ident;
                 if let Some(gid) = group_id
                     && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
@@ -8209,7 +8280,15 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
         let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
             continue;
         };
-        let arc_attr = bgp.attr_store.intern(attr);
+        // Outbound policy: per-peer v6 route-map / prefix-list. The
+        // session-establishment dump must filter the same way the
+        // event-driven advertise does, mirroring the v4 sync path —
+        // otherwise an out-policy-denied prefix leaks on the initial
+        // sync and is only suppressed on a later update.
+        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+            continue;
+        };
+        let arc_attr = bgp.attr_store.intern(decision.attr);
         entries.push((arc_attr, nlri));
     }
     super::update_group::send_ipv6_direct(peer, entries);

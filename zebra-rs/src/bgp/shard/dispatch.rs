@@ -169,10 +169,12 @@ impl BgpShard {
         }
     }
 
-    /// Shard half of `route_ipv6_update`. The v6 ingest path has no
-    /// inbound policy, so the carried attribute is final: store
-    /// Adj-RIB-In (un-interned), intern it for the Loc-RIB, gate with
-    /// main's NHT result, update, and report the best-path delta.
+    /// Shard half of `route_ipv6_update`. Mirrors `handle_update_v4`:
+    /// store the pre-policy attribute in Adj-RIB-In (un-interned, for
+    /// soft-reconfig), then — if inbound policy permitted the route —
+    /// intern the post-policy attribute into the Loc-RIB, gate with
+    /// main's NHT result, update, and report the best-path delta. A
+    /// denied route (`decision == None`) withdraws any prior Loc-RIB row.
     fn handle_update_v6(&mut self, u: ShardUpdateV6) -> Vec<ShardOut> {
         let ShardUpdateV6 {
             ident,
@@ -186,21 +188,19 @@ impl BgpShard {
             stale,
             nexthop_reachable,
             vrf_transit_only,
+            decision,
         } = u;
 
-        // v6 has no inbound policy, so Adj-RIB-In and Loc-RIB hold the
-        // same attribute — intern once and share the `Arc` for both
-        // (one deep clone instead of an un-interned adj-in copy plus the
-        // intern). Adj-RIB-In stores the row before the NHT/transit
-        // gates, matching `BgpRib::new`'s defaults.
-        let attr = self.intern(attr);
+        // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig
+        // replay); move it straight into the row's `Arc` (no deep clone)
+        // since the Loc-RIB row gets the interned post-policy attr.
         let mut rib = BgpRib::new_arc(
             ident,
             peer_router_id,
             typ,
             nlri.id,
             0,
-            attr,
+            Arc::new(attr),
             label,
             nexthop,
             stale,
@@ -211,6 +211,18 @@ impl BgpShard {
                 .add_v6vpn(rd, nlri.prefix, rib.clone()),
             None => self.adj_in_mut(ident).add_v6(nlri.prefix, rib.clone()),
         };
+
+        let Some(decision) = decision else {
+            // Inbound policy denied: drop any Loc-RIB row from this peer.
+            let removed = match rd {
+                Some(rd) => self.remove_v6vpn(rd, nlri.prefix, nlri.id, ident),
+                None => self.remove_v6(nlri.prefix, nlri.id, ident),
+            };
+            return vec![self.best_path_delta_v6(ident, rd, nlri, removed)];
+        };
+
+        rib.attr = self.intern(decision.attr);
+        rib.weight = decision.weight;
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
         let (replaced, selected, _next_id) = match rd {
@@ -529,12 +541,13 @@ mod tests {
             nlri: v6(prefix),
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
-            attr,
+            attr: attr.clone(),
             label: None,
             nexthop: None,
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
+            decision: Some(PolicyDecision { attr, weight: 100 }),
         })
     }
 

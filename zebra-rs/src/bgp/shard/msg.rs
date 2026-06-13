@@ -140,9 +140,10 @@ pub struct ShardUpdateV4 {
     pub decision: Option<PolicyDecision>,
 }
 
-/// Payload of [`ShardMsg::UpdateV6`]. The v6 ingest path has no inbound
-/// policy, so `attr` is the final attribute (stored both in Adj-RIB-In,
-/// un-interned via `BgpRib::new`, and — re-interned — in the Loc-RIB).
+/// Payload of [`ShardMsg::UpdateV6`]. Mirrors [`ShardUpdateV4`]: `attr`
+/// is the pre-policy attribute for Adj-RIB-In; `decision` is the
+/// post-policy result (`None` = inbound policy denied the route, so the
+/// shard withdraws any prior Loc-RIB entry).
 #[derive(Debug)]
 pub struct ShardUpdateV6 {
     pub ident: usize,
@@ -159,6 +160,7 @@ pub struct ShardUpdateV6 {
     pub nexthop_reachable: bool,
     /// Inter-AS Option AB for VPNv6 (see [`ShardUpdateV4::vrf_transit_only`]).
     pub vrf_transit_only: bool,
+    pub decision: Option<PolicyDecision>,
 }
 
 /// IPv4-or-IPv6 Labeled-Unicast NLRI — lets one `UpdateLu` /
