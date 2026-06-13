@@ -18,18 +18,27 @@ use stamp_packet::StampTimestamp;
 /// (1970-01-01): 70 years, 17 of them leap years.
 const NTP_UNIX_OFFSET_SECS: u64 = 2_208_988_800;
 
+/// Convert a UNIX-epoch instant (`seconds`, `nanos` where `nanos < 10⁹`)
+/// to an NTP 64-bit STAMP timestamp. Shared by [`now_ntp`] (userspace
+/// clock read) and the kernel `SO_TIMESTAMPING` path
+/// ([`crate::stamp::network`]), which both produce CLOCK_REALTIME
+/// values — the only difference is *where* the stamp was taken.
+pub fn unix_to_ntp(seconds: u64, nanos: u32) -> StampTimestamp {
+    // fraction = ns · 2³² / 10⁹, computed in u64 (ns < 10⁹ so the
+    // product fits comfortably).
+    let fraction = ((nanos as u64) << 32) / 1_000_000_000;
+    StampTimestamp {
+        seconds: (seconds.wrapping_add(NTP_UNIX_OFFSET_SECS)) as u32,
+        fraction: fraction as u32,
+    }
+}
+
 /// Current wall-clock time as an NTP 64-bit STAMP timestamp.
 pub fn now_ntp() -> StampTimestamp {
     let since_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    // fraction = ns · 2³² / 10⁹, computed in u64 (ns < 10⁹ so the
-    // product fits comfortably).
-    let fraction = ((since_unix.subsec_nanos() as u64) << 32) / 1_000_000_000;
-    StampTimestamp {
-        seconds: (since_unix.as_secs().wrapping_add(NTP_UNIX_OFFSET_SECS)) as u32,
-        fraction: fraction as u32,
-    }
+    unix_to_ntp(since_unix.as_secs(), since_unix.subsec_nanos())
 }
 
 /// Signed difference `later − earlier` in microseconds.
@@ -102,5 +111,22 @@ mod tests {
         let fraction = ((ns << 32) / 1_000_000_000) as u32;
         let got = delta_micros(ts(100, fraction), ts(100, 0));
         assert!((got - 123_456).abs() <= 1, "got {got}");
+    }
+
+    /// `unix_to_ntp` applies the epoch shift and the same fraction math
+    /// as `now_ntp` — a known UNIX instant maps to the expected NTP
+    /// words, and a kernel-style (secs, nanos) pair differences against
+    /// a userspace stamp on the same clock without bias.
+    #[test]
+    fn unix_to_ntp_epoch_and_fraction() {
+        let t = unix_to_ntp(100, 500_000_000); // 100.5 s UNIX
+        assert_eq!(t.seconds as u64, 100 + NTP_UNIX_OFFSET_SECS);
+        assert_eq!(t.fraction, 1 << 31, "half-second fraction");
+        // Two stamps 250 µs apart on the same (UNIX) clock. The
+        // fraction conversion and delta both floor, so allow the same
+        // ±1 µs tolerance as `fraction_round_trip`.
+        let a = unix_to_ntp(100, 0);
+        let b = unix_to_ntp(100, 250_000);
+        assert!((delta_micros(b, a) - 250).abs() <= 1);
     }
 }

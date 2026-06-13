@@ -110,6 +110,11 @@ pub struct Session {
     /// Replies that failed validation: SSID mismatch, or a delay that
     /// computed negative / absurd (clock step during the probe).
     pub rx_invalid_count: u64,
+    /// Accepted samples whose T4 came from a kernel `SO_TIMESTAMPING`
+    /// stamp (Phase 1.5 rung 1) vs a userspace fallback read. The ratio
+    /// is the figure of merit for whether kernel timestamping is live.
+    pub t4_kernel: u64,
+    pub t4_userspace: u64,
     /// Probes from `key.remote` answered by the implicit reflector —
     /// the per-session half of the reflector counters.
     pub reflected_count: u64,
@@ -143,6 +148,8 @@ impl Session {
             tx_failed_count: 0,
             rx_count: 0,
             rx_invalid_count: 0,
+            t4_kernel: 0,
+            t4_userspace: 0,
             reflected_count: 0,
             window: StatsWindow::default(),
             damping: Damping::default(),

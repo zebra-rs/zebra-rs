@@ -43,6 +43,10 @@ Feature: STAMP link-delay measurement feeding IGP TE metrics
     # implicit reflector on the peer is answering.
     And show command "show stamp" in namespace "st1" should eventually contain "Active"
     And show command "show stamp session" in namespace "st1" should eventually contain "Min delay"
+    # Phase 1.5: the kernel software RX timestamp (SO_TIMESTAMPING) feeds
+    # T4. Software stamps are stack-level, so they're delivered on veth —
+    # once kernel-stamped replies flow, the kernel count leaves zero.
+    And show command "show stamp statistics" in namespace "st1" should eventually not contain "T4 kernel timestamps: 0 ("
 
   Scenario: IS-IS advertises the measured link delay
     Given the test topology exists
