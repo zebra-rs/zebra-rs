@@ -291,7 +291,10 @@ mod tests {
     #[test]
     fn peer_down_and_shutdown_are_control() {
         // Control variants carry no route payload.
-        assert!(matches!(ShardMsg::PeerDown { ident: 1 }, ShardMsg::PeerDown { .. }));
+        assert!(matches!(
+            ShardMsg::PeerDown { ident: 1 },
+            ShardMsg::PeerDown { .. }
+        ));
         assert!(matches!(ShardMsg::Shutdown, ShardMsg::Shutdown));
     }
 

@@ -154,7 +154,6 @@ impl ShardLabelPool {
         self.pool.free(label);
         Some(label)
     }
-
 }
 
 #[derive(Debug, Default)]

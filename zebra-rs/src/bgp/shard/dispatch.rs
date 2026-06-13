@@ -19,10 +19,10 @@ use std::sync::Arc;
 
 use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
 
-use super::BgpShard;
-use super::msg::{LuNlri, ShardMsg, ShardOut, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
 use super::super::route::BgpRib;
 use super::super::vrf::VrfLabelAllocator;
+use super::BgpShard;
+use super::msg::{LuNlri, ShardMsg, ShardOut, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
 
 impl BgpShard {
     /// Apply one message to the shard's owned state, returning the
@@ -206,7 +206,9 @@ impl BgpShard {
             stale,
         );
         match rd {
-            Some(rd) => self.adj_in_mut(ident).add_v6vpn(rd, nlri.prefix, rib.clone()),
+            Some(rd) => self
+                .adj_in_mut(ident)
+                .add_v6vpn(rd, nlri.prefix, rib.clone()),
             None => self.adj_in_mut(ident).add_v6(nlri.prefix, rib.clone()),
         };
         rib.nexthop_reachable = nexthop_reachable;
@@ -360,17 +362,16 @@ impl BgpShard {
         let (v4, v4vpn): (Vec<Ipv4Nlri>, Vec<(RouteDistinguisher, Ipv4Nlri)>) =
             match self.adj_in(ident) {
                 Some(a) => {
-                    let v4 = a
-                        .v4
-                        .0
-                        .iter()
-                        .flat_map(|(p, ribs)| {
-                            ribs.iter().map(move |r| Ipv4Nlri {
-                                id: r.remote_id,
-                                prefix: *p,
+                    let v4 =
+                        a.v4.0
+                            .iter()
+                            .flat_map(|(p, ribs)| {
+                                ribs.iter().map(move |r| Ipv4Nlri {
+                                    id: r.remote_id,
+                                    prefix: *p,
+                                })
                             })
-                        })
-                        .collect();
+                            .collect();
                     let v4vpn = a
                         .v4vpn
                         .iter()
@@ -395,17 +396,16 @@ impl BgpShard {
         let (v6, v6vpn): (Vec<Ipv6Nlri>, Vec<(RouteDistinguisher, Ipv6Nlri)>) =
             match self.adj_in(ident) {
                 Some(a) => {
-                    let v6 = a
-                        .v6
-                        .0
-                        .iter()
-                        .flat_map(|(p, ribs)| {
-                            ribs.iter().map(move |r| Ipv6Nlri {
-                                id: r.remote_id,
-                                prefix: *p,
+                    let v6 =
+                        a.v6.0
+                            .iter()
+                            .flat_map(|(p, ribs)| {
+                                ribs.iter().map(move |r| Ipv6Nlri {
+                                    id: r.remote_id,
+                                    prefix: *p,
+                                })
                             })
-                        })
-                        .collect();
+                            .collect();
                     let v6vpn = a
                         .v6vpn
                         .iter()
@@ -449,16 +449,20 @@ impl BgpShard {
                 .0
                 .iter()
                 .flat_map(|(p, ribs)| {
-                    ribs.iter().map(move |r| LuNlri::V4(Ipv4Nlri {
-                        id: r.remote_id,
-                        prefix: *p,
-                    }))
+                    ribs.iter().map(move |r| {
+                        LuNlri::V4(Ipv4Nlri {
+                            id: r.remote_id,
+                            prefix: *p,
+                        })
+                    })
                 })
                 .chain(a.v6lu.0.iter().flat_map(|(p, ribs)| {
-                    ribs.iter().map(move |r| LuNlri::V6(Ipv6Nlri {
-                        id: r.remote_id,
-                        prefix: *p,
-                    }))
+                    ribs.iter().map(move |r| {
+                        LuNlri::V6(Ipv6Nlri {
+                            id: r.remote_id,
+                            prefix: *p,
+                        })
+                    })
                 }))
                 .collect(),
             None => Vec::new(),
@@ -473,8 +477,8 @@ impl BgpShard {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::route::{BgpRibType, PolicyDecision};
+    use super::*;
     use bgp_packet::{BgpAttr, BgpNexthop};
 
     fn v4(s: &str) -> Ipv4Nlri {
@@ -561,7 +565,9 @@ mod tests {
         assert!(matches!(&out[..], [ShardOut::BestPathLu { selected, .. }] if selected.len() == 1));
         // Peer down withdraws it (and re-elects if another peer had it).
         let down = shard.handle(ShardMsg::PeerDown { ident: 2 }, None);
-        assert!(matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty()));
+        assert!(
+            matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty())
+        );
         assert!(shard.v4lu.0.is_empty());
     }
 
@@ -576,7 +582,9 @@ mod tests {
         // Peer down sweeps the v6 route too (handle_peer_down covers v6).
         let down = shard.handle(ShardMsg::PeerDown { ident: 4 }, None);
         assert_eq!(down.len(), 1);
-        assert!(matches!(&down[..], [ShardOut::BestPathV6 { selected, .. }] if selected.is_empty()));
+        assert!(
+            matches!(&down[..], [ShardOut::BestPathV6 { selected, .. }] if selected.is_empty())
+        );
         assert!(shard.v6.0.is_empty());
         assert!(shard.adj_in(4).is_none());
     }
