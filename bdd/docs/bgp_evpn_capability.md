@@ -44,3 +44,4 @@ Both peers enable two AFI/SAFIs:
 |----------|--------|
 | Setup topology and establish iBGP session with EVPN capability | |
 | L2VPN/EVPN capability is advertised and received on both sides | |
+| Teardown topology | |
