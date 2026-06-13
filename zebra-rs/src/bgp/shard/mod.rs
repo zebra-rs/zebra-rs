@@ -26,6 +26,9 @@ use super::route::{BgpRib, LocalRibTable};
 use super::store::BgpAttrStore;
 use super::vrf::VrfLabelAllocator;
 
+pub mod msg;
+pub use msg::{ShardMsg, ShardOut};
+
 /// Labels a shard carves from the central allocator per refill (RIB
 /// sharding B.2). A shard mints local labels in the per-route hot
 /// path, so it can't ask the main task per label; it draws a chunk
