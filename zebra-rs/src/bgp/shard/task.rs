@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::context::Task;
 
 use super::BgpShard;
-use super::msg::{ShardMsg, ShardOut, ShardUpdateV4, ShardUpdateV6};
+use super::msg::{LuNlri, ShardMsg, ShardOut, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
 use super::super::route::BgpRib;
 
 /// One unit of work for the shard task: a message plus an optional
@@ -101,6 +101,10 @@ impl BgpShard {
             ShardMsg::UpdateV6(u) => self.handle_update_v6(u),
             ShardMsg::WithdrawV6 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
+            }
+            ShardMsg::UpdateLu(u) => self.handle_update_lu(u),
+            ShardMsg::WithdrawLu { ident, nlri } => {
+                vec![self.best_path_delta_lu(ident, nlri, Vec::new())]
             }
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
@@ -287,6 +291,90 @@ impl BgpShard {
         }
     }
 
+    /// Shard half of `route_labelv4_update` / `route_labelv6_update`.
+    /// No inbound policy; the shard mints a per-prefix local label from
+    /// its own sub-block (`None` central refill until LabelBlockLow).
+    fn handle_update_lu(&mut self, u: ShardUpdateLu) -> Vec<ShardOut> {
+        let ShardUpdateLu {
+            ident,
+            nlri,
+            peer_router_id,
+            typ,
+            attr,
+            received_label,
+            stale,
+            nexthop_reachable,
+        } = u;
+        let mut rib = BgpRib::new(
+            ident,
+            peer_router_id,
+            typ,
+            nlri.id(),
+            0,
+            &attr,
+            Some(received_label),
+            None,
+            stale,
+        );
+        match &nlri {
+            LuNlri::V4(n) => self.adj_in_mut(ident).add_v4lu(n.prefix, rib.clone()),
+            LuNlri::V6(n) => self.adj_in_mut(ident).add_v6lu(n.prefix, rib.clone()),
+        };
+        rib.attr = self.intern(attr);
+        rib.nexthop_reachable = nexthop_reachable;
+        let (replaced, selected, survivor_nexthops) = match &nlri {
+            LuNlri::V4(n) => {
+                rib.local_label = self.labels.label_lu_v4(None, n.prefix);
+                let (replaced, selected, _) = self.update_v4lu(n.prefix, rib);
+                (replaced, selected, self.candidate_nexthops_v4lu(n.prefix))
+            }
+            LuNlri::V6(n) => {
+                rib.local_label = self.labels.label_lu_v6(None, n.prefix);
+                let (replaced, selected, _) = self.update_v6lu(n.prefix, rib);
+                (replaced, selected, self.candidate_nexthops_v6lu(n.prefix))
+            }
+        };
+        vec![ShardOut::BestPathLu {
+            ident,
+            prefix: nlri,
+            selected,
+            replaced,
+            survivor_nexthops,
+        }]
+    }
+
+    /// LU counterpart of [`Self::best_path_delta_v4`].
+    fn best_path_delta_lu(
+        &mut self,
+        ident: usize,
+        nlri: LuNlri,
+        mut extra_replaced: Vec<BgpRib>,
+    ) -> ShardOut {
+        if extra_replaced.is_empty() {
+            extra_replaced = match &nlri {
+                LuNlri::V4(n) => self.remove_v4lu(n.prefix, n.id, ident),
+                LuNlri::V6(n) => self.remove_v6lu(n.prefix, n.id, ident),
+            };
+        }
+        let (selected, survivor_nexthops) = match &nlri {
+            LuNlri::V4(n) => (
+                self.select_best_path_v4lu(n.prefix),
+                self.candidate_nexthops_v4lu(n.prefix),
+            ),
+            LuNlri::V6(n) => (
+                self.select_best_path_v6lu(n.prefix),
+                self.candidate_nexthops_v6lu(n.prefix),
+            ),
+        };
+        ShardOut::BestPathLu {
+            ident,
+            prefix: nlri,
+            selected,
+            replaced: extra_replaced,
+            survivor_nexthops,
+        }
+    }
+
     /// Drop a departed peer's Adj-RIB-In slice and withdraw every IPv4
     /// route it contributed — the shard half of `route_clean` for the
     /// v4 families. Returns one withdrawal per affected prefix for main
@@ -380,6 +468,30 @@ impl BgpShard {
         for (rd, nlri) in v6vpn {
             out.push(self.best_path_delta_v6(ident, Some(rd), nlri, Vec::new()));
         }
+        // Labeled-Unicast (v4lu / v6lu).
+        let lu: Vec<LuNlri> = match self.adj_in(ident) {
+            Some(a) => a
+                .v4lu
+                .0
+                .iter()
+                .flat_map(|(p, ribs)| {
+                    ribs.iter().map(move |r| LuNlri::V4(Ipv4Nlri {
+                        id: r.remote_id,
+                        prefix: *p,
+                    }))
+                })
+                .chain(a.v6lu.0.iter().flat_map(|(p, ribs)| {
+                    ribs.iter().map(move |r| LuNlri::V6(Ipv6Nlri {
+                        id: r.remote_id,
+                        prefix: *p,
+                    }))
+                }))
+                .collect(),
+            None => Vec::new(),
+        };
+        for nlri in lu {
+            out.push(self.best_path_delta_lu(ident, nlri, Vec::new()));
+        }
         self.adj_in_drop(ident);
         out
     }
@@ -446,6 +558,36 @@ mod tests {
             nexthop_reachable: true,
             vrf_transit_only: false,
         })
+    }
+
+    fn update_lu_v4(ident: usize, prefix: &str, recv_label: u32) -> ShardMsg {
+        ShardMsg::UpdateLu(ShardUpdateLu {
+            ident,
+            nlri: LuNlri::V4(v4(prefix)),
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+            typ: BgpRibType::EBGP,
+            attr: attr_with_nh("192.0.2.1"),
+            received_label: bgp_packet::Label::new(recv_label, 0, true),
+            stale: false,
+            nexthop_reachable: true,
+        })
+    }
+
+    #[test]
+    fn update_lu_v4_installs_and_mints_local_label() {
+        let mut shard = BgpShard::default();
+        // Seed a label sub-block so the shard can mint a local label.
+        shard.labels.seed_block(1000, 2000);
+        let out = shard.handle(update_lu_v4(2, "10.0.0.0/24", 50));
+        assert_eq!(shard.v4lu.0.len(), 1);
+        // The Loc-RIB row carries a local label minted from the block.
+        let row = shard.v4lu.0.values().next().unwrap().first().unwrap();
+        assert_eq!(row.local_label, Some(1000), "minted from the sub-block");
+        assert!(matches!(&out[..], [ShardOut::BestPathLu { selected, .. }] if selected.len() == 1));
+        // Peer down withdraws it (and re-elects if another peer had it).
+        let down = shard.handle(ShardMsg::PeerDown { ident: 2 });
+        assert!(matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty()));
+        assert!(shard.v4lu.0.is_empty());
     }
 
     #[test]

@@ -80,6 +80,16 @@ pub enum ShardMsg {
         nlri: Ipv6Nlri,
     },
 
+    /// A received IPv4 / IPv6 Labeled-Unicast (SAFI 4) route. Like v6
+    /// there is no inbound policy; additionally the shard mints a
+    /// per-prefix *local* label (from its own sub-block) so a
+    /// next-hop-self re-advertisement forwards via a swap ILM. Main
+    /// has already stamped the MP_REACH next-hop onto `attr`.
+    UpdateLu(ShardUpdateLu),
+
+    /// Withdraw of a Labeled-Unicast prefix (v4 or v6, per `nlri`).
+    WithdrawLu { ident: usize, nlri: LuNlri },
+
     /// A peer left Established: the shard drops the peer's Adj-RIB-In
     /// slice across every sharded family and replies with a
     /// [`ShardOut::BestPathV4`] per contributed prefix — re-electing
@@ -151,6 +161,41 @@ pub struct ShardUpdateV6 {
     pub vrf_transit_only: bool,
 }
 
+/// IPv4-or-IPv6 Labeled-Unicast NLRI — lets one `UpdateLu` /
+/// `WithdrawLu` / `BestPathLu` cover both LU families.
+#[derive(Debug, Clone)]
+pub enum LuNlri {
+    V4(Ipv4Nlri),
+    V6(Ipv6Nlri),
+}
+
+impl LuNlri {
+    /// The NLRI's AddPath / remote path id (the `BgpRib::remote_id`).
+    pub fn id(&self) -> u32 {
+        match self {
+            LuNlri::V4(n) => n.id,
+            LuNlri::V6(n) => n.id,
+        }
+    }
+}
+
+/// Payload of [`ShardMsg::UpdateLu`]. `attr` is final (LU has no
+/// inbound policy) with the MP_REACH next-hop already stamped by main;
+/// `received_label` is the label the peer advertised (stored on the
+/// row), distinct from the local label the shard mints.
+#[derive(Debug)]
+pub struct ShardUpdateLu {
+    pub ident: usize,
+    pub nlri: LuNlri,
+    pub peer_router_id: Ipv4Addr,
+    pub typ: BgpRibType,
+    pub attr: bgp_packet::BgpAttr,
+    pub received_label: Label,
+    pub stale: bool,
+    /// See [`ShardUpdateV4::nexthop_reachable`].
+    pub nexthop_reachable: bool,
+}
+
 /// Shard → main. The result of applying a [`ShardMsg`]: the best-path
 /// delta main needs to drive NHT, FIB install, and the advertise
 /// fan-out. Attributes ride as `Arc<BgpAttr>` inside [`BgpRib`] — an
@@ -180,6 +225,15 @@ pub enum ShardOut {
         ident: usize,
         rd: Option<RouteDistinguisher>,
         prefix: Ipv6Nlri,
+        selected: Vec<BgpRib>,
+        replaced: Vec<BgpRib>,
+        survivor_nexthops: BTreeSet<IpAddr>,
+    },
+
+    /// Labeled-Unicast (v4 or v6, per `prefix`) best-path delta.
+    BestPathLu {
+        ident: usize,
+        prefix: LuNlri,
         selected: Vec<BgpRib>,
         replaced: Vec<BgpRib>,
         survivor_nexthops: BTreeSet<IpAddr>,
