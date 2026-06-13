@@ -431,9 +431,16 @@ Per-family status / notes:
   `route_withdraw_vpnv6_addpath`; reuses `send_vpnv6` /
   `cache_remove_vpnv6` (id rides in the NLRI, cache keys on it); no
   soft-out path for VPNv6. Closest analog to VPNv4.
-- **EVPN** — TODO: reuses `send_evpn`; EVPN *does* have a soft-out
-  (`route_soft_out_peer_table_evpn`) that needs the twin too. Route id
-  lives on each `EvpnRoute` variant.
+- **EVPN** — DONE: handled by an *internal* plain/AddPath split inside
+  `route_advertise_evpn_to_peers` / `route_withdraw_evpn_to_peers` /
+  `route_soft_out_peer_table_evpn` (shared `evpn_advertise_one` /
+  `evpn_withdraw_one` helpers), so the 8 call sites are unchanged. The
+  advertise function already receives the full `selected` candidate
+  set; the withdraw enumerates the path-ids recorded in the
+  Adj-RIB-Out; the soft-out re-evaluates `cands` (all candidates) and
+  diffs at `(prefix, path-id)` granularity for AddPath members (a
+  prefix-level diff would withdraw the backup paths on every refresh).
+  Route id lives on each `EvpnRoute` variant.
 - **LU-v4 / LU-v6** — TODO: no per-peer cache today (direct
   `send_packet`); the twin loops candidates and emits one UPDATE each
   with the path-id, or adds a small cache mirroring the VPN shape.
@@ -441,8 +448,12 @@ Per-family status / notes:
   v4-unicast, not the VPN per-peer cache); subsumed by B1 historically,
   worth a twin too but not in the user's named set.
 
-No end-to-end AddPath BDD exists yet (true for v4/VPNv4 too) — the
-families are control-plane-validated (cap negotiation +
-`addpath_send_implemented` unit tests + full suite). A multi-path
-topology BDD asserting two paths arrive with distinct path-ids is a
-worthwhile cross-cutting follow-up for all AddPath families.
+Wire coverage: `@bgp_addpath_ipv4` is the first end-to-end AddPath BDD
+(two paths for one prefix arrive at the receiver). It exercises the
+shared mechanism (membership split, per-candidate fan-out, path-id
+stamping) that every family reuses. A per-family multi-path BDD is
+worthwhile but, for EVPN especially, the multi-path-of-one-NLRI case
+needs an awkward topology (same RD from two sources / a reflector with
+two cluster paths) since per-PE RDs normally make each MAC a distinct
+NLRI; deferred. Until then the family twins are control-plane-validated
+(cap negotiation + `addpath_send_implemented` unit tests + full suite).
