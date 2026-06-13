@@ -19,6 +19,9 @@ pub fn spawn_isis(config: &ConfigManager) {
     // `bfd { … }` block exists. Callers that bypass `commit_config`
     // may still see `None`.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    // Same contract for the STAMP measurement handle (`te-metric
+    // measurement`): `commit_config` spawns STAMP eagerly before IS-IS.
+    let stamp_client_tx = config.stamp_client_tx.borrow().clone();
     // BGP-LS producer (RFC 9552): the IS-IS task pushes Link-State routes
     // to BGP over this sender. Captured by value — `None` if `router bgp`
     // is committed after `router isis` (cross-commit), matching the
@@ -35,6 +38,7 @@ pub fn spawn_isis(config: &ConfigManager) {
         ctx,
         rib_rx,
         bfd_client_tx,
+        stamp_client_tx,
         bgp_tx,
         config.policy_tx.clone(),
         "isis".to_string(),

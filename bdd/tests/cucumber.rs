@@ -954,6 +954,47 @@ async fn show_command_eventually_not_contains(
     );
 }
 
+/// Positive polling sibling of `show_command_eventually_not_contains`:
+/// assert the `vtyctl show` output comes to contain the substring within
+/// the attempt budget. Used when the value arrives asynchronously after
+/// convergence — e.g. a STAMP-measured te-metric needs a full damping
+/// period of probes before the sub-TLVs appear in the LSDB.
+#[then(expr = "show command {string} in namespace {string} should eventually contain {string}")]
+async fn show_command_eventually_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 60;
+    let mut found = false;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if last_output.contains(&needle) {
+            found = true;
+            break;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    if !found {
+        let diag = route_failure_diagnostics(&scoped).await;
+        panic!(
+            "show '{}' in namespace {} did not contain '{}' after {} attempts\nlast output:\n{}\n{}",
+            show_cmd, scoped, needle, ATTEMPTS, last_output, diag
+        );
+    }
+    println!(
+        "✓ show '{}' in namespace {} eventually contains '{}'",
+        show_cmd, scoped, needle
+    );
+}
+
 #[then(expr = "show command {string} in namespace {string} should not contain {string}")]
 async fn show_command_not_contains(
     world: &mut World,

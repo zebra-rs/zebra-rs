@@ -805,20 +805,21 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         // path computation. Receivers intersect the bitmap with any
         // FAD's include-any/include-all/exclude-any constraint and read
         // the delay metrics for metric-type-1 SPF (RFC 9350 §6.3). Only
-        // emitted when affinity or a TE metric is present.
+        // emitted when affinity or a TE metric is present. The metrics
+        // are the static-over-measured merge: STAMP measurement fills
+        // any field the operator left unconfigured.
+        let te_metric = link.te_metric_effective();
         if let Some(asla) = super::flex_algo::build_link_asla(
             &link.config.affinity,
             top.affinity_map,
-            link.config.te_metric.sub_tlvs(),
+            te_metric.sub_tlvs(),
         ) {
             is_reach.subs.push(neigh::IsisSubTlv::Asla(asla));
         }
         // Per-link RFC 8570 TE metrics (unidirectional / min-max delay,
         // delay variation, link loss), also advertised inline for
-        // general TE visibility (non-flex-algo consumers). Statically
-        // configured today; a TWAMP/STAMP measurement task will feed
-        // these dynamically in a later phase.
-        is_reach.subs.extend(link.config.te_metric.sub_tlvs());
+        // general TE visibility (non-flex-algo consumers).
+        is_reach.subs.extend(te_metric.sub_tlvs());
         // Neighbor
         for (_, nbr) in link.state.nbrs.get(&level).iter() {
             for (_key, value) in nbr.addr4.iter() {
@@ -999,18 +1000,20 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             };
             // Per-link ASLA carries the same affinity bitmap and TE
             // metrics on the MT IS-reach entry as on the legacy TLV 22
-            // entry — both are MT-agnostic in the YANG model.
+            // entry — both are MT-agnostic in the YANG model. Same
+            // static-over-measured merge as TLV 22.
+            let te_metric = link.te_metric_effective();
             if let Some(asla) = super::flex_algo::build_link_asla(
                 &link.config.affinity,
                 top.affinity_map,
-                link.config.te_metric.sub_tlvs(),
+                te_metric.sub_tlvs(),
             ) {
                 entry.subs.push(neigh::IsisSubTlv::Asla(asla));
             }
             // Same RFC 8570 TE metrics as the legacy TLV 22 entry above,
             // also advertised inline for general TE visibility — link
             // delay/loss are MT-agnostic physical properties.
-            entry.subs.extend(link.config.te_metric.sub_tlvs());
+            entry.subs.extend(te_metric.sub_tlvs());
             for (_, nbr) in link.state.nbrs.get(&level).iter() {
                 if let Some((_, sid_addr)) = nbr.endx_sid {
                     if nbr.network_type.is_p2p() {

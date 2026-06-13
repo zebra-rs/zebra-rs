@@ -14,6 +14,7 @@ use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
 use super::parse::parse;
 use super::paths::{path_try_trim, paths_str, vrf_redirect_split};
+use super::stamp::{despawn_stamp, spawn_stamp};
 use super::util::trim_first_line;
 use super::vty::CommandPath;
 use super::yaml::yaml_parse;
@@ -214,6 +215,14 @@ pub struct ConfigManager {
     /// instance. `None` indicates BFD has not (yet) been spawned — clients
     /// with a `None` handle silently skip their BFD attach logic.
     pub bfd_client_tx: RefCell<Option<UnboundedSender<crate::bfd::inst::ClientReq>>>,
+    /// Sender side of the STAMP client-request channel. Same contract
+    /// as `bfd_client_tx`: populated by [`super::stamp::spawn_stamp`]
+    /// (eager-spawned by the OSPF / IS-IS commit arms before those
+    /// protocols), cleared by `despawn_stamp` when the last consumer
+    /// is gone, captured by value at protocol spawn time. `None` means
+    /// STAMP is not running (never configured, or its reflector port
+    /// could not be bound) — consumers silently skip measurement.
+    pub stamp_client_tx: RefCell<Option<UnboundedSender<crate::stamp::client::ClientReq>>>,
     /// Sender side of the ND client-request channel. Populated by
     /// [`super::nd::spawn_nd`] on either the first
     /// `ipv6 router-advertisements` line or the first `router bgp`
@@ -268,6 +277,7 @@ impl ConfigManager {
             next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             policy_tx,
             bfd_client_tx: RefCell::new(None),
+            stamp_client_tx: RefCell::new(None),
             nd_client_tx: RefCell::new(None),
             protocol_tasks: RefCell::new(HashMap::new()),
             yang_service_accounts,
@@ -430,6 +440,7 @@ impl ConfigManager {
         let mut isis = false;
         let mut bgp = false;
         let mut bfd = false;
+        let mut stamp = false;
         let mut nd = false;
         for (proto, tx) in self.cm_clients.borrow().iter() {
             tx.send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart))
@@ -445,6 +456,9 @@ impl ConfigManager {
             }
             if proto == "bfd" {
                 bfd = true;
+            }
+            if proto == "stamp" {
+                stamp = true;
             }
             if proto == "nd" {
                 nd = true;
@@ -505,6 +519,15 @@ impl ConfigManager {
                     bfd = true;
                     spawn_bfd(self);
                 }
+                // OSPF captures `stamp_client_tx` by value at spawn,
+                // same contract as `bfd_client_tx` — bring STAMP up
+                // first so `te-metric measurement` works regardless of
+                // commit order. (The ospfv3 arm doesn't: OSPFv3 has no
+                // measurement YANG in Phase 1.)
+                if !stamp {
+                    stamp = true;
+                    spawn_stamp(self);
+                }
                 spawn_ospf(self);
             }
             if !isis && op == ConfigOp::Set && line.starts_with("router isis") {
@@ -519,6 +542,12 @@ impl ConfigManager {
                 if !bfd {
                     bfd = true;
                     spawn_bfd(self);
+                }
+                // Same by-value capture for `stamp_client_tx` (see the
+                // `router ospf` arm above).
+                if !stamp {
+                    stamp = true;
+                    spawn_stamp(self);
                 }
                 // Pre-spawn BGP if this commit will set it, so IS-IS
                 // captures a live `bgp_tx` for the BGP-LS producer (the
@@ -637,6 +666,16 @@ impl ConfigManager {
             && !proto_in_candidate("ospf")
         {
             despawn_bfd(self);
+        }
+        // STAMP follows the same eager-consumer lifecycle as BFD, with
+        // OSPF / IS-IS as its only consumers. The ospf prefix check
+        // also matching `router ospfv3` is conservative but harmless —
+        // an idle instance is one bound socket.
+        if self.protocol_tasks.borrow().contains_key("stamp")
+            && !proto_in_candidate("isis")
+            && !proto_in_candidate("ospf")
+        {
+            despawn_stamp(self);
         }
 
         self.store.commit();
@@ -953,6 +992,8 @@ impl ConfigManager {
                                 "BGP"
                             } else if is_bfd(&paths) {
                                 "BFD"
+                            } else if is_stamp(&paths) {
+                                "STAMP"
                             } else if is_nd(&paths) {
                                 "ND"
                             } else if is_policy(&paths) {
@@ -1092,6 +1133,10 @@ fn is_bfd(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "bfd")
 }
 
+fn is_stamp(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "stamp")
+}
+
 fn is_nd(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "nd")
 }
@@ -1117,6 +1162,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "isis"
     } else if is_bfd(paths) {
         "bfd"
+    } else if is_stamp(paths) {
+        "stamp"
     } else if is_nd(paths) {
         "nd"
     } else if is_policy(paths) {
@@ -1383,6 +1430,64 @@ mod yang_load_tests {
             ExecCode::Success,
             "`compute-mode turbo` must not parse"
         );
+    }
+
+    /// STAMP Phase 1 grammar: the `te-metric measurement` block on
+    /// both IGP interfaces (configure mode) and the `show stamp`
+    /// surface (exec mode). Pinned because vtyctl apply/show are
+    /// garbage-tolerant — an unwired grammar silently no-ops.
+    #[test]
+    fn stamp_measurement_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router isis interface eth0 te-metric measurement enable true",
+            "set router isis interface eth0 te-metric measurement interval 100",
+            "set router isis interface eth0 te-metric measurement damping-period 2",
+            "set router ospf area 0 interface eth0 te-metric measurement enable true",
+            "set router ospf area 0 interface eth0 te-metric measurement interval 100",
+            "set router ospf area 0 interface eth0 te-metric measurement damping-period 2",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        // An out-of-range interval must not parse (100..60000 ms).
+        let (code, _comps, _state) = parse(
+            "set router isis interface eth0 te-metric measurement interval 50",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_ne!(code, ExecCode::Success, "interval 50 is below the range");
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("exec").expect("exec mode loads");
+        yang.identity_resolve();
+        let module = yang.find_module("exec").expect("exec module present");
+        let entry = to_entry(&yang, module);
+
+        for cmd in ["show stamp", "show stamp session", "show stamp statistics"] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+        }
     }
 
     /// `router bgp global router-id` is zebra-rs's rename of the IETF

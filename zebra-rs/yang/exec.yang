@@ -215,6 +215,18 @@ module exec {
         type empty;
       }
     }
+    container stamp {
+      ext:help "STAMP (RFC 8762) link delay measurement";
+      presence "Show STAMP session summary";
+      leaf session {
+        ext:help "Per-session detail";
+        type empty;
+      }
+      leaf statistics {
+        ext:help "Sender and reflector packet counters";
+        type empty;
+      }
+    }
     container bgp {
       ext:help "BGP information";
       // `show bgp` with no AFI keyword is IPv4 unicast. A bare address

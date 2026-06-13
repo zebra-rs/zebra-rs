@@ -21,6 +21,9 @@ pub fn spawn_ospf(config: &ConfigManager) {
     // BFD is eager-spawned before OSPF in `commit_config`, so this
     // handle is live; threaded in so per-interface `bfd` can subscribe.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    // Same contract for the STAMP measurement handle (`te-metric
+    // measurement`): eager-spawned before OSPF.
+    let stamp_client_tx = config.stamp_client_tx.borrow().clone();
     let ospf = inst::Ospf::<crate::ospf::Ospfv2>::new(
         ctx,
         rib_rx,
@@ -29,6 +32,7 @@ pub fn spawn_ospf(config: &ConfigManager) {
         config.rib_subscriber(),
         config.tx.clone(),
         bfd_client_tx,
+        stamp_client_tx,
     );
     config.subscribe("ospf", ospf.cm.tx.clone());
     config.subscribe_show("ospf", ospf.show.tx.clone());
@@ -70,6 +74,9 @@ pub fn spawn_ospfv3(config: &ConfigManager) {
     // `"ospfv3"` default label; per-VRF children get
     // `"ospfv3:vrf:<name>"`. See `spawn_ospf` for the rationale.
     let bfd_client_tx = config.bfd_client_tx.borrow().clone();
+    // Forwarded for shape uniformity; v3 has no measurement YANG so
+    // the handle is never used (the v2 instance owns all sessions).
+    let stamp_client_tx = config.stamp_client_tx.borrow().clone();
     let ospf = inst::Ospf::<crate::ospf::Ospfv3>::new(
         ctx,
         rib_rx,
@@ -78,6 +85,7 @@ pub fn spawn_ospfv3(config: &ConfigManager) {
         config.rib_subscriber(),
         config.tx.clone(),
         bfd_client_tx,
+        stamp_client_tx,
     );
     config.subscribe("ospfv3", ospf.cm.tx.clone());
     config.subscribe_show("ospfv3", ospf.show.tx.clone());

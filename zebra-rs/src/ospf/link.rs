@@ -120,9 +120,17 @@ pub struct LinkConfig {
     pub affinity: BTreeSet<String>,
     /// Static RFC 7471 TE link metrics (delay/jitter/loss) advertised in
     /// this link's ASLA sub-TLV on the Extended-Link Opaque LSA. Mirrors
-    /// `isis::LinkConfig::te_metric`; a future TWAMP/STAMP task will
-    /// populate these dynamically.
+    /// `isis::LinkConfig::te_metric`. Merged with the measured values
+    /// (static wins per field) by [`OspfLink::te_metric_effective`].
     pub te_metric: LinkTeMetric,
+    /// STAMP measurement config for this link, from
+    /// `area <a> interface <if> te-metric measurement {}`. When enabled
+    /// (P2P network type, Full neighbor, v4 pair),
+    /// `Ospf::stamp_reconcile_link` keeps a measurement session
+    /// subscribed; its damped exports land in
+    /// `OspfLink::measured_te_metric`. v2-only — the v3 config tree
+    /// has no measurement block, so it stays default (inert) there.
+    pub te_metric_measurement: crate::stamp::session::MeasurementConfig,
     /// Per-interface BFD attachment (zebra-ospf-bfd.yang).
     pub bfd: OspfLinkBfdConfig,
 }
@@ -178,6 +186,20 @@ impl LinkTeMetric {
             }));
         }
         subs
+    }
+
+    /// Per-field merge of `self` (static config) over `fallback`
+    /// (measured values): a configured field always wins, an
+    /// unconfigured one takes the measurement. Mirrors
+    /// `isis::LinkTeMetric::merged_over`.
+    pub fn merged_over(&self, fallback: &LinkTeMetric) -> LinkTeMetric {
+        LinkTeMetric {
+            unidirectional_delay: self.unidirectional_delay.or(fallback.unidirectional_delay),
+            min_delay: self.min_delay.or(fallback.min_delay),
+            max_delay: self.max_delay.or(fallback.max_delay),
+            delay_variation: self.delay_variation.or(fallback.delay_variation),
+            loss: self.loss.or(fallback.loss),
+        }
     }
 }
 
@@ -441,6 +463,18 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     /// (no link-scope LSA types exist in RFC 2328) but the field
     /// stays generic for shape simplicity.
     pub lsdb: super::lsdb::Lsdb<V>,
+    /// Last STAMP measurement exported for this link (all fields
+    /// `None` when no measurement is active or the last export was a
+    /// clear). Merged under the static config per field by
+    /// [`Self::te_metric_effective`]. Only ever populated on v2.
+    pub measured_te_metric: LinkTeMetric,
+    /// The STAMP subscription this link currently holds, tracked so
+    /// `Ospf::stamp_reconcile_link` can diff desired-vs-actual and
+    /// only (un)subscribe on a real change.
+    pub stamp_session: Option<(
+        crate::stamp::session::SessionKey,
+        crate::stamp::session::SessionParams,
+    )>,
 }
 
 #[derive(Default)]
@@ -500,6 +534,8 @@ where
             ls_ack_delayed: Vec::new(),
             interface_id: link.index,
             lsdb: super::lsdb::Lsdb::new(),
+            measured_te_metric: LinkTeMetric::default(),
+            stamp_session: None,
         }
     }
 }
@@ -507,6 +543,14 @@ where
 impl<V: OspfVersion> OspfLink<V> {
     pub fn priority(&self) -> u8 {
         self.config.priority.unwrap_or(OSPF_DEFAULT_PRIORITY)
+    }
+
+    /// The TE metrics this link advertises: statically configured
+    /// values win over measured ones, per field — an operator override
+    /// never gets clobbered by measurement, while unconfigured fields
+    /// track the live measurement (or fall silent when it clears).
+    pub fn te_metric_effective(&self) -> LinkTeMetric {
+        self.config.te_metric.merged_over(&self.measured_te_metric)
     }
 
     pub fn hello_interval(&self) -> u16 {
@@ -794,5 +838,42 @@ mod te_metric_tests {
     #[test]
     fn default_is_empty() {
         assert!(LinkTeMetric::default().asla_sub_subs().is_empty());
+    }
+
+    /// `merged_over` (the [`OspfLink::te_metric_effective`] core):
+    /// static config wins per field, measured fills the gaps, and a
+    /// cleared measurement leaves only the static fields.
+    #[test]
+    fn merged_over_static_wins_measured_fills() {
+        let config = LinkTeMetric {
+            min_delay: Some(500), // operator override
+            loss: Some(3),
+            ..Default::default()
+        };
+        let measured = LinkTeMetric {
+            unidirectional_delay: Some(120),
+            min_delay: Some(100),
+            max_delay: Some(150),
+            delay_variation: Some(10),
+            loss: None,
+        };
+        let effective = config.merged_over(&measured);
+        assert_eq!(effective.min_delay, Some(500), "config wins");
+        assert_eq!(effective.unidirectional_delay, Some(120), "measured fills");
+        assert_eq!(effective.max_delay, Some(150));
+        assert_eq!(effective.delay_variation, Some(10));
+        assert_eq!(effective.loss, Some(3));
+
+        // Measurement cleared (no replies for a period): only static
+        // fields remain.
+        let effective = config.merged_over(&LinkTeMetric::default());
+        assert_eq!(
+            effective,
+            LinkTeMetric {
+                min_delay: Some(500),
+                loss: Some(3),
+                ..Default::default()
+            }
+        );
     }
 }

@@ -128,6 +128,21 @@ impl Ospf {
             "/area/interface/te-metric/loss",
             config_ospf_interface_te_loss,
         );
+        // STAMP measurement block — v2 only (this `callback_build` is
+        // `impl Ospf<Ospfv2>`; `config_v3.rs` registers nothing here,
+        // so the v3 instance never enables measurement).
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/enable",
+            config_ospf_interface_te_measurement_enable,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/interval",
+            config_ospf_interface_te_measurement_interval,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/damping-period",
+            config_ospf_interface_te_measurement_damping_period,
+        );
         self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
@@ -747,6 +762,61 @@ fn config_ospf_interface_te_delay_variation(
 
 fn config_ospf_interface_te_loss(ospf: &mut Ospf, args: Args, op: ConfigOp) -> Option<()> {
     config_ospf_interface_te_metric(ospf, args, op, |m, v| m.loss = v)
+}
+
+// `/router/ospf/area/interface/te-metric/measurement/*` — the STAMP
+// measurement block. Each leaf updates the config mirror and re-runs
+// the session reconcile, which (un)subscribes on real changes and —
+// on a teardown — clears the measured values and refreshes the
+// Extended-Link LSA.
+fn config_ospf_interface_te_measurement(
+    ospf: &mut Ospf,
+    mut args: Args,
+    set: impl FnOnce(&mut crate::stamp::session::MeasurementConfig, &mut Args) -> Option<()>,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let ifindex = link.index;
+    set(&mut link.config.te_metric_measurement, &mut args)?;
+    ospf.stamp_reconcile_and_originate(ifindex);
+    Some(())
+}
+
+fn config_ospf_interface_te_measurement_enable(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.boolean()?;
+        m.enable = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospf_interface_te_measurement_interval(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.interval_ms = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospf_interface_te_measurement_damping_period(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.damping_period_secs = op.is_set().then_some(value);
+        Some(())
+    })
 }
 
 fn config_ospf_interface_hello_interval(

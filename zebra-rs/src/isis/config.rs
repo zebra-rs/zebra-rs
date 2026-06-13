@@ -382,6 +382,18 @@ impl Isis {
             link::config_te_loss,
         );
         self.callback_add(
+            "/router/isis/interface/te-metric/measurement/enable",
+            link::config_te_measurement_enable,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/interval",
+            link::config_te_measurement_interval,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/damping-period",
+            link::config_te_measurement_damping_period,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

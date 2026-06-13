@@ -102,6 +102,18 @@ fn bfd_nfsm_dispatch(
     }
 }
 
+/// Kick the STAMP measurement reconcile on any NFSM transition that
+/// crosses the Up boundary — the session's existence is gated on an Up
+/// adjacency (the remote address comes from it, and probing a
+/// non-adjacent peer is pointless). The reconcile itself
+/// (`Isis::stamp_reconcile_link`) diffs desired-vs-tracked, so firing
+/// it is cheap and needs no enable gate here.
+fn stamp_nfsm_dispatch(link: &super::link::LinkTop<'_>, was_up: bool, state: NfsmState) {
+    if was_up != (state == NfsmState::Up) {
+        let _ = link.tx.send(Message::StampReconcile(link.ifindex));
+    }
+}
+
 use super::Level;
 use super::flood;
 use super::ifsm::has_level;
@@ -556,6 +568,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
     // we can read link.state.v4addr / link.config.bfd freely.
     bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
+    stamp_nfsm_dispatch(link, was_up, state);
 
     // CSNP + SRM kick on first RR. Deferred to here so we can take
     // `&mut link` after the `nbr` borrow has expired.
@@ -779,6 +792,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // borrow is gone so we can read link.state / link.config
         // freely.
         bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
+        stamp_nfsm_dispatch(link, was_up, state);
 
         // CSNP+SRM kick on first RR. P2P always wins the
         // helper_elected_for_csnp predicate, so this fires every

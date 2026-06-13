@@ -700,6 +700,41 @@ module config {
                    encoded in units of 0.000003 %; the maximum 16777214
                    (0xFFFFFE) is ~50.33 %.";
               }
+              container measurement {
+                ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+                description
+                  "Active performance measurement of this link. When
+                   enabled, a STAMP Session-Sender (RFC 8762,
+                   unauthenticated) probes the P2P neighbor once the
+                   adjacency reaches Full; the damped min/max/avg delay
+                   and delay variation populate the same te-metric
+                   fields as static configuration (a static leaf, when
+                   set, overrides the measured value per field). The
+                   probes are answered by the neighbor's implicit
+                   Session-Reflector, so measurement must be enabled on
+                   both ends of the link.";
+                leaf enable {
+                  type boolean;
+                  description "Activate measurement on this interface.";
+                }
+                leaf interval {
+                  type uint32 {
+                    range "100..60000";
+                  }
+                  units "milliseconds";
+                  description "Probe transmit interval. Default 1000 ms.";
+                }
+                leaf damping-period {
+                  type uint32 {
+                    range "1..3600";
+                  }
+                  units "seconds";
+                  description
+                    "Minimum spacing between exports to the IGP; each
+                     period's samples form the advertised min/max/avg
+                     window. Default 30 s.";
+                }
+              }
             }
           }
         }
@@ -2211,6 +2246,41 @@ module config {
                 "Unidirectional link loss (RFC 8570 §4.4, sub-TLV 36),
                  encoded in units of 0.000003 %; the maximum 16777214
                  (0xFFFFFE) is ~50.33 %.";
+            }
+            container measurement {
+              ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+              description
+                "Active performance measurement of this link. When
+                 enabled, a STAMP Session-Sender (RFC 8762,
+                 unauthenticated) probes the P2P neighbor once the
+                 adjacency is up; the damped min/max/avg delay and
+                 delay variation populate the same te-metric fields as
+                 static configuration (a static leaf, when set,
+                 overrides the measured value per field). The probes
+                 are answered by the neighbor's implicit
+                 Session-Reflector, so measurement must be enabled on
+                 both ends of the link.";
+              leaf enable {
+                type boolean;
+                description "Activate measurement on this interface.";
+              }
+              leaf interval {
+                type uint32 {
+                  range "100..60000";
+                }
+                units "milliseconds";
+                description "Probe transmit interval. Default 1000 ms.";
+              }
+              leaf damping-period {
+                type uint32 {
+                  range "1..3600";
+                }
+                units "seconds";
+                description
+                  "Minimum spacing between exports to the IGP; each
+                   period's samples form the advertised min/max/avg
+                   window. Default 30 s.";
+              }
             }
           }
 

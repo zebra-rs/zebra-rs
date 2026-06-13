@@ -142,5 +142,12 @@ pub fn nbr_hold_timer_expire(
         let _ = link.tx.send(Message::BfdUnsubscribe(key));
     }
 
+    // The Up adjacency is gone — let the STAMP reconcile see the
+    // removed neighbor and release the measurement session (diff-gated
+    // no-op when none exists).
+    if was_up {
+        let _ = link.tx.send(Message::StampReconcile(link.ifindex));
+    }
+
     spf_schedule(link, level);
 }

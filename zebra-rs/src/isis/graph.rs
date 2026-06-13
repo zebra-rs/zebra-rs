@@ -661,7 +661,7 @@ pub fn graph_flex_algo(
                         local_adj_to_ifindex
                             .get(&entry_reach.neighbor_id)
                             .and_then(|ifx| top.links.get(ifx))
-                            .and_then(|link| link.config.te_metric.min_delay)
+                            .and_then(|link| link.te_metric_effective().min_delay)
                     } else {
                         entry_reach.subs.iter().find_map(|sub| match sub {
                             neigh::IsisSubTlv::Asla(asla) => {
