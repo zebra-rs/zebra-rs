@@ -156,6 +156,11 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             lu_labels: None,
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        // Update-groups live outside `PeerMap`: removal below purges
+        // the membership index by construction, but the group member
+        // sets must be detached explicitly or the freed ident lingers
+        // and a future slot reuse inherits the group.
+        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
         bgp.peers.remove(&addr);
     }
     // Keep the shared listener's TCP MSS minimum in step with the peer

@@ -337,6 +337,23 @@ of B.
    consolidation — convert site by site with the `debug_assert`
    cross-check active; include detach-on-remove.
 
+   *Status — index landed.* `bgp/membership.rs` holds
+   `FamilyMembers { addpath_tx, plain }` keyed by `AfiSafi`. The
+   structure lives **inside `PeerMap`** (not `BgpTop`, which has 36
+   construction sites) so peer removal purges membership by
+   construction — that closes the ident-reuse ABA hazard
+   structurally rather than by convention. Enroll/withdraw run at
+   the FSM chokepoint next to `update_group::attach`/`detach`, and
+   `PeerMap::debug_verify_membership` cross-checks both directions
+   (index↔peers) on every FSM state transition in debug builds. The
+   three `peers.remove` sites (`config.rs` neighbor delete,
+   `interface_neighbor.rs` interface-neighbor delete, `inst.rs`
+   dynamic-peer GC) now also call `update_group::detach` explicitly
+   — update-groups live outside `PeerMap`, so their member sets do
+   not purge by construction. Remaining: convert the fourteen
+   fan-outs in §9 to consume `peers.membership().family(afi, safi)`
+   instead of scan-and-filter.
+
 Steps 1–3 are independent small PRs per the
 smallest-possible-PR-first rule; step 4 should not start until the
 direction is confirmed on review of this document.
