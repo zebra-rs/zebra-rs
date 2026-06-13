@@ -1806,7 +1806,7 @@ impl LocalRib {
 
 // RIB update from peer.
 pub fn route_apply_policy_in(
-    peer: &mut Peer,
+    peer: &Peer,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
@@ -4016,6 +4016,17 @@ pub fn route_labelv4_update(
     });
 
     let stale = stale || attr_has_llgr_stale(&attr);
+
+    // Inbound policy: per-peer route-map / prefix-list. The decision
+    // carries the post-policy attr; `None` drops the route (any prior
+    // Loc-RIB row from this peer is withdrawn). Reaches parity with the
+    // unicast ingest — LU previously applied no per-neighbor policy.
+    let decision = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        route_apply_policy_in(peer, &lu.nlri, attr.clone(), 0)
+    };
+
+    // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
     let mut rib = BgpRib::new(
         peer_ident,
         peer_router_id,
@@ -4027,28 +4038,37 @@ pub fn route_labelv4_update(
         None,
         stale,
     );
+    bgp.shard
+        .adj_in_mut(peer_ident)
+        .add_v4lu(lu.nlri.prefix, rib.clone());
 
-    {
-        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        bgp.shard
-            .adj_in_mut(peer.ident)
-            .add_v4lu(lu.nlri.prefix, rib.clone());
-    }
-
-    rib.attr = bgp.shard.intern(attr);
-    // Next-Hop Tracking: gate best-path on the BGP next-hop's
-    // reachability and resolve its transport for the FIB label-push.
+    // Next-Hop Tracking gate / per-prefix local label resolve only on the
+    // permit path; a denied route removes this peer's row and re-selects.
     let dep = super::nht::NhtDep::V4lu(lu.nlri.prefix);
-    nht_track_received(bgp, &mut rib, dep.clone());
-    // Allocate a per-prefix local label so re-advertising with
-    // next-hop-self forwards via a swap ILM (Phase 5b). `None` when no
-    // dynamic block is granted yet — advertise the received label until
-    // then.
-    rib.local_label = bgp
-        .shard
-        .labels
-        .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
-    let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
+    let (replaced, selected) = match decision {
+        None => {
+            let replaced = bgp
+                .shard
+                .remove_v4lu(lu.nlri.prefix, lu.nlri.id, peer_ident);
+            let selected = bgp.shard.select_best_path_v4lu(lu.nlri.prefix);
+            (replaced, selected)
+        }
+        Some(decision) => {
+            rib.attr = bgp.shard.intern(decision.attr);
+            rib.weight = decision.weight;
+            nht_track_received(bgp, &mut rib, dep.clone());
+            // Allocate a per-prefix local label so re-advertising with
+            // next-hop-self forwards via a swap ILM (Phase 5b). `None`
+            // when no dynamic block is granted yet — advertise the
+            // received label until then.
+            rib.local_label = bgp
+                .shard
+                .labels
+                .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
+            (replaced, selected)
+        }
+    };
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v4lu(lu.nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
@@ -4116,6 +4136,15 @@ pub fn route_labelv6_update(
     });
 
     let stale = stale || attr_has_llgr_stale(&attr);
+
+    // Inbound policy: per-peer route-map / prefix-list (see
+    // `route_labelv4_update`). `None` drops the route.
+    let decision = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        route_apply_policy_in_v6(peer, &lu.nlri, attr.clone(), 0)
+    };
+
+    // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
     let mut rib = BgpRib::new(
         peer_ident,
         peer_router_id,
@@ -4127,22 +4156,31 @@ pub fn route_labelv6_update(
         None,
         stale,
     );
+    bgp.shard
+        .adj_in_mut(peer_ident)
+        .add_v6lu(lu.nlri.prefix, rib.clone());
 
-    {
-        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        bgp.shard
-            .adj_in_mut(peer.ident)
-            .add_v6lu(lu.nlri.prefix, rib.clone());
-    }
-
-    rib.attr = bgp.shard.intern(attr);
     let dep = super::nht::NhtDep::V6lu(lu.nlri.prefix);
-    nht_track_received(bgp, &mut rib, dep.clone());
-    rib.local_label = bgp
-        .shard
-        .labels
-        .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
-    let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
+    let (replaced, selected) = match decision {
+        None => {
+            let replaced = bgp
+                .shard
+                .remove_v6lu(lu.nlri.prefix, lu.nlri.id, peer_ident);
+            let selected = bgp.shard.select_best_path_v6lu(lu.nlri.prefix);
+            (replaced, selected)
+        }
+        Some(decision) => {
+            rib.attr = bgp.shard.intern(decision.attr);
+            rib.weight = decision.weight;
+            nht_track_received(bgp, &mut rib, dep.clone());
+            rib.local_label = bgp
+                .shard
+                .labels
+                .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
+            (replaced, selected)
+        }
+    };
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v6lu(lu.nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
@@ -7219,7 +7257,13 @@ pub(super) fn route_advertise_to_peers_vpnv6(
                 else {
                     continue;
                 };
-                let attr = bgp.attr_store.intern(attr);
+                // Outbound policy: per-peer route-map / prefix-list. A
+                // denied route is suppressed (never advertised).
+                let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
+                else {
+                    continue;
+                };
+                let attr = bgp.attr_store.intern(decision.attr);
                 // RTC: skip without withdrawing when the peer's IPv6
                 // route-target constraint set doesn't admit this route.
                 if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
@@ -7443,8 +7487,13 @@ pub(super) fn route_advertise_to_peers_labelv4(
                 else {
                     continue;
                 };
+                // Outbound policy: per-peer route-map / prefix-list. A
+                // denied route is suppressed (never advertised).
+                let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) else {
+                    continue;
+                };
                 let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-                update.bgp_attr = Some(attr);
+                update.bgp_attr = Some(decision.attr);
                 update.mp_update = Some(MpReachAttr::Labelv4 {
                     snpa: 0,
                     nhop,
@@ -7494,8 +7543,14 @@ pub(super) fn route_advertise_to_peers_labelv6(
                 else {
                     continue;
                 };
+                // Outbound policy: per-peer route-map / prefix-list. A
+                // denied route is suppressed (never advertised).
+                let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
+                else {
+                    continue;
+                };
                 let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-                update.bgp_attr = Some(attr);
+                update.bgp_attr = Some(decision.attr);
                 update.mp_update = Some(MpReachAttr::Labelv6 {
                     snpa: 0,
                     nhop,
@@ -8585,8 +8640,13 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         else {
             continue;
         };
+        // Outbound policy on the establish-time dump (parity with the
+        // event-driven advertise and the unicast sync paths).
+        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) else {
+            continue;
+        };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-        update.bgp_attr = Some(attr);
+        update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv4 {
             snpa: 0,
             nhop,
@@ -8618,8 +8678,12 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
         else {
             continue;
         };
+        // Outbound policy on the establish-time dump (see route_sync_labelv4).
+        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) else {
+            continue;
+        };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-        update.bgp_attr = Some(attr);
+        update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv6 {
             snpa: 0,
             nhop,
