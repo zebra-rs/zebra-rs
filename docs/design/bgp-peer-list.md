@@ -350,9 +350,21 @@ of B.
    `interface_neighbor.rs` interface-neighbor delete, `inst.rs`
    dynamic-peer GC) now also call `update_group::detach` explicitly
    — update-groups live outside `PeerMap`, so their member sets do
-   not purge by construction. Remaining: convert the fourteen
-   fan-outs in §9 to consume `peers.membership().family(afi, safi)`
-   instead of scan-and-filter.
+   not purge by construction.
+
+   *Status — fan-outs converted.* All fourteen §9 sites now consume
+   the index via three `PeerMap` snapshot helpers:
+   `established_idents` (union), `established_plain_idents`
+   (best-path-only pipeline), `established_addpath_idents`
+   (per-candidate pipeline). The index maintenance moved to flip in
+   lockstep with `peer.state` itself — *before* `fsm_effect` and
+   `route_clean`, both of which fan out — so withdraw-before-clean
+   excludes the dying peer exactly as the live `is_established()`
+   filters did. The `update_group::attach`/`detach` calls stay at
+   the tail of `fsm` (detach intentionally after `route_clean` for
+   observability), and `debug_verify_membership` still runs on every
+   FSM transition. Step 4 is complete; the per-prefix scans are
+   gone.
 
 Steps 1–3 are independent small PRs per the
 smallest-possible-PR-first rule; step 4 should not start until the
@@ -380,5 +392,11 @@ direction is confirmed on review of this document.
 Single-peer guards (not fan-outs): `route_soft_out_peer`
 (`route.rs:2953`), `route_soft_in_peer` (`route.rs:3225`).
 
-All fourteen fan-outs use `peers.iter()` (addr-keyed only — B2) and
-none can reach an interface-keyed peer.
+*Historical note* — at the time of the analysis, all fourteen
+fan-outs used `peers.iter()` (addr-keyed only — B2) and none could
+reach an interface-keyed peer. #1414 converted them to ident-based
+`iter_all()` scans; the step-4 refactor then replaced the scans
+entirely with the membership-index snapshots
+(`established_idents` / `established_plain_idents` /
+`established_addpath_idents`), so the table's line numbers and
+"AddPath handling" column describe the pre-refactor code.
