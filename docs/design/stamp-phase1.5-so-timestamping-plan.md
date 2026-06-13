@@ -1,10 +1,11 @@
 # STAMP Phase 1.5 — Sender `SO_TIMESTAMPING` for accuracy
 
-> **Status:** rung 1 **implemented** (2026-06-13); rung 2 deferred to a follow-up PR.
+> **Status:** rung 1 **shipped** (PR #1431, 2026-06-13). Rung 2 **plan below**, awaiting
+> review — branch `stamp-tx-errqueue`.
 > **Parent docs:** [stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md)
 > (the shipped measurement plane), [bfd-sbfd-stamp-xdp-offload-notes.md §9b.3](./bfd-sbfd-stamp-xdp-offload-notes.md)
-> (the accuracy ladder — this is **rung 1**, optionally **rung 2**).
-> **Branch:** `stamp-so-timestamping`
+> (the accuracy ladder — rung 1 done, **rung 2** is §8 of this doc).
+> **Branches:** rung 1 `stamp-so-timestamping` (merged); rung 2 `stamp-tx-errqueue`.
 
 ---
 
@@ -140,3 +141,86 @@ Ship **rung 1** as the core PR (the recommended first follow-up; ~tens of
 lines + counters + tests). Decide rung 2 inclusion at review time — it is
 moderate plumbing and cleanly separable into a fast-follow if rung 1 should
 land thin.
+
+---
+
+## 8. Rung 2 — TX `SO_TIMESTAMPING` + errqueue → corrected T1′
+
+> **Branch:** `stamp-tx-errqueue`. Builds on the shipped rung 1.
+
+### 8.1 What it buys
+
+Rung 1 removed the daemon-scheduling part of `d` (sender RX, T4). Rung 2
+removes most of `a` — the **T1-stamp → wire** residue: the gap between
+`now_ntp()` at build and the packet actually leaving (encode, `send`
+syscall, qdisc). The kernel TX software timestamp `T1′` is taken when the
+skb is handed down, so `(T4 − T1′)` measures the true on-wire interval. With
+both rungs only `b` and `c` (the *reflector's* two residues) remain, and for
+RTT-mode senders those are bounded by the peer's residence rate (offload
+notes §9b.1).
+
+### 8.2 Mechanism (verified against nix 0.31.3 / tokio 1.52)
+
+- **Socket:** add `SOF_TIMESTAMPING_TX_SOFTWARE | OPT_ID | OPT_TSONLY` to the
+  sender socket's existing RX flags (one `SO_TIMESTAMPING` bitmask).
+  `OPT_ID` makes the kernel tag each sent datagram with a counter (reset to 0
+  when the option is enabled, ++ per successfully queued send);
+  `OPT_TSONLY` returns only the timestamp on the error queue, not a copy of
+  the payload. Reflector socket is unchanged (RX only).
+- **Retrieval:** the TX stamp lands on the socket **error queue**. A new
+  `sender_errqueue_read(key, sock, tx)` task waits on `Interest::ERROR` and
+  `recvmsg(MSG_ERRQUEUE)`, reading two cmsgs per message:
+  `ScmTimestampsns` (the `system` timespec = T1′) and `Ipv4RecvErr`
+  (`sock_extended_err.ee_data` = the `OPT_ID`). It emits
+  `Message::TxStamp { key, opt_id, t1_prime }`.
+- **Join:** `next_seq` and the kernel `OPT_ID` both start at 0 and increment
+  once per **successful** send, so `OPT_ID == seq` for every probe (invariant
+  documented at the send site). The instance stores `t1_prime` in a
+  per-session `pending_tx: BTreeMap<u32 /*seq*/, StampTimestamp>`. On
+  `ReplyRecv`, `on_reply_recv` does `pending_tx.remove(&reply.sender_seq)`:
+  `Some(t1′)` → use it for `(T4 − T1′)`; **miss → fall back to
+  `reply.sender_timestamp`** (the in-packet T1, i.e. rung-1 accuracy). The
+  fallback makes any desync or errqueue loss harmless.
+- **In-packet T1 unchanged:** the probe still carries `now_ntp()` as its
+  Timestamp, and the reflector still echoes that. Only *our local* math swaps
+  T1→T1′. **No wire change** — interop is identical to rung 1.
+
+### 8.3 Memory bound
+
+`pending_tx` holds at most one entry per in-flight (unanswered) probe. Cap it
+(`PENDING_TX_CAP`, e.g. 256) — on insert past the cap, drop the smallest key.
+Monotonic seq means the oldest unanswered probes are evicted first; a lost
+reply leaks nothing beyond the cap. Drops with the session.
+
+### 8.4 Steps
+
+1. `socket.rs`: rename `set_so_timestamping_rx` → `set_so_timestamping(sock,
+   flags)`; reflector passes `RX_SOFTWARE|SOFTWARE`, sender passes that
+   `| TX_SOFTWARE|OPT_ID|OPT_TSONLY`.
+2. `network.rs`: `sender_errqueue_read` task (`Interest::ERROR` +
+   `MSG_ERRQUEUE` recvmsg; parse `ScmTimestampsns` + `Ipv4RecvErr`). Helper
+   `errqueue_tx_stamp(cmsgs) -> Option<(u32 opt_id, StampTimestamp)>`.
+3. `inst.rs`: `Message::TxStamp { key, opt_id, t1_prime }`; spawn the errqueue
+   task in `add_session` alongside the reply reader; `on_tx_stamp` inserts
+   into `pending_tx` (capped). `on_reply_recv` resolves T1′ with fallback and
+   bumps `t1_kernel`/`t1_userspace`. Document the `OPT_ID == seq` invariant at
+   the send site.
+4. `session.rs`: `pending_tx` map + `t1_kernel`/`t1_userspace` counters; init;
+   the errqueue read task handle (aborts with the session).
+5. `show.rs`: add T1′ source to `show stamp session` / `statistics`
+   (`T1 kernel timestamps: N (userspace fallback: M)`).
+6. Tests: `errqueue_tx_stamp` parse (synthetic cmsgs); `pending_tx` cap/evict
+   + join + miss-fallback unit tests; a loopback test that a sent datagram
+   yields a TX stamp on the errqueue (software TX works on loopback); extend
+   the integration test to assert `t1_kernel > 0`. BDD: extend
+   `@stamp_te_metric` with a `T1 kernel timestamps: 0 (` negative-eventually
+   (mirrors the rung-1 T4 assertion).
+
+### 8.5 Risks
+
+| Risk | Mitigation |
+|------|------------|
+| `Interest::ERROR` readiness flaky for errqueue on this fd | Fallback: drain errqueue opportunistically in `sender_read` after each data recv + a low-rate poll. Decided at implementation if the dedicated task misbehaves. |
+| `OPT_ID`/`seq` desync (a counted send we don't count, or vice-versa) | Join tolerates it — miss ⇒ in-packet-T1 fallback (rung-1 accuracy), never a wrong delay. Invariant holds because both ++ only on successful send from 0. |
+| errqueue overflow drops TX stamps under burst | Continuous drain at 1 probe/s makes overflow implausible; dropped stamps ⇒ fallback. |
+| Two tasks (`READABLE` reply read + `ERROR` errqueue) on one `Arc<AsyncFd>` | tokio supports concurrent per-interest readiness on a shared fd; EPOLLERR is delivered regardless of mask. Verify at implementation. |
