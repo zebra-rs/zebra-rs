@@ -26,6 +26,7 @@ use crate::config::{DisplayRequest, path_from_command};
 /// `Bgp` and a per-VRF `BgpVrf`.
 pub trait BgpShowView {
     fn local_rib(&self) -> &LocalRib;
+    fn shard(&self) -> &super::shard::BgpShard;
     fn peers(&self) -> &PeerMap;
     fn router_id(&self) -> Ipv4Addr;
     fn asn(&self) -> u32;
@@ -34,6 +35,9 @@ pub trait BgpShowView {
 impl BgpShowView for Bgp {
     fn local_rib(&self) -> &LocalRib {
         &self.local_rib
+    }
+    fn shard(&self) -> &super::shard::BgpShard {
+        &self.shard
     }
     fn peers(&self) -> &PeerMap {
         &self.peers
@@ -49,6 +53,9 @@ impl BgpShowView for Bgp {
 impl BgpShowView for BgpVrf {
     fn local_rib(&self) -> &LocalRib {
         &self.local_rib
+    }
+    fn shard(&self) -> &super::shard::BgpShard {
+        &self.shard
     }
     fn peers(&self) -> &PeerMap {
         &self.peers
@@ -127,11 +134,11 @@ fn configured_afi_safis<V: BgpShowView>(bgp: &V) -> Vec<AfiSafi> {
 /// Count Loc-RIB entries for a given AFI/SAFI.
 fn rib_entries_count<V: BgpShowView>(bgp: &V, afi_safi: &AfiSafi) -> usize {
     match (afi_safi.afi, afi_safi.safi) {
-        (Afi::Ip, Safi::Unicast) => bgp.local_rib().v4.0.len(),
-        (Afi::Ip6, Safi::Unicast) => bgp.local_rib().v6.0.len(),
-        (Afi::Ip, Safi::MplsLabel) => bgp.local_rib().v4lu.0.len(),
-        (Afi::Ip6, Safi::MplsLabel) => bgp.local_rib().v6lu.0.len(),
-        (Afi::Ip, Safi::MplsVpn) => bgp.local_rib().v4vpn.values().map(|t| t.0.len()).sum(),
+        (Afi::Ip, Safi::Unicast) => bgp.shard().v4.0.len(),
+        (Afi::Ip6, Safi::Unicast) => bgp.shard().v6.0.len(),
+        (Afi::Ip, Safi::MplsLabel) => bgp.shard().v4lu.0.len(),
+        (Afi::Ip6, Safi::MplsLabel) => bgp.shard().v6lu.0.len(),
+        (Afi::Ip, Safi::MplsVpn) => bgp.shard().v4vpn.values().map(|t| t.0.len()).sum(),
         (Afi::L2vpn, Safi::Evpn) => bgp.local_rib().evpn.values().map(|t| t.cands.len()).sum(),
         (Afi::LinkState, Safi::LinkState) => bgp.local_rib().bgp_ls.selected.len(),
         _ => 0,
@@ -542,7 +549,7 @@ fn show_bgp<V: BgpShowView>(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
-    render_unicast_table(&bgp.local_rib().v4.0, json)
+    render_unicast_table(&bgp.shard().v4.0, json)
 }
 
 /// `show ip bgp labeled-unicast` — render the IPv4 and IPv6
@@ -562,13 +569,13 @@ fn show_bgp_labeled(
     buf.push_str(SHOW_BGP_HEADER);
 
     writeln!(buf, "IPv4 Labeled Unicast:")?;
-    for (key, value) in bgp.local_rib.v4lu.0.iter() {
+    for (key, value) in bgp.shard.v4lu.0.iter() {
         for rib in value.iter() {
             show_labeled_row(&mut buf, &key.to_string(), rib)?;
         }
     }
     writeln!(buf, "IPv6 Labeled Unicast:")?;
-    for (key, value) in bgp.local_rib.v6lu.0.iter() {
+    for (key, value) in bgp.shard.v6lu.0.iter() {
         for rib in value.iter() {
             show_labeled_row(&mut buf, &key.to_string(), rib)?;
         }
@@ -635,7 +642,7 @@ fn show_bgp_vpnv4_table(bgp: &Bgp, json: bool) -> std::result::Result<String, st
     if json {
         let mut routes: Vec<BgpVpnv4RouteJson> = Vec::new();
 
-        for (rd, value) in bgp.local_rib.v4vpn.iter() {
+        for (rd, value) in bgp.shard.v4vpn.iter() {
             for (prefix, ribs) in value.0.iter() {
                 for rib in ribs.iter() {
                     let aspath_str = show_aspath(&rib.attr);
@@ -690,7 +697,7 @@ fn show_bgp_vpnv4_table(bgp: &Bgp, json: bool) -> std::result::Result<String, st
         buf,
         "     Network          Next Hop            Metric LocPrf Weight Path"
     );
-    for (key, value) in bgp.local_rib.v4vpn.iter() {
+    for (key, value) in bgp.shard.v4vpn.iter() {
         if !value.0.is_empty() {
             writeln!(buf, "Route Distinguisher: {}", key)?;
         }
@@ -1000,7 +1007,7 @@ fn show_bgp_vpnv4_entry(bgp: &Bgp, tok: &str) -> std::result::Result<String, std
     if tok.contains('/') {
         match tok.parse::<Ipv4Net>() {
             Ok(net) => {
-                for (rd, table) in bgp.local_rib.v4vpn.iter() {
+                for (rd, table) in bgp.shard.v4vpn.iter() {
                     if let Some(ribs) = table.0.get(&net) {
                         write_vpnv4_entry_detail(&mut out, bgp, rd, &net.to_string(), ribs)?;
                     }
@@ -1012,7 +1019,7 @@ fn show_bgp_vpnv4_entry(bgp: &Bgp, tok: &str) -> std::result::Result<String, std
         match tok.parse::<Ipv4Addr>() {
             Ok(addr) => {
                 let host = addr.to_host_prefix();
-                for (rd, table) in bgp.local_rib.v4vpn.iter() {
+                for (rd, table) in bgp.shard.v4vpn.iter() {
                     if let Some((prefix, ribs)) = table.0.get_lpm(&host) {
                         write_vpnv4_entry_detail(&mut out, bgp, rd, &prefix.to_string(), ribs)?;
                     }
@@ -1303,7 +1310,7 @@ fn show_bgp_route_entry(
         Some(addr) => addr,
         None => return Ok(String::from("% No BGP route exists")),
     };
-    if let Some((prefix, ribs)) = bgp.local_rib.v4.0.get_lpm(&addr.to_host_prefix()) {
+    if let Some((prefix, ribs)) = bgp.shard.v4.0.get_lpm(&addr.to_host_prefix()) {
         write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
     }
     Ok(out)
@@ -1318,7 +1325,7 @@ fn show_bgp_ipv4<V: BgpShowView>(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(tok) = args.string() else {
-        return render_unicast_table(&bgp.local_rib().v4.0, json);
+        return render_unicast_table(&bgp.shard().v4.0, json);
     };
     // `summary` arrives as the list-key value (an enum arm of the key
     // union — see exec.yang), not as a separate path element.
@@ -1329,7 +1336,7 @@ fn show_bgp_ipv4<V: BgpShowView>(
     if tok.contains('/') {
         match tok.parse::<Ipv4Net>() {
             Ok(net) => {
-                if let Some(ribs) = bgp.local_rib().v4.0.get(&net) {
+                if let Some(ribs) = bgp.shard().v4.0.get(&net) {
                     write_bgp_entry_detail(&mut out, bgp, &net.to_string(), ribs)?;
                 }
             }
@@ -1338,7 +1345,7 @@ fn show_bgp_ipv4<V: BgpShowView>(
     } else {
         match tok.parse::<Ipv4Addr>() {
             Ok(addr) => {
-                if let Some((prefix, ribs)) = bgp.local_rib().v4.0.get_lpm(&addr.to_host_prefix()) {
+                if let Some((prefix, ribs)) = bgp.shard().v4.0.get_lpm(&addr.to_host_prefix()) {
                     write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
                 }
             }
@@ -1369,7 +1376,7 @@ fn show_bgp_ipv4_longer<V: BgpShowView>(
         return Ok(out);
     };
     out.push_str(SHOW_BGP_HEADER);
-    for (prefix, ribs) in bgp.local_rib().v4.0.children(&net) {
+    for (prefix, ribs) in bgp.shard().v4.0.children(&net) {
         for rib in ribs.iter() {
             write_bgp_route_line(&mut out, &prefix.to_string(), rib)?;
         }
@@ -1385,7 +1392,7 @@ fn show_bgp_ipv6<V: BgpShowView>(
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let Some(tok) = args.string() else {
-        return render_unicast_table(&bgp.local_rib().v6.0, json);
+        return render_unicast_table(&bgp.shard().v6.0, json);
     };
     if tok == "summary" {
         return show_bgp_summary_one(bgp, AfiSafi::new(Afi::Ip6, Safi::Unicast), json);
@@ -1394,7 +1401,7 @@ fn show_bgp_ipv6<V: BgpShowView>(
     if tok.contains('/') {
         match tok.parse::<Ipv6Net>() {
             Ok(net) => {
-                if let Some(ribs) = bgp.local_rib().v6.0.get(&net) {
+                if let Some(ribs) = bgp.shard().v6.0.get(&net) {
                     write_bgp_entry_detail(&mut out, bgp, &net.to_string(), ribs)?;
                 }
             }
@@ -1403,7 +1410,7 @@ fn show_bgp_ipv6<V: BgpShowView>(
     } else {
         match tok.parse::<Ipv6Addr>() {
             Ok(addr) => {
-                if let Some((prefix, ribs)) = bgp.local_rib().v6.0.get_lpm(&addr.to_host_prefix()) {
+                if let Some((prefix, ribs)) = bgp.shard().v6.0.get_lpm(&addr.to_host_prefix()) {
                     write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
                 }
             }
@@ -1434,7 +1441,7 @@ fn show_bgp_ipv6_longer<V: BgpShowView>(
         return Ok(out);
     };
     out.push_str(SHOW_BGP_HEADER);
-    for (prefix, ribs) in bgp.local_rib().v6.0.children(&net) {
+    for (prefix, ribs) in bgp.shard().v6.0.children(&net) {
         for rib in ribs.iter() {
             write_bgp_route_line(&mut out, &prefix.to_string(), rib)?;
         }
@@ -2957,12 +2964,8 @@ fn show_bgp_flowspec(
         // `*` marks a valid flow spec.
         let source = bgp.peers.get_by_idx(rib.ident);
         let validation_enabled = source.map(|p| p.config.flowspec_validation).unwrap_or(true);
-        let validation = super::flowspec::flowspec_validate_with_mode(
-            &bgp.local_rib,
-            nlri,
-            rib,
-            validation_enabled,
-        );
+        let validation =
+            super::flowspec::flowspec_validate_with_mode(&bgp.shard, nlri, rib, validation_enabled);
         let mark = if validation.is_valid() { "*" } else { " " };
         let from = source
             .map(|p| p.address.to_string())
@@ -3299,11 +3302,15 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
 
     struct TestView {
         rib: LocalRib,
+        shard: super::super::shard::BgpShard,
         peers: PeerMap,
     }
     impl BgpShowView for TestView {
         fn local_rib(&self) -> &LocalRib {
             &self.rib
+        }
+        fn shard(&self) -> &super::super::shard::BgpShard {
+            &self.shard
         }
         fn peers(&self) -> &PeerMap {
             &self.peers
@@ -3355,6 +3362,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
 
         TestView {
             rib: LocalRib::default(),
+            shard: super::super::shard::BgpShard::default(),
             peers,
         }
     }
@@ -3399,6 +3407,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         peers.insert_with_key(PeerKey::Interface(7), iface_peer);
         let view = TestView {
             rib: LocalRib::default(),
+            shard: super::super::shard::BgpShard::default(),
             peers,
         };
 
@@ -3620,11 +3629,15 @@ mod detail_tests {
     /// `PeerMap` is enough (unknown idents resolve to "self").
     struct TestView {
         rib: LocalRib,
+        shard: super::super::shard::BgpShard,
         peers: PeerMap,
     }
     impl BgpShowView for TestView {
         fn local_rib(&self) -> &LocalRib {
             &self.rib
+        }
+        fn shard(&self) -> &super::super::shard::BgpShard {
+            &self.shard
         }
         fn peers(&self) -> &PeerMap {
             &self.peers
@@ -3640,6 +3653,7 @@ mod detail_tests {
     fn test_view() -> TestView {
         TestView {
             rib: LocalRib::default(),
+            shard: super::super::shard::BgpShard::default(),
             peers: PeerMap::new(),
         }
     }

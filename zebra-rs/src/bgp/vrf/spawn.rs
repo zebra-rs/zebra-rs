@@ -186,7 +186,7 @@ pub fn spawn_bgp_vrf(
 
     // Self-originated networks from
     // `router bgp vrf X afi-safi ipv4-unicast network <p>` land
-    // in `vrf.local_rib.v4` as `BgpRibType::Originated` and
+    // in `vrf.shard.v4` as `BgpRibType::Originated` and
     // emit a `BgpGlobalMsg::Export` so the global instance
     // promotes them to VPNv4 advertisements toward PE peers.
     let network_count = materialize_self_originated_networks(&mut vrf, cfg);
@@ -386,7 +386,7 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
             vrf_transit_only: false,
         };
 
-        let (_, selected, _) = vrf.local_rib.update(None, *prefix, rib);
+        let (_, selected, _) = vrf.shard.update(None, *prefix, rib);
         // Best-path runs as part of `update`. A freshly-inserted
         // self-originated row always wins (nothing else exists),
         // so `selected.first()` carries the winner; emit Export.

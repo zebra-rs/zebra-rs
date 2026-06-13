@@ -141,6 +141,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             router_id: &bgp.router_id,
             srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
             local_rib: &mut bgp.local_rib,
+            shard: &mut bgp.shard,
             tx: &bgp.tx,
             rib_client: &bgp.ctx.rib,
             attr_store: &mut bgp.attr_store,

@@ -43,6 +43,8 @@ pub use policy::*;
 pub mod route;
 pub use route::*;
 
+pub mod shard;
+
 pub mod nht;
 
 pub mod flowspec;
