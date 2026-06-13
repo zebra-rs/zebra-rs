@@ -17,6 +17,8 @@ use super::cap::CapAfiMap;
 use super::peer::{AllowAsIn, BgpTop, Event, Peer, PeerType};
 use super::peer_map::PeerMap;
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
+use super::shard::msg::ShardUpdateV6;
+use super::shard::{ShardMsg, ShardOut};
 use super::{Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
@@ -1906,6 +1908,30 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
     }
 }
 
+/// Main-side NHT for a route whose rib lives in the shard (RIB sharding
+/// B.3 sync-dispatch): register the post-policy attr's next-hop (when
+/// new) and return its reachability, to pass into the shard's `Update*`
+/// message — the shard gates the row with it before best-path. The
+/// gating half of [`nht_track_received`] without needing the rib.
+/// Returns `true` when there is no NHT view or no next-hop (matching
+/// `BgpRib::new`'s default).
+fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::NhtDep) -> bool {
+    let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
+        return true;
+    };
+    let Some(nh) = super::nht::bgp_nexthop_ip(attr) else {
+        return true;
+    };
+    let (needs_register, reachable) = cache.track(nh, dep);
+    if needs_register {
+        let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
+            proto: "bgp".to_string(),
+            nh,
+        });
+    }
+    reachable
+}
+
 /// Symmetric to [`nht_track_received`]: on a withdrawal, drop `dep` from
 /// each distinct next-hop the `removed` paths used, and unregister a
 /// next-hop from the RIB once it has no deps left. `survivor_nhs` are
@@ -3398,115 +3424,101 @@ pub fn route_ipv6_update(
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
-    let mut rib = BgpRib::new(
-        peer_ident,
-        peer_router_id,
-        typ,
-        nlri.id,
-        0,
-        attr,
-        label,   // VPNv6 service label (None for plain v6 unicast)
-        nexthop, // VpnNexthop::V6 for VPNv6 rows; None for unicast
-        stale,
-    );
-
-    // Adj-RIB-In, so session teardown and future soft-reconfig can
-    // sweep these. (No inbound policy yet — see the doc comment.)
-    {
-        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        match rd {
-            Some(rd) => bgp
-                .shard
-                .adj_in_mut(peer.ident)
-                .add_v6vpn(rd, nlri.prefix, rib.clone()),
-            None => bgp
-                .shard
-                .adj_in_mut(peer.ident)
-                .add_v6(nlri.prefix, rib.clone()),
-        };
-    }
-
-    rib.attr = bgp.shard.intern(attr.clone());
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V6(nlri.prefix),
     };
-    nht_track_received(bgp, &mut rib, dep.clone());
-    // Kept for the rd==Some import-dispatch withdraw branch (the rib
-    // itself is moved into `update_v6vpn` below); cheap Arc bump.
-    let import_attr = rib.attr.clone();
-    // Inter-AS Option AB (VPNv6): mark a route a hybrid VRF imports as
-    // transit-only — relayed only via the VRF re-export (see the v4 path).
-    if rd.is_some()
-        && !rib.is_originated()
-        && let Some(disp) = bgp.vrf_import
-        && super::inst::rt_imported_by_hybrid_vrf_v6(disp.rib_known_vrfs, &rib.attr.ecom)
-    {
-        rib.vrf_transit_only = true;
-    }
-    let (replaced, selected, _next_id) = match rd {
-        Some(rd) => bgp.shard.update_v6vpn(rd, nlri.prefix, rib),
-        None => bgp.shard.update_v6(nlri.prefix, rib),
-    };
-    // Release the displaced row's old next-hop if this update changed it
-    // (see the v4 path). Survivors read after the update.
-    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.shard.candidate_nexthops_v6(rd, nlri.prefix);
-        nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
-    }
+    // Main owns NHT (the shard has no `nexthop_cache`): register the
+    // next-hop and resolve reachability to gate the shard's row.
+    let nexthop_reachable = nht_track_received_attr(bgp, attr, dep.clone());
+    // Inter-AS Option AB (VPNv6): a hybrid VRF importing this route makes
+    // it transit-only — relayed only via the VRF re-export.
+    let vrf_transit_only = rd.is_some()
+        && peer_ident != ORIGINATED_PEER
+        && bgp.vrf_import.is_some_and(|disp| {
+            super::inst::rt_imported_by_hybrid_vrf_v6(disp.rib_known_vrfs, &attr.ecom)
+        });
+    // The rib moves into the shard; keep the attr for the VPNv6
+    // import-withdraw dispatch below.
+    let import_attr = attr.clone();
 
-    match rd {
-        // Plain v6 unicast → kernel FIB + peer advertisement.
-        None => {
-            fib_install_v6(bgp, nlri.prefix, &selected);
+    // Hand the table op (Adj-RIB-In + intern + Loc-RIB + best-path) to
+    // the shard; act on the returned best-path delta.
+    let deltas = bgp.shard.handle(
+        ShardMsg::UpdateV6(ShardUpdateV6 {
+            ident: peer_ident,
+            rd,
+            nlri: nlri.clone(),
+            peer_router_id,
+            typ,
+            attr: attr.clone(),
+            label,
+            nexthop,
+            stale,
+            nexthop_reachable,
+            vrf_transit_only,
+        }),
+        None,
+    );
 
-            // Per-VRF best-path → global VPNv6 export. Fires only
-            // inside a VRF task (`vrf_export` is Some); the global
-            // task's BgpTop has `vrf_export = None`. Empty `selected`
-            // → WithdrawExportV6 so the global v6vpn row is dropped.
-            if let Some(exporter) = bgp.vrf_export {
-                if let Some(winner) = selected.first() {
-                    super::vrf::vrf_emit_export_v6(exporter, nlri.prefix, &winner.attr);
-                } else {
-                    super::vrf::vrf_emit_withdraw_v6(exporter, nlri.prefix);
-                }
-            }
-
-            if !selected.is_empty() {
-                route_advertise_to_peers_v6(nlri.prefix, &selected, bgp, peers);
-            }
+    for delta in deltas {
+        let ShardOut::BestPathV6 {
+            rd,
+            prefix,
+            selected,
+            replaced,
+            survivor_nexthops,
+            ..
+        } = delta
+        else {
+            continue;
+        };
+        // Release displaced next-hops (survivors computed by the shard).
+        if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+            nht_untrack_withdrawn(bgp, &replaced, &survivor_nexthops, dep.clone());
         }
-        // VPNv6 → advertise the winner to PE peers. No kernel FIB here
-        // (mirrors VPNv4, which keeps its v4vpn rows out of the FIB).
-        Some(rd) => {
-            // Remote VPNv6 → per-VRF import. `vrf_import` is Some only
-            // in the global task; per-VRF runtimes never receive VPNv6
-            // directly. `skip_vrf` is None — no originating local VRF
-            // on the remote ingress path.
-            if let Some(dispatcher) = bgp.vrf_import {
-                if let Some(winner) = selected.first() {
-                    let (label, transport) = vpn_import_transport(bgp, winner);
-                    super::vrf::dispatch_import_v6(
-                        dispatcher,
-                        rd,
-                        nlri.prefix,
-                        &winner.attr,
-                        label,
-                        transport,
-                        None,
-                    );
-                } else {
-                    super::vrf::dispatch_withdraw_import_v6(
-                        dispatcher,
-                        rd,
-                        nlri.prefix,
-                        &import_attr,
-                        None,
-                    );
+        match rd {
+            // Plain v6 unicast → kernel FIB + peer advertisement.
+            None => {
+                fib_install_v6(bgp, prefix.prefix, &selected);
+                if let Some(exporter) = bgp.vrf_export {
+                    if let Some(winner) = selected.first() {
+                        super::vrf::vrf_emit_export_v6(exporter, prefix.prefix, &winner.attr);
+                    } else {
+                        super::vrf::vrf_emit_withdraw_v6(exporter, prefix.prefix);
+                    }
+                }
+                if !selected.is_empty() {
+                    route_advertise_to_peers_v6(prefix.prefix, &selected, bgp, peers);
                 }
             }
-            if !selected.is_empty() {
-                route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
+            // VPNv6 → per-VRF import + PE-peer advertisement (no kernel FIB).
+            Some(rd) => {
+                if let Some(dispatcher) = bgp.vrf_import {
+                    if let Some(winner) = selected.first() {
+                        let (label, transport) = vpn_import_transport(bgp, winner);
+                        super::vrf::dispatch_import_v6(
+                            dispatcher,
+                            rd,
+                            prefix.prefix,
+                            &winner.attr,
+                            label,
+                            transport,
+                            None,
+                        );
+                    } else {
+                        super::vrf::dispatch_withdraw_import_v6(
+                            dispatcher,
+                            rd,
+                            prefix.prefix,
+                            &import_attr,
+                            None,
+                        );
+                    }
+                }
+                if !selected.is_empty() {
+                    route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
+                }
             }
         }
     }
