@@ -1054,8 +1054,11 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     let policy_tx = bgp.policy_tx.clone();
     let mut stops: Vec<usize> = Vec::new();
     let mut mss_refresh = false;
-    let mut md5_addrs: Vec<IpAddr> = Vec::new();
-    let mut bfd_addrs: Vec<IpAddr> = Vec::new();
+    // Collect idents, not addresses: the MD5 / BFD reconcilers must be
+    // able to reach an interface-keyed (unnumbered) member, whose
+    // link-local is not a map key (`get(&peer.address)` would miss it).
+    let mut md5_idents: Vec<usize> = Vec::new();
+    let mut bfd_idents: Vec<usize> = Vec::new();
     for (_, peer) in bgp.peers.iter_mut_all() {
         if peer.config.neighbor_group.as_deref() != Some(name) {
             continue;
@@ -1066,10 +1069,10 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
         }
         mss_refresh |= outcome.mss_refresh;
         if outcome.md5_refresh {
-            md5_addrs.push(peer.address);
+            md5_idents.push(peer.ident);
         }
         if outcome.bfd_reapply {
-            bfd_addrs.push(peer.address);
+            bfd_idents.push(peer.ident);
         }
     }
     for ident in stops {
@@ -1082,11 +1085,11 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     // group-delete cascade, where a deleted `ip-transparent` opinion
     // must drop out of the listener union.
     super::config::apply_ip_transparent_refresh_all(bgp);
-    for addr in md5_addrs {
-        super::config::apply_md5_refresh_for(bgp, addr);
+    for ident in md5_idents {
+        super::config::apply_md5_refresh_for_ident(bgp, ident);
     }
-    for addr in bfd_addrs {
-        let _ = super::config::bfd_apply(bgp, addr);
+    for ident in bfd_idents {
+        let _ = super::config::bfd_apply_ident(bgp, ident);
     }
 }
 

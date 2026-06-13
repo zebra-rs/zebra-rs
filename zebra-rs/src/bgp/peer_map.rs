@@ -95,6 +95,25 @@ impl PeerMap {
         &self.membership
     }
 
+    /// Snapshot of every live peer's ident, regardless of key variant
+    /// — the general, interface-keyed-safe replacement for the
+    /// addr-only `keys()` sweep. Whole-peer-set reconcilers (BFD,
+    /// listener TCP-MSS / MD5 / TCP-AO) must use this and re-look-up
+    /// via [`Self::get_by_idx`] / [`Self::get_mut_by_idx`]: a
+    /// `PeerKey::Interface` (IPv6 unnumbered) peer cannot be
+    /// round-tripped through `get(&peer.address)` — its stored key is
+    /// the ifindex, not the link-local — so any helper that re-looks-up
+    /// by address silently drops it. `keys()` stays for the few
+    /// genuinely addr-only consumers (CLI completion of typeable
+    /// neighbor addresses).
+    pub fn idents(&self) -> Vec<usize> {
+        self.map
+            .values()
+            .filter(|&&idx| self.peers[idx].is_some())
+            .copied()
+            .collect()
+    }
+
     /// Snapshot of every Established peer that negotiated `(afi,
     /// safi)` — both AddPath-send and plain members. The fan-out
     /// idiom: iterate this, re-look-up mutably via
@@ -506,5 +525,42 @@ mod tests {
 
         let keys: Vec<IpAddr> = m.keys().copied().collect();
         assert_eq!(keys, vec![a]);
+    }
+
+    /// `idents()` is the general, interface-keyed-safe sweep accessor:
+    /// unlike `keys()` it must include `PeerKey::Interface` peers, and
+    /// it must drop tombstoned slots. This is the contract the
+    /// transport reconcilers (BFD / TCP-MSS / MD5 / TCP-AO) rely on.
+    #[test]
+    fn idents_includes_interface_keyed_and_skips_tombstones() {
+        let mut m = PeerMap::new();
+        let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+        m.insert(a, make_peer(a));
+        let a_idx = m.get(&a).unwrap().ident;
+        m.insert_with_key(
+            PeerKey::Interface(11),
+            make_peer(Ipv4Addr::UNSPECIFIED.into()),
+        );
+        let if_idx = m.get_by_key(&PeerKey::Interface(11)).unwrap().ident;
+
+        let mut idents = m.idents();
+        idents.sort_unstable();
+        assert_eq!(
+            idents,
+            {
+                let mut v = vec![a_idx, if_idx];
+                v.sort_unstable();
+                v
+            },
+            "idents() must include both addr- and interface-keyed peers"
+        );
+
+        // Tombstone the addr-keyed peer: its slot must drop out.
+        m.remove(&a);
+        assert_eq!(
+            m.idents(),
+            vec![if_idx],
+            "idents() must skip tombstoned slots"
+        );
     }
 }

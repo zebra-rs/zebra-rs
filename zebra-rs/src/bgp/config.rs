@@ -940,9 +940,24 @@ fn config_local_as_dual_as(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()
 /// `minimum-ttl` is not part of the key; changing it on an already-up
 /// session needs a bounce (BFD applies params only at session
 /// creation), consistent with how intervals / profile behave.
+/// Addressed-neighbor entry point: resolve the address to its stable
+/// ident and reconcile. Used by the per-`neighbor <addr>` config
+/// callbacks. Interface-keyed (unnumbered) peers reach the same core
+/// via [`bfd_apply_ident`] — they cannot be found by `get(&addr)`,
+/// since their map key is the ifindex, not the link-local.
 pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
+    let ident = bgp.peers.get(&addr)?.ident;
+    bfd_apply_ident(bgp, ident)
+}
+
+/// Reconcile the BFD session for one peer by its stable ident. The
+/// BFD remote / session key derive from `peer.address` read here, so
+/// this also works for an interface-keyed peer whose link-local is not
+/// a map key.
+pub(super) fn bfd_apply_ident(bgp: &mut Bgp, ident: usize) -> Option<()> {
+    let addr = bgp.peers.get_by_idx(ident)?.address;
     let (enable, desired_key, params) = {
-        let peer = bgp.peers.get(&addr)?;
+        let peer = bgp.peers.get_by_idx(ident)?;
         // Effective enable + Echo = the per-neighbor `bfd {}` merged over the
         // instance-level `router bgp { bfd {} }` default (blanket enable +
         // per-neighbor override). Hop-mode / min-ttl stay per-neighbor.
@@ -1016,7 +1031,7 @@ pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
 
     let (current, current_params) = bgp
         .peers
-        .get(&addr)
+        .get_by_idx(ident)
         .map(|p| (p.bfd_session_key, p.bfd_session_params))
         .unwrap_or((None, None));
     let want = enable.then_some(desired_key);
@@ -1059,7 +1074,7 @@ pub(super) fn bfd_apply(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
         });
     }
 
-    if let Some(peer) = bgp.peers.get_mut(&addr) {
+    if let Some(peer) = bgp.peers.get_mut_by_idx(ident) {
         peer.bfd_session_key = want;
         peer.bfd_session_params = want_params;
     }
@@ -1177,9 +1192,8 @@ fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
 /// reconcile that diffs against the recorded session key, so this is just a
 /// fan-out (a no-op per neighbor when nothing changed).
 pub(super) fn bfd_reconcile_all(bgp: &mut Bgp) {
-    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
-    for addr in addrs {
-        bfd_apply(bgp, addr);
+    for ident in bgp.peers.idents() {
+        bfd_apply_ident(bgp, ident);
     }
 }
 
@@ -2345,12 +2359,18 @@ pub(super) fn apply_tcp_mss(peer: &mut Peer, want: Option<u16>) -> bool {
 pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
     let mut min_v4: Option<u16> = None;
     let mut min_v6: Option<u16> = None;
-    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
-    for addr in &addrs {
-        let Some(mss) = bgp.peers.get(addr).and_then(|p| p.config.transport.tcp_mss) else {
+    // Every peer regardless of key variant: an interface-keyed
+    // (unnumbered) peer's configured `tcp-mss` must fold into the
+    // listener-wide minimum like any other. The session family comes
+    // from `peer.address` (a v6 link-local for unnumbered peers).
+    for ident in bgp.peers.idents() {
+        let Some(peer) = bgp.peers.get_by_idx(ident) else {
             continue;
         };
-        let slot = if addr.is_ipv4() {
+        let Some(mss) = peer.config.transport.tcp_mss else {
+            continue;
+        };
+        let slot = if peer.address.is_ipv4() {
             &mut min_v4
         } else {
             &mut min_v6
@@ -2664,6 +2684,43 @@ pub(super) fn apply_md5_password(peer: &mut Peer, want: Option<String>) -> bool 
 /// when there is no listener fd yet — `apply_md5_refresh_all` from
 /// `listen()` will fill in once the bind completes.
 pub(super) fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
+    match bgp.peers.get(&addr).map(|p| p.ident) {
+        Some(ident) => apply_md5_refresh_for_ident(bgp, ident),
+        // Peer absent (defensive delete path): clear any stale listener
+        // key for this address with an empty key.
+        None => md5_set_on_listener(bgp, addr, &[]),
+    }
+}
+
+/// Reconcile the listener TCP MD5 key for one peer by its stable
+/// ident. Reads the source address from `peer.address`, so an
+/// interface-keyed (unnumbered) peer is serviced too — its link-local
+/// is not a map key, so an addr re-lookup would silently drop it. A
+/// dormant peer (unspecified address, no session yet) is skipped:
+/// there is no source address to key the listener on.
+pub(super) fn apply_md5_refresh_for_ident(bgp: &mut Bgp, ident: usize) {
+    let Some(peer) = bgp.peers.get_by_idx(ident) else {
+        return;
+    };
+    let addr = peer.address;
+    if addr.is_unspecified() {
+        return;
+    }
+    let password_bytes: Vec<u8> = peer
+        .config
+        .transport
+        .md5_password
+        .as_ref()
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
+    md5_set_on_listener(bgp, addr, &password_bytes);
+}
+
+/// Install (or, with an empty key, remove) the listener TCP MD5 entry
+/// for `addr` on the address-family-matching listening socket. Silent
+/// when there is no listener fd yet — the post-bind reconciler in
+/// `listen()` fills it in.
+fn md5_set_on_listener(bgp: &Bgp, addr: IpAddr, password_bytes: &[u8]) {
     let listen_fd = match addr {
         IpAddr::V4(_) => bgp.listen_fd_v4,
         IpAddr::V6(_) => bgp.listen_fd_v6,
@@ -2674,16 +2731,7 @@ pub(super) fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
         return;
     };
 
-    // Empty key removes the entry. Either the peer has no password
-    // set, or the peer doesn't exist in the map (delete path).
-    let password_bytes: Vec<u8> = bgp
-        .peers
-        .get(&addr)
-        .and_then(|p| p.config.transport.md5_password.as_ref())
-        .map(|s| s.as_bytes().to_vec())
-        .unwrap_or_default();
-
-    match super::auth::set_tcp_md5_key(fd, addr, &password_bytes) {
+    match super::auth::set_tcp_md5_key(fd, addr, password_bytes) {
         Ok(()) => {
             if !password_bytes.is_empty() {
                 tracing::debug!(
@@ -2717,9 +2765,8 @@ pub(super) fn apply_md5_refresh_for(bgp: &mut Bgp, addr: IpAddr) {
 /// Safe to call repeatedly — `setsockopt(TCP_MD5SIG)` is idempotent
 /// for the same (addr, key) tuple.
 pub(super) fn apply_md5_refresh_all(bgp: &mut Bgp) {
-    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
-    for addr in addrs {
-        apply_md5_refresh_for(bgp, addr);
+    for ident in bgp.peers.idents() {
+        apply_md5_refresh_for_ident(bgp, ident);
     }
 }
 
@@ -2765,11 +2812,20 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
     // iterating peers mutably.
     let key_chains = bgp.key_chains.clone();
 
-    let addrs: Vec<IpAddr> = bgp.peers.keys().copied().collect();
-    for addr in addrs {
-        let Some(peer) = bgp.peers.get_mut(&addr) else {
+    // Every peer regardless of key variant. The listener entry is
+    // keyed by the peer's source address read from `peer.address`, so
+    // an interface-keyed (unnumbered) peer is serviced too — it cannot
+    // be round-tripped through `get(&addr)`. A dormant peer
+    // (unspecified address, no session yet) is skipped: there is no
+    // source address to key on.
+    for ident in bgp.peers.idents() {
+        let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
+        let addr = peer.address;
+        if addr.is_unspecified() {
+            continue;
+        }
 
         let fd = match addr {
             IpAddr::V4(_) => fd_v4,
