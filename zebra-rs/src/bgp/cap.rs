@@ -105,6 +105,8 @@ pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
             | (Afi::Ip, Safi::MplsVpn)
             | (Afi::Ip6, Safi::MplsVpn)
             | (Afi::L2vpn, Safi::Evpn)
+            | (Afi::Ip, Safi::MplsLabel)
+            | (Afi::Ip6, Safi::MplsLabel)
     )
 }
 
@@ -199,9 +201,11 @@ mod tests {
 
     /// The supported-set itself, pinned. Growing it is deliberate —
     /// each family must be added WITH its per-candidate
-    /// advertise/withdraw twins (VPNv6 and EVPN each landed alongside
-    /// theirs). Labeled-unicast v4/v6 are the remaining families to
-    /// wire up; RTC is the one family that stays excluded by design.
+    /// advertise/withdraw twins (VPNv6, EVPN, and labeled-unicast v4/v6
+    /// each landed alongside theirs). IPv6 unicast is the remaining
+    /// unicast family (separate group-cache shape); RTC is the one
+    /// family that stays excluded by design (its NLRI carry no per-path
+    /// semantics).
     #[test]
     fn addpath_send_implemented_set() {
         for (afi, safi) in [
@@ -209,6 +213,8 @@ mod tests {
             (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::MplsVpn),
             (Afi::L2vpn, Safi::Evpn),
+            (Afi::Ip, Safi::MplsLabel),
+            (Afi::Ip6, Safi::MplsLabel),
         ] {
             assert!(
                 addpath_send_implemented(afi, safi),
@@ -217,8 +223,6 @@ mod tests {
         }
         for (afi, safi) in [
             (Afi::Ip6, Safi::Unicast),
-            (Afi::Ip, Safi::MplsLabel),
-            (Afi::Ip6, Safi::MplsLabel),
             (Afi::Ip, Safi::Flowspec),
             (Afi::Ip6, Safi::Flowspec),
             (Afi::Ip, Safi::Rtc),
