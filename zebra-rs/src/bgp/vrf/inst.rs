@@ -467,7 +467,7 @@ impl BgpVrf {
                     nexthop_cache: None,
                     vrf_transport_v4: Some(&self.transport_v4),
                     vrf_transport_v6: Some(&self.transport_v6),
-                    lu_labels: None,
+                    central_label_alloc: None,
                 };
                 fsm(&mut top, &mut self.peers, ident, event);
             }
@@ -635,7 +635,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            lu_labels: None,
+            central_label_alloc: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -721,7 +721,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            lu_labels: None,
+            central_label_alloc: None,
         };
         super::super::route::route_advertise_to_peers(
             None,
@@ -850,7 +850,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            lu_labels: None,
+            central_label_alloc: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,
@@ -920,7 +920,7 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            lu_labels: None,
+            central_label_alloc: None,
         };
         super::super::route::route_advertise_to_peers_v6(
             prefix,

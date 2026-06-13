@@ -572,18 +572,11 @@ pub struct Bgp {
     /// initial request and any on-demand extension so a burst of
     /// label-less VRFs asks the RIB label manager for only one block.
     vrf_label_request_pending: bool,
-    /// Per-prefix local labels assigned to received Labeled-Unicast
-    /// (SAFI 4) routes we re-advertise with next-hop-self. Drawn from the
-    /// same dynamic pool as `vrf_label_alloc`. The label is advertised in
-    /// the NLRI and swap-programmed via an ILM (`local → received`).
-    pub lu_label_v4: std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
-    pub lu_label_v6: std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
-    /// Per-`(RD, prefix)` local labels for received VPNv4 (SAFI 128)
-    /// routes we re-advertise with next-hop-self — the Inter-AS Option B
-    /// transit case. Same dynamic pool; the label is advertised in the
-    /// VPNv4 NLRI and swap-programmed via an ILM (`local → received`).
-    pub vpn_label_v4:
-        std::collections::BTreeMap<(bgp_packet::RouteDistinguisher, ipnet::Ipv4Net), u32>,
+    // The per-prefix LU/VPNv4 local-label caches moved to
+    // `BgpShard::labels` (RIB sharding B.2): they pair with the shard's
+    // sub-block allocator, which refills by carving from
+    // `vrf_label_alloc` above. `vrf_label_alloc` itself stays here — it
+    // is the central pool and still serves the per-VRF-spawn labels.
     /// Configured SRv6 locator name (`router bgp segment-routing
     /// srv6 locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
@@ -811,9 +804,6 @@ impl Bgp {
             rib_subscriber,
             vrf_label_alloc: None,
             vrf_label_request_pending: false,
-            lu_label_v4: BTreeMap::new(),
-            lu_label_v6: BTreeMap::new(),
-            vpn_label_v4: BTreeMap::new(),
             srv6_locator_name: None,
             srv6_locator_rx,
             srv6_locator: None,
@@ -1376,12 +1366,7 @@ impl Bgp {
                     nexthop_cache: Some(&mut self.nexthop_cache),
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    lu_labels: Some(super::peer::LuLabels {
-                        alloc: &mut self.vrf_label_alloc,
-                        v4: &mut self.lu_label_v4,
-                        v6: &mut self.lu_label_v6,
-                        vpn_v4: &mut self.vpn_label_v4,
-                    }),
+                    central_label_alloc: self.vrf_label_alloc.as_mut(),
                 };
 
                 fsm(&mut bgp_ref, &mut self.peers, ident, event);
@@ -2011,7 +1996,7 @@ impl Bgp {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                lu_labels: None,
+                central_label_alloc: None,
             };
             super::route::route_advertise_to_peers(
                 Some(rd),
@@ -2545,7 +2530,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
         match &dep {
             NhtDep::V4(p) => {
@@ -3013,7 +2998,7 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
         for (prefix, best) in &winners_v4 {
             super::route::fib_install_v4(&top, *prefix, std::slice::from_ref(best));
@@ -3268,7 +3253,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    lu_labels: None,
+                    central_label_alloc: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -3378,7 +3363,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    lu_labels: None,
+                    central_label_alloc: None,
                 };
                 super::route::route_advertise_to_peers(
                     Some(rd),
@@ -3535,7 +3520,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    lu_labels: None,
+                    central_label_alloc: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,
@@ -3623,7 +3608,7 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    lu_labels: None,
+                    central_label_alloc: None,
                 };
                 super::route::route_advertise_to_peers_vpnv6(
                     rd,

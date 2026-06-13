@@ -154,7 +154,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
         route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
         // Update-groups live outside `PeerMap`: removal below purges

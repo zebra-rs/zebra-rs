@@ -1325,13 +1325,16 @@ pub struct BgpTop<'a> {
             prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>,
         >,
     >,
-    /// BGP Labeled-Unicast (SAFI 4) local-label allocation context.
-    /// `Some` only in the receive `BgpTop` (the site that ingests
-    /// received routes); `None` in every advertise / originate / NHT
-    /// BgpTop — self-originated FECs advertise implicit-null and need no
-    /// local label. A received route advertised with next-hop-self gets
-    /// a local label here, swap-programmed via an ILM.
-    pub lu_labels: Option<LuLabels<'a>>,
+    /// Central MPLS label allocator (`Bgp::vrf_label_alloc`), borrowed
+    /// for the receive `BgpTop` so the shard can refill its per-route
+    /// label sub-block by [carving][super::vrf::VrfLabelAllocator::carve]
+    /// from it (RIB sharding B.2). `Some` only on the receive path —
+    /// the per-prefix label caches and the sub-block itself live on
+    /// `BgpShard::labels`; this is just the refill source. `None` in
+    /// every advertise / originate / NHT `BgpTop` (self-originated FECs
+    /// advertise implicit-null and need no local label) and on per-VRF
+    /// tasks.
+    pub central_label_alloc: Option<&'a mut super::vrf::VrfLabelAllocator>,
     /// Precomputed global-IPv6 SRv6 export data (`segment-routing srv6
     /// ipv6-unicast`), borrowed from the owning [`super::inst::Bgp`].
     /// `Some` only when origination is enabled and the locator has
@@ -1339,86 +1342,6 @@ pub struct BgpTop<'a> {
     /// locally-originated routes with its End.DT6 Prefix-SID + locator
     /// next-hop. `None` on per-VRF tasks and whenever origination is off.
     pub srv6_ipv6_export: Option<&'a super::inst::Srv6Ipv6Export>,
-}
-
-/// Per-prefix local-label state for BGP Labeled Unicast, borrowed into
-/// the receive [`BgpTop`]. Labels are drawn from the shared dynamic-label
-/// allocator (the same pool that serves per-VRF labels).
-pub struct LuLabels<'a> {
-    pub alloc: &'a mut Option<super::vrf::VrfLabelAllocator>,
-    pub v4: &'a mut std::collections::BTreeMap<ipnet::Ipv4Net, u32>,
-    pub v6: &'a mut std::collections::BTreeMap<ipnet::Ipv6Net, u32>,
-    /// Per-`(RD, prefix)` local labels for received VPNv4 (SAFI 128)
-    /// routes — the Inter-AS Option B transit case. A transit ASBR that
-    /// re-advertises a VPNv4 route with next-hop-self advertises this
-    /// label and swap-programs it (our label → received label) via an
-    /// ILM, so the VPN crosses the AS boundary on MPLS. The RD is part
-    /// of the key because the same IP prefix can live in many VPNs.
-    pub vpn_v4: &'a mut std::collections::BTreeMap<(RouteDistinguisher, ipnet::Ipv4Net), u32>,
-}
-
-impl LuLabels<'_> {
-    /// Local label for an IPv4 LU prefix, allocating one on first use.
-    /// `None` if the dynamic pool is empty (the caller advertises the
-    /// received label as a fallback until a block is granted).
-    pub fn label_v4(&mut self, prefix: ipnet::Ipv4Net) -> Option<u32> {
-        if let Some(l) = self.v4.get(&prefix) {
-            return Some(*l);
-        }
-        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
-        self.v4.insert(prefix, label);
-        Some(label)
-    }
-
-    /// Local label for a received VPNv4 `(RD, prefix)`, allocating one on
-    /// first use. Mirrors [`label_v4`](Self::label_v4); `None` until a
-    /// dynamic block is granted (the caller advertises the received
-    /// label until then).
-    pub fn label_vpn_v4(&mut self, rd: RouteDistinguisher, prefix: ipnet::Ipv4Net) -> Option<u32> {
-        if let Some(l) = self.vpn_v4.get(&(rd, prefix)) {
-            return Some(*l);
-        }
-        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
-        self.vpn_v4.insert((rd, prefix), label);
-        Some(label)
-    }
-
-    /// Release the label for a withdrawn VPNv4 `(RD, prefix)`; returns it
-    /// so the caller can tear down the swap ILM.
-    pub fn free_vpn_v4(&mut self, rd: RouteDistinguisher, prefix: ipnet::Ipv4Net) -> Option<u32> {
-        let label = self.vpn_v4.remove(&(rd, prefix))?;
-        if let Some(a) = self.alloc.as_mut() {
-            a.free(label);
-        }
-        Some(label)
-    }
-
-    pub fn label_v6(&mut self, prefix: ipnet::Ipv6Net) -> Option<u32> {
-        if let Some(l) = self.v6.get(&prefix) {
-            return Some(*l);
-        }
-        let label = self.alloc.as_mut().and_then(|a| a.alloc())?;
-        self.v6.insert(prefix, label);
-        Some(label)
-    }
-
-    /// Release the label for a withdrawn IPv4 LU prefix; returns it so
-    /// the caller can tear down the swap ILM.
-    pub fn free_v4(&mut self, prefix: ipnet::Ipv4Net) -> Option<u32> {
-        let label = self.v4.remove(&prefix)?;
-        if let Some(a) = self.alloc.as_mut() {
-            a.free(label);
-        }
-        Some(label)
-    }
-
-    pub fn free_v6(&mut self, prefix: ipnet::Ipv6Net) -> Option<u32> {
-        let label = self.v6.remove(&prefix)?;
-        if let Some(a) = self.alloc.as_mut() {
-            a.free(label);
-        }
-        Some(label)
-    }
 }
 
 /// Resolve a connection identity against the peer's current slots.
@@ -2874,7 +2797,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            lu_labels: None,
+            central_label_alloc: None,
         };
         super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
     } else if supports_refresh {
@@ -2913,7 +2836,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
-        lu_labels: None,
+        central_label_alloc: None,
     };
     super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
 }

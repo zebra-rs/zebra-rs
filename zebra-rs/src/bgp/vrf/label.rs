@@ -76,6 +76,40 @@ impl VrfLabelAllocator {
         });
     }
 
+    /// An allocator with no blocks — hands out nothing until one is
+    /// added via [`Self::extend`]. The seed for a shard's sub-block
+    /// pool (RIB sharding B.2): it starts empty and is filled by
+    /// [carving][Self::carve] sub-ranges from the central allocator.
+    pub fn empty() -> Self {
+        Self {
+            blocks: Vec::new(),
+            free: BTreeSet::new(),
+        }
+    }
+
+    /// Reserve `n` consecutive never-allocated labels from the
+    /// frontier of the first block with room, returning the half-open
+    /// range `[start, start + n)` for a shard to seed / extend its own
+    /// pool with (RIB sharding B.2). The reserved range leaves this
+    /// allocator's frontier, so neither [`alloc`](Self::alloc) (the
+    /// per-VRF-spawn labels) nor a later `carve` (another shard
+    /// sub-block) can ever hand the same label out twice — the carve
+    /// and the central allocator share one monotonic frontier. `None`
+    /// when no single block has `n` contiguous room left.
+    pub fn carve(&mut self, n: u32) -> Option<(u32, u32)> {
+        if n == 0 {
+            return None;
+        }
+        for block in self.blocks.iter_mut() {
+            if block.end - block.next >= n {
+                let start = block.next;
+                block.next += n;
+                return Some((start, start + n));
+            }
+        }
+        None
+    }
+
     /// Unbounded over the whole usable label space — kept for tests
     /// and as a fallback; the running BGP instance uses [`Self::bounded`]
     /// with the RIB-allocated block.
@@ -244,6 +278,42 @@ mod tests {
         a.free(501);
         assert_eq!(a.alloc(), Some(100));
         assert_eq!(a.alloc(), Some(501));
+    }
+
+    #[test]
+    fn empty_allocator_hands_out_nothing_until_extended() {
+        let mut a = VrfLabelAllocator::empty();
+        assert_eq!(a.alloc(), None, "no blocks yet");
+        assert_eq!(a.carve(4), None, "nothing to carve from");
+        a.extend(1000, 1004); // [1000, 1004)
+        assert_eq!(a.alloc(), Some(1000));
+    }
+
+    #[test]
+    fn carve_reserves_a_disjoint_subrange() {
+        // A shard carving a sub-block from the central pool: the
+        // carved range and the central allocator's own labels never
+        // collide because both advance one shared frontier.
+        let mut central = VrfLabelAllocator::bounded(100, 110); // [100, 110)
+        assert_eq!(central.alloc(), Some(100), "central VRF-spawn label");
+        // Shard carves 4 labels — taken from the frontier after 100.
+        assert_eq!(central.carve(4), Some((101, 105)));
+        // Central's next alloc resumes *past* the carved range.
+        assert_eq!(central.alloc(), Some(105), "no overlap with carve");
+        // A second carve continues the frontier.
+        assert_eq!(central.carve(3), Some((106, 109)));
+        assert_eq!(central.alloc(), Some(109));
+        assert_eq!(central.alloc(), None, "block spent");
+        assert_eq!(central.carve(1), None, "nothing left to carve");
+    }
+
+    #[test]
+    fn carve_rejects_a_request_larger_than_any_block() {
+        let mut a = VrfLabelAllocator::bounded(100, 104); // 4 labels
+        assert_eq!(a.carve(5), None, "no single block has 5 contiguous");
+        assert_eq!(a.carve(0), None, "zero is a no-op");
+        // The failed carves left the frontier untouched.
+        assert_eq!(a.alloc(), Some(100));
     }
 
     #[test]
