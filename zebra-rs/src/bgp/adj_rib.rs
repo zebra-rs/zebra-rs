@@ -293,7 +293,30 @@ impl<D: RibDirection, P: Ord> Default for AdjRibTable<D, P> {
     }
 }
 
-impl AdjRib<In> {
+/// Per-peer Adj-RIB-In slice for the shard-scope families (RIB
+/// sharding plan B.1 / D3): v4/v6 unicast, v4/v6 labeled-unicast,
+/// VPNv4/v6. Lives in [`super::shard::BgpShard::adj_in`] keyed by
+/// peer `ident` — `Peer` stays main-owned, so its received routes
+/// for the sharded tables are stored beside the Loc-RIB tables a
+/// future shard task will own. The main-only families stay on the
+/// peer in [`MainAdjIn`].
+#[derive(Debug, Default)]
+pub struct ShardAdjIn {
+    // IPv4 unicast
+    pub v4: AdjRibTable<In>,
+    // IPv6 unicast
+    pub v6: AdjRibTable<In, Ipv6Net>,
+    // IPv4 Labeled-Unicast (SAFI 4)
+    pub v4lu: AdjRibTable<In>,
+    // IPv6 Labeled-Unicast (SAFI 4)
+    pub v6lu: AdjRibTable<In, Ipv6Net>,
+    // IPv4 VPN
+    pub v4vpn: BTreeMap<RouteDistinguisher, AdjRibTable<In>>,
+    // IPv6 VPN
+    pub v6vpn: BTreeMap<RouteDistinguisher, AdjRibTable<In, Ipv6Net>>,
+}
+
+impl ShardAdjIn {
     // Add a route to Adj-RIB-In
     pub fn add(
         &mut self,
@@ -366,6 +389,43 @@ impl AdjRib<In> {
         self.v6vpn.entry(rd).or_default().remove(prefix, id)
     }
 
+    /// Received-prefix count for a sharded AFI/SAFI; 0 for families
+    /// owned by [`MainAdjIn`] (the two counts are disjoint, so show
+    /// paths may sum them for any AFI/SAFI).
+    pub fn count(&self, afi: Afi, safi: Safi) -> usize {
+        match (afi, safi) {
+            (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
+            (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
+            (Afi::Ip, Safi::MplsLabel) => self.v4lu.0.len(),
+            (Afi::Ip6, Safi::MplsLabel) => self.v6lu.0.len(),
+            (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
+            (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
+            (_, _) => 0,
+        }
+    }
+}
+
+/// Per-peer Adj-RIB-In for the main-owned families (RIB sharding
+/// plan D3): EVPN, flowspec, BGP-LS. Stays on [`super::peer::Peer`];
+/// the sharded families live in [`ShardAdjIn`] under
+/// `BgpShard::adj_in`.
+#[derive(Debug, Default)]
+pub struct MainAdjIn {
+    // EVPN, per Route Distinguisher
+    pub evpn: BTreeMap<RouteDistinguisher, AdjRibEvpnTable<In>>,
+    // IPv4 Flow Specification (AFI 1, SAFI 133)
+    pub flowspec_v4: AdjRibFlowspecTable<In>,
+    // IPv6 Flow Specification (AFI 2, SAFI 133)
+    pub flowspec_v6: AdjRibFlowspecTable<In>,
+    // BGP Link-State (AFI 16388, SAFI 71)
+    pub bgp_ls: AdjRibBgpLsTable<In>,
+}
+
+impl MainAdjIn {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     // EVPN add/remove ---------------------------------------------------------
 
     pub fn add_evpn(
@@ -412,14 +472,10 @@ impl AdjRib<In> {
         self.bgp_ls.remove(nlri, id)
     }
 
+    /// Received-prefix count for a main-owned AFI/SAFI; 0 for the
+    /// sharded families (see [`ShardAdjIn::count`]).
     pub fn count(&self, afi: Afi, safi: Safi) -> usize {
         match (afi, safi) {
-            (Afi::Ip, Safi::Unicast) => self.v4.0.len(),
-            (Afi::Ip6, Safi::Unicast) => self.v6.0.len(),
-            (Afi::Ip, Safi::MplsLabel) => self.v4lu.0.len(),
-            (Afi::Ip6, Safi::MplsLabel) => self.v6lu.0.len(),
-            (Afi::Ip, Safi::MplsVpn) => self.v4vpn.values().map(|table| table.0.len()).sum(),
-            (Afi::Ip6, Safi::MplsVpn) => self.v6vpn.values().map(|table| table.0.len()).sum(),
             (Afi::L2vpn, Safi::Evpn) => self.evpn.values().map(|table| table.0.len()).sum(),
             (Afi::Ip, Safi::Flowspec) => self.flowspec_v4.0.len(),
             (Afi::Ip6, Safi::Flowspec) => self.flowspec_v6.0.len(),

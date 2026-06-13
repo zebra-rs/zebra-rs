@@ -2070,7 +2070,9 @@ pub fn route_ipv4_update(
     // Register to peer's AdjRibIn and update stats
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.add(rd, nlri.prefix, rib.clone());
+        bgp.shard
+            .adj_in_mut(peer.ident)
+            .add(rd, nlri.prefix, rib.clone());
 
         // Apply policy. Carry the rib's current weight (0 here,
         // since this is the first time the route enters the local
@@ -3152,7 +3154,10 @@ pub fn route_soft_in_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap
         let do_v4 = peer.is_afi_safi(Afi::Ip, Safi::Unicast);
         let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
         let rds: Vec<RouteDistinguisher> = if do_vpn {
-            peer.adj_in.v4vpn.keys().copied().collect()
+            bgp.shard
+                .adj_in(peer.ident)
+                .map(|a| a.v4vpn.keys().copied().collect())
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -3178,15 +3183,16 @@ fn route_soft_in_peer_table(
     // fan-out) don't conflict with the iteration.
     let entries: Vec<(Ipv4Net, Vec<BgpRib>)> = {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        let Some(adj_in) = bgp.shard.adj_in(peer.ident) else {
+            return;
+        };
         match rd {
-            Some(rd) => peer
-                .adj_in
+            Some(rd) => adj_in
                 .v4vpn
                 .get(&rd)
                 .map(|t| t.0.iter().map(|(p, ribs)| (*p, ribs.clone())).collect())
                 .unwrap_or_default(),
-            None => peer
-                .adj_in
+            None => adj_in
                 .v4
                 .0
                 .iter()
@@ -3255,7 +3261,9 @@ pub fn route_ipv4_withdraw(
     {
         if rib_in {
             let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-            peer.adj_in.remove(rd, nlri.prefix, nlri.id);
+            bgp.shard
+                .adj_in_mut(peer.ident)
+                .remove(rd, nlri.prefix, nlri.id);
         }
     }
 
@@ -3439,8 +3447,14 @@ pub fn route_ipv6_update(
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         match rd {
-            Some(rd) => peer.adj_in.add_v6vpn(rd, nlri.prefix, rib.clone()),
-            None => peer.adj_in.add_v6(nlri.prefix, rib.clone()),
+            Some(rd) => bgp
+                .shard
+                .adj_in_mut(peer.ident)
+                .add_v6vpn(rd, nlri.prefix, rib.clone()),
+            None => bgp
+                .shard
+                .adj_in_mut(peer.ident)
+                .add_v6(nlri.prefix, rib.clone()),
         };
     }
 
@@ -3545,8 +3559,14 @@ pub fn route_ipv6_withdraw(
     if rib_in {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         match rd {
-            Some(rd) => peer.adj_in.remove_v6vpn(rd, nlri.prefix, nlri.id),
-            None => peer.adj_in.remove_v6(nlri.prefix, nlri.id),
+            Some(rd) => bgp
+                .shard
+                .adj_in_mut(peer.ident)
+                .remove_v6vpn(rd, nlri.prefix, nlri.id),
+            None => bgp
+                .shard
+                .adj_in_mut(peer.ident)
+                .remove_v6(nlri.prefix, nlri.id),
         };
     }
 
@@ -3697,7 +3717,9 @@ pub fn route_labelv4_update(
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.add_v4lu(lu.nlri.prefix, rib.clone());
+        bgp.shard
+            .adj_in_mut(peer.ident)
+            .add_v4lu(lu.nlri.prefix, rib.clone());
     }
 
     rib.attr = bgp.attr_store.intern(attr);
@@ -3795,7 +3817,9 @@ pub fn route_labelv6_update(
 
     {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.add_v6lu(lu.nlri.prefix, rib.clone());
+        bgp.shard
+            .adj_in_mut(peer.ident)
+            .add_v6lu(lu.nlri.prefix, rib.clone());
     }
 
     rib.attr = bgp.attr_store.intern(attr);
@@ -3834,7 +3858,9 @@ pub fn route_labelv4_withdraw(
 ) {
     if rib_in {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.remove_v4lu(nlri.prefix, nlri.id);
+        bgp.shard
+            .adj_in_mut(peer.ident)
+            .remove_v4lu(nlri.prefix, nlri.id);
     }
     let removed = bgp.shard.remove_v4lu(nlri.prefix, nlri.id, ident);
     if bgp.nexthop_cache.is_some() {
@@ -3880,7 +3906,9 @@ pub fn route_labelv6_withdraw(
 ) {
     if rib_in {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        peer.adj_in.remove_v6lu(nlri.prefix, nlri.id);
+        bgp.shard
+            .adj_in_mut(peer.ident)
+            .remove_v6lu(nlri.prefix, nlri.id);
     }
     let removed = bgp.shard.remove_v6lu(nlri.prefix, nlri.id, ident);
     if bgp.nexthop_cache.is_some() {
@@ -5669,15 +5697,15 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     // IPv4 unicast.
     let withdrawn = {
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-
-        for (prefix, ribs) in peer.adj_in.v4.0.iter() {
-            for rib in ribs.iter() {
-                let withdraw = Ipv4Nlri {
-                    id: rib.remote_id,
-                    prefix: *prefix,
-                };
-                withdrawn.push(withdraw);
+        if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+            for (prefix, ribs) in adj_in.v4.0.iter() {
+                for rib in ribs.iter() {
+                    let withdraw = Ipv4Nlri {
+                        id: rib.remote_id,
+                        prefix: *prefix,
+                    };
+                    withdrawn.push(withdraw);
+                }
             }
         }
         withdrawn
@@ -5685,8 +5713,8 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     for withdraw in withdrawn.iter() {
         route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
     }
+    bgp.shard.adj_in_mut(peer_id).v4.0.clear();
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-    peer.adj_in.v4.0.clear();
     peer.adj_out.v4.0.clear();
 
     peer.cache_vpnv4.clear();
@@ -5699,13 +5727,14 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     // leaving Established kept its v6 routes selected forever.
     let withdrawn_v6 = {
         let mut withdrawn: Vec<Ipv6Nlri> = vec![];
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-        for (prefix, ribs) in peer.adj_in.v6.0.iter() {
-            for rib in ribs.iter() {
-                withdrawn.push(Ipv6Nlri {
-                    id: rib.remote_id,
-                    prefix: *prefix,
-                });
+        if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+            for (prefix, ribs) in adj_in.v6.0.iter() {
+                for rib in ribs.iter() {
+                    withdrawn.push(Ipv6Nlri {
+                        id: rib.remote_id,
+                        prefix: *prefix,
+                    });
+                }
             }
         }
         withdrawn
@@ -5713,8 +5742,8 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     for withdraw in withdrawn_v6.iter() {
         route_ipv6_withdraw(peer_id, withdraw, None, bgp, peers, true);
     }
+    bgp.shard.adj_in_mut(peer_id).v6.0.clear();
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-    peer.adj_in.v6.0.clear();
     peer.adj_out.v6.0.clear();
 
     // IPv4 VPN.
@@ -5733,7 +5762,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         // them per normal RFC 4271 operation; only the rest go stale.
         let no_llgr: Vec<Vpnv4Nlri> = {
             let mut out = Vec::new();
-            for (rd, table) in peer.adj_in.v4vpn.iter_mut() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter_mut() {
                 for (prefix, ribs) in table.0.iter_mut() {
                     ribs.retain(|rib| {
                         let refuse = attr_refuses_llgr(&rib.attr);
@@ -5764,9 +5793,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                 true,
             );
         }
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-
-        for (_rd, table) in peer.adj_in.v4vpn.iter_mut() {
+        for (_rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter_mut() {
             for (_prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
@@ -5795,7 +5822,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             Option<VpnNexthop>,
         )> = {
             let mut updates = Vec::new();
-            for (rd, table) in peer.adj_in.v4vpn.iter() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter() {
                 for (prefix, ribs) in table.0.iter() {
                     for rib in ribs.iter() {
                         let nlri = Ipv4Nlri {
@@ -5833,9 +5860,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     } else {
         let withdrawn = {
             let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-            let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-
-            for (rd, table) in peer.adj_in.v4vpn.iter() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter() {
                 for (prefix, ribs) in table.0.iter() {
                     for rib in ribs.iter() {
                         let withdraw = Vpnv4Nlri {
@@ -5863,8 +5888,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                 true,
             );
         }
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-        peer.adj_in.v4vpn.clear();
+        bgp.shard.adj_in_mut(peer_id).v4vpn.clear();
     }
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
@@ -5888,7 +5912,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         // withdraw them; only the rest go stale.
         let no_llgr: Vec<Vpnv6Nlri> = {
             let mut out = Vec::new();
-            for (rd, table) in peer.adj_in.v6vpn.iter_mut() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter_mut() {
                 for (prefix, ribs) in table.0.iter_mut() {
                     ribs.retain(|rib| {
                         let refuse = attr_refuses_llgr(&rib.attr);
@@ -5911,9 +5935,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         for withdraw in no_llgr.iter() {
             route_ipv6_withdraw(peer_id, &withdraw.nlri, Some(withdraw.rd), bgp, peers, true);
         }
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-
-        for (_rd, table) in peer.adj_in.v6vpn.iter_mut() {
+        for (_rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter_mut() {
             for (_prefix, ribs) in table.0.iter_mut() {
                 for rib in ribs.iter_mut() {
                     rib.stale = true;
@@ -5943,7 +5965,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
             Option<VpnNexthop>,
         )> = {
             let mut updates = Vec::new();
-            for (rd, table) in peer.adj_in.v6vpn.iter() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter() {
                 for (prefix, ribs) in table.0.iter() {
                     for rib in ribs.iter() {
                         let nlri = Ipv6Nlri {
@@ -5978,9 +6000,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     } else {
         let withdrawn = {
             let mut withdrawn: Vec<Vpnv6Nlri> = vec![];
-            let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-
-            for (rd, table) in peer.adj_in.v6vpn.iter() {
+            for (rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter() {
                 for (prefix, ribs) in table.0.iter() {
                     for rib in ribs.iter() {
                         withdrawn.push(Vpnv6Nlri {
@@ -5999,8 +6019,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         for withdraw in withdrawn.iter() {
             route_ipv6_withdraw(peer_id, &withdraw.nlri, Some(withdraw.rd), bgp, peers, true);
         }
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-        peer.adj_in.v6vpn.clear();
+        bgp.shard.adj_in_mut(peer_id).v6vpn.clear();
     }
 
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
@@ -6128,8 +6147,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     // Adj-RIB tables, mirroring the unicast block above.
     let withdrawn_v4lu = {
         let mut withdrawn: Vec<Ipv4Nlri> = vec![];
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-        for (prefix, ribs) in peer.adj_in.v4lu.0.iter() {
+        for (prefix, ribs) in bgp.shard.adj_in_mut(peer_id).v4lu.0.iter() {
             for rib in ribs.iter() {
                 withdrawn.push(Ipv4Nlri {
                     id: rib.remote_id,
@@ -6144,8 +6162,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     }
     let withdrawn_v6lu = {
         let mut withdrawn: Vec<Ipv6Nlri> = vec![];
-        let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-        for (prefix, ribs) in peer.adj_in.v6lu.0.iter() {
+        for (prefix, ribs) in bgp.shard.adj_in_mut(peer_id).v6lu.0.iter() {
             for rib in ribs.iter() {
                 withdrawn.push(Ipv6Nlri {
                     id: rib.remote_id,
@@ -6158,9 +6175,12 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     for withdraw in withdrawn_v6lu.iter() {
         route_labelv6_withdraw(peer_id, withdraw, bgp, peers, true);
     }
+    {
+        let adj_in = bgp.shard.adj_in_mut(peer_id);
+        adj_in.v4lu.0.clear();
+        adj_in.v6lu.0.clear();
+    }
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
-    peer.adj_in.v4lu.0.clear();
-    peer.adj_in.v6lu.0.clear();
     peer.adj_out.v4lu.0.clear();
     peer.adj_out.v6lu.0.clear();
 
@@ -6235,6 +6255,25 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     peer.rtcv4.clear();
     peer.rtcv6.clear();
     peer.eor.clear();
+
+    // Drop the peer's sharded-family Adj-RIB-In slice once every
+    // table in it is empty. The VPNv4/v6 LLGR branches above retain
+    // stale-marked entries, so the slice must survive those.
+    if bgp
+        .shard
+        .adj_in(peer_id)
+        .map(|a| {
+            a.v4.0.is_empty()
+                && a.v6.0.is_empty()
+                && a.v4lu.0.is_empty()
+                && a.v6lu.0.is_empty()
+                && a.v4vpn.values().all(|t| t.0.is_empty())
+                && a.v6vpn.values().all(|t| t.0.is_empty())
+        })
+        .unwrap_or(false)
+    {
+        bgp.shard.adj_in_drop(peer_id);
+    }
 }
 
 /// Reconstruct the wire `EvpnRoute` from a Loc-RIB / Adj-RIB entry,
@@ -6287,10 +6326,11 @@ fn build_evpn_route(
 pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     // Fetch all of route which has stale flag.
     let withdrawn = {
-        let peer = peers.get_by_idx(peer_id).expect("peer must exist");
         let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-
-        for (rd, table) in peer.adj_in.v4vpn.iter() {
+        let Some(adj_in) = bgp.shard.adj_in(peer_id) else {
+            return;
+        };
+        for (rd, table) in adj_in.v4vpn.iter() {
             for (prefix, ribs) in table.0.iter() {
                 for rib in ribs.iter() {
                     if rib.stale {
