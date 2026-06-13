@@ -333,6 +333,179 @@ Two senses:
 
 ---
 
+## 9b. [2026-06-12] STAMP link TE-metric measurement — applicability review against the as-built helper
+
+§9 was written with **liveness** as the lens. The Phase-1 plan
+([stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md)) uses STAMP for
+**link delay numbers advertised into the IGP** (RFC 8570/7471 → Flex-Algo metric-type 1), which
+changes what offload is *for*: not detection latency, but **measurement error**. This section
+quantifies that, maps the work onto the as-built `xdp-bfd-echo` infrastructure (§2/§2b), and
+fixes the staging.
+
+### 9b.1 Error budget — what userspace timestamps actually cost
+
+Define the four stack residues around the RFC 8762 timestamps:
+`a` = sender T1-stamp → frame on wire, `b` = wire → reflector T2-stamp,
+`c` = reflector T3-stamp → wire, `d` = wire → sender T4-stamp. Expanding the Phase-1 D1 math:
+
+```
+delay_est = [(T4−T1) − (T3−T2)] / 2  =  (fwd_wire + rev_wire)/2  +  (a+b+c+d)/2
+```
+
+The `(T3−T2)` subtraction removes only the *measured* reflector residence; the four boundary
+residues survive, halved. In a tokio daemon each RX boundary (`b`, `d`) is a
+softirq→socket-queue→epoll-wake→task-poll chain — order 10–50 µs idle, **ms-class tails under
+load**; TX boundaries (`a`, `c`) are a few µs plus qdisc. Consequences for the exported fields:
+
+- **min-delay** (the Flex-Algo edge cost) is naturally robust: the window minimum picks the
+  luckiest probe, so its error converges to the *floor* of `(a+b+c+d)/2` — tens of µs.
+- **max-delay and delay-variation absorb the scheduling tails.** On links faster than ~1 ms,
+  those two fields measure daemon scheduling, not the network.
+
+So: pure-userspace Phase 1 is honest for **WAN/metro ms-class delay TE** (the primary
+Flex-Algo use case) and progressively dishonest toward **µs-class fabric** discrimination —
+which is exactly the regime where offload pays.
+
+One important cancellation: for RTT-mode senders (zebra-rs), the reflector's **absolute clock
+offset cancels** out of the math — only its *rate* matters across a µs residence. Absolute
+T2/T3 accuracy matters only to external **one-way-delay** consumers with synced clocks
+(Cisco IPM style). An offloaded reflector should therefore still publish wall-clock NTP time
+(recipe below), but its quality only affects third-party senders, not our own measurements.
+
+### 9b.2 Reflector offload (helps the *peer's* numbers) — direct §2 descendant
+
+The Phase-1 implicit reflector is a pure packet transformation; the XDP version removes `b`
+and `c` from the peer's budget (T2 at driver RX — or HW RX time via
+`bpf_xdp_metadata_rx_timestamp`, kernel 6.3+, mlx5/ice-class drivers; T3 written immediately
+before `XDP_TX`, residual = driver TX only):
+
+- **Match**: IPv4/UDP dst 862 → `(local, remote)` allow-list map (interface-scoped — the
+  helper attaches per ifindex, same as Echo). In-kernel allow-list is also the anti-abuse
+  gate: reflection is 1:1 in size (RFC 6038, no amplification) but still an unsolicited-reply
+  primitive — exact-pair match, optional per-entry token bucket.
+- **Rewrite in place, no length change**: sender and reflector base packets are both 44
+  octets (`stamp-packet::BASE_LEN`); the reflector fields overwrite the sender MBZ
+  ([16..44]) — §9's "no `bpf_xdp_adjust_tail`" observation, now confirmed against our codec.
+  Swap MAC/IP/ports (pseudo-header-sum-invariant), fill T2/T3 + reflector error estimate,
+  `sender_ttl` ← received TTL, reply TTL ← 255 (incremental IP-csum fix, same RFC 1141
+  machinery the Echo reflector ships). UDP checksum: incremental update over the 28 rewritten
+  payload bytes (`bpf_csum_diff` + fold); v4-only escape hatch = checksum 0 (legal per
+  RFC 768, but some receivers are strict — prefer incremental).
+- **Hybrid fallthrough resolves §9's "TLVs fight the verifier"**: don't fight — any probe
+  that isn't base-44 unauthenticated (TLV'd, authenticated, encapsulated) gets `XDP_PASS`
+  and lands on the userspace 862 socket, which handles it correctly (incl. RFC 6038 symmetric
+  padding). XDP owns the hot common case only. This also makes helper death a non-event:
+  no program attached ⇒ probes reach userspace ⇒ reflection continues (a *better* fallback
+  story than BFD Echo, where a dead helper falsifies an advertised promise).
+- **Wall clock in BPF**: there is no CLOCK_REALTIME helper. Recipe: userspace publishes
+  `realtime − monotonic` (ns) into an array map at ~1 Hz; program computes
+  `real = bpf_ktime_get_ns() + offset`, then NTP sec = `real/10⁹ + 2 208 988 800`,
+  frac = `(real % 10⁹) · 2³² / 10⁹` (fits u64). Staleness between refreshes is rate-bounded:
+  sub-µs/s on a disciplined steady-state clock, large only during aggressive slews
+  (chrony `maxslewrate`) — and immune for RTT-mode peers per §9b.1. Kernel ≥ 6.1 alternatively
+  offers `bpf_ktime_get_tai_ns` (CLOCK_TAI, no leap smearing) with a userspace-published TAI
+  offset. Set the reflected Error Estimate (S/scale/multiplier) honestly from this quality.
+- **Stateful mode** (Phase-4 directional loss): reflector seq = one atomic counter per
+  allow-list entry. Trivial in a map.
+
+### 9b.3 Sender-side: the accuracy ladder — eBPF is rung 3, not rung 1
+
+Before XDP, two plain-socket rungs remove most of `a`/`d` with no helper at all:
+
+| Rung | Mechanism | Removes | Cost |
+|---|---|---|---|
+| 0 | Phase 1 as planned (userspace stamps; min-statistics filter) | — | — |
+| 1 | `SO_TIMESTAMPING` RX software (`SCM_TIMESTAMPING` cmsg on the sender's connected socket) → kernel-stamped T4 | scheduling part of `d` | ~tens of lines, no eBPF — **recommended first follow-up after Phase 1** |
+| 2 | `SO_TIMESTAMPING` TX software + `MSG_ERRQUEUE` (`OPT_ID` keyed by seq) → corrected T1′ used in *our* math (in-packet T1 still goes out for the reflector copy) | most of `a` | moderate (errqueue plumbing, late pairing) |
+| 3 | **XDP sender-RX fastpath** (the detect-offload analog): per-session map `{count, sum, min, max, last, jitter_accum}`; program computes the full D1 math from packet fields + the offset map, `XDP_DROP`s the frame; userspace export tick reads-and-resets via a helper command | all of `d` + per-packet wakeups (scale) | helper extension; session flips to "kernel-fed" (DROP ⇒ userspace must *not* also count; on `HelperGone` revert to socket path) |
+| 4 | HW RX timestamps via metadata kfunc; PHC↔realtime mapping | driver/IRQ jitter | real NICs only — not veth/BDD (§9 environment note stands) |
+
+**Probe origination stays in userspace permanently**: XDP is RX-triggered, `bpf_timer`
+cannot emit packets, and origination accuracy is already fixed by rung 2 (interval jitter
+does not bias per-sample delay). Same conclusion as §1/§2 for BFD TX. AF_XDP's niche
+narrows accordingly: rungs 1–4 cover precision; AF_XDP remains relevant only for
+feature-rich fast paths (TLV processing, SRv6 reverse-encap) — a refinement of §9's
+"pragmatic answer".
+
+**`bpf_timer` detection has no analog in the TE-metric role** (loss is window-counted, not
+liveness). It *returns* in SR-Policy PM liveness (draft-ietf-spring-stamp-srpm: N missing
+replies ⇒ invalidate path) — that is a straight reuse of the §2b `DetectState` recipe.
+
+### 9b.4 Integration with the as-built helper — one architectural constraint
+
+**Only one XDP program attaches per interface** (absent an xdp-dispatcher), and
+`xdp-bfd-echo` already owns the hook wherever BFD Echo / detect-offload runs. Therefore
+STAMP matching cannot ship as a second loader binary on shared interfaces — it must join the
+**same program object**, and the per-ifindex child becomes shared infrastructure:
+
+- Extend `offload/xdp-bfd-echo/` with the STAMP branch (port 862 reflect + sense maps),
+  feature-gated by map contents exactly like echo/detect today. Command-line protocol grows
+  verbs: `stamp-reflect-add|del <local> <remote> [port]`, `stamp-sense-add|del …`,
+  plus a stats-readout line for `show stamp statistics` truthfulness when offloaded.
+- **Prerequisite refactor**: `EchoReflectors` (`bfd/reflector.rs`) is `Bfd`-private; two
+  supervisors would double-spawn the child and the second XDP attach fails. Promote it to a
+  shared offload supervisor (refcounts per ifindex across BFD + STAMP clients, one stdin/stdout
+  IPC task) before STAMP offload lands. The acquire/release/ready-gate/`HelperGone` semantics
+  carry over unchanged.
+- Inherited gotchas: veth needs `-m skb` (BDD), stale aya build cache, SIGTERM-detach,
+  `ZEBRA_XDP_BFD_ECHO_BIN`-style env override.
+
+### 9b.5 Staging verdict
+
+1. **Phase 1 (now)**: pure userspace — correct, interoperable, testable; honest for ms-class
+   links. Keep it offload-ready structurally (pure `build_reply` as the executable spec for
+   the future BPF program, allow-list as plain data, single T1/T4 capture points, one
+   `record_delay` entry into stats, per-session reflector counters) — encoded as §7 of the
+   Phase-1 plan.
+2. **Phase 1.5**: rung 1 (RX `SO_TIMESTAMPING`), optionally rung 2. No eBPF, biggest
+   accuracy-per-effort.
+3. **Offload stage A** (with/after the Phase-2 configured reflector): XDP base-44 reflector +
+   PASS-fallthrough, behind the shared-supervisor refactor.
+4. **Offload stage B**: sender-RX aggregate fastpath (rung 3) when session counts/rates or
+   tail-taming demand it.
+5. **Offload stage C**: HW timestamps (rung 4) on capable NICs; AF_XDP only if TLV/SRv6-encap
+   fast paths materialize (parent plan Phase 3+).
+
+### 9b.6 The pro case for eBPF integration, distilled
+
+Q&A distillation of §9b.1–9b.5: *what does putting part of STAMP into eBPF actually buy?*
+The advantages are real but regime-specific.
+
+1. **Measurement fidelity where it's currently impossible.** The error term `(a+b+c+d)/2` —
+   the four userspace stamp-to-wire residues — drops from "tens of µs with ms-class tails" to
+   roughly µs-level (generic XDP) or sub-µs (native XDP + HW timestamps). This specifically
+   rescues **max-delay and delay-variation**, which on fast links otherwise measure tokio
+   scheduling rather than the network. It is what makes Flex-Algo delay routing *meaningful*
+   on µs-class fabrics (DC/metro), where real path-delay differences are smaller than the
+   userspace noise floor. On the reflector side, stamping T2/T3 at the driver boundary makes
+   the residence-time subtraction nearly exact — a cooperative win: both ends offload, both
+   ends' advertised numbers tighten.
+2. **Honesty under control-plane load.** Without offload, the advertised delay/jitter spikes
+   exactly when the router is busy (BGP churn, SPF storms) — fabricated TE signals that can
+   flap delay-routed paths network-wide. Damping cannot tell "real network jitter" from "my
+   own scheduling jitter"; eBPF removes the latter at the source. Same rationale as BFD
+   detect-offload: timing immune to daemon scheduling.
+3. **Scale.** With the sender-RX fastpath, per-probe work leaves userspace entirely — no
+   wakeup per packet; userspace reads one aggregate per session per export period (~30 s)
+   instead of processing every probe. Reflection via `XDP_TX` never allocates an skb or
+   enters the IP stack. Hundreds of links × 10–100 Hz probing becomes a non-event.
+4. **Robustness / security.** The in-kernel allow-list drops unsolicited probes before the
+   stack ever sees them, with optional per-source rate limiting in a map — the reflector
+   cannot be used to load the daemon. Degradation is clean: helper dies → probes fall through
+   to the userspace 862 socket → reflection continues.
+5. **Low marginal cost in this codebase.** Per-ifindex helper supervision, the aya toolchain,
+   the IPC protocol, and the interop lessons are already production-validated from the BFD
+   Echo/detect work (§2/§2b). STAMP joins the same program object rather than building new
+   infrastructure.
+
+**Counterweight:** for ms-class WAN TE (the primary use case) userspace accuracy is already
+sufficient; the cheapest accuracy gains are plain `SO_TIMESTAMPING`, not eBPF; and
+auth/TLV/SRv6-encap paths cannot go XDP anyway. eBPF integration is justified by **µs-class
+fabrics, load immunity, scale, and line-rate reflection for external controllers** — not by
+the Phase-1 baseline.
+
+---
+
 ## 10. aya (Rust eBPF library)
 
 - A library/framework for writing eBPF in Rust. **No libbpf/bcc dependency, pure Rust; syscalls only via the libc crate.**
