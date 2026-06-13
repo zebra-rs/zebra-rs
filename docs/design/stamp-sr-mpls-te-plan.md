@@ -53,17 +53,33 @@ The two planes meet at one seam: per-interface **`te-metric`**. The measurement 
 | Flex-Algo metric-type 1 SPF | `isis/graph.rs` | `ospf/inst.rs` `graph_flex_algo` |
 | Show | `show isis database`, `show isis flex-algo` | `show ospf database detail`, `show ospf flex-algo` |
 
-### 3.2 Implemented — wire codec only
+### 3.2 Implemented — wire codec
 
 - **`crates/stamp-packet`** — RFC 8762 base packets, RFC 8972 TLV framework, RFC 9503 return-path sub-TLVs.
-- Not yet linked into `zebra-rs` (`stamp-packet` is not in `zebra-rs/Cargo.toml`).
+- Linked into `zebra-rs` since Phase 1 (see §3.3).
 
-### 3.3 Not implemented — measurement runtime
+### 3.3 Implemented — measurement runtime (Phase 1, 2026-06)
 
-- No `stamp/` (or `pm/`) module in `main.rs`.
-- No `spawn_stamp` in `config/manager.rs` (unlike `spawn_bfd`, `spawn_nd`).
-- `te_metric` lives only on **`LinkConfig`** (static YANG config); comments still reference a future TWAMP/STAMP task.
-- No runtime `measured_te_metric`, no damping, no IGP client API.
+Built per [stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md)
+(decisions D1–D16, implicit-reflector deviation §2):
+
+- `zebra-rs/src/stamp/` — RFC 8762 unauthenticated Session-Sender (one
+  connected socket + prober per session), implicit stateless
+  Session-Reflector on `0.0.0.0:862` (allow-list = registered sessions'
+  remotes), per-period stats window, export damping
+  (`max(old/10, 50 µs)` per field; empty period ⇒ clear), BFD-style
+  Subscribe/Unsubscribe client API shared across protocols.
+- `spawn_stamp` / `despawn_stamp` in `config/stamp.rs`, eager-spawned by
+  the `router isis` / `router ospf` commit arms; `stamp_client_tx` on
+  `ConfigManager`.
+- `te-metric measurement { enable; interval; damping-period }` on IS-IS
+  and OSPFv2 interfaces; runtime `measured_te_metric` on the link with
+  static-wins-per-field merge (`te_metric_effective()`) consumed by
+  LSP/Extended-Link-LSA origination and flex-algo metric-type-1 SPF.
+- `show stamp` / `show stamp session` / `show stamp statistics`; BDD
+  `@stamp_te_metric`.
+- Phase-1 scope limits: IPv4 P2P links, default VRF, no loss export, no
+  configured external reflector (Phase 2+, §6 of the phase-1 plan).
 
 ### 3.4 Patterns to follow when implementing
 
@@ -247,9 +263,15 @@ At origination, **merge** with documented precedence (recommended: static leaf o
 
 ## 8. Phased delivery
 
-### Phase 1 — Link TE metrics (Tier 1 specs)
+### Phase 1 — Link TE metrics (Tier 1 specs) — **DONE** (2026-06)
 
 **Goal:** Close the loop from probe → Flex-Algo SPF on a lab topology.
+
+> Shipped per [stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md),
+> including a minimal **implicit** stateless reflector (registered-peer
+> allow-list) pulled forward from Phase 2 so two zebra-rs routers can
+> measure each other; the *configured* external-reflector block stays
+> in Phase 2.
 
 | Work item | Detail |
 |-----------|--------|

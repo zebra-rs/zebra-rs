@@ -1,0 +1,43 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.61.0.2/32
+- if-name: st2-st1
+  ipv4:
+    address: 192.168.61.2/30
+
+router:
+  isis:
+    net: 49.0061.0000.0000.0002.00
+    hostname: st2
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+    - if-name: st2-st1
+      network-type: point-to-point
+      ipv4:
+        enable: true
+      te-metric:
+        measurement:
+          enable: true
+          interval: 100
+          damping-period: 2
+  ospf:
+    router-id: 10.61.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enable: true
+      - if-name: st2-st1
+        enable: true
+        network-type: point-to-point
+        te-metric:
+          measurement:
+            enable: true
+            interval: 100
+            damping-period: 2
