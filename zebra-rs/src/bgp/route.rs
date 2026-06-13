@@ -2510,7 +2510,7 @@ fn route_withdraw_from_addpath(
                 super::update_group::cache_remove_ipv4(group, prefix, removed.local_id);
             }
         }
-        route_withdraw_ipv4(peer, rd, prefix, removed.local_id);
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, removed.local_id);
         peer.adj_out.remove(rd, prefix, removed.local_id);
     }
 }
@@ -2723,7 +2723,7 @@ pub(super) fn route_advertise_to_peers(
                     }
                 }
                 if peer.adj_out.contains_key(rd, &prefix) {
-                    route_withdraw_ipv4(peer, rd, prefix, 0);
+                    withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
                     peer.adj_out.remove(rd, prefix, 0);
                 }
             }
@@ -2980,7 +2980,12 @@ pub fn route_advertise_evpn_to_peers(
 }
 
 // Send BGP withdrawal for a prefix
-fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) {
+pub(super) fn route_withdraw_ipv4(
+    peer: &mut Peer,
+    rd: Option<RouteDistinguisher>,
+    prefix: Ipv4Net,
+    id: u32,
+) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
 
     match rd {
@@ -3000,6 +3005,40 @@ fn route_withdraw_ipv4(peer: &mut Peer, rd: Option<RouteDistinguisher>, prefix: 
     }
 
     peer.send_packet(update.into());
+}
+
+/// Send — or, while the peer's update-group has a flush job in
+/// flight, defer — a per-peer IPv4 withdraw (sharding plan A.2).
+///
+/// The flush worker may still be writing the in-flight job's announce
+/// bytes onto the members' writer channels; a withdraw enqueued from
+/// the main task now could be overtaken by an in-flight announce of
+/// the same prefix, leaving the peer holding a stale route — and
+/// unlike announce/announce inversions, nothing later corrects it.
+/// Parked withdraws are replayed by `flush_done_ipv4` after every job
+/// byte is enqueued. VPN withdraws (`rd = Some`) never ride the group
+/// cache and always send immediately.
+pub(super) fn withdraw_ipv4_deferrable(
+    update_groups: &mut super::update_group::UpdateGroupMap,
+    peer: &mut Peer,
+    rd: Option<RouteDistinguisher>,
+    prefix: Ipv4Net,
+    id: u32,
+) {
+    if rd.is_none() {
+        let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        if let Some(gid) = peer.update_group_id.get(&afi_safi)
+            && let Some(af) = update_groups.get_mut(&afi_safi)
+            && let Some(group) = af.group_by_id_mut(gid)
+            && group.flush_inflight_ipv4
+        {
+            group
+                .deferred_withdraw_ipv4
+                .push((peer.ident, Ipv4Nlri { id, prefix }));
+            return;
+        }
+    }
+    route_withdraw_ipv4(peer, rd, prefix, id);
 }
 
 // Soft-reconfiguration outbound: walk Loc-RIB for the AFI/SAFIs the
@@ -3173,7 +3212,7 @@ fn route_soft_out_peer_table(
         // was never a pending bucket to drop. adj_out + the on-wire
         // withdraw still happen.
         peer.adj_out.remove(rd, prefix, 0);
-        route_withdraw_ipv4(peer, rd, prefix, 0);
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
     }
 }
 
@@ -6859,10 +6898,32 @@ pub fn route_update_ipv6(
 /// Per-peer IPv6 unicast withdraw — emit an MP_UNREACH(AFI=2, SAFI=1)
 /// for `prefix`. The v6 counterpart of [`route_withdraw_ipv4`]'s
 /// unicast arm; v6 has no legacy withdraw field.
-fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
+pub(super) fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri { id, prefix }]));
     peer.send_packet(update.into());
+}
+
+/// v6 twin of [`withdraw_ipv4_deferrable`] — defer the per-peer
+/// MP_UNREACH while the peer's group has a v6 flush job in flight.
+fn withdraw_ipv6_deferrable(
+    update_groups: &mut super::update_group::UpdateGroupMap,
+    peer: &mut Peer,
+    prefix: Ipv6Net,
+    id: u32,
+) {
+    let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+    if let Some(gid) = peer.update_group_id.get(&afi_safi)
+        && let Some(af) = update_groups.get_mut(&afi_safi)
+        && let Some(group) = af.group_by_id_mut(gid)
+        && group.flush_inflight_ipv6
+    {
+        group
+            .deferred_withdraw_ipv6
+            .push((peer.ident, Ipv6Nlri { id, prefix }));
+        return;
+    }
+    route_withdraw_ipv6(peer, prefix, id);
 }
 
 /// IPv6 unicast advertise — the v6 counterpart of
@@ -6942,7 +7003,7 @@ pub(super) fn route_advertise_to_peers_v6(
                 {
                     super::update_group::cache_remove_ipv6(group, prefix, 0);
                 }
-                route_withdraw_ipv6(peer, prefix, 0);
+                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
             }
         }
     }
