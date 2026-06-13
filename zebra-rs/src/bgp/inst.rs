@@ -1,6 +1,7 @@
 use super::peer::{BgpTop, Event, PeerBfdConfig, fsm};
 use super::peer_map::PeerMap;
 use super::route::LocalRib;
+use super::shard::BgpShard;
 use super::{BGP_PORT, BgpAttrStore};
 use crate::bgp::peer::accept;
 use crate::bgp::tracing::{Direction, PacketKind};
@@ -213,7 +214,7 @@ fn srv6_l3_service_prefix_sid(
 /// pair — RFC 4360 §4.1 puts the sub-type at `low_type = 0x02`.
 /// Routes with no RT extcomms match no VRF; routes with RTs that
 /// no configured VRF imports match no VRF either (and the global
-/// VPNv4 row sits in `local_rib.v4vpn` unimported).
+/// VPNv4 row sits in `shard.v4vpn` unimported).
 pub(crate) fn matching_import_vrfs(
     vrf_index: &BTreeMap<String, RibKnownVrf>,
     ecom: &Option<bgp_packet::ExtCommunity>,
@@ -459,6 +460,9 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: LocalRib,
+    /// Shard-scope Loc-RIB tables (unicast/LU/VPN) — see
+    /// [`super::shard::BgpShard`] for the sharding-plan partition.
+    pub shard: BgpShard,
     /// `router bgp port <0-65535>`: TCP port the BGP listener binds
     /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
     /// listening entirely — no server socket is open, so every session
@@ -778,6 +782,7 @@ impl Bgp {
             tx,
             rx,
             local_rib: LocalRib::default(),
+            shard: BgpShard::default(),
             ctx,
             rib_rx,
             nexthop_cache: super::nht::NexthopCache::default(),
@@ -1358,6 +1363,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
@@ -1962,7 +1968,7 @@ impl Bgp {
         // Snapshot the originated rows (clone to release the `local_rib`
         // borrow before mutating it / `peers` below).
         let rows: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = self
-            .local_rib
+            .shard
             .v4vpn
             .get(&rd)
             .map(|t| {
@@ -1987,11 +1993,12 @@ impl Bgp {
             }
             let tagged = tag_attr_with_export_rts(attr, &export_rts);
             rib.attr = self.attr_store.intern(tagged);
-            let (_, selected, _) = self.local_rib.update(Some(rd), prefix, rib);
+            let (_, selected, _) = self.shard.update(Some(rd), prefix, rib);
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
                 srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                 local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
                 tx: &self.tx,
                 rib_client: &self.ctx.rib,
                 attr_store: &mut self.attr_store,
@@ -2366,7 +2373,7 @@ impl Bgp {
         let transport = self.nexthop_cache.transport_for(nh);
         match dep {
             NhtDep::V4vpn(rd, p) => {
-                let selected = self.local_rib.select_best_path_vpn(&rd, p);
+                let selected = self.shard.select_best_path_vpn(&rd, p);
                 if let Some(winner) = selected.first() {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
                     super::vrf::dispatch_import_v4(
@@ -2388,7 +2395,7 @@ impl Bgp {
                 );
             }
             NhtDep::V6vpn(rd, p) => {
-                let selected = self.local_rib.select_best_path_vpn_v6(&rd, p);
+                let selected = self.shard.select_best_path_vpn_v6(&rd, p);
                 if let Some(winner) = selected.first() {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
                     super::vrf::dispatch_import_v6(
@@ -2437,7 +2444,7 @@ impl Bgp {
             // still reachable; re-install the FIB label-push entry with
             // the fresh transport. No re-advertise (best-path unchanged).
             NhtDep::V4lu(p) => {
-                let selected = self.local_rib.select_best_path_v4lu(p);
+                let selected = self.shard.select_best_path_v4lu(p);
                 super::route::fib_install_labelv4(
                     &self.ctx.rib,
                     Some(&self.nexthop_cache),
@@ -2446,7 +2453,7 @@ impl Bgp {
                 );
             }
             NhtDep::V6lu(p) => {
-                let selected = self.local_rib.select_best_path_v6lu(p);
+                let selected = self.shard.select_best_path_v6lu(p);
                 super::route::fib_install_labelv6(
                     &self.ctx.rib,
                     Some(&self.nexthop_cache),
@@ -2481,36 +2488,36 @@ impl Bgp {
         // Refresh gate flags + re-select (mutates `local_rib`).
         let selected = match &dep {
             NhtDep::V4(p) => {
-                self.local_rib.v4.set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.v4.select_best_path(*p)
+                self.shard.v4.set_nexthop_reachable(*p, nh, reachable);
+                self.shard.v4.select_best_path(*p)
             }
             NhtDep::V6(p) => {
-                self.local_rib.v6.set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.v6.select_best_path(*p)
+                self.shard.v6.set_nexthop_reachable(*p, nh, reachable);
+                self.shard.v6.select_best_path(*p)
             }
             NhtDep::V4lu(p) => {
-                self.local_rib.v4lu.set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.v4lu.select_best_path(*p)
+                self.shard.v4lu.set_nexthop_reachable(*p, nh, reachable);
+                self.shard.v4lu.select_best_path(*p)
             }
             NhtDep::V6lu(p) => {
-                self.local_rib.v6lu.set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.v6lu.select_best_path(*p)
+                self.shard.v6lu.set_nexthop_reachable(*p, nh, reachable);
+                self.shard.v6lu.select_best_path(*p)
             }
             NhtDep::V4vpn(rd, p) => {
-                self.local_rib
+                self.shard
                     .v4vpn
                     .entry(*rd)
                     .or_default()
                     .set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.select_best_path_vpn(rd, *p)
+                self.shard.select_best_path_vpn(rd, *p)
             }
             NhtDep::V6vpn(rd, p) => {
-                self.local_rib
+                self.shard
                     .v6vpn
                     .entry(*rd)
                     .or_default()
                     .set_nexthop_reachable(*p, nh, reachable);
-                self.local_rib.select_best_path_vpn_v6(rd, *p)
+                self.shard.select_best_path_vpn_v6(rd, *p)
             }
             // EVPN Type-5 best-path isn't gated on next-hop reachability
             // (the VRF FIB install is gated by transport availability in
@@ -2525,6 +2532,7 @@ impl Bgp {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -2618,11 +2626,8 @@ impl Bgp {
                         transport,
                         None,
                     );
-                } else if let Some(attr) = self
-                    .local_rib
-                    .v4vpn
-                    .get(rd)
-                    .and_then(|t| t.candidate_attr(*p))
+                } else if let Some(attr) =
+                    self.shard.v4vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
                     super::vrf::dispatch_withdraw_import_v4(&dispatcher, *rd, *p, &attr, None);
                 }
@@ -2662,11 +2667,8 @@ impl Bgp {
                         transport,
                         None,
                     );
-                } else if let Some(attr) = self
-                    .local_rib
-                    .v6vpn
-                    .get(rd)
-                    .and_then(|t| t.candidate_attr(*p))
+                } else if let Some(attr) =
+                    self.shard.v6vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
                     super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
                 }
@@ -2975,7 +2977,7 @@ impl Bgp {
         // Snapshot the winners first — building the `BgpTop` below
         // takes `&mut local_rib`.
         let winners_v4: Vec<(ipnet::Ipv4Net, super::route::BgpRib)> = if afi == Afi::Ip {
-            self.local_rib
+            self.shard
                 .v4
                 .1
                 .iter()
@@ -2985,7 +2987,7 @@ impl Bgp {
             Vec::new()
         };
         let winners_v6: Vec<(ipnet::Ipv6Net, super::route::BgpRib)> = if afi == Afi::Ip6 {
-            self.local_rib
+            self.shard
                 .v6
                 .1
                 .iter()
@@ -2998,6 +3000,7 @@ impl Bgp {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -3210,13 +3213,13 @@ impl Bgp {
                     vrf_transit_only: false,
                 };
 
-                let (_, selected, _gen) = self.local_rib.update(Some(rd), prefix, rib);
+                let (_, selected, _gen) = self.shard.update(Some(rd), prefix, rib);
                 let selected_len = selected.len();
 
                 // Local intra-router leak. The remote-VPNv4 ingress
                 // path (`route_ipv4_update`) fans an accepted VPNv4
                 // winner out to every importing VRF; the direct
-                // `local_rib.update` above bypasses that hook, so a
+                // `shard.update` above bypasses that hook, so a
                 // route exported by one local VRF would never reach a
                 // sibling VRF on the same box. Replicate the fan-out
                 // here, skipping the originating VRF so a `rt both`
@@ -3252,6 +3255,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
@@ -3314,16 +3318,16 @@ impl Bgp {
                 // ORIGINATED_PEER` and `local_id == 0` (the values used in
                 // the matching Export); the remove path uses that tuple to
                 // identify the row.
-                let removed =
-                    self.local_rib
-                        .remove(Some(rd), prefix, 0, super::route::ORIGINATED_PEER);
+                let removed = self
+                    .shard
+                    .remove(Some(rd), prefix, 0, super::route::ORIGINATED_PEER);
 
                 // Re-run best-path so any remaining candidate at
                 // (rd, prefix) becomes the new selected winner.
                 // Pass that result to `route_advertise_to_peers` —
                 // empty `selected` triggers the Withdraw branch
                 // there (`peer.adj_out` cleanup, MP_UNREACH emit).
-                let selected = self.local_rib.select_best_path_vpn(&rd, prefix);
+                let selected = self.shard.select_best_path_vpn(&rd, prefix);
 
                 // Local intra-router leak, symmetric with the Export
                 // handler. If a replacement candidate survives at
@@ -3361,6 +3365,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
@@ -3487,7 +3492,7 @@ impl Bgp {
                     vrf_transit_only: false,
                 };
 
-                let (_, selected, _gen) = self.local_rib.update_v6vpn(rd, prefix, rib);
+                let (_, selected, _gen) = self.shard.update_v6vpn(rd, prefix, rib);
                 let winners = selected.len();
 
                 // Local intra-router leak — the v6 analog of the VPNv4
@@ -3517,6 +3522,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
@@ -3565,10 +3571,10 @@ impl Bgp {
                 let Some(rd) = self.vrfs.get(&vrf).and_then(|cfg| cfg.rd) else {
                     return;
                 };
-                let removed =
-                    self.local_rib
-                        .remove_v6vpn(rd, prefix, 0, super::route::ORIGINATED_PEER);
-                let selected = self.local_rib.select_best_path_vpn_v6(&rd, prefix);
+                let removed = self
+                    .shard
+                    .remove_v6vpn(rd, prefix, 0, super::route::ORIGINATED_PEER);
+                let selected = self.shard.select_best_path_vpn_v6(&rd, prefix);
 
                 // Local intra-router leak, symmetric with the ExportV6
                 // handler: a surviving winner re-imports into sibling
@@ -3604,6 +3610,7 @@ impl Bgp {
                     router_id: &self.router_id,
                     srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,

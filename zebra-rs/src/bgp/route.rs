@@ -1653,22 +1653,11 @@ pub struct BgpTableMap {
     pub policy: Option<PolicyList>,
 }
 
+/// Main-task-owned Loc-RIB tables. The prefix-hashable tables
+/// (v4/v6 unicast, LU, VPNv4/v6) live in [`super::shard::BgpShard`]
+/// instead — see the RIB sharding plan (B.1 / D3) for the partition.
 #[derive(Debug, Default)]
 pub struct LocalRib {
-    pub v4: LocalRibTable<Ipv4Net>,
-
-    pub v6: LocalRibTable<Ipv6Net>,
-
-    /// IPv4 / IPv6 Labeled-Unicast (SAFI 4) Loc-RIB. Same prefix key as
-    /// unicast; each `BgpRib` carries the per-prefix label.
-    pub v4lu: LocalRibTable<Ipv4Net>,
-
-    pub v6lu: LocalRibTable<Ipv6Net>,
-
-    pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
-
-    pub v6vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv6Net>>,
-
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
@@ -1702,170 +1691,6 @@ pub struct LocalRib {
 }
 
 impl LocalRib {
-    // Update LocalRIB route.
-    pub fn update(
-        &mut self,
-        rd: Option<RouteDistinguisher>,
-        prefix: Ipv4Net,
-        rib: BgpRib,
-    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        match rd {
-            Some(rd) => self.v4vpn.entry(rd).or_default().update(prefix, rib),
-            None => self.v4.update(prefix, rib),
-        }
-    }
-
-    pub fn remove(
-        &mut self,
-        rd: Option<RouteDistinguisher>,
-        prefix: Ipv4Net,
-        id: u32,
-        ident: usize,
-    ) -> Vec<BgpRib> {
-        match rd {
-            Some(rd) => self.v4vpn.entry(rd).or_default().remove(prefix, id, ident),
-            None => self.v4.remove(prefix, id, ident),
-        }
-    }
-
-    // Return selected best path, not the change history.
-    pub fn select_best_path(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
-        self.v4.select_best_path(prefix)
-    }
-
-    // Return selected best path, not the change history.
-    pub fn select_best_path_vpn(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv4Net,
-    ) -> Vec<BgpRib> {
-        self.v4vpn.entry(*rd).or_default().select_best_path(prefix)
-    }
-
-    // IPv6 unicast accessors. VPNv6 (`v6vpn`) lands with layer 2c, so
-    // these take no RD — the global/default v6 unicast Loc-RIB only.
-    pub fn update_v6(&mut self, prefix: Ipv6Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v6.update(prefix, rib)
-    }
-
-    pub fn remove_v6(&mut self, prefix: Ipv6Net, id: u32, ident: usize) -> Vec<BgpRib> {
-        self.v6.remove(prefix, id, ident)
-    }
-
-    pub fn select_best_path_v6(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
-        self.v6.select_best_path(prefix)
-    }
-
-    // IPv4 / IPv6 Labeled-Unicast (SAFI 4) accessors. Same Loc-RIB
-    // engine as unicast; the per-prefix label travels on each `BgpRib`.
-    pub fn update_v4lu(&mut self, prefix: Ipv4Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v4lu.update(prefix, rib)
-    }
-
-    pub fn remove_v4lu(&mut self, prefix: Ipv4Net, id: u32, ident: usize) -> Vec<BgpRib> {
-        self.v4lu.remove(prefix, id, ident)
-    }
-
-    pub fn select_best_path_v4lu(&mut self, prefix: Ipv4Net) -> Vec<BgpRib> {
-        self.v4lu.select_best_path(prefix)
-    }
-
-    pub fn update_v6lu(&mut self, prefix: Ipv6Net, rib: BgpRib) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v6lu.update(prefix, rib)
-    }
-
-    pub fn remove_v6lu(&mut self, prefix: Ipv6Net, id: u32, ident: usize) -> Vec<BgpRib> {
-        self.v6lu.remove(prefix, id, ident)
-    }
-
-    pub fn select_best_path_v6lu(&mut self, prefix: Ipv6Net) -> Vec<BgpRib> {
-        self.v6lu.select_best_path(prefix)
-    }
-
-    // VPNv6 accessors — per-RD `v6vpn` tables, mirroring the v4vpn
-    // ones. (Best-path-for-advertise of VPNv6 winners lands in 2c-ii.)
-    pub fn update_v6vpn(
-        &mut self,
-        rd: RouteDistinguisher,
-        prefix: Ipv6Net,
-        rib: BgpRib,
-    ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.v6vpn.entry(rd).or_default().update(prefix, rib)
-    }
-
-    pub fn remove_v6vpn(
-        &mut self,
-        rd: RouteDistinguisher,
-        prefix: Ipv6Net,
-        id: u32,
-        ident: usize,
-    ) -> Vec<BgpRib> {
-        self.v6vpn.entry(rd).or_default().remove(prefix, id, ident)
-    }
-
-    pub fn select_best_path_vpn_v6(
-        &mut self,
-        rd: &RouteDistinguisher,
-        prefix: Ipv6Net,
-    ) -> Vec<BgpRib> {
-        self.v6vpn.entry(*rd).or_default().select_best_path(prefix)
-    }
-
-    /// Distinct BGP next-hops still in use by surviving candidates for a
-    /// v4 (`rd == None`) / VPNv4 (`rd == Some`) prefix — for NHT untrack
-    /// to avoid releasing a next-hop another path still needs.
-    pub fn candidate_nexthops_v4(
-        &self,
-        rd: Option<RouteDistinguisher>,
-        prefix: Ipv4Net,
-    ) -> std::collections::BTreeSet<IpAddr> {
-        let cands = match rd {
-            Some(rd) => self.v4vpn.get(&rd).map(|t| t.candidates(prefix)),
-            None => Some(self.v4.candidates(prefix)),
-        };
-        cands
-            .into_iter()
-            .flatten()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
-            .collect()
-    }
-
-    /// IPv6 counterpart of [`Self::candidate_nexthops_v4`].
-    pub fn candidate_nexthops_v6(
-        &self,
-        rd: Option<RouteDistinguisher>,
-        prefix: Ipv6Net,
-    ) -> std::collections::BTreeSet<IpAddr> {
-        let cands = match rd {
-            Some(rd) => self.v6vpn.get(&rd).map(|t| t.candidates(prefix)),
-            None => Some(self.v6.candidates(prefix)),
-        };
-        cands
-            .into_iter()
-            .flatten()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
-            .collect()
-    }
-
-    /// Labeled-Unicast (SAFI 4) counterparts: the distinct BGP next-hops
-    /// among the `v4lu` / `v6lu` candidates for `prefix` (for NHT untrack
-    /// after a displaced path).
-    pub fn candidate_nexthops_v4lu(&self, prefix: Ipv4Net) -> std::collections::BTreeSet<IpAddr> {
-        self.v4lu
-            .candidates(prefix)
-            .iter()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
-            .collect()
-    }
-
-    pub fn candidate_nexthops_v6lu(&self, prefix: Ipv6Net) -> std::collections::BTreeSet<IpAddr> {
-        self.v6lu
-            .candidates(prefix)
-            .iter()
-            .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
-            .collect()
-    }
-
     // EVPN dispatch ----------------------------------------------------------
 
     pub fn update_evpn(
@@ -2299,14 +2124,14 @@ pub fn route_ipv4_update(
     {
         rib.vrf_transit_only = true;
     }
-    let (replaced, selected, next_id) = bgp.local_rib.update(rd, nlri.prefix, rib.clone());
+    let (replaced, selected, next_id) = bgp.shard.update(rd, nlri.prefix, rib.clone());
     // If this update changed the path's next-hop, the displaced row's
     // old next-hop is no longer tracked by it; release it (unless
     // another surviving path still uses it). Survivors are read *after*
     // the update, so the new next-hop is in the set and an unchanged
     // next-hop is correctly skipped.
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4(rd, nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v4(rd, nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
     }
 
@@ -2355,7 +2180,7 @@ pub fn route_ipv4_update(
     }
 
     // Plain IPv4 unicast best-path winners are installed to the kernel
-    // FIB via RIB. VPNv4 lives in `local_rib.v4vpn`; a transit ASBR with
+    // FIB via RIB. VPNv4 lives in `shard.v4vpn`; a transit ASBR with
     // no importing VRF installs no IP route, but it does program a swap
     // ILM for the local label it advertises with next-hop-self (Inter-AS
     // Option B) — `reconcile_swap_ilm` is a no-op when no local label was
@@ -3062,7 +2887,7 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
         let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
         let do_evpn = peer.is_afi_safi(Afi::L2vpn, Safi::Evpn);
         let v4vpn_rds: Vec<RouteDistinguisher> = if do_vpn {
-            bgp.local_rib.v4vpn.keys().copied().collect()
+            bgp.shard.v4vpn.keys().copied().collect()
         } else {
             Vec::new()
         };
@@ -3107,18 +2932,12 @@ fn route_soft_out_peer_table(
     // mutable borrows of `bgp` (attr_store.intern, send paths).
     let selected: Vec<(Ipv4Net, BgpRib)> = match rd {
         Some(rd) => bgp
-            .local_rib
+            .shard
             .v4vpn
             .get(&rd)
             .map(|t| t.1.iter().map(|(p, r)| (p, r.clone())).collect())
             .unwrap_or_default(),
-        None => bgp
-            .local_rib
-            .v4
-            .1
-            .iter()
-            .map(|(p, r)| (p, r.clone()))
-            .collect(),
+        None => bgp.shard.v4.1.iter().map(|(p, r)| (p, r.clone())).collect(),
     };
 
     // Snapshot what's currently in this peer's Adj-RIB-Out so we can
@@ -3404,7 +3223,7 @@ fn route_soft_in_peer_table(
                     let mut new_rib = stored.clone();
                     new_rib.attr = bgp.attr_store.intern(decision.attr);
                     new_rib.weight = decision.weight;
-                    let (_, selected, next_id) = bgp.local_rib.update(rd, prefix, new_rib.clone());
+                    let (_, selected, next_id) = bgp.shard.update(rd, prefix, new_rib.clone());
 
                     // Policy-in change may have shifted the best path
                     // for this prefix; reconcile the FIB so the kernel
@@ -3441,12 +3260,12 @@ pub fn route_ipv4_withdraw(
     }
 
     // BGP Path selection - this may select a new best path
-    let mut removed = bgp.local_rib.remove(rd, nlri.prefix, nlri.id, ident);
+    let mut removed = bgp.shard.remove(rd, nlri.prefix, nlri.id, ident);
 
     // NHT untrack: release the withdrawn path's next-hop(s) unless a
     // surviving candidate still uses them.
     if bgp.nexthop_cache.is_some() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4(rd, nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v4(rd, nlri.prefix);
         let dep = match rd {
             Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
             None => super::nht::NhtDep::V4(nlri.prefix),
@@ -3456,9 +3275,9 @@ pub fn route_ipv4_withdraw(
 
     // Re-run best path selection and advertise changes
     let selected = if let Some(ref rd) = rd {
-        bgp.local_rib.select_best_path_vpn(rd, nlri.prefix)
+        bgp.shard.select_best_path_vpn(rd, nlri.prefix)
     } else {
-        bgp.local_rib.select_best_path(nlri.prefix)
+        bgp.shard.select_best_path(nlri.prefix)
     };
     // Reconcile FIB after the withdraw: empty `selected` means the
     // last candidate just disappeared and we should withdraw from
@@ -3538,7 +3357,7 @@ pub fn route_ipv4_withdraw(
 /// [`route_ipv4_update`]. The MP_REACH next-hop is carried in
 /// `attr.nexthop` as `BgpNexthop::Ipv6` (stamped by the dispatch
 /// site), drives the FIB install, and the route lands in
-/// `local_rib.v6`.
+/// `shard.v6`.
 ///
 /// Scope (layer 2b-i): receive → Adj-RIB-In → Loc-RIB → FIB. Inbound
 /// policy is **not** applied yet (the policy engine is IPv4-typed),
@@ -3644,13 +3463,13 @@ pub fn route_ipv6_update(
         rib.vrf_transit_only = true;
     }
     let (replaced, selected, _next_id) = match rd {
-        Some(rd) => bgp.local_rib.update_v6vpn(rd, nlri.prefix, rib),
-        None => bgp.local_rib.update_v6(nlri.prefix, rib),
+        Some(rd) => bgp.shard.update_v6vpn(rd, nlri.prefix, rib),
+        None => bgp.shard.update_v6(nlri.prefix, rib),
     };
     // Release the displaced row's old next-hop if this update changed it
     // (see the v4 path). Survivors read after the update.
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(rd, nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v6(rd, nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
     }
 
@@ -3733,9 +3552,9 @@ pub fn route_ipv6_withdraw(
 
     match rd {
         Some(rd) => {
-            let removed = bgp.local_rib.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+            let removed = bgp.shard.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
             if bgp.nexthop_cache.is_some() {
-                let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(Some(rd), nlri.prefix);
+                let survivor_nhs = bgp.shard.candidate_nexthops_v6(Some(rd), nlri.prefix);
                 nht_untrack_withdrawn(
                     bgp,
                     &removed,
@@ -3743,7 +3562,7 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6vpn(rd, nlri.prefix),
                 );
             }
-            let selected = bgp.local_rib.select_best_path_vpn_v6(&rd, nlri.prefix);
+            let selected = bgp.shard.select_best_path_vpn_v6(&rd, nlri.prefix);
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
             // (global task only). A surviving winner re-imports with
@@ -3777,9 +3596,9 @@ pub fn route_ipv6_withdraw(
             route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
         }
         None => {
-            let removed = bgp.local_rib.remove_v6(nlri.prefix, nlri.id, ident);
+            let removed = bgp.shard.remove_v6(nlri.prefix, nlri.id, ident);
             if bgp.nexthop_cache.is_some() {
-                let survivor_nhs = bgp.local_rib.candidate_nexthops_v6(None, nlri.prefix);
+                let survivor_nhs = bgp.shard.candidate_nexthops_v6(None, nlri.prefix);
                 nht_untrack_withdrawn(
                     bgp,
                     &removed,
@@ -3787,7 +3606,7 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6(nlri.prefix),
                 );
             }
-            let selected = bgp.local_rib.select_best_path_v6(nlri.prefix);
+            let selected = bgp.shard.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
             // VRF export, symmetric with route_ipv6_update: a
@@ -3894,9 +3713,9 @@ pub fn route_labelv4_update(
         .lu_labels
         .as_mut()
         .and_then(|ll| ll.label_v4(lu.nlri.prefix));
-    let (replaced, selected, _next_id) = bgp.local_rib.update_v4lu(lu.nlri.prefix, rib);
+    let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4lu(lu.nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v4lu(lu.nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
     }
     // Ingress LSR: install the received label toward the resolved
@@ -3986,9 +3805,9 @@ pub fn route_labelv6_update(
         .lu_labels
         .as_mut()
         .and_then(|ll| ll.label_v6(lu.nlri.prefix));
-    let (replaced, selected, _next_id) = bgp.local_rib.update_v6lu(lu.nlri.prefix, rib);
+    let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
     if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v6lu(lu.nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v6lu(lu.nlri.prefix);
         nht_untrack_withdrawn(bgp, &replaced, &survivor_nhs, dep);
     }
     fib_install_labelv6(
@@ -4017,9 +3836,9 @@ pub fn route_labelv4_withdraw(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.remove_v4lu(nlri.prefix, nlri.id);
     }
-    let removed = bgp.local_rib.remove_v4lu(nlri.prefix, nlri.id, ident);
+    let removed = bgp.shard.remove_v4lu(nlri.prefix, nlri.id, ident);
     if bgp.nexthop_cache.is_some() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v4lu(nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v4lu(nlri.prefix);
         nht_untrack_withdrawn(
             bgp,
             &removed,
@@ -4027,7 +3846,7 @@ pub fn route_labelv4_withdraw(
             super::nht::NhtDep::V4lu(nlri.prefix),
         );
     }
-    let selected = bgp.local_rib.select_best_path_v4lu(nlri.prefix);
+    let selected = bgp.shard.select_best_path_v4lu(nlri.prefix);
     // Prefix fully gone: release its local label and tear down the swap
     // ILM. (A surviving winner keeps the same per-prefix label, whose ILM
     // `fib_install_labelv4` reconciles below.)
@@ -4063,9 +3882,9 @@ pub fn route_labelv6_withdraw(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         peer.adj_in.remove_v6lu(nlri.prefix, nlri.id);
     }
-    let removed = bgp.local_rib.remove_v6lu(nlri.prefix, nlri.id, ident);
+    let removed = bgp.shard.remove_v6lu(nlri.prefix, nlri.id, ident);
     if bgp.nexthop_cache.is_some() {
-        let survivor_nhs = bgp.local_rib.candidate_nexthops_v6lu(nlri.prefix);
+        let survivor_nhs = bgp.shard.candidate_nexthops_v6lu(nlri.prefix);
         nht_untrack_withdrawn(
             bgp,
             &removed,
@@ -4073,7 +3892,7 @@ pub fn route_labelv6_withdraw(
             super::nht::NhtDep::V6lu(nlri.prefix),
         );
     }
-    let selected = bgp.local_rib.select_best_path_v6lu(nlri.prefix);
+    let selected = bgp.shard.select_best_path_v6lu(nlri.prefix);
     if selected.is_empty()
         && let Some(local) = bgp
             .lu_labels
@@ -5296,7 +5115,7 @@ fn route_flowspec_propagate(
         .map(|p| p.config.flowspec_validation)
         .unwrap_or(true);
     let valid =
-        super::flowspec::flowspec_validate_with_mode(bgp.local_rib, nlri, best, validation_enabled)
+        super::flowspec::flowspec_validate_with_mode(bgp.shard, nlri, best, validation_enabled)
             .is_valid();
     if valid {
         route_advertise_flowspec_to_peers(afi, nlri, best, bgp, peers);
@@ -8041,14 +7860,14 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
 
     // Collect all routes first to avoid borrow checker issues
     let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
-        bgp.local_rib
+        bgp.shard
             .v4
             .0
             .iter()
             .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
             .collect()
     } else {
-        bgp.local_rib
+        bgp.shard
             .v4
             .1
             .iter()
@@ -8103,14 +7922,14 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
 
     // Collect first to avoid borrowing `bgp.local_rib` across the loop.
     let routes: Vec<(Ipv6Net, BgpRib)> = if add_path {
-        bgp.local_rib
+        bgp.shard
             .v6
             .0
             .iter()
             .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
             .collect()
     } else {
-        bgp.local_rib
+        bgp.shard
             .v6
             .1
             .iter()
@@ -8147,7 +7966,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
 
     // Collect all VPNv4 routes first to avoid borrow checker issues
     let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv4Net, BgpRib)>)> = if add_path {
-        bgp.local_rib
+        bgp.shard
             .v4vpn
             .iter()
             .map(|(rd, table)| {
@@ -8160,7 +7979,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             })
             .collect()
     } else {
-        bgp.local_rib
+        bgp.shard
             .v4vpn
             .iter()
             .map(|(rd, table)| {
@@ -8413,7 +8232,7 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
 pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsLabel);
     let mut routes: Vec<(Ipv4Net, BgpRib)> = Vec::new();
-    for (prefix, ribs) in bgp.local_rib.v4lu.0.iter() {
+    for (prefix, ribs) in bgp.shard.v4lu.0.iter() {
         if add_path {
             routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
         } else if let Some(best) = ribs.last() {
@@ -8446,7 +8265,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
 pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsLabel);
     let mut routes: Vec<(Ipv6Net, BgpRib)> = Vec::new();
-    for (prefix, ribs) in bgp.local_rib.v6lu.0.iter() {
+    for (prefix, ribs) in bgp.shard.v6lu.0.iter() {
         if add_path {
             routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
         } else if let Some(best) = ribs.last() {
@@ -8543,13 +8362,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8588,12 +8408,13 @@ impl Bgp {
     pub fn route_del(&mut self, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let id = 0;
-        let removed = self.local_rib.remove(None, prefix, id, ident);
+        let removed = self.shard.remove(None, prefix, id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8609,7 +8430,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path(prefix);
+        let selected = bgp_ref.shard.select_best_path(prefix);
         // When the originated route disappears, a peer route may now
         // be the best (or no path may remain). Reconcile so the FIB
         // matches Loc-RIB.
@@ -8653,12 +8474,13 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, _next_id) = self.local_rib.update_v6(prefix, rib);
+        let (_replaced, selected, _next_id) = self.shard.update_v6(prefix, rib);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8684,12 +8506,13 @@ impl Bgp {
     pub fn route_del_v6(&mut self, prefix: Ipv6Net) {
         self.networks_v6.remove(&prefix);
         let ident = ORIGINATED_PEER;
-        let removed = self.local_rib.remove_v6(prefix, 0, ident);
+        let removed = self.shard.remove_v6(prefix, 0, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8705,7 +8528,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v6(prefix);
+        let selected = bgp_ref.shard.select_best_path_v6(prefix);
         fib_install_v6(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() || !removed.is_empty() {
@@ -8733,13 +8556,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_v4lu(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update_v4lu(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8770,12 +8594,13 @@ impl Bgp {
 
     pub fn route_del_label_v4(&mut self, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
-        let removed = self.local_rib.remove_v4lu(prefix, 0, ident);
+        let removed = self.shard.remove_v4lu(prefix, 0, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8791,7 +8616,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v4lu(prefix);
+        let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
         // Reconcile the FIB: removing a self-originated route may reveal
         // a received label winner that now needs its label-push entry.
         fib_install_labelv4(
@@ -8824,13 +8649,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_v6lu(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update_v6lu(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8859,12 +8685,13 @@ impl Bgp {
 
     pub fn route_del_label_v6(&mut self, prefix: Ipv6Net) {
         let ident = ORIGINATED_PEER;
-        let removed = self.local_rib.remove_v6lu(prefix, 0, ident);
+        let removed = self.shard.remove_v6lu(prefix, 0, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8880,7 +8707,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v6lu(prefix);
+        let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
         fib_install_labelv6(
             bgp_ref.rib_client,
             Some(&self.nexthop_cache),
@@ -8945,13 +8772,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update(None, prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update(None, prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -8988,12 +8816,13 @@ impl Bgp {
     pub fn route_redist_withdraw(&mut self, rtype: crate::rib::RibType, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
-        let removed = self.local_rib.remove(None, prefix, remote_id, ident);
+        let removed = self.shard.remove(None, prefix, remote_id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9009,7 +8838,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path(prefix);
+        let selected = bgp_ref.shard.select_best_path(prefix);
         // A peer route may now be best again (or nothing's left);
         // reconcile the FIB.
         fib_install_v4(&bgp_ref, prefix, &selected);
@@ -9061,13 +8890,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_v6(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update_v6(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9101,12 +8931,13 @@ impl Bgp {
     pub fn route_redist_withdraw_v6(&mut self, rtype: crate::rib::RibType, prefix: Ipv6Net) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
-        let removed = self.local_rib.remove_v6(prefix, remote_id, ident);
+        let removed = self.shard.remove_v6(prefix, remote_id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9122,7 +8953,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v6(prefix);
+        let selected = bgp_ref.shard.select_best_path_v6(prefix);
         fib_install_v6(&bgp_ref, prefix, &selected);
 
         if !selected.is_empty() || !removed.is_empty() {
@@ -9157,13 +8988,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_v4lu(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update_v4lu(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9195,12 +9027,13 @@ impl Bgp {
     pub fn route_redist_withdraw_labelv4(&mut self, rtype: crate::rib::RibType, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
-        let removed = self.local_rib.remove_v4lu(prefix, remote_id, ident);
+        let removed = self.shard.remove_v4lu(prefix, remote_id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9216,7 +9049,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v4lu(prefix);
+        let selected = bgp_ref.shard.select_best_path_v4lu(prefix);
         // Reconcile the FIB: removing a self-originated route may reveal
         // a received label winner that now needs its label-push entry.
         fib_install_labelv4(
@@ -9253,13 +9086,14 @@ impl Bgp {
             None,
             false,
         );
-        let (_replaced, selected, next_id) = self.local_rib.update_v6lu(prefix, rib.clone());
+        let (_replaced, selected, next_id) = self.shard.update_v6lu(prefix, rib.clone());
         rib.local_id = next_id;
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9289,12 +9123,13 @@ impl Bgp {
     pub fn route_redist_withdraw_labelv6(&mut self, rtype: crate::rib::RibType, prefix: Ipv6Net) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
-        let removed = self.local_rib.remove_v6lu(prefix, remote_id, ident);
+        let removed = self.shard.remove_v6lu(prefix, remote_id, ident);
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9310,7 +9145,7 @@ impl Bgp {
             lu_labels: None,
         };
 
-        let selected = bgp_ref.local_rib.select_best_path_v6lu(prefix);
+        let selected = bgp_ref.shard.select_best_path_v6lu(prefix);
         fib_install_labelv6(
             bgp_ref.rib_client,
             Some(&self.nexthop_cache),
@@ -9431,6 +9266,7 @@ impl Bgp {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9549,6 +9385,7 @@ impl Bgp {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -9654,6 +9491,7 @@ impl Bgp {
             router_id: &self.router_id,
             srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -11696,7 +11534,7 @@ mod tests {
 
     #[test]
     fn candidate_nexthops_v4_collects_distinct_survivors() {
-        use super::{BgpRib, BgpRibType, LocalRib};
+        use super::{BgpRib, BgpRibType};
         let mk = |ident: usize, nh: Ipv4Addr| {
             let attr = BgpAttr {
                 nexthop: Some(BgpNexthop::Ipv4(nh)),
@@ -11715,7 +11553,7 @@ mod tests {
             )
         };
         let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
-        let mut rib = LocalRib::default();
+        let mut rib = super::super::shard::BgpShard::default();
         rib.update(None, prefix, mk(1, Ipv4Addr::new(192, 0, 2, 1)));
         rib.update(None, prefix, mk(2, Ipv4Addr::new(192, 0, 2, 2)));
 

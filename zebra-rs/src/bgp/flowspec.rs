@@ -25,7 +25,7 @@ use bgp_packet::{
 };
 use ipnet::{IpNet, Ipv6Net};
 
-use super::route::{BgpRib, LocalRib};
+use super::route::BgpRib;
 
 /// Outcome of validating a received flow spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,11 +133,11 @@ fn originator_matches(unicast: &BgpRib, fs: &BgpRib) -> bool {
 
 /// Validate one received flow spec against the unicast Loc-RIB per
 /// RFC 9117. `rib` is the flow spec's Adj-RIB-In / Loc-RIB entry,
-/// carrying its path attributes and advertising peer. Takes `&LocalRib`
-/// directly so both the show path (`&Bgp`) and the route layer
-/// (`&mut BgpTop`) can call it.
+/// carrying its path attributes and advertising peer. Takes
+/// `&BgpShard` (the unicast Loc-RIB tables) directly so both the
+/// show path (`&Bgp`) and the route layer (`&mut BgpTop`) can call it.
 pub fn flowspec_validate(
-    local_rib: &LocalRib,
+    shard: &super::shard::BgpShard,
     nlri: &FlowspecNlri,
     rib: &BgpRib,
 ) -> FlowspecValidation {
@@ -154,8 +154,8 @@ pub fn flowspec_validate(
         return FlowspecValidation::InvalidNoUnicastRoute;
     };
     let best = match dst {
-        IpNet::V4(p) => local_rib.v4.1.get_lpm(&p).map(|(_, r)| r),
-        IpNet::V6(p) => local_rib.v6.1.get_lpm(&p).map(|(_, r)| r),
+        IpNet::V4(p) => shard.v4.1.get_lpm(&p).map(|(_, r)| r),
+        IpNet::V6(p) => shard.v6.1.get_lpm(&p).map(|(_, r)| r),
     };
     match best {
         None => FlowspecValidation::InvalidNoUnicastRoute,
@@ -168,7 +168,7 @@ pub fn flowspec_validate(
 /// toggle (RFC 9117 §6, configurable). When `validation_enabled` is
 /// false the flow spec is accepted without checks (trusted neighbor).
 pub fn flowspec_validate_with_mode(
-    local_rib: &LocalRib,
+    shard: &super::shard::BgpShard,
     nlri: &FlowspecNlri,
     rib: &BgpRib,
     validation_enabled: bool,
@@ -176,7 +176,7 @@ pub fn flowspec_validate_with_mode(
     if !validation_enabled {
         return FlowspecValidation::ValidDisabled;
     }
-    flowspec_validate(local_rib, nlri, rib)
+    flowspec_validate(shard, nlri, rib)
 }
 
 #[cfg(test)]
@@ -213,10 +213,10 @@ mod tests {
     fn validate_with_mode_disabled_accepts_anything() {
         // Validation off ⇒ feasible without any RFC 9117 check (even a
         // flow spec with no destination prefix).
-        let local_rib = LocalRib::default();
+        let shard = super::super::shard::BgpShard::default();
         let nlri = FlowspecNlri::new(Afi::Ip, vec![]);
         let rib = ebgp_rib(&BgpAttr::default());
-        let v = flowspec_validate_with_mode(&local_rib, &nlri, &rib, false);
+        let v = flowspec_validate_with_mode(&shard, &nlri, &rib, false);
         assert_eq!(v, FlowspecValidation::ValidDisabled);
         assert!(v.is_valid());
     }
@@ -224,11 +224,11 @@ mod tests {
     #[test]
     fn validate_with_mode_enabled_runs_rfc9117() {
         // Validation on, dest prefix present, empty AS_PATH ⇒ b.2 valid.
-        let local_rib = LocalRib::default();
+        let shard = super::super::shard::BgpShard::default();
         let nlri = v4_dst("10.0.0.0/24");
         let rib = ebgp_rib(&BgpAttr::default());
         assert_eq!(
-            flowspec_validate_with_mode(&local_rib, &nlri, &rib, true),
+            flowspec_validate_with_mode(&shard, &nlri, &rib, true),
             FlowspecValidation::ValidAsPathLocal
         );
     }

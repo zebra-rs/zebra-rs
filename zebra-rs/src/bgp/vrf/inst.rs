@@ -18,6 +18,7 @@ use super::super::Message;
 use super::super::interface_addrs::InterfaceAddrs;
 use super::super::peer_map::PeerMap;
 use super::super::route::LocalRib;
+use super::super::shard::BgpShard;
 use super::super::store::BgpAttrStore;
 use super::super::update_group::UpdateGroupMap;
 use super::msg::{BgpGlobalMsg, BgpVrfMsg};
@@ -43,6 +44,9 @@ pub struct BgpVrf {
     /// RIB holds only the CE-facing surface plus routes imported
     /// from the global Loc-RIB via [`BgpVrfMsg::ImportV4`].
     pub local_rib: LocalRib,
+    /// Shard-scope Loc-RIB tables (unicast/LU/VPN) — the per-VRF
+    /// twin of [`crate::bgp::shard::BgpShard`] on the global task.
+    pub shard: BgpShard,
     /// Per-VRF BGP router-id. Defaults to the global router-id at
     /// spawn time; the operator may override via
     /// `set router bgp vrf <name> router-id <addr>`, in which case
@@ -228,7 +232,7 @@ pub struct VrfImportDispatcher<'a> {
 /// Fan a freshly best-path-selected VPNv4 route out to every
 /// VRF whose `import_rts_v4` intersects the route's RT extcomms.
 /// Called from the shared `route_ipv4_update` after
-/// `local_rib.update(Some(rd), ...)` returns. `label = 0` means
+/// `shard.update(Some(rd), ...)` returns. `label = 0` means
 /// "no per-VRF label" — the receiving VRF treats it the same way
 /// the Export side does (skip the install).
 ///
@@ -355,6 +359,7 @@ impl BgpVrf {
             ctx,
             peers: PeerMap::new(),
             local_rib: LocalRib::default(),
+            shard: BgpShard::default(),
             router_id,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
@@ -445,6 +450,7 @@ impl BgpVrf {
                     router_id: &self.router_id,
                     srv6_ipv6_export: None,
                     local_rib: &mut self.local_rib,
+                    shard: &mut self.shard,
                     tx: &self.tx,
                     rib_client: &self.ctx.rib,
                     attr_store: &mut self.attr_store,
@@ -597,7 +603,7 @@ impl BgpVrf {
             vrf_transit_only: false,
         };
 
-        let (_, selected, _gen) = self.local_rib.update(None, prefix, rib);
+        let (_, selected, _gen) = self.shard.update(None, prefix, rib);
         let winners = selected.len();
 
         // Persist the resolved transport for this prefix so `fib_install`
@@ -614,6 +620,7 @@ impl BgpVrf {
             router_id: &self.router_id,
             srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -688,9 +695,9 @@ impl BgpVrf {
         prefix: ipnet::Ipv4Net,
     ) {
         let removed = self
-            .local_rib
+            .shard
             .remove(None, prefix, 0, super::super::route::ORIGINATED_PEER);
-        let selected = self.local_rib.select_best_path(prefix);
+        let selected = self.shard.select_best_path(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
 
@@ -701,6 +708,7 @@ impl BgpVrf {
             router_id: &self.router_id,
             srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -815,7 +823,7 @@ impl BgpVrf {
             vrf_transit_only: false,
         };
 
-        let (_, selected, _gen) = self.local_rib.update_v6(prefix, rib);
+        let (_, selected, _gen) = self.shard.update_v6(prefix, rib);
         let winners = selected.len();
 
         // Persist the resolved transport (see `handle_import_v4`).
@@ -829,6 +837,7 @@ impl BgpVrf {
             router_id: &self.router_id,
             srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,
@@ -886,9 +895,9 @@ impl BgpVrf {
         prefix: ipnet::Ipv6Net,
     ) {
         let removed = self
-            .local_rib
+            .shard
             .remove_v6(prefix, 0, super::super::route::ORIGINATED_PEER);
-        let selected = self.local_rib.select_best_path_v6(prefix);
+        let selected = self.shard.select_best_path_v6(prefix);
         let removed_n = removed.len();
         let winners = selected.len();
 
@@ -898,6 +907,7 @@ impl BgpVrf {
             router_id: &self.router_id,
             srv6_ipv6_export: None,
             local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
             tx: &self.tx,
             rib_client: &self.ctx.rib,
             attr_store: &mut self.attr_store,

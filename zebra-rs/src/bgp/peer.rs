@@ -1265,6 +1265,10 @@ impl Peer {
 pub struct BgpTop<'a> {
     pub router_id: &'a Ipv4Addr,
     pub local_rib: &'a mut LocalRib,
+    /// Shard-scope Loc-RIB tables (unicast/LU/VPN). Split from
+    /// `local_rib` per the RIB sharding plan's B.1/D3 partition —
+    /// these are the tables a future shard task will own.
+    pub shard: &'a mut super::shard::BgpShard,
     pub tx: &'a mpsc::Sender<Message>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub attr_store: &'a mut BgpAttrStore,
@@ -2836,6 +2840,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             router_id: &bgp.router_id,
             srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
             local_rib: &mut bgp.local_rib,
+            shard: &mut bgp.shard,
             tx: &bgp.tx,
             rib_client: &bgp.ctx.rib,
             attr_store: &mut bgp.attr_store,
@@ -2874,6 +2879,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         router_id: &bgp.router_id,
         srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
         local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
         tx: &bgp.tx,
         rib_client: &bgp.ctx.rib,
         attr_store: &mut bgp.attr_store,

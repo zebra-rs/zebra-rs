@@ -26,7 +26,7 @@ use crate::rib::nht::{NexthopResolution, ResolvedNexthop};
 pub enum NhtDep {
     V4(Ipv4Net),
     V6(Ipv6Net),
-    /// IPv4 / IPv6 Labeled-Unicast (SAFI 4) route in `local_rib.v4lu` /
+    /// IPv4 / IPv6 Labeled-Unicast (SAFI 4) route in `shard.v4lu` /
     /// `v6lu`. The BGP next-hop is tracked so the FIB label-push entry
     /// re-installs (and best-path re-gates) when the next-hop's
     /// reachability or transport changes — like the VPN deps, but the
