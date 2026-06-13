@@ -458,7 +458,10 @@ STAMP matching cannot ship as a second loader binary on shared interfaces — it
    `record_delay` entry into stats, per-session reflector counters) — encoded as §7 of the
    Phase-1 plan.
 2. **Phase 1.5**: rung 1 (RX `SO_TIMESTAMPING`), optionally rung 2. No eBPF, biggest
-   accuracy-per-effort.
+   accuracy-per-effort. **Rung 1 shipped 2026-06-13** (kernel-stamped T4/T2 on the
+   sender + reflector sockets, userspace fallback, `t4_kernel`/`t2_kernel` counters in
+   `show stamp statistics`); see [stamp-phase1.5-so-timestamping-plan.md](./stamp-phase1.5-so-timestamping-plan.md).
+   Rung 2 (TX errqueue → corrected T1′) deferred to a follow-up.
 3. **Offload stage A** (with/after the Phase-2 configured reflector): XDP base-44 reflector +
    PASS-fallthrough, behind the shared-supervisor refactor.
 4. **Offload stage B**: sender-RX aggregate fastpath (rung 3) when session counts/rates or

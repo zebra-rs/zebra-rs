@@ -1,6 +1,6 @@
 # STAMP Phase 1.5 — Sender `SO_TIMESTAMPING` for accuracy
 
-> **Status:** implementation plan, awaiting review (2026-06-13)
+> **Status:** rung 1 **implemented** (2026-06-13); rung 2 deferred to a follow-up PR.
 > **Parent docs:** [stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md)
 > (the shipped measurement plane), [bfd-sbfd-stamp-xdp-offload-notes.md §9b.3](./bfd-sbfd-stamp-xdp-offload-notes.md)
 > (the accuracy ladder — this is **rung 1**, optionally **rung 2**).
