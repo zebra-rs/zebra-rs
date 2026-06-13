@@ -3,17 +3,19 @@
 //! Three loops, mirroring `bfd/network.rs`:
 //!
 //!   * [`reflector_read`] — `recvmsg` on the wildcard reflector socket
-//!     with `IP_PKTINFO` + `IP_RECVTTL` ancillary data; stamps the
-//!     receive timestamp (T2) at the earliest userspace point and
-//!     forwards parsed probes to the event loop;
+//!     with `IP_PKTINFO` + `IP_RECVTTL` + `SCM_TIMESTAMPING` ancillary
+//!     data; takes T2 from the kernel software receive stamp when
+//!     present (Phase 1.5 rung 1), else a userspace read, and forwards
+//!     parsed probes to the event loop;
 //!   * [`reflector_write`] — drains [`ReflectRequest`]s, sending each
 //!     reply via `sendmsg` with the source address forced to the
 //!     probed address (the sender's connected socket only accepts
 //!     replies from exactly the address it probed) and egress pinned
 //!     to the ingress interface;
-//!   * [`sender_read`] — plain `recv` on one session's connected
-//!     socket; stamps T4 at receipt and forwards parsed reflector
-//!     packets keyed by the session.
+//!   * [`sender_read`] — `recvmsg` on one session's connected socket;
+//!     takes T4 from the kernel software receive stamp when present
+//!     (else a userspace read) and forwards parsed reflector packets
+//!     keyed by the session.
 
 use std::io::{ErrorKind, IoSlice, IoSliceMut};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -27,9 +29,11 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use stamp_packet::StampTimestamp;
+
 use super::inst::Message;
 use super::session::SessionKey;
-use super::timestamp::now_ntp;
+use super::timestamp::{now_ntp, unix_to_ntp};
 
 /// One reflected reply queued for [`reflector_write`].
 #[derive(Debug)]
@@ -52,7 +56,8 @@ pub struct ReflectRequest {
 pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Message>) {
     let mut buf = [0u8; 1500];
     let mut iov = [IoSliceMut::new(&mut buf)];
-    let mut cmsgspace = nix::cmsg_space!(libc::in_pktinfo, libc::c_int);
+    let mut cmsgspace =
+        nix::cmsg_space!(libc::in_pktinfo, libc::c_int, nix::sys::socket::Timestamps);
 
     loop {
         let _ = sock
@@ -63,7 +68,6 @@ pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                     Some(&mut cmsgspace),
                     MsgFlags::empty(),
                 )?;
-                let rx_ts = now_ntp();
 
                 let Some(src) = msg.address else {
                     return Err(ErrorKind::AddrNotAvailable.into());
@@ -73,6 +77,7 @@ pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                 let mut dst: Option<Ipv4Addr> = None;
                 let mut ifindex: u32 = 0;
                 let mut ttl: u8 = 0;
+                let mut kernel_t2: Option<StampTimestamp> = None;
                 for cmsg in msg.cmsgs()? {
                     match cmsg {
                         ControlMessageOwned::Ipv4PacketInfo(pi) => {
@@ -80,9 +85,19 @@ pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                             ifindex = pi.ipi_ifindex as u32;
                         }
                         ControlMessageOwned::Ipv4Ttl(v) => ttl = v.clamp(0, 255) as u8,
+                        ControlMessageOwned::ScmTimestampsns(ts) => {
+                            let (secs, nanos) = (ts.system.tv_sec(), ts.system.tv_nsec());
+                            if secs != 0 || nanos != 0 {
+                                kernel_t2 = Some(unix_to_ntp(secs as u64, nanos as u32));
+                            }
+                        }
                         _ => {}
                     }
                 }
+                // T2: the kernel software receive stamp when available,
+                // else a userspace read (offload notes §9b R3).
+                let t2_kernel = kernel_t2.is_some();
+                let rx_ts = kernel_t2.unwrap_or_else(now_ntp);
 
                 let Some(payload) = msg.iovs().next() else {
                     return Err(ErrorKind::UnexpectedEof.into());
@@ -104,6 +119,7 @@ pub async fn reflector_read(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<Mess
                     ifindex,
                     ttl,
                     rx_ts,
+                    t2_kernel,
                     len,
                 });
                 Ok(())
@@ -160,24 +176,59 @@ pub async fn reflector_write(
     }
 }
 
+/// Extract the software receive timestamp from an `SCM_TIMESTAMPING`
+/// ancillary message, if the kernel attached one (Phase 1.5 rung 1,
+/// enabled by [`super::socket::set_so_timestamping_rx`]). The `system`
+/// field carries the software (CLOCK_REALTIME) stamp; an all-zero value
+/// means the kernel didn't stamp this datagram, so we report `None` and
+/// the caller falls back to a userspace `now_ntp()`.
+fn kernel_rx_stamp<'a>(
+    cmsgs: impl Iterator<Item = ControlMessageOwned> + 'a,
+) -> Option<StampTimestamp> {
+    for cmsg in cmsgs {
+        if let ControlMessageOwned::ScmTimestampsns(ts) = cmsg {
+            let (secs, nanos) = (ts.system.tv_sec(), ts.system.tv_nsec());
+            if secs != 0 || nanos != 0 {
+                return Some(unix_to_ntp(secs as u64, nanos as u32));
+            }
+        }
+    }
+    None
+}
+
 /// Per-session reply read loop on the connected sender socket. The
-/// kernel already demuxed by 4-tuple, so a plain `recv` suffices. T4
-/// is taken here — the single T4 capture point (offload notes §9b R3).
+/// kernel already demuxed by 4-tuple. T4 is taken here — the single T4
+/// capture point (offload notes §9b R3): the kernel software receive
+/// stamp when available (`SO_TIMESTAMPING`), else a userspace
+/// `now_ntp()`. `t4_kernel` records which, for `show stamp statistics`.
 pub async fn sender_read(
     key: SessionKey,
     sock: Arc<AsyncFd<Socket>>,
     tx: UnboundedSender<Message>,
 ) {
     let mut buf = [0u8; 1500];
+    let mut iov = [IoSliceMut::new(&mut buf)];
+    let mut cmsgspace = nix::cmsg_space!(nix::sys::socket::Timestamps);
 
     loop {
         let _ = sock
             .async_io(Interest::READABLE, |sock| {
-                let n = socket::recv(sock.as_raw_fd(), &mut buf, MsgFlags::empty())
-                    .map_err(std::io::Error::from)?;
-                let t4 = now_ntp();
+                let msg = socket::recvmsg::<SockaddrIn>(
+                    sock.as_raw_fd(),
+                    &mut iov,
+                    Some(&mut cmsgspace),
+                    MsgFlags::empty(),
+                )?;
+                // Kernel stamp first (taken at skb receive, before the
+                // softirq→queue→wake→poll chain), userspace fallback.
+                let kernel_t4 = kernel_rx_stamp(msg.cmsgs()?);
+                let t4_kernel = kernel_t4.is_some();
+                let t4 = kernel_t4.unwrap_or_else(now_ntp);
 
-                let reply = match stamp_packet::ReflectorPacket::parse(&buf[..n]) {
+                let Some(payload) = msg.iovs().next() else {
+                    return Err(ErrorKind::UnexpectedEof.into());
+                };
+                let reply = match stamp_packet::ReflectorPacket::parse(payload) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::debug!(?key, error = %e, "stamp: invalid reflector packet");
@@ -185,9 +236,73 @@ pub async fn sender_read(
                     }
                 };
 
-                let _ = tx.send(Message::ReplyRecv { key, reply, t4 });
+                let _ = tx.send(Message::ReplyRecv {
+                    key,
+                    reply,
+                    t4,
+                    t4_kernel,
+                });
                 Ok(())
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::UdpSocket;
+
+    use super::*;
+    use crate::context::ProtoContext;
+    use crate::stamp::socket::stamp_reflector_socket;
+
+    /// Phase 1.5 rung 1: a socket built with `set_so_timestamping_rx`
+    /// receives a software RX timestamp in the `SCM_TIMESTAMPING`
+    /// ancillary message on loopback (software stamps are stack-level,
+    /// so they work without NIC support), and `kernel_rx_stamp`
+    /// extracts a non-zero NTP value from it.
+    #[tokio::test]
+    async fn reflector_socket_delivers_kernel_rx_stamp() {
+        let ctx = ProtoContext::default_table_no_rib();
+        let sock = stamp_reflector_socket(&ctx, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = sock.local_addr().unwrap().as_socket_ipv4().unwrap().port();
+        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+
+        // Send one datagram to the bound port.
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        sender
+            .send_to(&[0u8; 44], (Ipv4Addr::LOCALHOST, port))
+            .unwrap();
+
+        let mut buf = [0u8; 1500];
+        let mut iov = [IoSliceMut::new(&mut buf)];
+        let mut cmsgspace =
+            nix::cmsg_space!(libc::in_pktinfo, libc::c_int, nix::sys::socket::Timestamps);
+
+        let stamp = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let got = sock
+                    .async_io(Interest::READABLE, |sock| {
+                        let msg = socket::recvmsg::<SockaddrIn>(
+                            sock.as_raw_fd(),
+                            &mut iov,
+                            Some(&mut cmsgspace),
+                            MsgFlags::empty(),
+                        )?;
+                        Ok(kernel_rx_stamp(msg.cmsgs()?))
+                    })
+                    .await;
+                if let Ok(stamp) = got {
+                    return stamp;
+                }
+            }
+        })
+        .await
+        .expect("recv timed out");
+
+        assert!(
+            stamp.is_some(),
+            "loopback must deliver a software RX timestamp with SO_TIMESTAMPING enabled"
+        );
     }
 }

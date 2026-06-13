@@ -74,6 +74,11 @@ pub struct ReflectorStats {
     /// Probes dropped by the implicit allow-list (source is not a
     /// registered session's remote).
     pub unauthorized: u64,
+    /// Reflected probes whose T2 (receive timestamp echoed to the peer)
+    /// came from a kernel `SO_TIMESTAMPING` stamp.
+    pub t2_kernel: u64,
+    /// Reflected probes whose T2 fell back to a userspace read.
+    pub t2_userspace: u64,
 }
 
 #[derive(Debug)]
@@ -88,6 +93,9 @@ pub enum Message {
         ifindex: u32,
         ttl: u8,
         rx_ts: StampTimestamp,
+        /// `true` when `rx_ts` (T2) is a kernel `SO_TIMESTAMPING` stamp,
+        /// `false` when it fell back to a userspace read.
+        t2_kernel: bool,
         len: usize,
     },
     /// A reflected reply arrived on `key`'s connected socket; `t4` was
@@ -96,6 +104,9 @@ pub enum Message {
         key: SessionKey,
         reply: ReflectorPacket,
         t4: StampTimestamp,
+        /// `true` when `t4` is a kernel `SO_TIMESTAMPING` stamp, `false`
+        /// when it fell back to a userspace read.
+        t4_kernel: bool,
     },
     /// Probe transmit timer fired for `key`.
     TxTick { key: SessionKey },
@@ -363,7 +374,13 @@ impl Stamp {
 
     /// A reflected reply came back on `key`'s connected socket: verify
     /// the SSID, compute the two-way delay (plan D1), record it.
-    fn on_reply_recv(&mut self, key: SessionKey, reply: ReflectorPacket, t4: StampTimestamp) {
+    fn on_reply_recv(
+        &mut self,
+        key: SessionKey,
+        reply: ReflectorPacket,
+        t4: StampTimestamp,
+        t4_kernel: bool,
+    ) {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
@@ -389,6 +406,13 @@ impl Stamp {
             return;
         }
         session.rx_count += 1;
+        // Track the T4 source on accepted samples (Phase 1.5 rung 1) —
+        // the figure of merit for "is kernel timestamping live".
+        if t4_kernel {
+            session.t4_kernel += 1;
+        } else {
+            session.t4_userspace += 1;
+        }
         session.last_rx = Some(std::time::Instant::now());
         session.window.record_delay(delay as u32);
     }
@@ -426,6 +450,7 @@ impl Stamp {
         ifindex: u32,
         ttl: u8,
         rx_ts: StampTimestamp,
+        t2_kernel: bool,
         len: usize,
     ) {
         self.reflector_stats.rx += 1;
@@ -442,6 +467,13 @@ impl Stamp {
             ifindex: (ifindex != 0).then_some(ifindex),
         });
         self.reflector_stats.reflected += 1;
+        // The T2 we just echoed is only as good as its source; track it
+        // for `show stamp statistics` (helps the peer's numbers).
+        if t2_kernel {
+            self.reflector_stats.t2_kernel += 1;
+        } else {
+            self.reflector_stats.t2_userspace += 1;
+        }
         if let Some(session) = self.sessions.get_mut(&session_key) {
             session.reflected_count += 1;
         }
@@ -465,9 +497,10 @@ impl Stamp {
         loop {
             tokio::select! {
                 Some(msg) = self.rx.recv() => match msg {
-                    Message::ProbeRecv { probe, src, dst, ifindex, ttl, rx_ts, len } =>
-                        self.on_probe_recv(probe, src, dst, ifindex, ttl, rx_ts, len),
-                    Message::ReplyRecv { key, reply, t4 } => self.on_reply_recv(key, reply, t4),
+                    Message::ProbeRecv { probe, src, dst, ifindex, ttl, rx_ts, t2_kernel, len } =>
+                        self.on_probe_recv(probe, src, dst, ifindex, ttl, rx_ts, t2_kernel, len),
+                    Message::ReplyRecv { key, reply, t4, t4_kernel } =>
+                        self.on_reply_recv(key, reply, t4, t4_kernel),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::ExportTick { key } => self.on_export_tick(key),
                 },
@@ -585,7 +618,7 @@ mod tests {
             fraction: 4_294_967, // ~1000 µs
         };
         let ssid = stamp.sessions.get(&key).unwrap().ssid;
-        stamp.on_reply_recv(key, reply_for(ssid, t1), t4);
+        stamp.on_reply_recv(key, reply_for(ssid, t1), t4, false);
         stamp.on_export_tick(key);
         assert!(stamp.sessions.get(&key).unwrap().last_export.is_some());
 
@@ -618,21 +651,27 @@ mod tests {
             timestamp: us(600),
             ..ReflectorPacket::default()
         };
-        stamp.on_reply_recv(key, reply, us(1000));
+        stamp.on_reply_recv(key, reply, us(1000), true);
         {
             let s = stamp.sessions.get(&key).unwrap();
             assert_eq!(s.rx_count, 1);
+            // The accepted sample's T4 source is tracked (rung 1).
+            assert_eq!(s.t4_kernel, 1);
+            assert_eq!(s.t4_userspace, 0);
             let snap = s.window.snapshot().unwrap();
             assert!((299..=301).contains(&snap.min), "delay {}", snap.min);
         }
 
         // Wrong SSID → invalid.
-        stamp.on_reply_recv(key, reply_for(ssid.wrapping_add(1), us(0)), us(1000));
+        stamp.on_reply_recv(key, reply_for(ssid.wrapping_add(1), us(0)), us(1000), false);
         // Negative delay (T4 before T1) → invalid.
-        stamp.on_reply_recv(key, reply_for(ssid, us(1000)), us(0));
+        stamp.on_reply_recv(key, reply_for(ssid, us(1000)), us(0), false);
         let s = stamp.sessions.get(&key).unwrap();
         assert_eq!(s.rx_invalid_count, 2);
         assert_eq!(s.rx_count, 1);
+        // Rejected replies don't move the T4-source counters.
+        assert_eq!(s.t4_kernel, 1);
+        assert_eq!(s.t4_userspace, 0);
     }
 
     /// The implicit reflector only answers registered remotes: an
@@ -654,10 +693,14 @@ mod tests {
             0,
             255,
             StampTimestamp::default(),
+            false,
             stamp_packet::BASE_LEN,
         );
         assert_eq!(stamp.reflector_stats.unauthorized, 1);
         assert_eq!(stamp.reflector_stats.reflected, 0);
+        // Dropped (unauthorized) probes don't move the T2-source counters.
+        assert_eq!(stamp.reflector_stats.t2_kernel, 0);
+        assert_eq!(stamp.reflector_stats.t2_userspace, 0);
 
         let registered = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 5000));
         stamp.on_probe_recv(
@@ -667,9 +710,12 @@ mod tests {
             0,
             255,
             StampTimestamp::default(),
+            true,
             stamp_packet::BASE_LEN,
         );
         assert_eq!(stamp.reflector_stats.reflected, 1);
+        // The echoed T2's source is tracked on the reflected path.
+        assert_eq!(stamp.reflector_stats.t2_kernel, 1);
         assert_eq!(stamp.sessions.get(&key).unwrap().reflected_count, 1);
     }
 
@@ -688,7 +734,7 @@ mod tests {
             fraction: ((micros << 32) / 1_000_000) as u32,
         };
         let feed = |stamp: &mut Stamp| {
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000));
+            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
         };
 
         feed(&mut stamp);

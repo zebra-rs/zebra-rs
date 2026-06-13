@@ -73,6 +73,10 @@ struct StampSessionJson {
     rx_invalid_count: u64,
     tx_failed_count: u64,
     reflected_count: u64,
+    /// Accepted samples whose T4 came from a kernel `SO_TIMESTAMPING`
+    /// stamp vs a userspace fallback (Phase 1.5 rung 1).
+    t4_kernel: u64,
+    t4_userspace: u64,
     window_sent: u32,
     window_received: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +100,8 @@ fn session_json(key: &SessionKey, s: &Session) -> StampSessionJson {
         rx_invalid_count: s.rx_invalid_count,
         tx_failed_count: s.tx_failed_count,
         reflected_count: s.reflected_count,
+        t4_kernel: s.t4_kernel,
+        t4_userspace: s.t4_userspace,
         window_sent: s.window.sent,
         window_received: s.window.received,
         window_loss_pct: s.window.loss_pct(),
@@ -189,6 +195,11 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
         )?;
         writeln!(
             buf,
+            "        T4 timestamp source: kernel {} userspace {}",
+            s.t4_kernel, s.t4_userspace
+        )?;
+        writeln!(
+            buf,
             "        Current window: sent {} received {}",
             s.window.sent, s.window.received
         )?;
@@ -213,18 +224,29 @@ struct StampStatisticsJson {
     sender_rx: u64,
     sender_rx_invalid: u64,
     sender_tx_failed: u64,
+    /// Accepted samples whose T4 came from a kernel `SO_TIMESTAMPING`
+    /// stamp vs a userspace fallback, summed across sessions.
+    sender_t4_kernel: u64,
+    sender_t4_userspace: u64,
     reflector_rx: u64,
     reflector_reflected: u64,
     reflector_unauthorized: u64,
+    /// Reflected probes whose echoed T2 came from a kernel stamp vs a
+    /// userspace fallback.
+    reflector_t2_kernel: u64,
+    reflector_t2_userspace: u64,
 }
 
 fn show_stamp_statistics(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Error> {
     let (mut tx, mut rx, mut rx_invalid, mut tx_failed) = (0u64, 0u64, 0u64, 0u64);
+    let (mut t4_kernel, mut t4_userspace) = (0u64, 0u64);
     for (_, s) in stamp.sessions.iter() {
         tx += s.tx_count;
         rx += s.rx_count;
         rx_invalid += s.rx_invalid_count;
         tx_failed += s.tx_failed_count;
+        t4_kernel += s.t4_kernel;
+        t4_userspace += s.t4_userspace;
     }
     if json {
         let stats = StampStatisticsJson {
@@ -233,9 +255,13 @@ fn show_stamp_statistics(stamp: &Stamp, _args: Args, json: bool) -> Result<Strin
             sender_rx: rx,
             sender_rx_invalid: rx_invalid,
             sender_tx_failed: tx_failed,
+            sender_t4_kernel: t4_kernel,
+            sender_t4_userspace: t4_userspace,
             reflector_rx: stamp.reflector_stats.rx,
             reflector_reflected: stamp.reflector_stats.reflected,
             reflector_unauthorized: stamp.reflector_stats.unauthorized,
+            reflector_t2_kernel: stamp.reflector_stats.t2_kernel,
+            reflector_t2_userspace: stamp.reflector_stats.t2_userspace,
         };
         return Ok(serde_json::to_string_pretty(&stats)
             .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
@@ -250,6 +276,11 @@ fn show_stamp_statistics(stamp: &Stamp, _args: Args, json: bool) -> Result<Strin
     writeln!(buf, "        Replies received: {}", rx)?;
     writeln!(buf, "        Replies invalid: {}", rx_invalid)?;
     writeln!(buf, "        Send failures: {}", tx_failed)?;
+    writeln!(
+        buf,
+        "        T4 kernel timestamps: {} (userspace fallback: {})",
+        t4_kernel, t4_userspace
+    )?;
     writeln!(buf, "    Reflector:")?;
     writeln!(buf, "        Probes received: {}", stamp.reflector_stats.rx)?;
     writeln!(
@@ -261,6 +292,11 @@ fn show_stamp_statistics(stamp: &Stamp, _args: Args, json: bool) -> Result<Strin
         buf,
         "        Probes unauthorized: {}",
         stamp.reflector_stats.unauthorized
+    )?;
+    writeln!(
+        buf,
+        "        T2 kernel timestamps: {} (userspace fallback: {})",
+        stamp.reflector_stats.t2_kernel, stamp.reflector_stats.t2_userspace
     )?;
     Ok(buf)
 }
