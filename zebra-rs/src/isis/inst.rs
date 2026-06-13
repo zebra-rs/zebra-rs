@@ -2408,9 +2408,7 @@ impl Isis {
                 }
                 match key.remote {
                     std::net::IpAddr::V4(r) => nbr.addr4.contains_key(&r),
-                    std::net::IpAddr::V6(r) => {
-                        nbr.addr6l.contains(&r) || nbr.addr6.contains_key(&r)
-                    }
+                    std::net::IpAddr::V6(r) => nbr.addr6l.contains(&r) || nbr.addr6.contains(&r),
                 }
             });
             if let Some((sys_id, _)) = found {

@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use bytes::BytesMut;
+use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::neigh::{self, IsisSubAdjSid};
 use isis_packet::prefix::{self, Ipv4ControlInfo, Ipv6ControlInfo};
 use isis_packet::*;
 
 use crate::context::Timer;
-use crate::isis::config::{IsisRedistAfi, IsisRedistLevel, IsisRedistMetricType, IsisRedistSource};
+use crate::isis::config::{
+    IsisRedistAfi, IsisRedistLevel, IsisRedistMetricType, IsisRedistSource, IsisRedistribute,
+};
 use crate::isis_event_trace;
 use crate::rib::util::IpNetExt;
 use crate::rib::{DEFAULT_BLOCK_NAME, LocatorBehavior, MacAddr};
@@ -947,7 +950,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     .nbrs
                     .get(&level)
                     .values()
-                    .flat_map(|nbr| nbr.addr6.keys().copied())
+                    .flat_map(|nbr| nbr.addr6.iter().copied())
                     .next();
                 if let (Some(local_v6), Some(remote_v6)) = (local_v6, remote_v6) {
                     for chunk in values.chunks(IsisTlvIpv6Srlg::MAX_VALUES_PER_TLV) {
@@ -1106,18 +1109,12 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // local connected prefixes above (`metric: 10` in the link loop),
     // so a `network` entry looks like an interface route in receivers'
     // RIBs rather than a zero-cost shortcut.
-    for prefix in top.config.networks_v4.iter() {
-        let flags = Ipv4ControlInfo::new()
-            .with_prefixlen(prefix.prefix_len() as usize)
-            .with_sub_tlv(false)
-            .with_distribution(false);
-        ext_ip_reach.entries.push(IsisTlvExtIpReachEntry {
-            metric: 10,
-            flags,
-            prefix: *prefix,
-            subs: vec![],
-        });
-    }
+    ext_ip_reach.entries.extend(
+        top.config
+            .networks_v4
+            .iter()
+            .map(|prefix| ext_ip_reach_entry(*prefix, 10)),
+    );
     // Redistributed IPv4 prefixes (`router isis / afi-safi ipv4 /
     // redistribute / <source>`). For each route delivered by RIB into
     // `top.redist_v4`, look up the per-(afi, source) override in
@@ -1126,28 +1123,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // (rib-metric-as-* uses the RIB cost; internal/external set is
     // for the IPv6 X-bit / legacy TLV split — TLV 135 has no I/E bit
     // so the type only affects metric source for IPv4).
-    for ((rtype, prefix), route) in top.redist_v4.iter() {
-        let Some(source) = redist_source_from_rtype(*rtype) else {
-            continue;
-        };
-        let Some(cfg) = top.config.redistribute.get(&(IsisRedistAfi::Ipv4, source)) else {
-            continue;
-        };
-        if !redist_level_matches(cfg.level, level) {
-            continue;
-        }
-        let metric = redist_metric(cfg.metric, cfg.metric_type, route.metric);
-        let flags = Ipv4ControlInfo::new()
-            .with_prefixlen(prefix.prefix_len() as usize)
-            .with_sub_tlv(false)
-            .with_distribution(false);
-        ext_ip_reach.entries.push(IsisTlvExtIpReachEntry {
-            metric,
-            flags,
-            prefix: *prefix,
-            subs: vec![],
-        });
-    }
+    ext_ip_reach.entries.extend(collect_redist_entries(
+        top.redist_v4,
+        &top.config.redistribute,
+        IsisRedistAfi::Ipv4,
+        level,
+        |route| route.metric,
+        |prefix, metric, _| ext_ip_reach_entry(prefix, metric),
+    ));
     if !ext_ip_reach.entries.is_empty() {
         distributable.push(ext_ip_reach.into());
     }
@@ -1158,15 +1141,9 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         if link.config.enable.v6 && has_level(link.state.level(), level) {
             for v6addr in link.state.v6addr.iter() {
                 if !v6addr.addr().is_loopback() {
-                    let sub_tlv = false;
-                    let flags = Ipv6ControlInfo::new().with_sub_tlv(sub_tlv);
-                    let entry = IsisTlvIpv6ReachEntry {
-                        metric: 10,
-                        flags,
-                        prefix: *v6addr,
-                        subs: Vec::new(),
-                    };
-                    ipv6_reach.entries.push(entry);
+                    ipv6_reach
+                        .entries
+                        .push(ipv6_reach_entry(*v6addr, 10, false));
                 }
             }
         }
@@ -1180,50 +1157,30 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         && let Some(locator) = top.sr_locator.as_ref()
         && let Some(prefix) = locator.prefix
     {
-        let flags = Ipv6ControlInfo::new().with_sub_tlv(false);
-        ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
-            metric: 0,
-            flags,
-            prefix,
-            subs: Vec::new(),
-        });
+        ipv6_reach.entries.push(ipv6_reach_entry(prefix, 0, false));
     }
     // Operator-configured IPv6 `network` prefixes — sibling of the
     // IPv4 path above. Same metric-10 default for the same reason.
-    for prefix in top.config.networks_v6.iter() {
-        let flags = Ipv6ControlInfo::new().with_sub_tlv(false);
-        ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
-            metric: 10,
-            flags,
-            prefix: *prefix,
-            subs: Vec::new(),
-        });
-    }
+    ipv6_reach.entries.extend(
+        top.config
+            .networks_v6
+            .iter()
+            .map(|prefix| ipv6_reach_entry(*prefix, 10, false)),
+    );
     // Redistributed IPv6 prefixes — sibling of the IPv4 path above.
     // `metric-type external | rib-metric-as-external` sets the X bit
     // (RFC 5308 §2) so receivers can tell the prefix originated from
     // a different routing protocol.
-    for ((rtype, prefix), route) in top.redist_v6.iter() {
-        let Some(source) = redist_source_from_rtype(*rtype) else {
-            continue;
-        };
-        let Some(cfg) = top.config.redistribute.get(&(IsisRedistAfi::Ipv6, source)) else {
-            continue;
-        };
-        if !redist_level_matches(cfg.level, level) {
-            continue;
-        }
-        let metric = redist_metric(cfg.metric, cfg.metric_type, route.metric);
-        let flags = Ipv6ControlInfo::new()
-            .with_sub_tlv(false)
-            .with_dist_internal(redist_external_bit(cfg.metric_type));
-        ipv6_reach.entries.push(IsisTlvIpv6ReachEntry {
-            metric,
-            flags,
-            prefix: *prefix,
-            subs: Vec::new(),
-        });
-    }
+    ipv6_reach.entries.extend(collect_redist_entries(
+        top.redist_v6,
+        &top.config.redistribute,
+        IsisRedistAfi::Ipv6,
+        level,
+        |route| route.metric,
+        |prefix, metric, metric_type| {
+            ipv6_reach_entry(prefix, metric, redist_external_bit(metric_type))
+        },
+    ));
     if !ipv6_reach.entries.is_empty() {
         if top.config.mt_enabled && top.config.mt_topologies.contains(&MtId::Ipv6Unicast) {
             // MT 2 mode: same entries, MT-keyed TLV 237 instead of
@@ -1584,6 +1541,72 @@ fn redist_external_bit(metric_type: Option<IsisRedistMetricType>) -> bool {
         metric_type,
         Some(IsisRedistMetricType::External) | Some(IsisRedistMetricType::RibAsExternal)
     )
+}
+
+/// TLV 135 entry of the plain shape shared by `network` statements
+/// and redistributed prefixes: metric + prefix, no sub-TLVs. TLV 135
+/// has no I/E bit, so external-ness never shows on the wire for
+/// IPv4.
+fn ext_ip_reach_entry(prefix: Ipv4Net, metric: u32) -> IsisTlvExtIpReachEntry {
+    let flags = Ipv4ControlInfo::new()
+        .with_prefixlen(prefix.prefix_len() as usize)
+        .with_sub_tlv(false)
+        .with_distribution(false);
+    IsisTlvExtIpReachEntry {
+        metric,
+        flags,
+        prefix,
+        subs: vec![],
+    }
+}
+
+/// TLV 236 entry sibling of `ext_ip_reach_entry`. `external` sets
+/// the RFC 5308 §2 X bit so receivers can tell the prefix originated
+/// in another routing protocol; connected / `network` / locator
+/// entries pass false.
+fn ipv6_reach_entry(prefix: Ipv6Net, metric: u32, external: bool) -> IsisTlvIpv6ReachEntry {
+    let flags = Ipv6ControlInfo::new()
+        .with_sub_tlv(false)
+        .with_dist_internal(external);
+    IsisTlvIpv6ReachEntry {
+        metric,
+        flags,
+        prefix,
+        subs: Vec::new(),
+    }
+}
+
+/// Walk a per-family redistributed-route map and build one reach
+/// entry per route whose (afi, source) has redistribution configured
+/// at this generation level, resolving the metric from the
+/// per-source override / metric-type. `make` builds the family's
+/// entry from (prefix, resolved metric, configured metric-type).
+fn collect_redist_entries<P, R, E>(
+    redist: &BTreeMap<(crate::rib::RibType, P), R>,
+    redistribute: &BTreeMap<(IsisRedistAfi, IsisRedistSource), IsisRedistribute>,
+    afi: IsisRedistAfi,
+    level: Level,
+    rib_metric: impl Fn(&R) -> u32,
+    make: impl Fn(P, u32, Option<IsisRedistMetricType>) -> E,
+) -> Vec<E>
+where
+    P: Copy,
+{
+    let mut out = Vec::new();
+    for ((rtype, prefix), route) in redist.iter() {
+        let Some(source) = redist_source_from_rtype(*rtype) else {
+            continue;
+        };
+        let Some(cfg) = redistribute.get(&(afi, source)) else {
+            continue;
+        };
+        if !redist_level_matches(cfg.level, level) {
+            continue;
+        }
+        let metric = redist_metric(cfg.metric, cfg.metric_type, rib_metric(route));
+        out.push(make(*prefix, metric, cfg.metric_type));
+    }
+    out
 }
 
 #[cfg(test)]

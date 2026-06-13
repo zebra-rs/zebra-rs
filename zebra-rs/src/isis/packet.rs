@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::Error;
@@ -175,18 +175,6 @@ impl NeighborAddr4 {
     }
 }
 
-#[derive(Debug)]
-pub struct NeighborAddr6 {
-    pub addr: Ipv6Addr,
-    pub label: Option<u32>,
-}
-
-impl NeighborAddr6 {
-    pub fn new(addr: Ipv6Addr) -> Self {
-        Self { addr, label: None }
-    }
-}
-
 pub fn nbr_hello_interpret(
     nbr: &mut Neighbor,
     tlvs: &[IsisTlv],
@@ -200,7 +188,7 @@ pub fn nbr_hello_interpret(
     let mut helper_edge = HelperEdge::None;
 
     let mut addr4 = BTreeMap::new();
-    let mut addr6 = BTreeMap::new();
+    let mut addr6 = BTreeSet::new();
     let mut laddr6 = vec![];
 
     for tlv in tlvs.iter() {
@@ -220,7 +208,7 @@ pub fn nbr_hello_interpret(
                 addr4.insert(ifaddr.addr, NeighborAddr4::new(ifaddr.addr, None));
             }
             IsisTlv::Ipv6GlobalIfAddr(ifaddr) => {
-                addr6.insert(ifaddr.addr, NeighborAddr6::new(ifaddr.addr));
+                addr6.insert(ifaddr.addr);
             }
             IsisTlv::Ipv6IfAddr(ifaddr) => laddr6.push(ifaddr.addr),
             IsisTlv::ProtoSupported(tlv) => {
@@ -271,23 +259,9 @@ pub fn nbr_hello_interpret(
             e.insert(NeighborAddr4::new(key, label));
         }
     }
-    nbr.addr6.retain(|key, value| {
-        let keep = addr6.contains_key(key);
-        if !keep {
-            // Release the label before removing
-            if let Some(label) = value.label
-                && let Some(local_pool) = local_pool
-            {
-                local_pool.release(label as usize);
-            }
-        }
-        keep
-    });
-    for (&key, _) in addr6.iter() {
-        nbr.addr6
-            .entry(key)
-            .or_insert_with(|| NeighborAddr6::new(key));
-    }
+    // v6 globals carry no per-address state (no SR label is allocated
+    // for them), so the reconcile is a plain replace.
+    nbr.addr6 = addr6;
 
     nbr.addr6l = laddr6;
 
