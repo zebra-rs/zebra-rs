@@ -1992,7 +1992,7 @@ impl Bgp {
                 }
             }
             let tagged = tag_attr_with_export_rts(attr, &export_rts);
-            rib.attr = self.attr_store.intern(tagged);
+            rib.attr = self.shard.intern(tagged);
             let (_, selected, _) = self.shard.update(Some(rd), prefix, rib);
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
@@ -3153,7 +3153,7 @@ impl Bgp {
                 // mutated independently; this is the only place
                 // the global instance interns it.
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
-                let interned = self.attr_store.intern(tagged);
+                let interned = self.shard.intern(tagged);
                 // Capture the export-RT-tagged attribute (incl. any SRv6
                 // Prefix-SID) for a parallel EVPN Type-5 origination,
                 // before `interned` is moved into the VPNv4 BgpRib below.
@@ -3441,7 +3441,7 @@ impl Bgp {
                 let srv6_nexthop = self.srv6_export_nexthop(&vrf, &mut attr);
 
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
-                let interned = self.attr_store.intern(tagged);
+                let interned = self.shard.intern(tagged);
                 let evpn_attr = advertise_type5.then(|| (*interned).clone());
 
                 let label_obj = if label != 0 && srv6_nexthop.is_none() {

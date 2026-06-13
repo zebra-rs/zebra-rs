@@ -9,20 +9,21 @@
 //! routes don't even hash by IP prefix).
 //!
 //! Today `BgpShard` is a plain field on `Bgp` / `BgpVrf`, mutated
-//! inline by the single event loop — no behavior change. The
-//! shard-side `BgpAttrStore` lands as a later B.1 slice; Phase B.3
+//! inline by the single event loop — no behavior change. Phase B.3
 //! gives the shard its own task.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use bgp_packet::RouteDistinguisher;
 use ipnet::{Ipv4Net, Ipv6Net};
 
-use bgp_packet::{Afi, Safi};
+use bgp_packet::{Afi, BgpAttr, Safi};
 
 use super::adj_rib::ShardAdjIn;
 use super::route::{BgpRib, LocalRibTable};
+use super::store::BgpAttrStore;
 
 #[derive(Debug, Default)]
 pub struct BgpShard {
@@ -45,9 +46,27 @@ pub struct BgpShard {
     /// main-only families' adj-in stays on the peer as
     /// [`super::adj_rib::MainAdjIn`].
     pub adj_in: BTreeMap<usize, ShardAdjIn>,
+
+    /// Attribute-interning store for the sharded families' RIBs. The
+    /// `Arc<BgpAttr>` held by every entry in the tables and adj-in
+    /// slices above is interned here, so when the shard becomes a
+    /// task (B.3) it interns its own RIB attributes without touching
+    /// the main [`super::store::BgpAttrStore`]. The egress / advertise
+    /// path and the main-only families (EVPN, flowspec, BGP-LS, VRF
+    /// re-tag) keep using the main store; an `Arc` is valid regardless
+    /// of which store interned it, so the split is purely about which
+    /// store owns the dedup entry.
+    pub attr_store: BgpAttrStore,
 }
 
 impl BgpShard {
+    /// Intern a sharded-family RIB attribute. Delegates to the
+    /// shard's own [`BgpAttrStore`] — see the field doc for why
+    /// sharded RIB storage interns here rather than in the main store.
+    pub fn intern(&mut self, attr: BgpAttr) -> Arc<BgpAttr> {
+        self.attr_store.intern(attr)
+    }
+
     /// The peer's Adj-RIB-In slice, if it has ever stored a route.
     pub fn adj_in(&self, ident: usize) -> Option<&ShardAdjIn> {
         self.adj_in.get(&ident)
@@ -235,5 +254,35 @@ impl BgpShard {
             .iter()
             .filter_map(|r| super::nht::bgp_nexthop_ip(&r.attr))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intern_dedups_within_shard_store() {
+        let mut shard = BgpShard::default();
+        let a = shard.intern(BgpAttr::default());
+        let b = shard.intern(BgpAttr::default());
+        assert!(Arc::ptr_eq(&a, &b), "same content interns to one Arc");
+        assert_eq!(shard.attr_store.len(), 1);
+    }
+
+    #[test]
+    fn shard_stores_are_independent() {
+        // Two shards intern the same attr into distinct Arcs — the
+        // split is per-store dedup, which is exactly why an Arc's
+        // validity never depends on which store interned it (so
+        // classifying a site to the "wrong" store can't break
+        // correctness, only dedup locality / accounting).
+        let mut a = BgpShard::default();
+        let mut b = BgpShard::default();
+        let ra = a.intern(BgpAttr::default());
+        let rb = b.intern(BgpAttr::default());
+        assert!(!Arc::ptr_eq(&ra, &rb));
+        assert_eq!(a.attr_store.len(), 1);
+        assert_eq!(b.attr_store.len(), 1);
     }
 }

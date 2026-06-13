@@ -2086,7 +2086,7 @@ pub fn route_ipv4_update(
         route_ipv4_withdraw(ident, nlri, rd, None, bgp, peers, false);
         return;
     };
-    rib.attr = bgp.attr_store.intern(decision.attr);
+    rib.attr = bgp.shard.intern(decision.attr);
     rib.weight = decision.weight;
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V4vpn(rd, nlri.prefix),
@@ -3199,7 +3199,7 @@ fn route_soft_in_peer_table(
                 }
                 Some(decision) => {
                     let mut new_rib = stored.clone();
-                    new_rib.attr = bgp.attr_store.intern(decision.attr);
+                    new_rib.attr = bgp.shard.intern(decision.attr);
                     new_rib.weight = decision.weight;
                     let (_, selected, next_id) = bgp.shard.update(rd, prefix, new_rib.clone());
 
@@ -3430,7 +3430,7 @@ pub fn route_ipv6_update(
         };
     }
 
-    rib.attr = bgp.attr_store.intern(attr.clone());
+    rib.attr = bgp.shard.intern(attr.clone());
     let dep = match rd {
         Some(rd) => super::nht::NhtDep::V6vpn(rd, nlri.prefix),
         None => super::nht::NhtDep::V6(nlri.prefix),
@@ -3694,7 +3694,7 @@ pub fn route_labelv4_update(
             .add_v4lu(lu.nlri.prefix, rib.clone());
     }
 
-    rib.attr = bgp.attr_store.intern(attr);
+    rib.attr = bgp.shard.intern(attr);
     // Next-Hop Tracking: gate best-path on the BGP next-hop's
     // reachability and resolve its transport for the FIB label-push.
     let dep = super::nht::NhtDep::V4lu(lu.nlri.prefix);
@@ -3794,7 +3794,7 @@ pub fn route_labelv6_update(
             .add_v6lu(lu.nlri.prefix, rib.clone());
     }
 
-    rib.attr = bgp.attr_store.intern(attr);
+    rib.attr = bgp.shard.intern(attr);
     let dep = super::nht::NhtDep::V6lu(lu.nlri.prefix);
     nht_track_received(bgp, &mut rib, dep.clone());
     rib.local_label = bgp
@@ -5740,22 +5740,33 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                 true,
             );
         }
-        for (_rd, table) in bgp.shard.adj_in_mut(peer_id).v4vpn.iter_mut() {
-            for (_prefix, ribs) in table.0.iter_mut() {
-                for rib in ribs.iter_mut() {
-                    rib.stale = true;
-                    let mut new_attr = (*rib.attr).clone();
-                    match &mut new_attr.com {
-                        Some(com) => {
-                            com.insert(CommunityValue::LLGR_STALE.value());
-                        }
-                        None => {
-                            let mut com = Community::new();
-                            com.insert(CommunityValue::LLGR_STALE.value());
-                            new_attr.com = Some(com);
+        {
+            // Disjoint borrows of two `BgpShard` fields: the adj-in
+            // slice we mutate in place and the shard attr store we
+            // re-intern into. (`adj_in_mut(..)` would borrow all of
+            // `shard`, conflicting with `shard.intern`.)
+            let super::shard::BgpShard {
+                adj_in, attr_store, ..
+            } = &mut *bgp.shard;
+            if let Some(slice) = adj_in.get_mut(&peer_id) {
+                for (_rd, table) in slice.v4vpn.iter_mut() {
+                    for (_prefix, ribs) in table.0.iter_mut() {
+                        for rib in ribs.iter_mut() {
+                            rib.stale = true;
+                            let mut new_attr = (*rib.attr).clone();
+                            match &mut new_attr.com {
+                                Some(com) => {
+                                    com.insert(CommunityValue::LLGR_STALE.value());
+                                }
+                                None => {
+                                    let mut com = Community::new();
+                                    com.insert(CommunityValue::LLGR_STALE.value());
+                                    new_attr.com = Some(com);
+                                }
+                            }
+                            rib.attr = attr_store.intern(new_attr);
                         }
                     }
-                    rib.attr = bgp.attr_store.intern(new_attr);
                 }
             }
         }
@@ -5882,22 +5893,32 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
         for withdraw in no_llgr.iter() {
             route_ipv6_withdraw(peer_id, &withdraw.nlri, Some(withdraw.rd), bgp, peers, true);
         }
-        for (_rd, table) in bgp.shard.adj_in_mut(peer_id).v6vpn.iter_mut() {
-            for (_prefix, ribs) in table.0.iter_mut() {
-                for rib in ribs.iter_mut() {
-                    rib.stale = true;
-                    let mut new_attr = (*rib.attr).clone();
-                    match &mut new_attr.com {
-                        Some(com) => {
-                            com.insert(CommunityValue::LLGR_STALE.value());
-                        }
-                        None => {
-                            let mut com = Community::new();
-                            com.insert(CommunityValue::LLGR_STALE.value());
-                            new_attr.com = Some(com);
+        {
+            // Disjoint borrows of two `BgpShard` fields (see the v4
+            // VPN block above for why `adj_in_mut` + `shard.intern`
+            // would conflict).
+            let super::shard::BgpShard {
+                adj_in, attr_store, ..
+            } = &mut *bgp.shard;
+            if let Some(slice) = adj_in.get_mut(&peer_id) {
+                for (_rd, table) in slice.v6vpn.iter_mut() {
+                    for (_prefix, ribs) in table.0.iter_mut() {
+                        for rib in ribs.iter_mut() {
+                            rib.stale = true;
+                            let mut new_attr = (*rib.attr).clone();
+                            match &mut new_attr.com {
+                                Some(com) => {
+                                    com.insert(CommunityValue::LLGR_STALE.value());
+                                }
+                                None => {
+                                    let mut com = Community::new();
+                                    com.insert(CommunityValue::LLGR_STALE.value());
+                                    new_attr.com = Some(com);
+                                }
+                            }
+                            rib.attr = attr_store.intern(new_attr);
                         }
                     }
-                    rib.attr = bgp.attr_store.intern(new_attr);
                 }
             }
         }

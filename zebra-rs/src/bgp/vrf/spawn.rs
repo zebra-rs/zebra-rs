@@ -364,7 +364,7 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
         let mut attr = BgpAttr::new();
         attr.origin = Some(Origin::Igp);
         attr.nexthop = Some(BgpNexthop::Ipv4(vrf.router_id));
-        let interned = vrf.attr_store.intern(attr);
+        let interned = vrf.shard.intern(attr);
 
         let rib = super::super::route::BgpRib {
             remote_id: 0,
