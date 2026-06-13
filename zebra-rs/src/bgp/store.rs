@@ -3,9 +3,16 @@ use std::sync::{Arc, Weak};
 
 use bgp_packet::BgpAttr;
 
+/// The interning store hashes the whole `BgpAttr` (AS_PATH, communities,
+/// …) on every received update — a profile of an 8×500k convergence put
+/// the default SipHash at ~24% of daemon CPU. `BgpAttr` keys are
+/// internal dedup keys, not attacker-chosen hash-table indices, so a
+/// fast non-cryptographic hasher (ahash) is the right trade here.
+type AttrHasher = ahash::RandomState;
+
 #[derive(Debug)]
 pub struct BgpAttrStore {
-    store: HashMap<BgpAttr, Weak<BgpAttr>>,
+    store: HashMap<BgpAttr, Weak<BgpAttr>, AttrHasher>,
 }
 
 impl Default for BgpAttrStore {
@@ -17,7 +24,7 @@ impl Default for BgpAttrStore {
 impl BgpAttrStore {
     pub fn new() -> Self {
         Self {
-            store: HashMap::new(),
+            store: HashMap::with_hasher(AttrHasher::default()),
         }
     }
 
