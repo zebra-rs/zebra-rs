@@ -560,7 +560,7 @@ impl BgpVrf {
         // Rewrite the next-hop to "self" (the VRF's router-id)
         // so CE peers receive a reachable v4 address.
         attr.nexthop = Some(bgp_packet::BgpNexthop::Ipv4(self.router_id));
-        let interned = self.attr_store.intern(attr);
+        let interned = self.shard.intern(attr);
 
         let label_obj = if label != 0 {
             Some(bgp_packet::Label {
@@ -783,7 +783,7 @@ impl BgpVrf {
         transport: &[crate::rib::nht::ResolvedNexthop],
     ) {
         attr.nexthop = None;
-        let interned = self.attr_store.intern(attr);
+        let interned = self.shard.intern(attr);
 
         let label_obj = if label != 0 {
             Some(bgp_packet::Label {

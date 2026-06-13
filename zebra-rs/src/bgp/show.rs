@@ -3816,18 +3816,26 @@ fn show_bgp_attributes(
     _json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
     let mut buf = String::new();
+    // Two stores since RIB sharding B.1: the main store (egress
+    // encode + EVPN/flowspec/BGP-LS/VRF re-tag) and the shard store
+    // (sharded-family RIB attributes). Report combined totals, then
+    // dump each store's live entries under its own heading.
     writeln!(
         buf,
-        "BGP Attribute Store: {} entries ({} active)",
+        "BGP Attribute Store: {} entries ({} active) [main {} / shard {}]",
+        bgp.attr_store.len() + bgp.shard.attr_store.len(),
+        bgp.attr_store.refcnt_all() + bgp.shard.attr_store.refcnt_all(),
         bgp.attr_store.len(),
-        bgp.attr_store.refcnt_all()
+        bgp.shard.attr_store.len(),
     )?;
     writeln!(buf)?;
-    for (attr, weak) in bgp.attr_store.iter() {
-        let refcnt = weak.strong_count();
-        if refcnt > 0 {
-            writeln!(buf, "Refcnt: {}", refcnt)?;
-            write!(buf, "{}", attr)?;
+    for (label, store) in [("main", &bgp.attr_store), ("shard", &bgp.shard.attr_store)] {
+        for (attr, weak) in store.iter() {
+            let refcnt = weak.strong_count();
+            if refcnt > 0 {
+                writeln!(buf, "Refcnt: {} ({})", refcnt, label)?;
+                write!(buf, "{}", attr)?;
+            }
         }
     }
     Ok(buf)
