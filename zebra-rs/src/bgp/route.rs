@@ -993,12 +993,43 @@ impl BgpRib {
         nexthop: Option<VpnNexthop>,
         stale: bool,
     ) -> Self {
+        Self::new_arc(
+            ident,
+            router_id,
+            rib_type,
+            id,
+            weight,
+            Arc::new(attr.clone()),
+            label,
+            nexthop,
+            stale,
+        )
+    }
+
+    /// As [`new`](Self::new) but takes the attribute as an owned `Arc`,
+    /// skipping the deep clone when the caller already owns the
+    /// attribute — the shard dispatcher receives it by value in a
+    /// `ShardMsg`, so it can move it straight into the row instead of
+    /// re-cloning (RIB sharding B.3; saves one `BgpAttr` clone per
+    /// received update on the hot path).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_arc(
+        ident: usize,
+        router_id: Ipv4Addr,
+        rib_type: BgpRibType,
+        id: u32,
+        weight: u32,
+        attr: Arc<BgpAttr>,
+        label: Option<Label>,
+        nexthop: Option<VpnNexthop>,
+        stale: bool,
+    ) -> Self {
         BgpRib {
             remote_id: id,
             local_id: 0, // Will be assigned in LocalRibTable::update_route()
             ident,
             router_id,
-            attr: Arc::new(attr.clone()),
+            attr,
             weight,
             typ: rib_type,
             best_path: false,

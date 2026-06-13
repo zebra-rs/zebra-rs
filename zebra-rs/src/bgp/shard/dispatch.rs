@@ -15,6 +15,8 @@
 //! cutover — `shard.handle(msg)` becomes `shard_handle.request(msg)
 //! .await` — without re-deriving the pipeline split.
 
+use std::sync::Arc;
+
 use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
 
 use super::BgpShard;
@@ -74,13 +76,16 @@ impl BgpShard {
             decision,
         } = u;
 
-        let mut rib = BgpRib::new(
+        // The message owns the pre-policy attr; move it straight into
+        // the row's `Arc` (no deep clone) — it only feeds Adj-RIB-In
+        // here, since the Loc-RIB row gets the interned post-policy attr.
+        let mut rib = BgpRib::new_arc(
             ident,
             peer_router_id,
             typ,
             nlri.id,
             0,
-            &attr,
+            Arc::new(attr),
             label,
             nexthop,
             stale,
@@ -112,7 +117,15 @@ impl BgpShard {
         let mut added = rib.clone();
         let (replaced, selected, next_id) = self.update(rd, nlri.prefix, rib);
         added.local_id = next_id;
-        let survivor_nexthops = self.candidate_nexthops_v4(rd, nlri.prefix);
+        // Survivors are only read by main's NHT untrack, which runs
+        // only when a row was displaced — skip the candidate walk
+        // otherwise (the common add-a-candidate case), matching the
+        // inline path's gating.
+        let survivor_nexthops = if replaced.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            self.candidate_nexthops_v4(rd, nlri.prefix)
+        };
         vec![ShardOut::BestPathV4 {
             ident,
             rd,
@@ -175,13 +188,19 @@ impl BgpShard {
             vrf_transit_only,
         } = u;
 
-        let mut rib = BgpRib::new(
+        // v6 has no inbound policy, so Adj-RIB-In and Loc-RIB hold the
+        // same attribute — intern once and share the `Arc` for both
+        // (one deep clone instead of an un-interned adj-in copy plus the
+        // intern). Adj-RIB-In stores the row before the NHT/transit
+        // gates, matching `BgpRib::new`'s defaults.
+        let attr = self.intern(attr);
+        let mut rib = BgpRib::new_arc(
             ident,
             peer_router_id,
             typ,
             nlri.id,
             0,
-            &attr,
+            attr,
             label,
             nexthop,
             stale,
@@ -190,14 +209,17 @@ impl BgpShard {
             Some(rd) => self.adj_in_mut(ident).add_v6vpn(rd, nlri.prefix, rib.clone()),
             None => self.adj_in_mut(ident).add_v6(nlri.prefix, rib.clone()),
         };
-        rib.attr = self.intern(attr);
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
         let (replaced, selected, _next_id) = match rd {
             Some(rd) => self.update_v6vpn(rd, nlri.prefix, rib),
             None => self.update_v6(nlri.prefix, rib),
         };
-        let survivor_nexthops = self.candidate_nexthops_v6(rd, nlri.prefix);
+        let survivor_nexthops = if replaced.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            self.candidate_nexthops_v6(rd, nlri.prefix)
+        };
         vec![ShardOut::BestPathV6 {
             ident,
             rd,
@@ -255,13 +277,16 @@ impl BgpShard {
             stale,
             nexthop_reachable,
         } = u;
-        let mut rib = BgpRib::new(
+        // No inbound policy (like v6): Adj-RIB-In and Loc-RIB share one
+        // interned attr.
+        let attr = self.intern(attr);
+        let mut rib = BgpRib::new_arc(
             ident,
             peer_router_id,
             typ,
             nlri.id(),
             0,
-            &attr,
+            attr,
             Some(received_label),
             None,
             stale,
@@ -270,7 +295,6 @@ impl BgpShard {
             LuNlri::V4(n) => self.adj_in_mut(ident).add_v4lu(n.prefix, rib.clone()),
             LuNlri::V6(n) => self.adj_in_mut(ident).add_v6lu(n.prefix, rib.clone()),
         };
-        rib.attr = self.intern(attr);
         rib.nexthop_reachable = nexthop_reachable;
         let (replaced, selected, survivor_nexthops) = match &nlri {
             LuNlri::V4(n) => {
