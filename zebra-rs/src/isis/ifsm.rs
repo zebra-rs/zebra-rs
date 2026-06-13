@@ -43,6 +43,42 @@ pub fn proto_supported(enable: &Afis<bool>) -> IsisTlvProtoSupported {
     IsisTlvProtoSupported { nlpids }
 }
 
+/// Interface Address TLVs for an outbound IIH: IPv4 (RFC 1195 TLV
+/// 132) plus IPv6 (RFC 5308 TLV 232 for link-local; non-standard TLV
+/// 233 for global) — each family only when IS-IS for that family is
+/// enabled on this link, so we don't advertise a capability we won't
+/// honor. Shared by the LAN and P2P Hello generators.
+fn push_if_addr_tlvs(tlvs: &mut Vec<IsisTlv>, link: &LinkTop) {
+    if link.config.enable.v4 {
+        for prefix in &link.state.v4addr {
+            tlvs.push(
+                IsisTlvIpv4IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+    }
+    if link.config.enable.v6 {
+        for prefix in &link.state.v6laddr {
+            tlvs.push(
+                IsisTlvIpv6IfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+        for prefix in &link.state.v6addr {
+            tlvs.push(
+                IsisTlvIpv6GlobalIfAddr {
+                    addr: prefix.addr(),
+                }
+                .into(),
+            );
+        }
+    }
+}
+
 /// RFC 5306 §3.1 — when this instance is staged for restart, every
 /// outbound IIH carries a Restart TLV with RR=1. Remaining Time
 /// echoes the operator-requested grace period so helpers can seed
@@ -122,38 +158,7 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
 
-    if link.config.enable.v4 {
-        for prefix in &link.state.v4addr {
-            hello.tlvs.push(
-                IsisTlvIpv4IfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-    }
-
-    // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
-    // TLV 233 for global) — only when IS-IS IPv6 is enabled on this link, so we
-    // don't advertise an IPv6 capability we won't honor.
-    if link.config.enable.v6 {
-        for prefix in &link.state.v6laddr {
-            hello.tlvs.push(
-                IsisTlvIpv6IfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-        for prefix in &link.state.v6addr {
-            hello.tlvs.push(
-                IsisTlvIpv6GlobalIfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-    }
+    push_if_addr_tlvs(&mut hello.tlvs, link);
 
     let mut neighbors = Vec::new();
     for (_, nbr) in link.state.nbrs.get(&level).iter() {
@@ -214,38 +219,7 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     let tlv = IsisTlvAreaAddr { area_addr };
     hello.tlvs.push(tlv.into());
 
-    // Add IPv4 interface addresses
-    if link.config.enable.v4 {
-        for prefix in &link.state.v4addr {
-            hello.tlvs.push(
-                IsisTlvIpv4IfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-    }
-
-    // IPv6 Interface Address TLVs (RFC 5308 TLV 232 for link-local; non-standard
-    // TLV 233 for global) — only when IS-IS IPv6 is enabled on this link.
-    if link.config.enable.v6 {
-        for prefix in &link.state.v6laddr {
-            hello.tlvs.push(
-                IsisTlvIpv6IfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-        for prefix in &link.state.v6addr {
-            hello.tlvs.push(
-                IsisTlvIpv6GlobalIfAddr {
-                    addr: prefix.addr(),
-                }
-                .into(),
-            );
-        }
-    }
+    push_if_addr_tlvs(&mut hello.tlvs, link);
 
     // Three-way handshake (RFC 5303). On a point-to-point circuit the
     // adjacency is per-circuit, not per-level: one neighbor is reachable

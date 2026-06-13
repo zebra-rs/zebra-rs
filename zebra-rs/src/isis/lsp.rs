@@ -114,108 +114,99 @@ pub fn resolve_dis_ifindex(
         })
 }
 
-/// Split a TLV 135 (Extended IP Reachability) whose serialized
-/// value would overflow the 8-bit Length field into multiple TLV
-/// instances of type 135, each ≤ 255 value-bytes. Entries are
-/// distributed left-to-right; placement is stable per entry order.
-fn split_ext_ip_reach(t: IsisTlvExtIpReach) -> Vec<IsisTlv> {
-    let mut out: Vec<IsisTlv> = Vec::new();
-    let mut current = IsisTlvExtIpReach::default();
-    for entry in t.entries.into_iter() {
-        current.entries.push(entry);
-        let probe: IsisTlv = current.clone().into();
-        if probe.wire_len() > TLV_WIRE_MAX {
-            let latest = current.entries.pop().expect("just pushed");
-            if !current.entries.is_empty() {
-                out.push(current.into());
-            }
-            current = IsisTlvExtIpReach::default();
-            current.entries.push(latest);
-        }
-    }
-    if !current.entries.is_empty() {
-        out.push(current.into());
-    }
-    out
+/// Entry-bearing TLV the splitter below can shard into multiple
+/// instances of the same TLV type. `fresh` clones the per-instance
+/// header (the 2-byte MT ID on TLV 222/237) with an empty entry
+/// list.
+trait SplittableTlv: Clone + Into<IsisTlv> {
+    type Entry;
+    fn fresh(&self) -> Self;
+    fn entries_mut(&mut self) -> &mut Vec<Self::Entry>;
+    fn into_entries(self) -> Vec<Self::Entry>;
 }
 
-/// Same split as `split_ext_ip_reach` but for TLV 236 (IPv6
-/// Reachability).
-fn split_ipv6_reach(t: IsisTlvIpv6Reach) -> Vec<IsisTlv> {
-    let mut out: Vec<IsisTlv> = Vec::new();
-    let mut current = IsisTlvIpv6Reach::default();
-    for entry in t.entries.into_iter() {
-        current.entries.push(entry);
-        let probe: IsisTlv = current.clone().into();
-        if probe.wire_len() > TLV_WIRE_MAX {
-            let latest = current.entries.pop().expect("just pushed");
-            if !current.entries.is_empty() {
-                out.push(current.into());
-            }
-            current = IsisTlvIpv6Reach::default();
-            current.entries.push(latest);
-        }
+impl SplittableTlv for IsisTlvExtIpReach {
+    type Entry = IsisTlvExtIpReachEntry;
+    fn fresh(&self) -> Self {
+        Self::default()
     }
-    if !current.entries.is_empty() {
-        out.push(current.into());
+    fn entries_mut(&mut self) -> &mut Vec<Self::Entry> {
+        &mut self.entries
     }
-    out
+    fn into_entries(self) -> Vec<Self::Entry> {
+        self.entries
+    }
 }
 
-/// Same split as above, for TLV 222 (MT IS Reachability). The 2-byte
-/// MT ID prefix is preserved on every output instance.
-fn split_mt_is_reach(t: IsisTlvMtIsReach) -> Vec<IsisTlv> {
-    let mt = t.mt;
-    let mut out: Vec<IsisTlv> = Vec::new();
-    let mut current = IsisTlvMtIsReach {
-        mt,
-        entries: Vec::new(),
-    };
-    for entry in t.entries.into_iter() {
-        current.entries.push(entry);
-        let probe: IsisTlv = current.clone().into();
-        if probe.wire_len() > TLV_WIRE_MAX {
-            let latest = current.entries.pop().expect("just pushed");
-            if !current.entries.is_empty() {
-                out.push(current.into());
-            }
-            current = IsisTlvMtIsReach {
-                mt,
-                entries: Vec::new(),
-            };
-            current.entries.push(latest);
-        }
+impl SplittableTlv for IsisTlvIpv6Reach {
+    type Entry = IsisTlvIpv6ReachEntry;
+    fn fresh(&self) -> Self {
+        Self::default()
     }
-    if !current.entries.is_empty() {
-        out.push(current.into());
+    fn entries_mut(&mut self) -> &mut Vec<Self::Entry> {
+        &mut self.entries
     }
-    out
+    fn into_entries(self) -> Vec<Self::Entry> {
+        self.entries
+    }
 }
 
-/// Same split, for TLV 237 (MT IPv6 Reachability).
-fn split_mt_ipv6_reach(t: IsisTlvMtIpv6Reach) -> Vec<IsisTlv> {
-    let mt = t.mt;
-    let mut out: Vec<IsisTlv> = Vec::new();
-    let mut current = IsisTlvMtIpv6Reach {
-        mt,
-        entries: Vec::new(),
-    };
-    for entry in t.entries.into_iter() {
-        current.entries.push(entry);
-        let probe: IsisTlv = current.clone().into();
-        if probe.wire_len() > TLV_WIRE_MAX {
-            let latest = current.entries.pop().expect("just pushed");
-            if !current.entries.is_empty() {
-                out.push(current.into());
-            }
-            current = IsisTlvMtIpv6Reach {
-                mt,
-                entries: Vec::new(),
-            };
-            current.entries.push(latest);
+impl SplittableTlv for IsisTlvMtIsReach {
+    type Entry = IsisTlvExtIsReachEntry;
+    fn fresh(&self) -> Self {
+        Self {
+            mt: self.mt,
+            entries: Vec::new(),
         }
     }
-    if !current.entries.is_empty() {
+    fn entries_mut(&mut self) -> &mut Vec<Self::Entry> {
+        &mut self.entries
+    }
+    fn into_entries(self) -> Vec<Self::Entry> {
+        self.entries
+    }
+}
+
+impl SplittableTlv for IsisTlvMtIpv6Reach {
+    type Entry = IsisTlvIpv6ReachEntry;
+    fn fresh(&self) -> Self {
+        Self {
+            mt: self.mt,
+            entries: Vec::new(),
+        }
+    }
+    fn entries_mut(&mut self) -> &mut Vec<Self::Entry> {
+        &mut self.entries
+    }
+    fn into_entries(self) -> Vec<Self::Entry> {
+        self.entries
+    }
+}
+
+/// Split a TLV whose serialized value would overflow the 8-bit
+/// Length field into multiple TLV instances of the same type, each
+/// ≤ 255 value-bytes. Entries are distributed left-to-right;
+/// placement is stable per entry order. Covers TLV 135 (Extended IP
+/// Reachability), 236 (IPv6 Reachability), 222 (MT IS Reachability)
+/// and 237 (MT IPv6 Reachability); the MT variants keep their MT ID
+/// prefix on every output instance.
+fn split_tlv_entries<T: SplittableTlv>(t: T) -> Vec<IsisTlv> {
+    let template = t.fresh();
+    let mut out: Vec<IsisTlv> = Vec::new();
+    let mut current = template.clone();
+    for entry in t.into_entries() {
+        current.entries_mut().push(entry);
+        let probe: IsisTlv = current.clone().into();
+        if probe.wire_len() > TLV_WIRE_MAX {
+            let latest = current.entries_mut().pop().expect("just pushed");
+            if !current.entries_mut().is_empty() {
+                out.push(current.into());
+            }
+            current = template.clone();
+            current.entries_mut().push(latest);
+        }
+    }
+    if !current.entries_mut().is_empty() {
         out.push(current.into());
     }
     out
@@ -233,10 +224,10 @@ fn split_distributable_at_255(tlv: IsisTlv) -> Vec<IsisTlv> {
         return vec![tlv];
     }
     match tlv {
-        IsisTlv::ExtIpReach(t) => split_ext_ip_reach(t),
-        IsisTlv::Ipv6Reach(t) => split_ipv6_reach(t),
-        IsisTlv::MtIsReach(t) => split_mt_is_reach(t),
-        IsisTlv::MtIpv6Reach(t) => split_mt_ipv6_reach(t),
+        IsisTlv::ExtIpReach(t) => split_tlv_entries(t),
+        IsisTlv::Ipv6Reach(t) => split_tlv_entries(t),
+        IsisTlv::MtIsReach(t) => split_tlv_entries(t),
+        IsisTlv::MtIpv6Reach(t) => split_tlv_entries(t),
         other => vec![other],
     }
 }
@@ -1683,7 +1674,7 @@ mod tests {
             entries: (0..40).map(v4_entry).collect(),
         };
         let expected = tlv.entries.len();
-        let shards = split_ext_ip_reach(tlv);
+        let shards = split_tlv_entries(tlv);
         assert!(
             shards.len() >= 2,
             "40 entries × ~9B exceed the 255-byte TLV value ceiling — expected ≥ 2 shards"
