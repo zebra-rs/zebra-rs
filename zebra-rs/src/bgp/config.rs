@@ -2646,12 +2646,22 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     } else {
         None
     };
+    let mut bounce_ident = None;
     if let Some(peer) = bgp.peers.get_mut(&addr) {
         peer.config.knobs_explicit.password = explicit;
         let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
             k.password.clone()
         });
-        apply_md5_password(peer, want);
+        // A password change resets the session (FRR's `peer_change_reset`):
+        // the listener / connect-socket key only takes effect on a fresh
+        // connection, so a session authenticated under the old key would
+        // otherwise survive a new, removed, or mismatched password until
+        // the hold timer eventually expires. Bounce a live session with
+        // `Event::Stop` (the `clear … hard` teardown); an Idle peer picks
+        // the new key up on its first connect.
+        if apply_md5_password(peer, want) && !matches!(peer.state, super::peer::State::Idle) {
+            bounce_ident = Some(peer.ident);
+        }
     }
 
     // Reconcile the listener state for this peer regardless of
@@ -2661,15 +2671,22 @@ fn config_peer_tcp_md5_password(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
     // (we run apply_md5_refresh_all from config_peer too).
     apply_md5_refresh_for(bgp, addr);
 
+    if let Some(ident) = bounce_ident {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+
     Some(())
 }
 
 /// Write a resolved TCP MD5 password onto the peer. The active
 /// connect path reads it at dial time and the listener key is owned
-/// by [`apply_md5_refresh_for`] — no bounce, parity with the
-/// per-neighbor callback (the live session keeps its key until it
-/// resets). Returns `true` when the stored value changed — the
-/// caller owes a listener re-key for this peer's address.
+/// by [`apply_md5_refresh_for`]. Returns `true` when the stored value
+/// changed — the caller owes a listener re-key for this peer's address
+/// and, for a live session, a reset (`Event::Stop`) so the new key
+/// takes effect on the next connection (the per-neighbor callback and
+/// the group inherit sweep both honour this).
 pub(super) fn apply_md5_password(peer: &mut Peer, want: Option<String>) -> bool {
     if peer.config.transport.md5_password == want {
         return false;

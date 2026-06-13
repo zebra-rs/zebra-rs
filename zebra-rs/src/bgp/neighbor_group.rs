@@ -1017,6 +1017,12 @@ pub(super) fn apply_inherited(
     outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);
     outcome.md5_refresh = super::config::apply_md5_password(peer, password);
+    // A password change must reset the session, like the per-neighbor
+    // path: the listener / connect-socket key only takes effect on a
+    // fresh connection, so a live session under the old key must bounce.
+    // (`tcp-mss` is a clamp on new segments and does not break auth, so
+    // it stays out of the bounce set.)
+    bounce |= outcome.md5_refresh;
     super::config::apply_peer_policy_ref(
         policy_tx,
         peer,
