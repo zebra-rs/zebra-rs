@@ -9,9 +9,9 @@
 //! routes don't even hash by IP prefix).
 //!
 //! Today `BgpShard` is a plain field on `Bgp` / `BgpVrf`, mutated
-//! inline by the single event loop — no behavior change. Later B.1
-//! slices move the shard-side `BgpAttrStore` and the per-`ident`
-//! adj-in slices here; Phase B.3 gives it its own task.
+//! inline by the single event loop — no behavior change. The
+//! shard-side `BgpAttrStore` lands as a later B.1 slice; Phase B.3
+//! gives the shard its own task.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -19,6 +19,9 @@ use std::net::IpAddr;
 use bgp_packet::RouteDistinguisher;
 use ipnet::{Ipv4Net, Ipv6Net};
 
+use bgp_packet::{Afi, Safi};
+
+use super::adj_rib::ShardAdjIn;
 use super::route::{BgpRib, LocalRibTable};
 
 #[derive(Debug, Default)]
@@ -36,9 +39,40 @@ pub struct BgpShard {
     pub v4vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv4Net>>,
 
     pub v6vpn: BTreeMap<RouteDistinguisher, LocalRibTable<Ipv6Net>>,
+
+    /// Per-peer Adj-RIB-In slices for the sharded families, keyed by
+    /// peer `ident` ([`super::peer::Peer`] stays main-owned). The
+    /// main-only families' adj-in stays on the peer as
+    /// [`super::adj_rib::MainAdjIn`].
+    pub adj_in: BTreeMap<usize, ShardAdjIn>,
 }
 
 impl BgpShard {
+    /// The peer's Adj-RIB-In slice, if it has ever stored a route.
+    pub fn adj_in(&self, ident: usize) -> Option<&ShardAdjIn> {
+        self.adj_in.get(&ident)
+    }
+
+    /// The peer's Adj-RIB-In slice, created on first use.
+    pub fn adj_in_mut(&mut self, ident: usize) -> &mut ShardAdjIn {
+        self.adj_in.entry(ident).or_default()
+    }
+
+    /// Drop the peer's entire Adj-RIB-In slice (peer-down sweep).
+    pub fn adj_in_drop(&mut self, ident: usize) {
+        self.adj_in.remove(&ident);
+    }
+
+    /// Received-prefix count for a sharded AFI/SAFI (0 for main-owned
+    /// families and for peers with no slice — disjoint with
+    /// [`super::adj_rib::MainAdjIn::count`], so show paths sum both).
+    pub fn adj_in_count(&self, ident: usize, afi: Afi, safi: Safi) -> usize {
+        self.adj_in
+            .get(&ident)
+            .map(|a| a.count(afi, safi))
+            .unwrap_or(0)
+    }
+
     // Update LocalRIB route.
     pub fn update(
         &mut self,

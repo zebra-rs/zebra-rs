@@ -24,7 +24,7 @@ use crate::bfd::session::{EchoMode, SessionKey, SessionParams};
 use crate::bgp::cap::cap_register_recv;
 use crate::bgp::route::{route_clean, route_sync};
 use crate::bgp::tracing::{Direction, PacketKind};
-use crate::bgp::{AdjRib, In, Out};
+use crate::bgp::{AdjRib, MainAdjIn, Out};
 use crate::bgp::{stale_route_withdraw, timer};
 use crate::bgp_packet_trace;
 use crate::config::Args;
@@ -809,7 +809,11 @@ pub struct Peer {
     pub cap_send: BgpCap,
     pub cap_recv: BgpCap,
     pub cap_map: CapAfiMap,
-    pub adj_in: AdjRib<In>,
+    /// Adj-RIB-In for the main-owned families (EVPN, flowspec,
+    /// BGP-LS). The sharded families' received routes live in
+    /// `BgpShard::adj_in` keyed by this peer's `ident` (RIB sharding
+    /// plan B.1 / D3).
+    pub adj_in: MainAdjIn,
     pub adj_out: AdjRib<Out>,
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
@@ -960,7 +964,7 @@ impl Peer {
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
-            adj_in: AdjRib::new(),
+            adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),

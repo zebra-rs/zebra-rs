@@ -173,7 +173,13 @@ fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     )
 }
 
-fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -> std::fmt::Result {
+fn write_summary_peer_row(
+    buf: &mut String,
+    shard: &super::shard::BgpShard,
+    peer: &Peer,
+    afi: Afi,
+    safi: Safi,
+) -> std::fmt::Result {
     let mut msg_sent: u64 = 0;
     let mut msg_rcvd: u64 = 0;
     for counter in peer.counter.iter() {
@@ -190,7 +196,9 @@ fn write_summary_peer_row(buf: &mut String, peer: &Peer, afi: Afi, safi: Safi) -
     } else if !negotiated {
         "NoNeg".to_string()
     } else {
-        let pr = peer.adj_in.count(afi, safi);
+        // Sharded and main-owned family counts are disjoint, so the
+        // sum is the peer's received count for any AFI/SAFI.
+        let pr = shard.adj_in_count(peer.ident, afi, safi) + peer.adj_in.count(afi, safi);
         let ps = peer.adj_out.count(afi, safi);
         format!("{}/{}", pr, ps)
     };
@@ -264,7 +272,7 @@ fn write_summary_section<V: BgpShowView>(
 
     write_summary_header_row(buf)?;
     for peer in peers.iter() {
-        write_summary_peer_row(buf, peer, afi_safi.afi, afi_safi.safi)?;
+        write_summary_peer_row(buf, bgp.shard(), peer, afi_safi.afi, afi_safi.safi)?;
     }
 
     writeln!(buf)?;
@@ -993,8 +1001,14 @@ fn show_bgp_received_vpnv4(
         None => return Ok(format!("% No such neighbor: {}", addr)),
     };
 
-    // Display Adj-RIB-Out routes (routes to be advertised after policy application)
-    show_adj_rib_routes_vpnv4(&peer.adj_in.v4vpn, bgp.router_id, json)
+    // Display Adj-RIB-In routes (received routes before policy application)
+    let empty = BTreeMap::new();
+    let tables = bgp
+        .shard
+        .adj_in(peer.ident)
+        .map(|a| &a.v4vpn)
+        .unwrap_or(&empty);
+    show_adj_rib_routes_vpnv4(tables, bgp.router_id, json)
 }
 
 use crate::rib::util::IpAddrExt;
@@ -1592,7 +1606,13 @@ fn show_bgp_received(
     };
 
     // Display Adj-RIB-In routes (received routes before policy application)
-    show_adj_rib_routes(&peer.adj_in.v4.0, bgp.router_id, json)
+    let empty = BTreeMap::new();
+    let table = bgp
+        .shard
+        .adj_in(peer.ident)
+        .map(|a| &a.v4.0)
+        .unwrap_or(&empty);
+    show_adj_rib_routes(table, bgp.router_id, json)
 }
 
 /// The "BGP router identifier" field of the summary headers.
@@ -1604,7 +1624,12 @@ fn summary_router_id<V: BgpShowView>(bgp: &V) -> String {
     }
 }
 
-fn summary_peer_row_json(peer: &Peer, afi: Afi, safi: Safi) -> BgpPeerSummaryJson {
+fn summary_peer_row_json(
+    shard: &super::shard::BgpShard,
+    peer: &Peer,
+    afi: Afi,
+    safi: Safi,
+) -> BgpPeerSummaryJson {
     let mut msg_sent: u64 = 0;
     let mut msg_rcvd: u64 = 0;
     for counter in peer.counter.iter() {
@@ -1612,7 +1637,8 @@ fn summary_peer_row_json(peer: &Peer, afi: Afi, safi: Safi) -> BgpPeerSummaryJso
         msg_rcvd += counter.rcvd;
     }
 
-    let pfx_rcvd = peer.adj_in.count(afi, safi) as u64;
+    let pfx_rcvd =
+        (shard.adj_in_count(peer.ident, afi, safi) + peer.adj_in.count(afi, safi)) as u64;
     let pfx_sent = peer.adj_out.count(afi, safi) as u64;
 
     // FRR-style State/PfxRcd column: an Established session shows its
@@ -1645,7 +1671,7 @@ fn summary_section_json<V: BgpShowView>(bgp: &V, afi_safi: AfiSafi) -> BgpAfiSaf
             .peers()
             .iter_all()
             .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
-            .map(|(_, peer)| summary_peer_row_json(peer, afi_safi.afi, afi_safi.safi))
+            .map(|(_, peer)| summary_peer_row_json(bgp.shard(), peer, afi_safi.afi, afi_safi.safi))
             .collect(),
     }
 }
