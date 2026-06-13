@@ -1,15 +1,122 @@
 # BGP RIB Sharding (Juniper-style)
 
-Status: **Phase 0 + Phase A merged** — applicability analysis (§1–4)
-and delivery plan (§5–8) written 2026-06-12 (merged via PR #1402);
-bench harness (0.1, PR #1406) and the two flush-offload steps (A.1 PR
-#1408, A.2 PR #1416 — replaces auto-closed #1411) merged 2026-06-12,
-rebased on the peer-separation work (#1403/#1413/#1414). Open
-decisions in §8 still need a ruling before Phase B starts.
+Status: **Phase 0 + A merged; Phase B built at N=1 (sync-dispatch);
+policy-parallelism C.1/C.2 built** — Phase 0 + A merged 2026-06-12
+(PRs #1402/#1406/#1408/#1416). Phase B (state partition, message
+protocol, shard) and a re-scoped Phase C (parallel policy evaluation)
+were built 2026-06-13 on a WIP branch. Two deliberate divergences from
+the §5–8 plan: **B.3 became a synchronous dispatch, not a spawned task**,
+and **Phase C was re-scoped to parallelize the pure policy walk (rayon)
+rather than fan out to N shards** (the multi-shard form remains future).
+The "Implementation status" section below is the current architecture of
+record; §1–10 remain the original applicability analysis and design
+rationale. Open decisions §8: D1 (in-repo `bgp-bench`) and D3
+(v4/v6-unicast+LU+VPN scope) resolved as recommended; D2 (channel
+boundedness) moot under sync dispatch — there is no data channel yet;
+D4 (default shard count) deferred while the shard is still N=1.
 
 Source: "BGP RIB Sharding" — Ravindran Thangarajah, Juniper Networks,
 2022-10-24.
 <https://community.juniper.net/blogs/ravindran-thangarajah/2022/10/24/bgp-rib-sharding>
+
+## Implementation status (as built — 2026-06-13)
+
+What actually shipped diverges from the §5–8 plan in two deliberate
+ways: B.3 became a **synchronous dispatch** rather than a spawned task,
+and Phase C was **re-scoped** to parallelize the pure policy walk (rayon)
+instead of (yet) fanning out to N shards. §5–10 remain the original
+design rationale.
+
+### Phase B — shard extraction at N=1 (B.1–B.3, built)
+
+- **State partition (B.1).** `BgpShard` (`bgp/shard/mod.rs`) owns the
+  sharded Loc-RIB tables — `v4`, `v6`, `v4lu`, `v6lu`
+  (`LocalRibTable<…>`) and `v4vpn`, `v6vpn` (`BTreeMap<RouteDistinguisher,
+  LocalRibTable<…>>`) — plus the per-peer Adj-RIB-In slices (`adj_in:
+  BTreeMap<usize, ShardAdjIn>`), a shard-owned attribute-interning store,
+  and `ShardLabelPool` (per-route LU / VPNv4-transit label sub-blocks).
+  EVPN / flowspec / SR-Policy / BGP-LS / RTC stay main-owned (§8 D3).
+- **Attr store uses ahash** (`store.rs`). A profile put the default
+  SipHash at ~28 % of daemon CPU; interned keys are internal dedup keys,
+  not attacker-chosen, so a fast non-cryptographic hasher is the right
+  trade — it made the converted path net-faster than baseline.
+- **B.3 — synchronous dispatch (the pivot).** The plan called for a
+  spawned shard task (`BgpShardHandle`, channels). At N=1 a task adds a
+  hop + channel overhead and **zero** parallelism (it runs on main's
+  core anyway). So B.3 instead routes table ops through
+  `BgpShard::handle(ShardMsg, central) -> Vec<ShardOut>`, called
+  **inline** from `route.rs`; `shard` is a plain field on `Bgp`, not a
+  task. This keeps the value of B.1/B.2 — a clean state partition + a
+  typed message protocol, ready to be task-ified for N>1 — without
+  paying the task's cost at N=1.
+  - `ShardMsg`: `UpdateV4` / `UpdateV6` / `UpdateLu` (+ `WithdrawV4/V6/Lu`,
+    `PeerDown`, `Show`, `Shutdown`). `ShardOut`: `BestPathV4/V6/Lu`.
+  - Pipeline split per update: **main** runs the per-attr peer checks
+    (`inbound_attr_checks`), inbound policy, NHT resolution, and the
+    Inter-AS Option-AB transit flag; the **shard** does Adj-RIB-In +
+    intern + Loc-RIB insert + best-path + label allocation; **main** then
+    acts on the returned best-path delta — NHT untrack, FIB install, VPN
+    import/export, advertise.
+  - **Dispatch vs direct access**: v4-unicast + VPNv4 reach the shard via
+    `UpdateV4`, v6-unicast + VPNv6 via `UpdateV6`. **Labeled-unicast
+    (v4/v6) still uses direct shard-table access** (`route_labelv4_update`
+    → `bgp.shard.update_v4lu`); the `UpdateLu` + `WithdrawV4/V6/Lu`
+    variants are wired-but-unused scaffolding for a later migration (the
+    dead-code warnings on them are expected).
+
+### Phase C — re-scoped to parallel policy evaluation (C.1/C.2, built)
+
+The planned C.1 (N-shard fan-out) and C.2 (update-workers) are **not yet
+built — the shard is still single (N=1)**. Instead, profiling the N=1
+build under a realistic policy-heavy workload (a 1000-entry route-map
+applied inbound *and* outbound) put **74.8 % of CPU in
+`PrefixTrie::walk_enclosing`** — the prefix-set match, run ~1000× per
+route. Policy evaluation is **pure** (reads the peer's policy snapshot +
+the route, mutates nothing) and every prefix in one UPDATE shares one
+attribute, so it parallelizes with rayon *without* partitioning the RIB:
+
+- **C.1 — parallel inbound policy.** `route_ipv4_update_batch` runs
+  `inbound_attr_checks` once, `par_iter`s the per-prefix policy walk
+  (`apply_policy_in_pure`), then writes the Loc-RIB + advertises serially
+  in NLRI order.
+- **C.2 — parallel outbound policy.** `route_ipv4_update_decided` returns
+  advertise jobs instead of advertising inline; the batch then runs three
+  phases — serial Loc-RIB updates → **parallel per-group advertise-outcome
+  precompute** (`compute_advertise_outcome` is pure) → serial apply
+  (cache / adj-out / send in NLRI order). The per-group outcome is
+  computed on the same canonical (non-source, non-LLGR) peer the serial
+  memo would use, so the result is identical and group-counter bumps stay
+  once-per-group.
+
+**Enabling work — family-generic per-peer policy.** The policy engine was
+already family-generic (`policy_list_apply_net` takes an `IpNet`,
+`PrefixSet::matches` is dual-stack); the in/out apply collapsed into one
+core, `apply_policy_net(prefix_cfg, policy_cfg, router_id, IpNet, attr,
+weight)`, shared by both directions and all families. Per-peer route-maps
+now apply for **v4/v6 unicast, VPNv4/6, and labeled-unicast v4/v6**;
+before this only v4-unicast + VPNv4 had them (v6 / LU silently ignored
+neighbor policy). Verified by `@bgp_v6_route_map` and `@bgp_lu_route_map`.
+
+### Measured (12-core, 1000-entry policy in+out, 4×100k, interleaved A/B)
+
+| build | convergence | vs serial |
+|---|---|---|
+| serial (no C.1/C.2) | 19.57 s | — |
+| C.1 (parallel inbound) | 11.62 s | −41 % |
+| C.2 (parallel inbound + outbound) | **4.34 s** | **−78 % (4.5×)** |
+
+The win is the policy walk; the §9 baseline matrix (no policy) is a
+different workload where this parallelism barely registers — there the
+planned multi-shard / update-worker fan-out is what pays.
+
+### Still future (the plan's original Phase C)
+
+Multi-shard prefix-hash fan-out (planned C.1), update-worker tasks
+(planned C.2), N>1 barriers (C.3), perf matrix + default (C.4). The
+shard's clean partition + sync dispatch is the seam those build on:
+task-ify `BgpShard` behind the existing `ShardMsg` protocol, then fan out
+on `shard_of(prefix)`. The §7 ordering contract (single-relay FIFO,
+per-prefix affinity) is written for that step.
 
 ## 1. Verdict
 
@@ -137,15 +244,21 @@ PRs land.
 | 0.1 | Bench harness + baseline profile | — | merged (PR #1406) |
 | A.1 | Flush job extraction (pure function) | — | merged (PR #1408) |
 | A.2 | Flush offload to worker | A.1 | merged (PR #1416) |
-| B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ⏳ |
-| B.2 | Shard message protocol + label sub-blocks | B.1 | ⏳ |
-| B.3 | Spawn shard task at N=1 | B.2 | ⏳ |
-| B.4 | Show / clear / sync scatter-gather | B.3 | ⏳ |
+| B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ✅ built (WIP branch) |
+| B.2 | Shard message protocol + label sub-blocks | B.1 | ✅ built (WIP branch) |
+| B.3 | ~~Spawn shard task~~ → **sync dispatch** at N=1 | B.2 | ✅ built — pivoted to sync, see "Implementation status" |
+| B.4 | Show / clear / sync scatter-gather | B.3 | 🔶 partial — `Show` wired; clear/sync still inline |
 | B.5 | BDD + lifecycle hardening at N=1 | B.4 | ⏳ |
-| C.1 | Prefix-hash fan-out to N shards + YANG knob | B.5 | ⏳ |
-| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | ⏳ |
+| C.1 | Prefix-hash fan-out to N shards + YANG knob | B.5 | ⏳ deferred (label reused — see note) |
+| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | ⏳ deferred (label reused — see note) |
 | C.3 | Barriers: EoR, refresh, GR/LLGR sweeps, clear | C.1 | ⏳ |
 | C.4 | Perf matrix, defaults, docs | C.2, C.3 | ⏳ |
+
+> **Phase C label note**: the *built* "C.1/C.2" are a re-scope —
+> rayon-parallel inbound/outbound **policy** evaluation at N=1 (see
+> "Implementation status"). The rows above are the *original* plan's
+> C.1/C.2 (multi-shard fan-out + update-workers), which remain deferred.
+> Same letters, different axis of parallelism.
 
 ### Phase 0 — Baseline measurement (before touching anything)
 
@@ -385,7 +498,7 @@ timing), so single-run deltas below that are noise.
 |---|---|---|---|
 | Baseline | 1.564s | 4.556s | 8.147s |
 | A.2 (PR #1416, 2 runs) | 1.64–1.76s | 4.65–4.70s | 7.55s |
-| B.5 (N=1) | | | |
+| B.3 sync-dispatch (N=1) | parity ±noise | parity ±noise | parity ±noise |
 | C.4 (best) | | | |
 
 A.2 reading: parity within noise at the 100k scales, ~7% at 2M paths.
@@ -393,6 +506,15 @@ Expected — A.2 offloads the per-group encode, whose cost scales with
 member fan-out, and this matrix has only 2 receivers. The structural
 win is the freed main loop; C.2 (update-workers) is where egress
 parallelism actually pays.
+
+**B.3 sync-dispatch (N=1) reading**: this *no-policy* matrix is the
+wrong workload to show the built C.1/C.2 — its per-route work is intern
++ best-path + encode, not policy, so routing through `BgpShard::handle`
+is parity-within-noise (the dispatch is the same core, the win was never
+here). The built policy-parallelism C.1/C.2 are measured on the
+policy-heavy workload in the "Implementation status" section above
+(serial 19.57s → 4.34s at 12 cores). The planned multi-shard C.1 /
+update-worker C.2 are what this matrix is meant to capture, when built.
 
 ## 10. Caveats & out of scope
 
