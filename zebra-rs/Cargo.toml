@@ -54,6 +54,7 @@ isis-macros = { path = "../crates/isis-macros" }
 packet-utils = { path = "../crates/packet-utils" }
 bfd-packet = { path = "../crates/bfd-packet" }
 nd-packet = { path = "../crates/nd-packet" }
+stamp-packet = { path = "../crates/stamp-packet" }
 bitfield-struct = "0.13"
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
