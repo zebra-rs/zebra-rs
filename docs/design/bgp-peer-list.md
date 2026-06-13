@@ -441,12 +441,18 @@ Per-family status / notes:
   diffs at `(prefix, path-id)` granularity for AddPath members (a
   prefix-level diff would withdraw the backup paths on every refresh).
   Route id lives on each `EvpnRoute` variant.
-- **LU-v4 / LU-v6** — TODO: no per-peer cache today (direct
-  `send_packet`); the twin loops candidates and emits one UPDATE each
-  with the path-id, or adds a small cache mirroring the VPN shape.
+- **LU-v4 / LU-v6** — DONE: same internal plain/AddPath split inside
+  `route_advertise_to_peers_labelv4` / `…v6` (no call-site changes). LU
+  has no update-group cache, but `AdjRibOut` already carried unused
+  `v4lu` / `v6lu` tables — the AddPath path now populates them and
+  diffs the recorded path-ids against `selected` to withdraw exactly
+  the ids that fell out (selected empty ⇒ withdraw all). So the stale
+  "no Adj-RIB-Out yet" comment is now half-true: plain peers still
+  direct-send without tracking; AddPath peers track in `v4lu`/`v6lu`.
 - **IPv6-unicast** — separate family (group-cache shape like
   v4-unicast, not the VPN per-peer cache); subsumed by B1 historically,
-  worth a twin too but not in the user's named set.
+  worth a twin too but not in the user's named set. The only family
+  besides RTC still without AddPath Send.
 
 Wire coverage: `@bgp_addpath_ipv4` is the first end-to-end AddPath BDD
 (two paths for one prefix arrive at the receiver). It exercises the
