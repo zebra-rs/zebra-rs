@@ -24,6 +24,7 @@ use rib::{LogFormatType, LogOutputType, Rib, logging_config, tracing_set};
 mod ospf;
 mod spf;
 mod srv6;
+mod stamp;
 mod version;
 
 #[derive(Parser)]
