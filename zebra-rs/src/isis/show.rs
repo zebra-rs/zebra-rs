@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use ipnet::{Ipv4Net, Ipv6Net};
 use isis_packet::{IsisSysId, Nsap};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
@@ -819,15 +818,7 @@ fn show_isis_topology(
         // IPv4 SPF tree.
         writeln!(buf)?;
         writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
-        write_spf_tree(
-            &mut buf,
-            isis,
-            level,
-            &local_sys_id,
-            spf_result,
-            false,
-            false,
-        )?;
+        write_spf_tree::<V4>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
 
         // IPv6 SPF tree. When MT 2 is enabled, render from the MT 2
         // SPF result (matches what's actually installed in the v6
@@ -842,21 +833,13 @@ fn show_isis_topology(
                 level_long
             )?;
             if let Some(mt2_spf) = isis.mt2_spf_result.get(level).as_ref() {
-                write_spf_tree(&mut buf, isis, level, &local_sys_id, mt2_spf, true, true)?;
+                write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, mt2_spf, true)?;
             } else {
                 writeln!(buf, "  (MT 2 SPF not computed yet)")?;
             }
         } else {
             writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
-            write_spf_tree(
-                &mut buf,
-                isis,
-                level,
-                &local_sys_id,
-                spf_result,
-                true,
-                false,
-            )?;
+            write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
         }
     }
 
@@ -927,18 +910,18 @@ fn show_isis_topology_json(isis: &Isis) -> String {
             continue;
         }
 
-        let ipv4 = spf_tree_json(isis, level, &local_sys_id, spf_result, false, false);
+        let ipv4 = spf_tree_json::<V4>(isis, level, &local_sys_id, spf_result, false);
 
         // Match the text path: in MT 2 mode the IPv6 tree comes from
         // the MT 2 SPF result; otherwise the legacy NLPID-gated tree.
         let mt2 = mt2_v6_active(isis);
         let ipv6 = if mt2 {
             match isis.mt2_spf_result.get(level).as_ref() {
-                Some(mt2_spf) => spf_tree_json(isis, level, &local_sys_id, mt2_spf, true, true),
+                Some(mt2_spf) => spf_tree_json::<V6>(isis, level, &local_sys_id, mt2_spf, true),
                 None => Vec::new(),
             }
         } else {
-            spf_tree_json(isis, level, &local_sys_id, spf_result, true, false)
+            spf_tree_json::<V6>(isis, level, &local_sys_id, spf_result, false)
         };
 
         levels.push(TopologyLevelJson {
@@ -963,19 +946,18 @@ fn show_isis_topology_json(isis: &Isis) -> String {
 /// and reach maps and returns one entry per vertex; kept separate from
 /// the text renderer so the FRR-validated column output stays
 /// untouched.
-fn spf_tree_json(
+fn spf_tree_json<F>(
     isis: &Isis,
     level: &Level,
     local_sys_id: &IsisSysId,
     spf_result: &std::collections::BTreeMap<usize, spf::Path>,
-    ipv6: bool,
     mt2_mode: bool,
-) -> Vec<TopoVertexJson> {
-    let ipv6_capable = if ipv6 && !mt2_mode {
-        Some(ipv6_capable_set(isis.lsdb.get(level)))
-    } else {
-        None
-    };
+) -> Vec<TopoVertexJson>
+where
+    F: IsisRibFamilyShow,
+    F::Prefix: std::fmt::Display,
+{
+    let capable = F::spf_capable_set(isis, level, mt2_mode);
 
     let mut nodes: Vec<(usize, &spf::Path)> = spf_result.iter().map(|(k, v)| (*k, v)).collect();
     nodes.sort_by_key(|(_, p)| (p.cost, p.id));
@@ -989,7 +971,7 @@ fn spf_tree_json(
         };
         let node_sys_id = *node_sys_id;
         let is_self = node_sys_id == *local_sys_id;
-        if let Some(set) = &ipv6_capable
+        if let Some(set) = &capable
             && !set.contains(&node_sys_id)
         {
             continue;
@@ -1030,31 +1012,12 @@ fn spf_tree_json(
         // Prefix rows hanging off this node. nexthop_str / iface_str
         // are already empty for self, matching the blanked text cells.
         let mut prefixes = Vec::new();
-        if !ipv6 {
-            if let Some(entries) = isis.reach_map.get(level).get(&Afi::Ip).get(&node_sys_id) {
-                for entry in entries.iter() {
-                    let prefix_type = if is_self { "IP internal" } else { "IP TE" };
-                    prefixes.push(TopoPrefixJson {
-                        prefix: entry.prefix.trunc().to_string(),
-                        prefix_type: prefix_type.to_string(),
-                        metric: path.cost + entry.metric,
-                        nexthop: nexthop_str.clone(),
-                        interface: iface_str.clone(),
-                    });
-                }
-            }
-        } else if let Some(entries) = (if mt2_mode {
-            isis.mt2_reach_map_v6.get(level)
-        } else {
-            isis.reach_map_v6.get(level)
-        })
-        .get(&node_sys_id)
-        {
+        if let Some(entries) = F::reach_entries_show(isis, level, &node_sys_id, mt2_mode) {
             for entry in entries.iter() {
                 prefixes.push(TopoPrefixJson {
-                    prefix: entry.prefix.trunc().to_string(),
-                    prefix_type: "IP6 internal".to_string(),
-                    metric: path.cost + entry.metric,
+                    prefix: F::trunc_prefix(F::entry_prefix(entry)).to_string(),
+                    prefix_type: F::spf_prefix_type(is_self).to_string(),
+                    metric: path.cost + F::entry_metric(entry),
                     nexthop: nexthop_str.clone(),
                     interface: iface_str.clone(),
                 });
@@ -1102,15 +1065,7 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
         // IPv4 SPF tree
         writeln!(buf)?;
         writeln!(buf, "IS-IS paths to {} routers that speak IP", level_long)?;
-        write_spf_tree(
-            &mut buf,
-            isis,
-            level,
-            &local_sys_id,
-            spf_result,
-            false,
-            false,
-        )?;
+        write_spf_tree::<V4>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
 
         // IPv4 RIB
         writeln!(buf)?;
@@ -1128,21 +1083,13 @@ fn write_show_isis_route_text(isis: &Isis) -> std::result::Result<String, std::f
                 level_long
             )?;
             if let Some(mt2_spf) = isis.mt2_spf_result.get(level).as_ref() {
-                write_spf_tree(&mut buf, isis, level, &local_sys_id, mt2_spf, true, true)?;
+                write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, mt2_spf, true)?;
             } else {
                 writeln!(buf, "  (MT 2 SPF not computed yet)")?;
             }
         } else {
             writeln!(buf, "IS-IS paths to {} routers that speak IPv6", level_long)?;
-            write_spf_tree(
-                &mut buf,
-                isis,
-                level,
-                &local_sys_id,
-                spf_result,
-                true,
-                false,
-            )?;
+            write_spf_tree::<V6>(&mut buf, isis, level, &local_sys_id, spf_result, false)?;
         }
 
         // IPv6 RIB
@@ -1335,16 +1282,18 @@ fn ifname_for_neighbor(isis: &Isis, level: &Level, sys_id: &IsisSysId) -> String
     String::from("-")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_spf_tree(
+fn write_spf_tree<F>(
     buf: &mut String,
     isis: &Isis,
     level: &Level,
     local_sys_id: &IsisSysId,
     spf_result: &std::collections::BTreeMap<usize, spf::Path>,
-    ipv6: bool,
     mt2_mode: bool,
-) -> std::fmt::Result {
+) -> std::fmt::Result
+where
+    F: IsisRibFamilyShow,
+    F::Prefix: std::fmt::Display,
+{
     // Column widths chosen to fit the typical reference output.
     const W_VERTEX: usize = 22;
     const W_TYPE: usize = 13;
@@ -1369,16 +1318,7 @@ fn write_spf_tree(
     let total = 1 + W_VERTEX + 1 + W_TYPE + 1 + W_METRIC + 1 + W_NEXTHOP + 1 + W_INTERFACE + 1 + 8;
     writeln!(buf, " {}", "-".repeat(total - 2))?;
 
-    // For IPv6 trees in legacy single-topology mode, gate by NLPID-
-    // capable set per RFC 1195 §5 so the tree mirrors what
-    // build_rib_from_spf_v6 installs. In MT 2 mode the SPF graph is
-    // already filtered to MT-2-capable peers (TLV 229 is the
-    // stricter signal), so the NLPID gate is redundant — skip it.
-    let ipv6_capable = if ipv6 && !mt2_mode {
-        Some(ipv6_capable_set(isis.lsdb.get(level)))
-    } else {
-        None
-    };
+    let capable = F::spf_capable_set(isis, level, mt2_mode);
 
     let mut nodes: Vec<(usize, &spf::Path)> = spf_result.iter().map(|(k, v)| (*k, v)).collect();
     nodes.sort_by_key(|(_, p)| (p.cost, p.id));
@@ -1391,7 +1331,7 @@ fn write_spf_tree(
         };
         let node_sys_id = *node_sys_id;
         let is_self = node_sys_id == *local_sys_id;
-        if let Some(set) = &ipv6_capable
+        if let Some(set) = &capable
             && !set.contains(&node_sys_id)
         {
             continue;
@@ -1455,42 +1395,9 @@ fn write_spf_tree(
         }
 
         // Prefix rows hanging off this node.
-        if !ipv6 {
-            if let Some(entries) = isis.reach_map.get(level).get(&Afi::Ip).get(&node_sys_id) {
-                for entry in entries.iter() {
-                    let type_str = if is_self { "IP internal" } else { "IP TE" };
-                    let total_metric = path.cost + entry.metric;
-                    let (nh, iface) = if is_self {
-                        (String::new(), String::new())
-                    } else {
-                        (nexthop_str.clone(), iface_str.clone())
-                    };
-                    writeln!(
-                        buf,
-                        " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
-                        entry.prefix.trunc().to_string(),
-                        type_str,
-                        total_metric,
-                        nh,
-                        iface,
-                        node_hostname,
-                        wv = W_VERTEX,
-                        wt = W_TYPE,
-                        wm = W_METRIC,
-                        wn = W_NEXTHOP,
-                        wi = W_INTERFACE,
-                    )?;
-                }
-            }
-        } else if let Some(entries) = (if mt2_mode {
-            isis.mt2_reach_map_v6.get(level)
-        } else {
-            isis.reach_map_v6.get(level)
-        })
-        .get(&node_sys_id)
-        {
+        if let Some(entries) = F::reach_entries_show(isis, level, &node_sys_id, mt2_mode) {
             for entry in entries.iter() {
-                let total_metric = path.cost + entry.metric;
+                let total_metric = path.cost + F::entry_metric(entry);
                 let (nh, iface) = if is_self {
                     (String::new(), String::new())
                 } else {
@@ -1499,8 +1406,8 @@ fn write_spf_tree(
                 writeln!(
                     buf,
                     " {:<wv$} {:<wt$} {:<wm$} {:<wn$} {:<wi$} {}(0)",
-                    entry.prefix.trunc().to_string(),
-                    "IP6 internal",
+                    F::trunc_prefix(F::entry_prefix(entry)).to_string(),
+                    F::spf_prefix_type(is_self),
                     total_metric,
                     nh,
                     iface,
@@ -1599,6 +1506,35 @@ trait IsisRibFamilyShow: IsisRibFamily {
         level: &Level,
         nhop: &SpfNexthop<Self>,
     ) -> std::fmt::Result;
+    /// Node gate for the SPF-tree renderers: the set of nodes capable
+    /// of this family, or None for no gating. Only the legacy
+    /// single-topology IPv6 tree gates (RFC 1195 §5 NLPID set,
+    /// mirroring what build_rib_from_spf installs) — in MT 2 mode the
+    /// SPF graph is already filtered to MT-2-capable peers (TLV 229
+    /// is the stricter signal), and IPv4 trees never gate.
+    fn spf_capable_set(isis: &Isis, level: &Level, mt2_mode: bool) -> Option<BTreeSet<IsisSysId>>;
+    /// Reach-map lookup for the SPF-tree renderers — the `&Isis`
+    /// sibling of `IsisRibFamily::reach_entries`, which takes the
+    /// event-scoped `IsisTop`.
+    fn reach_entries_show<'a>(
+        isis: &'a Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Option<&'a Vec<Self::Entry>>;
+    /// "Type" column / field for a prefix row in the SPF tree.
+    fn spf_prefix_type(is_self: bool) -> &'static str;
+    /// Family tag in JSON rows.
+    const FAMILY: &'static str;
+    /// Per-level IS-IS RIB for this family.
+    fn rib<'a>(isis: &'a Isis, level: &Level) -> &'a PrefixMap<Self::Prefix, SpfRoute<Self>>;
+    /// Repair-path egress address, rendered.
+    fn backup_addr_str(backup: &Self::Backup) -> String;
+    /// Repair-path egress ifindex.
+    fn backup_ifindex(backup: &Self::Backup) -> u32;
+    /// Repair-path SR segments as JSON rows (label stack for SR-MPLS,
+    /// SID list for SRv6).
+    fn backup_segments_json(backup: &Self::Backup) -> Vec<RepairSegmentJson>;
 }
 
 impl IsisRibFamilyShow for V4 {
@@ -1650,6 +1586,45 @@ impl IsisRibFamilyShow for V4 {
         }
         Ok(())
     }
+    fn spf_capable_set(
+        _isis: &Isis,
+        _level: &Level,
+        _mt2_mode: bool,
+    ) -> Option<BTreeSet<IsisSysId>> {
+        None
+    }
+    fn reach_entries_show<'a>(
+        isis: &'a Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        _mt2_mode: bool,
+    ) -> Option<&'a Vec<Self::Entry>> {
+        isis.reach_map.get(level).get(&Afi::Ip).get(sys_id)
+    }
+    fn spf_prefix_type(is_self: bool) -> &'static str {
+        if is_self { "IP internal" } else { "IP TE" }
+    }
+    const FAMILY: &'static str = "ipv4";
+    fn rib<'a>(isis: &'a Isis, level: &Level) -> &'a PrefixMap<Self::Prefix, SpfRoute<Self>> {
+        isis.rib.get(level)
+    }
+    fn backup_addr_str(backup: &RepairPathMpls) -> String {
+        backup.addr.to_string()
+    }
+    fn backup_ifindex(backup: &RepairPathMpls) -> u32 {
+        backup.ifindex
+    }
+    fn backup_segments_json(backup: &RepairPathMpls) -> Vec<RepairSegmentJson> {
+        backup
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(idx, label)| RepairSegmentJson {
+                kind: mpls_segment_kind(idx),
+                value: label_value_str(label),
+            })
+            .collect()
+    }
 }
 
 impl IsisRibFamilyShow for V6 {
@@ -1683,6 +1658,45 @@ impl IsisRibFamilyShow for V6 {
             write_isis_backup_v6_detail(buf, isis, level, backup)?;
         }
         Ok(())
+    }
+    fn spf_capable_set(isis: &Isis, level: &Level, mt2_mode: bool) -> Option<BTreeSet<IsisSysId>> {
+        (!mt2_mode).then(|| ipv6_capable_set(isis.lsdb.get(level)))
+    }
+    fn reach_entries_show<'a>(
+        isis: &'a Isis,
+        level: &Level,
+        sys_id: &IsisSysId,
+        mt2_mode: bool,
+    ) -> Option<&'a Vec<Self::Entry>> {
+        if mt2_mode {
+            isis.mt2_reach_map_v6.get(level).get(sys_id)
+        } else {
+            isis.reach_map_v6.get(level).get(sys_id)
+        }
+    }
+    fn spf_prefix_type(_is_self: bool) -> &'static str {
+        "IP6 internal"
+    }
+    const FAMILY: &'static str = "ipv6";
+    fn rib<'a>(isis: &'a Isis, level: &Level) -> &'a PrefixMap<Self::Prefix, SpfRoute<Self>> {
+        isis.rib_v6.get(level)
+    }
+    fn backup_addr_str(backup: &RepairPathSrv6) -> String {
+        backup.addr.to_string()
+    }
+    fn backup_ifindex(backup: &RepairPathSrv6) -> u32 {
+        backup.ifindex
+    }
+    fn backup_segments_json(backup: &RepairPathSrv6) -> Vec<RepairSegmentJson> {
+        backup
+            .segs
+            .iter()
+            .enumerate()
+            .map(|(idx, seg)| RepairSegmentJson {
+                kind: srv6_segment_kind(idx),
+                value: seg.to_string(),
+            })
+            .collect()
     }
 }
 
@@ -2549,67 +2563,38 @@ fn label_value_str(label: &crate::rib::Label) -> String {
     }
 }
 
+fn collect_repair_rows_family<F>(isis: &Isis, level: &Level, rows: &mut Vec<RepairRowJson>)
+where
+    F: IsisRibFamilyShow,
+    F::Prefix: std::fmt::Display,
+    F::Addr: std::fmt::Display,
+{
+    for (prefix, route) in F::rib(isis, level).iter() {
+        for (addr, nhop) in route.nhops.iter() {
+            let Some(backup) = nhop.backup.as_ref() else {
+                continue;
+            };
+            rows.push(RepairRowJson {
+                level: format!("{level:?}"),
+                family: F::FAMILY,
+                prefix: prefix.to_string(),
+                primary_nexthop: addr.to_string(),
+                primary_ifindex: nhop.ifindex,
+                primary_metric: route.metric,
+                repair_nexthop: F::backup_addr_str(backup),
+                repair_ifindex: F::backup_ifindex(backup),
+                repair_metric: route.metric.saturating_add(1),
+                segments: F::backup_segments_json(backup),
+            });
+        }
+    }
+}
+
 fn collect_repair_rows(isis: &Isis) -> Vec<RepairRowJson> {
     let mut rows = Vec::new();
     for level in [Level::L1, Level::L2] {
-        let v4: &PrefixMap<Ipv4Net, SpfRoute<V4>> = isis.rib.get(&level);
-        for (prefix, route) in v4.iter() {
-            for (addr, nhop) in route.nhops.iter() {
-                let Some(backup) = nhop.backup.as_ref() else {
-                    continue;
-                };
-                let segments = backup
-                    .labels
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, label)| RepairSegmentJson {
-                        kind: mpls_segment_kind(idx),
-                        value: label_value_str(label),
-                    })
-                    .collect();
-                rows.push(RepairRowJson {
-                    level: format!("{level:?}"),
-                    family: "ipv4",
-                    prefix: prefix.to_string(),
-                    primary_nexthop: addr.to_string(),
-                    primary_ifindex: nhop.ifindex,
-                    primary_metric: route.metric,
-                    repair_nexthop: backup.addr.to_string(),
-                    repair_ifindex: backup.ifindex,
-                    repair_metric: route.metric.saturating_add(1),
-                    segments,
-                });
-            }
-        }
-        let v6: &PrefixMap<Ipv6Net, SpfRoute<V6>> = isis.rib_v6.get(&level);
-        for (prefix, route) in v6.iter() {
-            for (addr, nhop) in route.nhops.iter() {
-                let Some(backup) = nhop.backup.as_ref() else {
-                    continue;
-                };
-                let segments = backup
-                    .segs
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, seg)| RepairSegmentJson {
-                        kind: srv6_segment_kind(idx),
-                        value: seg.to_string(),
-                    })
-                    .collect();
-                rows.push(RepairRowJson {
-                    level: format!("{level:?}"),
-                    family: "ipv6",
-                    prefix: prefix.to_string(),
-                    primary_nexthop: addr.to_string(),
-                    primary_ifindex: nhop.ifindex,
-                    primary_metric: route.metric,
-                    repair_nexthop: backup.addr.to_string(),
-                    repair_ifindex: backup.ifindex,
-                    repair_metric: route.metric.saturating_add(1),
-                    segments,
-                });
-            }
-        }
+        collect_repair_rows_family::<V4>(isis, &level, &mut rows);
+        collect_repair_rows_family::<V6>(isis, &level, &mut rows);
     }
     rows
 }
