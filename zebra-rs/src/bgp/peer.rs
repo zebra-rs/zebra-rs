@@ -1412,11 +1412,17 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     }
 }
 
-fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMap) {
+fn fsm_effect(
+    id: usize,
+    effect: FsmEffect,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     match effect {
         FsmEffect::None => {}
         FsmEffect::RouteUpdate(packet) => {
-            route_from_peer(id, packet, bgp, peers);
+            route_from_peer(id, packet, bgp, peers, shards);
         }
         FsmEffect::StaleExpire(_afi_safi) => {
             stale_route_withdraw(id, bgp, peers);
@@ -1427,7 +1433,13 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
     }
 }
 
-pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
+pub fn fsm(
+    bgp_ref: &mut BgpTop,
+    peer_map: &mut PeerMap,
+    id: usize,
+    event: Event,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
@@ -1456,7 +1468,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
     }
 
     // Execute side effects that need peer_map.
-    fsm_effect(id, effect, bgp_ref, peer_map);
+    fsm_effect(id, effect, bgp_ref, peer_map, shards);
 
     // Handle state-transition consequences.
     {

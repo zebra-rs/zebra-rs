@@ -2134,6 +2134,7 @@ pub fn route_ipv4_update(
         enhe_egress,
         decision,
         bgp,
+        None,
         stale,
     );
     for job in jobs {
@@ -2187,6 +2188,7 @@ pub fn route_ipv4_update_batch(
     attr: &BgpAttr,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
     stale: bool,
 ) {
     use rayon::prelude::*;
@@ -2233,6 +2235,7 @@ pub fn route_ipv4_update_batch(
             None,
             decision,
             bgp,
+            shards,
             stale,
         ));
     }
@@ -2350,6 +2353,7 @@ fn route_ipv4_update_decided(
     enhe_egress: Option<(Ipv6Addr, u32)>,
     decision: Option<PolicyDecision>,
     bgp: &mut BgpTop,
+    shards: Option<&super::shard::pool::ShardPool>,
     stale: bool,
 ) -> Vec<Ipv4AdvertiseJob> {
     let dep = match rd {
@@ -2379,27 +2383,42 @@ fn route_ipv4_update_decided(
         None => (true, false, attr.clone()),
     };
 
-    // Hand the table op (Adj-RIB-In + policy decision → intern + VPNv4
-    // transit label + Loc-RIB + best-path) to the shard; act on the
-    // returned delta.
-    let deltas = bgp.shard.handle(
-        ShardMsg::UpdateV4(ShardUpdateV4 {
-            ident: peer_ident,
-            rd,
-            nlri: nlri.clone(),
-            peer_router_id,
-            typ,
-            attr: attr.clone(),
-            label,
-            nexthop,
-            enhe_egress,
-            stale,
-            nexthop_reachable,
-            vrf_transit_only,
-            decision,
-        }),
-        bgp.central_label_alloc.as_deref_mut(),
-    );
+    // The table op (Adj-RIB-In + policy decision → intern + VPNv4 transit
+    // label + Loc-RIB + best-path).
+    let msg = ShardMsg::UpdateV4(ShardUpdateV4 {
+        ident: peer_ident,
+        rd,
+        nlri: nlri.clone(),
+        peer_router_id,
+        typ,
+        attr: attr.clone(),
+        label,
+        nexthop,
+        enhe_egress,
+        stale,
+        nexthop_reachable,
+        vrf_transit_only,
+        decision,
+    });
+
+    // N-shard (N>1): v4-unicast (rd == None) fans out to the worker pool
+    // by prefix hash; the best-path delta returns asynchronously on the
+    // event loop's result arm (`process_shard_result`), so there is no
+    // inline advertise job here. VPNv4 (rd == Some) stays on the
+    // synchronous shard — its transit label needs main's central
+    // allocator, which can't be borrowed across the thread boundary.
+    if let Some(pool) = shards
+        && rd.is_none()
+    {
+        let idx = pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr()));
+        pool.dispatch(idx, msg);
+        return Vec::new();
+    }
+
+    // N=1: synchronous dispatch + inline post-work (unchanged).
+    let deltas = bgp
+        .shard
+        .handle(msg, bgp.central_label_alloc.as_deref_mut());
 
     let mut jobs = Vec::new();
     for delta in deltas {
@@ -2506,6 +2525,44 @@ fn apply_ipv4_advertise_job(
             }
         }
     }
+}
+
+/// Reduce side of the shard pool for v4-unicast (RIB sharding N-shard
+/// B.1): apply one worker's best-path delta — NHT untrack + FIB install
+/// + advertise. This is the inline post-work of
+/// `route_ipv4_update_decided`'s delta loop, lifted out so the event loop
+/// (`process_shard_result`) can run it when ingest fanned out to a pool
+/// shard at `SHARDS > 1`. Unicast only — the pool never carries VPNv4
+/// (`rd == Some` stays on the synchronous shard), so there is no VRF
+/// import/export or transit-label work here.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn route_apply_bestpath_v4(
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    ident: usize,
+    prefix: Ipv4Nlri,
+    selected: Vec<BgpRib>,
+    replaced: Vec<BgpRib>,
+    added: Option<BgpRib>,
+    survivor_nexthops: BTreeSet<IpAddr>,
+) {
+    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+        nht_untrack_withdrawn(
+            bgp,
+            &replaced,
+            &survivor_nexthops,
+            super::nht::NhtDep::V4(prefix.prefix),
+        );
+    }
+    fib_install_v4(bgp, prefix.prefix, &selected);
+    let job = Ipv4AdvertiseJob {
+        rd: None,
+        prefix: prefix.prefix,
+        selected,
+        added,
+        replaced,
+    };
+    apply_ipv4_advertise_job(job, ident, BTreeMap::new(), bgp, peers);
 }
 
 fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {
@@ -5667,6 +5724,7 @@ pub fn route_from_peer(
     mut packet: UpdatePacket,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
 ) {
     if let Some(peer) = peers.get_by_idx(peer_id) {
         bgp_adj_in_trace!(
@@ -5713,7 +5771,15 @@ pub fn route_from_peer(
     } else if let Some(bgp_attr) = &packet.bgp_attr {
         // Plain IPv4-unicast ingest goes through the batch path, which
         // fans the per-prefix inbound-policy walk across cores (C.1).
-        route_ipv4_update_batch(peer_id, &packet.ipv4_update, bgp_attr, bgp, peers, false);
+        route_ipv4_update_batch(
+            peer_id,
+            &packet.ipv4_update,
+            bgp_attr,
+            bgp,
+            peers,
+            shards,
+            false,
+        );
     }
 
     for withdraw in packet.ipv4_withdraw.iter() {

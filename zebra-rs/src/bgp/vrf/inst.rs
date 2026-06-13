@@ -469,7 +469,9 @@ impl BgpVrf {
                     vrf_transport_v6: Some(&self.transport_v6),
                     central_label_alloc: None,
                 };
-                fsm(&mut top, &mut self.peers, ident, event);
+                // Per-VRF tasks don't drive the global shard pool (their
+                // RIB is the VRF's own); ingest stays synchronous.
+                fsm(&mut top, &mut self.peers, ident, event, None);
             }
             Message::Accept(_, _) => {
                 // Active-connect path is driven by `Event(...)` from

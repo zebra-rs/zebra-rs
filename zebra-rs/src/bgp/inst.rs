@@ -1406,7 +1406,13 @@ impl Bgp {
                     central_label_alloc: self.vrf_label_alloc.as_mut(),
                 };
 
-                fsm(&mut bgp_ref, &mut self.peers, ident, event);
+                fsm(
+                    &mut bgp_ref,
+                    &mut self.peers,
+                    ident,
+                    event,
+                    self.shards.as_ref(),
+                );
 
                 // FSM-transition tracing: compare the captured pre-FSM
                 // state with the state the FSM left the peer in.
@@ -3120,15 +3126,56 @@ impl Bgp {
     }
 
     /// Reduce side of the shard pool: act on one worker's best-path
-    /// deltas — FIB install + advertise off each [`ShardOut`]. The ingest
-    /// fan-out that produces these is wired in a following slice; for now
-    /// this is reachable only at `SHARDS > 1`.
+    /// deltas — NHT untrack + FIB install + advertise off each
+    /// [`super::shard::ShardOut`], via the same post-work the synchronous
+    /// path runs. Reachable only at `SHARDS > 1`, where v4-unicast ingest
+    /// fanned out to the pool.
     fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
+        let import_dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: Some(&import_dispatcher),
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: self.vrf_label_alloc.as_mut(),
+        };
         for out in result.out {
-            // TODO(N-shard B.1): NHT-untrack + FIB + advertise off the
-            // BestPath* delta, sharing the post-work with the synchronous
-            // path. Tracing-only until the ingest map side lands.
-            tracing::trace!(shard = result.shard, ?out, "shard best-path delta");
+            if let super::shard::ShardOut::BestPathV4 {
+                ident,
+                rd: _,
+                prefix,
+                selected,
+                replaced,
+                added,
+                survivor_nexthops,
+            } = out
+            {
+                super::route::route_apply_bestpath_v4(
+                    &mut bgp_ref,
+                    &mut self.peers,
+                    ident,
+                    prefix,
+                    selected,
+                    replaced,
+                    added,
+                    survivor_nexthops,
+                );
+            }
         }
     }
 
