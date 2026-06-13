@@ -10,6 +10,7 @@ pub mod connected;
 pub mod dynamic_neighbors;
 pub mod interface_addrs;
 pub mod interface_neighbor;
+pub mod membership;
 pub mod neighbor_group;
 pub mod peer;
 pub mod peer_key;

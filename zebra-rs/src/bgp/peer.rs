@@ -1530,11 +1530,11 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
         route_clean(id, bgp_ref, peer_map);
     }
 
-    // Maintain update-group membership across the Established
-    // boundary. Detach must run *after* route_clean so observability
-    // sees the peer leave the group only once routes have been torn
-    // down; attach runs after route_sync so the group reflects the
-    // post-sync state.
+    // Maintain update-group membership and the per-family membership
+    // index across the Established boundary. Detach must run *after*
+    // route_clean so observability sees the peer leave the group only
+    // once routes have been torn down; attach runs after route_sync
+    // so the group reflects the post-sync state.
     {
         let now_established = peer_map
             .get_by_idx(id)
@@ -1542,9 +1542,12 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
             .unwrap_or(false);
         if prev_state.is_established() && !now_established {
             super::update_group::detach(bgp_ref.update_groups, peer_map, id);
+            peer_map.membership_withdraw(id);
         } else if !prev_state.is_established() && now_established {
             super::update_group::attach(bgp_ref.update_groups, peer_map, id);
+            peer_map.membership_enroll(id);
         }
+        peer_map.debug_verify_membership();
     }
 }
 

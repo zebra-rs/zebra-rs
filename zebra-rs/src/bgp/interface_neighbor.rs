@@ -285,6 +285,12 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
                         lu_labels: None,
                     };
                     super::route::route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+                    // Update-groups live outside `PeerMap`: the
+                    // removal below purges the membership index by
+                    // construction, but the group member sets need an
+                    // explicit detach or the freed ident lingers and a
+                    // future slot reuse inherits the group.
+                    super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
                 }
                 bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
             }
