@@ -1,11 +1,12 @@
 # STAMP Phase 1.5 — Sender `SO_TIMESTAMPING` for accuracy
 
-> **Status:** rung 1 **shipped** (PR #1431, 2026-06-13). Rung 2 **plan below**, awaiting
-> review — branch `stamp-tx-errqueue`.
+> **Status:** rung 1 **shipped** (PR #1431, 2026-06-13). Rung 2 **abandoned** (2026-06-13)
+> — software TX timestamps are unavailable on veth/loopback; see §8.0. Plan kept for a
+> future real-NIC revisit.
 > **Parent docs:** [stamp-phase1-implementation-plan.md](./stamp-phase1-implementation-plan.md)
 > (the shipped measurement plane), [bfd-sbfd-stamp-xdp-offload-notes.md §9b.3](./bfd-sbfd-stamp-xdp-offload-notes.md)
 > (the accuracy ladder — rung 1 done, **rung 2** is §8 of this doc).
-> **Branches:** rung 1 `stamp-so-timestamping` (merged); rung 2 `stamp-tx-errqueue`.
+> **Branches:** rung 1 `stamp-so-timestamping` (merged); rung 2 `stamp-tx-errqueue` (not shipped).
 
 ---
 
@@ -147,6 +148,39 @@ land thin.
 ## 8. Rung 2 — TX `SO_TIMESTAMPING` + errqueue → corrected T1′
 
 > **Branch:** `stamp-tx-errqueue`. Builds on the shipped rung 1.
+
+### 8.0 Outcome: ABANDONED — no software TX timestamps on veth/loopback (2026-06-13)
+
+Rung 2 was implemented (socket TX flags, `errqueue_tx_stamp`, the
+`sender_read`-piggyback drain, the `OPT_ID==seq` join with
+`pending_tx`/fallback, counters, tests) and **compiles**, but was reverted
+before merge after an empirical finding:
+
+**`SOF_TIMESTAMPING_TX_SOFTWARE` (and `TX_SCHED`) produce no timestamp on
+`lo` or `veth`.** A direct probe on kernel 6.8 (sender socket with
+`TX_SOFTWARE | OPT_ID | OPT_TSONLY`, one UDP send, drain `MSG_ERRQUEUE`)
+returned only the `IP_RECVERR` control message (`IPPROTO_IP`/`type 11`,
+carrying the `OPT_ID` in `ee_data`) and **never an `SCM_TIMESTAMPING`
+cmsg** — on both loopback and a real `veth` pair. Software TX timestamps
+require the egress driver to call `skb_tx_timestamp()`, which virtual
+interfaces don't; `TX_SCHED` (qdisc-entry, core-generated) was also absent
+in this config.
+
+Consequence: rung 2 yields T1′ only on **real NICs** whose drivers support
+software TX timestamping. On the project's veth-based BDD/lab and on CI it
+is permanently inert (every sample hits the in-packet-T1 fallback ⇒ rung-1
+accuracy), so it is **untestable here and delivers nothing in our
+environment**. Rung 1 already captured the larger residue (`d`, the sender
+RX boundary). Decision: don't ship rung 2; keep this plan for a future
+revisit *if and when there is a real-NIC validation target*.
+
+If revisited: gate the BDD T1 assertion on real hardware only; the
+graceful fallback already makes the code safe to run where TX stamping is
+unsupported. The design below stands; only its testability was the blocker.
+
+---
+
+**Original plan (retained for the future real-NIC revisit):**
 
 ### 8.1 What it buys
 
