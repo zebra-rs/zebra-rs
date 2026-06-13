@@ -992,6 +992,8 @@ impl ConfigManager {
                                 "BGP"
                             } else if is_bfd(&paths) {
                                 "BFD"
+                            } else if is_stamp(&paths) {
+                                "STAMP"
                             } else if is_nd(&paths) {
                                 "ND"
                             } else if is_policy(&paths) {
@@ -1131,6 +1133,10 @@ fn is_bfd(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "bfd")
 }
 
+fn is_stamp(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "stamp")
+}
+
 fn is_nd(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "nd")
 }
@@ -1156,6 +1162,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "isis"
     } else if is_bfd(paths) {
         "bfd"
+    } else if is_stamp(paths) {
+        "stamp"
     } else if is_nd(paths) {
         "nd"
     } else if is_policy(paths) {
