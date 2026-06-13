@@ -173,6 +173,27 @@ pub struct UpdateGroupCounters {
     pub last_replicate_us: Option<u64>,
 }
 
+impl UpdateGroupCounters {
+    /// Fold a [`FlushJob`]'s counter deltas into the group's live
+    /// counters. Additive fields accumulate; the timing fields
+    /// overwrite when the delta carries a value.
+    pub(super) fn merge(&mut self, delta: &UpdateGroupCounters) {
+        self.policy_runs += delta.policy_runs;
+        self.policy_denials += delta.policy_denials;
+        self.messages_formatted += delta.messages_formatted;
+        self.messages_replicated += delta.messages_replicated;
+        self.bytes_formatted += delta.bytes_formatted;
+        self.split_horizon_excluded += delta.split_horizon_excluded;
+        self.llgr_excluded += delta.llgr_excluded;
+        if delta.last_format_us.is_some() {
+            self.last_format_us = delta.last_format_us;
+        }
+        if delta.last_replicate_us.is_some() {
+            self.last_replicate_us = delta.last_replicate_us;
+        }
+    }
+}
+
 /// One update-group: a signature and the peers currently sharing it.
 #[derive(Debug)]
 pub struct UpdateGroup {
@@ -497,21 +518,291 @@ fn start_adv_timer_ipv4(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u6
     })
 }
 
+/// One member's send context, snapshotted out of `PeerMap` while
+/// building a [`FlushJob`]. Detached from peer state so the job can
+/// run without borrowing the instance (and, in Phase A.2 of the
+/// sharding plan, off the main task entirely).
+pub(super) struct FlushMember {
+    pub ident: usize,
+    pub tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
+    /// RFC 8950 per-member v6 next-hop. `Some` only on IPv4-unicast
+    /// jobs whose group negotiated ENHE — the next-hop derives from
+    /// each peer's egress ifindex (`scope_id`), so it varies per
+    /// member even within one update-group and forces per-member
+    /// encoding; the canonical-bytes sharing cannot apply.
+    pub enhe_v6: Option<Ipv4MpReachNextHop>,
+    /// Member advertised the LLGR capability for this AFI/SAFI —
+    /// only such members may receive LLGR_STALE-tagged buckets
+    /// (RFC 9494 §4.3). Per-peer state, hence resolved here and
+    /// not part of the group signature.
+    pub llgr_ok: bool,
+}
+
+/// NLRI families a [`FlushJob`] can encode. `enhe_v6` carries the
+/// RFC 8950 per-member next-hop and is meaningful only for IPv4;
+/// the IPv6 impl ignores it (v6 unicast next-hops are native and
+/// ride on the bucket-key attr).
+pub(super) trait FlushNlri: Clone {
+    fn encode(
+        attr: &Arc<BgpAttr>,
+        nlris: &[Self],
+        max_packet_size: usize,
+        enhe_v6: Option<Ipv4MpReachNextHop>,
+    ) -> Vec<bytes::BytesMut>;
+}
+
+impl FlushNlri for Ipv4Nlri {
+    fn encode(
+        attr: &Arc<BgpAttr>,
+        nlris: &[Self],
+        max_packet_size: usize,
+        enhe_v6: Option<Ipv4MpReachNextHop>,
+    ) -> Vec<bytes::BytesMut> {
+        encode_ipv4_update(attr, nlris, max_packet_size, enhe_v6)
+    }
+}
+
+impl FlushNlri for Ipv6Nlri {
+    fn encode(
+        attr: &Arc<BgpAttr>,
+        nlris: &[Self],
+        max_packet_size: usize,
+        _enhe_v6: Option<Ipv4MpReachNextHop>,
+    ) -> Vec<bytes::BytesMut> {
+        encode_ipv6_update(attr, nlris, max_packet_size)
+    }
+}
+
+/// Everything one update-group flush needs, snapshotted away from
+/// instance state: the drained attr buckets, the member send
+/// contexts, and the sig-derived encode parameters. [`Self::run`] is
+/// self-contained — it borrows nothing from `Bgp` — so the flush can
+/// execute inline today and on a worker in Phase A.2 of the sharding
+/// plan (`docs/design/bgp-rib-sharding-plan.md`).
+pub(super) struct FlushJob<N> {
+    /// Bucket shape is `(attr, [(nlri, source_ident)])`.
+    pub buckets: Vec<(Arc<BgpAttr>, Vec<(N, usize)>)>,
+    pub members: Vec<FlushMember>,
+    pub max_packet_size: usize,
+    /// Group negotiated RFC 8950 ENHE (IPv4 unicast only): every
+    /// bucket is encoded per-member with that member's v6 next-hop.
+    pub enhe: bool,
+}
+
+impl<N: FlushNlri> FlushJob<N> {
+    /// Encode and send every bucket; returns the counter deltas for
+    /// the caller to merge into the group. Per attr-bucket we encode
+    /// at most:
+    /// - one **canonical** UPDATE containing every NLRI in the bucket
+    ///   (sent to members whose ident does not appear as a
+    ///   source-ident in the bucket — split-horizon clean for them);
+    /// - one **pruned** UPDATE per source-member, with that member's
+    ///   sourced NLRIs removed;
+    /// - under ENHE, one UPDATE per member (per-member next-hop).
+    ///
+    /// `messages_formatted` increments per encoded variant;
+    /// `messages_replicated` per (UPDATE, member) pair sent;
+    /// `bytes_formatted` accumulates the encoded byte counts.
+    pub fn run(self) -> UpdateGroupCounters {
+        let mut counters = UpdateGroupCounters::default();
+        for (attr, entries) in self.buckets {
+            // Members that need split-horizon pruning: any whose
+            // ident appears as a source-ident in this bucket. Common
+            // case is empty (group has no source-members for this
+            // bucket), in which case every member shares the
+            // canonical UPDATE.
+            let source_idents: BTreeSet<usize> = entries.iter().map(|(_, src)| *src).collect();
+            let pruned_members: Vec<usize> = self
+                .members
+                .iter()
+                .map(|m| m.ident)
+                .filter(|m| source_idents.contains(m))
+                .collect();
+
+            // RFC 9494 §4.3: an LLGR_STALE-tagged bucket reaches only
+            // the members that advertised the LLGR capability. The
+            // advertise path gates per-peer too, but the cache fans
+            // out per-GROUP, so a bucket enqueued for capable members
+            // must be filtered here for the rest.
+            let llgr_stale_bucket = super::route::attr_has_llgr_stale(&attr);
+
+            if self.enhe {
+                // Per-member encode: each member's v6 next-hop is its
+                // own interface link-local; canonical-bytes sharing
+                // across members would force every member onto the
+                // same LL, which would break ENHE for everyone but
+                // one peer.
+                for ctx in &self.members {
+                    if llgr_stale_bucket && !ctx.llgr_ok {
+                        counters.llgr_excluded += 1;
+                        continue;
+                    }
+                    let Some(tx) = ctx.tx.as_ref() else { continue };
+                    let Some(nh) = ctx.enhe_v6 else {
+                        // ND hasn't observed any link-local on this
+                        // peer's egress interface yet; the
+                        // operator-side address-add events haven't
+                        // reached BGP. Skip this member's flush —
+                        // we'll re-cache on the next event arrival
+                        // rather than emit a garbage next-hop.
+                        continue;
+                    };
+                    let nlris: Vec<N> = entries
+                        .iter()
+                        .filter(|(_, src)| *src != ctx.ident)
+                        .map(|(n, _)| n.clone())
+                        .collect();
+                    if nlris.is_empty() {
+                        if pruned_members.contains(&ctx.ident) {
+                            counters.split_horizon_excluded += 1;
+                        }
+                        continue;
+                    }
+                    let bytes_list = N::encode(&attr, &nlris, self.max_packet_size, Some(nh));
+                    let byte_total: usize = bytes_list.iter().map(|b| b.len()).sum();
+                    for bytes in &bytes_list {
+                        let _ = tx.send(bytes.clone());
+                    }
+                    counters.messages_formatted += bytes_list.len() as u64;
+                    counters.messages_replicated += bytes_list.len() as u64;
+                    counters.bytes_formatted += byte_total as u64;
+                    if pruned_members.contains(&ctx.ident) {
+                        counters.split_horizon_excluded += 1;
+                    }
+                }
+                continue;
+            }
+
+            // Canonical UPDATE: every NLRI in the bucket.
+            let canonical: Vec<N> = entries.iter().map(|(n, _)| n.clone()).collect();
+            let canonical_bytes = N::encode(&attr, &canonical, self.max_packet_size, None);
+            let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
+
+            // Bump per-attr-bucket counters: one formatted variant
+            // (canonical), bytes summed.
+            counters.messages_formatted += canonical_bytes.len() as u64;
+            counters.bytes_formatted += canonical_byte_total as u64;
+
+            // Send canonical to every non-pruned member.
+            for ctx in &self.members {
+                if pruned_members.contains(&ctx.ident) {
+                    continue;
+                }
+                if llgr_stale_bucket && !ctx.llgr_ok {
+                    counters.llgr_excluded += 1;
+                    continue;
+                }
+                if let Some(tx) = ctx.tx.as_ref() {
+                    for bytes in &canonical_bytes {
+                        let _ = tx.send(bytes.clone());
+                    }
+                    counters.messages_replicated += canonical_bytes.len() as u64;
+                }
+            }
+
+            // Per pruned member: encode bucket minus its sourced
+            // NLRIs, then send.
+            for prune_ident in pruned_members {
+                if llgr_stale_bucket
+                    && !self
+                        .members
+                        .iter()
+                        .find(|c| c.ident == prune_ident)
+                        .is_some_and(|c| c.llgr_ok)
+                {
+                    counters.llgr_excluded += 1;
+                    continue;
+                }
+                let nlris: Vec<N> = entries
+                    .iter()
+                    .filter(|(_, src)| *src != prune_ident)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                if nlris.is_empty() {
+                    counters.split_horizon_excluded += 1;
+                    continue;
+                }
+                let pruned_bytes = N::encode(&attr, &nlris, self.max_packet_size, None);
+                let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
+                counters.messages_formatted += pruned_bytes.len() as u64;
+                counters.bytes_formatted += pruned_byte_total as u64;
+                counters.split_horizon_excluded += 1;
+                if let Some(tx) = self
+                    .members
+                    .iter()
+                    .find(|c| c.ident == prune_ident)
+                    .and_then(|c| c.tx.as_ref())
+                {
+                    for bytes in &pruned_bytes {
+                        let _ = tx.send(bytes.clone());
+                    }
+                    counters.messages_replicated += pruned_bytes.len() as u64;
+                }
+            }
+        }
+        counters
+    }
+}
+
+/// Drain the group's IPv4 pending cache into a [`FlushJob`]: clears
+/// the debounce timer slot (the next `send_ipv4` re-arms it), drains
+/// both forward and reverse maps, and snapshots member send contexts
+/// — packet_tx clones, per-member ENHE next-hops, LLGR capability —
+/// so the job needs no peer borrow. `None` when there is nothing to
+/// flush.
+pub(super) fn build_flush_job_ipv4(
+    group: &mut UpdateGroup,
+    peers: &PeerMap,
+    interface_addrs: &super::interface_addrs::InterfaceAddrs,
+) -> Option<FlushJob<Ipv4Nlri>> {
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    group.cache_ipv4_timer = None;
+    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv4Nlri, usize)>)> = group
+        .cache_ipv4
+        .drain()
+        .map(|(attr, set)| (attr, set.into_iter().collect()))
+        .collect();
+    group.cache_ipv4_rev.clear();
+    if buckets.is_empty() {
+        return None;
+    }
+    let max_packet_size = if group.sig.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    let enhe = group.sig.extended_next_hop;
+    let members: Vec<FlushMember> = group
+        .members
+        .iter()
+        .map(|ident| {
+            let peer = peers.get_by_idx(*ident);
+            FlushMember {
+                ident: *ident,
+                tx: peer.and_then(|p| p.packet_tx.clone()),
+                enhe_v6: if enhe {
+                    peer.and_then(|p| compose_enhe_next_hop(p, interface_addrs))
+                } else {
+                    None
+                },
+                llgr_ok: peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi)),
+            }
+        })
+        .collect();
+    Some(FlushJob {
+        buckets,
+        members,
+        max_packet_size,
+        enhe,
+    })
+}
+
 /// Drain the IPv4 cache and ship UPDATEs to every member. Called
 /// from `Bgp::serve` on `Message::FlushUpdateGroupIpv4`. The flush
-/// is at-most-once per timer fire — we clear the timer slot here so
-/// the next `send_ipv4` re-arms it.
-///
-/// Per attr-bucket we encode at most:
-/// - one **canonical** UPDATE containing every NLRI in the bucket
-///   (sent to members whose ident does not appear as a source-ident
-///   in the bucket — split-horizon clean for them);
-/// - one **pruned** UPDATE per source-member, with that member's
-///   sourced NLRIs removed.
-///
-/// `messages_formatted` increments per encoded variant;
-/// `messages_replicated` per (UPDATE, member) pair sent;
-/// `bytes_formatted` accumulates the encoded byte counts.
+/// is at-most-once per timer fire — building the job clears the
+/// timer slot so the next `send_ipv4` re-arms it. Encode + send live
+/// in [`FlushJob::run`]; only the cache drain and the counter merge
+/// touch group state.
 pub fn flush_ipv4(
     update_groups: &mut UpdateGroupMap,
     peers: &mut PeerMap,
@@ -526,218 +817,11 @@ pub fn flush_ipv4(
     let Some(group) = af.group_by_id_mut(id) else {
         return;
     };
-
-    // Snapshot the cache and clear the timer slot so the next send
-    // re-arms it. Drains both forward and reverse maps; the bucket
-    // shape is `(attr, [(nlri, source_ident)])`.
-    group.cache_ipv4_timer = None;
-    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv4Nlri, usize)>)> = group
-        .cache_ipv4
-        .drain()
-        .map(|(attr, set)| (attr, set.into_iter().collect()))
-        .collect();
-    group.cache_ipv4_rev.clear();
-
-    if buckets.is_empty() {
+    let Some(job) = build_flush_job_ipv4(group, peers, interface_addrs) else {
         return;
-    }
-
-    // Snapshot member idents + their packet_tx + max-packet-size
-    // before mutating peer state; downstream sends only need the
-    // cloned tx and the size, not a peer borrow.
-    let max_packet_size = if group.sig.extended_message {
-        bgp_packet::BGP_EXTENDED_PACKET_LEN
-    } else {
-        bgp_packet::BGP_PACKET_LEN
     };
-    let enhe = group.sig.extended_next_hop;
-    let member_idents: Vec<usize> = group.members.iter().copied().collect();
-
-    // Resolve packet_tx and (when ENHE) per-member v6 next-hop up
-    // front. The next-hop derives from each peer's egress ifindex
-    // (`scope_id`), so it varies per member even within one
-    // update-group; the canonical-bytes sharing the legacy path
-    // relies on cannot apply.
-    struct MemberCtx {
-        ident: usize,
-        tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
-        enhe_v6: Option<Ipv4MpReachNextHop>,
-        /// Member advertised the LLGR capability for this AFI/SAFI —
-        /// only such members may receive LLGR_STALE-tagged buckets
-        /// (RFC 9494 §4.3). Per-peer state, hence resolved here and
-        /// not part of the group signature.
-        llgr_ok: bool,
-    }
-    let members: Vec<MemberCtx> = member_idents
-        .iter()
-        .map(|ident| {
-            let peer = peers.get_by_idx(*ident);
-            let tx = peer.and_then(|p| p.packet_tx.clone());
-            let enhe_v6 = if enhe {
-                peer.and_then(|p| compose_enhe_next_hop(p, interface_addrs))
-            } else {
-                None
-            };
-            let llgr_ok = peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi));
-            MemberCtx {
-                ident: *ident,
-                tx,
-                enhe_v6,
-                llgr_ok,
-            }
-        })
-        .collect();
-
-    for (attr, entries) in buckets {
-        // Members that need split-horizon pruning: any whose ident
-        // appears as a source-ident in this bucket. Common case is
-        // empty (group has no source-members for this bucket), in
-        // which case every member shares the canonical UPDATE.
-        let source_idents: BTreeSet<usize> = entries.iter().map(|(_, src)| *src).collect();
-        let pruned_members: Vec<usize> = member_idents
-            .iter()
-            .copied()
-            .filter(|m| source_idents.contains(m))
-            .collect();
-
-        // RFC 9494 §4.3: an LLGR_STALE-tagged bucket reaches only the
-        // members that advertised the LLGR capability. The advertise
-        // path gates per-peer too, but the cache fans out per-GROUP,
-        // so a bucket enqueued for capable members must be filtered
-        // here for the rest.
-        let llgr_stale_bucket = super::route::attr_has_llgr_stale(&attr);
-
-        if enhe {
-            // Per-member encode: each member's v6 next-hop is its own
-            // interface link-local; canonical-bytes sharing across
-            // members would force every member onto the same LL,
-            // which would break ENHE for everyone but one peer.
-            for ctx in &members {
-                if llgr_stale_bucket && !ctx.llgr_ok {
-                    if let Some(group) = af.group_by_id_mut(id) {
-                        group.counters.llgr_excluded += 1;
-                    }
-                    continue;
-                }
-                let Some(tx) = ctx.tx.as_ref() else { continue };
-                let Some(nh) = ctx.enhe_v6 else {
-                    // ND hasn't observed any link-local on this
-                    // peer's egress interface yet; the operator-side
-                    // address-add events haven't reached BGP. Skip
-                    // this member's flush — we'll re-cache on the
-                    // next event arrival rather than emit a
-                    // garbage next-hop.
-                    continue;
-                };
-                let nlris: Vec<Ipv4Nlri> = entries
-                    .iter()
-                    .filter(|(_, src)| *src != ctx.ident)
-                    .map(|(n, _)| n.clone())
-                    .collect();
-                if nlris.is_empty() {
-                    if pruned_members.contains(&ctx.ident)
-                        && let Some(group) = af.group_by_id_mut(id)
-                    {
-                        group.counters.split_horizon_excluded += 1;
-                    }
-                    continue;
-                }
-                let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, Some(nh));
-                let byte_total: usize = bytes_list.iter().map(|b| b.len()).sum();
-                for bytes in &bytes_list {
-                    let _ = tx.send(bytes.clone());
-                }
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.messages_formatted += bytes_list.len() as u64;
-                    group.counters.messages_replicated += bytes_list.len() as u64;
-                    group.counters.bytes_formatted += byte_total as u64;
-                    if pruned_members.contains(&ctx.ident) {
-                        group.counters.split_horizon_excluded += 1;
-                    }
-                }
-            }
-            continue;
-        }
-
-        // Canonical UPDATE: every NLRI in the bucket.
-        let canonical: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let canonical_bytes = encode_ipv4_update(&attr, &canonical, max_packet_size, None);
-        let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
-
-        // Bump per-attr-bucket counters: one formatted variant
-        // (canonical), bytes summed.
-        if let Some(group) = af.group_by_id_mut(id) {
-            group.counters.messages_formatted += canonical_bytes.len() as u64;
-            group.counters.bytes_formatted += canonical_byte_total as u64;
-        }
-
-        // Send canonical to every non-pruned member.
-        for ctx in &members {
-            if pruned_members.contains(&ctx.ident) {
-                continue;
-            }
-            if llgr_stale_bucket && !ctx.llgr_ok {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.llgr_excluded += 1;
-                }
-                continue;
-            }
-            if let Some(tx) = ctx.tx.as_ref() {
-                for bytes in &canonical_bytes {
-                    let _ = tx.send(bytes.clone());
-                }
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.messages_replicated += canonical_bytes.len() as u64;
-                }
-            }
-        }
-
-        // Per pruned member: encode bucket minus its sourced
-        // NLRIs, then send.
-        for prune_ident in pruned_members {
-            if llgr_stale_bucket
-                && !members
-                    .iter()
-                    .find(|c| c.ident == prune_ident)
-                    .is_some_and(|c| c.llgr_ok)
-            {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.llgr_excluded += 1;
-                }
-                continue;
-            }
-            let nlris: Vec<Ipv4Nlri> = entries
-                .iter()
-                .filter(|(_, src)| *src != prune_ident)
-                .map(|(n, _)| n.clone())
-                .collect();
-            if nlris.is_empty() {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.split_horizon_excluded += 1;
-                }
-                continue;
-            }
-            let pruned_bytes = encode_ipv4_update(&attr, &nlris, max_packet_size, None);
-            let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
-            if let Some(group) = af.group_by_id_mut(id) {
-                group.counters.messages_formatted += pruned_bytes.len() as u64;
-                group.counters.bytes_formatted += pruned_byte_total as u64;
-                group.counters.split_horizon_excluded += 1;
-            }
-            if let Some(tx) = members
-                .iter()
-                .find(|c| c.ident == prune_ident)
-                .and_then(|c| c.tx.as_ref())
-            {
-                for bytes in &pruned_bytes {
-                    let _ = tx.send(bytes.clone());
-                }
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.messages_replicated += pruned_bytes.len() as u64;
-                }
-            }
-        }
-    }
+    let deltas = job.run();
+    group.counters.merge(&deltas);
 }
 
 /// Per-peer batched encode + send. Used by the route_sync_ipv4 and
@@ -870,6 +954,50 @@ fn start_adv_timer_ipv6(tx: &mpsc::Sender<Message>, id: &UpdateGroupId, secs: u6
     })
 }
 
+/// IPv6 counterpart of [`build_flush_job_ipv4`]. No ENHE step — v6
+/// unicast next-hops are native and ride on the bucket-key attr — so
+/// `enhe` is always false and members carry no per-member next-hop.
+pub(super) fn build_flush_job_ipv6(
+    group: &mut UpdateGroup,
+    peers: &PeerMap,
+) -> Option<FlushJob<Ipv6Nlri>> {
+    let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+    group.cache_ipv6_timer = None;
+    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv6Nlri, usize)>)> = group
+        .cache_ipv6
+        .drain()
+        .map(|(attr, set)| (attr, set.into_iter().collect()))
+        .collect();
+    group.cache_ipv6_rev.clear();
+    if buckets.is_empty() {
+        return None;
+    }
+    let max_packet_size = if group.sig.extended_message {
+        bgp_packet::BGP_EXTENDED_PACKET_LEN
+    } else {
+        bgp_packet::BGP_PACKET_LEN
+    };
+    let members: Vec<FlushMember> = group
+        .members
+        .iter()
+        .map(|ident| {
+            let peer = peers.get_by_idx(*ident);
+            FlushMember {
+                ident: *ident,
+                tx: peer.and_then(|p| p.packet_tx.clone()),
+                enhe_v6: None,
+                llgr_ok: peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi)),
+            }
+        })
+        .collect();
+    Some(FlushJob {
+        buckets,
+        members,
+        max_packet_size,
+        enhe: false,
+    })
+}
+
 /// Drain the IPv6 cache and ship UPDATEs to every member. Called from
 /// `Bgp::serve` on `Message::FlushUpdateGroupIpv6`. Same canonical /
 /// split-horizon-pruned encoding as [`flush_ipv4`], minus the ENHE
@@ -883,128 +1011,11 @@ pub fn flush_ipv6(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, id: &
     let Some(group) = af.group_by_id_mut(id) else {
         return;
     };
-
-    group.cache_ipv6_timer = None;
-    let buckets: Vec<(Arc<BgpAttr>, Vec<(Ipv6Nlri, usize)>)> = group
-        .cache_ipv6
-        .drain()
-        .map(|(attr, set)| (attr, set.into_iter().collect()))
-        .collect();
-    group.cache_ipv6_rev.clear();
-    if buckets.is_empty() {
+    let Some(job) = build_flush_job_ipv6(group, peers) else {
         return;
-    }
-
-    let max_packet_size = if group.sig.extended_message {
-        bgp_packet::BGP_EXTENDED_PACKET_LEN
-    } else {
-        bgp_packet::BGP_PACKET_LEN
     };
-    let member_idents: Vec<usize> = group.members.iter().copied().collect();
-
-    struct MemberCtx {
-        ident: usize,
-        tx: Option<mpsc::UnboundedSender<bytes::BytesMut>>,
-        /// RFC 9494 §4.3 — see the `flush_ipv4` twin.
-        llgr_ok: bool,
-    }
-    let members: Vec<MemberCtx> = member_idents
-        .iter()
-        .map(|ident| {
-            let peer = peers.get_by_idx(*ident);
-            MemberCtx {
-                ident: *ident,
-                tx: peer.and_then(|p| p.packet_tx.clone()),
-                llgr_ok: peer.is_some_and(|p| p.cap_recv.llgr.contains_key(&afi_safi)),
-            }
-        })
-        .collect();
-
-    for (attr, entries) in buckets {
-        let source_idents: BTreeSet<usize> = entries.iter().map(|(_, src)| *src).collect();
-        let pruned_members: Vec<usize> = member_idents
-            .iter()
-            .copied()
-            .filter(|m| source_idents.contains(m))
-            .collect();
-
-        // RFC 9494 §4.3 — see the `flush_ipv4` twin.
-        let llgr_stale_bucket = super::route::attr_has_llgr_stale(&attr);
-
-        // Canonical UPDATE: every NLRI in the bucket, sent to members
-        // that did not source any of them.
-        let canonical: Vec<Ipv6Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
-        let canonical_bytes = encode_ipv6_update(&attr, &canonical, max_packet_size);
-        let canonical_byte_total: usize = canonical_bytes.iter().map(|b| b.len()).sum();
-        if let Some(group) = af.group_by_id_mut(id) {
-            group.counters.messages_formatted += canonical_bytes.len() as u64;
-            group.counters.bytes_formatted += canonical_byte_total as u64;
-        }
-        for ctx in &members {
-            if pruned_members.contains(&ctx.ident) {
-                continue;
-            }
-            if llgr_stale_bucket && !ctx.llgr_ok {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.llgr_excluded += 1;
-                }
-                continue;
-            }
-            if let Some(tx) = ctx.tx.as_ref() {
-                for bytes in &canonical_bytes {
-                    let _ = tx.send(bytes.clone());
-                }
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.messages_replicated += canonical_bytes.len() as u64;
-                }
-            }
-        }
-
-        // Per pruned member: the bucket minus its own sourced NLRIs.
-        for prune_ident in pruned_members {
-            if llgr_stale_bucket
-                && !members
-                    .iter()
-                    .find(|c| c.ident == prune_ident)
-                    .is_some_and(|c| c.llgr_ok)
-            {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.llgr_excluded += 1;
-                }
-                continue;
-            }
-            let nlris: Vec<Ipv6Nlri> = entries
-                .iter()
-                .filter(|(_, src)| *src != prune_ident)
-                .map(|(n, _)| n.clone())
-                .collect();
-            if nlris.is_empty() {
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.split_horizon_excluded += 1;
-                }
-                continue;
-            }
-            let pruned_bytes = encode_ipv6_update(&attr, &nlris, max_packet_size);
-            let pruned_byte_total: usize = pruned_bytes.iter().map(|b| b.len()).sum();
-            if let Some(group) = af.group_by_id_mut(id) {
-                group.counters.messages_formatted += pruned_bytes.len() as u64;
-                group.counters.bytes_formatted += pruned_byte_total as u64;
-                group.counters.split_horizon_excluded += 1;
-            }
-            if let Some(tx) = members
-                .iter()
-                .find(|c| c.ident == prune_ident)
-                .and_then(|c| c.tx.as_ref())
-            {
-                for bytes in &pruned_bytes {
-                    let _ = tx.send(bytes.clone());
-                }
-                if let Some(group) = af.group_by_id_mut(id) {
-                    group.counters.messages_replicated += pruned_bytes.len() as u64;
-                }
-            }
-        }
-    }
+    let deltas = job.run();
+    group.counters.merge(&deltas);
 }
 
 /// Encode one or more UPDATE PDUs carrying `nlris` under `attr` as
@@ -1445,5 +1456,252 @@ mod tests {
             Afi::Ip,
             Safi::Unicast
         ));
+    }
+
+    // ── FlushJob goldens (sharding plan Phase A.1) ──
+    //
+    // The job is constructed directly — no PeerMap / Bgp needed — and
+    // run() executes synchronously, so the exact bytes each member's
+    // writer channel receives are pinned against the module's own
+    // encode functions. These goldens must survive A.2 (worker
+    // offload) byte-for-byte.
+
+    use std::net::Ipv4Addr;
+
+    use bgp_packet::{As4Path, BgpNexthop, Community, CommunityValue, Med, Origin};
+
+    fn test_attr(med: u32) -> Arc<BgpAttr> {
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.aspath = Some(As4Path::from(vec![65001]));
+        attr.nexthop = Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1)));
+        attr.med = Some(Med::new(med));
+        Arc::new(attr)
+    }
+
+    fn nlri(s: &str) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        }
+    }
+
+    fn flush_member(ident: usize) -> (FlushMember, mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            FlushMember {
+                ident,
+                tx: Some(tx),
+                enhe_v6: None,
+                llgr_ok: false,
+            },
+            rx,
+        )
+    }
+
+    fn recv_all(rx: &mut mpsc::UnboundedReceiver<bytes::BytesMut>) -> Vec<bytes::BytesMut> {
+        let mut out = Vec::new();
+        while let Ok(b) = rx.try_recv() {
+            out.push(b);
+        }
+        out
+    }
+
+    /// Canonical sharing: a bucket with no member sources produces one
+    /// encoded variant whose exact bytes reach every member.
+    #[test]
+    fn flush_job_canonical_shared_bytes() {
+        let attr = test_attr(0);
+        let entries = vec![(nlri("10.0.0.1/32"), 99), (nlri("10.0.0.2/32"), 99)];
+        let (m1, mut rx1) = flush_member(1);
+        let (m2, mut rx2) = flush_member(2);
+        let job = FlushJob {
+            buckets: vec![(attr.clone(), entries.clone())],
+            members: vec![m1, m2],
+            max_packet_size: bgp_packet::BGP_PACKET_LEN,
+            enhe: false,
+        };
+        let counters = job.run();
+
+        let nlris: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let golden = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, None);
+        assert!(!golden.is_empty());
+        assert_eq!(recv_all(&mut rx1), golden);
+        assert_eq!(recv_all(&mut rx2), golden);
+
+        assert_eq!(counters.messages_formatted, golden.len() as u64);
+        assert_eq!(counters.messages_replicated, 2 * golden.len() as u64);
+        assert_eq!(
+            counters.bytes_formatted,
+            golden.iter().map(|b| b.len() as u64).sum::<u64>()
+        );
+        assert_eq!(counters.split_horizon_excluded, 0);
+        assert_eq!(counters.llgr_excluded, 0);
+    }
+
+    /// Split-horizon: a member that sourced an NLRI gets the pruned
+    /// variant (its own NLRI removed); the other member gets the
+    /// canonical bytes.
+    #[test]
+    fn flush_job_split_horizon_prunes_source() {
+        let attr = test_attr(0);
+        let entries = vec![(nlri("10.0.0.1/32"), 1), (nlri("10.0.0.2/32"), 7)];
+        let (m1, mut rx1) = flush_member(1);
+        let (m2, mut rx2) = flush_member(2);
+        let job = FlushJob {
+            buckets: vec![(attr.clone(), entries)],
+            members: vec![m1, m2],
+            max_packet_size: bgp_packet::BGP_PACKET_LEN,
+            enhe: false,
+        };
+        let counters = job.run();
+
+        let canonical = encode_ipv4_update(
+            &attr,
+            &[nlri("10.0.0.1/32"), nlri("10.0.0.2/32")],
+            bgp_packet::BGP_PACKET_LEN,
+            None,
+        );
+        let pruned = encode_ipv4_update(
+            &attr,
+            &[nlri("10.0.0.2/32")],
+            bgp_packet::BGP_PACKET_LEN,
+            None,
+        );
+        assert_eq!(recv_all(&mut rx1), pruned);
+        assert_eq!(recv_all(&mut rx2), canonical);
+        assert_eq!(counters.split_horizon_excluded, 1);
+        assert_eq!(
+            counters.messages_formatted,
+            (canonical.len() + pruned.len()) as u64
+        );
+    }
+
+    /// RFC 9494 §4.3: an LLGR_STALE bucket reaches only members that
+    /// advertised the LLGR capability.
+    #[test]
+    fn flush_job_llgr_stale_gates_incapable() {
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.aspath = Some(As4Path::from(vec![65001]));
+        attr.nexthop = Some(BgpNexthop::Ipv4(Ipv4Addr::new(192, 0, 2, 1)));
+        attr.com = Some(Community([CommunityValue::LLGR_STALE.value()].into()));
+        let attr = Arc::new(attr);
+
+        let (capable, mut rx_ok) = flush_member(1);
+        let capable = FlushMember {
+            llgr_ok: true,
+            ..capable
+        };
+        let (incapable, mut rx_no) = flush_member(2);
+
+        let job = FlushJob {
+            buckets: vec![(attr.clone(), vec![(nlri("10.0.0.1/32"), 99)])],
+            members: vec![capable, incapable],
+            max_packet_size: bgp_packet::BGP_PACKET_LEN,
+            enhe: false,
+        };
+        let counters = job.run();
+        assert!(!recv_all(&mut rx_ok).is_empty());
+        assert!(recv_all(&mut rx_no).is_empty());
+        assert_eq!(counters.llgr_excluded, 1);
+    }
+
+    /// ENHE: per-member encode with that member's own v6 next-hop; a
+    /// member with no link-local yet is skipped entirely.
+    #[test]
+    fn flush_job_enhe_per_member_next_hops() {
+        let attr = test_attr(0);
+        let nh1 = Ipv4MpReachNextHop::LinkLocal("fe80::1".parse().unwrap());
+        let nh2 = Ipv4MpReachNextHop::LinkLocal("fe80::2".parse().unwrap());
+        let (m1, mut rx1) = flush_member(1);
+        let m1 = FlushMember {
+            enhe_v6: Some(nh1),
+            ..m1
+        };
+        let (m2, mut rx2) = flush_member(2);
+        let m2 = FlushMember {
+            enhe_v6: Some(nh2),
+            ..m2
+        };
+        let (m3, mut rx3) = flush_member(3); // no link-local yet → skipped
+
+        let entries = vec![(nlri("10.0.0.1/32"), 99)];
+        let job = FlushJob {
+            buckets: vec![(attr.clone(), entries.clone())],
+            members: vec![m1, m2, m3],
+            max_packet_size: bgp_packet::BGP_PACKET_LEN,
+            enhe: true,
+        };
+        let counters = job.run();
+
+        let nlris: Vec<Ipv4Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let golden1 = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, Some(nh1));
+        let golden2 = encode_ipv4_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN, Some(nh2));
+        assert_ne!(golden1, golden2);
+        assert_eq!(recv_all(&mut rx1), golden1);
+        assert_eq!(recv_all(&mut rx2), golden2);
+        assert!(recv_all(&mut rx3).is_empty());
+        assert_eq!(
+            counters.messages_formatted,
+            (golden1.len() + golden2.len()) as u64
+        );
+        assert_eq!(counters.messages_replicated, counters.messages_formatted);
+    }
+
+    /// IPv6 jobs run the same engine; canonical bytes match the direct
+    /// MP_REACH encode.
+    #[test]
+    fn flush_job_ipv6_canonical() {
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.aspath = Some(As4Path::from(vec![65001]));
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+        let attr = Arc::new(attr);
+        let entries = vec![(
+            Ipv6Nlri {
+                id: 0,
+                prefix: "2001:db8:1::/48".parse().unwrap(),
+            },
+            99,
+        )];
+        let (m1, mut rx1) = flush_member(1);
+        let job = FlushJob {
+            buckets: vec![(attr.clone(), entries.clone())],
+            members: vec![m1],
+            max_packet_size: bgp_packet::BGP_PACKET_LEN,
+            enhe: false,
+        };
+        let counters = job.run();
+        let nlris: Vec<Ipv6Nlri> = entries.iter().map(|(n, _)| n.clone()).collect();
+        let golden = encode_ipv6_update(&attr, &nlris, bgp_packet::BGP_PACKET_LEN);
+        assert_eq!(recv_all(&mut rx1), golden);
+        assert_eq!(counters.messages_formatted, golden.len() as u64);
+    }
+
+    /// Counter merge accumulates additive fields and overwrites the
+    /// timing fields only when the delta carries one.
+    #[test]
+    fn counters_merge_accumulates() {
+        let mut base = UpdateGroupCounters {
+            messages_formatted: 1,
+            last_format_us: Some(10),
+            ..Default::default()
+        };
+        let delta = UpdateGroupCounters {
+            messages_formatted: 2,
+            messages_replicated: 3,
+            bytes_formatted: 4,
+            split_horizon_excluded: 5,
+            llgr_excluded: 6,
+            ..Default::default()
+        };
+        base.merge(&delta);
+        assert_eq!(base.messages_formatted, 3);
+        assert_eq!(base.messages_replicated, 3);
+        assert_eq!(base.bytes_formatted, 4);
+        assert_eq!(base.split_horizon_excluded, 5);
+        assert_eq!(base.llgr_excluded, 6);
+        assert_eq!(base.last_format_us, Some(10));
     }
 }
