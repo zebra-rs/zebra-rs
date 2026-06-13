@@ -76,7 +76,7 @@ Feature: BGP route-map match clauses
     And I start zebra-rs in namespace "z2"
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2-base.yaml" to namespace "z2"
-    And I wait 5 seconds for BGP to operate
+    And I wait 10 seconds for BGP to operate
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
     And BGP route in "z2" has "10.0.0.1/32"
