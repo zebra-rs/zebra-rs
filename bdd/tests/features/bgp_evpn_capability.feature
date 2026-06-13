@@ -51,3 +51,12 @@ Feature: BGP L2VPN/EVPN capability negotiation
     Given the test topology exists
     Then show command "show bgp neighbors 192.168.0.2" in namespace "z1" should contain "L2VPN EVPN: advertised and received"
     And show command "show bgp neighbors 192.168.0.1" in namespace "z2" should contain "L2VPN EVPN: advertised and received"
+
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I stop zebra-rs in namespace "z2"
+    And I delete namespace "z1"
+    And I delete namespace "z2"
+    And I delete bridge "br0"
+    Then the test environment should be clean
