@@ -52,6 +52,10 @@ impl BgpShard {
                 vec![self.best_path_delta_lu(ident, nlri, Vec::new())]
             }
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
+            ShardMsg::PolicyReplace { ident, policy } => {
+                self.set_in_policy(ident, policy);
+                Vec::new()
+            }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }
@@ -125,18 +129,29 @@ impl BgpShard {
         self.adj_in_mut(ident).add(rd, nlri.prefix, rib.clone());
 
         // RIB sharding Phase C: at N>1 the shard applies inbound policy
-        // itself, off the main task. Minimal default-permit until per-peer
-        // policy replication (`PolicyReplace`) lands — correct for the
-        // no-policy workload; configured policy is a follow-up.
+        // itself, off the main task — against the peer's replicated
+        // snapshot ([`ShardMsg::PolicyReplace`]), falling back to
+        // default-permit when none is present (no inbound policy bound, or
+        // not yet replicated).
         let decision = if compute_policy {
-            crate::bgp::route::apply_policy_net(
-                &Default::default(),
-                &Default::default(),
-                peer_router_id,
-                ipnet::IpNet::V4(nlri.prefix),
-                (*rib.attr).clone(),
-                0,
-            )
+            match self.in_policy.get(&ident) {
+                Some(p) => crate::bgp::route::apply_policy_net(
+                    &p.prefix_set,
+                    &p.policy_list,
+                    peer_router_id,
+                    ipnet::IpNet::V4(nlri.prefix),
+                    (*rib.attr).clone(),
+                    0,
+                ),
+                None => crate::bgp::route::apply_policy_net(
+                    &Default::default(),
+                    &Default::default(),
+                    peer_router_id,
+                    ipnet::IpNet::V4(nlri.prefix),
+                    (*rib.attr).clone(),
+                    0,
+                ),
+            }
         } else {
             decision
         };
@@ -573,6 +588,30 @@ mod tests {
         })
     }
 
+    /// An UPDATE that asks the shard to compute inbound policy itself
+    /// (`compute_policy: true`, no pre-computed `decision`) — the N>1 /
+    /// RouteBatch path that consults the replicated `PolicyReplace`
+    /// snapshot.
+    fn update_v4_compute(ident: usize, prefix: &str, nh: &str) -> ShardMsg {
+        let attr = attr_with_nh(nh);
+        ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident,
+            rd: None,
+            nlri: v4(prefix),
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+            typ: BgpRibType::EBGP,
+            attr,
+            label: None,
+            nexthop: None,
+            enhe_egress: None,
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: true,
+        })
+    }
+
     fn v6(s: &str) -> Ipv6Nlri {
         Ipv6Nlri {
             id: 0,
@@ -706,5 +745,51 @@ mod tests {
         // select_best_path pruned the now-empty Loc-RIB keys.
         assert!(shard.v4.0.is_empty(), "Loc-RIB emptied");
         assert!(shard.adj_in(7).is_none(), "peer's adj-in slice dropped");
+    }
+
+    #[test]
+    fn compute_policy_consults_replicated_snapshot() {
+        use super::super::InPolicy;
+        use crate::bgp::policy::{PolicyListValue, PrefixSetValue};
+
+        let mut shard = BgpShard::default();
+
+        // No snapshot ⇒ compute_policy falls back to default-permit.
+        let out = shard.handle(update_v4_compute(7, "10.0.0.0/24", "192.0.2.1"), None);
+        assert!(
+            matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.len() == 1),
+            "no snapshot ⇒ default-permit, route enters Loc-RIB"
+        );
+
+        // Replicate a deny: a prefix-set bound by name but unresolved
+        // denies every prefix (apply_policy_net: name set + object None).
+        let deny = std::sync::Arc::new(InPolicy {
+            prefix_set: PrefixSetValue {
+                name: Some("deny".into()),
+                prefix_set: None,
+            },
+            policy_list: PolicyListValue::default(),
+        });
+        shard.set_in_policy(7, Some(deny));
+        let out = shard.handle(update_v4_compute(7, "10.0.2.0/24", "192.0.2.1"), None);
+        assert!(
+            matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.is_empty()),
+            "replicated deny ⇒ route rejected from Loc-RIB"
+        );
+
+        // A peer with no snapshot is unaffected (lookup is per-ident).
+        let out = shard.handle(update_v4_compute(9, "10.0.3.0/24", "192.0.2.1"), None);
+        assert!(
+            matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.len() == 1),
+            "other peer still default-permits"
+        );
+
+        // Clearing the snapshot restores default-permit for peer 7.
+        shard.set_in_policy(7, None);
+        let out = shard.handle(update_v4_compute(7, "10.0.4.0/24", "192.0.2.1"), None);
+        assert!(
+            matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.len() == 1),
+            "cleared snapshot ⇒ default-permit again"
+        );
     }
 }

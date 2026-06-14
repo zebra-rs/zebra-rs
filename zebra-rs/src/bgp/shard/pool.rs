@@ -129,6 +129,17 @@ impl ShardPool {
         let _ = self.inboxes[idx].send(msg);
     }
 
+    /// Send a freshly-built message to **every** shard. Used for control
+    /// state that isn't prefix-scoped — notably a peer's inbound policy
+    /// snapshot, which every shard needs since one peer's prefixes hash
+    /// across all of them. `make` is called once per shard so a per-shard
+    /// payload (e.g. an `Arc` clone) stays cheap.
+    pub fn broadcast(&self, mut make: impl FnMut() -> ShardMsg) {
+        for tx in &self.inboxes {
+            let _ = tx.send(make());
+        }
+    }
+
     /// Stop every worker and join its thread (clean teardown).
     pub fn shutdown(self) {
         for tx in &self.inboxes {

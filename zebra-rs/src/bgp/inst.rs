@@ -2896,6 +2896,31 @@ impl Bgp {
             .and_then(|c| c.metric)
     }
 
+    /// Replicate a peer's resolved **inbound** policy into the shard(s)
+    /// so the shard applies the operator's real route-map / prefix-list in
+    /// `compute_policy` (RIB sharding — closes the Phase C default-permit
+    /// placeholder). Broadcast to every pool shard (a peer's prefixes hash
+    /// across all of them) at N>1, or applied to the synchronous shard at
+    /// N=1. Called on every inbound `PolicyRx` resolve, before the soft-in
+    /// replay so replayed Adj-RIB-In routes see the new policy.
+    pub(super) fn shard_replace_in_policy(&mut self, ident: usize) {
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        let snap = std::sync::Arc::new(super::shard::InPolicy {
+            prefix_set: peer.prefix_set.input.clone(),
+            policy_list: peer.policy_list.input.clone(),
+        });
+        if let Some(pool) = self.shards.as_ref() {
+            pool.broadcast(|| super::shard::ShardMsg::PolicyReplace {
+                ident,
+                policy: Some(snap.clone()),
+            });
+            return;
+        }
+        self.shard.set_in_policy(ident, Some(snap));
+    }
+
     pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
         // Two responsibilities per message: refresh the per-peer policy
         // snapshot, then trigger a soft-reconfiguration so already-
@@ -2922,7 +2947,14 @@ impl Bgp {
                 config.prefix_set = prefix_set;
 
                 match direction {
-                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Input => {
+                        // Push the new inbound policy into the shard(s)
+                        // before replaying Adj-RIB-In, so the replay
+                        // re-evaluates against it (single-relay FIFO keeps
+                        // PolicyReplace ahead of the replayed routes).
+                        self.shard_replace_in_policy(ident);
+                        super::peer::apply_soft_in_peer(self, ident);
+                    }
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
@@ -2965,7 +2997,14 @@ impl Bgp {
                 config.policy_list = policy_list;
 
                 match direction {
-                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Input => {
+                        // Push the new inbound policy into the shard(s)
+                        // before replaying Adj-RIB-In, so the replay
+                        // re-evaluates against it (single-relay FIFO keeps
+                        // PolicyReplace ahead of the replayed routes).
+                        self.shard_replace_in_policy(ident);
+                        super::peer::apply_soft_in_peer(self, ident);
+                    }
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }

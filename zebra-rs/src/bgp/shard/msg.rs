@@ -113,6 +113,17 @@ pub enum ShardMsg {
     /// request's own oneshot channel, not [`ShardOut`].
     Show(crate::config::DisplayRequest),
 
+    /// Replace (or clear, `policy = None`) a peer's inbound policy
+    /// snapshot so the shard applies the operator's real route-map /
+    /// prefix-list in `compute_policy` instead of default-permit. Pushed
+    /// by main whenever the policy actor resolves a peer's inbound policy
+    /// ([`crate::bgp::inst::Bgp::shard_replace_in_policy`]); broadcast to
+    /// every shard since a peer's prefixes hash across all of them.
+    PolicyReplace {
+        ident: usize,
+        policy: Option<std::sync::Arc<super::InPolicy>>,
+    },
+
     /// Tear the shard task down; its event loop exits on the next
     /// iteration. Used at daemon shutdown.
     Shutdown,

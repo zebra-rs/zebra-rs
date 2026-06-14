@@ -28,13 +28,13 @@ impl<T> InOuts<T> {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct PrefixSetValue {
     pub name: Option<String>,
     pub prefix_set: Option<PrefixSet>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct PolicyListValue {
     pub name: Option<String>,
     pub policy_list: Option<PolicyList>,
