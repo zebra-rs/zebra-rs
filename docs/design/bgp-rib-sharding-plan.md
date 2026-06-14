@@ -1,7 +1,10 @@
 # BGP RIB Sharding (Juniper-style)
 
 Status: **Phase 0 + A merged; Phase B built at N=1 (sync-dispatch);
-policy-parallelism C.1/C.2 built** — Phase 0 + A merged 2026-06-12
+policy-parallelism C.1/C.2 built; N-shard dedicated-thread pool +
+RouteBatch + mimalloc built (dark behind `SHARDS=1`); Phase E.1
+(parallel advertise-outcome precompute) built** — Phase 0 + A merged
+2026-06-12
 (PRs #1402/#1406/#1408/#1416). Phase B (state partition, message
 protocol, shard) and a re-scoped Phase C (parallel policy evaluation)
 were built 2026-06-13 on a WIP branch. Two deliberate divergences from
@@ -13,7 +16,8 @@ record; §1–10 remain the original applicability analysis and design
 rationale. Open decisions §8: D1 (in-repo `bgp-bench`) and D3
 (v4/v6-unicast+LU+VPN scope) resolved as recommended; D2 (channel
 boundedness) moot under sync dispatch — there is no data channel yet;
-D4 (default shard count) deferred while the shard is still N=1.
+D4 (default shard count) deferred — the N-shard path now exists but
+ships dark behind the `SHARDS` constant (default 1).
 
 Source: "BGP RIB Sharding" — Ravindran Thangarajah, Juniper Networks,
 2022-10-24.
@@ -109,14 +113,79 @@ The win is the policy walk; the §9 baseline matrix (no policy) is a
 different workload where this parallelism barely registers — there the
 planned multi-shard / update-worker fan-out is what pays.
 
-### Still future (the plan's original Phase C)
+### Phase N-shard — dedicated-thread pool (as built, dark behind `SHARDS=1`)
 
-Multi-shard prefix-hash fan-out (planned C.1), update-worker tasks
-(planned C.2), N>1 barriers (C.3), perf matrix + default (C.4). The
-shard's clean partition + sync dispatch is the seam those build on:
-task-ify `BgpShard` behind the existing `ShardMsg` protocol, then fan out
-on `shard_of(prefix)`. The §7 ordering contract (single-relay FIFO,
-per-prefix affinity) is written for that step.
+The planned multi-shard fan-out (original C.1) is now built, but on
+**dedicated OS threads, not tokio tasks or rayon** — the rayon-per-UPDATE
+form (the re-scoped C.1/C.2 above) regressed the no-policy workload ~36 %
+(a `par_iter` tax with no policy to amortize), so the shard became a real
+thread that owns its slice end-to-end.
+
+- **`ShardPool`** (`bgp/shard/pool.rs`) spawns `SHARDS` worker threads
+  (`std::thread`), one per `BgpShard`. A worker blocks on an `mpsc`
+  inbox, runs `BgpShard::handle(msg, None)`, and ships a `ShardResult`
+  back over a tokio `UnboundedSender`. CPU-bound work on real threads
+  keeps it off the tokio runtime and away from the I/O (reader/writer)
+  tasks.
+- **`shard_of(addr)`** = FNV-1a over the address octets `% N`
+  (deterministic, address-only) so unicast / LU / VPN rows of one prefix
+  co-locate (the Juniper invariant) with no cross-shard synchronization.
+- **Gated on `SHARDS > 1`** (`inst.rs`): at the default `SHARDS == 1`
+  nothing spawns, the synchronous `shard` field + byte-identical sync
+  path run, and the event loop's `shard_results_rx` arm stays idle — so
+  BDD and every default run traverse the proven N=1 path.
+- **RouteBatch** (`ShardMsg::RouteBatchV4`): one UPDATE's prefixes are
+  split by hash and sent as **one batch per shard** (not one message per
+  prefix), collapsing ~4M per-prefix futex wakeups to ~N.
+- **Phase C — policy in the shard** (`compute_policy: true`): the shard
+  runs inbound policy itself, removing main's `par_iter`.
+- **mimalloc** as the global allocator (`main.rs`): per-thread heaps
+  remove ~12 % of CPU an N=12 profile put in the allocator's `osq_lock`
+  (shards intern attrs / build RIB rows concurrently).
+- **Reduce** (`inst.rs::process_shard_result`): the main event loop
+  `select!`s best-path deltas and runs NHT untrack + FIB install +
+  advertise off each.
+
+**Measured (12-core, no-policy, interleaved A/B):** pre-sharding baseline
+~20 s; the rayon-policy build on this no-policy workload *regressed* to
+27.2 s (the tax above); the dedicated-thread pool at N=12 + RouteBatch +
+mimalloc converges in **16.3 s** — ~20 % below the serial baseline, the
+first build to beat it on this workload.
+
+### Phase E — parallel advertise (the reduce is the next serial point)
+
+At N>1 the shards parallelize best-path, but the **reduce**
+(`process_shard_result`) still ran the advertise — out-policy + attribute
+transform + bucketing — serially on the main thread (it passed an *empty*
+memo, so `compute_advertise_outcome` ran inline). That is exactly the C.2
+parallelism *lost* when ingest moved to the shards. The encode itself is
+already off-thread (Phase A `FlushJob` → `spawn_blocking`); Phase E moves
+the rest of egress off the serial reduce.
+
+- **E.1 (built) — parallel advertise-outcome precompute in the reduce.**
+  `route_apply_bestpath_v4_batch` runs NHT untrack + FIB install serially
+  over a whole `ShardResult`, then **`par_iter`s the per-(prefix, group)
+  out-policy + attribute transform** (`precompute_ipv4_advertise_outcomes`,
+  the C.2 routine), then applies the bucketing serially off the memos.
+  Restores C.2's parallel out-policy to the N-shard path — large on
+  policy-heavy convergence, modest on no-policy (advertise was ~6 % there).
+- **E.2+ (future) — dedicated update-worker threads.** Move the per-group
+  caches + adj-out + encode into M worker threads with static
+  group→worker affinity, fed `AdvDelta` (RTO) directly by the shards
+  (bypassing the main reduce). BIRD 3.x (a per-protocol loop pulls a
+  lockfree journal, then filters + encodes on its own thread) and GoBGP
+  (a per-peer send goroutine) are the two reference designs (§11).
+  Per-(peer, prefix) ordering holds: one prefix → one shard → one worker.
+
+### Still future
+
+N>1 barriers (planned C.3: EoR / refresh / GR-LLGR sweeps
+broadcast-and-ack), N>1 show / clear / sync scatter-gather (B.4 is still
+inline — at N>1 they read the empty main shard), `PolicyReplace`
+(per-peer policy snapshots replicated to shards — Phase C uses
+default-permit, correct only for no-configured-policy), the YANG knob
+`router bgp shards <1-64>` to replace the `SHARDS` constant, and the perf
+matrix + shipping default (planned C.4).
 
 ## 1. Verdict
 
@@ -531,3 +600,76 @@ update-worker C.2 are what this matrix is meant to capture, when built.
   per-VRF tasks (they stay single-shard; the machinery is reusable
   later), reader-direct shard dispatch (requires epochs, §7), RIB
   daemon parallelism, EVPN/flowspec/SR-Policy/BGP-LS sharding.
+
+## 11. Prior art: parallelism in BIRD 3.x and GoBGP
+
+Two other open BGP stacks were read in full — BIRD 3.3.0 (branch
+`stable-v3.3`) and GoBGP (`master`) — to place zebra-rs's design. The
+sharp question is **how each parallelizes a single BGP table's work**
+(best-path and advertise). Three different answers.
+
+### BIRD 3.3 — per-protocol / per-table loops, serial within a table
+
+BIRD 3 is a ground-up multi-threaded redesign (2.x was a single event
+loop). A configurable **thread pool** (`bird_thread_start` →
+`pthread_create`, `sysdep/unix/io-loop.c:1253`) runs **`birdloop`s**; a
+work-stealing balancer (`birdloop_balancer`, io-loop.c:832) picks up and
+migrates loops between threads. The unit of concurrency is the **loop**:
+each protocol instance gets one (`nest/proto.c:1568`) and **each routing
+table gets its own service loop** (`nest/rt-table.c:3808`).
+
+- **A single table is serialized.** All imports + best-path
+  (`rte_recalculate`) for one table run on that one loop under `RT_LOCKED`
+  (rt-table.c:2765). There is **no per-prefix sharding within a table** —
+  BIRD parallelizes *across* tables and protocols.
+- **What it makes lockless instead — the reads.** Export is a **lockfree
+  journal** (`lfjour`, rt-table.c:3856): the table loop writes deltas,
+  each protocol loop *pulls* them locklessly and runs its export filter +
+  encode **on its own loop** → egress is parallel per peer. The attribute
+  cache (RCU hash, `nest/rt-attr.c`) and the netindex prefix interning
+  (`lib/netindex.c`) are RCU/lockless so lookups never take the table
+  lock. A strict lock-domain order (`lib/locking.h`:
+  `the_bird < … < service < rtable < attrs`) prevents deadlock when a
+  protocol loop crosses into a table loop.
+
+### GoBGP — per-peer goroutines + prefix-hash *lock* sharding
+
+GoBGP recently retrofitted prefix-hash sharding — convergent with our
+design, but via locks over shared memory. Per peer there is an FSM
+goroutine plus recv + send goroutines (`pkg/server/fsm.go`); a central
+`Serve()` loop handles mostly management. `propagateUpdate`
+(`pkg/server/server.go:1222`) hashes each path to **one of 2048 bucket
+mutexes** — `farm.Hash64(family+prefix) % 2048` (server.go:112,131) —
+with a nested per-destination shard lock (`internal/pkg/table/table.go`).
+Best-path (`Destination.Calculate`) and import policy run on the **per-peer
+recv goroutine**, parallel across prefixes but *inside* the bucket lock.
+Egress encode is **parallel per-peer** (each send goroutine encodes its
+own UPDATEs).
+
+### zebra-rs — prefix-hash *ownership* sharding (shared-nothing)
+
+N dedicated threads each **own** a prefix-hash slice of the Loc-RIB — no
+shared table, **no locks** on the hot path; main↔shard is message
+passing. Best-path + inbound policy run inside the owning shard; advertise
+runs on the main reduce (Phase E.1 parallelizes its out-policy; E.2 will
+move it to update-worker threads).
+
+### The picture
+
+| | BIRD 3.3 | GoBGP | zebra-rs |
+|---|---|---|---|
+| Concurrency unit | loop (per-proto, per-table) | per-peer goroutine + 2048 lock-buckets | per-prefix-hash **owned** shard thread |
+| Single table's best-path | **serial** (one table loop) | parallel (bucket mutexes) | parallel (owned shards) |
+| RIB memory model | shared, RCU reads + domain locks | shared, 2048 bucket mutexes | **partitioned, shared-nothing** |
+| Hot-path lock cost | RCU reads lock-free; table write serial | mutex + cache-coherency per update | **none** (message passing) |
+| Egress / advertise | **parallel per-peer** (lockfree journal) | **parallel per-peer** (send goroutine) | serial reduce → E.1 parallel out-policy → E.2 workers |
+
+**Takeaways.** (1) Two mature stacks independently shard the RIB by prefix
+hash — strong validation of the direction; ours is the shared-nothing
+variant (no lock / coherency tax), which is why RouteBatch + mimalloc put
+convergence *below* the serial baseline — a lock-based design rarely beats
+its own baseline. (2) Both BIRD 3 and GoBGP parallelize **egress per-peer**;
+we don't yet — that is Phase E, now validated from two directions. (3)
+BIRD 3's RCU attribute cache / netindex is the reference for our
+cross-shard interning question: at large N, either duplicate the intern
+table per shard (memory) or share one behind RCU/lockfree (BIRD's choice).
