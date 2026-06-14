@@ -2520,6 +2520,26 @@ impl Bgp {
     /// VRF dataplane install is triggered.
     fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
         use super::nht::NhtDep;
+        // At N>1, v4-unicast deps live in the pool shard (v6 / LU / VPN
+        // stay on the synchronous `self.shard`). Dispatch the re-eval to
+        // the owning pool shard — its `BestPathV4` delta drives FIB +
+        // re-advertise through the reduce (`process_shard_result`). Without
+        // this, a route held pending next-hop resolution in a pool shard is
+        // never released (its `set_nexthop_reachable` only ever ran on the
+        // empty `self.shard`).
+        if let NhtDep::V4(p) = &dep
+            && let Some(pool) = self.shards.as_ref()
+        {
+            pool.dispatch(
+                pool.shard_of(std::net::IpAddr::V4(p.addr())),
+                super::shard::ShardMsg::NexthopReachableV4 {
+                    nlri: bgp_packet::Ipv4Nlri { id: 0, prefix: *p },
+                    nh,
+                    reachable,
+                },
+            );
+            return;
+        }
         // Refresh gate flags + re-select (mutates `local_rib`).
         let selected = match &dep {
             NhtDep::V4(p) => {

@@ -124,6 +124,20 @@ pub enum ShardMsg {
         policy: Option<std::sync::Arc<super::InPolicy>>,
     },
 
+    /// Re-evaluate one IPv4-unicast prefix after its next-hop's
+    /// reachability flipped (`RibRx::NexthopUpdate`). The owning shard
+    /// refreshes the gate flag and re-runs best-path WITHOUT removing the
+    /// row, then replies with the [`ShardOut::BestPathV4`] delta so the
+    /// reduce reconciles the FIB + re-advertises. Without this, a route
+    /// held pending next-hop resolution in a pool shard is never released.
+    /// v4-unicast only — v6 / LU / VPN re-evals stay on the synchronous
+    /// shard (they aren't fanned out to the pool).
+    NexthopReachableV4 {
+        nlri: Ipv4Nlri,
+        nh: IpAddr,
+        reachable: bool,
+    },
+
     /// Tear the shard task down; its event loop exits on the next
     /// iteration. Used at daemon shutdown.
     Shutdown,

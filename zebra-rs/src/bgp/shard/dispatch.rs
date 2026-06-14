@@ -56,6 +56,11 @@ impl BgpShard {
                 self.set_in_policy(ident, policy);
                 Vec::new()
             }
+            ShardMsg::NexthopReachableV4 {
+                nlri,
+                nh,
+                reachable,
+            } => self.reeval_nexthop_v4(nlri, nh, reachable),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }
@@ -229,6 +234,32 @@ impl BgpShard {
             added: None,
             survivor_nexthops,
         }
+    }
+
+    /// Re-evaluate one IPv4-unicast prefix after its next-hop's
+    /// reachability flipped: refresh the gate flag and re-run best-path
+    /// WITHOUT removing the row, then report the delta (RIB sharding — the
+    /// pool-shard half of `Bgp::nht_reeval_dep` at N>1). `ident` is unused
+    /// by the reduce's advertise (it keys split-horizon off the surviving
+    /// path), so it is left 0.
+    fn reeval_nexthop_v4(
+        &mut self,
+        nlri: Ipv4Nlri,
+        nh: std::net::IpAddr,
+        reachable: bool,
+    ) -> Vec<ShardOut> {
+        self.v4.set_nexthop_reachable(nlri.prefix, nh, reachable);
+        let selected = self.select_best_path(nlri.prefix);
+        let survivor_nexthops = self.candidate_nexthops_v4(None, nlri.prefix);
+        vec![ShardOut::BestPathV4 {
+            ident: 0,
+            rd: None,
+            prefix: nlri,
+            selected,
+            replaced: Vec::new(),
+            added: None,
+            survivor_nexthops,
+        }]
     }
 
     /// Shard half of `route_ipv6_update`. Mirrors `handle_update_v4`:
