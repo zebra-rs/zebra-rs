@@ -8281,6 +8281,10 @@ pub struct PolicyDecision {
     pub weight: u32,
 }
 
+/// IPv4-unicast convenience wrapper over [`policy_list_apply_net`].
+/// Currently exercised only by unit tests — the production ingest paths
+/// call [`policy_list_apply_net`] (or the per-family helpers) directly.
+#[allow(dead_code)]
 pub fn policy_list_apply(
     policy_list: &PolicyList,
     nlri: &Ipv4Nlri,

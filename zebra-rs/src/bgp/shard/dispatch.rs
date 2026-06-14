@@ -610,9 +610,10 @@ mod tests {
     }
 
     fn attr_with_nh(nh: &str) -> BgpAttr {
-        let mut a = BgpAttr::default();
-        a.nexthop = Some(BgpNexthop::Ipv4(nh.parse().unwrap()));
-        a
+        BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(nh.parse().unwrap())),
+            ..Default::default()
+        }
     }
 
     fn update_v4(ident: usize, prefix: &str, nh: &str, permit: bool) -> ShardMsg {
@@ -630,7 +631,7 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
-            decision: permit.then(|| PolicyDecision { attr, weight: 100 }),
+            decision: permit.then_some(PolicyDecision { attr, weight: 100 }),
             compute_policy: false,
         })
     }
@@ -667,8 +668,10 @@ mod tests {
     }
 
     fn update_v6(ident: usize, prefix: &str) -> ShardMsg {
-        let mut attr = BgpAttr::default();
-        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap())),
+            ..Default::default()
+        };
         ShardMsg::UpdateV6(ShardUpdateV6 {
             ident,
             rd: None,

@@ -70,6 +70,10 @@ pub enum ShardMsg {
     /// Explicit withdraw of an IPv4 / VPNv4 prefix the peer no longer
     /// advertises (or that failed a re-check). The shard removes the
     /// Adj-RIB-In + Loc-RIB entry and replies with the best-path delta.
+    // Not yet constructed: withdraws take the synchronous-shard
+    // `bgp.shard.remove_*` path. Routing them through the pool as a
+    // message is reserved for the N>1 withdraw wiring (B.3 follow-up).
+    #[allow(dead_code)]
     WithdrawV4 {
         ident: usize,
         rd: Option<RouteDistinguisher>,
@@ -84,6 +88,7 @@ pub enum ShardMsg {
     UpdateV6(ShardUpdateV6),
 
     /// Withdraw of an IPv6 / VPNv6 prefix.
+    #[allow(dead_code)] // reserved — see WithdrawV4
     WithdrawV6 {
         ident: usize,
         rd: Option<RouteDistinguisher>,
@@ -95,9 +100,11 @@ pub enum ShardMsg {
     /// per-prefix *local* label (from its own sub-block) so a
     /// next-hop-self re-advertisement forwards via a swap ILM. Main
     /// has already stamped the MP_REACH next-hop onto `attr`.
+    #[allow(dead_code)] // reserved: LU pool dispatch not yet wired (see WithdrawV4)
     UpdateLu(ShardUpdateLu),
 
     /// Withdraw of a Labeled-Unicast prefix (v4 or v6, per `nlri`).
+    #[allow(dead_code)] // reserved — see WithdrawV4
     WithdrawLu { ident: usize, nlri: LuNlri },
 
     /// A peer left Established: the shard drops the peer's Adj-RIB-In
@@ -106,11 +113,13 @@ pub enum ShardMsg {
     /// any surviving path (another peer may now win) or signalling a
     /// withdraw (empty winners). Centralizing the sweep here closes the
     /// "new SAFI forgot a route_clean block" bug-class (#1329).
+    #[allow(dead_code)] // reserved: peer-down pool dispatch not yet wired (see WithdrawV4)
     PeerDown { ident: usize },
 
     /// Render a sharded Loc-RIB table for a `show` command — the
     /// scatter-gather half of the show split. The reply travels on the
     /// request's own oneshot channel, not [`ShardOut`].
+    #[allow(dead_code)] // reserved: the sharded show scatter-gather is not yet wired
     Show(crate::config::DisplayRequest),
 
     /// Replace (or clear, `policy = None`) a peer's inbound policy
@@ -290,6 +299,9 @@ pub enum ShardOut {
 
     /// IPv6 / VPNv6 counterpart of [`Self::BestPathV4`].
     BestPathV6 {
+        // Symmetric with `BestPathV4.ident`; the v6 reduce derives
+        // split-horizon from the surviving path, so it isn't read here.
+        #[allow(dead_code)]
         ident: usize,
         rd: Option<RouteDistinguisher>,
         prefix: Ipv6Nlri,
@@ -304,6 +316,10 @@ pub enum ShardOut {
     },
 
     /// Labeled-Unicast (v4 or v6, per `prefix`) best-path delta.
+    /// Constructed by `handle_update_lu` but not yet consumed — LU runs the
+    /// synchronous-shard path, so the reduce reads BestPathV4/V6, not this.
+    /// Reserved for when LU dispatches through the pool.
+    #[allow(dead_code)]
     BestPathLu {
         ident: usize,
         prefix: LuNlri,

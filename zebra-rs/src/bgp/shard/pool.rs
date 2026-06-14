@@ -33,6 +33,9 @@ use super::{BgpShard, ShardMsg, ShardOut};
 /// (so main can attribute results) and the best-path deltas it produced.
 #[derive(Debug)]
 pub struct ShardResult {
+    /// Set by the worker for result attribution / debug logging; main
+    /// currently processes the deltas without needing the source index.
+    #[allow(dead_code)]
     pub shard: usize,
     pub out: Vec<ShardOut>,
 }
@@ -78,6 +81,10 @@ impl ShardWorker {
 pub struct ShardPool {
     n: usize,
     inboxes: Vec<Sender<ShardMsg>>,
+    /// Joined only by `shutdown`, which the daemon doesn't call (it runs
+    /// the pool for its whole lifetime). Held so the handles aren't
+    /// dropped, and ready for a graceful-teardown path.
+    #[allow(dead_code)]
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -140,7 +147,10 @@ impl ShardPool {
         }
     }
 
-    /// Stop every worker and join its thread (clean teardown).
+    /// Stop every worker and join its thread (clean teardown). Not called
+    /// yet — the daemon runs the pool for its whole lifetime; kept for a
+    /// future graceful-shutdown path.
+    #[allow(dead_code)]
     pub fn shutdown(self) {
         for tx in &self.inboxes {
             let _ = tx.send(ShardMsg::Shutdown);
