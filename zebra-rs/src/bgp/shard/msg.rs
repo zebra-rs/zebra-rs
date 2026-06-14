@@ -295,6 +295,11 @@ pub enum ShardOut {
         prefix: Ipv6Nlri,
         selected: Vec<BgpRib>,
         replaced: Vec<BgpRib>,
+        /// VPNv6 AddPath: the just-updated candidate path with its
+        /// allocated `local_id`, advertised as one of several paths
+        /// (independent of whether it won best-path). `None` for
+        /// v6-unicast and for withdraw / peer-down deltas.
+        added: Option<BgpRib>,
         survivor_nexthops: BTreeSet<IpAddr>,
     },
 

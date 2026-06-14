@@ -324,10 +324,18 @@ impl BgpShard {
         rib.weight = decision.weight;
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
-        let (replaced, selected, _next_id) = match rd {
+        // VPNv6 AddPath: clone the candidate before it moves into the
+        // table, then stamp its allocated `local_id` after the update so
+        // main can advertise it as one of several paths.
+        let rib_addpath = rd.is_some().then(|| rib.clone());
+        let (replaced, selected, next_id) = match rd {
             Some(rd) => self.update_v6vpn(rd, nlri.prefix, rib),
             None => self.update_v6(nlri.prefix, rib),
         };
+        let added = rib_addpath.map(|mut r| {
+            r.local_id = next_id;
+            r
+        });
         let survivor_nexthops = if replaced.is_empty() {
             std::collections::BTreeSet::new()
         } else {
@@ -339,6 +347,7 @@ impl BgpShard {
             prefix: nlri,
             selected,
             replaced,
+            added,
             survivor_nexthops,
         }]
     }
@@ -368,6 +377,7 @@ impl BgpShard {
             prefix: nlri,
             selected,
             replaced: extra_replaced,
+            added: None,
             survivor_nexthops,
         }
     }

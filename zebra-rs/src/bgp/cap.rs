@@ -101,7 +101,12 @@ pub fn cap_register_recv(bgp_cap: &BgpCap, cap_map: &mut CapAfiMap) {
 pub fn addpath_send_implemented(afi: Afi, safi: Safi) -> bool {
     matches!(
         (afi, safi),
-        (Afi::Ip, Safi::Unicast) | (Afi::Ip, Safi::MplsVpn)
+        (Afi::Ip, Safi::Unicast)
+            | (Afi::Ip, Safi::MplsVpn)
+            | (Afi::Ip6, Safi::MplsVpn)
+            | (Afi::L2vpn, Safi::Evpn)
+            | (Afi::Ip, Safi::MplsLabel)
+            | (Afi::Ip6, Safi::MplsLabel)
     )
 }
 
@@ -176,9 +181,9 @@ mod tests {
         // Implemented families negotiate send.
         assert!(opt.is_add_path_send(Afi::Ip, Safi::Unicast));
         assert!(opt.is_add_path_send(Afi::Ip, Safi::MplsVpn));
+        assert!(opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn));
         // Unimplemented families are masked to receive-only.
         assert!(!opt.is_add_path_send(Afi::Ip6, Safi::Unicast));
-        assert!(!opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn));
         // Receive negotiates for every family (parsing is generic).
         for (afi, safi) in [
             (Afi::Ip, Safi::Unicast),
@@ -194,25 +199,38 @@ mod tests {
         }
     }
 
-    /// The supported-set itself, pinned: exactly IPv4 unicast + VPNv4
-    /// today. Growing it is deliberate — it must come WITH the
-    /// per-candidate advertise/withdraw twins for the new family.
+    /// The supported-set itself, pinned. Growing it is deliberate —
+    /// each family must be added WITH its per-candidate
+    /// advertise/withdraw twins (VPNv6, EVPN, and labeled-unicast v4/v6
+    /// each landed alongside theirs). IPv6 unicast is the remaining
+    /// unicast family (separate group-cache shape); RTC is the one
+    /// family that stays excluded by design (its NLRI carry no per-path
+    /// semantics).
     #[test]
-    fn addpath_send_implemented_set_is_v4_unicast_and_vpnv4() {
-        assert!(addpath_send_implemented(Afi::Ip, Safi::Unicast));
-        assert!(addpath_send_implemented(Afi::Ip, Safi::MplsVpn));
+    fn addpath_send_implemented_set() {
         for (afi, safi) in [
-            (Afi::Ip6, Safi::Unicast),
+            (Afi::Ip, Safi::Unicast),
+            (Afi::Ip, Safi::MplsVpn),
             (Afi::Ip6, Safi::MplsVpn),
             (Afi::L2vpn, Safi::Evpn),
             (Afi::Ip, Safi::MplsLabel),
             (Afi::Ip6, Safi::MplsLabel),
+        ] {
+            assert!(
+                addpath_send_implemented(afi, safi),
+                "{afi} {safi} has a per-path advertise pipeline"
+            );
+        }
+        for (afi, safi) in [
+            (Afi::Ip6, Safi::Unicast),
             (Afi::Ip, Safi::Flowspec),
             (Afi::Ip6, Safi::Flowspec),
+            (Afi::Ip, Safi::Rtc),
+            (Afi::Ip6, Safi::Rtc),
         ] {
             assert!(
                 !addpath_send_implemented(afi, safi),
-                "{afi} {safi} has no per-path advertise pipeline"
+                "{afi} {safi} has no per-path advertise pipeline yet"
             );
         }
     }

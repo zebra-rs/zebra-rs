@@ -400,3 +400,66 @@ entirely with the membership-index snapshots
 (`established_idents` / `established_plain_idents` /
 `established_addpath_idents`), so the table's line numbers and
 "AddPath handling" column describe the pre-refactor code.
+
+## 10. AddPath Send completion (B3 follow-through)
+
+B3 was first contained by *masking*: `addpath_send_implemented()`
+refused to negotiate AddPath Send for any family without a
+per-candidate advertise/withdraw twin (originally v4-unicast + VPNv4
+only). The follow-through is to *build* the twins so AddPath Send is
+supported everywhere it's meaningful. Target: every advertise family
+**except RTC** (`(Ip|Ip6, Rtc)` — Route Target Constraint NLRI carry
+no per-path semantics).
+
+**Invariant:** a family joins the `addpath_send_implemented()`
+allowlist in the SAME change that adds its twin — never before, or B3
+reopens (RFC 7911 §3 binds every NLRI of a negotiated family to a
+path-id, so a half-wired family emits malformed/ineffective
+withdraws).
+
+Each family follows the proven v4/VPNv4 twin shape:
+- split the existing best-path advertise to `established_plain_idents`;
+- add a per-candidate reach twin over `established_addpath_idents`
+  (one call per changed path, NLRI stamped `id = rib.local_id`);
+- add a withdraw twin keyed on `removed.local_id`;
+- wire both into the family's update / withdraw (and soft-out, where
+  one exists) call sites — clone the inbound `rib` before it moves
+  into the Loc-RIB `update`, carry `next_id`.
+
+Per-family status / notes:
+- **VPNv6** — DONE: `route_advertise_to_peers_vpnv6_addpath` /
+  `route_withdraw_vpnv6_addpath`; reuses `send_vpnv6` /
+  `cache_remove_vpnv6` (id rides in the NLRI, cache keys on it); no
+  soft-out path for VPNv6. Closest analog to VPNv4.
+- **EVPN** — DONE: handled by an *internal* plain/AddPath split inside
+  `route_advertise_evpn_to_peers` / `route_withdraw_evpn_to_peers` /
+  `route_soft_out_peer_table_evpn` (shared `evpn_advertise_one` /
+  `evpn_withdraw_one` helpers), so the 8 call sites are unchanged. The
+  advertise function already receives the full `selected` candidate
+  set; the withdraw enumerates the path-ids recorded in the
+  Adj-RIB-Out; the soft-out re-evaluates `cands` (all candidates) and
+  diffs at `(prefix, path-id)` granularity for AddPath members (a
+  prefix-level diff would withdraw the backup paths on every refresh).
+  Route id lives on each `EvpnRoute` variant.
+- **LU-v4 / LU-v6** — DONE: same internal plain/AddPath split inside
+  `route_advertise_to_peers_labelv4` / `…v6` (no call-site changes). LU
+  has no update-group cache, but `AdjRibOut` already carried unused
+  `v4lu` / `v6lu` tables — the AddPath path now populates them and
+  diffs the recorded path-ids against `selected` to withdraw exactly
+  the ids that fell out (selected empty ⇒ withdraw all). So the stale
+  "no Adj-RIB-Out yet" comment is now half-true: plain peers still
+  direct-send without tracking; AddPath peers track in `v4lu`/`v6lu`.
+- **IPv6-unicast** — separate family (group-cache shape like
+  v4-unicast, not the VPN per-peer cache); subsumed by B1 historically,
+  worth a twin too but not in the user's named set. The only family
+  besides RTC still without AddPath Send.
+
+Wire coverage: `@bgp_addpath_ipv4` is the first end-to-end AddPath BDD
+(two paths for one prefix arrive at the receiver). It exercises the
+shared mechanism (membership split, per-candidate fan-out, path-id
+stamping) that every family reuses. A per-family multi-path BDD is
+worthwhile but, for EVPN especially, the multi-path-of-one-NLRI case
+needs an awkward topology (same RD from two sources / a reflector with
+two cluster paths) since per-PE RDs normally make each MAC a distinct
+NLRI; deferred. Until then the family twins are control-plane-validated
+(cap negotiation + `addpath_send_implemented` unit tests + full suite).

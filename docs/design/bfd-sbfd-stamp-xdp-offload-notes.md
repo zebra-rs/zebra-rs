@@ -415,8 +415,8 @@ Before XDP, two plain-socket rungs remove most of `a`/`d` with no helper at all:
 | Rung | Mechanism | Removes | Cost |
 |---|---|---|---|
 | 0 | Phase 1 as planned (userspace stamps; min-statistics filter) | — | — |
-| 1 | `SO_TIMESTAMPING` RX software (`SCM_TIMESTAMPING` cmsg on the sender's connected socket) → kernel-stamped T4 | scheduling part of `d` | ~tens of lines, no eBPF — **recommended first follow-up after Phase 1** |
-| 2 | `SO_TIMESTAMPING` TX software + `MSG_ERRQUEUE` (`OPT_ID` keyed by seq) → corrected T1′ used in *our* math (in-packet T1 still goes out for the reflector copy) | most of `a` | moderate (errqueue plumbing, late pairing) |
+| 1 | `SO_TIMESTAMPING` RX software (`SCM_TIMESTAMPING` cmsg on the sender's connected socket) → kernel-stamped T4 | scheduling part of `d` | ~tens of lines, no eBPF — **DONE (PR #1431)**; works on veth (software RX is stack-level) |
+| 2 | `SO_TIMESTAMPING` TX software + `MSG_ERRQUEUE` (`OPT_ID` keyed by seq) → corrected T1′ used in *our* math (in-packet T1 still goes out for the reflector copy) | most of `a` | moderate (errqueue plumbing, late pairing) — **ABANDONED 2026-06-13: software TX stamps need driver `skb_tx_timestamp()`, absent on `lo`/`veth` (verified, kernel 6.8); the errqueue returns only the `IP_RECVERR`/`OPT_ID` marker, never `SCM_TIMESTAMPING`. Real-NIC only ⇒ untestable in BDD/lab. Plan kept (Phase-1.5 doc §8.0) for a real-NIC revisit.** |
 | 3 | **XDP sender-RX fastpath** (the detect-offload analog): per-session map `{count, sum, min, max, last, jitter_accum}`; program computes the full D1 math from packet fields + the offset map, `XDP_DROP`s the frame; userspace export tick reads-and-resets via a helper command | all of `d` + per-packet wakeups (scale) | helper extension; session flips to "kernel-fed" (DROP ⇒ userspace must *not* also count; on `HelperGone` revert to socket path) |
 | 4 | HW RX timestamps via metadata kfunc; PHC↔realtime mapping | driver/IRQ jitter | real NICs only — not veth/BDD (§9 environment note stands) |
 

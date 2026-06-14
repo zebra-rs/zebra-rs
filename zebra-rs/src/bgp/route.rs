@@ -3220,33 +3220,55 @@ fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
 /// without this, a quick add/remove cycle would leave a stale
 /// announce in the cache that fires after the withdraw wins on the
 /// wire.
+/// Withdraw one EVPN `(rd, prefix)` path identified by `id` from a
+/// single `peer`: drop any queued advertise from its cache, drop the
+/// Adj-RIB-Out entry, and emit the MP_UNREACH. `id == 0` is the
+/// non-AddPath sentinel (no path-id on the wire, whole-prefix
+/// Adj-RIB-Out clear); a non-zero `id` withdraws exactly that path.
+fn evpn_withdraw_one(peer: &mut Peer, rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32) {
+    let route = evpn_route_from_prefix(rd, prefix, id);
+    // Drop a queued advertise for the same route from the peer's cache
+    // so flush_evpn doesn't ship a now-stale add after the withdraw.
+    if let Some(attr) = peer.cache_evpn_rev.remove(&route)
+        && let Some(set) = peer.cache_evpn.get_mut(&attr)
+    {
+        set.remove(&route);
+        if set.is_empty() {
+            peer.cache_evpn.remove(&attr);
+        }
+    }
+    // Drop the Adj-RIB-Out entry so soft-out's baseline reflects
+    // reality — without this a follow-up policy change would think the
+    // route is still advertised and emit a redundant withdraw.
+    peer.adj_out.remove_evpn(*rd, prefix, id);
+    route_withdraw_evpn(peer, route);
+}
+
 pub fn route_withdraw_evpn_to_peers(
     rd: RouteDistinguisher,
     prefix: EvpnPrefix,
     peers: &mut PeerMap,
 ) {
-    let peer_idents: Vec<usize> = peers.established_idents(Afi::L2vpn, Safi::Evpn);
-
-    for ident in peer_idents {
+    // Non-AddPath members: a single id-less MP_UNREACH clears the prefix.
+    for ident in peers.established_plain_idents(Afi::L2vpn, Safi::Evpn) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let route = evpn_route_from_prefix(&rd, &prefix, 0);
-        // Drop a queued advertise for the same route from the peer's
-        // cache so flush_evpn doesn't ship a now-stale add after we
-        // ship the withdraw.
-        if let Some(attr) = peer.cache_evpn_rev.remove(&route)
-            && let Some(set) = peer.cache_evpn.get_mut(&attr)
-        {
-            set.remove(&route);
-            if set.is_empty() {
-                peer.cache_evpn.remove(&attr);
-            }
+        evpn_withdraw_one(peer, &rd, &prefix, 0);
+    }
+
+    // AddPath members: withdraw every path-id we advertised for this
+    // prefix (read from the Adj-RIB-Out, the record of what was sent).
+    for ident in peers.established_addpath_idents(Afi::L2vpn, Safi::Evpn) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        let ids: Vec<u32> = peer
+            .adj_out
+            .evpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&prefix))
+            .map(|cands| cands.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        for id in ids {
+            evpn_withdraw_one(peer, &rd, &prefix, id);
         }
-        // Drop the Adj-RIB-Out entry so soft-out's baseline reflects
-        // reality — without this a follow-up policy change would
-        // think the route is still advertised and emit a redundant
-        // withdraw.
-        peer.adj_out.remove_evpn(rd, &prefix, 0);
-        route_withdraw_evpn(peer, route);
     }
 }
 
@@ -3300,10 +3322,46 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
     }
 }
 
-/// Fan out an EVPN best-path selection to every peer with the
-/// `(L2vpn, Evpn)` AFI/SAFI established. Skips peers filtered by
-/// split-horizon / iBGP rules inside `route_update_evpn`. Pairs with
-/// `route_withdraw_evpn_to_peers` for the inverse direction.
+/// Advertise one EVPN candidate `rib` of `(rd, prefix)` to a single
+/// `peer`: run the split-horizon / iBGP / community gate
+/// (`route_update_evpn`, which stamps the path-id when `add_path`),
+/// the outbound policy, record the Adj-RIB-Out entry, and queue the
+/// send. Shared by the best-path (plain) and per-candidate (AddPath)
+/// fan-outs and by the EVPN soft-out. No-op when any gate rejects.
+fn evpn_advertise_one(
+    peer: &mut Peer,
+    rd: &RouteDistinguisher,
+    prefix: &EvpnPrefix,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    add_path: bool,
+) -> bool {
+    // RFC 9494 §4.3: stale routes only go to LLGR peers.
+    if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
+        return false;
+    }
+    let Some((route, attr)) = route_update_evpn(peer, rd, prefix, rib, bgp, add_path) else {
+        return false;
+    };
+    let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, rib.weight) else {
+        return false;
+    };
+    let attr = bgp.attr_store.intern(decision.attr);
+    // Record what we advertised so a later policy change can diff the
+    // Adj-RIB-Out against the Loc-RIB and withdraw what the new policy
+    // now denies. Keyed by path-id, so AddPath candidates coexist.
+    let mut adj = rib.clone();
+    adj.attr = attr.clone();
+    peer.adj_out.add_evpn(*rd, prefix.clone(), adj);
+    peer.send_evpn(route, attr, true);
+    true
+}
+
+/// Fan out an EVPN selection to every Established `(L2vpn, Evpn)` peer.
+/// Plain members receive only the best path; AddPath members receive
+/// every candidate in `selected`, each NLRI carrying its own path-id
+/// (RFC 7911 §3). Split-horizon / iBGP rules are applied per candidate
+/// inside `route_update_evpn`. Pairs with `route_withdraw_evpn_to_peers`.
 pub fn route_advertise_evpn_to_peers(
     rd: RouteDistinguisher,
     prefix: EvpnPrefix,
@@ -3315,34 +3373,18 @@ pub fn route_advertise_evpn_to_peers(
         return;
     };
 
-    let peer_idents: Vec<usize> = peers.established_idents(Afi::L2vpn, Safi::Evpn);
-
-    for ident in peer_idents {
+    // Non-AddPath members: the best path only.
+    for ident in peers.established_plain_idents(Afi::L2vpn, Safi::Evpn) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
+        evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false);
+    }
 
-        // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        if llgr_blocks_advertisement(new_best.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
-            continue;
+    // AddPath members: every candidate path, each with its path-id.
+    for ident in peers.established_addpath_idents(Afi::L2vpn, Safi::Evpn) {
+        for rib in selected {
+            let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+            evpn_advertise_one(peer, &rd, &prefix, rib, bgp, true);
         }
-        let Some((route, attr)) = route_update_evpn(peer, &rd, &prefix, new_best, bgp, add_path)
-        else {
-            continue;
-        };
-
-        let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, new_best.weight)
-        else {
-            continue;
-        };
-
-        let attr = bgp.attr_store.intern(decision.attr);
-        // Record what we advertised so a later policy change can
-        // diff the Adj-RIB-Out against the Loc-RIB and withdraw
-        // anything that the new policy now denies.
-        let mut adj = new_best.clone();
-        adj.attr = attr.clone();
-        peer.adj_out.add_evpn(rd, prefix.clone(), adj);
-        peer.send_evpn(route, attr, true);
     }
 }
 
@@ -3595,78 +3637,76 @@ fn route_soft_out_peer_table_evpn(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    // Snapshot Loc-RIB selected EVPN routes for this RD so iteration
-    // outlives later mutable borrows of `bgp` (attr_store.intern,
-    // send paths).
-    let selected: Vec<(EvpnPrefix, BgpRib)> = bgp
+    // AddPath member: re-evaluate every candidate path and diff the
+    // Adj-RIB-Out at (prefix, path-id) granularity. A plain member
+    // keeps the best-path-per-prefix shape, with the sentinel path-id 0.
+    let add_path = peers
+        .get_by_idx(peer_idx)
+        .map(|p| p.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn))
+        .unwrap_or(false);
+
+    // Snapshot the (prefix, rib) set to (re)advertise so iteration
+    // outlives later mutable borrows of `bgp` (attr_store.intern, send
+    // paths): every candidate for AddPath, best-path-per-prefix
+    // otherwise.
+    let candidates: Vec<(EvpnPrefix, BgpRib)> = bgp
         .local_rib
         .evpn
         .get(&rd)
         .map(|t| {
-            t.selected
-                .iter()
-                .map(|(p, r)| (p.clone(), r.clone()))
-                .collect()
+            if add_path {
+                t.cands
+                    .iter()
+                    .flat_map(|(p, v)| v.iter().map(move |r| (p.clone(), r.clone())))
+                    .collect()
+            } else {
+                t.selected
+                    .iter()
+                    .map(|(p, r)| (p.clone(), r.clone()))
+                    .collect()
+            }
         })
         .unwrap_or_default();
 
-    // What's currently in this peer's Adj-RIB-Out for the RD —
-    // anything in here but missing from the post-policy newly-
-    // advertised set needs a withdraw.
-    let was_advertised: BTreeSet<EvpnPrefix> = {
+    // What's currently in this peer's Adj-RIB-Out for the RD, keyed by
+    // (prefix, path-id) — anything here but missing from the post-policy
+    // newly-advertised set needs a withdraw. Plain members use the
+    // sentinel id 0 (whole-prefix); AddPath members use each advertised
+    // candidate's local_id.
+    let was_advertised: BTreeSet<(EvpnPrefix, u32)> = {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         peer.adj_out
             .evpn
             .get(&rd)
-            .map(|t| t.0.keys().cloned().collect())
+            .map(|t| {
+                if add_path {
+                    t.0.iter()
+                        .flat_map(|(p, v)| v.iter().map(move |r| (p.clone(), r.local_id)))
+                        .collect()
+                } else {
+                    t.0.keys().map(|p| (p.clone(), 0)).collect()
+                }
+            })
             .unwrap_or_default()
     };
 
-    let mut newly_advertised: BTreeSet<EvpnPrefix> = BTreeSet::new();
+    let mut newly_advertised: BTreeSet<(EvpnPrefix, u32)> = BTreeSet::new();
 
-    for (prefix, rib) in &selected {
+    for (prefix, rib) in &candidates {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(Afi::L2vpn, Safi::Evpn);
-
-        // RFC 9494 §4.3: stale routes only go to LLGR peers; falls out
-        // of `newly_advertised`, so the diff below withdraws it.
-        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::L2vpn, Safi::Evpn) {
-            continue;
+        let id = if add_path { rib.local_id } else { 0 };
+        if evpn_advertise_one(peer, &rd, prefix, rib, bgp, add_path) {
+            newly_advertised.insert((prefix.clone(), id));
         }
-        let Some((route, attr)) = route_update_evpn(peer, &rd, prefix, rib, bgp, add_path) else {
-            continue;
-        };
-        let Some(decision) = route_apply_policy_out_evpn(peer, &route, attr, rib.weight) else {
-            continue;
-        };
-        let attr = bgp.attr_store.intern(decision.attr);
-        let mut adj = rib.clone();
-        adj.attr = attr.clone();
-        peer.adj_out.add_evpn(rd, prefix.clone(), adj);
-        peer.send_evpn(route, attr, true);
-        newly_advertised.insert(prefix.clone());
     }
 
-    let to_withdraw: Vec<EvpnPrefix> = was_advertised
+    let to_withdraw: Vec<(EvpnPrefix, u32)> = was_advertised
         .difference(&newly_advertised)
         .cloned()
         .collect();
-    for prefix in to_withdraw {
+    for (prefix, id) in to_withdraw {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        let route = evpn_route_from_prefix(&rd, &prefix, 0);
-        // Drop any queued advertise so flush_evpn doesn't ship a
-        // stale add after the withdraw; mirrors the same cache
-        // drain in route_withdraw_evpn_to_peers.
-        if let Some(attr) = peer.cache_evpn_rev.remove(&route)
-            && let Some(set) = peer.cache_evpn.get_mut(&attr)
-        {
-            set.remove(&route);
-            if set.is_empty() {
-                peer.cache_evpn.remove(&attr);
-            }
-        }
-        peer.adj_out.remove_evpn(rd, &prefix, 0);
-        route_withdraw_evpn(peer, route);
+        evpn_withdraw_one(peer, &rd, &prefix, id);
     }
 }
 
@@ -4025,6 +4065,7 @@ pub fn route_ipv6_update(
             prefix,
             selected,
             replaced,
+            added,
             survivor_nexthops,
             ..
         } = delta
@@ -4076,6 +4117,12 @@ pub fn route_ipv6_update(
                 }
                 if !selected.is_empty() {
                     route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
+                }
+                // VPNv6 AddPath: advertise the just-updated candidate path
+                // itself (with its shard-allocated local_id), independent of
+                // whether it won best-path.
+                if let Some(rib_ap) = added {
+                    route_advertise_to_peers_vpnv6_addpath(rd, prefix.prefix, &rib_ap, bgp, peers);
                 }
             }
         }
@@ -4152,6 +4199,11 @@ pub fn route_ipv6_withdraw(
             // Empty `selected` → MP_UNREACH to PE peers; a replacement
             // winner → re-advertise. Both handled by the helper.
             route_advertise_to_peers_vpnv6(rd, nlri.prefix, &selected, bgp, peers);
+            // AddPath members: withdraw exactly the path that left (by
+            // its local_id); any remaining candidates stay advertised.
+            if let Some(gone) = removed.first() {
+                route_withdraw_vpnv6_addpath(rd, nlri.prefix, gone, peers);
+            }
         }
         None => {
             let removed = bgp.shard.remove_v6(nlri.prefix, nlri.id, ident);
@@ -7476,7 +7528,10 @@ pub(super) fn route_advertise_to_peers_vpnv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
 
-    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
+    // Best-path only, to the non-AddPath members. AddPath peers receive
+    // every candidate path (each with its own path-id) through
+    // [`route_advertise_to_peers_vpnv6_addpath`] instead.
+    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -7518,6 +7573,74 @@ pub(super) fn route_advertise_to_peers_vpnv6(
                 route_withdraw_vpnv6(peer, rd, prefix, 0);
             }
         }
+    }
+}
+
+/// VPNv6 AddPath twin of [`route_advertise_to_peers_vpnv6`] — the v6
+/// counterpart of the `rd.is_some()` branch of
+/// [`route_advertise_to_addpath`]. Called once per changed candidate
+/// path with that path's `rib` (its `local_id` already stamped), it
+/// advertises the path — not just the best — to every AddPath-Send
+/// member, each NLRI carrying the path-id (RFC 7911 §3). Split-horizon
+/// excludes the path's own source peer.
+pub(super) fn route_advertise_to_peers_vpnv6_addpath(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
+
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        // Split-horizon: never reflect a path back to the peer that
+        // sourced it.
+        if rib.ident == peer.ident {
+            continue;
+        }
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
+        let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
+            continue;
+        };
+        let attr = bgp.attr_store.intern(attr);
+        // RTC: skip without withdrawing when the peer's IPv6
+        // route-target constraint set doesn't admit this route.
+        if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            continue;
+        }
+        let vpnv6_nlri = Vpnv6Nlri {
+            label: rib.label.unwrap_or_default(),
+            rd,
+            nlri,
+        };
+        peer.send_vpnv6(vpnv6_nlri, attr, true);
+    }
+}
+
+/// VPNv6 AddPath withdraw twin — emit an MP_UNREACH carrying the
+/// withdrawn path's `local_id` to every AddPath-Send member, and drop
+/// the matching entry from each peer's pending cache. The other paths
+/// for the prefix stay advertised (they carry different path-ids).
+pub(super) fn route_withdraw_vpnv6_addpath(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    removed: &BgpRib,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+
+    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
+
+    for ident in peer_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        peer.cache_remove_vpnv6(rd, prefix, removed.local_id);
+        route_withdraw_vpnv6(peer, rd, prefix, removed.local_id);
     }
 }
 
@@ -7705,9 +7828,9 @@ pub(super) fn route_advertise_to_peers_labelv4(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip, Safi::MplsLabel);
 
-    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
-
-    for ident in peer_idents {
+    // Non-AddPath members: best-path only; `None` ⇒ one id-less
+    // MP_UNREACH for the prefix.
+    for ident in peers.established_plain_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
@@ -7715,9 +7838,8 @@ pub(super) fn route_advertise_to_peers_labelv4(
                 if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
                     continue;
                 }
-                let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr, nhop, label)) =
-                    route_update_labelv4(peer, &prefix, best, bgp, add_path)
+                    route_update_labelv4(peer, &prefix, best, bgp, false)
                 else {
                     continue;
                 };
@@ -7748,6 +7870,58 @@ pub(super) fn route_advertise_to_peers_labelv4(
             }
         }
     }
+
+    // AddPath members: every candidate, each NLRI carrying its path-id.
+    // LU has no update-group cache, so the per-peer LU Adj-RIB-Out
+    // (`v4lu`) is the record of what was sent — diff it against the new
+    // candidate set to withdraw exactly the path-ids that fell out
+    // (selected empty ⇒ withdraw them all).
+    for ident in peers.established_addpath_idents(afi, safi) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        let was: Vec<u32> = peer
+            .adj_out
+            .v4lu
+            .0
+            .get(&prefix)
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        let mut newly: BTreeSet<u32> = BTreeSet::new();
+        for cand in selected {
+            if cand.ident == peer.ident {
+                continue; // split-horizon
+            }
+            if llgr_blocks_advertisement(cand.stale, &peer.cap_recv, afi, safi) {
+                continue;
+            }
+            let Some((nlri, attr, nhop, label)) =
+                route_update_labelv4(peer, &prefix, cand, bgp, true)
+            else {
+                continue;
+            };
+            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            update.bgp_attr = Some(attr);
+            update.mp_update = Some(MpReachAttr::Labelv4 {
+                snpa: 0,
+                nhop,
+                updates: vec![Labelv4Nlri { label, nlri }],
+            });
+            peer.send_packet(update.into());
+            peer.adj_out.v4lu.add(prefix, cand.clone());
+            newly.insert(cand.local_id);
+        }
+        for id in was {
+            if newly.contains(&id) {
+                continue;
+            }
+            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            update.mp_withdraw = Some(MpUnreachAttr::Labelv4(vec![Labelv4Nlri {
+                label: Label::default(),
+                nlri: Ipv4Nlri { id, prefix },
+            }]));
+            peer.send_packet(update.into());
+            peer.adj_out.v4lu.remove(prefix, id);
+        }
+    }
 }
 
 /// IPv6 Labeled-Unicast (incl. 6PE) advertise — the v6 counterpart of
@@ -7761,9 +7935,9 @@ pub(super) fn route_advertise_to_peers_labelv6(
     let new_best = selected.last();
     let (afi, safi) = (Afi::Ip6, Safi::MplsLabel);
 
-    let peer_idents: Vec<usize> = peers.established_idents(afi, safi);
-
-    for ident in peer_idents {
+    // Non-AddPath members: best-path only; `None` ⇒ one id-less
+    // MP_UNREACH for the prefix.
+    for ident in peers.established_plain_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         match new_best {
             Some(best) if best.ident != peer.ident => {
@@ -7771,9 +7945,8 @@ pub(super) fn route_advertise_to_peers_labelv6(
                 if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
                     continue;
                 }
-                let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr, nhop, label)) =
-                    route_update_labelv6(peer, &prefix, best, bgp, add_path)
+                    route_update_labelv6(peer, &prefix, best, bgp, false)
                 else {
                     continue;
                 };
@@ -7803,6 +7976,56 @@ pub(super) fn route_advertise_to_peers_labelv6(
                 }]));
                 peer.send_packet(update.into());
             }
+        }
+    }
+
+    // AddPath members: every candidate with its path-id; the per-peer
+    // LU Adj-RIB-Out (`v6lu`) records what was sent so removed path-ids
+    // can be withdrawn precisely (the v6 twin of the `labelv4` path).
+    for ident in peers.established_addpath_idents(afi, safi) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        let was: Vec<u32> = peer
+            .adj_out
+            .v6lu
+            .0
+            .get(&prefix)
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        let mut newly: BTreeSet<u32> = BTreeSet::new();
+        for cand in selected {
+            if cand.ident == peer.ident {
+                continue; // split-horizon
+            }
+            if llgr_blocks_advertisement(cand.stale, &peer.cap_recv, afi, safi) {
+                continue;
+            }
+            let Some((nlri, attr, nhop, label)) =
+                route_update_labelv6(peer, &prefix, cand, bgp, true)
+            else {
+                continue;
+            };
+            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            update.bgp_attr = Some(attr);
+            update.mp_update = Some(MpReachAttr::Labelv6 {
+                snpa: 0,
+                nhop,
+                updates: vec![Labelv6Nlri { label, nlri }],
+            });
+            peer.send_packet(update.into());
+            peer.adj_out.v6lu.add(prefix, cand.clone());
+            newly.insert(cand.local_id);
+        }
+        for id in was {
+            if newly.contains(&id) {
+                continue;
+            }
+            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+            update.mp_withdraw = Some(MpUnreachAttr::Labelv6(vec![Labelv6Nlri {
+                label: Label::default(),
+                nlri: Ipv6Nlri { id, prefix },
+            }]));
+            peer.send_packet(update.into());
+            peer.adj_out.v6lu.remove(prefix, id);
         }
     }
 }
