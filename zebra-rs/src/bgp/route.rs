@@ -2255,7 +2255,7 @@ pub fn route_ipv4_update_batch(
         // fork-join when an inbound policy is bound (its prefix-set walk is
         // the work). With none, `apply_policy_in_pure` is default-permit and
         // the par_iter is pure overhead — measured +23% on a no-policy
-        // full-table load at the default SHARDS=1. Iterate serially then;
+        // full-table load at the default N=1. Iterate serially then;
         // the result is identical.
         if prefix_cfg.name.is_some() || policy_cfg.name.is_some() {
             prefixes.par_iter().map(eval).collect()
@@ -2633,7 +2633,7 @@ pub(super) fn route_apply_bestpath_v4_batch(
     // Cost-gate the parallel precompute. Its whole purpose is to fan out
     // the out-policy prefix-set walk; with no out-policy bound on any
     // advertised-to peer there is nothing expensive to amortize, and at
-    // SHARDS ≈ cores there are no spare cores — rayon's pool would only
+    // N ≈ cores there are no spare cores — rayon's pool would only
     // steal them from the (CPU-bound) shard threads doing best-path
     // (measured 3x slower on a no-policy full-table load). So parallelize
     // egress only when out-policy makes egress the bottleneck (the shards

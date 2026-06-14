@@ -364,11 +364,20 @@ pub struct RibKnownVrf {
     pub inter_as_hybrid: bool,
 }
 
-/// Number of parallel RIB shards (RIB sharding Phase C). `1` keeps the
-/// synchronous single-shard path (today's behavior, BDD-safe); `> 1`
-/// spawns that many worker threads and fans ingest out by prefix hash.
-/// TODO: replace with the `router bgp shards <1-64>` YANG knob.
-pub const SHARDS: usize = 1;
+/// Number of parallel RIB shards (RIB sharding Phase C), read once from
+/// the `ZEBRA_BGP_SHARDS` environment variable at instance construction.
+/// `1` (default, and when unset/invalid) keeps the synchronous
+/// single-shard path (BDD-safe); `> 1` spawns that many worker threads and
+/// fans ingest out by prefix hash. Startup-only — live resharding is out
+/// of scope (the pool spawns in [`Bgp::new`] before any route state). The
+/// value is clamped to `1..=64`.
+pub fn shard_count() -> usize {
+    std::env::var("ZEBRA_BGP_SHARDS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or(1)
+}
 
 pub struct Bgp {
     pub asn: u32,
@@ -476,17 +485,14 @@ pub struct Bgp {
     ///
     /// [`BgpShard::handle`]: super::shard::BgpShard::handle
     pub shard: BgpShard,
-    /// Parallel shard worker pool (RIB sharding Phase C). `None` at
-    /// [`SHARDS`]` == 1` — the synchronous `shard` field above is used and
-    /// nothing is spawned. `Some` at `SHARDS > 1`: N worker threads, each
+    /// Parallel shard worker pool (RIB sharding Phase C). `None` when
+    /// [`shard_count`]` == 1` — the synchronous `shard` field above is used
+    /// and nothing is spawned. `Some` when `> 1`: N worker threads, each
     /// owning a `BgpShard`, with the ingest fanned out by prefix hash and
     /// their best-path deltas drained on `shard_results_rx`.
-    // Held to keep the worker threads alive; the ingest fan-out that
-    // reads it (dispatch by prefix hash) lands in the next slice.
-    #[allow(dead_code)]
     pub shards: Option<super::shard::pool::ShardPool>,
     /// Merged best-path deltas from every shard worker, drained by the
-    /// event loop's `select!`. Closed and idle at `SHARDS == 1`.
+    /// event loop's `select!`. Closed and idle when `shard_count() == 1`.
     pub shard_results_rx: UnboundedReceiver<super::shard::pool::ShardResult>,
     /// `router bgp port <0-65535>`: TCP port the BGP listener binds
     /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
@@ -785,14 +791,15 @@ impl Bgp {
         // expressed later via `SrLocatorWatch` when the operator sets
         // `router bgp segment-routing srv6 locator <name>`.
         let (srv6_sr_tx, srv6_locator_rx) = mpsc::unbounded_channel();
-        // Parallel shard pool (RIB sharding Phase C). At `SHARDS == 1`
-        // (default) the synchronous `shard` field is used and no pool is
-        // spawned — dropping `shard_results_tx` here closes the channel so
-        // the event loop's drain arm stays idle. At `SHARDS > 1` the pool
+        // Parallel shard pool (RIB sharding Phase C). With `shard_count()`
+        // == 1 (default) the synchronous `shard` field is used and no pool
+        // is spawned — dropping `shard_results_tx` here closes the channel
+        // so the event loop's drain arm stays idle. With `> 1` the pool
         // spawns N worker threads and owns the sender clones.
         let (shard_results_tx, shard_results_rx) = mpsc::unbounded_channel();
-        let shards = (SHARDS > 1).then(move || {
-            let workers = (0..SHARDS).map(|_| BgpShard::default()).collect();
+        let n_shards = shard_count();
+        let shards = (n_shards > 1).then(move || {
+            let workers = (0..n_shards).map(|_| BgpShard::default()).collect();
             super::shard::pool::ShardPool::spawn(workers, shard_results_tx)
         });
         let mut bgp = Self {
@@ -3155,7 +3162,7 @@ impl Bgp {
                 }
                 Some(result) = self.shard_results_rx.recv() => {
                     // Best-path deltas from the parallel shard pool (the
-                    // map-reduce "reduce" side). Idle at SHARDS == 1 (the
+                    // map-reduce "reduce" side). Idle at N=1 (the
                     // channel is closed). The ingest "map" side that feeds
                     // it lands in the next slice.
                     self.process_shard_result(result);
@@ -3168,7 +3175,7 @@ impl Bgp {
     /// deltas — NHT untrack + FIB install per delta, then the advertise
     /// out-policy + attribute transform precomputed in parallel across the
     /// batch (Phase E.1), then serial bucketing — via the same post-work
-    /// the synchronous path runs. Reachable only at `SHARDS > 1`, where
+    /// the synchronous path runs. Reachable only at N>1, where
     /// v4-unicast ingest fanned out to the pool.
     fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
         let import_dispatcher = super::vrf::VrfImportDispatcher {
