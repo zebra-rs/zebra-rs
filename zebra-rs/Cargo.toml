@@ -13,6 +13,7 @@ workspace = true
 ahash = "0.8"
 anyhow.workspace = true
 bytes = "1"
+mimalloc = "0.1"
 ipnet = "2.9"
 prost.workspace = true
 rayon.workspace = true

@@ -57,6 +57,16 @@ pub enum ShardMsg {
     /// [`ShardOut::BestPathV4`].
     UpdateV4(ShardUpdateV4),
 
+    /// A batch of IPv4-unicast prefixes from one UPDATE that hash to this
+    /// shard, carrying the shared attribute once (RIB sharding RouteBatch
+    /// — the per-shard ingest fan-out). The shard processes each NLRI like
+    /// an [`Self::UpdateV4`] with `compute_policy`, replying with one
+    /// [`ShardOut::BestPathV4`] per NLRI. Sending one batch per shard per
+    /// UPDATE instead of one message per prefix collapses 4M futex
+    /// wake-ups to ~N and moves the per-prefix attr clone off main onto
+    /// the parallel shards.
+    RouteBatchV4(ShardRouteBatchV4),
+
     /// Explicit withdraw of an IPv4 / VPNv4 prefix the peer no longer
     /// advertises (or that failed a re-check). The shard removes the
     /// Adj-RIB-In + Loc-RIB entry and replies with the best-path delta.
@@ -143,6 +153,23 @@ pub struct ShardUpdateV4 {
     /// walk off the main task into the parallel shard. Set by the N>1
     /// ingest; `false` on the synchronous (N=1) path, where main already
     /// computed `decision`.
+    pub compute_policy: bool,
+}
+
+/// Payload of [`ShardMsg::RouteBatchV4`]: the IPv4-unicast NLRIs from one
+/// UPDATE that hash to a single shard, plus the attribute they share
+/// (cloned once per shard, not per prefix). The shard expands each NLRI
+/// into the same work an [`ShardUpdateV4`] with `compute_policy` does.
+#[derive(Debug)]
+pub struct ShardRouteBatchV4 {
+    pub ident: usize,
+    pub peer_router_id: Ipv4Addr,
+    pub typ: BgpRibType,
+    pub attr: bgp_packet::BgpAttr,
+    pub nlris: Vec<Ipv4Nlri>,
+    pub enhe_egress: Option<(std::net::Ipv6Addr, u32)>,
+    pub stale: bool,
+    pub nexthop_reachable: bool,
     pub compute_policy: bool,
 }
 

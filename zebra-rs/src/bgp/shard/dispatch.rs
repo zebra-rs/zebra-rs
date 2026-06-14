@@ -22,7 +22,9 @@ use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
 use super::super::route::BgpRib;
 use super::super::vrf::VrfLabelAllocator;
 use super::BgpShard;
-use super::msg::{LuNlri, ShardMsg, ShardOut, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
+use super::msg::{
+    LuNlri, ShardMsg, ShardOut, ShardRouteBatchV4, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6,
+};
 
 impl BgpShard {
     /// Apply one message to the shard's owned state, returning the
@@ -37,6 +39,7 @@ impl BgpShard {
     ) -> Vec<ShardOut> {
         match msg {
             ShardMsg::UpdateV4(u) => self.handle_update_v4(u),
+            ShardMsg::RouteBatchV4(b) => self.handle_route_batch_v4(b),
             ShardMsg::WithdrawV4 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
             }
@@ -51,6 +54,32 @@ impl BgpShard {
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
+    }
+
+    /// Expand a [`ShardMsg::RouteBatchV4`] into per-NLRI table ops. The
+    /// shared attribute is cloned per prefix here — on the worker thread,
+    /// in parallel across shards — instead of per prefix on the main task.
+    fn handle_route_batch_v4(&mut self, b: ShardRouteBatchV4) -> Vec<ShardOut> {
+        let mut outs = Vec::with_capacity(b.nlris.len());
+        for nlri in b.nlris {
+            outs.extend(self.handle_update_v4(ShardUpdateV4 {
+                ident: b.ident,
+                rd: None,
+                nlri,
+                peer_router_id: b.peer_router_id,
+                typ: b.typ,
+                attr: b.attr.clone(),
+                label: None,
+                nexthop: None,
+                enhe_egress: b.enhe_egress,
+                stale: b.stale,
+                nexthop_reachable: b.nexthop_reachable,
+                vrf_transit_only: false,
+                decision: None,
+                compute_policy: b.compute_policy,
+            }));
+        }
+        outs
     }
 
     /// Shard half of `route_ipv4_update`: store Adj-RIB-In (pre-policy,

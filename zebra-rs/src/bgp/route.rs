@@ -2202,26 +2202,39 @@ pub fn route_ipv4_update_batch(
     };
     let stale = stale || attr_has_llgr_stale(attr);
 
-    // N>1 (RIB sharding Phase C): inbound policy runs in the shard, so
-    // there is no main-side `par_iter` here — just fan each prefix's
-    // raw-attr table op out to its shard. Best-path + advertise then
-    // happen asynchronously on the event loop (`process_shard_result`).
-    if shards.is_some() {
+    // N>1 (RIB sharding Phase C + RouteBatch): inbound policy runs in the
+    // shard (no main-side `par_iter`), and this UPDATE's prefixes are
+    // split by hash and sent as ONE batch per shard — collapsing the
+    // per-prefix dispatch (a futex wake + attr clone each) to one per
+    // shard. Best-path + advertise happen asynchronously on the event
+    // loop (`process_shard_result`). NHT registers per prefix in main
+    // (a no-op when NHT is off); reachability is shared (same attr).
+    if let Some(pool) = shards {
+        let mut per_shard: Vec<Vec<Ipv4Nlri>> = vec![Vec::new(); pool.n()];
+        let mut nexthop_reachable = true;
         for nlri in prefixes {
-            route_ipv4_update_decided(
-                peer_ident,
-                peer_router_id,
-                typ,
-                nlri,
-                None,
-                None,
-                attr,
-                None,
-                None,
-                None,
-                bgp,
-                shards,
-                stale,
+            nexthop_reachable =
+                nht_track_received_attr(bgp, attr, super::nht::NhtDep::V4(nlri.prefix));
+            let idx = pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr()));
+            per_shard[idx].push(nlri.clone());
+        }
+        for (idx, nlris) in per_shard.into_iter().enumerate() {
+            if nlris.is_empty() {
+                continue;
+            }
+            pool.dispatch(
+                idx,
+                ShardMsg::RouteBatchV4(super::shard::msg::ShardRouteBatchV4 {
+                    ident: peer_ident,
+                    peer_router_id,
+                    typ,
+                    attr: attr.clone(),
+                    nlris,
+                    enhe_egress: None,
+                    stale,
+                    nexthop_reachable,
+                    compute_policy: true,
+                }),
             );
         }
         return;

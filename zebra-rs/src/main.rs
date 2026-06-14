@@ -7,6 +7,14 @@ use std::sync::RwLock;
 use clap::Parser;
 use daemonize::Daemonize;
 
+// Per-thread-caching allocator. The N-shard worker pool (RIB sharding
+// Phase C) has up to 64 threads allocating concurrently on the hot path
+// (intern, BgpRib, attr clones); a profile of an N=12 convergence put
+// ~12% of CPU in the global allocator's `osq_lock`. mimalloc's per-thread
+// heaps remove that contention.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod bfd;
 mod bgp;
 mod config;
