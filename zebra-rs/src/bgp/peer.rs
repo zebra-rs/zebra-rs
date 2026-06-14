@@ -2811,7 +2811,12 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             vrf_transport_v6: None,
             central_label_alloc: None,
         };
-        super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        super::route::route_soft_in_peer(
+            peer_idx,
+            &mut bgp_ref,
+            &mut bgp.peers,
+            bgp.shards.as_ref(),
+        );
     } else if supports_refresh {
         let peer = bgp.peers.get_mut_by_idx(peer_idx).expect("peer exists");
         for (afi, safi) in &mp_pairs {

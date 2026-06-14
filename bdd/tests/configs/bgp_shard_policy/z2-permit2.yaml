@@ -2,6 +2,9 @@ prefix-set:
 - name: ALLOW-1
   prefixes:
   - prefix: 10.0.0.1/32
+- name: ALLOW-2
+  prefixes:
+  - prefix: 10.0.0.2/32
 policy:
 - name: IN-POL
   entry:
@@ -9,6 +12,10 @@ policy:
     action: permit
     match:
       prefix: ALLOW-1
+  - number: 20
+    action: permit
+    match:
+      prefix: ALLOW-2
 router:
   bgp:
     global:

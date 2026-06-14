@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use bgp_packet::{Ipv4Nlri, Ipv6Nlri, RouteDistinguisher};
+use ipnet::Ipv4Net;
 
 use super::super::route::BgpRib;
 use super::super::vrf::VrfLabelAllocator;
@@ -63,6 +64,7 @@ impl BgpShard {
                 vec![self.best_path_delta_lu(ident, nlri, Vec::new())]
             }
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
+            ShardMsg::SoftInV4 { ident } => self.handle_soft_in_v4(ident),
             ShardMsg::PolicyReplace { ident, policy } => {
                 self.set_in_policy(ident, policy);
                 Vec::new()
@@ -604,6 +606,86 @@ impl BgpShard {
         }
         self.adj_in_drop(ident);
         out
+    }
+
+    /// Shard half of `route_soft_in_peer_table` (v4-unicast soft-reconfig):
+    /// re-apply the peer's current inbound policy — the replicated
+    /// `in_policy` snapshot, identical to what `compute_policy` consults —
+    /// to every stored v4-unicast Adj-RIB-In row, and report the best-path
+    /// deltas so a policy change re-converges the pool-owned Loc-RIB
+    /// without the peer re-sending. Mirrors the synchronous path: a
+    /// now-denied route drops its Loc-RIB row (Adj-RIB-In kept for the
+    /// next replay), a permitted route re-interns + re-runs best-path; the
+    /// async reduce drives FIB + advertise (incl. AddPath via `added`).
+    /// v4-unicast only — VPNv4 soft-in stays on the synchronous shard.
+    fn handle_soft_in_v4(&mut self, ident: usize) -> Vec<ShardOut> {
+        // Snapshot the stored rows so the per-row Loc-RIB mutation below
+        // doesn't alias the Adj-RIB-In iteration.
+        let entries: Vec<(Ipv4Net, Vec<BgpRib>)> = match self.adj_in(ident) {
+            Some(a) => a.v4.0.iter().map(|(p, ribs)| (*p, ribs.clone())).collect(),
+            None => return Vec::new(),
+        };
+        let mut outs = Vec::with_capacity(entries.len());
+        for (prefix, ribs) in entries {
+            for stored in ribs {
+                let nlri = Ipv4Nlri {
+                    id: stored.remote_id,
+                    prefix,
+                };
+                // Re-run inbound policy against the pre-policy attr kept in
+                // Adj-RIB-In, off the replicated snapshot (default-permit
+                // when none is bound) — the same call `compute_policy` makes.
+                let pre = (*stored.attr).clone();
+                let decision = match self.in_policy.get(&ident) {
+                    Some(p) => crate::bgp::route::apply_policy_net(
+                        &p.prefix_set,
+                        &p.policy_list,
+                        stored.router_id,
+                        ipnet::IpNet::V4(prefix),
+                        pre,
+                        0,
+                    ),
+                    None => crate::bgp::route::apply_policy_net(
+                        &Default::default(),
+                        &Default::default(),
+                        stored.router_id,
+                        ipnet::IpNet::V4(prefix),
+                        pre,
+                        0,
+                    ),
+                };
+                match decision {
+                    None => {
+                        // Denied under the new policy: drop any Loc-RIB row
+                        // from this peer (Adj-RIB-In stays for a later replay).
+                        outs.push(self.best_path_delta_v4(ident, None, nlri, Vec::new()));
+                    }
+                    Some(d) => {
+                        let mut new_rib = stored.clone();
+                        new_rib.attr = self.intern(d.attr);
+                        new_rib.weight = d.weight;
+                        let mut added = new_rib.clone();
+                        let (replaced, selected, next_id) = self.update(None, prefix, new_rib);
+                        added.local_id = next_id;
+                        let survivor_nexthops = if replaced.is_empty() {
+                            std::collections::BTreeSet::new()
+                        } else {
+                            self.candidate_nexthops_v4(None, prefix)
+                        };
+                        outs.push(ShardOut::BestPathV4 {
+                            ident,
+                            rd: None,
+                            prefix: nlri,
+                            selected,
+                            replaced,
+                            added: Some(added),
+                            survivor_nexthops,
+                        });
+                    }
+                }
+            }
+        }
+        outs
     }
 }
 

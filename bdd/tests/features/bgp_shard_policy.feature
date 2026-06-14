@@ -13,7 +13,7 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
   `compute_policy` on the shard worker — not on the main task.
 
   Correctness is observed DOWNSTREAM on z3 on the N>1 advertise,
-  withdraw, and peer-down paths (the N>1 `show`, soft-in replay, and
+  withdraw, peer-down, and soft-reconfig paths (the N>1 `show` and
   new-peer sync are still gaps): policy is set at startup, z3 is brought
   up FIRST, and z1's routes are originated only AFTER every session is
   Established, so z2 processes them live (ingest → shard → reduce →
@@ -23,10 +23,13 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
   .2 (sharded deny works; before PolicyReplace the shard default-permitted
   and .2 would have leaked).
 
-  Two follow-on scenarios exercise churn at N=4: an explicit withdraw
+  Follow-on scenarios exercise churn at N=4: a soft-reconfig replay (z2's
+  prefix-set widens to also permit .2 → SoftInV4 to every pool shard
+  replays the stored Adj-RIB-In, no UPDATE from z1), an explicit withdraw
   (z1 deletes its `network` statements → z2 runs WithdrawV4 to the owning
-  pool shard) and a session drop (z1 killed → z2's route_clean dispatches
-  PeerDown to every pool shard), each verified by z3 losing 10.0.0.1/32.
+  pool shard), and a session drop (z1 killed → z2's route_clean dispatches
+  PeerDown to every pool shard) — verified by z3 gaining .2, then losing
+  10.0.0.1/32.
 
   Test Topology:
   ```
@@ -66,6 +69,20 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
     And I wait 10 seconds for BGP to operate
     Then BGP route in "z3" has "10.0.0.1/32"
     And BGP route in "z3" does not have "10.0.0.2/32"
+
+  Scenario: z2's inbound prefix-set widens; soft-reconfiguration replays the sharded Adj-RIB-In
+    Given the test topology exists
+    # z2 stored z1's .1 AND .2 in its (pool-sharded) Adj-RIB-In but only
+    # advertised .1 (policy denied .2). Widen ALLOW-1 to also permit .2: the
+    # prefix-set change drives PolicyRx → shard_replace_in_policy (the new
+    # policy to every shard) + apply_soft_in_peer. z2 has
+    # soft-reconfiguration inbound, so it replays locally instead of asking
+    # z1 to re-send; at N>1 the replay dispatches SoftInV4 to every pool
+    # shard, .2 now passes policy, and z3 learns it — with no UPDATE from z1.
+    When I apply config "z2-permit2.yaml" to namespace "z2"
+    And I wait 10 seconds for BGP to operate
+    Then BGP route in "z3" has "10.0.0.2/32"
+    And BGP route in "z3" has "10.0.0.1/32"
 
   Scenario: z1 withdraws its routes; the sharded withdraw reaches z3
     Given the test topology exists

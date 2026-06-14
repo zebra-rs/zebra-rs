@@ -120,6 +120,16 @@ pub enum ShardMsg {
     /// the peer's v4-unicast slice.
     PeerDown { ident: usize },
 
+    /// Re-apply the peer's current inbound policy (the replicated
+    /// `in_policy` snapshot) to its stored v4-unicast Adj-RIB-In and
+    /// report the best-path deltas — the shard half of
+    /// `route_soft_in_peer_table`. At N>1 `apply_soft_in_peer` dispatches
+    /// this to every pool shard right after a `PolicyReplace`, so a policy
+    /// change (or `clear … soft in`) re-converges the pool-owned Loc-RIB
+    /// without the peer re-sending. v4-unicast only; VPNv4 soft-in stays
+    /// on the synchronous shard.
+    SoftInV4 { ident: usize },
+
     /// Render a sharded Loc-RIB table for a `show` command — the
     /// scatter-gather half of the show split. The reply travels on the
     /// request's own oneshot channel, not [`ShardOut`].

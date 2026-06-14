@@ -3723,7 +3723,12 @@ fn route_soft_out_peer_table_evpn(
 //
 // Covers IPv4 unicast and IPv4 MPLS-VPN. EVPN soft-in is left
 // for a follow-up, mirroring the EVPN soft-out gap.
-pub fn route_soft_in_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+pub fn route_soft_in_peer(
+    peer_idx: usize,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     let (do_v4, vpn_rds) = {
         let Some(peer) = peers.get_by_idx(peer_idx) else {
             return;
@@ -3745,10 +3750,10 @@ pub fn route_soft_in_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap
     };
 
     if do_v4 {
-        route_soft_in_peer_table(peer_idx, None, bgp, peers);
+        route_soft_in_peer_table(peer_idx, None, bgp, peers, shards);
     }
     for rd in vpn_rds {
-        route_soft_in_peer_table(peer_idx, Some(rd), bgp, peers);
+        route_soft_in_peer_table(peer_idx, Some(rd), bgp, peers, shards);
     }
 }
 
@@ -3757,7 +3762,26 @@ fn route_soft_in_peer_table(
     rd: Option<RouteDistinguisher>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
 ) {
+    // RIB sharding (N>1): v4-unicast Adj-RIB-In lives on the pool shards,
+    // so dispatch a SoftInV4 to each (the peer's prefixes hash across all)
+    // to replay locally against the replicated policy snapshot; the async
+    // reduce drives FIB + advertise. `process_policy_msg` sends the
+    // matching `PolicyReplace` first, so the replay sees the new policy.
+    // VPNv4 (`rd = Some`) is not pooled and replays synchronously below.
+    if rd.is_none()
+        && let Some(pool) = shards
+    {
+        let Some(ident) = peers.get_by_idx(peer_idx).map(|p| p.ident) else {
+            return;
+        };
+        for idx in 0..pool.n() {
+            pool.dispatch(idx, ShardMsg::SoftInV4 { ident });
+        }
+        return;
+    }
+
     // Snapshot stored Adj-RIB-In entries so subsequent mutable borrows
     // of `peers` / `bgp` (policy apply, Loc-RIB update, advertise
     // fan-out) don't conflict with the iteration.
