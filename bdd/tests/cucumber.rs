@@ -397,6 +397,41 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     );
 }
 
+#[when(expr = "I start zebra-rs in namespace {string} with {int} shards")]
+async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: usize) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    let pid_file = world.pid_file(&namespace);
+    let shards = shards.to_string();
+
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        // Same SKB note as `start zebra-rs`; ZEBRA_BGP_SHARDS runs the BGP
+        // RIB sharded (N>1) so inbound policy flows through the shard
+        // workers + PolicyReplace rather than the synchronous N=1 path.
+        &[
+            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
+            ("ZEBRA_BGP_SHARDS", shards.as_str()),
+        ],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    println!(
+        "✓ zebra-rs started in namespace {} with {} shards (pid file {})",
+        scoped, shards, pid_file
+    );
+}
+
 /// When `BDD_KEEP` is set in the environment, the teardown steps
 /// (`stop zebra-rs`, `delete namespace`/`bridge`, and the clean-environment
 /// check) turn into no-ops so the daemons, namespaces, and bridge survive the
