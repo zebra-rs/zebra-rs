@@ -648,73 +648,25 @@ update-worker C.2 are what this matrix is meant to capture, when built.
 
 ## 11. Prior art: parallelism in BIRD 3.x and GoBGP
 
-Two other open BGP stacks were read in full — BIRD 3.3.0 (branch
-`stable-v3.3`) and GoBGP (`master`) — to place zebra-rs's design. The
-sharp question is **how each parallelizes a single BGP table's work**
-(best-path and advertise). Three different answers.
+Extracted to its own memo:
+[`bgp-sharding-prior-art.md`](bgp-sharding-prior-art.md). BIRD 3.3.0
+(branch `stable-v3.3`) and GoBGP (`master`) were both read in full to
+place zebra-rs's design — the sharp question being **how each
+parallelizes a single BGP table's work** (best-path and advertise).
+Three different answers:
 
-### BIRD 3.3 — per-protocol / per-table loops, serial within a table
+- **BIRD 3.3** parallelizes *across* tables/protocols, never within one
+  table: a single table's best-path is **serial** under one per-table
+  lock, reads are lock-free (RCU caches), and egress is **parallel per
+  consumer** via lock-free journals (`lfjour`).
+- **GoBGP** shards one table by prefix hash across **2048 bucket *locks***
+  over shared memory; best-path runs in parallel across prefixes but
+  inside the lock, and export *policy* runs serially on the producer
+  (only encode/write is per-peer parallel).
+- **zebra-rs** shards by prefix hash into **owned** shards
+  (shared-nothing, no hot-path locks). Both BIRD and GoBGP parallelizing
+  egress per-peer is the cross-validation for Phase E.
 
-BIRD 3 is a ground-up multi-threaded redesign (2.x was a single event
-loop). A configurable **thread pool** (`bird_thread_start` →
-`pthread_create`, `sysdep/unix/io-loop.c:1253`) runs **`birdloop`s**; a
-work-stealing balancer (`birdloop_balancer`, io-loop.c:832) picks up and
-migrates loops between threads. The unit of concurrency is the **loop**:
-each protocol instance gets one (`nest/proto.c:1568`) and **each routing
-table gets its own service loop** (`nest/rt-table.c:3808`).
-
-- **A single table is serialized.** All imports + best-path
-  (`rte_recalculate`) for one table run on that one loop under `RT_LOCKED`
-  (rt-table.c:2765). There is **no per-prefix sharding within a table** —
-  BIRD parallelizes *across* tables and protocols.
-- **What it makes lockless instead — the reads.** Export is a **lockfree
-  journal** (`lfjour`, rt-table.c:3856): the table loop writes deltas,
-  each protocol loop *pulls* them locklessly and runs its export filter +
-  encode **on its own loop** → egress is parallel per peer. The attribute
-  cache (RCU hash, `nest/rt-attr.c`) and the netindex prefix interning
-  (`lib/netindex.c`) are RCU/lockless so lookups never take the table
-  lock. A strict lock-domain order (`lib/locking.h`:
-  `the_bird < … < service < rtable < attrs`) prevents deadlock when a
-  protocol loop crosses into a table loop.
-
-### GoBGP — per-peer goroutines + prefix-hash *lock* sharding
-
-GoBGP recently retrofitted prefix-hash sharding — convergent with our
-design, but via locks over shared memory. Per peer there is an FSM
-goroutine plus recv + send goroutines (`pkg/server/fsm.go`); a central
-`Serve()` loop handles mostly management. `propagateUpdate`
-(`pkg/server/server.go:1222`) hashes each path to **one of 2048 bucket
-mutexes** — `farm.Hash64(family+prefix) % 2048` (server.go:112,131) —
-with a nested per-destination shard lock (`internal/pkg/table/table.go`).
-Best-path (`Destination.Calculate`) and import policy run on the **per-peer
-recv goroutine**, parallel across prefixes but *inside* the bucket lock.
-Egress encode is **parallel per-peer** (each send goroutine encodes its
-own UPDATEs).
-
-### zebra-rs — prefix-hash *ownership* sharding (shared-nothing)
-
-N dedicated threads each **own** a prefix-hash slice of the Loc-RIB — no
-shared table, **no locks** on the hot path; main↔shard is message
-passing. Best-path + inbound policy run inside the owning shard; advertise
-runs on the main reduce (Phase E.1 parallelizes its out-policy; E.2 will
-move it to update-worker threads).
-
-### The picture
-
-| | BIRD 3.3 | GoBGP | zebra-rs |
-|---|---|---|---|
-| Concurrency unit | loop (per-proto, per-table) | per-peer goroutine + 2048 lock-buckets | per-prefix-hash **owned** shard thread |
-| Single table's best-path | **serial** (one table loop) | parallel (bucket mutexes) | parallel (owned shards) |
-| RIB memory model | shared, RCU reads + domain locks | shared, 2048 bucket mutexes | **partitioned, shared-nothing** |
-| Hot-path lock cost | RCU reads lock-free; table write serial | mutex + cache-coherency per update | **none** (message passing) |
-| Egress / advertise | **parallel per-peer** (lockfree journal) | **parallel per-peer** (send goroutine) | serial reduce → E.1 parallel out-policy → E.2 workers |
-
-**Takeaways.** (1) Two mature stacks independently shard the RIB by prefix
-hash — strong validation of the direction; ours is the shared-nothing
-variant (no lock / coherency tax), which is why RouteBatch + mimalloc put
-convergence *below* the serial baseline — a lock-based design rarely beats
-its own baseline. (2) Both BIRD 3 and GoBGP parallelize **egress per-peer**;
-we don't yet — that is Phase E, now validated from two directions. (3)
-BIRD 3's RCU attribute cache / netindex is the reference for our
-cross-shard interning question: at large N, either duplicate the intern
-table per shard (memory) or share one behind RCU/lockfree (BIRD's choice).
+The memo carries the full architecture of each, diagrams, the comparison
+table, verified source anchors, and the per-stack takeaways (incl.
+corrections to the framing summarized here).

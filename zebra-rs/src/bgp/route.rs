@@ -7493,6 +7493,65 @@ pub(super) fn route_advertise_to_peers_v6(
             }
         }
     }
+
+    // AddPath members: every candidate path, each NLRI carrying its
+    // path-id, bucketed into the (AddPath-signature) update-group cache.
+    // v6 unicast has no per-peer batch cache, so the per-peer v6
+    // Adj-RIB-Out (`adj_out.v6`) is the record of what was sent — diff
+    // it against the new candidate set to withdraw exactly the path-ids
+    // that fell out (selected empty ⇒ withdraw them all).
+    for ident in peers.established_addpath_idents(afi, safi) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        let group_id = peer.update_group_id.get(&afi_safi).cloned();
+        let was: Vec<u32> = peer
+            .adj_out
+            .v6
+            .0
+            .get(&prefix)
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        let mut newly: BTreeSet<u32> = BTreeSet::new();
+        for cand in selected {
+            if cand.ident == peer.ident {
+                continue; // split-horizon
+            }
+            if llgr_blocks_advertisement(cand.stale, &peer.cap_recv, afi, safi) {
+                continue;
+            }
+            let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, cand, bgp, true) else {
+                continue;
+            };
+            let attr = bgp.attr_store.intern(attr);
+            if let Some(gid) = &group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(gid)
+            {
+                super::update_group::send_ipv6(group, nlri, attr, cand.ident, bgp.tx, true);
+            } else {
+                tracing::warn!(
+                    peer = %peer.address,
+                    prefix = %prefix,
+                    "IPv6 AddPath advertise: peer Established but not in any update-group; advertise skipped"
+                );
+                continue;
+            }
+            peer.adj_out.v6.add(prefix, cand.clone());
+            newly.insert(cand.local_id);
+        }
+        for id in was {
+            if newly.contains(&id) {
+                continue;
+            }
+            if let Some(gid) = &group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(gid)
+            {
+                super::update_group::cache_remove_ipv6(group, prefix, id);
+            }
+            withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+            peer.adj_out.v6.remove(prefix, id);
+        }
+    }
 }
 
 /// Per-peer VPNv6 withdraw — emit an MP_UNREACH(AFI=2, SAFI=128) for
