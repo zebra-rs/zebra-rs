@@ -3126,10 +3126,11 @@ impl Bgp {
     }
 
     /// Reduce side of the shard pool: act on one worker's best-path
-    /// deltas — NHT untrack + FIB install + advertise off each
-    /// [`super::shard::ShardOut`], via the same post-work the synchronous
-    /// path runs. Reachable only at `SHARDS > 1`, where v4-unicast ingest
-    /// fanned out to the pool.
+    /// deltas — NHT untrack + FIB install per delta, then the advertise
+    /// out-policy + attribute transform precomputed in parallel across the
+    /// batch (Phase E.1), then serial bucketing — via the same post-work
+    /// the synchronous path runs. Reachable only at `SHARDS > 1`, where
+    /// v4-unicast ingest fanned out to the pool.
     fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
         let import_dispatcher = super::vrf::VrfImportDispatcher {
             rib_known_vrfs: &self.rib_known_vrfs,
@@ -3154,29 +3155,7 @@ impl Bgp {
             vrf_transport_v6: None,
             central_label_alloc: self.vrf_label_alloc.as_mut(),
         };
-        for out in result.out {
-            if let super::shard::ShardOut::BestPathV4 {
-                ident,
-                rd: _,
-                prefix,
-                selected,
-                replaced,
-                added,
-                survivor_nexthops,
-            } = out
-            {
-                super::route::route_apply_bestpath_v4(
-                    &mut bgp_ref,
-                    &mut self.peers,
-                    ident,
-                    prefix,
-                    selected,
-                    replaced,
-                    added,
-                    survivor_nexthops,
-                );
-            }
-        }
+        super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, result.out);
     }
 
     /// If `vrf` is an `encapsulation srv6` VRF with an allocated

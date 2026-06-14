@@ -2583,41 +2583,72 @@ fn apply_ipv4_advertise_job(
 }
 
 /// Reduce side of the shard pool for v4-unicast (RIB sharding N-shard
-/// B.1): apply one worker's best-path delta — NHT untrack + FIB install
-/// + advertise. This is the inline post-work of
-/// `route_ipv4_update_decided`'s delta loop, lifted out so the event loop
-/// (`process_shard_result`) can run it when ingest fanned out to a pool
-/// shard at `SHARDS > 1`. Unicast only — the pool never carries VPNv4
-/// (`rd == Some` stays on the synchronous shard), so there is no VRF
-/// import/export or transit-label work here.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn route_apply_bestpath_v4(
+/// B.1 + Phase E.1): apply one worker's whole `ShardResult` of best-path
+/// deltas. NHT untrack + FIB install run serially per delta (the NHT
+/// cache and the FIB client are main-owned), then the advertise
+/// out-policy + attribute transform are **precomputed in parallel across
+/// the batch** (`precompute_ipv4_advertise_outcomes`, the C.2 routine),
+/// then the bucketing / adj-out apply serially off the memos in delta
+/// order. Restores the C.2 out-policy parallelism the N-shard reduce had
+/// lost — `route_ipv4_update_decided`'s shard branch returns no inline
+/// advertise job, so without this the reduce ran the out-policy serially.
+/// Unicast only — the pool never carries VPNv4 (`rd == Some` stays on the
+/// synchronous shard), so there is no VRF import/export or transit-label
+/// work here.
+pub(super) fn route_apply_bestpath_v4_batch(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
-    ident: usize,
-    prefix: Ipv4Nlri,
-    selected: Vec<BgpRib>,
-    replaced: Vec<BgpRib>,
-    added: Option<BgpRib>,
-    survivor_nexthops: BTreeSet<IpAddr>,
+    outs: Vec<ShardOut>,
 ) {
-    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-        nht_untrack_withdrawn(
-            bgp,
-            &replaced,
-            &survivor_nexthops,
-            super::nht::NhtDep::V4(prefix.prefix),
-        );
+    // Serial: per-delta NHT untrack + FIB install; collect the advertise
+    // jobs (and their source idents) for the parallel precompute. Doing
+    // every NHT/FIB before every advertise is safe — distinct prefixes,
+    // and the NHT cache / FIB client are disjoint from the update-group
+    // caches the advertise mutates.
+    let mut jobs: Vec<Ipv4AdvertiseJob> = Vec::with_capacity(outs.len());
+    let mut idents: Vec<usize> = Vec::with_capacity(outs.len());
+    for out in outs {
+        let ShardOut::BestPathV4 {
+            ident,
+            rd: _,
+            prefix,
+            selected,
+            replaced,
+            added,
+            survivor_nexthops,
+        } = out
+        else {
+            continue;
+        };
+        if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+            nht_untrack_withdrawn(
+                bgp,
+                &replaced,
+                &survivor_nexthops,
+                super::nht::NhtDep::V4(prefix.prefix),
+            );
+        }
+        fib_install_v4(bgp, prefix.prefix, &selected);
+        jobs.push(Ipv4AdvertiseJob {
+            rd: None,
+            prefix: prefix.prefix,
+            selected,
+            added,
+            replaced,
+        });
+        idents.push(ident);
     }
-    fib_install_v4(bgp, prefix.prefix, &selected);
-    let job = Ipv4AdvertiseJob {
-        rd: None,
-        prefix: prefix.prefix,
-        selected,
-        added,
-        replaced,
-    };
-    apply_ipv4_advertise_job(job, ident, BTreeMap::new(), bgp, peers);
+
+    // Parallel: precompute each job's per-group advertise outcome — the
+    // out-policy prefix-set walk + attribute transform, pure over the
+    // route + group config.
+    let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
+
+    // Serial: apply each job's bucketing / adj-out off the precomputed
+    // memo, in delta order (per-prefix ordering preserved).
+    for ((job, memo), ident) in jobs.into_iter().zip(memos).zip(idents) {
+        apply_ipv4_advertise_job(job, ident, memo, bgp, peers);
+    }
 }
 
 fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {
