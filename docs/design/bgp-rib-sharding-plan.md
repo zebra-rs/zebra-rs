@@ -201,12 +201,25 @@ the rest of egress off the serial reduce.
   every core on best-path. The general fix for the *both-busy* case
   (out-policy + saturated shards, e.g. post-`PolicyReplace`) is E.2's
   bounded worker pool, not rayon's cores-wide global pool.
-- **E.2+ (future) — dedicated update-worker threads.** Move the per-group
-  caches + adj-out + encode into M worker threads with static
-  group→worker affinity, fed `AdvDelta` (RTO) directly by the shards
-  (bypassing the main reduce). BIRD 3.x (a per-protocol loop pulls a
-  lockfree journal, then filters + encodes on its own thread) and GoBGP
-  (a per-peer send goroutine) are the two reference designs (§11).
+- **E.2 (built) — bounded egress worker pool.** E.1's out-policy precompute
+  now runs on a **bounded** rayon `ThreadPool` (`egress_pool().install(…)`)
+  instead of rayon's cores-wide *global* pool, so it can't oversubscribe
+  the dedicated shard threads at N ≈ cores. Sized from
+  `ZEBRA_BGP_UPDATE_WORKERS`, default `max(1, cores − ZEBRA_BGP_SHARDS)` —
+  which makes the **shard count the cores-split knob** (Juniper's
+  shards-vs-update-threads): inbound parallelism from the shards, outbound
+  from the egress pool, the two *fitting* the core count rather than
+  fighting for it. Measured (1000-entry policy in+out, 8×100k): serial
+  baseline 42.7 s; **N=4 (4 shards + 8 egress) 8.9 s (−79 %)**, beating the
+  old oversubscribed global-pool N=12 (11.9 s) by ~25 %. N=12 starves egress
+  (=1 worker → serial out-policy walk) at 20.9 s — the "no spare cores"
+  reality made explicit, and why the optimum is N=4, not N=cores.
+- **E.2+ (future) — group-affinity update-workers.** The full Juniper form:
+  move the per-group caches + adj-out + encode into M dedicated worker
+  threads with static group→worker affinity, fed `AdvDelta` (RTO) directly
+  by the shards (bypassing the main reduce). BIRD 3.x (a per-protocol loop
+  pulls a lockfree journal, then filters + encodes on its own thread) and
+  GoBGP (a per-peer send goroutine) are the two reference designs (§11).
   Per-(peer, prefix) ordering holds: one prefix → one shard → one worker.
 
 ### Still future
