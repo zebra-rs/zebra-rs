@@ -2600,55 +2600,92 @@ pub(super) fn route_apply_bestpath_v4_batch(
     peers: &mut PeerMap,
     outs: Vec<ShardOut>,
 ) {
-    // Serial: per-delta NHT untrack + FIB install; collect the advertise
-    // jobs (and their source idents) for the parallel precompute. Doing
-    // every NHT/FIB before every advertise is safe — distinct prefixes,
-    // and the NHT cache / FIB client are disjoint from the update-group
-    // caches the advertise mutates.
+    // Cost-gate the parallel precompute. Its whole purpose is to fan out
+    // the out-policy prefix-set walk; with no out-policy bound on any
+    // advertised-to peer there is nothing expensive to amortize, and at
+    // SHARDS ≈ cores there are no spare cores — rayon's pool would only
+    // steal them from the (CPU-bound) shard threads doing best-path
+    // (measured 3x slower on a no-policy full-table load). So parallelize
+    // egress only when out-policy makes egress the bottleneck (the shards
+    // are then mostly idle).
+    let worth_parallel = peers
+        .established_plain_idents(Afi::Ip, Safi::Unicast)
+        .into_iter()
+        .filter_map(|id| peers.get_by_idx(id))
+        .any(|p| {
+            p.policy_list.get(&InOut::Output).name.is_some()
+                || p.prefix_set.get(&InOut::Output).name.is_some()
+        });
+
+    if !worth_parallel {
+        // Serial, per delta — byte-identical to the pre-E.1 reduce (no
+        // jobs / memos vectors): NHT untrack + FIB install + inline
+        // advertise with an empty memo (computed on the first group member).
+        for out in outs {
+            if let Some((ident, job)) = reduce_bestpath_v4_nht_fib(bgp, out) {
+                apply_ipv4_advertise_job(job, ident, BTreeMap::new(), bgp, peers);
+            }
+        }
+        return;
+    }
+
+    // Parallel path: collect the advertise jobs (NHT + FIB serial per
+    // delta), precompute each job's per-(prefix, group) out-policy walk +
+    // attribute transform across the batch, then apply the bucketing
+    // serially off the memos in delta order (per-prefix ordering preserved).
     let mut jobs: Vec<Ipv4AdvertiseJob> = Vec::with_capacity(outs.len());
     let mut idents: Vec<usize> = Vec::with_capacity(outs.len());
     for out in outs {
-        let ShardOut::BestPathV4 {
-            ident,
-            rd: _,
-            prefix,
-            selected,
-            replaced,
-            added,
-            survivor_nexthops,
-        } = out
-        else {
-            continue;
-        };
-        if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
-            nht_untrack_withdrawn(
-                bgp,
-                &replaced,
-                &survivor_nexthops,
-                super::nht::NhtDep::V4(prefix.prefix),
-            );
+        if let Some((ident, job)) = reduce_bestpath_v4_nht_fib(bgp, out) {
+            jobs.push(job);
+            idents.push(ident);
         }
-        fib_install_v4(bgp, prefix.prefix, &selected);
-        jobs.push(Ipv4AdvertiseJob {
+    }
+    let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
+    for ((job, memo), ident) in jobs.into_iter().zip(memos).zip(idents) {
+        apply_ipv4_advertise_job(job, ident, memo, bgp, peers);
+    }
+}
+
+/// NHT untrack + FIB install for one v4 best-path delta — the main-owned,
+/// always-serial half of the reduce (the NHT cache and FIB client are
+/// single-owner). Returns the advertise job + its source ident; `None` for
+/// a non-`BestPathV4` out.
+fn reduce_bestpath_v4_nht_fib(
+    bgp: &mut BgpTop,
+    out: ShardOut,
+) -> Option<(usize, Ipv4AdvertiseJob)> {
+    let ShardOut::BestPathV4 {
+        ident,
+        rd: _,
+        prefix,
+        selected,
+        replaced,
+        added,
+        survivor_nexthops,
+    } = out
+    else {
+        return None;
+    };
+    if bgp.nexthop_cache.is_some() && !replaced.is_empty() {
+        nht_untrack_withdrawn(
+            bgp,
+            &replaced,
+            &survivor_nexthops,
+            super::nht::NhtDep::V4(prefix.prefix),
+        );
+    }
+    fib_install_v4(bgp, prefix.prefix, &selected);
+    Some((
+        ident,
+        Ipv4AdvertiseJob {
             rd: None,
             prefix: prefix.prefix,
             selected,
             added,
             replaced,
-        });
-        idents.push(ident);
-    }
-
-    // Parallel: precompute each job's per-group advertise outcome — the
-    // out-policy prefix-set walk + attribute transform, pure over the
-    // route + group config.
-    let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
-
-    // Serial: apply each job's bucketing / adj-out off the precomputed
-    // memo, in delta order (per-prefix ordering preserved).
-    for ((job, memo), ident) in jobs.into_iter().zip(memos).zip(idents) {
-        apply_ipv4_advertise_job(job, ident, memo, bgp, peers);
-    }
+        },
+    ))
 }
 
 fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {

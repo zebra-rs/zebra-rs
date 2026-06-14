@@ -162,13 +162,23 @@ parallelism *lost* when ingest moved to the shards. The encode itself is
 already off-thread (Phase A `FlushJob` → `spawn_blocking`); Phase E moves
 the rest of egress off the serial reduce.
 
-- **E.1 (built) — parallel advertise-outcome precompute in the reduce.**
-  `route_apply_bestpath_v4_batch` runs NHT untrack + FIB install serially
-  over a whole `ShardResult`, then **`par_iter`s the per-(prefix, group)
-  out-policy + attribute transform** (`precompute_ipv4_advertise_outcomes`,
-  the C.2 routine), then applies the bucketing serially off the memos.
-  Restores C.2's parallel out-policy to the N-shard path — large on
-  policy-heavy convergence, modest on no-policy (advertise was ~6 % there).
+- **E.1 (built) — parallel advertise-outcome precompute in the reduce,
+  cost-gated.** `route_apply_bestpath_v4_batch` runs NHT untrack + FIB
+  install serially over a whole `ShardResult`, then — **only when an
+  out-policy is bound on some advertised-to peer** — `par_iter`s the
+  per-(prefix, group) out-policy + attribute transform
+  (`precompute_ipv4_advertise_outcomes`, the C.2 routine), then applies
+  the bucketing serially off the memos. Measured at N=12 (interleaved A/B
+  vs the pre-E.1 N=12 build): policy-heavy 8×100k convergence
+  **18.97 s → 11.65 s (~39 %)**. The cost-gate is essential: at
+  SHARDS ≈ cores there are no spare cores, so an *ungated* par_iter steals
+  them from the CPU-bound shard threads — a no-policy 8×500k load
+  regressed **3.2×** (15.7 s → 50.8 s) before the gate. Parallelize egress
+  only when out-policy makes egress the bottleneck (the shards are then
+  mostly idle); otherwise the serial inline apply (byte-identical) keeps
+  every core on best-path. The general fix for the *both-busy* case
+  (out-policy + saturated shards, e.g. post-`PolicyReplace`) is E.2's
+  bounded worker pool, not rayon's cores-wide global pool.
 - **E.2+ (future) — dedicated update-worker threads.** Move the per-group
   caches + adj-out + encode into M worker threads with static
   group→worker affinity, fed `AdvDelta` (RTO) directly by the shards
