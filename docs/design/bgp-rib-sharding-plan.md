@@ -146,20 +146,33 @@ thread that owns its slice end-to-end.
   `select!`s best-path deltas and runs NHT untrack + FIB install +
   advertise off each.
 
-**Measured (12-core, no-policy 8×500k, interleaved A/B).** Pre-sharding
-baseline ~20.5 s. Isolation showed the shard *dispatch* is free
-(sync-dispatch ≈ baseline) and ahash interning even helps (−11 %), but
-naive sharding regressed the workload anyway: the ungated rayon policy
-par_iters (+46 % — they fork-join with no policy to amortize), the
-per-prefix dispatch storm (+26 % at N=12), and allocator contention.
-RouteBatch + mimalloc + **uniform cost-gating of every rayon par_iter**
-(C.1 inbound, C.2 outbound, E.1 reduce — each fans out only when its policy
-is bound) fixed all of it: **default N=1 16.5 s (−19 %), N=12 15.7 s
-(−23 %)** — both now beat the serial baseline, the once-+20 % default
-config the bigger turnaround. On this no-policy load the wins are mostly
-ahash + mimalloc + de-taxing the par_iters; the shard parallelism itself
-adds only the last ~5 % (N=1 16.5 s → N=12 15.7 s). It pays far more under
-policy (C.1/C.2 above; E.1 −39 % at N=12) or high RIB-FIB fan-out (§9).
+**Measured (12-core, no-policy 8×500k, interleaved A/B, NHT release
+batched).** Isolation showed the shard *dispatch* is free (sync-dispatch ≈
+baseline) and ahash interning even helps (−11 %); naive sharding then
+regressed the workload (ungated rayon par_iters +46 %, per-prefix dispatch
+storms, allocator contention), which RouteBatch + mimalloc + uniform
+cost-gating of every rayon par_iter (C.1 inbound, C.2 outbound, E.1 reduce)
++ per-shard NHT-release batching all fixed. End state, `ZEBRA_BGP_SHARDS`
+swept (one binary, no recompile):
+
+| build | r1 | r2 | r3 | avg | vs base |
+|---|---|---|---|---|---|
+| base (pre-sharding) | 20.89 | 20.79 | 20.51 | 20.73 s | — |
+| N=1 | 15.62 | 16.53 | 16.66 | 16.27 s | −22 % |
+| N=4 | 14.94 | 14.12 | 14.25 | 14.44 s | **−30 % (knee)** |
+| N=12 | 16.62 | 16.66 | 16.55 | 16.61 s | −20 % |
+
+**N=4 is the sweet spot; N=12 over-shards** — a textbook optimal-thread
+curve (Juniper's "threads ≤ cores", gains evaporating past the knee). At
+SHARDS ≈ cores there are no spare cores for the main reduce + tokio I/O, so
+coordination outweighs the marginal best-path gain on a workload where
+per-route work is trivial. The wins here are mostly ahash + mimalloc +
+de-taxing the par_iters; the shard fan-out adds −22 %→−30 % from N=1 to the
+N=4 knee, then regresses. (The earlier −23 % at N=12 was *before* the N>1
+NHT-release fix, when first-sight held routes were silently stuck — these
+numbers are correct end-to-end, and batching the release collapsed the N=12
+run-to-run spread from ~1.4 s to ~0.1 s.) It pays far more under policy
+(C.1/C.2 above; E.1 −39 % at N=12) or high RIB-FIB fan-out (§9).
 
 ### Phase E — parallel advertise (the reduce is the next serial point)
 
