@@ -2311,6 +2311,33 @@ fn any_established_out_policy_v4(peers: &PeerMap) -> bool {
         })
 }
 
+/// Bounded worker pool for the egress (advertise-outcome) precompute —
+/// Phase E.2. The out-policy prefix-set walk fans out here instead of on
+/// rayon's cores-wide *global* pool, so at N ≈ cores it can't oversubscribe
+/// the dedicated shard threads (the "no spare cores" effect the no-policy
+/// N=12 bench showed). Sized from `ZEBRA_BGP_UPDATE_WORKERS`, defaulting to
+/// `max(1, cores − ZEBRA_BGP_SHARDS)` so shards + egress workers fit the
+/// core count. Built once, lazily; lives for the process.
+fn egress_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let default = cores.saturating_sub(super::inst::shard_count()).max(1);
+        let workers = std::env::var("ZEBRA_BGP_UPDATE_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 256))
+            .unwrap_or(default);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|i| format!("bgp-egress-{i}"))
+            .build()
+            .expect("build BGP egress worker pool")
+    })
+}
+
 /// Parallel precompute of per-group advertise outcomes for a batch of
 /// IPv4 advertise jobs (C.2). Returns one memo per job, in `jobs` order,
 /// each mapping an update-group id to the outcome a clean (non-source,
@@ -2347,35 +2374,40 @@ fn precompute_ipv4_advertise_outcomes(
             .push(ident);
     }
 
-    jobs.par_iter()
-        .map(|job| {
-            let mut memo = BTreeMap::new();
-            // VPNv4 (rd) keeps its inline path; a withdraw has no outcome.
-            if job.rd.is_some() {
-                return memo;
-            }
-            let Some(best) = job.selected.last() else {
-                return memo;
-            };
-            for (gid, (members, add_path)) in groups.iter() {
-                // Canonical member: the first established, non-source,
-                // non-LLGR peer — the one the serial memo computes on.
-                let canonical = members.iter().copied().find(|&idx| {
-                    peers.get_by_idx(idx).is_some_and(|p| {
-                        best.ident != p.ident
-                            && !llgr_blocks_advertisement(best.stale, &p.cap_recv, afi, safi)
-                    })
-                });
-                if let Some(idx) = canonical {
-                    let peer = peers.get_by_idx(idx).expect("peer exists");
-                    let outcome =
-                        compute_advertise_outcome(peer, &job.prefix, best, bgp, *add_path);
-                    memo.insert(gid.clone(), outcome);
+    // Phase E.2: fan out on the bounded egress worker pool, not rayon's
+    // cores-wide global pool, so the out-policy walk can't steal cores from
+    // the dedicated shard threads at N ≈ cores.
+    egress_pool().install(|| {
+        jobs.par_iter()
+            .map(|job| {
+                let mut memo = BTreeMap::new();
+                // VPNv4 (rd) keeps its inline path; a withdraw has no outcome.
+                if job.rd.is_some() {
+                    return memo;
                 }
-            }
-            memo
-        })
-        .collect()
+                let Some(best) = job.selected.last() else {
+                    return memo;
+                };
+                for (gid, (members, add_path)) in groups.iter() {
+                    // Canonical member: the first established, non-source,
+                    // non-LLGR peer — the one the serial memo computes on.
+                    let canonical = members.iter().copied().find(|&idx| {
+                        peers.get_by_idx(idx).is_some_and(|p| {
+                            best.ident != p.ident
+                                && !llgr_blocks_advertisement(best.stale, &p.cap_recv, afi, safi)
+                        })
+                    });
+                    if let Some(idx) = canonical {
+                        let peer = peers.get_by_idx(idx).expect("peer exists");
+                        let outcome =
+                            compute_advertise_outcome(peer, &job.prefix, best, bgp, *add_path);
+                        memo.insert(gid.clone(), outcome);
+                    }
+                }
+                memo
+            })
+            .collect()
+    })
 }
 
 /// One IPv4 advertise job produced by a Loc-RIB best-path delta: the
