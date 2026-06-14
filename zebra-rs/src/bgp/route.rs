@@ -4274,19 +4274,10 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6(nlri.prefix),
                 );
             }
-            // A withdraw for a prefix this peer never contributed to the
-            // Loc-RIB removes nothing, so the best-path is unchanged and
-            // there is nothing to re-evaluate or re-advertise. Returning
-            // early here is correctness, not just an optimization: v6 has
-            // no Adj-RIB-Out, so `route_advertise_to_peers_v6` floods an
-            // empty-selected withdraw to *every* Established peer. If we
-            // propagated this no-op withdraw, a peer that also lacks the
-            // prefix would re-flood it straight back, and two such
-            // speakers bounce MP_UNREACH forever (the storm that wedged
-            // the BGP message channel and broke peer-down detection).
-            if removed.is_empty() {
-                return;
-            }
+            // No no-op guard here: `route_advertise_to_peers_v6` now keeps
+            // a per-peer Adj-RIB-Out (`adj_out.v6`) and withdraws only to
+            // peers that were actually advertised the prefix, so an
+            // empty-selected withdraw no longer floods or ping-pongs.
             let selected = bgp.shard.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
@@ -7556,26 +7547,39 @@ pub(super) fn route_advertise_to_peers_v6(
         let add_path = peer.opt.is_add_path_send(afi, safi);
         let group_id = peer.update_group_id.get(&afi_safi).cloned();
 
-        match new_best {
-            Some(best) if best.ident != peer.ident => {
-                // RFC 9494 §4.3: stale routes only go to LLGR peers.
-                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
-                    continue;
+        // Advertise the best path to this peer unless it is the source
+        // (split-horizon), the route is LLGR-blocked, community-suppressed,
+        // or denied by out-policy — each of those falls through to the
+        // withdraw branch, which (via the Adj-RIB-Out below) emits an
+        // MP_UNREACH only to a peer that was actually advertised the prefix.
+        let to_advertise: Option<(Ipv6Nlri, BgpAttr, BgpRib)> = match new_best {
+            Some(best)
+                if best.ident != peer.ident
+                    && !llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) =>
+            {
+                match route_update_ipv6(peer, &prefix, best, bgp, add_path) {
+                    // Outbound policy: per-peer v6 route-map / prefix-list.
+                    Some((nlri, attr)) => route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
+                        .map(|decision| (nlri, decision.attr, best.clone())),
+                    None => None,
                 }
-                let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
-                else {
-                    continue;
-                };
-                // Outbound policy: per-peer v6 route-map / prefix-list. A
-                // denied route is suppressed (never advertised, so there
-                // is nothing to withdraw). Reaches parity with the v4
-                // advertise — v6 previously applied no out-policy.
-                let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
-                else {
-                    continue;
-                };
-                let attr = bgp.attr_store.intern(decision.attr);
+            }
+            _ => None,
+        };
+
+        match to_advertise {
+            Some((nlri, attr, best)) => {
+                let attr = bgp.attr_store.intern(attr);
                 let source_ident = best.ident;
+                // Adj-RIB-Out: record what was sent so a later withdraw is
+                // pruned to exactly the peers that received the route (the
+                // v4 path does the same via `adj_out.add`). Without this a
+                // withdraw floods every peer; with it, a peer that never
+                // got the route gets no MP_UNREACH — which is what stops
+                // the no-op-withdraw ping-pong at the source.
+                let mut rib = best;
+                rib.attr = attr.clone();
+                peer.adj_out.v6.add(prefix, rib);
                 if let Some(gid) = group_id
                     && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                     && let Some(group) = af.group_by_id_mut(&gid)
@@ -7595,19 +7599,24 @@ pub(super) fn route_advertise_to_peers_v6(
                     );
                 }
             }
-            Some(_) => {
-                // Split-horizon: the source peer receives nothing.
-            }
             None => {
-                // Withdraw: cancel any still-pending reach for this
-                // prefix, then emit an explicit MP_UNREACH.
-                if let Some(gid) = group_id
-                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                    && let Some(group) = af.group_by_id_mut(&gid)
-                {
-                    super::update_group::cache_remove_ipv6(group, prefix, 0);
+                // Withdraw only if this peer actually had the route in its
+                // Adj-RIB-Out. Gate on prefix presence (id-agnostic, like
+                // the v4 path's `contains_key`) — `remove(prefix, 0)`
+                // returns None for a non-zero stored id, so it can't be the
+                // gate. Pruning here (not the old flood-to-every-peer) is
+                // what stops the no-op-withdraw ping-pong and supersedes the
+                // `route_ipv6_withdraw` no-op guard.
+                if peer.adj_out.v6.0.contains_key(&prefix) {
+                    if let Some(gid) = group_id
+                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                        && let Some(group) = af.group_by_id_mut(&gid)
+                    {
+                        super::update_group::cache_remove_ipv6(group, prefix, 0);
+                    }
+                    withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
+                    peer.adj_out.v6.remove(prefix, 0);
                 }
-                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
             }
         }
     }
