@@ -2377,7 +2377,41 @@ impl Bgp {
             CacheChange::Unchanged => {}
             // Gate flipped → full re-eval: best-path, advertise, install.
             CacheChange::Reachability(deps) => {
-                for dep in deps {
+                // At N>1, batch the v4-unicast re-evals per shard — every
+                // one of this next-hop's dependent prefixes hashing to a
+                // shard rides a single message instead of one dispatch
+                // each (RouteBatch for the release path; a first-seen
+                // next-hop can release a whole table's worth of held
+                // routes at once). Non-v4 deps (v6 / LU / VPN / EVPN /
+                // SR-Policy) stay on the inline sync-shard path.
+                let mut inline: Vec<super::nht::NhtDep> = Vec::new();
+                if let Some(pool) = self.shards.as_ref() {
+                    let mut per_shard: Vec<Vec<bgp_packet::Ipv4Nlri>> = vec![Vec::new(); pool.n()];
+                    for dep in deps {
+                        match dep {
+                            super::nht::NhtDep::V4(p) => {
+                                let idx = pool.shard_of(std::net::IpAddr::V4(p.addr()));
+                                per_shard[idx].push(bgp_packet::Ipv4Nlri { id: 0, prefix: p });
+                            }
+                            other => inline.push(other),
+                        }
+                    }
+                    for (idx, nlris) in per_shard.into_iter().enumerate() {
+                        if !nlris.is_empty() {
+                            pool.dispatch(
+                                idx,
+                                super::shard::ShardMsg::NexthopReachableBatchV4 {
+                                    nlris,
+                                    nh,
+                                    reachable,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    inline.extend(deps);
+                }
+                for dep in inline {
                     self.nht_reeval_dep(nh, reachable, dep);
                 }
             }
@@ -2520,27 +2554,10 @@ impl Bgp {
     /// VRF dataplane install is triggered.
     fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
         use super::nht::NhtDep;
-        // At N>1, v4-unicast deps live in the pool shard (v6 / LU / VPN
-        // stay on the synchronous `self.shard`). Dispatch the re-eval to
-        // the owning pool shard — its `BestPathV4` delta drives FIB +
-        // re-advertise through the reduce (`process_shard_result`). Without
-        // this, a route held pending next-hop resolution in a pool shard is
-        // never released (its `set_nexthop_reachable` only ever ran on the
-        // empty `self.shard`).
-        if let NhtDep::V4(p) = &dep
-            && let Some(pool) = self.shards.as_ref()
-        {
-            pool.dispatch(
-                pool.shard_of(std::net::IpAddr::V4(p.addr())),
-                super::shard::ShardMsg::NexthopReachableV4 {
-                    nlri: bgp_packet::Ipv4Nlri { id: 0, prefix: *p },
-                    nh,
-                    reachable,
-                },
-            );
-            return;
-        }
-        // Refresh gate flags + re-select (mutates `local_rib`).
+        // Refresh gate flags + re-select (mutates `local_rib`). At N>1 the
+        // v4-unicast deps are batched per shard by the caller
+        // (`nht_handle_update`), so here `dep` is always sync-shard-owned
+        // (v6 / LU / VPN / EVPN / SR-Policy) at N>1, or any dep at N=1.
         let selected = match &dep {
             NhtDep::V4(p) => {
                 self.shard.v4.set_nexthop_reachable(*p, nh, reachable);

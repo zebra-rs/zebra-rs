@@ -124,16 +124,18 @@ pub enum ShardMsg {
         policy: Option<std::sync::Arc<super::InPolicy>>,
     },
 
-    /// Re-evaluate one IPv4-unicast prefix after its next-hop's
-    /// reachability flipped (`RibRx::NexthopUpdate`). The owning shard
-    /// refreshes the gate flag and re-runs best-path WITHOUT removing the
-    /// row, then replies with the [`ShardOut::BestPathV4`] delta so the
-    /// reduce reconciles the FIB + re-advertises. Without this, a route
-    /// held pending next-hop resolution in a pool shard is never released.
-    /// v4-unicast only — v6 / LU / VPN re-evals stay on the synchronous
-    /// shard (they aren't fanned out to the pool).
-    NexthopReachableV4 {
-        nlri: Ipv4Nlri,
+    /// Re-evaluate a batch of IPv4-unicast prefixes that share a next-hop,
+    /// after that next-hop's reachability flipped (`RibRx::NexthopUpdate`).
+    /// All of the next-hop's dependent prefixes hashing to this shard ride
+    /// one message (RouteBatch-style) rather than one dispatch per prefix —
+    /// collapsing the futex storm when a first-seen next-hop resolves and
+    /// releases a whole table's worth of held routes at once. The shard
+    /// refreshes each row's gate flag and re-runs best-path WITHOUT
+    /// removing it, replying with one [`ShardOut::BestPathV4`] per prefix
+    /// so the reduce reconciles the FIB + re-advertises. v4-unicast only —
+    /// v6 / LU / VPN re-evals stay on the synchronous shard.
+    NexthopReachableBatchV4 {
+        nlris: Vec<Ipv4Nlri>,
         nh: IpAddr,
         reachable: bool,
     },

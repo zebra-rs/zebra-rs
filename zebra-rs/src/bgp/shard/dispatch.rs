@@ -56,11 +56,17 @@ impl BgpShard {
                 self.set_in_policy(ident, policy);
                 Vec::new()
             }
-            ShardMsg::NexthopReachableV4 {
-                nlri,
+            ShardMsg::NexthopReachableBatchV4 {
+                nlris,
                 nh,
                 reachable,
-            } => self.reeval_nexthop_v4(nlri, nh, reachable),
+            } => {
+                let mut outs = Vec::with_capacity(nlris.len());
+                for nlri in nlris {
+                    outs.push(self.reeval_nexthop_v4(nlri, nh, reachable));
+                }
+                outs
+            }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }
@@ -247,11 +253,11 @@ impl BgpShard {
         nlri: Ipv4Nlri,
         nh: std::net::IpAddr,
         reachable: bool,
-    ) -> Vec<ShardOut> {
+    ) -> ShardOut {
         self.v4.set_nexthop_reachable(nlri.prefix, nh, reachable);
         let selected = self.select_best_path(nlri.prefix);
         let survivor_nexthops = self.candidate_nexthops_v4(None, nlri.prefix);
-        vec![ShardOut::BestPathV4 {
+        ShardOut::BestPathV4 {
             ident: 0,
             rd: None,
             prefix: nlri,
@@ -259,7 +265,7 @@ impl BgpShard {
             replaced: Vec::new(),
             added: None,
             survivor_nexthops,
-        }]
+        }
     }
 
     /// Shard half of `route_ipv6_update`. Mirrors `handle_update_v4`:
