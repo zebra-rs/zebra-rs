@@ -4214,6 +4214,17 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6vpn(rd, nlri.prefix),
                 );
             }
+            // VPNv6 no-op withdraw guard — same as `route_labelv4_withdraw`.
+            // Unlike VPNv4 (which rides the unified `route_advertise_to_peers`
+            // and its `adj_out.v4vpn` diff, so it never floods a no-op
+            // withdraw), VPNv6 uses `route_advertise_to_peers_vpnv6`, which
+            // has no Adj-RIB-Out — `adj_out.v6vpn` is never populated — and
+            // floods an empty-selected withdraw to every PE. Re-propagating a
+            // withdraw that removed nothing would ping-pong MP_UNREACH between
+            // two route-less PEs.
+            if removed.is_empty() {
+                return;
+            }
             let selected = bgp.shard.select_best_path_vpn_v6(&rd, nlri.prefix);
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
