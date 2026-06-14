@@ -2191,8 +2191,6 @@ pub fn route_ipv4_update_batch(
     shards: Option<&super::shard::pool::ShardPool>,
     stale: bool,
 ) {
-    use rayon::prelude::*;
-
     let checks = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
         inbound_attr_checks(peer, attr, bgp.router_id)
@@ -2240,50 +2238,42 @@ pub fn route_ipv4_update_batch(
         return;
     }
 
-    let decisions: Vec<(Ipv4Nlri, Option<PolicyDecision>)> = {
-        let peer = peers.get_by_idx(ident).expect("peer must exist");
-        let prefix_cfg = peer.prefix_set.get(&InOut::Input);
-        let policy_cfg = peer.policy_list.get(&InOut::Input);
-        let router_id = peer.router_id;
-        let eval = |nlri: &Ipv4Nlri| {
-            (
-                nlri.clone(),
-                apply_policy_in_pure(prefix_cfg, policy_cfg, router_id, nlri, attr.clone(), 0),
-            )
-        };
-        // Cost-gate (C.1): the inbound par_iter only earns its rayon
-        // fork-join when an inbound policy is bound (its prefix-set walk is
-        // the work). With none, `apply_policy_in_pure` is default-permit and
-        // the par_iter is pure overhead — measured +23% on a no-policy
-        // full-table load at the default N=1. Iterate serially then;
-        // the result is identical.
-        if prefix_cfg.name.is_some() || policy_cfg.name.is_some() {
-            prefixes.par_iter().map(eval).collect()
-        } else {
-            prefixes.iter().map(eval).collect()
-        }
-    };
-
-    // Phase A (serial): Loc-RIB update per prefix. The table op +
-    // best-path + FIB/VRF run on the single shard; collect the resulting
-    // advertise jobs without running the (out-policy) advertise yet.
+    // Phase A — N=1 (the synchronous shard): route inbound policy THROUGH
+    // the shard (`compute_policy: true` — it holds the peer's policy via
+    // `PolicyReplace`), so policy is applied in exactly one place at every
+    // N and the main-side par_iter is gone. NHT registers on the raw attr
+    // (as the N>1 path does; reachability is shared across the UPDATE's
+    // prefixes — one attr). `reduce_bestpath_v4_nht_fib` runs the
+    // NHT-untrack + FIB + advertise-job post-work, the same routine the
+    // N>1 reduce uses; the out-policy advertise is deferred to Phase B/C.
     let mut jobs: Vec<Ipv4AdvertiseJob> = Vec::new();
-    for (nlri, decision) in decisions {
-        jobs.extend(route_ipv4_update_decided(
-            peer_ident,
+    for nlri in prefixes {
+        let nexthop_reachable =
+            nht_track_received_attr(bgp, attr, super::nht::NhtDep::V4(nlri.prefix));
+        let msg = ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: peer_ident,
+            rd: None,
+            nlri: nlri.clone(),
             peer_router_id,
             typ,
-            &nlri,
-            None,
-            None,
-            attr,
-            None,
-            None,
-            decision,
-            bgp,
-            shards,
+            attr: attr.clone(),
+            label: None,
+            nexthop: None,
+            enhe_egress: None,
             stale,
-        ));
+            nexthop_reachable,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: true,
+        });
+        let deltas = bgp
+            .shard
+            .handle(msg, bgp.central_label_alloc.as_deref_mut());
+        for delta in deltas {
+            if let Some((_src, job)) = reduce_bestpath_v4_nht_fib(bgp, delta) {
+                jobs.push(job);
+            }
+        }
     }
 
     // Phase B (parallel, cost-gated): precompute each job's per-group
