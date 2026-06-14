@@ -4263,6 +4263,19 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6(nlri.prefix),
                 );
             }
+            // A withdraw for a prefix this peer never contributed to the
+            // Loc-RIB removes nothing, so the best-path is unchanged and
+            // there is nothing to re-evaluate or re-advertise. Returning
+            // early here is correctness, not just an optimization: v6 has
+            // no Adj-RIB-Out, so `route_advertise_to_peers_v6` floods an
+            // empty-selected withdraw to *every* Established peer. If we
+            // propagated this no-op withdraw, a peer that also lacks the
+            // prefix would re-flood it straight back, and two such
+            // speakers bounce MP_UNREACH forever (the storm that wedged
+            // the BGP message channel and broke peer-down detection).
+            if removed.is_empty() {
+                return;
+            }
             let selected = bgp.shard.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
@@ -7493,9 +7506,15 @@ fn withdraw_ipv6_deferrable(
 ///
 /// The update-group post-policy memoization, Adj-RIB-Out tracking, and
 /// outbound policy that the v4 path carries are deferred for v6 (the
-/// policy engine is IPv4-typed). Without Adj-RIB-Out, a withdraw is
-/// sent to every Established v6 peer even if it never received the
-/// route — harmless (peers ignore unknown-prefix withdraws).
+/// policy engine is IPv4-typed). Without Adj-RIB-Out, an empty-selected
+/// withdraw is flooded to every Established v6 peer, even ones that
+/// never received the route. That is safe ONLY because the caller drops
+/// a no-op withdraw first: `route_ipv6_withdraw` returns early when it
+/// removed nothing, so a route-less peer cannot bounce the MP_UNREACH
+/// back and start an infinite withdraw storm (peers do NOT ignore an
+/// unknown-prefix withdraw — they re-evaluate and re-flood it). Never
+/// call this with an empty `selected` for a prefix that was not in the
+/// Loc-RIB.
 pub(super) fn route_advertise_to_peers_v6(
     prefix: Ipv6Net,
     selected: &[BgpRib],

@@ -2091,7 +2091,15 @@ pub async fn peer_read(
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
                 if read_len == 0 {
-                    let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
+                    // EOF: the peer closed the connection (graceful close,
+                    // or its process died). Deliver ConnFail with an
+                    // awaiting send rather than `try_send` — a momentarily
+                    // full message channel must not drop the one event that
+                    // drives peer-down detection, or detection falls back
+                    // to the ~90s hold timer. Mirrors the read-error arm
+                    // below; a dying connection has nothing left to read,
+                    // so parking this task on backpressure is harmless.
+                    let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
                     return;
                 }
                 while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
