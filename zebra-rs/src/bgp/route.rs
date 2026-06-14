@@ -4560,6 +4560,15 @@ pub fn route_labelv4_withdraw(
             super::nht::NhtDep::V4lu(nlri.prefix),
         );
     }
+    // No-op withdraw guard (same bug class as `route_ipv6_withdraw`): LU has
+    // no Adj-RIB-Out, so `route_advertise_to_peers_labelv4` floods an
+    // empty-selected withdraw to every peer. Re-propagating a withdraw that
+    // removed nothing lets two route-less speakers bounce MP_UNREACH forever;
+    // removing nothing also means the best-path is unchanged, so there is
+    // nothing to re-advertise.
+    if removed.is_empty() {
+        return;
+    }
     let selected = bgp.shard.select_best_path_v4lu(nlri.prefix);
     // Prefix fully gone: release its local label and tear down the swap
     // ILM. (A surviving winner keeps the same per-prefix label, whose ILM
@@ -4604,6 +4613,10 @@ pub fn route_labelv6_withdraw(
             &survivor_nhs,
             super::nht::NhtDep::V6lu(nlri.prefix),
         );
+    }
+    // No-op withdraw guard, identical to `route_labelv4_withdraw` — see there.
+    if removed.is_empty() {
+        return;
     }
     let selected = bgp.shard.select_best_path_v6lu(nlri.prefix);
     if selected.is_empty()
@@ -7970,8 +7983,12 @@ fn route_update_labelv6(
 /// peer that negotiated it. Immediate per-peer send — no update-group
 /// batching yet (a future optimization; LU volumes are typically small,
 /// e.g. PE loopbacks). A `None` best-path emits MP_UNREACH to all LU
-/// peers (no Adj-RIB-Out yet, so withdraws aren't pruned to recipients —
-/// harmless, peers ignore unknown-prefix withdraws).
+/// peers (no Adj-RIB-Out yet, so withdraws aren't pruned to recipients).
+/// That is safe ONLY because the caller drops a no-op withdraw first:
+/// `route_labelv4_withdraw` / `route_labelv6_withdraw` return early when
+/// they removed nothing, so a route-less peer cannot bounce the MP_UNREACH
+/// back into an infinite withdraw storm (peers do NOT ignore an
+/// unknown-prefix withdraw — they re-evaluate and re-flood it).
 pub(super) fn route_advertise_to_peers_labelv4(
     prefix: Ipv4Net,
     selected: &[BgpRib],
