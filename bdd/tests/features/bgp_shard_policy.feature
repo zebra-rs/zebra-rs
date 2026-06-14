@@ -12,9 +12,9 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
   every shard (a peer's prefixes hash across all of them) and applied in
   `compute_policy` on the shard worker — not on the main task.
 
-  Correctness is observed DOWNSTREAM on z3, and only on the N>1
-  steady-state advertise path (the N>1 `show`, soft-in replay, and
-  new-peer sync are known gaps): policy is set at startup, z3 is brought
+  Correctness is observed DOWNSTREAM on z3 on the N>1 advertise,
+  withdraw, and peer-down paths (the N>1 `show`, soft-in replay, and
+  new-peer sync are still gaps): policy is set at startup, z3 is brought
   up FIRST, and z1's routes are originated only AFTER every session is
   Established, so z2 processes them live (ingest → shard → reduce →
   advertise to the already-up z3). One inbound policy permits 10.0.0.1/32
@@ -22,6 +22,11 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
   one shot: z3 must see .1 (sharded permit + advertise works) but never
   .2 (sharded deny works; before PolicyReplace the shard default-permitted
   and .2 would have leaked).
+
+  Two follow-on scenarios exercise churn at N=4: an explicit withdraw
+  (z1 deletes its `network` statements → z2 runs WithdrawV4 to the owning
+  pool shard) and a session drop (z1 killed → z2's route_clean dispatches
+  PeerDown to every pool shard), each verified by z3 losing 10.0.0.1/32.
 
   Test Topology:
   ```
@@ -61,6 +66,29 @@ Feature: BGP inbound policy through the RIB shards (ZEBRA_BGP_SHARDS>1)
     And I wait 10 seconds for BGP to operate
     Then BGP route in "z3" has "10.0.0.1/32"
     And BGP route in "z3" does not have "10.0.0.2/32"
+
+  Scenario: z1 withdraws its routes; the sharded withdraw reaches z3
+    Given the test topology exists
+    # `vtyctl apply -f` is a whole-config replace, so re-applying the base
+    # (which originates nothing) deletes z1's `network` statements and z1
+    # withdraws 10.0.0.1/32. z2 ingests the withdraw at N=4 -> WithdrawV4 to
+    # the owning pool shard -> async reduce -> MP_UNREACH onward to z3.
+    When I apply config "z1-base.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then BGP route in "z3" does not have "10.0.0.1/32"
+
+  Scenario: z1's session drops; sharded peer-down withdraws its routes from z3
+    Given the test topology exists
+    # Re-originate so z3 sees .1 again, then kill z1. z2 detects the session
+    # drop and runs route_clean, which at N>1 dispatches PeerDown to every
+    # pool shard to sweep z1's v4-unicast slice; the async reduce withdraws
+    # .1 from z3.
+    When I apply config "z1-routes.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then BGP route in "z3" has "10.0.0.1/32"
+    When I stop zebra-rs in namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then BGP route in "z3" does not have "10.0.0.1/32"
 
   Scenario: Teardown topology
     Given the test topology exists

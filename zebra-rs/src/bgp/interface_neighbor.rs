@@ -285,7 +285,12 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
                         vrf_transport_v6: None,
                         central_label_alloc: None,
                     };
-                    super::route::route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+                    super::route::route_clean(
+                        peer_idx,
+                        &mut bgp_ref,
+                        &mut bgp.peers,
+                        bgp.shards.as_ref(),
+                    );
                     // Update-groups live outside `PeerMap`: the
                     // removal below purges the membership index by
                     // construction, but the group member sets need an

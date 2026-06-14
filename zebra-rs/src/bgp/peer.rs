@@ -1488,7 +1488,7 @@ pub fn fsm(
 
     // route_clean if leaving Established (needs peer_map).
     if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
-        route_clean(id, bgp_ref, peer_map);
+        route_clean(id, bgp_ref, peer_map, shards);
     }
 
     // Maintain update-group membership across the Established

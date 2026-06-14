@@ -3803,7 +3803,7 @@ fn route_soft_in_peer_table(
                     // Policy denies this route under the new rules.
                     // rib_in=false leaves the Adj-RIB-In entry in
                     // place so subsequent replays still see it.
-                    route_ipv4_withdraw(peer_idx, &nlri, rd, None, bgp, peers, false);
+                    route_ipv4_withdraw(peer_idx, &nlri, rd, None, bgp, peers, None, false);
                 }
                 Some(decision) => {
                     let mut new_rib = stored.clone();
@@ -3836,8 +3836,31 @@ pub fn route_ipv4_withdraw(
     _label: Option<Label>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
     rib_in: bool,
 ) {
+    // RIB sharding (N>1): v4-unicast lives on the pool, so dispatch the
+    // withdraw to the owning shard and let the async reduce
+    // (`process_shard_result` → `route_apply_bestpath_v4_batch`) drive the
+    // Adj-RIB-In drop (in the shard, via `rib_in`), NHT untrack, FIB
+    // reconcile and re-advertise — the same path the update ingest takes.
+    // VPNv4 (`rd = Some`) is not pooled; it stays on the synchronous shard.
+    if rd.is_none()
+        && let Some(pool) = shards
+    {
+        let idx = pool.shard_of(std::net::IpAddr::V4(nlri.prefix.addr()));
+        pool.dispatch(
+            idx,
+            ShardMsg::WithdrawV4 {
+                ident,
+                rd: None,
+                nlri: nlri.clone(),
+                rib_in,
+            },
+        );
+        return;
+    }
+
     {
         if rib_in {
             let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
@@ -5872,7 +5895,13 @@ pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &m
 /// `*_withdraw` path so any previously-installed copy from this peer is
 /// removed. RTC and any other family that cannot carry a Prefix-SID
 /// attribute fall through the catch-all as a no-op.
-fn withdraw_mp_reach(peer_id: usize, mp: MpReachAttr, bgp: &mut BgpTop, peers: &mut PeerMap) {
+fn withdraw_mp_reach(
+    peer_id: usize,
+    mp: MpReachAttr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     match mp {
         MpReachAttr::Vpnv4(nlri) => {
             for update in nlri.updates.iter() {
@@ -5883,6 +5912,7 @@ fn withdraw_mp_reach(peer_id: usize, mp: MpReachAttr, bgp: &mut BgpTop, peers: &
                     Some(update.label),
                     bgp,
                     peers,
+                    None,
                     true,
                 );
             }
@@ -5899,7 +5929,7 @@ fn withdraw_mp_reach(peer_id: usize, mp: MpReachAttr, bgp: &mut BgpTop, peers: &
         }
         MpReachAttr::Ipv4 { updates, .. } => {
             for update in updates.iter() {
-                route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, true);
+                route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, shards, true);
             }
         }
         MpReachAttr::Ipv6 { updates, .. } => {
@@ -5986,7 +6016,7 @@ pub fn route_from_peer(
 
     if treat_as_withdraw {
         for update in packet.ipv4_update.iter() {
-            route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, true);
+            route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, shards, true);
         }
     } else if let Some(bgp_attr) = &packet.bgp_attr {
         // Plain IPv4-unicast ingest goes through the batch path, which
@@ -6003,11 +6033,11 @@ pub fn route_from_peer(
     }
 
     for withdraw in packet.ipv4_withdraw.iter() {
-        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
+        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, shards, true);
     }
     if let Some(mp_updates) = packet.mp_update {
         if treat_as_withdraw {
-            withdraw_mp_reach(peer_id, mp_updates, bgp, peers);
+            withdraw_mp_reach(peer_id, mp_updates, bgp, peers, shards);
         } else if let Some(bgp_attr) = &packet.bgp_attr {
             match mp_updates {
                 MpReachAttr::Vpnv4(nlri) => {
@@ -6187,6 +6217,7 @@ pub fn route_from_peer(
                         Some(withdraw.label),
                         bgp,
                         peers,
+                        None,
                         true,
                     );
                 }
@@ -6297,27 +6328,44 @@ pub fn route_from_peer(
     }
 }
 
-pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    // IPv4 unicast.
-    let withdrawn = {
-        let mut withdrawn: Vec<Ipv4Nlri> = vec![];
-        if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
-            for (prefix, ribs) in adj_in.v4.0.iter() {
-                for rib in ribs.iter() {
-                    let withdraw = Ipv4Nlri {
-                        id: rib.remote_id,
-                        prefix: *prefix,
-                    };
-                    withdrawn.push(withdraw);
+pub fn route_clean(
+    peer_id: usize,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
+    // IPv4 unicast. At N>1 the peer's v4-unicast routes live on the pool
+    // shards, not `bgp.shard`; dispatch a PeerDown to each so it sweeps
+    // its own slice (drops Adj-RIB-In + re-runs best-path), and the async
+    // reduce withdraws or re-advertises. At N=1 sweep the in-process shard
+    // inline, as before. (Only v4-unicast is pooled, so a pool shard's
+    // PeerDown touches only that family; v6 / VPN / LU are swept below on
+    // `bgp.shard` at every N.)
+    if let Some(pool) = shards {
+        for idx in 0..pool.n() {
+            pool.dispatch(idx, ShardMsg::PeerDown { ident: peer_id });
+        }
+    } else {
+        let withdrawn = {
+            let mut withdrawn: Vec<Ipv4Nlri> = vec![];
+            if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+                for (prefix, ribs) in adj_in.v4.0.iter() {
+                    for rib in ribs.iter() {
+                        let withdraw = Ipv4Nlri {
+                            id: rib.remote_id,
+                            prefix: *prefix,
+                        };
+                        withdrawn.push(withdraw);
+                    }
                 }
             }
+            withdrawn
+        };
+        for withdraw in withdrawn.iter() {
+            route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, None, true);
         }
-        withdrawn
-    };
-    for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, true);
+        bgp.shard.adj_in_mut(peer_id).v4.0.clear();
     }
-    bgp.shard.adj_in_mut(peer_id).v4.0.clear();
     let peer = peers.get_mut_by_idx(peer_id).expect("peer must exist");
     peer.adj_out.v4.0.clear();
 
@@ -6394,6 +6442,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                 Some(withdraw.label),
                 bgp,
                 peers,
+                None,
                 true,
             );
         }
@@ -6500,6 +6549,7 @@ pub fn route_clean(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
                 Some(withdraw.label),
                 bgp,
                 peers,
+                None,
                 true,
             );
         }
@@ -6984,6 +7034,7 @@ pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMa
             Some(withdraw.label),
             bgp,
             peers,
+            None,
             true,
         );
     }

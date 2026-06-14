@@ -40,7 +40,18 @@ impl BgpShard {
         match msg {
             ShardMsg::UpdateV4(u) => self.handle_update_v4(u),
             ShardMsg::RouteBatchV4(b) => self.handle_route_batch_v4(b),
-            ShardMsg::WithdrawV4 { ident, rd, nlri } => {
+            ShardMsg::WithdrawV4 {
+                ident,
+                rd,
+                nlri,
+                rib_in,
+            } => {
+                // Drop the Adj-RIB-In row first, exactly as the
+                // synchronous `route_ipv4_withdraw` does on `bgp.shard`,
+                // then re-run best-path off the Loc-RIB removal.
+                if rib_in {
+                    self.adj_in_mut(ident).remove(rd, nlri.prefix, nlri.id);
+                }
                 vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
             }
             ShardMsg::UpdateV6(u) => self.handle_update_v6(u),

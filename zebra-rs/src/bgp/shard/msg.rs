@@ -68,16 +68,19 @@ pub enum ShardMsg {
     RouteBatchV4(ShardRouteBatchV4),
 
     /// Explicit withdraw of an IPv4 / VPNv4 prefix the peer no longer
-    /// advertises (or that failed a re-check). The shard removes the
-    /// Adj-RIB-In + Loc-RIB entry and replies with the best-path delta.
-    // Not yet constructed: withdraws take the synchronous-shard
-    // `bgp.shard.remove_*` path. Routing them through the pool as a
-    // message is reserved for the N>1 withdraw wiring (B.3 follow-up).
-    #[allow(dead_code)]
+    /// advertises (or that failed a re-check). The shard drops the
+    /// Adj-RIB-In row (when `rib_in`) and the Loc-RIB row, then replies
+    /// with the best-path delta. Dispatched to the owning pool shard for
+    /// v4-unicast at N>1; VPNv4 stays on the synchronous shard.
     WithdrawV4 {
         ident: usize,
         rd: Option<RouteDistinguisher>,
         nlri: Ipv4Nlri,
+        /// Mirrors `route_ipv4_withdraw`'s `rib_in`: when set the
+        /// withdraw came from the peer, so the shard must also drop the
+        /// Adj-RIB-In row (else a soft-reconfig replay re-injects the
+        /// route). `false` for internal re-evaluations.
+        rib_in: bool,
     },
 
     /// A received IPv6-unicast (`rd = None`) or VPNv6 (`rd = Some`)
@@ -88,7 +91,7 @@ pub enum ShardMsg {
     UpdateV6(ShardUpdateV6),
 
     /// Withdraw of an IPv6 / VPNv6 prefix.
-    #[allow(dead_code)] // reserved — see WithdrawV4
+    #[allow(dead_code)] // reserved: v6 / VPN aren't pooled (synchronous shard at every N)
     WithdrawV6 {
         ident: usize,
         rd: Option<RouteDistinguisher>,
@@ -100,11 +103,11 @@ pub enum ShardMsg {
     /// per-prefix *local* label (from its own sub-block) so a
     /// next-hop-self re-advertisement forwards via a swap ILM. Main
     /// has already stamped the MP_REACH next-hop onto `attr`.
-    #[allow(dead_code)] // reserved: LU pool dispatch not yet wired (see WithdrawV4)
+    #[allow(dead_code)] // reserved: LU isn't pooled (synchronous shard at every N)
     UpdateLu(ShardUpdateLu),
 
     /// Withdraw of a Labeled-Unicast prefix (v4 or v6, per `nlri`).
-    #[allow(dead_code)] // reserved — see WithdrawV4
+    #[allow(dead_code)] // reserved: LU isn't pooled (synchronous shard at every N)
     WithdrawLu { ident: usize, nlri: LuNlri },
 
     /// A peer left Established: the shard drops the peer's Adj-RIB-In
@@ -112,8 +115,9 @@ pub enum ShardMsg {
     /// [`ShardOut::BestPathV4`] per contributed prefix — re-electing
     /// any surviving path (another peer may now win) or signalling a
     /// withdraw (empty winners). Centralizing the sweep here closes the
-    /// "new SAFI forgot a route_clean block" bug-class (#1329).
-    #[allow(dead_code)] // reserved: peer-down pool dispatch not yet wired (see WithdrawV4)
+    /// "new SAFI forgot a route_clean block" bug-class (#1329). At N>1
+    /// `route_clean` dispatches this to every pool shard so each sweeps
+    /// the peer's v4-unicast slice.
     PeerDown { ident: usize },
 
     /// Render a sharded Loc-RIB table for a `show` command — the
