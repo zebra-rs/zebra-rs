@@ -146,11 +146,20 @@ thread that owns its slice end-to-end.
   `select!`s best-path deltas and runs NHT untrack + FIB install +
   advertise off each.
 
-**Measured (12-core, no-policy, interleaved A/B):** pre-sharding baseline
-~20 s; the rayon-policy build on this no-policy workload *regressed* to
-27.2 s (the tax above); the dedicated-thread pool at N=12 + RouteBatch +
-mimalloc converges in **16.3 s** — ~20 % below the serial baseline, the
-first build to beat it on this workload.
+**Measured (12-core, no-policy 8×500k, interleaved A/B).** Pre-sharding
+baseline ~20.5 s. Isolation showed the shard *dispatch* is free
+(sync-dispatch ≈ baseline) and ahash interning even helps (−11 %), but
+naive sharding regressed the workload anyway: the ungated rayon policy
+par_iters (+46 % — they fork-join with no policy to amortize), the
+per-prefix dispatch storm (+26 % at N=12), and allocator contention.
+RouteBatch + mimalloc + **uniform cost-gating of every rayon par_iter**
+(C.1 inbound, C.2 outbound, E.1 reduce — each fans out only when its policy
+is bound) fixed all of it: **default N=1 16.5 s (−19 %), N=12 15.7 s
+(−23 %)** — both now beat the serial baseline, the once-+20 % default
+config the bigger turnaround. On this no-policy load the wins are mostly
+ahash + mimalloc + de-taxing the par_iters; the shard parallelism itself
+adds only the last ~5 % (N=1 16.5 s → N=12 15.7 s). It pays far more under
+policy (C.1/C.2 above; E.1 −39 % at N=12) or high RIB-FIB fan-out (§9).
 
 ### Phase E — parallel advertise (the reduce is the next serial point)
 
