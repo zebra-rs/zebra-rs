@@ -2245,15 +2245,23 @@ pub fn route_ipv4_update_batch(
         let prefix_cfg = peer.prefix_set.get(&InOut::Input);
         let policy_cfg = peer.policy_list.get(&InOut::Input);
         let router_id = peer.router_id;
-        prefixes
-            .par_iter()
-            .map(|nlri| {
-                (
-                    nlri.clone(),
-                    apply_policy_in_pure(prefix_cfg, policy_cfg, router_id, nlri, attr.clone(), 0),
-                )
-            })
-            .collect()
+        let eval = |nlri: &Ipv4Nlri| {
+            (
+                nlri.clone(),
+                apply_policy_in_pure(prefix_cfg, policy_cfg, router_id, nlri, attr.clone(), 0),
+            )
+        };
+        // Cost-gate (C.1): the inbound par_iter only earns its rayon
+        // fork-join when an inbound policy is bound (its prefix-set walk is
+        // the work). With none, `apply_policy_in_pure` is default-permit and
+        // the par_iter is pure overhead — measured +23% on a no-policy
+        // full-table load at the default SHARDS=1. Iterate serially then;
+        // the result is identical.
+        if prefix_cfg.name.is_some() || policy_cfg.name.is_some() {
+            prefixes.par_iter().map(eval).collect()
+        } else {
+            prefixes.iter().map(eval).collect()
+        }
     };
 
     // Phase A (serial): Loc-RIB update per prefix. The table op +
@@ -2278,17 +2286,39 @@ pub fn route_ipv4_update_batch(
         ));
     }
 
-    // Phase B (parallel): precompute each job's per-group advertise
-    // outcome. The out-policy prefix-set walk — the convergence hot spot
-    // under a large policy — is pure over the route + the group's config,
-    // so it fans out across prefixes.
-    let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
+    // Phase B (parallel, cost-gated): precompute each job's per-group
+    // advertise outcome — the out-policy prefix-set walk, the convergence
+    // hot spot under a large policy. Same gate as the reduce (Phase E.1):
+    // fan out only when an out-policy is bound, else the empty memos make
+    // the apply compute inline (identical result, no rayon overhead).
+    let memos = if any_established_out_policy_v4(peers) {
+        precompute_ipv4_advertise_outcomes(&jobs, bgp, peers)
+    } else {
+        vec![BTreeMap::new(); jobs.len()]
+    };
 
     // Phase C (serial): apply each job's advertise off the precomputed
     // outcomes; cache / adj-out / send mutate shared state in NLRI order.
     for (job, memo) in jobs.into_iter().zip(memos) {
         apply_ipv4_advertise_job(job, peer_ident, memo, bgp, peers);
     }
+}
+
+/// Whether any Established plain IPv4-unicast peer has an outbound policy
+/// (route-map or prefix-list) bound — the cost-gate for the advertise
+/// out-policy precompute. With none, the precompute's prefix-set walk is a
+/// no-op, so its rayon fan-out is pure overhead at the default N=1 and
+/// steals cores from the shard threads at N>1; callers fall back to a
+/// serial apply (identical result).
+fn any_established_out_policy_v4(peers: &PeerMap) -> bool {
+    peers
+        .established_plain_idents(Afi::Ip, Safi::Unicast)
+        .into_iter()
+        .filter_map(|id| peers.get_by_idx(id))
+        .any(|p| {
+            p.policy_list.get(&InOut::Output).name.is_some()
+                || p.prefix_set.get(&InOut::Output).name.is_some()
+        })
 }
 
 /// Parallel precompute of per-group advertise outcomes for a batch of
@@ -2608,14 +2638,7 @@ pub(super) fn route_apply_bestpath_v4_batch(
     // (measured 3x slower on a no-policy full-table load). So parallelize
     // egress only when out-policy makes egress the bottleneck (the shards
     // are then mostly idle).
-    let worth_parallel = peers
-        .established_plain_idents(Afi::Ip, Safi::Unicast)
-        .into_iter()
-        .filter_map(|id| peers.get_by_idx(id))
-        .any(|p| {
-            p.policy_list.get(&InOut::Output).name.is_some()
-                || p.prefix_set.get(&InOut::Output).name.is_some()
-        });
+    let worth_parallel = any_established_out_policy_v4(peers);
 
     if !worth_parallel {
         // Serial, per delta — byte-identical to the pre-E.1 reduce (no
