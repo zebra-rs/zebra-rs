@@ -40,6 +40,25 @@ Feature: BGP TCP Authentication Option (RFC 5925 / RFC 5926)
     Then BGP session in "z1" to "192.168.0.2" should be "Established"
     And BGP session in "z2" to "192.168.0.1" should be "Established"
 
+  Scenario: Switching to a mismatched key-chain drops the session
+    Given the test topology exists
+    # z2 swaps its tcp-ao key-chain reference (BGP-AO -> BGP-AO-WRONG,
+    # a different key-string). The MKT is installed on the listener at
+    # accept time, so the key change only resets the session because the
+    # key-chain callback now bounces it — otherwise the old session
+    # would survive under the old key until the hold timer expired.
+    When I apply config "z2-2.yaml" to namespace "z2"
+    And I wait 5 seconds for BGP to operate
+    Then BGP session in "z1" to "192.168.0.2" should not be "Established"
+    And BGP session in "z2" to "192.168.0.1" should not be "Established"
+
+  Scenario: Restoring the matching key-chain re-establishes the session
+    Given the test topology exists
+    When I apply config "z2-1.yaml" to namespace "z2"
+    And I wait 5 seconds for BGP to operate
+    Then BGP session in "z1" to "192.168.0.2" should be "Established"
+    And BGP session in "z2" to "192.168.0.1" should be "Established"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
