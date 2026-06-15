@@ -1,0 +1,30 @@
+vrf:
+- name: vrf-blue
+  ipv6:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8::2
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    vrf:
+    - name: vrf-blue
+      rd: 65001:100
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:2::/64
