@@ -4214,17 +4214,8 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6vpn(rd, nlri.prefix),
                 );
             }
-            // VPNv6 no-op withdraw guard — same as `route_labelv4_withdraw`.
-            // Unlike VPNv4 (which rides the unified `route_advertise_to_peers`
-            // and its `adj_out.v4vpn` diff, so it never floods a no-op
-            // withdraw), VPNv6 uses `route_advertise_to_peers_vpnv6`, which
-            // has no Adj-RIB-Out — `adj_out.v6vpn` is never populated — and
-            // floods an empty-selected withdraw to every PE. Re-propagating a
-            // withdraw that removed nothing would ping-pong MP_UNREACH between
-            // two route-less PEs.
-            if removed.is_empty() {
-                return;
-            }
+            // No no-op guard — `route_advertise_to_peers_vpnv6` now prunes
+            // via its Adj-RIB-Out (`adj_out.v6vpn`), like the v4 VPN path.
             let selected = bgp.shard.select_best_path_vpn_v6(&rd, nlri.prefix);
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
@@ -7688,15 +7679,32 @@ fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net
     peer.send_packet(update.into());
 }
 
+/// Withdraw a VPNv6 prefix from `peer` only if its Adj-RIB-Out
+/// (`adj_out.v6vpn`) records that it was advertised — the pruning that
+/// keeps a no-op withdraw from flooding and ping-ponging across PEs.
+fn withdraw_vpnv6_if_advertised(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net) {
+    if peer
+        .adj_out
+        .v6vpn
+        .get(&rd)
+        .is_some_and(|t| t.0.contains_key(&prefix))
+    {
+        peer.cache_remove_vpnv6(rd, prefix, 0);
+        route_withdraw_vpnv6(peer, rd, prefix, 0);
+        if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
+            t.remove(prefix, 0);
+        }
+    }
+}
+
 /// VPNv6 advertise — the v6 counterpart of the `rd.is_some()` branch
 /// of [`route_advertise_to_peers`]. Reach winners are batched into the
 /// per-peer `cache_vpnv6` (flushed via the VPNv6 adv timer); a `None`
 /// best-path emits an immediate MP_UNREACH. The next-hop-self rewrite
 /// to `BgpNexthop::Vpnv6` happens in [`route_update_ipv6`].
 ///
-/// Like the v6-unicast advertise, the update-group memoization,
-/// Adj-RIB-Out tracking, and outbound policy of the v4 path are
-/// deferred for v6.
+/// Outbound policy and a per-peer Adj-RIB-Out (`adj_out.v6vpn`) now match
+/// the v4 path; only the update-group memoization is still deferred.
 pub(super) fn route_advertise_to_peers_vpnv6(
     rd: RouteDistinguisher,
     prefix: Ipv6Net,
@@ -7718,25 +7726,36 @@ pub(super) fn route_advertise_to_peers_vpnv6(
             Some(best) if best.ident != peer.ident => {
                 // RFC 9494 §4.3: stale routes only go to LLGR peers.
                 if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
+                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
                     continue;
                 }
                 let add_path = peer.opt.is_add_path_send(afi, safi);
                 let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
                 else {
+                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
                     continue;
                 };
                 // Outbound policy: per-peer route-map / prefix-list. A
-                // denied route is suppressed (never advertised).
+                // denied route is withdrawn if it was previously advertised.
                 let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
                 else {
+                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
                     continue;
                 };
                 let attr = bgp.attr_store.intern(decision.attr);
-                // RTC: skip without withdrawing when the peer's IPv6
-                // route-target constraint set doesn't admit this route.
+                // RTC: skip WITHOUT withdrawing when the peer's IPv6
+                // route-target constraint set doesn't admit this route
+                // (matches the v4 VPN path).
                 if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
                     continue;
                 }
+                // Adj-RIB-Out: record what was sent so a later withdraw is
+                // pruned to actual recipients (no flood, no ping-pong).
+                peer.adj_out
+                    .v6vpn
+                    .entry(rd)
+                    .or_default()
+                    .add(prefix, best.clone());
                 let vpnv6_nlri = Vpnv6Nlri {
                     label: best.label.unwrap_or_default(),
                     rd,
@@ -7744,12 +7763,10 @@ pub(super) fn route_advertise_to_peers_vpnv6(
                 };
                 peer.send_vpnv6(vpnv6_nlri, attr, true);
             }
-            Some(_) => {
-                // Split-horizon: the source peer receives nothing.
-            }
-            None => {
-                peer.cache_remove_vpnv6(rd, prefix, 0);
-                route_withdraw_vpnv6(peer, rd, prefix, 0);
+            _ => {
+                // Split-horizon (source peer) or no best path: withdraw,
+                // but only from peers that were actually advertised it.
+                withdraw_vpnv6_if_advertised(peer, rd, prefix);
             }
         }
     }
