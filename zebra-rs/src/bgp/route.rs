@@ -146,10 +146,42 @@ fn aspath_first_as_mismatch(aspath: Option<&As4Path>, expected_as: u32) -> bool 
     }
 }
 
-/// Apply the egress AS_PATH transformation for an eBGP announcement to
-/// `peer`. Three stages run in FRR's order, all *before* the local-AS
-/// prepend (iBGP peers and routes without an AS_PATH are left
-/// untouched):
+/// The eBGP AS_PATH egress transform inputs. AF-agnostic — shared by the
+/// v4 / v6 / LU / VPN advertise builders via `ebgp_egress_aspath` — so
+/// split out of the v4-specific [`SyncCtx`].
+#[derive(Clone, Copy)]
+pub struct EgressAs {
+    pub is_ebgp: bool,
+    pub local_as: u32,
+    pub remote_as: u32,
+    pub as_override: bool,
+    pub remove_private_as: Option<super::peer::RemovePrivateAs>,
+    pub local_as_substitute: Option<u32>, // resolved peer.change_local_as()
+    pub local_as_replace: bool,           // config.local_as.is_some_and(replace_as)
+}
+
+/// Per-session egress snapshot for the IPv4-unicast advertise build (A2).
+/// Carries everything `route_update_ipv4` reads from a `Peer`/`BgpTop`,
+/// so the build can run where there is no `Peer`: on the main task today
+/// (built via `Peer::sync_ctx`) and inside a shard worker for `DumpV4`
+/// later. All fields are `Copy`, so building one per advertise is cheap.
+/// (Out-policy is evaluated separately via `OutPolicyRef`; it joins this
+/// snapshot when `DumpV4` lands, since a shard has no `Peer` to source it
+/// from either.)
+#[derive(Clone, Copy)]
+pub struct SyncCtx {
+    pub ident: usize,
+    pub peer_type: PeerType,
+    pub reflector_client: bool,
+    pub local_addr_v4: Option<Ipv4Addr>,
+    pub router_id: Ipv4Addr,
+    pub vpnv4_next_hop_self: bool,
+    pub egress_as: EgressAs,
+}
+
+/// Apply the egress AS_PATH transformation for an eBGP announcement.
+/// Three stages run in FRR's order, all *before* the local-AS prepend
+/// (iBGP peers and routes without an AS_PATH are left untouched):
 ///
 /// 1. `remove-private-as`: strip (or, with `replace-as`, rewrite to the
 ///    local AS) private ASNs. The bare form only fires when the whole
@@ -167,35 +199,34 @@ fn aspath_first_as_mismatch(aspath: Option<&As4Path>, expected_as: u32) -> bool 
 ///
 /// Call this at every eBGP egress site instead of prepending inline, so
 /// the transforms apply uniformly across address families.
-fn ebgp_egress_aspath(peer: &Peer, attrs: &mut BgpAttr) {
-    if !peer.is_ebgp() {
+fn ebgp_egress_aspath(eas: &EgressAs, attrs: &mut BgpAttr) {
+    if !eas.is_ebgp {
         return;
     }
     let Some(aspath) = attrs.aspath.as_mut() else {
         return;
     };
-    if let Some(rpa) = peer.config.remove_private_as {
+    if let Some(rpa) = eas.remove_private_as {
         // Bare form acts only on an all-private path; `all` acts on any.
         if rpa.all || aspath.is_all_private() {
             if rpa.replace_as {
-                aspath.replace_private_as_mut(peer.local_as, peer.remote_as);
+                aspath.replace_private_as_mut(eas.local_as, eas.remote_as);
             } else {
-                aspath.remove_private_as_mut(peer.remote_as);
+                aspath.remove_private_as_mut(eas.remote_as);
             }
         }
     }
-    if peer.config.as_override {
-        aspath.replace_as_mut(peer.remote_as, peer.local_as);
+    if eas.as_override {
+        aspath.replace_as_mut(eas.remote_as, eas.local_as);
     }
-    match peer.change_local_as() {
+    match eas.local_as_substitute {
         Some(substitute) => {
-            let replace_as = peer.config.local_as.is_some_and(|la| la.replace_as);
-            if !replace_as {
-                aspath.prepend_mut(As4Path::from(vec![peer.local_as]));
+            if !eas.local_as_replace {
+                aspath.prepend_mut(As4Path::from(vec![eas.local_as]));
             }
             aspath.prepend_mut(As4Path::from(vec![substitute]));
         }
-        None => aspath.prepend_mut(As4Path::from(vec![peer.local_as])),
+        None => aspath.prepend_mut(As4Path::from(vec![eas.local_as])),
     }
 }
 
@@ -2877,7 +2908,9 @@ fn compute_advertise_outcome(
     bgp: &BgpTop,
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv4Nlri> {
-    if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
+    if let Some((nlri, attr)) =
+        route_update_ipv4(&peer.sync_ctx(*bgp.router_id), prefix, best, add_path)
+    {
         if let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, best.weight)
         {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
@@ -3087,7 +3120,9 @@ impl BatchAfi for V4Batch {
         rib: &BgpRib,
         bgp: &mut BgpTop,
     ) {
-        let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) else {
+        let Some((nlri, attr)) =
+            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, rib, true)
+        else {
             return;
         };
         let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
@@ -3449,7 +3484,7 @@ pub fn route_update_evpn(
 
     let mut attrs = (*rib.attr).clone();
 
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
     if peer.is_ebgp() || rib.is_originated() {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
@@ -3820,7 +3855,9 @@ fn route_soft_out_peer_table(
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
             continue;
         }
-        let Some((nlri, attr)) = route_update_ipv4(peer, prefix, rib, bgp, add_path) else {
+        let Some((nlri, attr)) =
+            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), prefix, rib, add_path)
+        else {
             continue;
         };
         let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
@@ -6109,7 +6146,7 @@ pub fn route_update_flowspec(
     out.id = if add_path { rib.local_id } else { 0 };
 
     let mut attrs = (*rib.attr).clone();
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
@@ -7426,14 +7463,13 @@ fn llgr_blocks_advertisement(
 }
 
 pub fn route_update_ipv4(
-    peer: &Peer,
+    ctx: &SyncCtx,
     prefix: &Ipv4Net,
     rib: &BgpRib,
-    bgp: &BgpTop,
     add_path: bool,
 ) -> Option<(Ipv4Nlri, BgpAttr)> {
     // Split-horizon: Don't send route back to the peer that sent it
-    if rib.ident == peer.ident {
+    if rib.ident == ctx.ident {
         return None;
     }
 
@@ -7446,10 +7482,7 @@ pub fn route_update_ipv4(
 
     // iBGP to iBGP: Don't advertise iBGP-learned routes except the peer is
     // route reflector client.
-    if peer.peer_type == PeerType::IBGP
-        && rib.typ == BgpRibType::IBGP
-        && !peer.is_reflector_client()
-    {
+    if ctx.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP && !ctx.reflector_client {
         return None;
     }
 
@@ -7457,7 +7490,7 @@ pub fn route_update_ipv4(
     // suppressed route flows into `AdvertiseOutcome::Withdraw`, so a
     // previously-advertised route that gains one of these communities
     // is withdrawn from the affected peers (adj-out gated).
-    if community_suppresses_advertisement(&rib.attr, peer.peer_type) {
+    if community_suppresses_advertisement(&rib.attr, ctx.peer_type) {
         return None;
     }
 
@@ -7473,7 +7506,7 @@ pub fn route_update_ipv4(
     // 1. Origin.  Pass through
 
     // 2. AS_PATH
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&ctx.egress_as, &mut attrs);
 
     // 3. NEXT_HOP
     //
@@ -7491,18 +7524,12 @@ pub fn route_update_ipv4(
     // the iBGP session to its PE so a re-advertised eBGP-VPNv4 route carries
     // the ASBR (a resolvable next-hop) instead of the unreachable foreign
     // PE. eBGP and self-originated routes rewrite unconditionally as before.
-    let needs_v4_rewrite = peer.is_ebgp()
+    let needs_v4_rewrite = ctx.peer_type.is_ebgp()
         || rib.is_originated()
         || rib.enhe_egress.is_some()
-        || (rib.nexthop.is_some() && peer.next_hop_self(Afi::Ip, Safi::MplsVpn));
+        || (rib.nexthop.is_some() && ctx.vpnv4_next_hop_self);
     if needs_v4_rewrite {
-        let nexthop = if let Some(ref local_addr) = peer.param.local_addr
-            && let IpAddr::V4(local_addr) = local_addr.ip()
-        {
-            local_addr
-        } else {
-            *bgp.router_id
-        };
+        let nexthop = ctx.local_addr_v4.unwrap_or(ctx.router_id);
         // VPNv4 rows carry the `Vpnv4Nexthop` slot (it holds the
         // route's RD); emit an MP_REACH-shaped next-hop so
         // `flush_vpnv4` picks it up — writing a bare `BgpNexthop::Ipv4`
@@ -7537,7 +7564,7 @@ pub fn route_update_ipv4(
     // 4. MED - Pass through.
 
     // 5. Local Preference (for IBGP only)
-    if peer.is_ibgp() && attrs.local_pref.is_none() {
+    if ctx.peer_type.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
 
@@ -7545,7 +7572,7 @@ pub fn route_update_ipv4(
     // RFC 4456: A route reflector SHOULD NOT create an ORIGINATOR_ID if one already
     // exists. ORIGINATOR_ID is set only once by the first route reflector and preserved
     // thereafter to identify the original route source within the AS.
-    if peer.peer_type == PeerType::IBGP
+    if ctx.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && attrs.originator_id.is_none()
     {
@@ -7557,14 +7584,14 @@ pub fn route_update_ipv4(
     // 7. Cluster List (for IBGP route reflection)
     // RFC 4456: When a route reflector reflects a route, it must prepend the local
     // CLUSTER_ID to the CLUSTER_LIST. By default, the CLUSTER_ID is the router ID.
-    if peer.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
+    if ctx.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP {
         if let Some(ref mut cluster_list) = attrs.cluster_list {
             // Prepend local router ID to existing cluster list
-            cluster_list.list.insert(0, *bgp.router_id);
+            cluster_list.list.insert(0, ctx.router_id);
         } else {
             // Create new cluster list with local router ID
             let mut cluster_list = ClusterList::new();
-            cluster_list.list.push(*bgp.router_id);
+            cluster_list.list.push(ctx.router_id);
             attrs.cluster_list = Some(cluster_list);
         }
     }
@@ -7622,7 +7649,7 @@ pub fn route_update_ipv6(
     let mut attrs = (*rib.attr).clone();
 
     // AS_PATH prepend for eBGP.
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
     // NEXT_HOP: next-hop-self for eBGP / locally-originated routes.
     // RFC 2545 §2 requires the MP_REACH next-hop be one of OUR IPv6
@@ -7989,7 +8016,7 @@ fn route_update_labelv4(
     };
     let mut attrs = (*rib.attr).clone();
 
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
     // Next-hop-self for eBGP / locally-originated, or when the neighbor
     // has `afi-safi label-v4 next-hop-self` (Inter-AS Option C ASBR → PE);
@@ -8063,7 +8090,7 @@ fn route_update_labelv6(
     };
     let mut attrs = (*rib.attr).clone();
 
-    ebgp_egress_aspath(peer, &mut attrs);
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
 
     let needs_self =
         peer.is_ebgp() || rib.is_originated() || peer.next_hop_self(Afi::Ip6, Safi::MplsLabel);
@@ -9156,7 +9183,9 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
                 continue;
             }
-            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
+            let Some((nlri, attr)) =
+                route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
+            else {
                 continue;
             };
             let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
@@ -9221,7 +9250,9 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
             continue;
         }
-        let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
+        let Some((nlri, attr)) =
+            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
+        else {
             continue;
         };
 
@@ -9348,7 +9379,9 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::MplsVpn) {
                 continue;
             }
-            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
+            let Some((nlri, attr)) =
+                route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
+            else {
                 continue;
             };
 
@@ -13302,7 +13335,7 @@ mod local_as_tests {
             aspath: Some(As4Path::from_str(path).unwrap()),
             ..Default::default()
         };
-        ebgp_egress_aspath(peer, &mut attrs);
+        ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
         attrs
             .aspath
             .unwrap()

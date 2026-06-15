@@ -1198,6 +1198,41 @@ impl Peer {
         }
     }
 
+    /// Snapshot this peer's IPv4-unicast egress context (A2). `router_id`
+    /// is the local/global router-id (`*bgp.router_id`), used for the
+    /// next-hop fallback and the cluster-id. Cheap (all-`Copy`); the
+    /// egress build (`route_update_ipv4`) takes this instead of `&Peer`
+    /// so the same build can run in a shard worker that has no `Peer`.
+    pub fn sync_ctx(&self, router_id: Ipv4Addr) -> super::route::SyncCtx {
+        super::route::SyncCtx {
+            ident: self.ident,
+            peer_type: self.peer_type,
+            reflector_client: self.reflector_client,
+            local_addr_v4: self.param.local_addr.and_then(|sa| match sa.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            }),
+            router_id,
+            vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
+            egress_as: self.egress_as(),
+        }
+    }
+
+    /// The eBGP AS_PATH egress transform inputs for this peer (A2). Shared
+    /// across address families — the v6 / LU / VPN advertise builders call
+    /// `ebgp_egress_aspath` with this too.
+    pub fn egress_as(&self) -> super::route::EgressAs {
+        super::route::EgressAs {
+            is_ebgp: self.is_ebgp(),
+            local_as: self.local_as,
+            remote_as: self.remote_as,
+            as_override: self.config.as_override,
+            remove_private_as: self.config.remove_private_as,
+            local_as_substitute: self.change_local_as(),
+            local_as_replace: self.config.local_as.is_some_and(|la| la.replace_as),
+        }
+    }
+
     /// Whether `afi-safi <name> next-hop-self` is set for this neighbor in
     /// the given address family. Forces next-hop-self on forwarded routes
     /// (not just eBGP / self-originated) — see [`PeerSubConfig::next_hop_self`].
