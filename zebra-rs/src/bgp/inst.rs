@@ -67,6 +67,25 @@ fn parse_clear_bgp_path(
     Some((afi_safi, op))
 }
 
+/// Tier 1b sync backpressure: park the IPv4 sync cursor once this many
+/// UPDATE messages are queued (not yet written) toward a peer, so a slow
+/// socket can't let a large session-up dump outrun it and grow memory
+/// unboundedly. At ~max-packet UPDATEs this caps in-flight bytes at a
+/// few hundred KB. Re-polled every `SYNC_PARK_MS` while parked.
+/// Overridable via `ZEBRA_BGP_SYNC_EGRESS_HIGH` (default 64).
+fn sync_egress_high_water() -> usize {
+    use std::sync::OnceLock;
+    static W: OnceLock<usize> = OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("ZEBRA_BGP_SYNC_EGRESS_HIGH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(64)
+    })
+}
+const SYNC_PARK_MS: u64 = 20;
+
 #[derive(Debug)]
 pub enum Message {
     Event(usize, Event),
@@ -1347,11 +1366,39 @@ impl Bgp {
     /// has dropped Established or already finished its cursor is a
     /// no-op (the cursor is cleared on leaving Established).
     fn drive_sync_v4(&mut self, ident: usize) {
-        let active = self
-            .peers
-            .get_by_idx(ident)
-            .is_some_and(|p| p.state.is_established() && p.sync_v4.is_some());
-        if !active {
+        // Active + Tier 1b backpressure in one mutable borrow: a tick
+        // for a dropped/finished peer is a no-op; a peer whose egress is
+        // backed up (a slow socket letting UPDATEs pile up) parks the
+        // cursor and re-polls shortly — the writer drains during the
+        // delay, bounding in-flight memory instead of letting a large
+        // dump outrun the peer. The gauge is published by
+        // `peer_start_writer`; park/resume is logged once per transition.
+        let backed_up = {
+            let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                return;
+            };
+            if !(peer.state.is_established() && peer.sync_v4.is_some()) {
+                return;
+            }
+            let depth = peer.egress_depth.load(std::sync::atomic::Ordering::Relaxed);
+            let over = depth >= sync_egress_high_water();
+            if let Some(cursor) = peer.sync_v4.as_mut() {
+                if over && !cursor.parked {
+                    cursor.parked = true;
+                    tracing::info!(ident, depth, "bgp: v4 sync parked (egress backpressure)");
+                } else if !over && cursor.parked {
+                    cursor.parked = false;
+                    tracing::info!(ident, depth, "bgp: v4 sync resumed");
+                }
+            }
+            over
+        };
+        if backed_up {
+            let tx = self.sync_tick_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(SYNC_PARK_MS)).await;
+                let _ = tx.send(ident);
+            });
             return;
         }
         let chunk = super::route::sync_chunk_size().unwrap_or(1000);

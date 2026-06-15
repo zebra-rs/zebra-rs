@@ -8390,10 +8390,19 @@ pub(super) fn route_advertise_to_peers_labelv6(
 
 impl Peer {
     pub fn send_packet(&self, bytes: BytesMut) {
-        if let Some(ref packet_tx) = self.packet_tx
-            && let Err(e) = packet_tx.send(bytes)
-        {
-            eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
+        if let Some(ref packet_tx) = self.packet_tx {
+            // Tier 1b: count this UPDATE as in-flight the moment it's
+            // queued (real-time), so the sync cursor's egress gauge
+            // reflects a slow writer immediately — not only after the
+            // writer's next, possibly-delayed, drain. The writer
+            // decrements on write; a failed send undoes the count.
+            self.egress_depth
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = packet_tx.send(bytes) {
+                self.egress_depth
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
+            }
         }
     }
 
@@ -9092,6 +9101,10 @@ pub(crate) struct Ipv4SyncCursor {
     /// Set true at creation; cleared by the first kick in
     /// `process_msg` so the cursor is enqueued exactly once.
     pub(crate) fresh: bool,
+    /// True while the cursor is parked on egress backpressure (Tier
+    /// 1b). Tracked so the park / resume transition is logged once each,
+    /// not on every re-poll.
+    pub(crate) parked: bool,
 }
 
 impl Ipv4SyncCursor {
@@ -9101,6 +9114,7 @@ impl Ipv4SyncCursor {
             idx: 0,
             add_path,
             fresh: true,
+            parked: false,
         }
     }
 }

@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::BytesMut;
@@ -820,6 +821,13 @@ pub struct Peer {
     /// `ZEBRA_BGP_SYNC_CHUNK` (legacy one-shot `route_sync_ipv4` when
     /// the flag is off, so this stays `None`).
     pub sync_v4: Option<super::route::Ipv4SyncCursor>,
+    /// Egress backlog gauge (Tier 1b backpressure): the per-peer writer
+    /// task publishes `packet_rx.len()` (pending UPDATE messages) here
+    /// after each write; the sync cursor reads it and parks itself when
+    /// a slow socket lets the queue exceed the watermark, so a large
+    /// dump can't outrun the peer and grow memory unboundedly. Shared
+    /// (the writer holds a clone).
+    pub egress_depth: Arc<AtomicUsize>,
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
@@ -972,6 +980,7 @@ impl Peer {
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
             sync_v4: None,
+            egress_depth: Arc::new(AtomicUsize::new(0)),
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
@@ -1932,7 +1941,11 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     peer.primary_conn_id = Some(conn_id);
     let (read_half, write_half) = stream.into_split();
     peer.task.reader = Some(peer_start_reader(peer, conn_id, read_half));
-    peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
+    peer.task.writer = Some(peer_start_writer(
+        write_half,
+        packet_rx,
+        peer.egress_depth.clone(),
+    ));
     peer_send_open(peer);
     State::OpenSent
 }
@@ -2156,13 +2169,49 @@ pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) ->
     })
 }
 
+/// Test/debug knob: artificially slow the egress writer by N ms per
+/// UPDATE (`ZEBRA_BGP_WRITER_DELAY_MS`, default 0 = off). Simulates a
+/// slow peer at the application layer so the pending-UPDATE queue backs
+/// up deterministically — used to exercise the Tier-1b sync-cursor park
+/// without depending on kernel send-buffer / `tc` behaviour. Read once.
+fn writer_delay_ms() -> u64 {
+    use std::sync::OnceLock;
+    static D: OnceLock<u64> = OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("ZEBRA_BGP_WRITER_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    })
+}
+
 pub fn peer_start_writer(
     mut write_half: OwnedWriteHalf,
     mut rx: UnboundedReceiver<BytesMut>,
+    egress_depth: Arc<AtomicUsize>,
 ) -> Task<()> {
+    // Fresh connection ⇒ fresh queue: reset the in-flight gauge
+    // synchronously (before any `send_packet` on the new channel) so it
+    // doesn't carry a stale count across reconnects.
+    egress_depth.store(0, Ordering::Relaxed);
+    let delay = writer_delay_ms();
     Task::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let _ = write_half.write_all(&msg).await;
+            // Tier 1b: decrement the in-flight gauge that `send_packet`
+            // incremented on queue. Saturating because control frames
+            // (keepalive/OPEN) bypass `send_packet` so weren't counted,
+            // yet the writer drains them too — clamp at 0 rather than
+            // wrap. The pair (send +1 / write −1) keeps the gauge a
+            // real-time count of queued route UPDATEs.
+            egress_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                })
+                .ok();
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
         }
     })
 }
@@ -2581,7 +2630,7 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
     let reader = peer_start_reader(peer, conn_id, read_half);
-    let writer = peer_start_writer(write_half, packet_rx);
+    let writer = peer_start_writer(write_half, packet_rx, peer.egress_depth.clone());
     // Stash before sending OPEN so peer_send_open_on_tx has the tx to
     // write into.
     peer.collision = Some(CollisionConn {
@@ -3442,7 +3491,7 @@ mod fsm_idle_hold_tests {
 
         let (_read_half, write_half) = client.into_split();
         let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
-        let writer = peer_start_writer(write_half, rx);
+        let writer = peer_start_writer(write_half, rx, Arc::new(AtomicUsize::new(0)));
 
         // Queue a frame, close the channel, detach — mirroring
         // `close_primary` / the Idle-entry teardown ordering.
