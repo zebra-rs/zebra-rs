@@ -1187,6 +1187,17 @@ impl Peer {
         self.reflector_client
     }
 
+    /// Borrowed view of this peer's outbound policy (A2 Phase 0). The
+    /// egress build takes this instead of `&Peer` so the same evaluation
+    /// can run in a shard worker (which holds a `SyncCtx`, not a `Peer`).
+    pub fn out_policy(&self) -> super::policy::OutPolicyRef<'_> {
+        super::policy::OutPolicyRef {
+            prefix_set: self.prefix_set.get(&super::policy::InOut::Output),
+            policy_list: self.policy_list.get(&super::policy::InOut::Output),
+            router_id: self.router_id,
+        }
+    }
+
     /// Whether `afi-safi <name> next-hop-self` is set for this neighbor in
     /// the given address family. Forces next-hop-self on forwarded routes
     /// (not just eBGP / self-originated) — see [`PeerSubConfig::next_hop_self`].

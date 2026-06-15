@@ -1931,15 +1931,15 @@ pub fn route_apply_policy_out_evpn(
 /// projection of [`apply_policy_net`]. `set next-hop self` anchors on
 /// the session's local router-id (`peer.router_id`).
 pub fn route_apply_policy_out(
-    peer: &Peer,
+    out: super::policy::OutPolicyRef,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        peer.prefix_set.get(&InOut::Output),
-        peer.policy_list.get(&InOut::Output),
-        peer.router_id,
+        out.prefix_set,
+        out.policy_list,
+        out.router_id,
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
@@ -2878,7 +2878,8 @@ fn compute_advertise_outcome(
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv4Nlri> {
     if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
-        if let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) {
+        if let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, best.weight)
+        {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
@@ -3089,7 +3090,8 @@ impl BatchAfi for V4Batch {
         let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) else {
             return;
         };
-        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
+        else {
             return;
         };
         let attr = decision.attr;
@@ -3821,7 +3823,8 @@ fn route_soft_out_peer_table(
         let Some((nlri, attr)) = route_update_ipv4(peer, prefix, rib, bgp, add_path) else {
             continue;
         };
-        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
+        else {
             continue;
         };
         let attr = decision.attr;
@@ -8186,7 +8189,7 @@ impl LabeledAfi for LabeledV4 {
         attr: BgpAttr,
         weight: u32,
     ) -> Option<PolicyDecision> {
-        route_apply_policy_out(peer, nlri, attr, weight)
+        route_apply_policy_out(peer.out_policy(), nlri, attr, weight)
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
         MpReachAttr::Labelv4 {
@@ -9156,7 +9159,8 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
+            else {
                 continue;
             };
             rib.attr = bgp.attr_store.intern(decision.attr);
@@ -9221,7 +9225,8 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
 
-        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
+        else {
             continue;
         };
 
@@ -9347,7 +9352,8 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 continue;
             };
 
-            let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
+            else {
                 continue;
             };
             let attr = decision.attr;
@@ -9667,7 +9673,8 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         };
         // Outbound policy on the establish-time dump (parity with the
         // event-driven advertise and the unicast sync paths).
-        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) else {
+        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, best.weight)
+        else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());

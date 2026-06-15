@@ -39,3 +39,16 @@ pub struct PolicyListValue {
     pub name: Option<String>,
     pub policy_list: Option<PolicyList>,
 }
+
+/// A borrowed view of a peer's *outbound* policy — the prefix-set,
+/// policy-list, and the router-id anchor (`set next-hop self`). Lets the
+/// egress policy evaluation run without the full `Peer`: built cheaply
+/// (no clones) from a `Peer` on the main task today (A2 Phase 0), and
+/// from a per-session `SyncCtx` snapshot inside a shard worker later, so
+/// one `route_apply_policy_out` serves both.
+#[derive(Clone, Copy)]
+pub struct OutPolicyRef<'a> {
+    pub prefix_set: &'a PrefixSetValue,
+    pub policy_list: &'a PolicyListValue,
+    pub router_id: std::net::Ipv4Addr,
+}
