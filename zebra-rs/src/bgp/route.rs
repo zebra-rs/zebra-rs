@@ -8009,40 +8009,178 @@ fn route_update_labelv6(
     Some((nlri, attrs, nhop, label))
 }
 
-/// Advertise an IPv4 Labeled-Unicast best-path change (SAFI 4) to every
-/// peer that negotiated it. Immediate per-peer send — no update-group
-/// batching yet (a future optimization; LU volumes are typically small,
-/// e.g. PE loopbacks). A `None` best-path withdraws the prefix, but only
-/// from peers whose Adj-RIB-Out (`adj_out.v4lu`) holds it — the same
-/// pruning the v4-unicast path does, so a no-op withdraw neither floods
-/// nor ping-pongs.
-pub(super) fn route_advertise_to_peers_labelv4(
-    prefix: Ipv4Net,
+/// Per-AF hooks that let one generic [`route_advertise_labeled`] cover the
+/// SAFI-4 (labeled-unicast) v4 and v6 advertise paths. Phase 2 of the
+/// Adj-RIB-Out unification: the two families differ only in prefix/NLRI
+/// type, which `adj_out` table records reach, their update builder and
+/// out-policy, and which `Mp{Reach,Unreach}Attr` variant they encode.
+trait LabeledAfi {
+    type Prefix: Copy + Ord;
+    type Nlri;
+    const AFI: Afi;
+
+    fn adj_out_add(peer: &mut Peer, prefix: Self::Prefix, rib: BgpRib);
+    fn adj_out_contains(peer: &Peer, prefix: &Self::Prefix) -> bool;
+    fn adj_out_remove(peer: &mut Peer, prefix: Self::Prefix, id: u32);
+    fn adj_out_ids(peer: &Peer, prefix: &Self::Prefix) -> Vec<u32>;
+
+    fn update(
+        peer: &mut Peer,
+        prefix: &Self::Prefix,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+        add_path: bool,
+    ) -> Option<(Self::Nlri, BgpAttr, IpAddr, Label)>;
+    fn apply_policy_out(
+        peer: &Peer,
+        nlri: &Self::Nlri,
+        attr: BgpAttr,
+        weight: u32,
+    ) -> Option<PolicyDecision>;
+    fn reach(nhop: IpAddr, label: Label, nlri: Self::Nlri) -> MpReachAttr;
+    fn unreach(prefix: Self::Prefix, id: u32) -> MpUnreachAttr;
+}
+
+struct LabeledV4;
+impl LabeledAfi for LabeledV4 {
+    type Prefix = Ipv4Net;
+    type Nlri = Ipv4Nlri;
+    const AFI: Afi = Afi::Ip;
+
+    fn adj_out_add(peer: &mut Peer, prefix: Ipv4Net, rib: BgpRib) {
+        peer.adj_out.v4lu.add(prefix, rib);
+    }
+    fn adj_out_contains(peer: &Peer, prefix: &Ipv4Net) -> bool {
+        peer.adj_out.v4lu.0.contains_key(prefix)
+    }
+    fn adj_out_remove(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
+        peer.adj_out.v4lu.remove(prefix, id);
+    }
+    fn adj_out_ids(peer: &Peer, prefix: &Ipv4Net) -> Vec<u32> {
+        peer.adj_out
+            .v4lu
+            .0
+            .get(prefix)
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default()
+    }
+    fn update(
+        peer: &mut Peer,
+        prefix: &Ipv4Net,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+        add_path: bool,
+    ) -> Option<(Ipv4Nlri, BgpAttr, IpAddr, Label)> {
+        route_update_labelv4(peer, prefix, rib, bgp, add_path)
+    }
+    fn apply_policy_out(
+        peer: &Peer,
+        nlri: &Ipv4Nlri,
+        attr: BgpAttr,
+        weight: u32,
+    ) -> Option<PolicyDecision> {
+        route_apply_policy_out(peer, nlri, attr, weight)
+    }
+    fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
+        MpReachAttr::Labelv4 {
+            snpa: 0,
+            nhop,
+            updates: vec![Labelv4Nlri { label, nlri }],
+        }
+    }
+    fn unreach(prefix: Ipv4Net, id: u32) -> MpUnreachAttr {
+        MpUnreachAttr::Labelv4(vec![Labelv4Nlri {
+            label: Label::default(),
+            nlri: Ipv4Nlri { id, prefix },
+        }])
+    }
+}
+
+struct LabeledV6;
+impl LabeledAfi for LabeledV6 {
+    type Prefix = Ipv6Net;
+    type Nlri = Ipv6Nlri;
+    const AFI: Afi = Afi::Ip6;
+
+    fn adj_out_add(peer: &mut Peer, prefix: Ipv6Net, rib: BgpRib) {
+        peer.adj_out.v6lu.add(prefix, rib);
+    }
+    fn adj_out_contains(peer: &Peer, prefix: &Ipv6Net) -> bool {
+        peer.adj_out.v6lu.0.contains_key(prefix)
+    }
+    fn adj_out_remove(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
+        peer.adj_out.v6lu.remove(prefix, id);
+    }
+    fn adj_out_ids(peer: &Peer, prefix: &Ipv6Net) -> Vec<u32> {
+        peer.adj_out
+            .v6lu
+            .0
+            .get(prefix)
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default()
+    }
+    fn update(
+        peer: &mut Peer,
+        prefix: &Ipv6Net,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+        add_path: bool,
+    ) -> Option<(Ipv6Nlri, BgpAttr, IpAddr, Label)> {
+        route_update_labelv6(peer, prefix, rib, bgp, add_path)
+    }
+    fn apply_policy_out(
+        peer: &Peer,
+        nlri: &Ipv6Nlri,
+        attr: BgpAttr,
+        weight: u32,
+    ) -> Option<PolicyDecision> {
+        route_apply_policy_out_v6(peer, nlri, attr, weight)
+    }
+    fn reach(nhop: IpAddr, label: Label, nlri: Ipv6Nlri) -> MpReachAttr {
+        MpReachAttr::Labelv6 {
+            snpa: 0,
+            nhop,
+            updates: vec![Labelv6Nlri { label, nlri }],
+        }
+    }
+    fn unreach(prefix: Ipv6Net, id: u32) -> MpUnreachAttr {
+        MpUnreachAttr::Labelv6(vec![Labelv6Nlri {
+            label: Label::default(),
+            nlri: Ipv6Nlri { id, prefix },
+        }])
+    }
+}
+
+/// Generic labeled-unicast advertise (SAFI 4), shared by v4 and v6 via
+/// [`LabeledAfi`]. Plain members get the best path (or a withdraw pruned
+/// to actual recipients through the per-AF Adj-RIB-Out); AddPath members
+/// get every candidate path-id, with the same diff-based withdraw of the
+/// path-ids that fell out. Immediate per-peer send — no update-group cache.
+fn route_advertise_labeled<A: LabeledAfi>(
+    prefix: A::Prefix,
     selected: &[BgpRib],
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
     let new_best = selected.last();
-    let (afi, safi) = (Afi::Ip, Safi::MplsLabel);
+    let (afi, safi) = (A::AFI, Safi::MplsLabel);
 
     // Non-AddPath members: best-path only.
     for ident in peers.established_plain_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
 
         // Advertise the best path unless this peer is the source
-        // (split-horizon), the route is LLGR-blocked, suppressed, or
-        // denied by out-policy — each falls through to the withdraw
-        // branch, which (via the Adj-RIB-Out below) emits an MP_UNREACH
-        // only to a peer that was actually advertised the prefix.
-        let to_advertise: Option<(Ipv4Nlri, BgpAttr, IpAddr, Label, BgpRib)> = match new_best {
+        // (split-horizon), LLGR-blocked, suppressed, or out-policy-denied —
+        // each falls through to the withdraw branch, which emits an
+        // MP_UNREACH only to a peer the Adj-RIB-Out says received the route.
+        let to_advertise: Option<(A::Nlri, BgpAttr, IpAddr, Label, BgpRib)> = match new_best {
             Some(best)
                 if best.ident != peer.ident
                     && !llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) =>
             {
-                match route_update_labelv4(peer, &prefix, best, bgp, false) {
-                    // Outbound policy: per-peer route-map / prefix-list.
+                match A::update(peer, &prefix, best, bgp, false) {
                     Some((nlri, attr, nhop, label)) => {
-                        route_apply_policy_out(peer, &nlri, attr, best.weight)
+                        A::apply_policy_out(peer, &nlri, attr, best.weight)
                             .map(|d| (nlri, d.attr, nhop, label, best.clone()))
                     }
                     None => None,
@@ -8053,49 +8191,29 @@ pub(super) fn route_advertise_to_peers_labelv4(
 
         match to_advertise {
             Some((nlri, attr, nhop, label, best)) => {
-                // Adj-RIB-Out: record what was sent so a later withdraw is
-                // pruned to exactly the peers that received the route.
-                peer.adj_out.v4lu.add(prefix, best);
+                A::adj_out_add(peer, prefix, best);
                 let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
                 update.bgp_attr = Some(attr);
-                update.mp_update = Some(MpReachAttr::Labelv4 {
-                    snpa: 0,
-                    nhop,
-                    updates: vec![Labelv4Nlri { label, nlri }],
-                });
+                update.mp_update = Some(A::reach(nhop, label, nlri));
                 peer.send_packet(update.into());
             }
             None => {
-                // Withdraw only if this peer actually had the route — gate
-                // on prefix presence (id-agnostic, like the v4 path). This
-                // pruning supersedes the route_labelv4_withdraw no-op guard.
-                if peer.adj_out.v4lu.0.contains_key(&prefix) {
+                if A::adj_out_contains(peer, &prefix) {
                     let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-                    update.mp_withdraw = Some(MpUnreachAttr::Labelv4(vec![Labelv4Nlri {
-                        label: Label::default(),
-                        nlri: Ipv4Nlri { id: 0, prefix },
-                    }]));
+                    update.mp_withdraw = Some(A::unreach(prefix, 0));
                     peer.send_packet(update.into());
-                    peer.adj_out.v4lu.remove(prefix, 0);
+                    A::adj_out_remove(peer, prefix, 0);
                 }
             }
         }
     }
 
-    // AddPath members: every candidate, each NLRI carrying its path-id.
-    // LU has no update-group cache, so the per-peer LU Adj-RIB-Out
-    // (`v4lu`) is the record of what was sent — diff it against the new
-    // candidate set to withdraw exactly the path-ids that fell out
-    // (selected empty ⇒ withdraw them all).
+    // AddPath members: every candidate, each NLRI carrying its path-id;
+    // diff the prior path-ids (Adj-RIB-Out) against the new set to withdraw
+    // exactly the ones that fell out (selected empty ⇒ withdraw them all).
     for ident in peers.established_addpath_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let was: Vec<u32> = peer
-            .adj_out
-            .v4lu
-            .0
-            .get(&prefix)
-            .map(|c| c.iter().map(|r| r.local_id).collect())
-            .unwrap_or_default();
+        let was = A::adj_out_ids(peer, &prefix);
         let mut newly: BTreeSet<u32> = BTreeSet::new();
         for cand in selected {
             if cand.ident == peer.ident {
@@ -8104,20 +8222,14 @@ pub(super) fn route_advertise_to_peers_labelv4(
             if llgr_blocks_advertisement(cand.stale, &peer.cap_recv, afi, safi) {
                 continue;
             }
-            let Some((nlri, attr, nhop, label)) =
-                route_update_labelv4(peer, &prefix, cand, bgp, true)
-            else {
+            let Some((nlri, attr, nhop, label)) = A::update(peer, &prefix, cand, bgp, true) else {
                 continue;
             };
             let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
             update.bgp_attr = Some(attr);
-            update.mp_update = Some(MpReachAttr::Labelv4 {
-                snpa: 0,
-                nhop,
-                updates: vec![Labelv4Nlri { label, nlri }],
-            });
+            update.mp_update = Some(A::reach(nhop, label, nlri));
             peer.send_packet(update.into());
-            peer.adj_out.v4lu.add(prefix, cand.clone());
+            A::adj_out_add(peer, prefix, cand.clone());
             newly.insert(cand.local_id);
         }
         for id in was {
@@ -8125,126 +8237,33 @@ pub(super) fn route_advertise_to_peers_labelv4(
                 continue;
             }
             let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-            update.mp_withdraw = Some(MpUnreachAttr::Labelv4(vec![Labelv4Nlri {
-                label: Label::default(),
-                nlri: Ipv4Nlri { id, prefix },
-            }]));
+            update.mp_withdraw = Some(A::unreach(prefix, id));
             peer.send_packet(update.into());
-            peer.adj_out.v4lu.remove(prefix, id);
+            A::adj_out_remove(peer, prefix, id);
         }
     }
 }
 
-/// IPv6 Labeled-Unicast (incl. 6PE) advertise — the v6 counterpart of
-/// [`route_advertise_to_peers_labelv4`].
+/// Advertise an IPv4 Labeled-Unicast best-path change (SAFI 4). Thin
+/// wrapper over the generic [`route_advertise_labeled`].
+pub(super) fn route_advertise_to_peers_labelv4(
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    route_advertise_labeled::<LabeledV4>(prefix, selected, bgp, peers);
+}
+
+/// Advertise an IPv6 Labeled-Unicast (incl. 6PE) best-path change (SAFI 4).
+/// Thin wrapper over the generic [`route_advertise_labeled`].
 pub(super) fn route_advertise_to_peers_labelv6(
     prefix: Ipv6Net,
     selected: &[BgpRib],
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let new_best = selected.last();
-    let (afi, safi) = (Afi::Ip6, Safi::MplsLabel);
-
-    // Non-AddPath members: best-path only.
-    for ident in peers.established_plain_idents(afi, safi) {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-
-        // Same outcome model as `route_advertise_to_peers_labelv4`: any
-        // non-advertise outcome falls through to a withdraw that the
-        // Adj-RIB-Out (`v6lu`) prunes to actual recipients.
-        let to_advertise: Option<(Ipv6Nlri, BgpAttr, IpAddr, Label, BgpRib)> = match new_best {
-            Some(best)
-                if best.ident != peer.ident
-                    && !llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) =>
-            {
-                match route_update_labelv6(peer, &prefix, best, bgp, false) {
-                    // Outbound policy: per-peer route-map / prefix-list.
-                    Some((nlri, attr, nhop, label)) => {
-                        route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
-                            .map(|d| (nlri, d.attr, nhop, label, best.clone()))
-                    }
-                    None => None,
-                }
-            }
-            _ => None,
-        };
-
-        match to_advertise {
-            Some((nlri, attr, nhop, label, best)) => {
-                peer.adj_out.v6lu.add(prefix, best);
-                let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-                update.bgp_attr = Some(attr);
-                update.mp_update = Some(MpReachAttr::Labelv6 {
-                    snpa: 0,
-                    nhop,
-                    updates: vec![Labelv6Nlri { label, nlri }],
-                });
-                peer.send_packet(update.into());
-            }
-            None => {
-                if peer.adj_out.v6lu.0.contains_key(&prefix) {
-                    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-                    update.mp_withdraw = Some(MpUnreachAttr::Labelv6(vec![Labelv6Nlri {
-                        label: Label::default(),
-                        nlri: Ipv6Nlri { id: 0, prefix },
-                    }]));
-                    peer.send_packet(update.into());
-                    peer.adj_out.v6lu.remove(prefix, 0);
-                }
-            }
-        }
-    }
-
-    // AddPath members: every candidate with its path-id; the per-peer
-    // LU Adj-RIB-Out (`v6lu`) records what was sent so removed path-ids
-    // can be withdrawn precisely (the v6 twin of the `labelv4` path).
-    for ident in peers.established_addpath_idents(afi, safi) {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let was: Vec<u32> = peer
-            .adj_out
-            .v6lu
-            .0
-            .get(&prefix)
-            .map(|c| c.iter().map(|r| r.local_id).collect())
-            .unwrap_or_default();
-        let mut newly: BTreeSet<u32> = BTreeSet::new();
-        for cand in selected {
-            if cand.ident == peer.ident {
-                continue; // split-horizon
-            }
-            if llgr_blocks_advertisement(cand.stale, &peer.cap_recv, afi, safi) {
-                continue;
-            }
-            let Some((nlri, attr, nhop, label)) =
-                route_update_labelv6(peer, &prefix, cand, bgp, true)
-            else {
-                continue;
-            };
-            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-            update.bgp_attr = Some(attr);
-            update.mp_update = Some(MpReachAttr::Labelv6 {
-                snpa: 0,
-                nhop,
-                updates: vec![Labelv6Nlri { label, nlri }],
-            });
-            peer.send_packet(update.into());
-            peer.adj_out.v6lu.add(prefix, cand.clone());
-            newly.insert(cand.local_id);
-        }
-        for id in was {
-            if newly.contains(&id) {
-                continue;
-            }
-            let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
-            update.mp_withdraw = Some(MpUnreachAttr::Labelv6(vec![Labelv6Nlri {
-                label: Label::default(),
-                nlri: Ipv6Nlri { id, prefix },
-            }]));
-            peer.send_packet(update.into());
-            peer.adj_out.v6lu.remove(prefix, id);
-        }
-    }
+    route_advertise_labeled::<LabeledV6>(prefix, selected, bgp, peers);
 }
 
 impl Peer {
