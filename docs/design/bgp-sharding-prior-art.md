@@ -626,9 +626,13 @@ two are complementary. Two cheaper interim borrows fall out: BIRD's
 **resumable, cooperatively-yielding cursor** (don't hold the main task
 for a whole RR-scale dump) and a **bounded**-egress backpressure story
 (BIRD pauses/resumes on socket-writable; zebra-rs and GoBGP both let an
-unbounded queue grow under a slow peer). The always-on Adj-RIB-Out is
-zebra-rs's deliberate outlier — heavier memory per peer, but an O(1)
-withdraw gate the others re-derive or skip.
+unbounded queue grow under a slow peer). **Both are now built** (Tier
+1a/1b, IPv4-unicast — see the plan's B.4 "Resumable sync cursor"): the
+cursor cut max main-loop stall 12–91× (flat vs linear in RIB size), and
+a real-time egress gauge parks it under a slow peer; only the A2
+intra-peer axis remains open. The always-on Adj-RIB-Out is zebra-rs's
+deliberate outlier — heavier memory per peer, but an O(1) withdraw gate
+the others re-derive or skip.
 
 ## Takeaways for zebra-rs
 
@@ -669,7 +673,10 @@ withdraw gate the others re-derive or skip.
    `DumpV4`-to-shards plan adds the *orthogonal* *intra-peer* axis that
    neither reference attempts. BIRD's resumable, cooperatively-yielding
    cursor and a bounded socket-backpressure egress are the two cheap
-   interim borrows worth taking even before A2.
+   interim borrows worth taking even before A2. **Both built** (Tier
+   1a/1b, IPv4-unicast): `ZEBRA_BGP_SYNC_CHUNK` chunks the dump (12–91×
+   lower max stall, flat in RIB size) and a real-time egress gauge parks
+   it at `ZEBRA_BGP_SYNC_EGRESS_HIGH` under a slow peer; A2 stays open.
 
 6. **RustyBGP validates the ownership model by contrast.** The GoBGP
    author's Rust rewrite *designed* zebra-rs's owned-shard / channel model
