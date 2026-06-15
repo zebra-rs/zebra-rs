@@ -7766,8 +7766,24 @@ pub(super) fn route_advertise_to_peers_v6(
     // v6 unicast has no per-peer batch cache, so the per-peer v6
     // Adj-RIB-Out (`adj_out.v6`) is the record of what was sent — diff
     // it against the new candidate set to withdraw exactly the path-ids
-    // that fell out (selected empty ⇒ withdraw them all).
-    for ident in peers.established_addpath_idents(afi, safi) {
+    // that fell out (no candidates ⇒ withdraw them all).
+    //
+    // The candidate set is the FULL Loc-RIB entry, not the best-only
+    // `selected` arg: `select_best_path` returns a single winner, so
+    // iterating `selected` here would only ever advertise the best path
+    // and silently drop every non-best AddPath candidate on the
+    // event-driven path — they would reach an AddPath peer only via the
+    // session-up `route_sync_ipv6` dump (which reads the full cands
+    // table) and then get withdrawn on the very next update.
+    let addpath_idents = peers.established_addpath_idents(afi, safi);
+    // Only clone the candidate list when there is an AddPath audience —
+    // the common best-path-only fan-out must not pay a per-route clone.
+    let all_cands: Vec<BgpRib> = if addpath_idents.is_empty() {
+        Vec::new()
+    } else {
+        bgp.shard.v6.0.get(&prefix).cloned().unwrap_or_default()
+    };
+    for ident in addpath_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let group_id = peer.update_group_id.get(&afi_safi).cloned();
         let was: Vec<u32> = peer
@@ -7778,7 +7794,7 @@ pub(super) fn route_advertise_to_peers_v6(
             .map(|c| c.iter().map(|r| r.local_id).collect())
             .unwrap_or_default();
         let mut newly: BTreeSet<u32> = BTreeSet::new();
-        for cand in selected {
+        for cand in &all_cands {
             if cand.ident == peer.ident {
                 continue; // split-horizon
             }
@@ -8076,6 +8092,11 @@ trait LabeledAfi {
     fn adj_out_contains(peer: &Peer, prefix: &Self::Prefix) -> bool;
     fn adj_out_remove(peer: &mut Peer, prefix: Self::Prefix, id: u32);
     fn adj_out_ids(peer: &Peer, prefix: &Self::Prefix) -> Vec<u32>;
+    /// The full Loc-RIB candidate list for `prefix` (every path, not just
+    /// the best). AddPath advertises all of them, but `select_best_path`
+    /// collapses to a single winner, so the advertise loop must read the
+    /// candidates straight from the shard.
+    fn all_cands(bgp: &BgpTop, prefix: &Self::Prefix) -> Vec<BgpRib>;
 
     fn update(
         peer: &mut Peer,
@@ -8116,6 +8137,9 @@ impl LabeledAfi for LabeledV4 {
             .get(prefix)
             .map(|c| c.iter().map(|r| r.local_id).collect())
             .unwrap_or_default()
+    }
+    fn all_cands(bgp: &BgpTop, prefix: &Ipv4Net) -> Vec<BgpRib> {
+        bgp.shard.v4lu.0.get(prefix).cloned().unwrap_or_default()
     }
     fn update(
         peer: &mut Peer,
@@ -8171,6 +8195,9 @@ impl LabeledAfi for LabeledV6 {
             .get(prefix)
             .map(|c| c.iter().map(|r| r.local_id).collect())
             .unwrap_or_default()
+    }
+    fn all_cands(bgp: &BgpTop, prefix: &Ipv6Net) -> Vec<BgpRib> {
+        bgp.shard.v6lu.0.get(prefix).cloned().unwrap_or_default()
     }
     fn update(
         peer: &mut Peer,
@@ -8263,12 +8290,24 @@ fn route_advertise_labeled<A: LabeledAfi>(
 
     // AddPath members: every candidate, each NLRI carrying its path-id;
     // diff the prior path-ids (Adj-RIB-Out) against the new set to withdraw
-    // exactly the ones that fell out (selected empty ⇒ withdraw them all).
-    for ident in peers.established_addpath_idents(afi, safi) {
+    // exactly the ones that fell out (no candidates ⇒ withdraw them all).
+    //
+    // The candidate set is the FULL Loc-RIB entry, not the best-only
+    // `selected` arg: `select_best_path` returns a single winner, so
+    // iterating `selected` would only ever advertise the best path and
+    // silently drop every non-best AddPath candidate on the event-driven
+    // path (the v6-unicast advertise carried the same latent bug).
+    let addpath_idents = peers.established_addpath_idents(afi, safi);
+    let all_cands = if addpath_idents.is_empty() {
+        Vec::new()
+    } else {
+        A::all_cands(bgp, &prefix)
+    };
+    for ident in addpath_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         let was = A::adj_out_ids(peer, &prefix);
         let mut newly: BTreeSet<u32> = BTreeSet::new();
-        for cand in selected {
+        for cand in &all_cands {
             if cand.ident == peer.ident {
                 continue; // split-horizon
             }
