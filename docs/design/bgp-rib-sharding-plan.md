@@ -399,6 +399,71 @@ bgp ipv4` through it (flips the z2 assertion green) → ④ wire
 `route_sync_ipv4` through it (flips z4 green; add an AddPath-send BDD
 variant) → ⑤ retrofit `clear`/soft-in onto the same `DumpV4`.
 
+### Shard sync matrix — every AFI/SAFI × AddPath validated (B.4 complete, 2026-06-15)
+
+**Status (landed, branch `bgp-shard-sync-matrix`, folded into
+`bgp-nshard-policy-shard`).** The session-up sync path is now BDD-locked
+across the full family matrix at N>1 (4 shards). Each feature drives
+**sync → per-path withdraw → peer-down** to a *late* peer — one that
+establishes only after the routes already exist, so it can learn them
+solely via `route_sync_*` (the event-driven path can't have delivered
+them):
+
+| Family | sync | AddPath | BDD tags |
+|---|---|---|---|
+| IPv4 unicast | ✓ | ✓ | `@bgp_shard_v4_sync` / `@bgp_shard_addpath_v4` |
+| IPv6 unicast | ✓ | ✓ | `@bgp_shard_sync_v6` / `@bgp_shard_addpath_v6` |
+| Labeled-unicast v4 | ✓ | ✓ | `@bgp_shard_sync_lu` / `@bgp_shard_addpath_lu4` |
+| Labeled-unicast v6 | ✓ | ✓ | `@bgp_shard_sync_labelv6` / `@bgp_shard_addpath_lu6` |
+| VPNv4 | ✓ | ✓ | `@bgp_shard_sync_vpnv4` / `@bgp_shard_addpath_vpnv4` |
+| VPNv6 | ✓ | ✓ | `@bgp_shard_sync_vpnv6` / `@bgp_shard_addpath_vpnv6` |
+
+**Dispatch scope — which families the mirror even applies to.** Only
+**plain IPv4 unicast** is pool-distributed (`ShardMsg::RouteBatchV4`,
+hashed by prefix), so it is the only family that needs the read-replica
+mirror. v6-unicast, LU-v4/v6, VPNv4 and VPNv6 are **sync-ingested on the
+main `bgp.shard`** (not pooled), so their Loc-RIBs stay populated at N>1
+and `route_sync_*` reads them directly — no mirror required. AddPath
+does not change which family is pooled (it is a per-AFI/SAFI decision);
+the AddPath features pin that `route_sync_*` dumps *every candidate*
+(from `*.0`) and that the pooled-v4 mirror (`BgpShard::mirror_v4`) keeps
+both candidates, not just the best path.
+
+**Withdraw-after-sync `adj_out` fix (general, not sharding-specific).**
+A `route_sync_*` that dumps a prefix to a late peer must also register
+it in `peer.adj_out.<af>`, or the later event-driven withdraw's
+Adj-RIB-Out gate skips that peer and the route leaks. Bit
+`route_sync_ipv6` and `route_sync_labelv4`/`labelv6` (fixed);
+`route_sync_ipv4`/`vpnv4`/`vpnv6` already registered. The per-path
+withdraw scenarios lock this across the matrix.
+
+**VRF self-originated network withdraw — root-caused + fixed (commits
+`541920a1`, `3941398c`).** Surfaced by the VPNv4/VPNv6 features:
+removing a `network` from a `router bgp vrf …` config emitted no
+withdraw. Root cause — `compute_vrf_diff` only diffs the VRF *name set*
+(it drives spawn/despawn), never config bodies, so a `network` change to
+an *already-running* VRF updated only the desired config and the VRF
+task kept advertising the route forever (and adding one post-spawn did
+nothing); self-originated VRF networks were effectively immortal. Fix:
+new `BgpVrfMsg::{Originate,Withdraw}Network{,V6}` messaged from the
+config callbacks to the running VRF, which originates/withdraws in its
+Loc-RIB and emits `Export`/`WithdrawExport`;
+`materialize_self_originated_networks` factored to share the exact
+per-prefix path so spawn-time and dynamic origination are identical.
+Because `afi-safi ipv4`/`ipv6` are presence containers, dropping the
+whole block emits a container-level delete too, so
+`config_vrf_afi_ipv4`/`ipv6` also withdraw their networks (idempotent
+with the per-network path). Independent of sharding — it was a latent
+N=1 bug the matrix happened to expose.
+
+**Note — AddPath VPN test topology.** VPNv4/VPNv6 AddPath needs two PEs
+originating the *same* NLRI (same RD+prefix). With a shared import RT
+each PE re-imports the other's route, so withdrawing one
+self-origination correctly *re-exports* the imported copy — right VRF
+behaviour, wrong for a clean single-path-withdraw assertion. The AddPath
+VPN features use **export-only RTs** (independent origins) to keep each
+path attributable to exactly one PE.
+
 ## 1. Verdict
 
 Juniper's BGP RIB sharding is applicable to zebra-rs — and zebra-rs is
