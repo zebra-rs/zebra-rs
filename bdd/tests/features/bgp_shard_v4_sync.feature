@@ -5,9 +5,10 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
   Regression test for a correctness gap in BGP RIB sharding. At
   ZEBRA_BGP_SHARDS>1, plain IPv4-unicast routes are dispatched to the
   worker-shard pool (RouteBatchV4) and live ONLY in the pool shards; the
-  reduce (`reduce_bestpath_v4_nht_fib`) does FIB-install + advertise but
-  never mirrors the best-path back into the synchronous `bgp.shard`. So
-  every read path that consults `bgp.shard.v4` is empty at N>1:
+  reduce (`route_apply_bestpath_v4_batch`) used to do FIB-install +
+  advertise but never mirror the best-path back into the synchronous
+  `bgp.shard`, so every read path that consults `bgp.shard.v4` was empty
+  at N>1:
 
     * `show bgp ipv4` — the operator can't see the v4 Loc-RIB;
     * `route_sync_ipv4` — a peer that establishes AFTER routes exist gets
@@ -23,11 +24,16 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     * z3 establishes BEFORE the routes exist → learns them via the
       EVENT-DRIVEN advertise (off the delta) — the positive control, PASSES.
     * z4 establishes AFTER the routes exist → can only learn them via z2's
-      session-up `route_sync_ipv4` — the broken path, FAILS at N>1.
+      session-up `route_sync_ipv4` — the path that was broken at N>1.
 
-  EXPECTED STATE: scenario "z4 ... sync" and the z2 `show` assertion
-  currently FAIL at N>1 (the bug); both PASS once the B.4 read-path
-  scatter-gather lands (see docs/design/bgp-rib-sharding-plan.md §12).
+  FIXED by the read-replica mirror: the pool reduce
+  (`route_apply_bestpath_v4_batch` → `BgpShard::mirror_v4`) now keeps the
+  main shard's `bgp.shard.v4` in step with the pool-owned table, so both
+  read paths — `route_sync_ipv4` (for the late peer z4) and `show bgp
+  ipv4` (z2's own RIB) — see the routes at N>1. This feature now guards
+  against regressing that. (The sync build still runs serially on the
+  main task; parallelizing its egress is a separate optimization, see
+  docs/design/bgp-rib-sharding-plan.md §B.4.)
 
   Test Topology:
   ```
@@ -67,12 +73,13 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     Then show command "show bgp ipv4" in namespace "z3" should contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
 
-  Scenario: bug — the late peer z4 gets nothing on sync, and z2 can't even show its own RIB
+  Scenario: the late peer z4 gets the routes on sync, and z2 can show its own RIB
     Given the test topology exists
     # z4's daemon starts now — AFTER z2 already holds z1's routes — so z4 can
     # obtain them only via z2's `route_sync_ipv4` initial dump. And z2's own
-    # `show bgp ipv4` reads the same `bgp.shard.v4`. Both read the empty main
-    # shard at N>1, so these FAIL today (the bug) and PASS once fixed.
+    # `show bgp ipv4` reads the same `bgp.shard.v4`. Both read the main shard,
+    # which the pool reduce now mirrors, so both see the routes at N>1 (these
+    # FAILED before the read-replica mirror).
     When I start zebra-rs in namespace "z4"
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 15 seconds for BGP to operate

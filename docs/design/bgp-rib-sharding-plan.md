@@ -322,6 +322,21 @@ The larger architectural improvements — drawn from the BIRD/GoBGP study
 
 ### Read-path scatter-gather at N>1 — bug + fix plan (B.4)
 
+**Status (landed, branch `bgp-shard-sync-mirror`):** the correctness bug is
+FIXED by a **read-replica mirror**, chosen to keep the proven sync
+architecture synchronous on the main task (no async refactor). The pool
+reduce (`route_apply_bestpath_v4_batch` → `BgpShard::mirror_v4`) writes each
+v4 best-path delta into the main shard's `bgp.shard.v4` — both the candidate
+table (`v4.0`, read by `show bgp ipv4`) and the best-path table (`v4.1`,
+read by non-AddPath `route_sync_ipv4`) — so the *unchanged* synchronous read
+paths see the routes at N>1. `@bgp_shard_v4_sync` is green and
+`@bgp_shard_policy` is unaffected. Tradeoff: a FIB-sized v4 replica now
+lives in main (a partial give-back of sharding's memory win), and the sync
+*build* still runs serially on the main task. The scatter-gather /
+in-shard-parallel options below remain the path to parallel sync **egress**
+if that serial build ever becomes a bottleneck — they are now a performance
+follow-up, not the correctness fix.
+
 **Bug (critical, v4-unicast-only).** At N>1, plain v4-unicast best-paths
 live only in the pool shards; the reduce (`reduce_bestpath_v4_nht_fib`)
 does FIB-install + advertise off the delta and never populates the

@@ -2652,6 +2652,17 @@ pub(super) fn route_apply_bestpath_v4_batch(
     peers: &mut PeerMap,
     outs: Vec<ShardOut>,
 ) {
+    // N>1 read replica: ingest + best-path for v4-unicast ran on the
+    // worker pool, so the main shard's `v4` table is empty. The
+    // synchronous main-task read paths still read it (`route_sync_ipv4`
+    // dumps `bgp.shard.v4` to a new peer; `show bgp ipv4` reads it). Keep
+    // it in step by mirroring each delta before consuming it for the
+    // advertise. This reduce only runs at N>1 (it is dispatched solely
+    // from `process_shard_result`), so the N=1 path is untouched.
+    for out in &outs {
+        mirror_v4_delta(bgp, out);
+    }
+
     // Cost-gate the parallel precompute. Its whole purpose is to fan out
     // the out-policy prefix-set walk; with no out-policy bound on any
     // advertised-to peer there is nothing expensive to amortize, and at
@@ -2689,6 +2700,25 @@ pub(super) fn route_apply_bestpath_v4_batch(
     let memos = precompute_ipv4_advertise_outcomes(&jobs, bgp, peers);
     for ((job, memo), ident) in jobs.into_iter().zip(memos).zip(idents) {
         apply_ipv4_advertise_job(job, ident, memo, bgp, peers);
+    }
+}
+
+/// Mirror one pool `BestPathV4` delta into the main shard's v4-unicast
+/// Loc-RIB so the synchronous read paths see it at N>1 (read replica).
+/// VPNv4 (`rd = Some`) is not pool-dispatched, so only `rd = None` is
+/// mirrored; non-`BestPathV4` deltas are ignored.
+fn mirror_v4_delta(bgp: &mut BgpTop, out: &ShardOut) {
+    if let ShardOut::BestPathV4 {
+        rd: None,
+        prefix,
+        selected,
+        replaced,
+        added,
+        ..
+    } = out
+    {
+        bgp.shard
+            .mirror_v4(prefix.prefix, added.as_ref(), replaced, selected.first());
     }
 }
 

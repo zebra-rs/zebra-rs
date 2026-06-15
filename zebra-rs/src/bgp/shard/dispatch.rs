@@ -84,6 +84,52 @@ impl BgpShard {
         }
     }
 
+    /// Mirror one pool best-path delta into THIS shard's v4-unicast
+    /// Loc-RIB, keeping it a read replica of the pool-owned table.
+    ///
+    /// At N>1, v4-unicast ingest + best-path run on the worker pool, so
+    /// the main shard's `v4` is otherwise empty — and the synchronous
+    /// main-task read paths (`route_sync_ipv4` reads `v4.1`; `show bgp
+    /// ipv4` reads `v4.0`) would see nothing. The pool reduce, which
+    /// already runs on main per delta, calls this to keep both the
+    /// candidate (`v4.0`) and best-path (`v4.1`) tables in step, applying
+    /// exactly the add / remove the owning pool shard applied — keyed by
+    /// `(ident, remote_id)` (source peer + path-id), the same identity
+    /// `LocalRibTable::update` uses.
+    pub fn mirror_v4(
+        &mut self,
+        prefix: Ipv4Net,
+        added: Option<&BgpRib>,
+        replaced: &[BgpRib],
+        best: Option<&BgpRib>,
+    ) {
+        if !replaced.is_empty() || added.is_some() {
+            let cands = self.v4.0.entry(prefix).or_default();
+            if !replaced.is_empty() {
+                cands.retain(|r| {
+                    !replaced
+                        .iter()
+                        .any(|rr| rr.ident == r.ident && rr.remote_id == r.remote_id)
+                });
+            }
+            if let Some(a) = added {
+                cands.retain(|r| !(r.ident == a.ident && r.remote_id == a.remote_id));
+                cands.push(a.clone());
+            }
+            if cands.is_empty() {
+                self.v4.0.remove(&prefix);
+            }
+        }
+        match best {
+            Some(b) => {
+                self.v4.1.insert(prefix, b.clone());
+            }
+            None => {
+                self.v4.1.remove(&prefix);
+            }
+        }
+    }
+
     /// Expand a [`ShardMsg::RouteBatchV4`] into per-NLRI table ops. The
     /// shared attribute is cloned per prefix here — on the worker thread,
     /// in parallel across shards — instead of per prefix on the main task.
