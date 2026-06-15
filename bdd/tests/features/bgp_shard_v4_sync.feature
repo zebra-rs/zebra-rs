@@ -89,6 +89,33 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     And show command "show bgp ipv4" in namespace "z2" should contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z2" should contain "10.10.11.0/24"
 
+  Scenario: z1 withdraws one route; the sharded reduce removes it from z2's mirror
+    Given the test topology exists
+    # z1 re-originates only 10.10.11.0/24 (dropping .10). At N=4, z2's pool
+    # ingests the withdraw and the reduce's mirror must DROP .10 from
+    # bgp.shard.v4 — exercising mirror_v4's remove (`replaced`) path — so
+    # `show bgp ipv4` (which reads the cands mirror) no longer lists it. .11
+    # staying is the positive control, so the negative assertion isn't
+    # vacuous. z4 losing .10 confirms the withdraw also propagates downstream.
+    When I apply config "z1-withdraw.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then show command "show bgp ipv4" in namespace "z2" should not contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z2" should contain "10.10.11.0/24"
+    And show command "show bgp ipv4" in namespace "z4" should not contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z4" should contain "10.10.11.0/24"
+
+  Scenario: z1's session drops; the sharded peer-down sweep clears z2's mirror
+    Given the test topology exists
+    # z2 still holds .11 (positive control). Stop z1 — z2's route_clean sweeps
+    # z1's v4 slice on the pool, and the reduce's mirror must drop .11 from
+    # bgp.shard.v4 (the peer-down remove path) so `show` no longer lists it.
+    Then show command "show bgp ipv4" in namespace "z2" should contain "10.10.11.0/24"
+    When I stop zebra-rs in namespace "z1"
+    And I wait 20 seconds for BGP to operate
+    Then BGP session in "z2" to "10.0.0.1" should not be "Established"
+    And show command "show bgp ipv4" in namespace "z2" should not contain "10.10.11.0/24"
+    And show command "show bgp ipv4" in namespace "z4" should not contain "10.10.11.0/24"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
