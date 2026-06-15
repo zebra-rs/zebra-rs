@@ -2348,7 +2348,7 @@ fn precompute_ipv4_advertise_outcomes(
     jobs: &[Ipv4AdvertiseJob],
     bgp: &BgpTop,
     peers: &PeerMap,
-) -> Vec<BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>> {
+) -> Vec<BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome<Ipv4Nlri>>> {
     use rayon::prelude::*;
 
     let (afi, safi) = (Afi::Ip, Safi::Unicast);
@@ -2610,7 +2610,7 @@ fn route_ipv4_update_decided(
 fn apply_ipv4_advertise_job(
     job: Ipv4AdvertiseJob,
     source_ident: usize,
-    memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>,
+    memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome<Ipv4Nlri>>,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
@@ -2621,7 +2621,7 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
-    route_advertise_to_peers_memo(rd, prefix, &selected, source_ident, bgp, peers, memo);
+    route_advertise_batch::<V4Batch>(rd, prefix, &selected, source_ident, bgp, peers, memo);
     match &added {
         Some(added) => {
             route_advertise_to_addpath(rd, prefix, added, source_ident, bgp, peers);
@@ -2865,8 +2865,8 @@ fn route_withdraw_from_addpath(
 /// split-horizon (handled before cache lookup) and per-peer RTC
 /// (applied after).
 #[derive(Clone)]
-enum AdvertiseOutcome {
-    Advertise(Ipv4Nlri, BgpAttr),
+enum AdvertiseOutcome<N> {
+    Advertise(N, BgpAttr),
     Withdraw,
 }
 
@@ -2882,7 +2882,7 @@ fn compute_advertise_outcome(
     best: &BgpRib,
     bgp: &BgpTop,
     add_path: bool,
-) -> AdvertiseOutcome {
+) -> AdvertiseOutcome<Ipv4Nlri> {
     if let Some((nlri, attr)) = route_update_ipv4(peer, prefix, best, bgp, add_path) {
         if let Some(decision) = route_apply_policy_out(peer, &nlri, attr, best.weight) {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
@@ -2925,7 +2925,7 @@ pub(super) fn route_advertise_to_peers(
     peers: &mut PeerMap,
 ) {
     // Non-batch callers run the out-policy inline (empty pre-seeded memo).
-    route_advertise_to_peers_memo(
+    route_advertise_batch::<V4Batch>(
         rd,
         prefix,
         selected,
@@ -2936,173 +2936,203 @@ pub(super) fn route_advertise_to_peers(
     );
 }
 
-/// Body of [`route_advertise_to_peers`] with the per-group outcome memo
-/// supplied by the caller. The IPv4 batch path (C.2) pre-seeds this map
-/// with out-policy outcomes computed in parallel across prefixes, so the
-/// expensive prefix-set walk never runs on the serial advertise loop;
-/// other callers pass an empty map and the outcome is computed inline on
-/// the first clean (non-source, non-LLGR) group member, exactly as before.
-fn route_advertise_to_peers_memo(
+/// Per-AF hooks for the generic update-group/memo advertise path
+/// ([`route_advertise_batch`]). Phase 2 of the Adj-RIB-Out unification:
+/// v4-unicast/VPNv4 (`V4Batch`) and v6-unicast/VPNv6 (`V6Batch`) share the
+/// memo loop + group-counter logic; the AF impls own the prefix/NLRI type,
+/// the build (`compute_outcome`), and the per-peer `advertise` / `withdraw`
+/// (which dispatch unicast vs VPN on `rd`). `afi` is fixed per impl; `safi`
+/// (Unicast vs MplsVpn) follows `rd`.
+trait BatchAfi {
+    type Prefix: Copy;
+    type Nlri: Clone;
+    fn afi_safi(rd: Option<RouteDistinguisher>) -> (Afi, Safi);
+    fn compute_outcome(
+        peer: &Peer,
+        prefix: &Self::Prefix,
+        best: &BgpRib,
+        bgp: &BgpTop,
+        add_path: bool,
+    ) -> AdvertiseOutcome<Self::Nlri>;
+    #[allow(clippy::too_many_arguments)]
+    fn advertise(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        nlri: Self::Nlri,
+        attr: BgpAttr,
+        new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    );
+    fn withdraw(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    );
+}
+
+struct V4Batch;
+impl BatchAfi for V4Batch {
+    type Prefix = Ipv4Net;
+    type Nlri = Ipv4Nlri;
+
+    fn afi_safi(rd: Option<RouteDistinguisher>) -> (Afi, Safi) {
+        if rd.is_some() {
+            (Afi::Ip, Safi::MplsVpn)
+        } else {
+            (Afi::Ip, Safi::Unicast)
+        }
+    }
+    fn compute_outcome(
+        peer: &Peer,
+        prefix: &Ipv4Net,
+        best: &BgpRib,
+        bgp: &BgpTop,
+        add_path: bool,
+    ) -> AdvertiseOutcome<Ipv4Nlri> {
+        compute_advertise_outcome(peer, prefix, best, bgp, add_path)
+    }
+    fn advertise(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        nlri: Ipv4Nlri,
+        attr: BgpAttr,
+        new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    ) {
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+            // RTC: per-peer; skip without withdrawing.
+            return;
+        }
+        let attr = bgp.attr_store.intern(attr);
+        if let Some(best) = new_best {
+            let mut rib = best.clone();
+            rib.attr = attr.clone();
+            peer.adj_out.add(rd, prefix, rib);
+        }
+        if let Some(rd) = rd {
+            let vpnv4_nlri = Vpnv4Nlri {
+                label: new_best
+                    .map(|b| vpnv4_service_label(peer, b))
+                    .unwrap_or_default(),
+                rd,
+                nlri,
+            };
+            peer.send_vpnv4(vpnv4_nlri, attr, true);
+        } else {
+            let source_ident = new_best.map(|b| b.ident).unwrap_or(peer.ident);
+            let group_id = peer.update_group_id.get(&afi_safi).cloned();
+            if let Some(gid) = group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::send_ipv4(group, nlri, attr, source_ident, bgp.tx, true);
+            } else {
+                tracing::warn!(
+                    peer = %peer.address,
+                    prefix = %prefix,
+                    "IPv4 advertise: peer is Established but not in any update-group; advertise skipped"
+                );
+            }
+        }
+    }
+    fn withdraw(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    ) {
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(rd) = rd {
+            peer.cache_remove_vpnv4(rd, prefix, 0);
+        } else {
+            // Per-peer Withdraws (split-horizon / LLGR gate) must not clobber
+            // the group's pending entry, which other members may still want.
+            let per_peer_suppress = new_best
+                .map(|b| {
+                    b.ident == peer.ident
+                        || llgr_blocks_advertisement(b.stale, &peer.cap_recv, afi, safi)
+                })
+                .unwrap_or(false);
+            if !per_peer_suppress
+                && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::cache_remove_ipv4(group, prefix, 0);
+            }
+        }
+        if peer.adj_out.contains_key(rd, &prefix) {
+            withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
+            peer.adj_out.remove(rd, prefix, 0);
+        }
+    }
+}
+
+/// Generic update-group advertise with the per-group outcome memo, shared
+/// across address families via [`BatchAfi`]. The memo caches the
+/// post-policy outcome per `update-group` (members share it, modulo
+/// per-peer split-horizon / LLGR / RTC which are handled outside the
+/// cache); the map may arrive pre-seeded from the IPv4 batch precompute.
+fn route_advertise_batch<A: BatchAfi>(
     rd: Option<RouteDistinguisher>,
-    prefix: Ipv4Net,
+    prefix: A::Prefix,
     selected: &[BgpRib],
     _source_peer: usize,
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
-    mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome>,
+    mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome<A::Nlri>>,
 ) {
-    // Get the new best path (last entry in selected vector)
     let new_best = selected.last();
-
-    // Collect peer idents that need updates to avoid borrow checker issues
-    let (afi, safi) = if rd.is_some() {
-        (Afi::Ip, Safi::MplsVpn)
-    } else {
-        (Afi::Ip, Safi::Unicast)
-    };
+    let (afi, safi) = A::afi_safi(rd);
     let afi_safi = AfiSafi::new(afi, safi);
-
     let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
-
-    // Per-call memo: outcome cached per update-group id for the span of
-    // this advertisement only. Members of the same group share the
-    // post-policy outcome (modulo split-horizon, which is checked
-    // per-peer before lookup so the canonical computation is always run
-    // on a non-source peer). The map may arrive pre-seeded from a
-    // parallel precompute; `bumped` decouples the group-counter bump
-    // (once per group, on first clean consumer) from where the outcome
-    // was computed.
     let mut bumped: BTreeSet<super::update_group::UpdateGroupId> = BTreeSet::new();
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-
         let add_path = peer.opt.is_add_path_send(afi, safi);
         let group_id = peer.update_group_id.get(&afi_safi).cloned();
 
         let outcome = match new_best {
             None => AdvertiseOutcome::Withdraw,
-            Some(best) if best.ident == peer.ident => {
-                // Split-horizon: source peer does not receive its own
-                // route back. Cache must not be poisoned by this
-                // outcome — fall through directly.
-                AdvertiseOutcome::Withdraw
-            }
+            Some(best) if best.ident == peer.ident => AdvertiseOutcome::Withdraw,
             Some(best) if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) => {
-                // RFC 9494 §4.3: a stale route only goes to peers that
-                // sent the LLGR capability. Per-peer state — like
-                // split-horizon, this must not poison the group memo.
                 AdvertiseOutcome::Withdraw
             }
             Some(best) => match group_id.as_ref() {
                 Some(gid) => {
-                    // Outcome from the (possibly parallel-precomputed)
-                    // memo, else computed inline on this clean peer.
                     let outcome = match memo.get(gid) {
                         Some(cached) => cached.clone(),
                         None => {
-                            let outcome =
-                                compute_advertise_outcome(peer, &prefix, best, bgp, add_path);
+                            let outcome = A::compute_outcome(peer, &prefix, best, bgp, add_path);
                             memo.insert(gid.clone(), outcome.clone());
                             outcome
                         }
                     };
-                    // Bump the group counters once, on the first clean
-                    // (non-source, non-LLGR) consumer of this group —
-                    // independent of whether the outcome was precomputed.
                     if bumped.insert(gid.clone()) {
                         let denied = matches!(outcome, AdvertiseOutcome::Withdraw);
                         bump_group_counters_on_miss(bgp, afi_safi, gid, denied);
                     }
                     outcome
                 }
-                None => compute_advertise_outcome(peer, &prefix, best, bgp, add_path),
+                None => A::compute_outcome(peer, &prefix, best, bgp, add_path),
             },
         };
 
         match outcome {
             AdvertiseOutcome::Advertise(nlri, attr) => {
-                if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
-                    // RTC: per-peer; varies independently of group
-                    // signature. Skip without withdrawing.
-                    continue;
-                }
-                let attr = bgp.attr_store.intern(attr);
-                if let Some(best) = new_best {
-                    let mut rib = best.clone();
-                    rib.attr = attr.clone();
-                    peer.adj_out.add(rd, nlri.prefix, rib);
-                }
-                if let Some(ref rd) = rd {
-                    let vpnv4_nlri = Vpnv4Nlri {
-                        label: new_best
-                            .map(|b| vpnv4_service_label(peer, b))
-                            .unwrap_or_default(),
-                        rd: *rd,
-                        nlri,
-                    };
-                    peer.send_vpnv4(vpnv4_nlri, attr, true);
-                } else {
-                    // IPv4 unicast: bucket into the group's pending
-                    // cache. Source ident comes from the selected
-                    // best path so split-horizon pruning at flush
-                    // time can drop NLRIs from their originator.
-                    let source_ident = new_best.map(|b| b.ident).unwrap_or(peer.ident);
-                    let group_id = peer.update_group_id.get(&afi_safi).cloned();
-                    if let Some(gid) = group_id
-                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                        && let Some(group) = af.group_by_id_mut(&gid)
-                    {
-                        super::update_group::send_ipv4(
-                            group,
-                            nlri,
-                            attr,
-                            source_ident,
-                            bgp.tx,
-                            true,
-                        );
-                    } else {
-                        // Established peer with no IPv4 unicast
-                        // group is a bug — `update_group::attach`
-                        // is supposed to enroll every peer that
-                        // reaches Established. Skip the advertise
-                        // rather than silently dropping it on the
-                        // floor or panicking.
-                        tracing::warn!(
-                            peer = %peer.address,
-                            prefix = %prefix,
-                            "IPv4 advertise: peer is Established but not in any update-group; advertise skipped"
-                        );
-                    }
-                }
+                A::advertise(peer, rd, prefix, nlri, attr, new_best, bgp);
             }
             AdvertiseOutcome::Withdraw => {
-                if let Some(ref rd) = rd {
-                    peer.cache_remove_vpnv4(*rd, prefix, 0);
-                } else {
-                    // Group cache cleanup. Skipped for per-PEER
-                    // Withdraws (split-horizon, LLGR capability gate):
-                    // this peer doesn't receive the route, but other
-                    // group members may — removing here would clobber
-                    // their pending entry.
-                    let per_peer_suppress = new_best
-                        .map(|b| {
-                            b.ident == peer.ident
-                                || llgr_blocks_advertisement(b.stale, &peer.cap_recv, afi, safi)
-                        })
-                        .unwrap_or(false);
-                    if !per_peer_suppress
-                        && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
-                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                        && let Some(group) = af.group_by_id_mut(&gid)
-                    {
-                        super::update_group::cache_remove_ipv4(group, prefix, 0);
-                    }
-                }
-                if peer.adj_out.contains_key(rd, &prefix) {
-                    withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
-                    peer.adj_out.remove(rd, prefix, 0);
-                }
+                A::withdraw(peer, rd, prefix, new_best, bgp);
             }
         }
     }
