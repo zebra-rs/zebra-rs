@@ -1,29 +1,52 @@
-# BGP RIB Parallelism: Prior Art (BIRD 3.x & GoBGP)
+# BGP RIB Parallelism: Prior Art (BIRD 3.x, GoBGP, RustyBGP & FRR)
 
-Status: **Reference memo.** Two other open BGP stacks — BIRD 3.3.0 and
-GoBGP — were read in full to place zebra-rs's RIB-sharding design. This
-memo is the companion to [`bgp-rib-sharding-plan.md`](bgp-rib-sharding-plan.md)
-(it was extracted and expanded from that doc's §11); the plan owns the
-zebra-rs design and delivery, this memo owns the comparison.
+Status: **Reference memo.** Four other open BGP stacks — BIRD 3.3.0,
+GoBGP, RustyBGP, and FRR — were read in full to place zebra-rs's
+RIB-sharding design. This memo is the companion to
+[`bgp-rib-sharding-plan.md`](bgp-rib-sharding-plan.md) (it was extracted
+and expanded from that doc's §11); the plan owns the zebra-rs design and
+delivery, this memo owns the comparison. (RustyBGP and FRR were added
+2026-06-15, together with the two-axis reframing below.)
 
 The sharp question throughout: **how does each stack parallelize a single
-BGP table's work** — best-path selection and advertise? There are three
-different answers, and the differences are exactly the design space the
-sharding plan navigates.
+BGP table's work?** FRR forces the realization that this is really *two
+orthogonal axes*, and the stacks answer them independently:
+
+- **Ingress / Loc-RIB write concurrency** — who runs best-path, and how is
+  the single table protected: a single-thread actor, one write-lock,
+  striped locks, or owned shards?
+- **Egress / Adj-RIB-Out coalescing** — are per-peer outbound policy and
+  UPDATE encoding run *once and shared* across peers with identical output
+  policy (FRR's `update-group`, zebra-rs's `UpdateGroupSig`), or re-done
+  per peer?
+
+There are now five answers on the ingress axis, and the differences are
+exactly the design space the sharding plan navigates. **Do not conflate
+the two axes:** `update-group` is an *egress* feature and says nothing
+about how the Loc-RIB itself is structured — FRR pairs the most developed
+egress coalescer with the *simplest possible* ingress (one thread).
 
 ## Source pins
 
 | Stack | Path | Version | Branch | HEAD |
 |---|---|---|---|---|
 | BIRD | `/home/kunihiro/bird` (`../bird`) | 3.3.0 | `stable-v3.3` | `10682b7b` |
-| GoBGP | `/home/kunihiro/gobgp` (`../gobgp`) | `gobgp/v4` | `master` | `7204bf9d` |
+| GoBGP | `/home/kunihiro/gobgp` (`../gobgp`) | `v4.6.0-18` | `master` | `7204bf9d` |
+| RustyBGP | `/home/kunihiro/rustybgp` (`../rustybgp`) | 0.2.0 | `master` | `8c398cb` |
+| FRR | `/home/kunihiro/frr` (`../frr`) | `frr-10.7.0-dev-1876` | `master` | `961a1e80` |
 
 All `file:line` anchors below were verified against these exact
 checkouts. Line numbers drift across commits — if one misses, **grep the
 named symbol**, don't trust the number.
 
-## The three answers at a glance
+## The answers at a glance
 
+Sorted by their **ingress** (Loc-RIB write) model:
+
+- **FRR** doesn't parallelize the Loc-RIB at all: one `bgp_table` per
+  (afi,safi), best-path **serial on a single event-loop thread**, **no RIB
+  locks** (the two pthreads do socket I/O + keepalives only). It spends its
+  whole concurrency budget on the **egress** axis instead — `update-group`.
 - **BIRD 3.3** parallelizes *across* tables and protocols, never *within*
   one table. A single table's best-path is **serial** under one per-table
   lock; the win is that **reads are lock-free** (RCU caches) and **egress
@@ -32,15 +55,28 @@ named symbol**, don't trust the number.
   *locks*** over shared memory. Best-path runs in parallel across
   prefixes, but inside a lock, with cache-coherency traffic on every
   update.
+- **RustyBGP** (the GoBGP author's Rust rewrite) shards by prefix hash
+  across **`num_cpus` `tokio::Mutex` shards** — GoBGP's model in Rust. Its
+  `DESIGN.md` describes zebra-rs's owned-thread model, but the *shipped
+  code* is striped locks (see below — doc ≠ code).
 - **zebra-rs** shards a single table by prefix hash into **owned** shard
   threads — shared-nothing, **no hot-path locks**, main↔shard by message
   passing. (See the plan.)
 
+**No stack has a single table with lock-free *writes*.** Best-path is a
+per-prefix read-modify-write that can't be done lock-free with concurrent
+writers, so the field splits cleanly: the only routes to a *single*
+Loc-RIB serialize writes (one lock — BIRD; one thread — FRR); the only
+routes to *parallel* writes shard (locks — GoBGP/RustyBGP; ownership —
+zebra-rs). A single, lock-free-*write* table is the empty quadrant.
+
 ```
-                 within-one-table best-path        egress (advertise)
-BIRD 3.3         serial (1 lock/table)             parallel per consumer (journal pull)
-GoBGP            parallel under 2048 bucket locks  parallel per peer (encode only)
-zebra-rs         parallel, owned shards, no locks  serial reduce → Phase E
+                 within-one-table best-path           egress (advertise)
+FRR              serial (1 thread, work-queue)         parallel per subgroup (update-group, format once)
+BIRD 3.3         serial (1 lock/table)                 parallel per consumer (journal pull)
+GoBGP            parallel under 2048 bucket locks      parallel per peer (encode only)
+RustyBGP         parallel under num_cpus tokio locks   parallel per peer thread (channel)
+zebra-rs         parallel, owned shards, no locks      serial reduce → Phase E + UpdateGroupSig
 ```
 
 ---
@@ -312,6 +348,163 @@ peer C recv goroutine ──┘   bucket.Lock(hash(family+prefix))   [1 of 2048]
 
 ---
 
+## RustyBGP — prefix-hash *lock* sharding, but **doc ≠ code**
+
+RustyBGP (0.2.0, master `8c398cb`) is the most directly comparable point:
+a from-scratch **Rust** multicore BGP daemon by the GoBGP author. It is the
+one case where the published design and the shipped code disagree — and the
+disagreement is exactly the zebra-rs question.
+
+### What the design *says* — owned table threads + channels (≈ zebra-rs)
+
+`DESIGN.md` describes peer threads ↔ table threads connected by **async
+channels**: half the cores are *peer threads* (socket I/O, decode/encode),
+half are *table threads* that **own** a prefix-hash slice and "process
+routes independently." A peer thread hashes the prefix and **sends the
+route to the owning table thread over a channel**; the table thread
+computes best-path and channels the result back to peer threads to encode.
+That is the shared-nothing, owned-shard, message-passing model — zebra-rs's
+design, on paper.
+
+### What the code *does* — striped `tokio::Mutex`, no owned threads
+
+The shipped daemon is **not** that. The table is
+`shards: Vec<Mutex<TableShard>>` (`daemon/src/table_manager.rs:82`) —
+`num_cpus::get()` shards (`TableManager::new(num_cpus::get())`,
+`event.rs`), each a `tokio::sync::Mutex`. The write path is
+**lock-and-mutate on the caller's task**, not a channel hand-off to an
+owner:
+
+```rust
+// insert_route / remove_route, table_manager.rs:261, :320
+let idx = self.dealer(&net.nlri);          // FNV hash of the NLRI
+let mut t = self.shards[idx].lock().await; // striped lock
+t.rtable.insert(...); t.distribute_update(...);
+```
+
+The `tx.send(...)` channels that *do* exist carry **table→peer**
+notifications (`ToPeerEvent`, `BgpEvent`) and subscriber events — the
+egress direction — **not** peer→table route ingestion. So the *ingress*
+concurrency is GoBGP's model (multi-writer, per-shard lock over shared
+memory), just with `num_cpus` shards + a `tokio::Mutex` instead of GoBGP's
+2048 + `sync.RWMutex`, on a Tokio multi-thread runtime (`#[tokio::main]`).
+
+Best-path is an `Ord`-sorted `Vec<RibEntry>` per `Destination`, best at
+index 0 (`partition_point` + `insert`, `table/src/lib.rs:1143`) — the GoBGP
+shape. The gRPC read path (`event.rs::list_path`, `collect_loc_rib_paths`)
+is a **scatter-gather**: lock each shard briefly, copy its destinations
+out, release, then stream the collected `Vec` lock-free — a **non-atomic**
+whole-RIB snapshot (shard 0 read before shard N).
+
+> **Takeaway:** the GoBGP author, rewriting in Rust and *explicitly
+> designing* the owned-shard / channel model, **shipped striped locks** —
+> and zebra-rs is the implementation that actually realized that design.
+> Trust the code over `DESIGN.md`. Classify RustyBGP-as-shipped with GoBGP
+> (sharded + per-shard lock), not with zebra-rs.
+
+---
+
+## FRR — single-threaded Loc-RIB actor + `update-group` egress coalescing
+
+FRR (`frr-10.7.0-dev-1876`, master `961a1e80`) is the canonical,
+most-deployed BGP, and it sits on a **different axis** from every stack
+above. It does **not** parallelize the Loc-RIB at all — its scaling story
+splits cleanly into a single-threaded *ingress* RIB and a sophisticated
+*egress* coalescer. That split is the lens this memo borrows for the whole
+comparison.
+
+### Loc-RIB — single-threaded actor, no sharding, no RIB locks
+
+One `bgp_table` per `(afi,safi)` per instance —
+`bgp->rib[AFI_MAX][SAFI_MAX]` (`bgpd/bgpd.h:835`), a patricia trie
+(`lib/table.h`), per-prefix a linked list of `bgp_path_info` with the best
+flagged `BGP_PATH_SELECTED` (`bgp_route.h:329`). **Not sharded.** The only
+two pthreads `bgpd` spawns (`bgp_pthreads_init`, `bgpd.c:9331`) are
+`bgp_pth_io` and `bgp_pth_ka`, and **neither touches the RIB**:
+
+- `bgp_io` reads bytes → `stream_fifo_push(connection->ibuf, pkt)` under
+  `connection->io_mtx` (`bgp_io.c:221`) →
+  `event_add_event(bm->master, bgp_process_packet, …)` (`bgp_io.c:319`) —
+  it only fills a per-peer FIFO and schedules an event on the **main** loop.
+- `bgp_keepalives` only enqueues keepalive packets to `obuf`.
+
+All parsing, `bgp_update()` (`bgp_route.c`), best-path (`bgp_best_selection`
+via the `bgp->process_queue` work-queue, `bgp_route.c:5134`), and the RIB
+mutation run **on the single main event loop**. There is **no lock on
+`bgp_table` / `bgp_dest` / `bgp_path_info`** — the only mutexes (`io_mtx`,
+`peer_connection_mtx`) guard I/O buffers, not the RIB. Serialization is
+"everything is an event on one thread." `show bgp` walks the table on that
+same thread (`bgp_show_table` → `bgp_table_top` / `bgp_route_next`) — **no
+snapshot, no lock, because there is no other thread to race**.
+
+So FRR is the BIRD answer ("serialize, don't lock") taken to the limit:
+where BIRD multi-threads protocols and protects one table with a
+write-mutex + RCU reads, FRR simply **single-threads the entire daemon's
+RIB**. The whole-RIB-read consistency problem that motivates zebra-rs's
+mirror/snapshot question **does not exist** for FRR — one owner of
+everything.
+
+### `update-group` — egress-only Adj-RIB-Out coalescing (= `UpdateGroupSig`)
+
+`update-group` is **not** a Loc-RIB architecture; it is the **egress**
+optimization, strictly downstream of best-path, orthogonal to the single
+Loc-RIB:
+
+- **Membership by identical outbound policy.** `updgrp_hash_key_make`
+  (`bgp_updgrp.c:320`) hashes ~50 egress-affecting fields: route-map /
+  prefix-list / filter-list / distribute-list **names** out, send-community
+  variants, next-hop-self, AS-path/MED-unchanged, addpath type,
+  remove-private-AS, ORF, MRAI (`v_routeadv`), peer-group name, local-role,
+  SoO, … Peers with byte-identical egress config → one **subgroup**. (Two
+  levels — `update_group` policy bucket vs `update_subgroup` processing
+  instance — exist so peers joining mid-announce don't stall in-flight
+  ones, and so ORF / max-prefix-out / lonesoul peers split off.)
+- **One `bgp_adj_out` per (prefix, subgroup), not per peer** — an RB-tree
+  on each `bgp_dest` keyed by *subgroup pointer* + addpath-id
+  (`bgp_table.h:80`, `bgp_adj_out_set_subgroup`, `bgp_updgrp_adv.c:542`).
+  Outbound policy is applied **once per subgroup**
+  (`subgroup_announce_check`, `bgp_route.c:2387`); the per-subgroup
+  attribute is de-duplicated through `subgrp->hash`.
+- **UPDATE formatted once per subgroup** (`subgroup_update_packet`,
+  `bgp_updgrp_packet.c:659`) into a shared `bpacket`; each member peer holds
+  a position pointer `paf->next_pkt_to_send` into the subgroup's `bpacket`
+  queue, so slow peers don't stall fast ones, and only a **per-peer nexthop
+  fixup** is stamped onto the shared buffer (`bpacket_reformat_for_peer`,
+  `:334`). Packets are GC'd once no peer references them.
+
+This is exactly zebra-rs's `UpdateGroupSig` / `send_ipv4_direct`
+clustering — bucket peers by a signature over egress-affecting knobs,
+format once, share. FRR's machinery is just the most fully-developed
+instance of it (the two-level group/subgroup split + the position-pointer
+`bpacket` queue with per-peer NH fixup).
+
+### Where FRR spent its concurrency budget
+
+FRR — the most feature-complete BGP — **deliberately kept the Loc-RIB
+single-threaded** and put its parallelism into (1) the **I/O pthread** (get
+socket read/write off the main loop) and (2) **`update-group`** (don't
+re-run export policy or re-encode per peer). Its implicit vote: *the
+Loc-RIB write path is not where BGP scaling pain lives — egress fan-out and
+socket I/O are.* zebra-rs bet the opposite and sharded ingress. The two
+axes are **complementary**, and zebra-rs already has both (sharded Loc-RIB +
+`UpdateGroupSig`); FRR's vote is a strong signal that the **egress**
+pipeline (Phase E) is the higher-leverage frontier.
+
+```
+peer recv (bgp_io pthread): socket → ibuf FIFO ──event──┐
+                                                        ▼
+                            MAIN EVENT LOOP (single thread, no RIB lock)
+                            bgp_update → bgp_process → bgp_best_selection
+                            [SERIAL — one bgp->rib[afi][safi]]
+                                        │ group_announce_route
+                                        ▼
+                   update-group ─┬─ subgroup A (policy once, format once) ─┬─ bpacket queue
+                                 └─ subgroup B (policy once, format once) ─┘   per-peer NH fixup
+                                                                               + per-peer TCP write
+```
+
+---
+
 ## zebra-rs — prefix-hash *ownership* sharding (shared-nothing)
 
 For contrast (the full design is in the
@@ -325,16 +518,17 @@ dedicated update-worker threads.
 
 ## The picture
 
-| | BIRD 3.3 | GoBGP | zebra-rs |
-|---|---|---|---|
-| Concurrency unit | loop (per-proto, per-table) | per-peer goroutine + 2048 lock-buckets | per-prefix-hash **owned** shard thread |
-| Single table's best-path | **serial** (one table lock) | parallel (2048 bucket + shard locks) | parallel (owned shards) |
-| RIB memory model | shared, RCU reads + domain locks | shared, 2048+2048 nested mutexes | **partitioned, shared-nothing** |
-| Hot-path lock cost | RCU reads lock-free; table write serial | mutex + cache-coherency per update | **none** (message passing) |
-| Where inbound policy runs | importing protocol loop (before lock) | producing recv goroutine (in lock) | owning shard thread |
-| Where export policy runs | **consumer loop** (parallel, journal pull) | **producer recv goroutine** (serial fan-out) | main reduce → E.1 parallel → E.2 workers |
-| Egress encode / write | parallel per consumer loop | parallel per peer (send goroutine) | off-thread since Phase A; E.2 workers |
-| Prefix interning | global RCU cache (shared) | shared table | per-shard (duplicated) |
+| | BIRD 3.3 | GoBGP | RustyBGP | FRR | zebra-rs |
+|---|---|---|---|---|---|
+| Concurrency unit | loop (per-proto, per-table) | per-peer goroutine + 2048 lock-buckets | per-peer + `num_cpus` shard tasks | **single main event loop** (+io/ka pthreads) | per-prefix-hash **owned** shard thread |
+| Single table's best-path | **serial** (one table lock) | parallel (2048 bucket + shard locks) | parallel (`num_cpus` `tokio::Mutex`) | **serial** (one thread, work-queue) | parallel (owned shards) |
+| RIB memory model | shared, RCU reads + domain locks | shared, 2048+2048 nested mutexes | shared, `num_cpus` `tokio::Mutex` | **single, no locks (1 thread)** | **partitioned, shared-nothing** |
+| Hot-path lock cost | RCU reads lock-free; table write serial | mutex + cache-coherency per update | mutex per update | **none** (single thread) | **none** (message passing) |
+| Whole-RIB read | RCU journal/cursor, lock-free | per-shard lock, scatter | per-shard lock, scatter (non-atomic) | same-thread walk (no snapshot) | main-task `mirror` replica |
+| Where inbound policy runs | importing protocol loop (before lock) | producing recv goroutine (in lock) | caller task (in shard lock) | main thread (`bgp_update`) | owning shard thread |
+| Where export policy runs | **consumer loop** (parallel, journal pull) | **producer recv goroutine** (serial fan-out) | producer task → peer threads | **once per subgroup** (`update-group`) | main reduce → E.1 parallel → E.2 workers |
+| Egress encode / write | parallel per consumer loop | parallel per peer (send goroutine) | parallel per peer thread | per-peer NH fixup of shared `bpacket` | off-thread since Phase A; E.2 workers |
+| Prefix interning | global RCU cache (shared) | shared table | per-shard (shared map) | single (one thread) | per-shard (duplicated) |
 
 ## The sync path — initial feed of the Loc-RIB to a new peer
 
@@ -342,7 +536,11 @@ Everything above compares **steady-state** parallelism (best-path, egress
 fan-out). A second axis matters directly for the plan's B.4 work: when a
 peer reaches **Established**, how does each stack walk the existing
 Loc-RIB and feed it to that *one* new peer? The shapes diverge more here
-than in steady state.
+than in steady state. (RustyBGP and FRR were **not** audited for this sync
+axis in the 2026-06-15 pass — the three-way comparison below stands as
+originally written. Note FRR's single-threaded model implies it shares
+zebra-rs's weakness here: a new peer's dump runs on the one main thread,
+with no inter-peer parallelism — worth confirming before relying on it.)
 
 ```
                  dump read             who runs the build        per-peer parallel?
@@ -472,3 +670,34 @@ withdraw gate the others re-derive or skip.
    neither reference attempts. BIRD's resumable, cooperatively-yielding
    cursor and a bounded socket-backpressure egress are the two cheap
    interim borrows worth taking even before A2.
+
+6. **RustyBGP validates the ownership model by contrast.** The GoBGP
+   author's Rust rewrite *designed* zebra-rs's owned-shard / channel model
+   on paper (`DESIGN.md`) but **shipped striped `tokio::Mutex` locks**. The
+   owned-shard design is the harder one to actually build: that *two*
+   mature efforts (GoBGP, then RustyBGP) both fell back to locks while
+   zebra-rs carries ownership through is the strongest evidence yet that
+   the shared-nothing path is viable and underexploited — not naive.
+
+7. **FRR splits the problem into two axes — and votes egress.** The
+   canonical, most-deployed stack keeps its Loc-RIB **single-threaded** and
+   spends everything on the I/O pthread + `update-group`. Its
+   `update-group` is exactly zebra-rs's `UpdateGroupSig`, only more
+   developed (two-level group/subgroup, per-peer `bpacket` position
+   pointers, NH-only reformat of a shared buffer). Read as a vote: the
+   **egress** axis (Phase E) is where the biggest *proven* scaling wins
+   are, possibly ahead of further ingress work. zebra-rs is the only one of
+   the five carrying **both** axes (sharded ingress + egress coalescing);
+   the gap to close is making Phase E's format-once / share-packet pipeline
+   as complete as FRR's `bpacket` machinery.
+
+8. **"Single Loc-RIB, lock-free" resolves to single-thread or RCU reads —
+   never lock-free writes.** Across all five, a single table is only ever
+   achieved by *serializing* writes (BIRD's per-table mutex, FRR's single
+   thread); the lock-free part is always the *read* side (BIRD's RCU). FRR
+   proves single-threading is the cheapest single-RIB — but it forfeits
+   exactly the write parallelism zebra-rs sharded to get. So zebra-rs
+   cannot have both a single *physical* table and shard write-parallelism;
+   the consistent-snapshot whole-RIB read it wants comes instead from
+   publishing the existing `mirror` via an `arc-swap` / `left-right` handle
+   (lock-free, atomic, off-thread) while keeping the sharded writers.
