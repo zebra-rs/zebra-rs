@@ -464,6 +464,70 @@ behaviour, wrong for a clean single-path-withdraw assertion. The AddPath
 VPN features use **export-only RTs** (independent origins) to keep each
 path attributable to exactly one PE.
 
+### Resumable session-up sync cursor + egress backpressure (Tier 1a/1b, built 2026-06-15)
+
+The B.4 mirror fixed the *correctness* of the N>1 v4 sync (the routes
+are there to dump). This pair fixes the *cost* of the dump itself: the
+one-shot `route_sync_ipv4` builds + encodes the whole v4 Loc-RIB in a
+single uninterrupted pass on the main task, so a new peer
+head-of-line-blocks ingest and every other peer for the duration. Both
+are env-gated; **unset ⇒ the legacy one-shot path, a complete no-op.**
+Branch `bgp-sync-cursor-backpressure`, folded into
+`bgp-nshard-policy-shard`.
+
+**Tier 1a — resumable cursor (`ZEBRA_BGP_SYNC_CHUNK`).** At Established,
+`route_sync` snapshots the v4 prefix *keys* into a per-peer
+`Ipv4SyncCursor`; the event loop drives it `chunk` prefixes per tick (a
+dedicated *unbounded* `sync_tick` channel + `select!` arm), yielding to
+ingest / other peers between chunks. Each chunk reads the *live* Loc-RIB
+(keys-only snapshot ⇒ never a stale attr) and dedups each send against
+`adj_out` (interning ⇒ equal attrs are pointer-equal), so it races
+safely with the concurrent event-driven advertise path — both only
+converge `adj_out` toward the live table. This is BIRD's `feed_index` +
+`MAYBE_DEFER_TASK` model (§11) applied to zebra-rs's single main task;
+keys-only is also cheaper than the legacy full `(prefix, BgpRib)` clone.
+
+Measured — max uninterrupted main-loop occupancy (= the
+head-of-line-block bound), chunk 500:
+
+| RIB | one-shot (off) | cursor (on) | reduction |
+|---|---|---|---|
+| 8 192 | 6.86 ms | 0.59 ms | 12× |
+| 81 920 | 75.46 ms | 0.83 ms | 91× |
+
+The one-shot stall is **linear** in N (~0.9 µs/route → ~0.9 s at 1 M for
+a route reflector); the cursor's is **flat** — bounded by chunk size,
+not RIB size — so the win widens with scale. Total build CPU is
+comparable (the per-key trie lookup is offset by bounded-working-set
+locality). `@bgp_sync_cursor_v4` pins chunked delivery + EoR +
+`adj_out`-deduped withdraw / peer-down to a late peer.
+
+**Tier 1b — bounded backpressure (`ZEBRA_BGP_SYNC_EGRESS_HIGH`, default
+64).** The cursor still queues every UPDATE on the unbounded
+`packet_tx`, so a *slow* peer could let the dump pile up in memory. A
+per-peer in-flight gauge (`Peer::egress_depth`) — incremented in
+`send_packet` the instant an UPDATE is queued, decremented by the writer
+on write, so it is **real-time** — lets `drive_sync_v4` park the cursor
+above the watermark (re-polling via the sync-tick channel) until the
+writer drains, bounding the in-flight queue and pacing the dump to the
+peer's drain rate (BIRD's resume-on-writable, §11). A stuck peer stays
+parked until its hold timer drops the session — correct; don't keep
+dumping to a peer that isn't reading.
+
+A first cut published `packet_rx.len()` from the writer, which is stale
+exactly when the writer is slow (mid-write) and so never engaged — the
+throttled-peer BDD caught it. `@bgp_sync_backpressure` slows the egress
+writer (`ZEBRA_BGP_WRITER_DELAY_MS`, a test/debug knob) so the queue
+backs up deterministically, then asserts the park engages (daemon log)
+and the slowed dump still converges (full RIB, first prefix to last).
+
+**Deferred.** IPv4-unicast only (v6/LU/VPN keep the synchronous
+`route_sync_*`); the `show` RPC's 4 MB ceiling — it builds the whole
+*sorted* table into one message, so a streamed/paginated `show` is the
+sorted-trie-resumable follow-up; and **A2** — the *intra*-peer
+shard-parallel dump (the orthogonal axis neither BIRD nor GoBGP
+attempts, §11).
+
 ## 1. Verdict
 
 Juniper's BGP RIB sharding is applicable to zebra-rs — and zebra-rs is
@@ -988,7 +1052,10 @@ GoBGP `master` (`pkg/server/`, `internal/pkg/table/`).
   most exposed because it *also encodes to bytes on the main task* before
   queuing — no yield point for the entire build. BIRD's `feed_index` +
   `MAYBE_DEFER_TASK` is the reference design for "don't starve other work
-  mid-dump," worth borrowing even before full sharding.
+  mid-dump," worth borrowing even before full sharding. **Built** — the
+  Tier-1a resumable cursor (`ZEBRA_BGP_SYNC_CHUNK`) does exactly this for
+  IPv4-unicast (see the B.4 "Resumable sync cursor" section); measured
+  12–91× lower max main-loop stall, flat in RIB size.
 - **zebra-rs carries the heaviest Adj-RIB-Out, by choice.** Always-on
   per-peer `adj_out` costs memory per peer (a real line item against
   sharding's memory win) but buys an O(1) withdraw gate with no
@@ -1000,7 +1067,11 @@ GoBGP `master` (`pkg/server/`, `internal/pkg/table/`).
   BIRD is the bounded outlier.** A slow peer grows the in-memory queue in
   both zebra-rs and GoBGP. When A2 fans the dump across shards, each
   shard's send needs a backpressure story — BIRD's resume-on-writable is
-  the model to copy if bounded memory matters under slow peers.
+  the model to copy if bounded memory matters under slow peers. **Built**
+  (Tier 1b) ahead of A2: a real-time per-peer egress gauge parks the sync
+  cursor at a watermark (`ZEBRA_BGP_SYNC_EGRESS_HIGH`) — BIRD's
+  resume-on-writable applied to the single-task sync; A2's per-shard send
+  can reuse the same gauge.
 - **EoR**: zebra-rs emits End-of-RIB unconditionally per family; both
   others gate it on graceful-restart. Harmless, but note it for interop —
   a zebra-rs speaker sends EoR even to non-GR neighbors.
