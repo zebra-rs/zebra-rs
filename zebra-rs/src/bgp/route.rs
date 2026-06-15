@@ -9549,6 +9549,11 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             updates: vec![Labelv4Nlri { label, nlri }],
         });
         peer.send_packet(update.into());
+        // Register the dump in the per-peer LU Adj-RIB-Out so a later
+        // withdraw reaches a peer that learned the prefix only via this
+        // session-up dump (the event-driven LU withdraw gates on
+        // `adj_out.v4lu`; mirrors the route_sync_ipv4/ipv6 fix).
+        peer.adj_out.v4lu.add(prefix, best);
     }
 }
 
@@ -9586,6 +9591,9 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             updates: vec![Labelv6Nlri { label, nlri }],
         });
         peer.send_packet(update.into());
+        // See route_sync_labelv4: register so a later withdraw reaches a
+        // peer that learned the prefix only via this session-up dump.
+        peer.adj_out.v6lu.add(prefix, best);
     }
 }
 
