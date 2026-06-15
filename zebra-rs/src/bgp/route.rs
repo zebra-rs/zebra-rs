@@ -9141,12 +9141,14 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
 
     // Single-peer dump (see `send_ipv6_direct`): accumulate per shared
     // attr-set and emit straight to this peer rather than through the
-    // group cache. No Adj-RIB-Out registration — v6-unicast `adj_out`
-    // tracking isn't wired (the event-driven `route_advertise_to_peers_v6`
-    // skips it too); revisit when `show bgp neighbors <X> advertised-routes`
-    // grows v6 support.
+    // group cache. Register each dumped prefix in the per-peer v6
+    // Adj-RIB-Out (`adj_out.v6`), like the v4 sync path — so a later
+    // withdraw reaches a peer that learned the prefix only via this
+    // session-up dump. Without it the event-driven withdraw's
+    // `adj_out.v6` gate sees no record and skips the peer, leaving the
+    // route stuck (caught by @bgp_shard_sync_v6's withdraw scenario).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
-    for (prefix, rib) in routes {
+    for (prefix, mut rib) in routes {
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::Unicast) {
             continue;
@@ -9162,7 +9164,9 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
         let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
             continue;
         };
-        let arc_attr = bgp.attr_store.intern(decision.attr);
+        rib.attr = bgp.attr_store.intern(decision.attr);
+        let arc_attr = rib.attr.clone();
+        peer.adj_out.v6.add(prefix, rib);
         entries.push((arc_attr, nlri));
     }
     super::update_group::send_ipv6_direct(peer, entries);
