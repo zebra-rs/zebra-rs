@@ -432,6 +432,42 @@ async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: us
     );
 }
 
+#[when(expr = "I start zebra-rs in namespace {string} with sync chunk {int}")]
+async fn start_zebra_rs_sync_chunk(world: &mut World, namespace: String, chunk: usize) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    let pid_file = world.pid_file(&namespace);
+    let chunk = chunk.to_string();
+
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        // ZEBRA_BGP_SYNC_CHUNK enables the Tier-1a resumable IPv4 sync
+        // cursor: the session-up dump runs `chunk` prefixes per main-loop
+        // tick instead of one uninterruptible pass. A small chunk forces
+        // many ticks so the chunked path is actually exercised.
+        &[
+            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
+            ("ZEBRA_BGP_SYNC_CHUNK", chunk.as_str()),
+        ],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    println!(
+        "✓ zebra-rs started in namespace {} with sync chunk {} (pid file {})",
+        scoped, chunk, pid_file
+    );
+}
+
 /// When `BDD_KEEP` is set in the environment, the teardown steps
 /// (`stop zebra-rs`, `delete namespace`/`bridge`, and the clean-environment
 /// check) turn into no-ops so the daemons, namespaces, and bridge survive the
