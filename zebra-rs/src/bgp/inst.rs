@@ -2931,9 +2931,14 @@ impl Bgp {
             } => {
                 // Apply the snapshot delta first so any downstream
                 // resolve() sees the new state. Then reconcile the
-                // TCP-AO MKTs installed on the listening sockets so
-                // a key edit lands on the kernel before the peer's
-                // next SYN arrives.
+                // TCP-AO MKTs installed on the listening sockets so a key
+                // edit lands on the kernel before the peer's next SYN
+                // arrives. `apply_ao_refresh_all` also bounces any live
+                // session whose resolved key materially changed — that is
+                // how an in-chain key-string rotation (same chain name,
+                // same SendID/RecvID, new material) resets the session
+                // instead of surviving on the old key until the hold
+                // timer expires.
                 if let Some(kc) = key_chain {
                     self.key_chains.insert(name, kc);
                 } else {

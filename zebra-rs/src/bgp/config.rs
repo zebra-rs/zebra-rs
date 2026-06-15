@@ -2822,12 +2822,28 @@ fn config_peer_tcp_md5_encoding(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
 ///
 /// Called from every TCP-AO callback (peer-side and key-chain-side)
 /// after the change has been absorbed into `Bgp`.
+///
+/// A live (non-Idle) session whose *resolved* key materially changes —
+/// new algorithm, key material, SendID/RecvID, or include-tcp-options —
+/// is bounced with `Event::Stop`. The MKT is installed on the listener
+/// and inherited by the established child socket, so re-installing a
+/// rotated key here does not reset the connection by itself; without the
+/// bounce the session would keep authenticating with the old key until
+/// the hold timer expired. This single, delta-gated check covers every
+/// caller: a per-neighbor key-chain *name* change, a key-chain *content*
+/// rotation pushed through the policy actor, and an include-tcp-options
+/// edit all funnel through here, and repeated calls are idempotent (the
+/// second sees `resolved_ao_key` already updated, so no delta).
 pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
     let fd_v4 = bgp.listen_fd_v4;
     let fd_v6 = bgp.listen_fd_v6;
     // Snapshot key_chains to release the immutable borrow before
     // iterating peers mutably.
     let key_chains = bgp.key_chains.clone();
+
+    // Peers whose resolved key changed under a live session; bounced
+    // after the loop so `bgp.tx` is borrowed clear of the peer iteration.
+    let mut bounce: Vec<usize> = Vec::new();
 
     // Every peer regardless of key variant. The listener entry is
     // keyed by the peer's source address read from `peer.address`, so
@@ -2855,14 +2871,30 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
             .ao_config
             .as_ref()
             .and_then(|ao| ao.resolve(&key_chains));
+
+        // Did the resolved key materially change from what we last
+        // cached? Drives both the live-session bounce and the
+        // del-before-set below. Captured before we overwrite the cache.
+        let changed = peer.config.transport.resolved_ao_key != resolved;
+
+        // Queue a bounce if a session is live under a key that just
+        // changed. An Idle peer just adopts the new key on its next
+        // connect.
+        if changed && !matches!(peer.state, super::peer::State::Idle) {
+            bounce.push(ident);
+        }
         peer.config.transport.resolved_ao_key = resolved.clone();
 
         let new_ids = resolved.as_ref().map(|r| (r.send_id, r.recv_id));
 
-        // Remove the stale listener entry if the resolved key now
-        // disappears or uses different SendID/RecvID.
+        // Remove the stale listener entry when the resolved key
+        // disappears, switches SendID/RecvID, OR rotates its material
+        // under the *same* SendID/RecvID. The kernel keys MKTs by
+        // (address, send_id, recv_id) and `TCP_AO_ADD_KEY` returns
+        // EEXIST on a duplicate, so a same-id rotation must del before it
+        // can re-add — otherwise the listener keeps serving the old key.
         if let (Some(prev_ids), Some(fd)) = (peer.last_ao_installed, fd)
-            && new_ids != Some(prev_ids)
+            && (new_ids != Some(prev_ids) || changed)
         {
             if let Err(e) = super::auth::del_tcp_ao_key(fd, addr, prev_ids.0, prev_ids.1) {
                 tracing::warn!(
@@ -2882,6 +2914,12 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
         let Some(fd) = fd else {
             continue;
         };
+        // Already installed and unchanged: skip the redundant
+        // `TCP_AO_ADD_KEY`, which would only return EEXIST. Any real
+        // change cleared `last_ao_installed` in the del step above.
+        if peer.last_ao_installed == Some((r.send_id, r.recv_id)) {
+            continue;
+        }
         match super::auth::set_tcp_ao_key(
             fd,
             addr,
@@ -2900,6 +2938,15 @@ pub(super) fn apply_ao_refresh_all(bgp: &mut Bgp) {
                 );
             }
         }
+    }
+
+    // Bounce the sessions whose key changed. `Event::Stop` is the
+    // `clear … hard` teardown; the peer re-handshakes from Idle under
+    // the new key.
+    for ident in bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
 }
 
@@ -2934,46 +2981,29 @@ fn config_peer_tcp_ao_key_chain(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> 
             ao.key_chain = chain_name.clone();
             (ident, prior, Some(chain_name))
         } else {
+            // Leave `resolved_ao_key` for `apply_ao_refresh_all` to
+            // clear: dropping it here would hide the Some→None delta it
+            // uses to bounce a live session off a removed key.
             peer.config.transport.ao_config = None;
-            peer.config.transport.resolved_ao_key = None;
             (ident, prior, None)
         }
     };
     // Subscribe (or rebind) the peer's interest in the chain so the
-    // policy actor pushes future `PolicyRx::KeyChain` updates for it;
-    // `apply_ao_refresh_all` reconciles the live listener entries
-    // using the snapshot we already have for `Set` cases and for
-    // `Delete`s that need to del a stale MKT.
+    // policy actor pushes future `PolicyRx::KeyChain` updates for it.
+    // `apply_ao_refresh_all` then reconciles the live listener entries
+    // and bounces the session if its resolved key changed — a key-chain
+    // *name* change here, a removal, or an in-chain content rotation
+    // pushed through the policy actor all funnel through that one
+    // delta-gated check, so this callback no longer resets the session
+    // itself.
     policy_attach_msgs(
         &bgp.policy_tx,
         peer_ident,
         policy::PolicyType::KeyChain(policy::KeyChainScope::BgpNeighbor),
-        prior.clone(),
-        new.clone(),
+        prior,
+        new,
     );
     apply_ao_refresh_all(bgp);
-
-    // A key-chain change resets the session, like the TCP-MD5 password
-    // path: the AO MKT is installed on the listener / active-connect
-    // socket at accept/dial time, so a session authenticated under the
-    // old key-chain would otherwise survive a new, removed, or
-    // mismatched one until the hold timer eventually expires. Bounce a
-    // live session with `Event::Stop` (the `clear … hard` teardown); an
-    // Idle peer picks the new key-chain up on its first connect.
-    // (A *content* change within the same chain — key rotation — flows
-    // through the policy `KeyChain` path, not this callback.)
-    if prior != new {
-        let live = bgp
-            .peers
-            .get(&addr)
-            .is_some_and(|p| !matches!(p.state, super::peer::State::Idle));
-        if live {
-            let _ = bgp.tx.try_send(super::inst::Message::Event(
-                peer_ident,
-                super::peer::Event::Stop,
-            ));
-        }
-    }
     Some(())
 }
 

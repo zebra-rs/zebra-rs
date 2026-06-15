@@ -48,16 +48,35 @@ Feature: BGP TCP Authentication Option (RFC 5925 / RFC 5926)
     # key-chain callback now bounces it — otherwise the old session
     # would survive under the old key until the hold timer expired.
     When I apply config "z2-2.yaml" to namespace "z2"
-    And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should not be "Established"
-    And BGP session in "z2" to "192.168.0.1" should not be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually not be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually not be "Established"
 
   Scenario: Restoring the matching key-chain re-establishes the session
     Given the test topology exists
     When I apply config "z2-1.yaml" to namespace "z2"
-    And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
+
+  Scenario: Rotating the key-string within the same chain drops the session
+    Given the test topology exists
+    # z2 keeps its neighbor pointed at the SAME chain name (BGP-AO) and
+    # the SAME send-id/recv-id, but rotates the key-string
+    # (shared-ao-secret -> rotated-ao-secret). This edits the chain
+    # content, so it arrives via the policy key-chain callback rather
+    # than the neighbor tcp-ao callback. apply_ao_refresh_all re-installs
+    # the new MKT on the listener under the unchanged (addr, send-id,
+    # recv-id) tuple, so the established session would survive on the old
+    # key until the hold timer expired — unless the resolved-key delta
+    # bounces it.
+    When I apply config "z2-3.yaml" to namespace "z2"
+    Then BGP session in "z1" to "192.168.0.2" should eventually not be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually not be "Established"
+
+  Scenario: Restoring the original key-string re-establishes the session
+    Given the test topology exists
+    When I apply config "z2-1.yaml" to namespace "z2"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
 
   Scenario: Teardown topology
     Given the test topology exists

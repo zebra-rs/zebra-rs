@@ -319,7 +319,7 @@ impl Default for AoConfig {
 /// pass into `set_tcp_ao_key`. Cached on `PeerTransportConfig` so the
 /// active-side `peer_connect` can apply it without needing to walk
 /// the `Bgp` registry at spawn time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAoKey {
     pub alg_name: &'static str,
     pub key_material: Vec<u8>,

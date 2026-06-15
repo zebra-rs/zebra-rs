@@ -38,4 +38,6 @@ Requires Linux kernel >= 6.7 on both peers.
 | Establish a TCP-AO authenticated BGP session | |
 | Switching to a mismatched key-chain drops the session | |
 | Restoring the matching key-chain re-establishes the session | |
+| Rotating the key-string within the same chain drops the session | |
+| Restoring the original key-string re-establishes the session | |
 | Teardown topology | |

@@ -645,6 +645,87 @@ async fn verify_bgp_session_not(
     );
 }
 
+/// Poll `show bgp neighbors <addr>` (JSON) until the addressed peer's
+/// `state` matches `expected` (`want_match = true`) or stops matching it
+/// (`want_match = false`). Returns `(satisfied, last_output)`.
+///
+/// The polling siblings of [`verify_bgp_session`] /
+/// [`verify_bgp_session_not`]: a state *transition* driven by a config
+/// change (an auth-key bounce, say) reaches the reconfigured speaker
+/// promptly but the far side only reflects it once the teardown or
+/// re-handshake propagates, so a single fixed-wait check races. Polling
+/// absorbs that lag.
+async fn poll_bgp_session_state(
+    scoped: &str,
+    neighbor: &str,
+    expected: &str,
+    want_match: bool,
+) -> (bool, String) {
+    const ATTEMPTS: u32 = 30;
+    let cmd = format!("show bgp neighbors {}", neighbor);
+    let mut last = String::new();
+    for i in 0..ATTEMPTS {
+        last = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", &cmd])
+            .await
+            .expect("Failed to get BGP neighbor state");
+        let matched = serde_json::from_str::<Value>(&last)
+            .ok()
+            .and_then(|v| {
+                v.get("state")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.eq_ignore_ascii_case(expected))
+            })
+            .unwrap_or(false);
+        if matched == want_match {
+            return (true, last);
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    (false, last)
+}
+
+#[then(expr = "BGP session in {string} to {string} should eventually be {string}")]
+async fn verify_bgp_session_eventually(
+    world: &mut World,
+    namespace: String,
+    neighbor: String,
+    expected_state: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_bgp_session_state(&scoped, &neighbor, &expected_state, true).await;
+    assert!(
+        ok,
+        "BGP session {} -> {} never reached {}; last output:\n{}",
+        scoped, neighbor, expected_state, last
+    );
+    println!(
+        "✓ BGP session {} -> {} reached {}",
+        scoped, neighbor, expected_state
+    );
+}
+
+#[then(expr = "BGP session in {string} to {string} should eventually not be {string}")]
+async fn verify_bgp_session_eventually_not(
+    world: &mut World,
+    namespace: String,
+    neighbor: String,
+    unexpected_state: String,
+) {
+    let scoped = world.ns(&namespace);
+    let (ok, last) = poll_bgp_session_state(&scoped, &neighbor, &unexpected_state, false).await;
+    assert!(
+        ok,
+        "BGP session {} -> {} stayed {}; last output:\n{}",
+        scoped, neighbor, unexpected_state, last
+    );
+    println!(
+        "✓ BGP session {} -> {} is no longer {}",
+        scoped, neighbor, unexpected_state
+    );
+}
+
 /// Poll `show bgp neighbors` (all peers, JSON) until some peer's
 /// `state` matches `expected` (`want_match = true`) or no peer matches
 /// it (`want_match = false`). Returns `(satisfied, last_output)`.
