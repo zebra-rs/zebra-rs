@@ -468,3 +468,70 @@ needs an awkward topology (same RD from two sources / a reflector with
 two cluster paths) since per-PE RDs normally make each MAC a distinct
 NLRI; deferred. Until then the family twins are control-plane-validated
 (cap negotiation + `addpath_send_implemented` unit tests + full suite).
+
+## 11. Transport-auth sweeps and session reset on key change
+
+The membership refactor exposed a second class of "scan idiom" bug in
+the per-peer transport callbacks (BFD/TCP-MSS/TCP-MD5/TCP-AO): each
+reconcile swept peers by **address** via `PeerMap::keys()`, which keys
+on `IpAddr` and so silently skipped interface-keyed (unnumbered) peers
+— and the helpers then re-looked-up through `get(&peer.address)`, which
+can't round-trip an interface-keyed peer either. Fixed by routing every
+sweep through `PeerMap::idents()` + an ident-based helper core
+(`bfd_apply_ident`, `apply_md5_refresh_for_ident`, …); `keys()` is
+retained only for `peer_comps` CLI completion (addr-only by design).
+— #1429.
+
+**Session reset on auth-key change.** MD5 and TCP-AO keys are installed
+on the **listener** fd (and on the active-connect socket at dial time),
+then *inherited by the established child socket at accept time*. So a
+key change on the listener does **not** reset a session already up
+under the old key — the mismatch would survive until the hold timer
+expired. Each family bounces the live session (`Event::Stop`, the
+`clear … hard` teardown) on an actual key change, gated `!Idle`:
+
+- **TCP-MD5 password** — #1430. Both the per-neighbor callback
+  (`config_peer_tcp_md5_password`) and the group path
+  (`apply_inherited`, `bounce |= md5_refresh`). Found while validating
+  #1429; verified identical on the baseline binary before concluding it
+  was pre-existing, not a regression.
+- **TCP-AO key-chain name change** — #1438. The per-neighbor key-chain
+  callback bounces when the referenced chain name changes.
+- **TCP-AO in-chain key rotation** — #1440. A key-string edit *within*
+  the same chain flows through the policy `KeyChain` callback, not the
+  neighbor callback, so the name-based bounce never saw it. Two bugs
+  were in the way:
+  1. `TCP_AO_ADD_KEY` returns `EEXIST` for a duplicate
+     `(address, send_id, recv_id)`. The del-before-set in
+     `apply_ao_refresh_all` only fired on a SendID/RecvID *switch*, so a
+     same-id rotation never replaced the listener MKT — the listener
+     kept serving the old material (and every periodic reconcile logged
+     EEXIST re-adding an already-present key). Fix: del-before-re-add on
+     any *material* delta, and skip the redundant add when an unchanged
+     key is already installed.
+  2. The bounce compared chain *names*, so a same-name content rotation
+     never triggered it. Fix: centralize the bounce into
+     `apply_ao_refresh_all`, gated on the resolved-key delta (algorithm,
+     key material, SendID, RecvID, include-tcp-options). A neighbor name
+     change, a removal, an include-tcp-options edit, and a policy-driven
+     rotation now all funnel through one delta-gated check; repeated
+     calls are idempotent (the second sees `resolved_ao_key` already
+     updated). `ResolvedAoKey` gained `PartialEq`/`Eq`.
+
+BDD: `@bgp_tcp_md5_auth` (mismatch-drop) and `@bgp_tcp_ao_auth`
+(name-change drop + in-chain rotation drop + restore). The session-state
+assertions use polling step variants
+(`BGP session in … should eventually [not] be …`): a config-driven
+teardown reaches the reconfigured speaker promptly but the far,
+un-reconfigured side reflects it asynchronously, which races a fixed
+wait. Note `@bgp_tcp_md5_auth` is CI-excluded (BDD is), so run the
+transport-auth features locally when touching auth/transport.
+
+**Deferred (TCP-AO, not blocking).** The bounce is a *hard* rekey.
+`AoConfig::resolve()` picks the lowest key-id and ignores per-key
+lifetimes, so two follow-ups remain: (a) RFC 8177 lifetime-based key
+selection (time-scheduled rollover within a chain); (b) RFC 5925
+graceful in-session rekey via `RNextKeyID` MKT rollover — swap the
+active key without dropping the session. Both are refinements; the
+listener-based model with a bounce is correct and complete for the
+single-key chains that are the common case.
