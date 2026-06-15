@@ -302,8 +302,14 @@ needed no new variants.
   activated.
 - **N>1 barriers** (planned C.3): EoR / route-refresh / GR-LLGR sweeps
   must become broadcast-and-ack across shards.
-- **N>1 show / clear / sync scatter-gather** (B.4): `Show` is wired but
-  clear/sync are still inline — at N>1 they read the empty main shard.
+- **N>1 v4-unicast read paths** (B.4) — **critical**: `show bgp ipv4`,
+  session-up `route_sync_ipv4`, and `clear`/soft-in all read the
+  synchronous `bgp.shard.v4`, which is empty at N>1 (v4-unicast is the only
+  pooled family and the reduce never mirrors best-paths back). The operator
+  can't see the v4 RIB and a peer establishing after routes exist gets
+  nothing; forwarding is unaffected. (The earlier "`Show` is wired" note was
+  wrong — disproved by `@bgp_shard_v4_sync`.) Fix plan + recommended design
+  below.
 - **YANG knob** `router bgp shards <1-64>` to replace `ZEBRA_BGP_SHARDS`
   as the shipping form (planned C.4), plus the perf matrix + default.
 - **`PolicyReplace` correctness sweep.** Inbound policy snapshots are now
@@ -313,6 +319,70 @@ needed no new variants.
 
 The larger architectural improvements — drawn from the BIRD/GoBGP study
 (§11) — are collected in §12.
+
+### Read-path scatter-gather at N>1 — bug + fix plan (B.4)
+
+**Bug (critical, v4-unicast-only).** At N>1, plain v4-unicast best-paths
+live only in the pool shards; the reduce (`reduce_bestpath_v4_nht_fib`)
+does FIB-install + advertise off the delta and never populates the
+synchronous `bgp.shard.v4`. So every read path that consults it returns
+empty: `show bgp ipv4`, the session-up dump `route_sync_ipv4`, and
+`clear`/soft-in. The operator can't see the v4 RIB, and a peer that
+establishes *after* routes exist receives only the EoR marker. Forwarding
+is unaffected (event-driven advertise runs off the delta). Locked by the
+`@bgp_shard_v4_sync` BDD (red until fixed): an early peer learns routes via
+the event-driven path (control, green), a late peer gets nothing on sync
+(bug, red), and the sharded node's own `show bgp ipv4` is empty (bug, red).
+
+**The work to parallelize.** A full dump/show is not bounded by *reading*
+the RIB — it is the per-route egress build: `route_update_ipv4`
+(next-hop-self, AS_PATH), the out-policy `PrefixTrie::walk_enclosing` (the
+profile's 74.8 %-of-CPU hot spot), intern, encode. For a route reflector
+that is millions of routes per new peer. *Where that build runs* decides
+whether the fix scales on a multi-core box.
+
+**Options.**
+
+- **A1 — gather-then-build.** Shards return raw `(prefix, BgpRib)` rows;
+  main assembles and runs the egress build serially. Correct, but the build
+  is back on one core and every row is copied main-ward (an N→1 funnel) — it
+  reintroduces the single-core ceiling Phase E removed.
+- **A2 — shards build and send their own slice (RECOMMENDED).** A per-
+  session `SyncCtx` snapshot (local addr for next-hop-self, peer_type/AS,
+  AddPath flag, out-policy snapshot — already shard-replicated via
+  `PolicyReplace` — ENHE, the cloneable `packet_tx`) rides the request;
+  each shard transforms + out-policy-filters + encodes + sends *its own*
+  slice directly to the peer, in parallel across all N shard cores with
+  full data locality (no gather copy). Main only emits EoR after an N-ack
+  barrier (the C.3 broadcast-and-ack). This is the E.2+
+  shards-as-update-workers model applied to the read path; it is the only
+  option that makes the dump scale ~N-way and the only one that reads the
+  cands table for AddPath. One `DumpV4` then serves `show`, `sync`, and
+  `clear` alike.
+- **B — main best-path mirror.** The reduce also writes `selected` into
+  `bgp.shard.v4`; reads stay synchronous. Tiny, but the build is still
+  serial on main, AddPath sync stays best-path-only, and it reintroduces a
+  FIB-sized v4 copy + an always-on mirror-consistency invariant — the exact
+  bug-class sharding removed.
+
+**Recommendation: A2** — the only fully-correct *and* scalable fix: the
+expensive egress build fans out across the shard cores instead of
+funnelling back to one. A1/B are correct-but-serial (a single-PR stop-gap
+at best). Multi-core scalability ranking: **A2 ≫ A1 ≈ B**.
+
+Tradeoff: A2 packs UPDATEs per-shard, so same-attribute routes in different
+shards (the attribute is not the hash key) ride separate MP_REACH messages
+— marginally more packets, dominated by the N-way CPU win on any large
+dump. Caveat (E.2's lesson): at N ≈ cores a sync burst building in the
+shards competes with steady-state ingest; if it starves ingest, route A2's
+build through the bounded `egress_pool()` rather than rayon's global pool.
+
+**PR breakdown (A2):** ① `ShardMsg::DumpV4 { SyncCtx }` + `DumpDoneV4` ack +
+a per-request barrier (N=1 keeps today's direct read) → ② shard
+`handle_dump_v4`: walk the slice, build + send per `SyncCtx` → ③ wire `show
+bgp ipv4` through it (flips the z2 assertion green) → ④ wire
+`route_sync_ipv4` through it (flips z4 green; add an AddPath-send BDD
+variant) → ⑤ retrofit `clear`/soft-in onto the same `DumpV4`.
 
 ## 1. Verdict
 
@@ -444,7 +514,7 @@ post-A rows unmerged as of 2026-06-14).
 | B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ✅ built (WIP branch) |
 | B.2 | Shard message protocol + label sub-blocks | B.1 | ✅ built (WIP branch) |
 | B.3 | ~~Spawn shard task~~ → **sync dispatch** at N=1 | B.2 | ✅ built — pivoted to sync, see "Implementation status" |
-| B.4 | Show / clear / sync scatter-gather | B.3 | 🔶 partial — `Show` wired; clear/sync still inline |
+| B.4 | Show / clear / sync scatter-gather | B.3 | ❌ not built — `show` / `sync` / `clear` all read the empty `bgp.shard.v4` at N>1 (`@bgp_shard_v4_sync` red); recommended A2 fix plan in Implementation status |
 | B.5 | BDD + lifecycle hardening at N=1 | B.4 | ⏳ |
 | C.1 | Prefix-hash fan-out to N shards (+ YANG knob) | B.5 | ✅ built — dedicated-thread `ShardPool`, env-gated `ZEBRA_BGP_SHARDS` (plain v4-unicast only; VPNv4/v6/VPNv6/LU still sync); YANG knob still future |
 | C.2 | Update-worker tasks (group affinity) | A.2, C.1 | 🔶 partial — E.1/E.2 parallel egress (bounded pool) built; dedicated group-affinity workers = E.2+ (§12) |
