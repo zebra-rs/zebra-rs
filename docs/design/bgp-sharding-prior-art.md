@@ -336,6 +336,102 @@ dedicated update-worker threads.
 | Egress encode / write | parallel per consumer loop | parallel per peer (send goroutine) | off-thread since Phase A; E.2 workers |
 | Prefix interning | global RCU cache (shared) | shared table | per-shard (duplicated) |
 
+## The sync path — initial feed of the Loc-RIB to a new peer
+
+Everything above compares **steady-state** parallelism (best-path, egress
+fan-out). A second axis matters directly for the plan's B.4 work: when a
+peer reaches **Established**, how does each stack walk the existing
+Loc-RIB and feed it to that *one* new peer? The shapes diverge more here
+than in steady state.
+
+```
+                 dump read             who runs the build        per-peer parallel?
+BIRD 3.3         resumable cursor      protocol's own birdloop    yes (loops on a pool); 1 peer serial
+GoBGP            one-shot best list    per-peer FSM goroutine      yes (RLock); 1 peer serial
+zebra-rs         one-shot Vec collect  single main task            NO — all peers serialize on main
+```
+
+| Dimension | zebra-rs | BIRD 3.3.0 | GoBGP (master) |
+|---|---|---|---|
+| Trigger | FSM→Established → `route_sync()` (`route.rs:9600`, from `peer.rs:1484`) dispatches `route_sync_<af>` | `proto_notify_state(PS_UP)` → `channel_start_export` (`nest/proto.c:1195`) → `rt_export_subscribe` | `fsmHandler.loop` → `handleFSMMessage` ESTABLISHED (`server.go:1716`) → `getBestFromLocalCallback` |
+| Loc-RIB read | one-shot `Vec` (AddPath cands `.0` / best `.1`) | resumable cursor `rt_export_get` (`rt-export.c:39`), per-net `feed_index` | one-shot under `RLock`: `GetBestPathList` / `GetPathList` |
+| Threading | **single main task**; v4 read via `mirror_v4` | per-protocol `birdloop` on a thread pool; `MAYBE_DEFER_TASK` yields | per-peer FSM goroutine under `s.shared.mu.RLock`; encode on `sendMessageloop` |
+| Adj-RIB-Out | always-on `peer.adj_out.<af>` | opt-in (`export table`→`tx_keep`); else journal-driven | none persistent; `sentPaths` map |
+| Batch / coalesce | per-attr buckets (`send_ipv4_direct`) | attr buckets (`bgp_get_bucket`) → max packet (`bgp_create_update`) | attr "cages" + ≤2048-msg coalesce (`CreateUpdateMsgFromPaths`) |
+| Backpressure | unbounded `packet_tx` (encoded) → TCP at writer | TCP pauses/resumes `bgp_fire_tx` (bounded) | unbounded `InfiniteChannel` (paths) → TCP at `sendMessageloop` |
+| End-of-RIB | **always**, per family (`send_eor_<af>`) | only under graceful-restart | only under GR / RTC (`table.NewEOR`) |
+
+**BIRD — resumable cursor on the protocol's own loop.**
+`bgp_conn_enter_established_state` calls `proto_notify_state(PS_UP)`; the
+channel goes `CS_UP` and `channel_set_state` calls `channel_start_export`
+(`nest/proto.c:1195`), which subscribes an `rt_export_request` to the
+table's exporter. There is **no** BGP-specific "feed begin" — the old
+`bgp_feed_begin` is gone; BGP only registers
+`rt_notify`/`export_fed`/`refeed_begin` in `bgp_init` (`bgp.c:3105`). The
+feed is a **resumable cursor**: `rt_export_get` (`nest/rt-export.c:39`)
+drives `rt_export_get_next_feed`, advancing a `feed_index` one *net* at a
+time off the shared table's export journal, so a huge dump cooperatively
+yields (`MAYBE_DEFER_TASK`, `lib/io-loop.h:32`, at the tail of
+`channel_notify_any`) and resumes next loop pass. It runs on **the BGP
+protocol's own `birdloop`**, picked up by a pool thread (`bird_thread_
+main`, `birdloop_take_one`): one peer is one-route-at-a-time, but
+**different peers feed concurrently** on different cores. A persistent
+Adj-RIB-Out exists only with the `export table` knob (`tx_keep`,
+`bgp.c:3213`); by default `bgp_done_prefix` (`attrs.c:2413`) frees the
+prefix after send and later withdraws ride the journal. EoR is emitted
+**only under graceful-restart** (`BFS_LOADING`→`BFS_LOADED` in
+`bgp_export_fed`, then `bgp_create_end_mark` in `bgp_fire_tx`).
+
+**GoBGP — one-shot best-path list on the per-peer goroutine.** The
+per-peer FSM goroutine `fsmHandler.loop` (`fsm.go:2119`) signals
+Established by calling `h.callback` **directly** — *not* through the
+central `Serve()` select loop, which only handles mgmt/accept/ROA. That
+callback is `handleFSMMessage` (`server.go:1548`); its ESTABLISHED branch
+(`server.go:1716`) calls `getBestFromLocalCallback(..., addEOR,
+routeRefresh)`, which reads the Loc-RIB **once** under `manager.mu.RLock`
+(`GetBestPathList`, or `GetPathList` when ADD-PATH send is on), runs
+**export policy on this same goroutine** (`filterpath` →
+`ApplyPolicy(EXPORT)`), then `sendfsmOutgoingMsg`. Because it holds a
+*read* lock, **two peers' dumps run concurrently**; only config mutations
+(write lock) serialize against them. There is **no persistent
+Adj-RIB-Out** — a `sentPaths sync.Map` records path-ids (`updateRoutes`,
+`peer.go:258`) for the withdraw decision, and a full `AdjRib` is rebuilt
+transiently only for gRPC monitoring (`UpdateAdjRibOut`, `adj.go:113`).
+The path list crosses an **unbounded `InfiniteChannel`** to a separate
+`sendMessageloop` (`fsm.go:1756`) that coalesces ≤2048 messages and packs
+same-attribute "cages" (`CreateUpdateMsgFromPaths`, `message.go:694`).
+EoR is a sentinel `table.NewEOR` path appended only under GR or RTC.
+
+**zebra-rs — one-shot collect on the single main task.** `route_sync`
+(`route.rs:9600`, from the FSM at `peer.rs:1484`) dispatches
+`route_sync_<af>` per negotiated family. Each collects the whole family
+table from `bgp.shard.<af>` into a `Vec` (candidates `.0` for AddPath,
+best-paths `.1` otherwise), then builds + **encodes** every UPDATE and
+ships the bytes — **all on the one main task**. v4-unicast is read back
+through the `mirror_v4` replica (the pool doesn't serve reads). The
+per-peer Adj-RIB-Out (`peer.adj_out.<af>`) is **always** maintained and
+populated *during* the dump (the B.4 fix), so the event-driven withdraw
+gate is O(1). `send_ipv4_direct` (`update_group.rs:922`) clusters NLRI
+per shared attr-set; the encoded bytes queue on an **unbounded**
+`packet_tx`, drained by the writer task (TCP backpressure only there).
+Each family ends with an unconditional `send_eor_<af>`.
+
+**Implications.** zebra-rs is the only one of the three with **no
+inter-peer dump parallelism** — every new peer's feed competes with every
+other peer *and* with steady-state ingest on the single main task, and it
+runs the expensive encode there too, with no mid-dump yield. BIRD and
+GoBGP both get per-peer concurrency for free from their loop/goroutine
+model (each still one-route-at-a-time per peer). The plan's A2
+`DumpV4`-to-shards is a **different, orthogonal** axis — *intra*-peer
+parallelism by prefix shard — that **neither** reference attempts; the
+two are complementary. Two cheaper interim borrows fall out: BIRD's
+**resumable, cooperatively-yielding cursor** (don't hold the main task
+for a whole RR-scale dump) and a **bounded**-egress backpressure story
+(BIRD pauses/resumes on socket-writable; zebra-rs and GoBGP both let an
+unbounded queue grow under a slow peer). The always-on Adj-RIB-Out is
+zebra-rs's deliberate outlier — heavier memory per peer, but an O(1)
+withdraw gate the others re-derive or skip.
+
 ## Takeaways for zebra-rs
 
 1. **Two mature stacks independently shard the RIB by prefix hash** —
@@ -366,3 +462,13 @@ dedicated update-worker threads.
    per prefix (bucket); zebra-rs serializes nothing on the ingest hot
    path (owned shards) and pushes the remaining serial work to the main
    reduce — which is precisely why Phase E (egress) is the next frontier.
+
+5. **The session-up *sync* path is a distinct axis — and zebra-rs's
+   weakest (see "The sync path" above).** Steady-state aside, BIRD and
+   GoBGP both get *inter-peer* dump parallelism for free from their
+   loop / goroutine model, while zebra-rs serializes every new peer's
+   feed — and its encode — on the single main task. The A2
+   `DumpV4`-to-shards plan adds the *orthogonal* *intra-peer* axis that
+   neither reference attempts. BIRD's resumable, cooperatively-yielding
+   cursor and a bounded socket-backpressure egress are the two cheap
+   interim borrows worth taking even before A2.
