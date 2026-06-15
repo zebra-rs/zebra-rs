@@ -2,34 +2,46 @@
 
 Status: **Phase 0 + A merged; Phase B built at N=1 (sync-dispatch);
 policy-parallelism C.1/C.2 built; N-shard dedicated-thread pool +
-RouteBatch + mimalloc built (dark behind `SHARDS=1`); Phase E.1
-(parallel advertise-outcome precompute) built** — Phase 0 + A merged
-2026-06-12
-(PRs #1402/#1406/#1408/#1416). Phase B (state partition, message
-protocol, shard) and a re-scoped Phase C (parallel policy evaluation)
-were built 2026-06-13 on a WIP branch. Two deliberate divergences from
-the §5–8 plan: **B.3 became a synchronous dispatch, not a spawned task**,
-and **Phase C was re-scoped to parallelize the pure policy walk (rayon)
-rather than fan out to N shards** (the multi-shard form remains future).
+RouteBatch + mimalloc built; per-shard inbound-policy replication
+(`PolicyReplace`) built; Phase E.1 (parallel advertise-outcome
+precompute) + E.2 (bounded egress worker pool) built; Adj-RIB-Out
+unified across all families (BatchAfi/LabeledAfi)** — Phase 0 + A merged
+2026-06-12 (PRs #1402/#1406/#1408/#1416). Everything after Phase A lives
+**unmerged** on branch `bgp-nshard-policy-shard` (55 commits ahead of
+`main` as of 2026-06-14, no PR yet). Three deliberate divergences from
+the §5–8 plan: **B.3 became a synchronous dispatch, not a spawned task**;
+**the re-scoped Phase C parallelizes the pure policy walk (rayon)**; and
+**the multi-shard fan-out runs on dedicated OS threads, not tokio tasks**.
+Shard count is now **runtime env-driven** — `ZEBRA_BGP_SHARDS` (clamp
+1–64, default 1), with the egress pool sized by `ZEBRA_BGP_UPDATE_WORKERS`
+(default `max(1, cores − shards)`) — the compile-time `SHARDS` constant
+is gone; a YANG knob is still the future shipping form.
 The "Implementation status" section below is the current architecture of
 record; §1–10 remain the original applicability analysis and design
 rationale. Open decisions §8: D1 (in-repo `bgp-bench`) and D3
 (v4/v6-unicast+LU+VPN scope) resolved as recommended; D2 (channel
-boundedness) moot under sync dispatch — there is no data channel yet;
-D4 (default shard count) deferred — the N-shard path now exists but
-ships dark behind the `SHARDS` constant (default 1).
+boundedness) resolved as **unbounded** for now (both shard inbox and
+result channel) — backpressure is a tracked improvement, see §12;
+D4 (default shard count) — defaults to 1 (opt-in via env), perf knee
+measured at N=4.
 
 Source: "BGP RIB Sharding" — Ravindran Thangarajah, Juniper Networks,
 2022-10-24.
 <https://community.juniper.net/blogs/ravindran-thangarajah/2022/10/24/bgp-rib-sharding>
 
-## Implementation status (as built — 2026-06-13)
+## Implementation status (as built — 2026-06-14)
 
-What actually shipped diverges from the §5–8 plan in two deliberate
-ways: B.3 became a **synchronous dispatch** rather than a spawned task,
-and Phase C was **re-scoped** to parallelize the pure policy walk (rayon)
-instead of (yet) fanning out to N shards. §5–10 remain the original
-design rationale.
+What actually shipped diverges from the §5–8 plan in three deliberate
+ways: B.3 became a **synchronous dispatch** rather than a spawned task;
+Phase C was **re-scoped** to parallelize the pure policy walk (rayon);
+and the multi-shard fan-out (original C.1) runs on **dedicated OS
+threads** owning a slice end-to-end, not tokio shard-tasks. On top of
+sharding, the egress path was **unified** — every family (v4/v6 unicast,
+VPNv4/6, labeled-unicast v4/v6) now has a functional Adj-RIB-Out behind
+two generic traits, which is the substrate Phase E.2+ (group-affinity
+update-workers) will build on. §5–10 remain the original design
+rationale; §11 is the BIRD/GoBGP prior-art comparison and §12 is the
+current improvement roadmap.
 
 ### Phase B — shard extraction at N=1 (B.1–B.3, built)
 
@@ -61,19 +73,35 @@ design rationale.
     intern + Loc-RIB insert + best-path + label allocation; **main** then
     acts on the returned best-path delta — NHT untrack, FIB install, VPN
     import/export, advertise.
-  - **Dispatch vs direct access**: v4-unicast + VPNv4 reach the shard via
-    `UpdateV4`, v6-unicast + VPNv6 via `UpdateV6`. **Labeled-unicast
-    (v4/v6) still uses direct shard-table access** (`route_labelv4_update`
-    → `bgp.shard.update_v4lu`); the `UpdateLu` + `WithdrawV4/V6/Lu`
-    variants are wired-but-unused scaffolding for a later migration (the
-    dead-code warnings on them are expected).
+  - **Dispatch vs direct access (and what is parallelized at N>1)**:
+    **only plain v4-unicast fans out across the pool** — via
+    `ShardMsg::RouteBatchV4` (one batch per shard, hashed; the message is
+    unicast-only, no `rd` field). **VPNv4 deliberately stays on the
+    synchronous `bgp.shard`** — its transit label needs main's central
+    allocator, which can't be borrowed across the thread boundary, so
+    `route_ipv4_update_decided` gates the pool path on `rd.is_none()`
+    (`route.rs:2463`). v6-unicast + VPNv6 reach the shard via `UpdateV6`,
+    also on the **single synchronous `bgp.shard`** (no `RouteBatchV6` is
+    dispatched to the pool yet), and **labeled-unicast (v4/v6) uses direct
+    shard-table access** (`bgp.shard.update_v4lu` / `update_v6lu`). So at
+    N>1 the only parallelized best-path is plain v4-unicast; VPNv4, v6,
+    VPNv6 and LU all stay on the main thread's sync shard. The `UpdateLu` + `WithdrawLu` +
+    `Show` + `BestPathLu` variants are wired-but-unused scaffolding for a
+    later migration (the dead-code warnings on them are expected).
+  - **Live `ShardMsg` set** (`shard/msg.rs`): `UpdateV4`, `RouteBatchV4`,
+    `WithdrawV4`, `UpdateV6` (sync only), `PeerDown` (broadcast),
+    `SoftInV4` (broadcast), `PolicyReplace` (broadcast),
+    `NexthopReachableBatchV4` (batched NHT re-eval). Live `ShardOut`:
+    `BestPathV4`, `BestPathV6`.
 
 ### Phase C — re-scoped to parallel policy evaluation (C.1/C.2, built)
 
-The planned C.1 (N-shard fan-out) and C.2 (update-workers) are **not yet
-built — the shard is still single (N=1)**. Instead, profiling the N=1
-build under a realistic policy-heavy workload (a 1000-entry route-map
-applied inbound *and* outbound) put **74.8 % of CPU in
+This is the *re-scoped* C.1/C.2, which landed **first** — parallelizing
+the pure policy walk at N=1. (The original-plan C.1, the N-shard
+fan-out, landed later as the dedicated-thread pool — see "Phase N-shard"
+below and the label note in §6.) The re-scope came from profiling the
+N=1 build under a realistic policy-heavy workload (a 1000-entry route-map
+applied inbound *and* outbound), which put **74.8 % of CPU in
 `PrefixTrie::walk_enclosing`** — the prefix-set match, run ~1000× per
 route. Policy evaluation is **pure** (reads the peer's policy snapshot +
 the route, mutates nothing) and every prefix in one UPDATE shares one
@@ -113,7 +141,7 @@ The win is the policy walk; the §9 baseline matrix (no policy) is a
 different workload where this parallelism barely registers — there the
 planned multi-shard / update-worker fan-out is what pays.
 
-### Phase N-shard — dedicated-thread pool (as built, dark behind `SHARDS=1`)
+### Phase N-shard — dedicated-thread pool (as built, env-gated, default off)
 
 The planned multi-shard fan-out (original C.1) is now built, but on
 **dedicated OS threads, not tokio tasks or rayon** — the rayon-per-UPDATE
@@ -121,19 +149,23 @@ form (the re-scoped C.1/C.2 above) regressed the no-policy workload ~36 %
 (a `par_iter` tax with no policy to amortize), so the shard became a real
 thread that owns its slice end-to-end.
 
-- **`ShardPool`** (`bgp/shard/pool.rs`) spawns `SHARDS` worker threads
-  (`std::thread`), one per `BgpShard`. A worker blocks on an `mpsc`
-  inbox, runs `BgpShard::handle(msg, None)`, and ships a `ShardResult`
-  back over a tokio `UnboundedSender`. CPU-bound work on real threads
-  keeps it off the tokio runtime and away from the I/O (reader/writer)
-  tasks.
+- **`ShardPool`** (`bgp/shard/pool.rs`) spawns `shard_count()` worker
+  threads (`std::thread`, named `bgp-shard-{idx}`), one per `BgpShard`. A
+  worker blocks on a `std::sync::mpsc` inbox, runs `BgpShard::handle`, and
+  ships a `ShardResult` back over a tokio `UnboundedSender`. CPU-bound work
+  on real threads keeps it off the tokio runtime and away from the I/O
+  (reader/writer) tasks.
+- **`shard_count()`** (`inst.rs`) reads `ZEBRA_BGP_SHARDS`, clamps to
+  `1..=64`, defaults to 1 — runtime env-driven, no compile-time constant.
+  (The shipping form is a YANG knob, §12.)
 - **`shard_of(addr)`** = FNV-1a over the address octets `% N`
   (deterministic, address-only) so unicast / LU / VPN rows of one prefix
   co-locate (the Juniper invariant) with no cross-shard synchronization.
-- **Gated on `SHARDS > 1`** (`inst.rs`): at the default `SHARDS == 1`
-  nothing spawns, the synchronous `shard` field + byte-identical sync
-  path run, and the event loop's `shard_results_rx` arm stays idle — so
-  BDD and every default run traverse the proven N=1 path.
+- **Gated on `shard_count() > 1`** (`inst.rs`): at the default `1`
+  nothing spawns (`(n_shards > 1).then(…)`), the synchronous `shard` field
+  + byte-identical sync path run, and the event loop's `shard_results_rx`
+  arm stays idle — so BDD and every default run traverse the proven N=1
+  path.
 - **RouteBatch** (`ShardMsg::RouteBatchV4`): one UPDATE's prefixes are
   split by hash and sent as **one batch per shard** (not one message per
   prefix), collapsing ~4M per-prefix futex wakeups to ~N.
@@ -222,15 +254,65 @@ the rest of egress off the serial reduce.
   GoBGP (a per-peer send goroutine) are the two reference designs (§11).
   Per-(peer, prefix) ordering holds: one prefix → one shard → one worker.
 
-### Still future
+### Adj-RIB-Out unification — the egress substrate (built)
 
-N>1 barriers (planned C.3: EoR / refresh / GR-LLGR sweeps
-broadcast-and-ack), N>1 show / clear / sync scatter-gather (B.4 is still
-inline — at N>1 they read the empty main shard), `PolicyReplace`
-(per-peer policy snapshots replicated to shards — Phase C uses
-default-permit, correct only for no-configured-policy), the YANG knob
-`router bgp shards <1-64>` to replace the `SHARDS` constant, and the perf
-matrix + shipping default (planned C.4).
+Independent of the shard split but built on the same branch, the egress
+path was unified across all families. This matters here for two reasons:
+the shard reduce now drives **one** advertise path regardless of family,
+and E.2+ (group-affinity workers fed `AdvDelta`) needs a per-family
+Adj-RIB-Out to diff against — which only v4/VPNv4 had before.
+
+- **Phase 1 — functional Adj-RIB-Out for v6 / LU / VPNv6.** Before this,
+  v4-unicast and VPNv4 stored a real per-peer Adj-RIB-Out (`Peer.adj_out`,
+  the `AdjRib<Out>` in `adj_rib.rs`) and pruned withdrawals against it;
+  v6, labeled-unicast (v4/v6) and VPNv6 **flooded every withdrawal to
+  every Established peer** with no per-peer egress state, which produced a
+  withdraw ping-pong (a route a peer was never sent still got a withdraw,
+  bouncing back). The interim ping-pong guards (`64f205b6` v6, `d7f048fe`
+  LU, `c12d675f` VPNv6) were removed once each family got a real
+  `adj_out` slice (`adj_out.{v6,v4lu,v6lu,v6vpn}`) — a peer not in the
+  table is simply never sent a spurious withdraw, so the bug class is
+  **structurally** gone.
+- **Phase 2 — generic advertise via two traits.** The per-family
+  `route_advertise_to_peers_{v4,v6,vpnv4,vpnv6}` functions collapsed into
+  one `route_advertise_batch::<A: BatchAfi>` (impls `V4Batch` / `V6Batch`,
+  covering v4/v6 unicast + VPNv4/6), and the labeled-unicast pair into one
+  `route_advertise_labeled::<A: LabeledAfi>` (impls `LabeledV4` /
+  `LabeledV6`). The `BatchAfi` trait carries `compute_outcome` (the pure
+  out-policy + attribute transform the E.1/E.2 reduce parallelizes),
+  `advertise`, `withdraw`, `advertise_addpath`; `LabeledAfi` carries the
+  per-peer `adj_out_*` diff primitives plus `update`/`apply_policy_out`.
+- **AddPath — advertise all candidates** (`3a27ec65`): the event-driven
+  v6 and LU AddPath paths now read the **full Loc-RIB candidate set** from
+  the shard (`bgp.shard.v6.0.get(prefix)` / `A::all_cands`) instead of the
+  best-only `selected` (≤1 path), which silently dropped non-best AddPath
+  candidates on the event path. v4/VPN already advertised per-candidate.
+
+The update-group cache (`cache_ipv4` …) and `UpdateGroupSig` are
+unchanged — the signature is per-session, not per-family, so unification
+needed no new variants.
+
+### Still future (immediate sharding gaps)
+
+- **VPNv4 / v6 / VPNv6 / LU pool dispatch.** At N>1 only plain v4-unicast
+  fans out; VPNv4, v6, VPNv6 and LU best-path still run on the single sync
+  shard. VPNv4 needs a pool path that keeps label allocation shard-side
+  (today its transit label borrows main's central allocator); v6/VPNv6
+  need `RouteBatchV6`; LU needs the `UpdateLu`/`WithdrawLu` scaffolding
+  activated.
+- **N>1 barriers** (planned C.3): EoR / route-refresh / GR-LLGR sweeps
+  must become broadcast-and-ack across shards.
+- **N>1 show / clear / sync scatter-gather** (B.4): `Show` is wired but
+  clear/sync are still inline — at N>1 they read the empty main shard.
+- **YANG knob** `router bgp shards <1-64>` to replace `ZEBRA_BGP_SHARDS`
+  as the shipping form (planned C.4), plus the perf matrix + default.
+- **`PolicyReplace` correctness sweep.** Inbound policy snapshots are now
+  replicated to shards (`BgpShard.in_policy`, broadcast `PolicyReplace`);
+  remaining work is the live-reconfig re-evaluation path (re-running
+  best-path against the new snapshot, not just storing it).
+
+The larger architectural improvements — drawn from the BIRD/GoBGP study
+(§11) — are collected in §12.
 
 ## 1. Verdict
 
@@ -300,9 +382,9 @@ middle. One core is the convergence ceiling regardless of machine size.
 
 | Junos concept | zebra-rs counterpart | Status |
 |---|---|---|
-| Shard thread owning a RIB slice | tokio shard task owning a `LocalRibTable<P>` partition + adj-in slices | to build — but the per-VRF task (`process_vrf_global_msg`) is this exact pattern, sharded by table instead of by hash |
+| Shard thread owning a RIB slice | `BgpShard` owning `LocalRibTable<P>` partitions + adj-in slices (a plain field at N=1, a dedicated OS thread per shard at N>1 — *not* a tokio task) | ✅ built — only plain v4-unicast fans out across the pool; VPNv4 (transit label needs main's central allocator), v6, VPNv6 and LU best-path still run on the single sync shard. The per-VRF task (`process_vrf_global_msg`) was the precedent, sharded by table instead of by hash |
 | RTO (prefix + attr shorthand) | `(Arc<BgpAttr>, Nlri, source_ident)` — the *existing* update-group cache entry (`bgp/update_group.rs:181`) | exists — zebra-rs invented the RTO without naming it |
-| Update thread packing RTOs | update-worker task owning `UpdateGroup` caches + debounce timers + canonical encode | encode logic exists (update-groups Phase 3, shipped for IPv4); needs to move off the main task |
+| Update thread packing RTOs | update-worker task owning `UpdateGroup` caches + debounce timers + canonical encode | 🔶 partial — encode is off-thread (A.2 `FlushJob` → `spawn_blocking`) and the out-policy precompute parallelizes (E.1/E.2 bounded egress pool); the dedicated group-affinity worker fed `AdvDelta` is still future (E.2+, §12) |
 | Resolver-as-a-service in main | already a service: RIB daemon NHT over `RibRx::NexthopUpdate` channel | exists |
 | Non-BGP routes hashed into shards | **not needed** — cross-protocol active-route selection lives in the central RIB daemon, not in BGP | simpler than Junos |
 | KRT/FIB download from main | `rib_client` channel sends — handle is cloneable into shards | exists |
@@ -350,8 +432,9 @@ peer writer tasks ◀──bytes── │ (coordina-   │  listeners, VRF regi
 
 Each PR is a separate branch off `main` (repo convention), lands only
 CI-green, and must leave the daemon fully functional — sharding ships
-dark behind `shards = 1` until C.4. Status column to be filled in as
-PRs land.
+off by default (`ZEBRA_BGP_SHARDS` unset → N=1) until C.4 flips a YANG
+knob. Status column reflects the `bgp-nshard-policy-shard` branch (all
+post-A rows unmerged as of 2026-06-14).
 
 | Step | Title | Depends on | Status |
 |---|---|---|---|
@@ -363,16 +446,18 @@ PRs land.
 | B.3 | ~~Spawn shard task~~ → **sync dispatch** at N=1 | B.2 | ✅ built — pivoted to sync, see "Implementation status" |
 | B.4 | Show / clear / sync scatter-gather | B.3 | 🔶 partial — `Show` wired; clear/sync still inline |
 | B.5 | BDD + lifecycle hardening at N=1 | B.4 | ⏳ |
-| C.1 | Prefix-hash fan-out to N shards + YANG knob | B.5 | ⏳ deferred (label reused — see note) |
-| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | ⏳ deferred (label reused — see note) |
+| C.1 | Prefix-hash fan-out to N shards (+ YANG knob) | B.5 | ✅ built — dedicated-thread `ShardPool`, env-gated `ZEBRA_BGP_SHARDS` (plain v4-unicast only; VPNv4/v6/VPNv6/LU still sync); YANG knob still future |
+| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | 🔶 partial — E.1/E.2 parallel egress (bounded pool) built; dedicated group-affinity workers = E.2+ (§12) |
 | C.3 | Barriers: EoR, refresh, GR/LLGR sweeps, clear | C.1 | ⏳ |
 | C.4 | Perf matrix, defaults, docs | C.2, C.3 | ⏳ |
 
-> **Phase C label note**: the *built* "C.1/C.2" are a re-scope —
-> rayon-parallel inbound/outbound **policy** evaluation at N=1 (see
-> "Implementation status"). The rows above are the *original* plan's
-> C.1/C.2 (multi-shard fan-out + update-workers), which remain deferred.
-> Same letters, different axis of parallelism.
+> **Phase C label note**: "C.1/C.2" name two different axes. The
+> *re-scoped* C.1/C.2 (rayon-parallel inbound/outbound **policy** at N=1)
+> built first; the *original-plan* C.1 (multi-shard fan-out) then landed
+> as the dedicated-thread `ShardPool`, and the original-plan C.2
+> (update-workers) is partly covered by E.1/E.2's parallel egress with
+> the dedicated group-affinity form deferred to E.2+ (§12). The rows
+> above track the original-plan axis.
 
 ### Phase 0 — Baseline measurement (before touching anything)
 
@@ -552,7 +637,15 @@ consider flipping the default.
   update-workers safe — the risk register in `bgp-update-groups.md` §6
   (silent leak, capability mismatch) applies identically.
 
-## 8. Open decisions (need a ruling before the affected step)
+## 8. Decisions (resolved)
+
+All four were ruled as recommended and are reflected in the current
+build (see the Status header): **D1** in-repo `bgp-bench` (PR #1406);
+**D2** channels unbounded both directions for now, with backpressure
+tracked as §12 P2; **D3** v4/v6-unicast + LU + VPNv4/6 sharded,
+EVPN/flowspec/SR-Policy/BGP-LS/RTC main-owned; **D4** default shard
+count 1 (opt-in via `ZEBRA_BGP_SHARDS`), measured knee at N=4. The
+original framing of each follows.
 
 - **D1 — Bench harness form (Phase 0.1)**: in-repo Rust injector
   reusing `bgp_packet` (recommended — no new system deps, CI-runnable)
@@ -581,12 +674,18 @@ announce at the slowest receiver (3s quiet window, excluded from the
 number). Daemon config: `no-fib-install true`, MRAI 1s both peer
 types (±1s quantization floor).
 
-Machine: 5-vCPU VM (model not exposed), 31 GB RAM, Linux
-6.8.0-124-generic. Flamegraph pending: `perf_event_paranoid=4` blocks
-unprivileged perf on this box and user namespaces are restricted —
-thread-level attribution needs a root run (recipe in the bench
-README). The single-task serialization claim in §3 rests on code
-structure, not yet on a profile.
+Machine: the early baseline table below is a 5-vCPU VM (model not
+exposed), 31 GB RAM, Linux 6.8.0-124-generic; the 12-core matrices
+(Implementation status §"Measured" and the base-vs-sharded sweep below)
+are a later 12-core / 31 GB box. Flamegraph pending: `perf_event_paranoid=4`
+blocks unprivileged perf on these boxes and user namespaces are
+restricted — thread-level attribution needs a root run (recipe in the
+bench README). The single-task serialization claim in §3 is now
+corroborated by the workload profiles in "Implementation status":
+`PrefixTrie::walk_enclosing` 74.8 % (policy-heavy), SipHash interning
+~28 %, and the allocator's `osq_lock` ~12 % at N=12 — all single-core
+hotspots that the policy-parallelism, sharding, and allocator/hasher
+swaps target.
 
 Baseline, branch point `41a1d07d` (2026-06-12):
 
@@ -630,14 +729,46 @@ policy-heavy workload in the "Implementation status" section above
 (serial 19.57s → 4.34s at 12 cores). The planned multi-shard C.1 /
 update-worker C.2 are what this matrix is meant to capture, when built.
 
+**Base-vs-sharded sweep (12-core, 8×500k no-policy) — 2026-06-14, HEAD
+`3a27ec65`.** Fresh back-to-back run on the 12-core box (12 cores, 31 GB,
+Linux 6.8.0-124-generic): base rebuilt from the pre-sharding branch point
+`41a1d07d` and driven by the *same* `bgp-bench` binary, then
+`ZEBRA_BGP_SHARDS` swept on the current build (one binary, daemon restart
+per run, 3 runs each). Harness as above — 8 senders, 2 receivers, 500k
+prefixes, `no-fib-install`, MRAI 1s.
+
+| build | r1 | r2 | r3 | avg | vs base |
+|---|---|---|---|---|---|
+| base (pre-sharding `41a1d07d`) | 22.29 | 22.51 | 23.31 | 22.70 s | — |
+| N=1 (sync-dispatch) | 17.28 | 16.37 | 17.42 | 17.02 s | −25 % |
+| N=4 | 14.29 | 14.88 | 14.09 | 14.42 s | **−37 % (knee)** |
+| N=12 | 16.56 | 15.18 | 17.85 | 16.53 s | −27 % |
+
+Daemon RSS 7.0 GB (base) → 7.6 GB (N=12); all 12 runs converged. This
+reproduces the earlier 12-core matrix (Implementation status,
+§"Measured"): N=4 absolute matches to ~0.1 s (14.42 vs 14.44), N=12 to
+~0.1 s (16.53 vs 16.61); base ran ~2 s slower this session (22.70 vs the
+earlier 20.73, inside the ~10 % run-to-run variance), so the relative
+deltas come out slightly larger. Two takeaways hold. **(1) N=1 is already
+−25 % with no parallelism** — sync-dispatch is the same single ingest
+thread as base, so the win is the branch's global swaps (mimalloc
+allocator + `ahash` attr-interning hasher in `store.rs`, both absent at
+base), not sharding. **(2) the shard fan-out adds ~12 points** (N=1 −25 %
+→ N=4 −37 %), then over-shards at N=12 (no spare cores for the reduce +
+tokio I/O). The AddPath fix `3a27ec65` is benchmark-neutral here (IPv4
+load; it touches only the v6/LU advertise loops).
+
 ## 10. Caveats & out of scope
 
 - **Gains require scale and fan-out** (high RIB-FIB ratio, many
   peers). A 2-peer BDD topology shows zero or negative gain — that is
   expected, BDD is the correctness gate, the §9 matrix is the perf
   gate.
-- **Phase C is gated on the Phase 0 profile.** If the flamegraph shows
-  allocations/interning dominate, fix that single-threaded first.
+- **Phase C was gated on the Phase 0 profile — and the profile bore it
+  out.** Interning (SipHash ~28 %) and allocation (`osq_lock` ~12 %) did
+  dominate, so both were fixed single-threaded first (ahash + mimalloc,
+  which alone get N=1 to −25 % vs base) before the shard fan-out — exactly
+  the "fix that first" the plan called for.
 - **The next bottleneck moves to the central RIB daemon** (single
   task) for 1:1 RIB-FIB roles — out of scope here, bounds end-to-end
   gains for non-RR roles.
@@ -670,3 +801,54 @@ Three different answers:
 The memo carries the full architecture of each, diagrams, the comparison
 table, verified source anchors, and the per-stack takeaways (incl.
 corrections to the framing summarized here).
+
+## 12. Improvement roadmap (prior-art-informed)
+
+The §11 comparison places zebra-rs as the only shared-nothing design of
+the three — which fits Rust (ownership > GC'd shared pointers > lock-free
+RCU) and gives the strongest compute-parallel and egress-parallel story.
+Three architectural gaps remain, in priority order. The first two are the
+two places all three stacks differ; the third is where zebra is uniquely
+constrained.
+
+**P1 — E.2+ group-affinity update-workers, fed by a per-shard journal.**
+Today the shard reduce parallelizes the *out-policy precompute* (E.1/E.2)
+but the bucketing / cache / encode / adj-out still run **serially on the
+main reduce thread**. The full Juniper form moves per-group egress into M
+dedicated workers with static group→worker affinity, fed `AdvDelta` (RTO)
+directly by the shards, bypassing the main reduce. BIRD 3.x is the
+reference substrate: a **per-shard append-only journal** (the `lfjour`
+shape — seq numbers + a per-worker cursor) lets each update-worker *pull*
+deltas at its own pace instead of main fanning them out. The Adj-RIB-Out
+unification (above) is the enabler — every family now has the per-peer
+`adj_out` a worker diffs against. Ordering still holds: one prefix → one
+shard → one worker. This is the single highest-value remaining item and
+the one §11 explicitly points at.
+
+**P2 — Backpressure.** Every inter-thread channel is currently unbounded
+(shard inbox `std::sync::mpsc`, the tokio result channel, the egress
+hand-off) — the same soft spot GoBGP has (`InfiniteChannel`), and the one
+place BIRD is clearly ahead (the `lfjour` token + slowest-consumer
+watermark GC bounds the journal). A slow consumer (peer, FIB, RIB daemon)
+can grow memory unboundedly. Options: bounded channels with `try_send` +
+overflow accounting, or — if P1 lands a journal — adopt BIRD's
+watermark/token model directly on it (GC to the slowest cursor). Decide
+after a fan-out/slow-peer bench, not before.
+
+**P3 — Decouple ownership granularity from worker-thread count.** Today
+`shard == OS thread`, so the shard count is simultaneously the ownership
+granularity *and* the parallelism degree — which is exactly why the knee
+is N=4 (not N=cores) and why shards fight the egress pool for cores (the
+`max(1, cores − shards)` split). Both other stacks separate these: GoBGP
+has 2048 lock/ownership domains served by `GOMAXPROCS` goroutines; BIRD
+3.x's `birdloop` balancer work-steals many loops onto a fixed thread
+pool. The analogue here: many *logical* shards (fine, stable prefix
+ownership) mapped onto a small fixed worker pool by work-stealing, so the
+operator stops hand-tuning N against core count. Larger refactor; only
+worth it if the N-tuning friction proves real on production workloads.
+
+**Lower priority / already noted.** Extending pooled dispatch to
+v6/VPNv6/LU (immediate gap above) is mechanical, not architectural. The
+central RIB daemon becoming the next serial bottleneck for 1:1 RIB-FIB
+roles (§10) bounds end-to-end gains regardless of BGP-side sharding — a
+separate effort.
