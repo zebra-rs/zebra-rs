@@ -309,6 +309,23 @@ module exec {
           }
         }
       }
+      // VPNv6 (SAFI 128) Loc-RIB across every route distinguisher — the
+      // v6 twin of `vpnv4` above.
+      list vpnv6 {
+        ext:help "BGP VPNv6 RIB";
+        ext:presence "BGP VPNv6 RIB (all route distinguishers)";
+        key value;
+        leaf value {
+          ext:help "Address (routes containing it), prefix (exact match) or summary";
+          type union {
+            type inet:ipv6-address;
+            type inet:ipv6-prefix;
+            type enumeration {
+              enum summary;
+            }
+          }
+        }
+      }
       container evpn {
         ext:help "BGP EVPN RIB";
         presence "BGP EVPN RIB";

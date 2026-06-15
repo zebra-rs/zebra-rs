@@ -751,6 +751,150 @@ fn show_bgp_vpnv4_table(bgp: &Bgp, json: bool) -> std::result::Result<String, st
     Ok(buf)
 }
 
+/// `show bgp vpnv6 [X:X::X | X:X::X/M | summary]` — VPNv6 (SAFI 128)
+/// Loc-RIB. The v6 twin of [`show_bgp_vpnv4`].
+fn show_bgp_vpnv6(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    match args.string() {
+        None => show_bgp_vpnv6_table(bgp, json),
+        Some(tok) if tok == "summary" => {
+            show_bgp_summary_one(bgp, AfiSafi::new(Afi::Ip6, Safi::MplsVpn), json)
+        }
+        Some(tok) => show_bgp_vpnv6_entry(bgp, &tok),
+    }
+}
+
+/// The all-RD VPNv6 table — `show bgp vpnv6` with no value. Reuses
+/// `BgpVpnv4RouteJson` (its `prefix` is a `String`, so family-agnostic).
+fn show_bgp_vpnv6_table(bgp: &Bgp, json: bool) -> std::result::Result<String, std::fmt::Error> {
+    if json {
+        let mut routes: Vec<BgpVpnv4RouteJson> = Vec::new();
+        for (rd, value) in bgp.shard.v6vpn.iter() {
+            for (prefix, ribs) in value.0.iter() {
+                for rib in ribs.iter() {
+                    let aspath_str = show_aspath(&rib.attr);
+                    let origin_str = show_origin(&rib.attr);
+                    let ecom_str = show_ecom(&rib.attr);
+                    routes.push(BgpVpnv4RouteJson {
+                        route_distinguisher: rd.to_string(),
+                        prefix: prefix.to_string(),
+                        valid: true,
+                        best: rib.best_path,
+                        internal: rib.typ == BgpRibType::IBGP,
+                        route_type: if rib.typ == BgpRibType::IBGP {
+                            "iBGP".to_string()
+                        } else {
+                            "eBGP".to_string()
+                        },
+                        next_hop: show_nexthop_vpn(&rib.nexthop),
+                        metric: show_med2(&rib.attr),
+                        local_pref: show_local_pref2(&rib.attr),
+                        weight: rib.weight,
+                        as_path: if aspath_str.is_empty() {
+                            None
+                        } else {
+                            Some(aspath_str)
+                        },
+                        origin: if origin_str.is_empty() {
+                            None
+                        } else {
+                            Some(origin_str)
+                        },
+                        extended_community: if ecom_str.is_empty() {
+                            None
+                        } else {
+                            Some(ecom_str)
+                        },
+                        path_id: rib.remote_id,
+                        local_path_id: rib.local_id,
+                        label: rib.label.map(|l| l.label).unwrap_or(0),
+                    });
+                }
+            }
+        }
+        return Ok(serde_json::to_string_pretty(&routes)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e)));
+    }
+
+    let mut buf = String::new();
+    let _ = writeln!(
+        buf,
+        "     Network          Next Hop            Metric LocPrf Weight Path"
+    );
+    for (key, value) in bgp.shard.v6vpn.iter() {
+        if !value.0.is_empty() {
+            writeln!(buf, "Route Distinguisher: {}", key)?;
+        }
+        for (k, v) in value.0.iter() {
+            for rib in v.iter() {
+                let stale = if rib.stale { "S" } else { " " };
+                let valid = "*";
+                let best = if rib.best_path { ">" } else { " " };
+                let internal = if rib.typ == BgpRibType::IBGP {
+                    "i"
+                } else {
+                    " "
+                };
+                let nexthop = show_nexthop_vpn(&rib.nexthop);
+                let med = show_med(&rib.attr);
+                let local_pref = show_local_pref(&rib.attr);
+                let weight = rib.weight;
+                let mut aspath = show_aspath(&rib.attr);
+                if !aspath.is_empty() {
+                    aspath.push(' ');
+                }
+                let add_path = format!("[{}] ", rib.local_id);
+                let origin = show_origin(&rib.attr);
+                let com = show_com(&rib.attr);
+                writeln!(
+                    buf,
+                    "{stale}{valid}{best}{internal} {}{:18} {:18} {:>7} {:>6} {:>6} {}{}",
+                    add_path,
+                    k.to_string(),
+                    nexthop,
+                    med,
+                    local_pref,
+                    weight,
+                    aspath,
+                    origin,
+                )?;
+                let ecom = show_ecom(&rib.attr);
+                let label = rib.label.map(|l| l.label).unwrap_or(0);
+                writeln!(buf, "     {} label={}, {}", ecom, label, com)?;
+            }
+        }
+    }
+    Ok(buf)
+}
+
+/// Keyed form of [`show_bgp_vpnv6`] — per-RD detail for one prefix
+/// (exact match) or host address (/128 lookup). Reuses the vpnv4 detail
+/// writer (prefix passed as a string).
+fn show_bgp_vpnv6_entry(bgp: &Bgp, tok: &str) -> std::result::Result<String, std::fmt::Error> {
+    let mut out = String::new();
+    if let Ok(net) = tok.parse::<Ipv6Net>() {
+        for (rd, table) in bgp.shard.v6vpn.iter() {
+            if let Some(ribs) = table.0.get(&net) {
+                write_vpnv4_entry_detail(&mut out, bgp, rd, &net.to_string(), ribs)?;
+            }
+        }
+    } else if let Ok(addr) = tok.parse::<std::net::Ipv6Addr>() {
+        if let Ok(host) = Ipv6Net::new(addr, 128) {
+            for (rd, table) in bgp.shard.v6vpn.iter() {
+                if let Some(ribs) = table.0.get(&host) {
+                    write_vpnv4_entry_detail(&mut out, bgp, rd, &host.to_string(), ribs)?;
+                }
+            }
+        }
+    } else {
+        writeln!(out, "% Malformed IPv6 prefix/address: {tok}")?;
+    }
+    Ok(out)
+}
+
 fn show_adj_rib_routes_vpnv4<D: RibDirection>(
     routes: &BTreeMap<RouteDistinguisher, AdjRibTable<D>>,
     _router_id: Ipv4Addr,
@@ -4526,6 +4670,8 @@ impl Bgp {
             .set(show_bgp_ipv6_longer::<Bgp>)
             .path("/show/bgp/vpnv4")
             .set(show_bgp_vpnv4)
+            .path("/show/bgp/vpnv6")
+            .set(show_bgp_vpnv6)
             .path("/show/bgp/evpn")
             .set(show_bgp_evpn)
             .path("/show/bgp/summary")

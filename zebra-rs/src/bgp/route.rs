@@ -9141,6 +9141,79 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
     send_eor_vpnv4_unicast(peer);
 }
 
+/// VPNv6 counterpart of [`route_sync_vpnv4`]: dump the VPNv6 Loc-RIB to a
+/// peer when its session establishes. The global VPNv6 advertise is
+/// event-driven, so a peer that comes up *after* a route was originated /
+/// imported needs this catch-up (the v6 twin of the VPNv4 sync that was
+/// previously missing).
+pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
+    let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn);
+
+    let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv6Net, BgpRib)>)> = if add_path {
+        bgp.shard
+            .v6vpn
+            .iter()
+            .map(|(rd, table)| {
+                let routes: Vec<(Ipv6Net, BgpRib)> = table
+                    .0
+                    .iter()
+                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                    .collect();
+                (*rd, routes)
+            })
+            .collect()
+    } else {
+        bgp.shard
+            .v6vpn
+            .iter()
+            .map(|(rd, table)| {
+                let routes: Vec<(Ipv6Net, BgpRib)> = table
+                    .1
+                    .iter()
+                    .map(|(prefix, rib)| (prefix, rib.clone()))
+                    .collect();
+                (*rd, routes)
+            })
+            .collect()
+    };
+
+    for (rd, routes) in all_routes {
+        for (prefix, mut rib) in routes {
+            // RFC 9494 §4.3: stale routes only go to LLGR peers.
+            if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::MplsVpn) {
+                continue;
+            }
+            let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
+                continue;
+            };
+            let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+                continue;
+            };
+            let attr = decision.attr;
+            // RTC: per-peer route-target constraint.
+            if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+                continue;
+            }
+            rib.attr = bgp.attr_store.intern(attr);
+            let arc_attr = rib.attr.clone();
+            let label = rib.label.unwrap_or_default();
+            peer.adj_out.v6vpn.entry(rd).or_default().add(prefix, rib);
+            let vpnv6_nlri = Vpnv6Nlri { label, rd, nlri };
+            peer.send_vpnv6(vpnv6_nlri, arc_attr, false);
+        }
+    }
+
+    peer.flush_vpnv6();
+    send_eor_vpnv6_vpn(peer);
+}
+
+// Send End-of-RIB marker for IPv6 VPN.
+fn send_eor_vpnv6_vpn(peer: &mut Peer) {
+    let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
+    update.mp_withdraw = Some(MpUnreachAttr::Vpnv6Eor);
+    peer.send_packet(update.into());
+}
+
 // Send End-of-RIB marker for IPv4 Unicast.
 fn send_eor_ipv4_unicast(peer: &mut Peer) {
     let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -9444,6 +9517,9 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
         if !peer.eor.contains_key(&key) {
             route_sync_vpnv4(peer, bgp);
         }
+    }
+    if peer.is_afi_safi(Afi::Ip6, Safi::MplsVpn) {
+        route_sync_vpnv6(peer, bgp);
     }
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);

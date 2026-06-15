@@ -189,7 +189,8 @@ pub fn spawn_bgp_vrf(
     // in `vrf.shard.v4` as `BgpRibType::Originated` and
     // emit a `BgpGlobalMsg::Export` so the global instance
     // promotes them to VPNv4 advertisements toward PE peers.
-    let network_count = materialize_self_originated_networks(&mut vrf, cfg);
+    let network_count = materialize_self_originated_networks(&mut vrf, cfg)
+        + materialize_self_originated_networks_v6(&mut vrf, cfg);
 
     // Install the AF_MPLS DecapVrf ILM at the allocated label so a
     // remote PE's VPNv4 packet with this label pops + lands in
@@ -392,6 +393,64 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
         // so `selected.first()` carries the winner; emit Export.
         if let Some(winner) = selected.first() {
             super::vrf_emit_export(&exporter, *prefix, &winner.attr);
+        }
+        count += 1;
+    }
+    count
+}
+
+/// IPv6 counterpart of [`materialize_self_originated_networks`]: insert each
+/// `router bgp vrf X afi-safi ipv6 network <p>` into `vrf.shard.v6` as an
+/// `Originated` row and emit `ExportV6` so the global instance promotes it
+/// to a VPNv6 advertisement. The next-hop is a placeholder — the global
+/// re-advertise rewrites it to next-hop-self (`BgpNexthop::Vpnv6`) in
+/// `route_update_ipv6`.
+fn materialize_self_originated_networks_v6(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
+    use bgp_packet::{BgpAttr, BgpNexthop, Origin};
+
+    let Some(af) = cfg.ipv6_unicast.as_ref() else {
+        return 0;
+    };
+    if af.networks.is_empty() {
+        return 0;
+    }
+
+    let exporter = super::VrfExporter {
+        name: vrf.name.clone(),
+        tx: vrf.global_tx.clone(),
+        label: vrf.label,
+    };
+
+    let mut count = 0usize;
+    for prefix in &af.networks {
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.nexthop = Some(BgpNexthop::Ipv6(std::net::Ipv6Addr::UNSPECIFIED));
+        let interned = vrf.shard.intern(attr);
+
+        let rib = super::super::route::BgpRib {
+            remote_id: 0,
+            local_id: 0,
+            attr: interned,
+            ident: 0,
+            router_id: vrf.router_id,
+            weight: 32768,
+            typ: super::super::route::BgpRibType::Originated,
+            best_path: false,
+            best_reason: super::super::route::Reason::Default,
+            label: None,
+            local_label: None,
+            nexthop: None,
+            nexthop_reachable: true,
+            enhe_egress: None,
+            stale: false,
+            esi: None,
+            vrf_transit_only: false,
+        };
+
+        let (_, selected, _) = vrf.shard.update_v6(*prefix, rib);
+        if let Some(winner) = selected.first() {
+            super::vrf_emit_export_v6(&exporter, *prefix, &winner.attr);
         }
         count += 1;
     }
