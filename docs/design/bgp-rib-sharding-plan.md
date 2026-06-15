@@ -952,6 +952,59 @@ The memo carries the full architecture of each, diagrams, the comparison
 table, verified source anchors, and the per-stack takeaways (incl.
 corrections to the framing summarized here).
 
+### Initial feed of the Loc-RIB to a newly-Established peer (the sync path)
+
+A second prior-art axis, specific to the **session-up dump** (the B.4
+sync path): when a peer reaches Established, how does each stack walk the
+Loc-RIB and advertise it to that one new peer? Verified against BIRD
+3.3.0 (`proto/bgp/`, `nest/rt-export.c`, `sysdep/unix/io-loop.c`) and
+GoBGP `master` (`pkg/server/`, `internal/pkg/table/`).
+
+| Dimension | zebra-rs | BIRD 3.3.0 | GoBGP (master) |
+|---|---|---|---|
+| **Trigger** | FSM→Established → `route_sync()` (`peer.rs:1484`→`route.rs:9600`) dispatches `route_sync_<af>` per AFI/SAFI | `proto_notify_state(PS_UP)` → channel `CS_UP` → `channel_start_export` → `rt_export_subscribe` (generic nest; old `bgp_feed_begin` is gone) | per-peer FSM goroutine → `handleFSMMessage` ESTABLISHED → `getBestFromLocalCallback` → `sendfsmOutgoingMsg` |
+| **Loc-RIB read** | Synchronous **one-shot** `Vec` collect (AddPath → cands `.0`; else best `.1`) | **Resumable cursor** (`rt_export_get`, `feed_index`), one net per step, yields mid-dump | Synchronous **one-shot** under `RLock` (`GetBestPathList` / `GetPathList`) |
+| **Threading** | **Single main task** — all peers' dumps + steady-state ingest serialize here; build is serial; v4 read via `mirror_v4` | **Per-protocol birdloop** on a thread pool: peers parallel across cores; one peer serial; cooperative `MAYBE_DEFER_TASK` yielding | **Per-peer FSM goroutine** under shared `RLock`: peers parallel; one peer serial; encode on a separate `sendMessageloop` goroutine |
+| **Adj-RIB-Out** | **Always-on** per-peer `adj_out.<af>`, filled during dump; the withdraw gate reads it | **Opt-in** (`export table` → `tx_keep` bucket/prefix hash); default frees the prefix post-send, withdraws ride the journal | **None persistent**: a `sentPaths` map (dest→path-ids); a full `AdjRib` is rebuilt transiently only for monitoring / soft-out |
+| **Batch / coalesce** | Per-attr buckets → one MP_REACH per attribute set (`send_ipv4_direct`) | Attribute buckets (`bgp_get_bucket`) packed to max packet length (`bgp_create_update`) | Same-attr "cages" + cross-message coalesce ≤2048 (`CreateUpdateMsgFromPaths`) |
+| **Backpressure** | **Unbounded** `packet_tx` of *encoded bytes* → no build-side backpressure; TCP only at the writer draining `packet_rx` | **TCP socket** pauses/resumes `bgp_fire_tx` — bounded memory, resumes on writable | **Unbounded** `InfiniteChannel` of *paths* → no build-side backpressure; TCP only at `sendMessageloop` |
+| **End-of-RIB** | **Always**, per family (`send_eor_<af>`) | **Only** under graceful-restart (`BFS_LOADING`→`LOADED`) | **Only** under GR or RTC (`table.NewEOR` sentinel) |
+
+**Takeaways for the sharding work.**
+
+- **Inter-peer parallelism is table stakes — zebra-rs is the outlier
+  that lacks it.** BIRD (per-protocol birdloop) and GoBGP (per-peer
+  goroutine under `RLock`) both run a new peer's dump on its own core, so
+  it never head-of-line-blocks other peers *or* steady-state ingest.
+  zebra-rs funnels all of it through the one main task — the ceiling
+  B.4 / Phase E target. The *axis* differs, though: prior art gets
+  *inter-peer* parallelism (each peer still one-route-at-a-time); the A2
+  `DumpV4`-to-shards plan targets *intra-peer* parallelism
+  (prefix-sharded across cores), which **neither BIRD nor GoBGP does**.
+  They are complementary — zebra-rs could ultimately want both.
+- **One-shot collect is the worst pattern for an RR-scale dump.**
+  zebra-rs and GoBGP both materialize the whole path list up front; only
+  BIRD streams a resumable, cooperatively-yielding cursor. zebra-rs is
+  most exposed because it *also encodes to bytes on the main task* before
+  queuing — no yield point for the entire build. BIRD's `feed_index` +
+  `MAYBE_DEFER_TASK` is the reference design for "don't starve other work
+  mid-dump," worth borrowing even before full sharding.
+- **zebra-rs carries the heaviest Adj-RIB-Out, by choice.** Always-on
+  per-peer `adj_out` costs memory per peer (a real line item against
+  sharding's memory win) but buys an O(1) withdraw gate with no
+  re-derivation. GoBGP keeps essentially nothing (a path-id set); BIRD
+  only with an opt-in knob. The B.4 fix — registering `adj_out` *during*
+  sync — is exactly what keeps that gate correct; the other two sidestep
+  it (journal / `sentPaths`).
+- **Backpressure: zebra-rs ≈ GoBGP (unbounded, build never blocks),
+  BIRD is the bounded outlier.** A slow peer grows the in-memory queue in
+  both zebra-rs and GoBGP. When A2 fans the dump across shards, each
+  shard's send needs a backpressure story — BIRD's resume-on-writable is
+  the model to copy if bounded memory matters under slow peers.
+- **EoR**: zebra-rs emits End-of-RIB unconditionally per family; both
+  others gate it on graceful-restart. Harmless, but note it for interop —
+  a zebra-rs speaker sends EoR even to non-GR neighbors.
+
 ## 12. Improvement roadmap (prior-art-informed)
 
 The §11 comparison places zebra-rs as the only shared-nothing design of
