@@ -2948,10 +2948,10 @@ trait BatchAfi {
     type Nlri: Clone;
     fn afi_safi(rd: Option<RouteDistinguisher>) -> (Afi, Safi);
     fn compute_outcome(
-        peer: &Peer,
+        peer: &mut Peer,
         prefix: &Self::Prefix,
         best: &BgpRib,
-        bgp: &BgpTop,
+        bgp: &mut BgpTop,
         add_path: bool,
     ) -> AdvertiseOutcome<Self::Nlri>;
     #[allow(clippy::too_many_arguments)]
@@ -2986,10 +2986,10 @@ impl BatchAfi for V4Batch {
         }
     }
     fn compute_outcome(
-        peer: &Peer,
+        peer: &mut Peer,
         prefix: &Ipv4Net,
         best: &BgpRib,
-        bgp: &BgpTop,
+        bgp: &mut BgpTop,
         add_path: bool,
     ) -> AdvertiseOutcome<Ipv4Nlri> {
         compute_advertise_outcome(peer, prefix, best, bgp, add_path)
@@ -3072,6 +3072,145 @@ impl BatchAfi for V4Batch {
         if peer.adj_out.contains_key(rd, &prefix) {
             withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
             peer.adj_out.remove(rd, prefix, 0);
+        }
+    }
+}
+
+/// IPv6 twin of [`compute_advertise_outcome`] (the build + out-policy that
+/// `V6Batch::compute_outcome` runs). `&mut` because `route_update_ipv6`
+/// takes it; the v6 path has no parallel batch precompute, so this only
+/// ever runs inline on the advertise loop.
+fn compute_advertise_outcome_v6(
+    peer: &mut Peer,
+    prefix: &Ipv6Net,
+    best: &BgpRib,
+    bgp: &mut BgpTop,
+    add_path: bool,
+) -> AdvertiseOutcome<Ipv6Nlri> {
+    if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
+        if let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) {
+            AdvertiseOutcome::Advertise(nlri, decision.attr)
+        } else {
+            AdvertiseOutcome::Withdraw
+        }
+    } else {
+        AdvertiseOutcome::Withdraw
+    }
+}
+
+struct V6Batch;
+impl BatchAfi for V6Batch {
+    type Prefix = Ipv6Net;
+    type Nlri = Ipv6Nlri;
+
+    fn afi_safi(rd: Option<RouteDistinguisher>) -> (Afi, Safi) {
+        if rd.is_some() {
+            (Afi::Ip6, Safi::MplsVpn)
+        } else {
+            (Afi::Ip6, Safi::Unicast)
+        }
+    }
+    fn compute_outcome(
+        peer: &mut Peer,
+        prefix: &Ipv6Net,
+        best: &BgpRib,
+        bgp: &mut BgpTop,
+        add_path: bool,
+    ) -> AdvertiseOutcome<Ipv6Nlri> {
+        compute_advertise_outcome_v6(peer, prefix, best, bgp, add_path)
+    }
+    fn advertise(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+        nlri: Ipv6Nlri,
+        attr: BgpAttr,
+        new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    ) {
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        if rd.is_some() && !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            // RTC: per-peer; skip without withdrawing.
+            return;
+        }
+        let attr = bgp.attr_store.intern(attr);
+        if let Some(rd) = rd {
+            // VPNv6: store best.clone() under the RD; send via send_vpnv6.
+            if let Some(best) = new_best {
+                peer.adj_out
+                    .v6vpn
+                    .entry(rd)
+                    .or_default()
+                    .add(prefix, best.clone());
+            }
+            let vpnv6_nlri = Vpnv6Nlri {
+                label: new_best
+                    .map(|b| b.label.unwrap_or_default())
+                    .unwrap_or_default(),
+                rd,
+                nlri,
+            };
+            peer.send_vpnv6(vpnv6_nlri, attr, true);
+        } else {
+            // v6-unicast: store the interned rib in `v6`; send via update-group.
+            if let Some(best) = new_best {
+                let mut rib = best.clone();
+                rib.attr = attr.clone();
+                peer.adj_out.v6.add(prefix, rib);
+            }
+            let source_ident = new_best.map(|b| b.ident).unwrap_or(peer.ident);
+            let group_id = peer.update_group_id.get(&afi_safi).cloned();
+            if let Some(gid) = group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::send_ipv6(group, nlri, attr, source_ident, bgp.tx, true);
+            } else {
+                tracing::warn!(
+                    peer = %peer.address,
+                    prefix = %prefix,
+                    "IPv6 advertise: peer is Established but not in any update-group; advertise skipped"
+                );
+            }
+        }
+    }
+    fn withdraw(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+        _new_best: Option<&BgpRib>,
+        bgp: &mut BgpTop,
+    ) {
+        let (afi, safi) = Self::afi_safi(rd);
+        let afi_safi = AfiSafi::new(afi, safi);
+        if let Some(rd) = rd {
+            // VPNv6: withdraw only from PEs whose v6vpn Adj-RIB-Out holds it.
+            if peer
+                .adj_out
+                .v6vpn
+                .get(&rd)
+                .is_some_and(|t| t.0.contains_key(&prefix))
+            {
+                peer.cache_remove_vpnv6(rd, prefix, 0);
+                route_withdraw_vpnv6(peer, rd, prefix, 0);
+                if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
+                    t.remove(prefix, 0);
+                }
+            }
+        } else {
+            // v6-unicast: withdraw only from peers whose v6 Adj-RIB-Out holds it.
+            if peer.adj_out.v6.0.contains_key(&prefix) {
+                let group_id = peer.update_group_id.get(&afi_safi).cloned();
+                if let Some(gid) = group_id
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::cache_remove_ipv6(group, prefix, 0);
+                }
+                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
+                peer.adj_out.v6.remove(prefix, 0);
+            }
         }
     }
 }
@@ -7550,90 +7689,14 @@ pub(super) fn route_advertise_to_peers_v6(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let new_best = selected.last();
+    // Plain (non-AddPath) members go through the generic memo path shared
+    // with v4/VPN (V6Batch). v6 unicast has no batch precompute → empty memo.
+    route_advertise_batch::<V6Batch>(None, prefix, selected, 0, bgp, peers, BTreeMap::new());
+
+    // AddPath members keep their own inline loop below (the generic covers
+    // plain members only).
     let (afi, safi) = (Afi::Ip6, Safi::Unicast);
     let afi_safi = AfiSafi::new(afi, safi);
-
-    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
-
-    for ident in peer_idents {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(afi, safi);
-        let group_id = peer.update_group_id.get(&afi_safi).cloned();
-
-        // Advertise the best path to this peer unless it is the source
-        // (split-horizon), the route is LLGR-blocked, community-suppressed,
-        // or denied by out-policy — each of those falls through to the
-        // withdraw branch, which (via the Adj-RIB-Out below) emits an
-        // MP_UNREACH only to a peer that was actually advertised the prefix.
-        let to_advertise: Option<(Ipv6Nlri, BgpAttr, BgpRib)> = match new_best {
-            Some(best)
-                if best.ident != peer.ident
-                    && !llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) =>
-            {
-                match route_update_ipv6(peer, &prefix, best, bgp, add_path) {
-                    // Outbound policy: per-peer v6 route-map / prefix-list.
-                    Some((nlri, attr)) => route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
-                        .map(|decision| (nlri, decision.attr, best.clone())),
-                    None => None,
-                }
-            }
-            _ => None,
-        };
-
-        match to_advertise {
-            Some((nlri, attr, best)) => {
-                let attr = bgp.attr_store.intern(attr);
-                let source_ident = best.ident;
-                // Adj-RIB-Out: record what was sent so a later withdraw is
-                // pruned to exactly the peers that received the route (the
-                // v4 path does the same via `adj_out.add`). Without this a
-                // withdraw floods every peer; with it, a peer that never
-                // got the route gets no MP_UNREACH — which is what stops
-                // the no-op-withdraw ping-pong at the source.
-                let mut rib = best;
-                rib.attr = attr.clone();
-                peer.adj_out.v6.add(prefix, rib);
-                if let Some(gid) = group_id
-                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                    && let Some(group) = af.group_by_id_mut(&gid)
-                {
-                    super::update_group::send_ipv6(group, nlri, attr, source_ident, bgp.tx, true);
-                } else {
-                    // Established peer with no IPv6 unicast group is a
-                    // bug — `update_group::attach` is supposed to
-                    // enroll every negotiated family. Surface it
-                    // rather than dropping the reach on the floor
-                    // (which is exactly how the missing-enrollment
-                    // bug stayed invisible).
-                    tracing::warn!(
-                        peer = %peer.address,
-                        prefix = %prefix,
-                        "IPv6 advertise: peer is Established but not in any update-group; advertise skipped"
-                    );
-                }
-            }
-            None => {
-                // Withdraw only if this peer actually had the route in its
-                // Adj-RIB-Out. Gate on prefix presence (id-agnostic, like
-                // the v4 path's `contains_key`) — `remove(prefix, 0)`
-                // returns None for a non-zero stored id, so it can't be the
-                // gate. Pruning here (not the old flood-to-every-peer) is
-                // what stops the no-op-withdraw ping-pong and supersedes the
-                // `route_ipv6_withdraw` no-op guard.
-                if peer.adj_out.v6.0.contains_key(&prefix) {
-                    if let Some(gid) = group_id
-                        && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                        && let Some(group) = af.group_by_id_mut(&gid)
-                    {
-                        super::update_group::cache_remove_ipv6(group, prefix, 0);
-                    }
-                    withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
-                    peer.adj_out.v6.remove(prefix, 0);
-                }
-            }
-        }
-    }
 
     // AddPath members: every candidate path, each NLRI carrying its
     // path-id, bucketed into the (AddPath-signature) update-group cache.
@@ -7709,24 +7772,6 @@ fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net
     peer.send_packet(update.into());
 }
 
-/// Withdraw a VPNv6 prefix from `peer` only if its Adj-RIB-Out
-/// (`adj_out.v6vpn`) records that it was advertised — the pruning that
-/// keeps a no-op withdraw from flooding and ping-ponging across PEs.
-fn withdraw_vpnv6_if_advertised(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net) {
-    if peer
-        .adj_out
-        .v6vpn
-        .get(&rd)
-        .is_some_and(|t| t.0.contains_key(&prefix))
-    {
-        peer.cache_remove_vpnv6(rd, prefix, 0);
-        route_withdraw_vpnv6(peer, rd, prefix, 0);
-        if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
-            t.remove(prefix, 0);
-        }
-    }
-}
-
 /// VPNv6 advertise — the v6 counterpart of the `rd.is_some()` branch
 /// of [`route_advertise_to_peers`]. Reach winners are batched into the
 /// per-peer `cache_vpnv6` (flushed via the VPNv6 adv timer); a `None`
@@ -7742,64 +7787,9 @@ pub(super) fn route_advertise_to_peers_vpnv6(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let new_best = selected.last();
-    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
-
-    // Best-path only, to the non-AddPath members. AddPath peers receive
-    // every candidate path (each with its own path-id) through
-    // [`route_advertise_to_peers_vpnv6_addpath`] instead.
-    let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
-
-    for ident in peer_idents {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        match new_best {
-            Some(best) if best.ident != peer.ident => {
-                // RFC 9494 §4.3: stale routes only go to LLGR peers.
-                if llgr_blocks_advertisement(best.stale, &peer.cap_recv, afi, safi) {
-                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
-                    continue;
-                }
-                let add_path = peer.opt.is_add_path_send(afi, safi);
-                let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, best, bgp, add_path)
-                else {
-                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
-                    continue;
-                };
-                // Outbound policy: per-peer route-map / prefix-list. A
-                // denied route is withdrawn if it was previously advertised.
-                let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight)
-                else {
-                    withdraw_vpnv6_if_advertised(peer, rd, prefix);
-                    continue;
-                };
-                let attr = bgp.attr_store.intern(decision.attr);
-                // RTC: skip WITHOUT withdrawing when the peer's IPv6
-                // route-target constraint set doesn't admit this route
-                // (matches the v4 VPN path).
-                if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
-                    continue;
-                }
-                // Adj-RIB-Out: record what was sent so a later withdraw is
-                // pruned to actual recipients (no flood, no ping-pong).
-                peer.adj_out
-                    .v6vpn
-                    .entry(rd)
-                    .or_default()
-                    .add(prefix, best.clone());
-                let vpnv6_nlri = Vpnv6Nlri {
-                    label: best.label.unwrap_or_default(),
-                    rd,
-                    nlri,
-                };
-                peer.send_vpnv6(vpnv6_nlri, attr, true);
-            }
-            _ => {
-                // Split-horizon (source peer) or no best path: withdraw,
-                // but only from peers that were actually advertised it.
-                withdraw_vpnv6_if_advertised(peer, rd, prefix);
-            }
-        }
-    }
+    // VPNv6 plain members go through the generic memo path (V6Batch with
+    // rd=Some); AddPath is handled by route_advertise_to_peers_vpnv6_addpath.
+    route_advertise_batch::<V6Batch>(Some(rd), prefix, selected, 0, bgp, peers, BTreeMap::new());
 }
 
 /// VPNv6 AddPath twin of [`route_advertise_to_peers_vpnv6`] — the v6
