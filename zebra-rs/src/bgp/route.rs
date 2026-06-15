@@ -2748,6 +2748,30 @@ fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> 
     false
 }
 
+/// Generic AddPath advertise for the delta-driven (one-rib) BatchAfi
+/// families: advertise `rib` (carrying its path-id) to every AddPath-Send
+/// peer. v4-unicast/VPNv4 (V4Batch) and VPNv6 (V6Batch) share this; the
+/// v6-unicast AddPath is diff-based and keeps its own inline loop.
+fn route_advertise_batch_addpath<A: BatchAfi>(
+    rd: Option<RouteDistinguisher>,
+    prefix: A::Prefix,
+    rib: &BgpRib,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = A::afi_safi(rd);
+    for ident in peers.established_addpath_idents(afi, safi) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        // RFC 9494 §4.3: stale routes only go to LLGR peers.
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
+        A::advertise_addpath(peer, rd, prefix, rib, bgp);
+    }
+}
+
+/// Advertise one added/changed IPv4-unicast or VPNv4 AddPath path. Thin
+/// wrapper over [`route_advertise_batch_addpath`].
 fn route_advertise_to_addpath(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -2756,67 +2780,7 @@ fn route_advertise_to_addpath(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let (afi, safi) = if rd.is_some() {
-        (Afi::Ip, Safi::MplsVpn)
-    } else {
-        (Afi::Ip, Safi::Unicast)
-    };
-    let afi_safi = AfiSafi::new(afi, safi);
-
-    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
-
-    for ident in peer_idents {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-
-        // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
-            continue;
-        }
-        if let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true)
-            && let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight)
-        {
-            let attr = decision.attr;
-            // RTC match.
-            if let Some(_rd) = rd
-                && !peer.rtcv4.is_empty()
-                && !rtc_match(&peer.rtcv4, &attr.ecom)
-            {
-                continue;
-            }
-            let attr = bgp.attr_store.intern(attr);
-            let mut rib_clone = rib.clone();
-            rib_clone.attr = attr.clone();
-
-            peer.adj_out.add(rd, nlri.prefix, rib_clone);
-            if let Some(ref rd) = rd {
-                let vpnv4_nlri = Vpnv4Nlri {
-                    label: vpnv4_service_label(peer, rib),
-                    rd: *rd,
-                    nlri,
-                };
-                peer.send_vpnv4(vpnv4_nlri, attr, true);
-            } else {
-                // IPv4 unicast addpath: bucket into the group cache.
-                // All addpath-enabled peers share the same
-                // `addpath_send: true` signature, so the group
-                // contains only addpath peers — fan-out at flush
-                // time goes only to other addpath peers.
-                let group_id = peer.update_group_id.get(&afi_safi).cloned();
-                if let Some(gid) = group_id
-                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                    && let Some(group) = af.group_by_id_mut(&gid)
-                {
-                    super::update_group::send_ipv4(group, nlri, attr, rib.ident, bgp.tx, true);
-                } else {
-                    tracing::warn!(
-                        peer = %peer.address,
-                        prefix = %prefix,
-                        "IPv4 addpath advertise: peer Established but not in any update-group; advertise skipped"
-                    );
-                }
-            }
-        }
-    }
+    route_advertise_batch_addpath::<V4Batch>(rd, prefix, rib, bgp, peers);
 }
 
 fn route_withdraw_from_addpath(
@@ -2971,6 +2935,17 @@ trait BatchAfi {
         new_best: Option<&BgpRib>,
         bgp: &mut BgpTop,
     );
+    /// Advertise one AddPath candidate `rib` (carrying its path-id) to a
+    /// single AddPath-Send peer. The peer loop + LLGR gate live in
+    /// [`route_advertise_batch_addpath`]; split-horizon is enforced by the
+    /// per-AF `route_update_*`.
+    fn advertise_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+    );
 }
 
 struct V4Batch;
@@ -3072,6 +3047,52 @@ impl BatchAfi for V4Batch {
         if peer.adj_out.contains_key(rd, &prefix) {
             withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
             peer.adj_out.remove(rd, prefix, 0);
+        }
+    }
+    fn advertise_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+    ) {
+        let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, rib, bgp, true) else {
+            return;
+        };
+        let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+            return;
+        };
+        let attr = decision.attr;
+        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+            return;
+        }
+        let attr = bgp.attr_store.intern(attr);
+        let mut rib_clone = rib.clone();
+        rib_clone.attr = attr.clone();
+        peer.adj_out.add(rd, prefix, rib_clone);
+        if let Some(rd) = rd {
+            let vpnv4_nlri = Vpnv4Nlri {
+                label: vpnv4_service_label(peer, rib),
+                rd,
+                nlri,
+            };
+            peer.send_vpnv4(vpnv4_nlri, attr, true);
+        } else {
+            let (afi, safi) = Self::afi_safi(rd);
+            let afi_safi = AfiSafi::new(afi, safi);
+            let group_id = peer.update_group_id.get(&afi_safi).cloned();
+            if let Some(gid) = group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::send_ipv4(group, nlri, attr, rib.ident, bgp.tx, true);
+            } else {
+                tracing::warn!(
+                    peer = %peer.address,
+                    prefix = %prefix,
+                    "IPv4 addpath advertise: peer Established but not in any update-group; advertise skipped"
+                );
+            }
         }
     }
 }
@@ -3210,6 +3231,48 @@ impl BatchAfi for V6Batch {
                 }
                 withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
                 peer.adj_out.v6.remove(prefix, 0);
+            }
+        }
+    }
+    fn advertise_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+        rib: &BgpRib,
+        bgp: &mut BgpTop,
+    ) {
+        let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
+            return;
+        };
+        let attr = bgp.attr_store.intern(attr);
+        if let Some(rd) = rd {
+            // VPNv6 AddPath (current behavior: RTC only, no out-policy/adj_out).
+            if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+                return;
+            }
+            let vpnv6_nlri = Vpnv6Nlri {
+                label: rib.label.unwrap_or_default(),
+                rd,
+                nlri,
+            };
+            peer.send_vpnv6(vpnv6_nlri, attr, true);
+        } else {
+            // v6-unicast AddPath (current behavior: no out-policy).
+            let (afi, safi) = Self::afi_safi(rd);
+            let afi_safi = AfiSafi::new(afi, safi);
+            let group_id = peer.update_group_id.get(&afi_safi).cloned();
+            if let Some(gid) = group_id
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::send_ipv6(group, nlri, attr, rib.ident, bgp.tx, true);
+                peer.adj_out.v6.add(prefix, rib.clone());
+            } else {
+                tracing::warn!(
+                    peer = %peer.address,
+                    prefix = %prefix,
+                    "IPv6 AddPath advertise: peer Established but not in any update-group; advertise skipped"
+                );
             }
         }
     }
@@ -7806,37 +7869,7 @@ pub(super) fn route_advertise_to_peers_vpnv6_addpath(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
-
-    let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
-
-    for ident in peer_idents {
-        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        // Split-horizon: never reflect a path back to the peer that
-        // sourced it.
-        if rib.ident == peer.ident {
-            continue;
-        }
-        // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
-            continue;
-        }
-        let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
-            continue;
-        };
-        let attr = bgp.attr_store.intern(attr);
-        // RTC: skip without withdrawing when the peer's IPv6
-        // route-target constraint set doesn't admit this route.
-        if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
-            continue;
-        }
-        let vpnv6_nlri = Vpnv6Nlri {
-            label: rib.label.unwrap_or_default(),
-            rd,
-            nlri,
-        };
-        peer.send_vpnv6(vpnv6_nlri, attr, true);
-    }
+    route_advertise_batch_addpath::<V6Batch>(Some(rd), prefix, rib, bgp, peers);
 }
 
 /// VPNv6 AddPath withdraw twin — emit an MP_UNREACH carrying the
