@@ -342,61 +342,17 @@ fn materialize_peers(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
 /// through. The direct-write here is the same shape `Bgp::route_add`
 /// uses for the global case.
 fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
-    use bgp_packet::{BgpAttr, BgpNexthop, Origin};
-
     let Some(af) = cfg.ipv4_unicast.as_ref() else {
         return 0;
     };
-    if af.networks.is_empty() {
-        return 0;
-    }
-
-    let exporter = super::VrfExporter {
-        name: vrf.name.clone(),
-        tx: vrf.global_tx.clone(),
-        label: vrf.label,
-    };
-
-    let mut count = 0usize;
+    // `originate_self_network_v4` is the exact per-prefix work the
+    // dynamic `BgpVrfMsg::OriginateNetwork` path runs, so spawn-time
+    // and post-spawn origination stay identical. (`cfg` and `vrf`
+    // are distinct borrows — the loop reads one, mutates the other.)
     for prefix in &af.networks {
-        // Build a self-originated attr: IGP origin, next-hop-self.
-        // Local-pref / weight default to the same values
-        // `BgpAttr::new` uses for the global `network` path.
-        let mut attr = BgpAttr::new();
-        attr.origin = Some(Origin::Igp);
-        attr.nexthop = Some(BgpNexthop::Ipv4(vrf.router_id));
-        let interned = vrf.shard.intern(attr);
-
-        let rib = super::super::route::BgpRib {
-            remote_id: 0,
-            local_id: 0,
-            attr: interned,
-            ident: 0,
-            router_id: vrf.router_id,
-            weight: 32768,
-            typ: super::super::route::BgpRibType::Originated,
-            best_path: false,
-            best_reason: super::super::route::Reason::Default,
-            label: None,
-            local_label: None,
-            nexthop: None,
-            nexthop_reachable: true,
-            enhe_egress: None,
-            stale: false,
-            esi: None,
-            vrf_transit_only: false,
-        };
-
-        let (_, selected, _) = vrf.shard.update(None, *prefix, rib);
-        // Best-path runs as part of `update`. A freshly-inserted
-        // self-originated row always wins (nothing else exists),
-        // so `selected.first()` carries the winner; emit Export.
-        if let Some(winner) = selected.first() {
-            super::vrf_emit_export(&exporter, *prefix, &winner.attr);
-        }
-        count += 1;
+        vrf.originate_self_network_v4(*prefix);
     }
-    count
+    af.networks.len()
 }
 
 /// IPv6 counterpart of [`materialize_self_originated_networks`]: insert each
@@ -406,55 +362,13 @@ fn materialize_self_originated_networks(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) ->
 /// re-advertise rewrites it to next-hop-self (`BgpNexthop::Vpnv6`) in
 /// `route_update_ipv6`.
 fn materialize_self_originated_networks_v6(vrf: &mut BgpVrf, cfg: &BgpVrfConfig) -> usize {
-    use bgp_packet::{BgpAttr, BgpNexthop, Origin};
-
     let Some(af) = cfg.ipv6_unicast.as_ref() else {
         return 0;
     };
-    if af.networks.is_empty() {
-        return 0;
-    }
-
-    let exporter = super::VrfExporter {
-        name: vrf.name.clone(),
-        tx: vrf.global_tx.clone(),
-        label: vrf.label,
-    };
-
-    let mut count = 0usize;
     for prefix in &af.networks {
-        let mut attr = BgpAttr::new();
-        attr.origin = Some(Origin::Igp);
-        attr.nexthop = Some(BgpNexthop::Ipv6(std::net::Ipv6Addr::UNSPECIFIED));
-        let interned = vrf.shard.intern(attr);
-
-        let rib = super::super::route::BgpRib {
-            remote_id: 0,
-            local_id: 0,
-            attr: interned,
-            ident: 0,
-            router_id: vrf.router_id,
-            weight: 32768,
-            typ: super::super::route::BgpRibType::Originated,
-            best_path: false,
-            best_reason: super::super::route::Reason::Default,
-            label: None,
-            local_label: None,
-            nexthop: None,
-            nexthop_reachable: true,
-            enhe_egress: None,
-            stale: false,
-            esi: None,
-            vrf_transit_only: false,
-        };
-
-        let (_, selected, _) = vrf.shard.update_v6(*prefix, rib);
-        if let Some(winner) = selected.first() {
-            super::vrf_emit_export_v6(&exporter, *prefix, &winner.attr);
-        }
-        count += 1;
+        vrf.originate_self_network_v6(*prefix);
     }
-    count
+    af.networks.len()
 }
 
 /// Send `Shutdown` to the per-VRF task. Caller drops the handle

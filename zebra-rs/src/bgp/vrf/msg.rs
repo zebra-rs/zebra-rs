@@ -78,6 +78,28 @@ pub enum BgpVrfMsg {
         prefix: ipnet::Ipv6Net,
     },
 
+    /// Originate one self-network into the running VRF's Loc-RIB
+    /// (`router bgp vrf X afi-safi ipv4 network <p>` added *after*
+    /// the VRF task spawned). [`super::compute_vrf_diff`] only
+    /// spawns / despawns on the VRF *name* set, so a `network`
+    /// change to an already-running VRF never reaches it through the
+    /// spawn path — it arrives here instead. The not-yet-spawned
+    /// case is still handled by the spawn-time materialize.
+    OriginateNetwork { prefix: Ipv4Net },
+
+    /// Inverse of [`Self::OriginateNetwork`]: a `network` was
+    /// removed from a running VRF. Drop the self-originated row
+    /// (ident 0 / remote 0) from the VRF Loc-RIB and emit
+    /// `BgpGlobalMsg::WithdrawExport` so the global instance
+    /// withdraws the VPNv4 advertisement.
+    WithdrawNetwork { prefix: Ipv4Net },
+
+    /// IPv6 counterpart of [`Self::OriginateNetwork`].
+    OriginateNetworkV6 { prefix: Ipv6Net },
+
+    /// IPv6 counterpart of [`Self::WithdrawNetwork`].
+    WithdrawNetworkV6 { prefix: Ipv6Net },
+
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by
     /// `despawn_bgp_vrf` and during daemon shutdown.
