@@ -815,6 +815,11 @@ pub struct Peer {
     /// plan B.1 / D3).
     pub adj_in: MainAdjIn,
     pub adj_out: AdjRib<Out>,
+    /// Resumable IPv4-unicast session-up sync cursor (Tier 1a).
+    /// `Some` only while a chunked dump is in flight; gated on
+    /// `ZEBRA_BGP_SYNC_CHUNK` (legacy one-shot `route_sync_ipv4` when
+    /// the flag is off, so this stays `None`).
+    pub sync_v4: Option<super::route::Ipv4SyncCursor>,
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
@@ -966,6 +971,7 @@ impl Peer {
             cap_map: CapAfiMap::new(),
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
+            sync_v4: None,
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
@@ -1489,6 +1495,12 @@ pub fn fsm(
     // route_clean if leaving Established (needs peer_map).
     if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
         route_clean(id, bgp_ref, peer_map, shards);
+        // Drop any in-flight resumable sync cursor (Tier 1a) — a
+        // pending tick for this peer no-ops in `drive_sync_v4`, but
+        // clear it so the keys snapshot isn't held past the session.
+        if let Some(peer) = peer_map.get_mut_by_idx(id) {
+            peer.sync_v4 = None;
+        }
     }
 
     // Maintain update-group membership across the Established

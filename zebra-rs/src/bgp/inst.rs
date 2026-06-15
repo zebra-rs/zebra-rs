@@ -453,6 +453,12 @@ pub struct Bgp {
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
+    /// Unbounded self-signal for the resumable IPv4 sync cursor (Tier
+    /// 1a). Dedicated + unbounded so a continuation tick can never be
+    /// dropped on a full `tx`; carries the peer `ident`. Idle (never
+    /// fed) when `ZEBRA_BGP_SYNC_CHUNK` is unset.
+    pub sync_tick_tx: mpsc::UnboundedSender<usize>,
+    pub sync_tick_rx: mpsc::UnboundedReceiver<usize>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -770,6 +776,7 @@ impl Bgp {
         let _ = policy_tx.send(msg);
 
         let (tx, rx) = mpsc::channel(8192);
+        let (sync_tick_tx, sync_tick_rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         // Fan-in channel: every per-VRF task gets a clone of
         // `vrf_global_tx_init` at spawn time, so all VRF→global
@@ -816,6 +823,8 @@ impl Bgp {
             bfd: PeerBfdConfig::default(),
             tx,
             rx,
+            sync_tick_tx,
+            sync_tick_rx,
             local_rib: LocalRib::default(),
             shard: BgpShard::default(),
             shards,
@@ -1332,6 +1341,54 @@ impl Bgp {
         self.pcallbacks.insert(path.to_string(), cb);
     }
 
+    /// Drive one chunk of a peer's resumable IPv4 sync cursor (Tier
+    /// 1a), re-arming the next tick until the dump completes. Fired by
+    /// the `sync_tick_rx` arm of the event loop. A tick for a peer that
+    /// has dropped Established or already finished its cursor is a
+    /// no-op (the cursor is cleared on leaving Established).
+    fn drive_sync_v4(&mut self, ident: usize) {
+        let active = self
+            .peers
+            .get_by_idx(ident)
+            .is_some_and(|p| p.state.is_established() && p.sync_v4.is_some());
+        if !active {
+            return;
+        }
+        let chunk = super::route::sync_chunk_size().unwrap_or(1000);
+
+        let import_dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: Some(&import_dispatcher),
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: self.vrf_label_alloc.as_mut(),
+        };
+        let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+            return;
+        };
+        let done = super::route::route_sync_v4_chunk(peer, &mut bgp_ref, chunk);
+        if !done {
+            // Re-arm; unbounded channel, so this never drops.
+            let _ = self.sync_tick_tx.send(ident);
+        }
+    }
+
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(ident, event) => {
@@ -1432,6 +1489,22 @@ impl Bgp {
                         to = peer.state.to_str(),
                         "FSM transition"
                     );
+                }
+
+                // Tier 1a: a peer that just got a fresh resumable v4
+                // sync cursor (set by `route_sync` inside the FSM) is
+                // enqueued here exactly once — the kick needs full
+                // `self` for `sync_tick_tx`; the continuation re-arms
+                // from `drive_sync_v4`.
+                let kick = self
+                    .peers
+                    .get_mut_by_idx(ident)
+                    .and_then(|p| p.sync_v4.as_mut())
+                    .filter(|c| c.fresh)
+                    .map(|c| c.fresh = false)
+                    .is_some();
+                if kick {
+                    let _ = self.sync_tick_tx.send(ident);
                 }
 
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
@@ -3172,6 +3245,14 @@ impl Bgp {
                     } else {
                         self.process_msg(msg);
                     }
+                }
+                Some(ident) = self.sync_tick_rx.recv() => {
+                    // Tier 1a: one chunk of a peer's resumable IPv4
+                    // sync dump, then it re-arms itself. Interleaves
+                    // fairly with real events so a large dump never
+                    // head-of-line-blocks ingest. Idle when the flag
+                    // is off (nothing ever feeds `sync_tick_tx`).
+                    self.drive_sync_v4(ident);
                 }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);

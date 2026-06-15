@@ -9057,6 +9057,121 @@ fn apply_set_as_path_prepend(bgp_attr: &mut BgpAttr, cfg: &AsPathPrependConfig) 
     }
 }
 
+/// Chunk size for the resumable session-up sync cursor (Tier 1a),
+/// read once from `ZEBRA_BGP_SYNC_CHUNK` (routes per tick). `None`
+/// means the flag is off and `route_sync` keeps the legacy one-shot
+/// `route_sync_ipv4`. A value of 0 or an unparseable value is treated
+/// as off.
+pub(super) fn sync_chunk_size() -> Option<usize> {
+    use std::sync::OnceLock;
+    static CHUNK: OnceLock<Option<usize>> = OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        std::env::var("ZEBRA_BGP_SYNC_CHUNK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+    })
+}
+
+/// Resumable cursor for the IPv4-unicast session-up dump (Tier 1a).
+///
+/// Snapshots the prefix *keys* of `bgp.shard.v4` at Established and
+/// walks them in bounded chunks off the main loop, so a large dump no
+/// longer head-of-line-blocks ingest or other peers. Each chunk reads
+/// the *live* Loc-RIB (never a value snapshot), so it can't ship a
+/// stale attribute, and each per-prefix send is deduped against
+/// `adj_out` — so the cursor races safely with the concurrent
+/// event-driven advertise path (both converge `adj_out` to the live
+/// table; the cursor is just the one-time gap-fill). Keys-only is also
+/// strictly cheaper than the legacy full `(prefix, BgpRib)` clone.
+#[derive(Debug)]
+pub(crate) struct Ipv4SyncCursor {
+    keys: Vec<Ipv4Net>,
+    idx: usize,
+    add_path: bool,
+    /// Set true at creation; cleared by the first kick in
+    /// `process_msg` so the cursor is enqueued exactly once.
+    pub(crate) fresh: bool,
+}
+
+impl Ipv4SyncCursor {
+    pub(super) fn new(keys: Vec<Ipv4Net>, add_path: bool) -> Self {
+        Self {
+            keys,
+            idx: 0,
+            add_path,
+            fresh: true,
+        }
+    }
+}
+
+/// Process one chunk of the IPv4-unicast sync cursor for `peer`,
+/// returning `true` when the dump is complete (EoR sent, cursor
+/// cleared). Mirrors `route_sync_ipv4`'s per-route build but bounded to
+/// `chunk` prefixes and deduped against `adj_out`. See
+/// [`Ipv4SyncCursor`] for the reconciliation argument.
+pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usize) -> bool {
+    // Pull this chunk's keys out (copied) and advance the cursor, then
+    // drop the cursor borrow so the loop can take `peer` mutably for
+    // `route_update_ipv4` / `adj_out`.
+    let (keys, add_path, done) = {
+        let Some(cursor) = peer.sync_v4.as_mut() else {
+            return true;
+        };
+        let end = (cursor.idx + chunk.max(1)).min(cursor.keys.len());
+        let keys: Vec<Ipv4Net> = cursor.keys[cursor.idx..end].to_vec();
+        cursor.idx = end;
+        (keys, cursor.add_path, cursor.idx >= cursor.keys.len())
+    };
+
+    let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
+    for prefix in keys {
+        // Read the LIVE Loc-RIB: a prefix withdrawn since the snapshot
+        // is simply absent here (skipped), and a changed prefix sends
+        // its current value — never a stale one.
+        let ribs: Vec<BgpRib> = if add_path {
+            bgp.shard.v4.0.get(&prefix).cloned().unwrap_or_default()
+        } else {
+            bgp.shard.v4.1.get(&prefix).cloned().into_iter().collect()
+        };
+        for mut rib in ribs {
+            // RFC 9494 §4.3: stale routes only go to LLGR peers.
+            if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
+                continue;
+            }
+            let Some((nlri, attr)) = route_update_ipv4(peer, &prefix, &rib, bgp, add_path) else {
+                continue;
+            };
+            let Some(decision) = route_apply_policy_out(peer, &nlri, attr, rib.weight) else {
+                continue;
+            };
+            rib.attr = bgp.attr_store.intern(decision.attr);
+            let arc_attr = rib.attr.clone();
+            // Register in adj_out and dedup: if the concurrent
+            // event-driven path already advertised this exact interned
+            // attr, `add` returns it and we skip the resend. Interning
+            // makes equal attrs pointer-equal, so `ptr_eq` is the test.
+            let prev = peer.adj_out.add(None, nlri.prefix, rib);
+            let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc_attr));
+            if !already_sent {
+                entries.push((arc_attr, nlri));
+            }
+        }
+    }
+
+    let enhe_v6 = peer
+        .is_enhe_v4_negotiated()
+        .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
+        .flatten();
+    super::update_group::send_ipv4_direct(peer, entries, enhe_v6);
+
+    if done {
+        send_eor_ipv4_unicast(peer);
+        peer.sync_v4 = None;
+    }
+    done
+}
+
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
 
@@ -9621,7 +9736,21 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
     }
     // Advertize.
     if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
-        route_sync_ipv4(peer, bgp);
+        if sync_chunk_size().is_some() {
+            // Tier 1a: snapshot the v4 keys and hand them to the
+            // resumable cursor; the event loop kicks (`process_msg`)
+            // and drives it in chunks (`drive_sync_v4`). Reads stay on
+            // the legacy `route_sync_ipv4` when the flag is off.
+            let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+            let keys: Vec<Ipv4Net> = if add_path {
+                bgp.shard.v4.0.iter().map(|(prefix, _)| prefix).collect()
+            } else {
+                bgp.shard.v4.1.iter().map(|(prefix, _)| prefix).collect()
+            };
+            peer.sync_v4 = Some(Ipv4SyncCursor::new(keys, add_path));
+        } else {
+            route_sync_ipv4(peer, bgp);
+        }
     }
     if peer.is_afi_safi(Afi::Ip6, Safi::Unicast) {
         route_sync_ipv6(peer, bgp);
