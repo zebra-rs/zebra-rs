@@ -191,3 +191,48 @@ its own. If pursued, **Phase 0 + Phase 1** is the smallest reviewable slice
 that proves the model (event-driven advertise off main, gate-on parity vs
 gate-off) before committing to the withdraw-gate and dump migrations. Treat
 it as its own PR series, exactly as A2 was.
+
+## 10. Implementation findings (2026-06-16 — from starting Phase 0)
+
+Reading the actual egress code surfaced two things §3–§6 got wrong; both
+change the Phase 0/1 shape, so they are recorded before any code lands.
+
+**(F1) The PET is *not* the writer grown up — it's a new per-peer task that
+*feeds* `packet_tx`.** The writer (`peer_start_writer`) is **per-connection**
+— spawned at all three connection sites, and collision keeps *two* live at
+once. `adj_out` is **per-peer**. So the PET is a separate **per-peer** actor
+that builds + encodes and pushes bytes onto the *current* connection's
+`packet_tx`; the per-connection writer drains it to the socket, unchanged.
+The PET must track the current `packet_tx` (main pushes it on each
+connection swap / collision resolution). This is cleaner (the PET never
+touches the socket or reconnects) but corrects §3's "writer is the seed."
+
+**(F2) `adj_out` is all-or-nothing, so the per-path phases (advertise /
+withdraw / dump / show) do NOT produce shippable intermediate states.** If
+Phase 1 moves `adj_out` into the PET for the *advertise* path only, the
+still-on-main withdraw gate, DumpV4 ③ record, and `show advertised-routes`
+read the now-empty main `adj_out` → **withdraws leak and shows go blank at
+gate-on**. So gate-on is only parity-correct once advertise **and** withdraw
+**and** dump-③ **and** the reads all move together — i.e. the *whole v4
+egress* in one slice, not four.
+
+**Two viable first slices (this is the decision to confirm):**
+- **(a) report-back — `adj_out` stays on main.** The PET does the expensive
+  work (out-policy build + encode + send) and reports `(nlri, post-policy
+  attr)` back; main records `adj_out`. **Incrementally correct** — withdraw
+  gate / dump / show are untouched (they keep reading main's `adj_out`).
+  Moves the ~75%-CPU out-policy build off main (the headline win). Costs: a
+  `main → PET → main` round-trip, and the pre-send **dedup is lost** (the
+  PET sends before main records, so a no-op re-advertise re-sends — correct
+  routes, redundant UPDATEs, *not* byte-parity). This is the natural
+  extension of the §5.3 "(a) first, then (a′)" progression.
+- **(a′) full v4 migration — `adj_out` in the PET.** advertise + withdraw +
+  dump-③ + reads all move in one (large, ~54-site) slice. Byte-parity-
+  capable and the memo's end-state, but big and genuinely all-or-nothing.
+
+**Recommendation: (a) report-back for the first slice.** It sidesteps the
+all-or-nothing trap, stays correct at every step, delivers the build-off-main
+win, and keeps the slice reviewable; migrate to (a′) later if byte-parity +
+the ③ tail-removal are wanted. **Phase 0** (the PET shell) and the channel
+shapes differ between (a) and (a′), so the approach must be picked before
+Phase 0 code — which is why this is a checkpoint, not a commit.
