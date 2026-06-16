@@ -60,6 +60,9 @@ impl BgpShard {
                 }
                 vec![self.best_path_delta_v4(ident, rd, nlri, Vec::new())]
             }
+            ShardMsg::OriginateV4 { prefix, withdraw } => {
+                self.handle_originate_v4(prefix, withdraw)
+            }
             ShardMsg::UpdateV6(u) => self.handle_update_v6(u),
             ShardMsg::WithdrawV6 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
@@ -392,6 +395,54 @@ impl BgpShard {
         vec![ShardOut::BestPathV4 {
             ident,
             rd,
+            prefix: nlri,
+            selected,
+            replaced,
+            added: Some(added),
+            survivor_nexthops,
+        }]
+    }
+
+    /// Originate / withdraw one locally-configured `network` prefix in this
+    /// shard — the pool half of `Bgp::route_add` / `route_del` at N>1. Builds
+    /// the canonical originated row (typ `Originated`, weight 32768, empty
+    /// attr, always reachable) and runs best-path off the Loc-RIB ONLY — no
+    /// Adj-RIB-In, since the route is not received from a peer — replying with
+    /// the best-path delta for the reduce to FIB-install, advertise, and mirror
+    /// into main's shard. The store tail mirrors `handle_update_v4`.
+    fn handle_originate_v4(&mut self, prefix: Ipv4Net, withdraw: bool) -> Vec<ShardOut> {
+        let orig = super::super::route::ORIGINATED_PEER;
+        let nlri = Ipv4Nlri { id: 0, prefix };
+        if withdraw {
+            let removed = self.remove(None, prefix, 0, orig);
+            return vec![self.best_path_delta_v4(orig, None, nlri, removed)];
+        }
+        // Identical row to the synchronous `route_add`, interned for dedup.
+        let attr = bgp_packet::BgpAttr::new();
+        let mut rib = BgpRib::new(
+            orig,
+            std::net::Ipv4Addr::UNSPECIFIED,
+            super::super::route::BgpRibType::Originated,
+            0,
+            32768,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.nexthop_reachable = true;
+        rib.attr = self.intern(attr);
+        let mut added = rib.clone();
+        let (replaced, selected, next_id) = self.update(None, prefix, rib);
+        added.local_id = next_id;
+        let survivor_nexthops = if replaced.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            self.candidate_nexthops_v4(None, prefix)
+        };
+        vec![ShardOut::BestPathV4 {
+            ident: orig,
+            rd: None,
             prefix: nlri,
             selected,
             replaced,

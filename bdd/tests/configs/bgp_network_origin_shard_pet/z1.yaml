@@ -1,0 +1,23 @@
+router:
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.1
+    peer-task: true
+    shards: 4
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8::8
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65501
+      update-source: 2001:db8::1
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 0.0.0.0/0
+      - prefix: 5.5.5.0/24
