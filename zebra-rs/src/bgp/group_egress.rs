@@ -1,25 +1,38 @@
-//! Per-update-group egress task — **Phase 0 (the lifecycle shell)**.
+//! Per-update-group egress task — **Phase 1a (the engine; not yet reduce-wired)**.
 //!
-//! Plan: `docs/design/bgp-egress-group-task-migration.md`. The end state is
-//! one persistent task per [`UpdateGroup`](super::update_group::UpdateGroup)
-//! that owns the group's coalescing cache + the encode and fans bytes to its
-//! member peers — **M tasks (groups), not N (peers)**, coalescing *and*
+//! Plan: `docs/design/bgp-egress-group-task-migration.md`. One persistent task
+//! per [`UpdateGroup`](super::update_group::UpdateGroup) that — at the end of
+//! the migration — owns the group's adj-out + encode and fans bytes to its
+//! member peers: **M tasks (groups), not N (peers)**, coalescing *and*
 //! off-main-parallel. A per-peer egress task (PET) is the M=1 case.
 //!
-//! Phase 0 is only the lifecycle: env-gated, spawned when a group is created
-//! (`attach`) and dropped when it empties (`detach`), tracking its member set
-//! from the membership machinery. It is **idle** — no egress is routed through
-//! it yet (Phase 1). Default off; gate-off is byte-identical (no task is
-//! created and the member sends are `if let Some` no-ops).
+//! Phase 0 was the lifecycle shell (member tracking, idle). **Phase 1a** adds
+//! the [`Engine`]: it captures each member's [`SyncCtx`] and can build one
+//! best-path advertisement **once** (the shared group transform), record it in
+//! the group's `adj_out`, encode it **once**, and **fan** the bytes to every
+//! member except the path's source (split-horizon). It is the per-group twin
+//! of the PET `Engine` — `send_ipv4_direct` fanned across members.
+//!
+//! 1a is **not wired into the reduce yet**: `attach`/`detach` feed the member
+//! set live (so the engine holds real `SyncCtx`s at gate-on), but no
+//! `Advertise`/`Withdraw` delta is routed to it — those land in Phase 1b. So
+//! gate-on egress is unchanged; the engine is exercised by the unit tests.
+//! Default off; gate-off is byte-identical.
 
-use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
+use bgp_packet::{Ipv4Nlri, UpdatePacket};
+use bytes::BytesMut;
+use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::context::task::Task;
 
-use super::update_group::UpdateGroupId;
+use super::adj_rib::{AdjRibTable, Out};
+use super::route::{BgpRib, SyncCtx};
+use super::store::BgpAttrStore;
+use super::update_group::{UpdateGroupId, encode_ipv4_update};
 
 /// `ZEBRA_BGP_EGRESS_GROUP_TASK=1` opts into the per-update-group egress task
 /// (the group-task migration). Default off: egress stays on the update-group
@@ -34,13 +47,36 @@ pub fn egress_group_task_enabled() -> bool {
     })
 }
 
-/// A member-set change the `attach` / `detach` machinery pushes to a group's
-/// task. Phase 0 carries identity only; the member's `packet_tx` (for the
-/// fan-out) and the egress deltas arrive in Phase 1.
+/// One egress operation the `attach`/`detach` (and, from Phase 1b, the reduce)
+/// machinery forwards to a group's task. `AddMember` carries the member's
+/// `SyncCtx` (its packet sink and the shared egress identity) so the engine can
+/// build and fan, plus the group's `add_path` flag. `Advertise` and `Withdraw`
+/// carry the path's `source_ident` for split-horizon.
 #[derive(Debug)]
-pub enum GroupMemberDelta {
-    Add(usize),
-    Remove(usize),
+pub enum GroupEgressDeltaV4 {
+    AddMember {
+        ident: usize,
+        ctx: Box<SyncCtx>,
+        add_path: bool,
+    },
+    RemoveMember {
+        ident: usize,
+    },
+    // Advertise / Withdraw are routed by the reduce in Phase 1b; until then
+    // they are constructed only by the engine unit tests, so the bin build
+    // sees them as unconstructed.
+    #[allow(dead_code)]
+    Advertise {
+        prefix: Ipv4Net,
+        rib: BgpRib,
+        source_ident: usize,
+    },
+    #[allow(dead_code)]
+    Withdraw {
+        prefix: Ipv4Net,
+        id: u32,
+        source_ident: usize,
+    },
 }
 
 /// Handle main keeps on each [`UpdateGroup`](super::update_group::UpdateGroup)
@@ -49,8 +85,8 @@ pub enum GroupMemberDelta {
 /// closes the channel.
 #[derive(Debug)]
 pub struct GroupEgressTask {
-    /// `attach` / `detach` push member add/remove here.
-    member_tx: UnboundedSender<GroupMemberDelta>,
+    /// `attach` / `detach` (and, from Phase 1b, the reduce) push deltas here.
+    delta_tx: UnboundedSender<GroupEgressDeltaV4>,
     // Held only for its abort-on-drop teardown; the task is driven entirely by
     // the channel, so the handle is never read after spawn.
     #[allow(dead_code)]
@@ -58,55 +94,244 @@ pub struct GroupEgressTask {
 }
 
 impl GroupEgressTask {
-    /// Spawn a group's egress task. **Phase 0 — idle**: it maintains its
-    /// member set from [`GroupMemberDelta`]s and otherwise does nothing.
-    /// Phase 1 adds the egress delta channel and the encode/fan. Exits when
-    /// `member_tx` is dropped (the group emptied).
+    /// Spawn a group's egress task. The [`Engine`] starts empty and fills its
+    /// member set from `AddMember` deltas. Exits when `delta_tx` is dropped
+    /// (the group emptied).
     pub fn spawn(id: UpdateGroupId) -> Self {
-        let (member_tx, mut member_rx) = mpsc::unbounded_channel::<GroupMemberDelta>();
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<GroupEgressDeltaV4>();
         tracing::info!("BGP egress group task: spawned (group {id:?})");
         let task = Task::spawn(async move {
-            let mut members: BTreeSet<usize> = BTreeSet::new();
-            while let Some(delta) = member_rx.recv().await {
-                match delta {
-                    GroupMemberDelta::Add(ident) => {
-                        members.insert(ident);
-                    }
-                    GroupMemberDelta::Remove(ident) => {
-                        members.remove(&ident);
-                    }
-                }
-                // Phase 0: membership tracked (the `members.len()` read keeps
-                // the set live for Phase 1), but no egress is routed yet.
-                tracing::debug!("BGP egress group {id:?}: {} member(s)", members.len());
+            let mut engine = Engine::default();
+            while let Some(delta) = delta_rx.recv().await {
+                engine.handle(delta);
             }
             tracing::debug!("BGP egress group task: exited (group {id:?})");
         });
-        GroupEgressTask { member_tx, task }
+        GroupEgressTask { delta_tx, task }
     }
 
-    /// Push a member-set change to the task. A send failure means the task has
-    /// already gone (the group is tearing down), which is harmless here.
-    pub fn member_delta(&self, delta: GroupMemberDelta) {
-        let _ = self.member_tx.send(delta);
+    /// Push a delta to the task. A send failure means the task has already
+    /// gone (the group is tearing down), which is harmless here.
+    pub fn send(&self, delta: GroupEgressDeltaV4) {
+        let _ = self.delta_tx.send(delta);
+    }
+}
+
+/// A group's owned v4-unicast egress state + per-delta logic, run inside the
+/// task. The build / out-policy / intern / `adj_out` dedup are identical to
+/// the PET `Engine`; the only difference is the **send**: it encodes one
+/// best-path advertisement once and fans the bytes to every member except the
+/// path's source (split-horizon), instead of to a single peer.
+#[derive(Default)]
+struct Engine {
+    /// Member peer → its `SyncCtx` (the packet sink; the egress-transform
+    /// fields are shared across the group, so any member's ctx builds the
+    /// canonical bytes).
+    members: BTreeMap<usize, SyncCtx>,
+    add_path: bool,
+    adj_out: AdjRibTable<Out>,
+    attr_store: BgpAttrStore,
+}
+
+impl Engine {
+    fn handle(&mut self, delta: GroupEgressDeltaV4) {
+        match delta {
+            GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx,
+                add_path,
+            } => {
+                self.add_path = add_path;
+                self.members.insert(ident, *ctx);
+            }
+            GroupEgressDeltaV4::RemoveMember { ident } => {
+                self.members.remove(&ident);
+            }
+            GroupEgressDeltaV4::Advertise {
+                prefix,
+                rib,
+                source_ident,
+            } => self.advertise(prefix, rib, source_ident),
+            GroupEgressDeltaV4::Withdraw {
+                prefix,
+                id,
+                source_ident,
+            } => self.withdraw(prefix, id, source_ident),
+        }
+    }
+
+    /// Build one best path for the group's shared egress identity, record it
+    /// in `adj_out` (dedup'd by interned-attr pointer identity), encode it
+    /// once, and fan to every member except `source_ident`. A build / policy
+    /// filter (split-horizon at the source, policy-deny) becomes a withdraw,
+    /// exactly as the PET / gate-off `Withdraw` outcome.
+    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib, source_ident: usize) {
+        // Any member's ctx yields the canonical bytes (shared transform).
+        let Some(ctx) = self.members.values().next().cloned() else {
+            // No members yet — still record the group's RIB state so a future
+            // member is caught up; nothing to send.
+            let arc = self.attr_store.intern((*rib.attr).clone());
+            rib.attr = arc;
+            self.adj_out.add(prefix, rib);
+            return;
+        };
+        let built = super::route::route_update_ipv4(&ctx, &prefix, &rib, self.add_path).and_then(
+            |(nlri, attr)| {
+                super::route::route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+                    .map(|d| (nlri, d))
+            },
+        );
+        let Some((nlri, decision)) = built else {
+            self.withdraw(prefix, rib.remote_id, source_ident);
+            return;
+        };
+        let arc = self.attr_store.intern(decision.attr);
+        rib.attr = arc.clone();
+        let prev = self.adj_out.add(prefix, rib);
+        let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
+        if !already_sent {
+            let bytes_list = encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), None);
+            self.fan(&bytes_list, source_ident);
+        }
+    }
+
+    /// Drop `prefix` from `adj_out` and, if it had been advertised, fan one
+    /// MP_UNREACH to every member except `source_ident`. Matches by prefix
+    /// (not exact `id`), as the PET withdraw does.
+    fn withdraw(&mut self, prefix: Ipv4Net, id: u32, source_ident: usize) {
+        if self.adj_out.0.remove(&prefix).is_some() {
+            let max = self
+                .members
+                .values()
+                .next()
+                .map(|c| c.max_packet_size())
+                .unwrap_or(4096);
+            let mut update = UpdatePacket::with_max_packet_size(max);
+            update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
+            self.fan(&[update.into()], source_ident);
+        }
+    }
+
+    /// Fan pre-encoded UPDATE bytes to every member except the path's source.
+    /// The encode happened once; this is a cheap per-member buffer clone +
+    /// enqueue (the per-member backpressure rides each ctx's `send_packet`).
+    fn fan(&self, bytes_list: &[BytesMut], source_ident: usize) {
+        for (ident, ctx) in &self.members {
+            if *ident == source_ident {
+                continue;
+            }
+            for buf in bytes_list {
+                ctx.send_packet(buf.clone());
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::route::BgpRibType;
     use super::*;
-    use bgp_packet::{Afi, Safi};
+    use bgp_packet::{BgpAttr, BgpNexthop};
 
-    #[tokio::test]
-    async fn spawn_accepts_member_deltas_and_aborts_on_drop() {
-        let task = GroupEgressTask::spawn(UpdateGroupId::new(Afi::Ip, Safi::Unicast, 0));
-        // Member add/remove are accepted without panicking (Phase 0 is idle).
-        task.member_delta(GroupMemberDelta::Add(1));
-        task.member_delta(GroupMemberDelta::Add(2));
-        task.member_delta(GroupMemberDelta::Remove(1));
-        // Dropping the handle closes the channel and aborts the task; the
-        // task observes the closed channel on the next poll and exits.
-        drop(task);
-        tokio::task::yield_now().await;
+    /// A best-path row from peer `ident`, next-hop `nh` (mirrors the PET
+    /// test's `rib`).
+    fn rib(ident: usize, nh: &str) -> BgpRib {
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(nh.parse().unwrap())),
+            ..Default::default()
+        };
+        BgpRib::new_arc(
+            ident,
+            "10.0.0.1".parse().unwrap(),
+            BgpRibType::EBGP,
+            0,
+            100,
+            Arc::new(attr),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Add a member with a readable packet channel via the real `AddMember`
+    /// delta (so the protocol path is exercised end to end).
+    fn member(engine: &mut Engine, ident: usize) -> mpsc::UnboundedReceiver<BytesMut> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        engine.handle(GroupEgressDeltaV4::AddMember {
+            ident,
+            ctx: Box::new(ctx),
+            add_path: false,
+        });
+        rx
+    }
+
+    fn advertise(engine: &mut Engine, prefix: &str, source_ident: usize) {
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: prefix.parse().unwrap(),
+            rib: rib(5, "192.0.2.1"),
+            source_ident,
+        });
+    }
+
+    #[test]
+    fn advertise_encodes_once_and_fans_to_all_members_when_source_is_external() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        // source 99 is not a member, so both members receive the advertisement.
+        advertise(&mut engine, "10.10.10.0/24", 99);
+        assert!(rx1.try_recv().is_ok(), "member 1 receives the advertise");
+        assert!(rx2.try_recv().is_ok(), "member 2 receives the advertise");
+    }
+
+    #[test]
+    fn advertise_excludes_the_source_member_split_horizon() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        // The path's source is member 1 — it must NOT be advertised back to it.
+        advertise(&mut engine, "10.10.10.0/24", 1);
+        assert!(rx1.try_recv().is_err(), "source member 1 is excluded");
+        assert!(rx2.try_recv().is_ok(), "member 2 still receives it");
+    }
+
+    #[test]
+    fn re_advertise_same_attr_dedups() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        advertise(&mut engine, "10.10.10.0/24", 99);
+        assert!(rx1.try_recv().is_ok(), "first advertise sends");
+        // Same path again: recorded but not re-sent (interned-attr ptr_eq).
+        advertise(&mut engine, "10.10.10.0/24", 99);
+        assert!(rx1.try_recv().is_err(), "identical re-advertise dedups");
+    }
+
+    #[test]
+    fn removed_member_is_dropped_from_the_fan() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        engine.handle(GroupEgressDeltaV4::RemoveMember { ident: 1 });
+        advertise(&mut engine, "10.10.10.0/24", 99);
+        assert!(rx1.try_recv().is_err(), "removed member receives nothing");
+    }
+
+    #[test]
+    fn withdraw_fans_to_non_source_members() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        advertise(&mut engine, "10.10.10.0/24", 99);
+        let _ = rx1.try_recv();
+        let _ = rx2.try_recv();
+        // Withdraw of an advertised prefix reaches the non-source members.
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: "10.10.10.0/24".parse().unwrap(),
+            id: 0,
+            source_ident: 99,
+        });
+        assert!(rx1.try_recv().is_ok(), "member 1 receives the withdraw");
+        assert!(rx2.try_recv().is_ok(), "member 2 receives the withdraw");
     }
 }

@@ -21,7 +21,7 @@
 //! handles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -389,7 +389,12 @@ fn enhe_negotiated_for(
 /// Takes split borrows on `update_groups` and `peers` so the caller
 /// can be the FSM (which holds a `BgpTop` separately from the
 /// `PeerMap`).
-pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx: usize) {
+pub fn attach(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    router_id: Ipv4Addr,
+) {
     let Some(peer) = peers.get_by_idx(peer_idx) else {
         return;
     };
@@ -411,10 +416,13 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
         let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
             let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
             af.next_seq += 1;
-            // Phase 0: spawn the per-group egress task at gate-on; dropped
-            // (abort-on-drop) when this group is removed in `detach`.
-            let task = super::group_egress::egress_group_task_enabled()
-                .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
+            // Phase 0/1a: spawn the per-group egress task at gate-on for
+            // v4-unicast (the family being migrated); dropped (abort-on-drop)
+            // when this group is removed in `detach`.
+            let task = (afi_safi.afi == Afi::Ip
+                && afi_safi.safi == Safi::Unicast
+                && super::group_egress::egress_group_task_enabled())
+            .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
             UpdateGroup {
                 id,
                 sig: sig.clone(),
@@ -438,9 +446,18 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             }
         });
         entry.members.insert(peer_idx);
-        // Phase 0: mirror the membership into the group's egress task (gate-on).
-        if let Some(t) = &entry.task {
-            t.member_delta(super::group_egress::GroupMemberDelta::Add(peer_idx));
+        // Phase 1a: mirror the membership into the group's egress task with the
+        // member's SyncCtx (its packet sink + the shared egress identity) so the
+        // engine can build + fan once advertises are routed there (Phase 1b).
+        if let Some(t) = &entry.task
+            && let Some(peer) = peers.get_by_idx(peer_idx)
+        {
+            let add_path = peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi);
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident: peer_idx,
+                ctx: Box::new(peer.sync_ctx(router_id)),
+                add_path,
+            });
         }
 
         let id = entry.id.clone();
@@ -482,11 +499,12 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             let drop_group = {
                 let group = af.groups.get_mut(&key).expect("just located");
                 group.members.remove(&peer_idx);
-                // Phase 0: mirror the removal into the group's egress task
-                // (the task itself is dropped + aborted below if the group
-                // becomes empty).
+                // Mirror the removal into the group's egress task (the task
+                // itself is dropped + aborted below if the group empties).
                 if let Some(t) = &group.task {
-                    t.member_delta(super::group_egress::GroupMemberDelta::Remove(peer_idx));
+                    t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
+                        ident: peer_idx,
+                    });
                 }
                 group.members.is_empty()
             };
@@ -1461,8 +1479,9 @@ mod tests {
         let v4only_idx = peers.get(&v4only).unwrap().ident;
 
         let mut groups = empty_map();
-        attach(&mut groups, &mut peers, dual_idx);
-        attach(&mut groups, &mut peers, v4only_idx);
+        let rid = "1.1.1.1".parse().unwrap();
+        attach(&mut groups, &mut peers, dual_idx, rid);
+        attach(&mut groups, &mut peers, v4only_idx, rid);
 
         let v4_key = AfiSafi::new(Afi::Ip, Safi::Unicast);
         let v6_key = AfiSafi::new(Afi::Ip6, Safi::Unicast);

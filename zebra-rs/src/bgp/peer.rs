@@ -1605,7 +1605,7 @@ pub fn fsm(
         if prev_state.is_established() && !now_established {
             super::update_group::detach(bgp_ref.update_groups, peer_map, id);
         } else if !prev_state.is_established() && now_established {
-            super::update_group::attach(bgp_ref.update_groups, peer_map, id);
+            super::update_group::attach(bgp_ref.update_groups, peer_map, id, *bgp_ref.router_id);
         }
         peer_map.debug_verify_membership();
     }
