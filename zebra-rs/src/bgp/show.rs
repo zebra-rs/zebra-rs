@@ -155,6 +155,34 @@ fn peer_has_negotiated(peer: &Peer, afi: Afi, safi: Safi) -> bool {
         .unwrap_or(false)
 }
 
+/// Externally-gathered per-peer v4-unicast summary prefix counts (peer ident
+/// → (PfxRcd, PfxSnt)). At gate-on / N>1 the v4 Adj-RIB-In lives in the pool
+/// shards and the v4 Adj-RIB-Out in the PET, so the main-side reads below come
+/// back empty; the async show path gathers the real counts first
+/// ([`super::inst`]) and passes them here. Only the v4-unicast section ever
+/// receives a `Some` — every other family is main-owned and reads correctly.
+type SummaryCounts = std::collections::BTreeMap<usize, (u64, u64)>;
+
+/// The (PfxRcd, PfxSnt) for one peer's summary row: the gathered counts when
+/// present (gate-on / N>1), else the main-side Adj-RIB read. Sharded and
+/// main-owned family counts are disjoint, so the sum is the received count for
+/// any AFI/SAFI.
+fn summary_pfx_counts(
+    shard: &super::shard::BgpShard,
+    peer: &Peer,
+    afi: Afi,
+    safi: Safi,
+    counts: Option<&SummaryCounts>,
+) -> (u64, u64) {
+    match counts.and_then(|m| m.get(&peer.ident)) {
+        Some(&(pr, ps)) => (pr, ps),
+        None => (
+            (shard.adj_in_count(peer.ident, afi, safi) + peer.adj_in.count(afi, safi)) as u64,
+            peer.adj_out.count(afi, safi) as u64,
+        ),
+    }
+}
+
 fn write_summary_header_row(buf: &mut String) -> std::fmt::Result {
     writeln!(
         buf,
@@ -179,6 +207,7 @@ fn write_summary_peer_row(
     peer: &Peer,
     afi: Afi,
     safi: Safi,
+    counts: Option<&SummaryCounts>,
 ) -> std::fmt::Result {
     let mut msg_sent: u64 = 0;
     let mut msg_rcvd: u64 = 0;
@@ -196,10 +225,7 @@ fn write_summary_peer_row(
     } else if !negotiated {
         "NoNeg".to_string()
     } else {
-        // Sharded and main-owned family counts are disjoint, so the
-        // sum is the peer's received count for any AFI/SAFI.
-        let pr = shard.adj_in_count(peer.ident, afi, safi) + peer.adj_in.count(afi, safi);
-        let ps = peer.adj_out.count(afi, safi);
+        let (pr, ps) = summary_pfx_counts(shard, peer, afi, safi, counts);
         format!("{}/{}", pr, ps)
     };
 
@@ -234,7 +260,11 @@ fn write_summary_section<V: BgpShowView>(
     buf: &mut String,
     bgp: &V,
     afi_safi: AfiSafi,
+    counts: Option<&SummaryCounts>,
 ) -> std::fmt::Result {
+    // The gathered counts are v4-unicast only; every other section reads its
+    // main-owned Adj-RIBs directly.
+    let section_counts = counts.filter(|_| afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast));
     let label = afi_safi_summary_label(afi_safi.afi, afi_safi.safi);
     let router_id = summary_router_id(bgp);
     let asn = if bgp.asn() == 0 {
@@ -272,7 +302,14 @@ fn write_summary_section<V: BgpShowView>(
 
     write_summary_header_row(buf)?;
     for peer in peers.iter() {
-        write_summary_peer_row(buf, bgp.shard(), peer, afi_safi.afi, afi_safi.safi)?;
+        write_summary_peer_row(
+            buf,
+            bgp.shard(),
+            peer,
+            afi_safi.afi,
+            afi_safi.safi,
+            section_counts,
+        )?;
     }
 
     writeln!(buf)?;
@@ -1824,6 +1861,7 @@ fn summary_peer_row_json(
     peer: &Peer,
     afi: Afi,
     safi: Safi,
+    counts: Option<&SummaryCounts>,
 ) -> BgpPeerSummaryJson {
     let mut msg_sent: u64 = 0;
     let mut msg_rcvd: u64 = 0;
@@ -1832,9 +1870,7 @@ fn summary_peer_row_json(
         msg_rcvd += counter.rcvd;
     }
 
-    let pfx_rcvd =
-        (shard.adj_in_count(peer.ident, afi, safi) + peer.adj_in.count(afi, safi)) as u64;
-    let pfx_sent = peer.adj_out.count(afi, safi) as u64;
+    let (pfx_rcvd, pfx_sent) = summary_pfx_counts(shard, peer, afi, safi, counts);
 
     // FRR-style State/PfxRcd column: an Established session shows its
     // received-prefix count in place of the state word.
@@ -1857,7 +1893,13 @@ fn summary_peer_row_json(
     }
 }
 
-fn summary_section_json<V: BgpShowView>(bgp: &V, afi_safi: AfiSafi) -> BgpAfiSafiSummaryJson {
+fn summary_section_json<V: BgpShowView>(
+    bgp: &V,
+    afi_safi: AfiSafi,
+    counts: Option<&SummaryCounts>,
+) -> BgpAfiSafiSummaryJson {
+    // v4-unicast only; see `write_summary_section`.
+    let section_counts = counts.filter(|_| afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast));
     BgpAfiSafiSummaryJson {
         afi_safi: afi_safi_summary_label(afi_safi.afi, afi_safi.safi).to_string(),
         // `iter_all` for the same reason as the text renderer:
@@ -1866,7 +1908,15 @@ fn summary_section_json<V: BgpShowView>(bgp: &V, afi_safi: AfiSafi) -> BgpAfiSaf
             .peers()
             .iter_all()
             .filter(|(_, peer)| peer.config.mp.has(&afi_safi))
-            .map(|(_, peer)| summary_peer_row_json(bgp.shard(), peer, afi_safi.afi, afi_safi.safi))
+            .map(|(_, peer)| {
+                summary_peer_row_json(
+                    bgp.shard(),
+                    peer,
+                    afi_safi.afi,
+                    afi_safi.safi,
+                    section_counts,
+                )
+            })
             .collect(),
     }
 }
@@ -1881,13 +1931,25 @@ fn show_bgp_summary<V: BgpShowView>(
     _args: Args,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    summary_all(bgp, json, None)
+}
+
+/// Body of `show bgp summary` (every configured AFI/SAFI), parameterised on the
+/// optional gathered v4 counts. `None` is the synchronous path (the row reads
+/// its main-side Adj-RIBs); `Some` is the async gate-on / N>1 path via
+/// [`render_summary_with_counts`].
+fn summary_all<V: BgpShowView>(
+    bgp: &V,
+    json: bool,
+    counts: Option<&SummaryCounts>,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let summary = BgpSummaryJson {
             router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
             afi_safis: configured_afi_safis(bgp)
                 .into_iter()
-                .map(|afi_safi| summary_section_json(bgp, afi_safi))
+                .map(|afi_safi| summary_section_json(bgp, afi_safi, counts))
                 .collect(),
         };
         return Ok(summary_json_render(&summary));
@@ -1919,7 +1981,7 @@ fn show_bgp_summary<V: BgpShowView>(
         if i > 0 {
             writeln!(buf)?;
         }
-        write_summary_section(&mut buf, bgp, afi_safi)?;
+        write_summary_section(&mut buf, bgp, afi_safi, counts)?;
     }
 
     Ok(buf)
@@ -1933,17 +1995,47 @@ fn show_bgp_summary_one<V: BgpShowView>(
     afi_safi: AfiSafi,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
+    summary_one(bgp, afi_safi, json, None)
+}
+
+/// Body of `show bgp <afi> summary`, parameterised on the optional gathered v4
+/// counts (see [`summary_all`]).
+fn summary_one<V: BgpShowView>(
+    bgp: &V,
+    afi_safi: AfiSafi,
+    json: bool,
+    counts: Option<&SummaryCounts>,
+) -> std::result::Result<String, std::fmt::Error> {
     if json {
         let summary = BgpSummaryJson {
             router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
-            afi_safis: vec![summary_section_json(bgp, afi_safi)],
+            afi_safis: vec![summary_section_json(bgp, afi_safi, counts)],
         };
         return Ok(summary_json_render(&summary));
     }
     let mut buf = String::new();
-    write_summary_section(&mut buf, bgp, afi_safi)?;
+    write_summary_section(&mut buf, bgp, afi_safi, counts)?;
     Ok(buf)
+}
+
+/// Render `show … summary` with externally-gathered v4-unicast prefix counts —
+/// the async path for gate-on / N>1, where the v4 PfxRcd/PfxSnt live off-main
+/// (pool shards / PET) and must be gathered before this (synchronous) render
+/// (see [`super::inst::Bgp::gather_v4_summary_counts`]). `afi_safi` `None`
+/// renders every configured section (`show bgp summary`); `Some` renders that
+/// one (`show bgp ipv4 summary`). The counts apply only to the v4 section.
+pub(super) fn render_summary_with_counts<V: BgpShowView>(
+    bgp: &V,
+    afi_safi: Option<AfiSafi>,
+    json: bool,
+    counts: &SummaryCounts,
+) -> String {
+    let rendered = match afi_safi {
+        Some(one) => summary_one(bgp, one, json, Some(counts)),
+        None => summary_all(bgp, json, Some(counts)),
+    };
+    rendered.unwrap_or_else(|e| format!("Error formatting output: {}", e))
 }
 
 /// `show bgp evpn summary` — the L2VPN/EVPN section only.
