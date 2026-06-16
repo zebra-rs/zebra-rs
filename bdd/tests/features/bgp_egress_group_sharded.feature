@@ -107,6 +107,20 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     Then show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.10.0/24"
     And show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.11.0/24"
 
+  Scenario: z2's `show bgp ipv4 summary` counts come from the shards (PfxRcd) and the group task (PfxSnt)
+    Given the test topology exists
+    # The summary's PfxRcd/Snt column at N>1 + egress-group-task: PfxRcd lives
+    # in the pool shards' Adj-RIB-In and PfxSnt in the per-update-group egress
+    # task's shared Adj-RIB-Out (the peer's own copies are both empty), so the
+    # row read main-side printed "0/0". The count-gather fixes it: z2 received
+    # z1's two routes (PfxRcd 2) and the group advertised both to z3 and z4
+    # (PfxSnt 2), never back to their source z1 (split-horizon, PfxSnt 0). So
+    # z1's row is "2/0" (the shard PfxRcd gather) and z3's / z4's are "0/2" (the
+    # group CountAdjOut: total minus each member's solely-sourced prefixes).
+    # Under the bug every row is "0/0", so neither substring appears.
+    Then show command "show bgp ipv4 summary" in namespace "z2" should contain "2/0"
+    And show command "show bgp ipv4 summary" in namespace "z2" should contain "0/2"
+
   Scenario: z1 withdraws one route; the sharded reduce removes it from z2's mirror
     Given the test topology exists
     # z1 re-originates only 10.10.11.0/24 (dropping .10). At N=4, z2's pool
