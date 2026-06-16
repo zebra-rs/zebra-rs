@@ -10277,6 +10277,22 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
 
 impl Bgp {
     pub fn route_add(&mut self, prefix: Ipv4Net) {
+        // N>1: originate through the pool so the pool owns the row — its
+        // session-up `DumpV4` sync, the reduce's event-driven advertise, and
+        // `mirror_v4` (into main's shard, for `show bgp ipv4`) all pick it up,
+        // exactly like a peer route. Writing to `self.shard` directly (the N=1
+        // path below) left the originated row invisible to the pool's DumpV4,
+        // so a peer establishing after origination never learned the network.
+        if let Some(pool) = self.shards.as_ref() {
+            pool.dispatch(
+                pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
+                ShardMsg::OriginateV4 {
+                    prefix,
+                    withdraw: false,
+                },
+            );
+            return;
+        }
         let ident = ORIGINATED_PEER;
         let attr = BgpAttr::new();
         let mut rib = BgpRib::new(
@@ -10334,6 +10350,18 @@ impl Bgp {
     }
 
     pub fn route_del(&mut self, prefix: Ipv4Net) {
+        // N>1: retract through the pool (the owning shard re-runs best-path and
+        // the reduce withdraws + un-mirrors), matching `route_add`.
+        if let Some(pool) = self.shards.as_ref() {
+            pool.dispatch(
+                pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
+                ShardMsg::OriginateV4 {
+                    prefix,
+                    withdraw: true,
+                },
+            );
+            return;
+        }
         let ident = ORIGINATED_PEER;
         let id = 0;
         let removed = self.shard.remove(None, prefix, id, ident);

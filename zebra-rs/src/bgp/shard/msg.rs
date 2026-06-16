@@ -83,6 +83,20 @@ pub enum ShardMsg {
         rib_in: bool,
     },
 
+    /// Originate (or, with `withdraw`, retract) a locally-configured
+    /// IPv4-unicast `network` prefix at N>1. The shard builds the canonical
+    /// originated row (typ `Originated`, weight 32768, empty attr) and runs
+    /// best-path WITHOUT touching Adj-RIB-In — an originated route is not
+    /// "received" — replying with [`ShardOut::BestPathV4`] so the reduce
+    /// installs the FIB, advertises it, and mirrors it into main's shard,
+    /// exactly like a peer route. (`route_add` wrote straight to main's shard,
+    /// which the pool's session-up `DumpV4` never sees — the origination bug.)
+    /// The N=1 path stays synchronous in `route_add` / `route_del`.
+    OriginateV4 {
+        prefix: ipnet::Ipv4Net,
+        withdraw: bool,
+    },
+
     /// A received IPv6-unicast (`rd = None`) or VPNv6 (`rd = Some`)
     /// route. Unlike v4 there is no inbound-policy stage (the v6
     /// ingest path has none today), so the carried `attr` is final:
