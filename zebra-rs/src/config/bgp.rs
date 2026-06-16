@@ -23,6 +23,18 @@ pub fn spawn_bgp(config: &ConfigManager) {
                 );
             }
         }
+        // Same lifetime contract for the egress model: the PET and
+        // update-group models are alternatives, fixed at spawn.
+        if let Some(requested) = configured_peer_task(config) {
+            let live = crate::bgp::peer_egress::peer_egress_task_enabled();
+            if requested != live {
+                tracing::warn!(
+                    "router bgp peer-task {requested} ignored: the egress model is \
+                     fixed for the BGP instance lifetime — clear `router bgp` or \
+                     restart the daemon to switch"
+                );
+            }
+        }
         return;
     }
     // Capture BFD / ND client handles so per-neighbor `bfd { enable }`
@@ -40,6 +52,9 @@ pub fn spawn_bgp(config: &ConfigManager) {
     // C.4: freeze the shard count from the `router bgp shards <n>` leaf (else
     // `ZEBRA_BGP_SHARDS`, else 1) before `Bgp::new` spawns the pool.
     inst::init_shard_count(configured_shards(config));
+    // Freeze the per-peer egress-task model from the `router bgp peer-task`
+    // leaf (else `ZEBRA_BGP_PEER_TASK`, else off) before any peer establishes.
+    crate::bgp::peer_egress::init_peer_task(configured_peer_task(config));
     let bgp = inst::Bgp::new(
         ctx,
         rib_rx,
@@ -99,6 +114,25 @@ fn shards_from_config_text(text: &str) -> Option<usize> {
     })
 }
 
+/// Read the `router bgp peer-task <bool>` leaf from the committed candidate
+/// config, if set. Same flattened-text scan as [`configured_shards`].
+/// `None` ⇒ the caller falls back to `ZEBRA_BGP_PEER_TASK` / off.
+fn configured_peer_task(config: &ConfigManager) -> Option<bool> {
+    let mut text = String::new();
+    config.store.candidate.borrow().list(&mut text);
+    peer_task_from_config_text(&text)
+}
+
+/// Pure line-scan (unit-tested): pull the `peer-task` boolean out of the
+/// flattened config text — `router bgp peer-task <true|false>`, the form the
+/// `bgp_peer_task_grammar` parse test pins.
+fn peer_task_from_config_text(text: &str) -> Option<bool> {
+    text.lines().find_map(|line| {
+        let v = line.strip_prefix("router bgp peer-task ")?.trim();
+        Some(v == "true" || v == "1")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::shards_from_config_text;
@@ -123,5 +157,23 @@ mod tests {
             None
         );
         assert_eq!(shards_from_config_text(""), None);
+    }
+
+    #[test]
+    fn peer_task_line_scan() {
+        use super::peer_task_from_config_text;
+        assert_eq!(
+            peer_task_from_config_text("router bgp peer-task true\n"),
+            Some(true)
+        );
+        // Explicit false is distinguishable from absent (so config can
+        // override an env-on).
+        assert_eq!(
+            peer_task_from_config_text("router bgp peer-task false\n"),
+            Some(false)
+        );
+        // Absent ⇒ None (caller falls back to env / off).
+        assert_eq!(peer_task_from_config_text("router bgp shards 4\n"), None);
+        assert_eq!(peer_task_from_config_text(""), None);
     }
 }

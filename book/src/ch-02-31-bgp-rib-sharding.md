@@ -122,3 +122,56 @@ This line is the authoritative confirmation that the knob took effect —
 because sharding is behavior-transparent, the routing tables themselves look
 identical at any shard count, so the log is how you tell `shards: 4`
 actually spawned four workers rather than silently falling back to one.
+
+## Egress model: per-peer task (experimental)
+
+Where `shards` parallelises the **ingress** side (which thread elects the
+best path), a second, independent knob — `peer-task` — chooses how the
+**egress** side is structured.
+
+By default zebra-rs coalesces outbound work into **update groups**: peers
+that share an outbound identity (same out-policy, next-hop treatment, AS,
+capabilities) are served by one group, so a prefix is policy-processed and
+encoded **once** and the resulting bytes are fanned to every member. This is
+the FRR model and is the right default — especially for a **route
+reflector**, where hundreds of clients often share one policy and would
+otherwise each repeat the same encode.
+
+`router bgp peer-task true` switches plain IPv4-unicast egress to a
+**per-peer egress task** instead: one task per established peer builds and
+encodes that peer's stream independently (the GoBGP per-peer model). This
+trades coalescing away for per-peer parallelism — it can help when peers
+have *divergent* policies (so update groups wouldn't coalesce much anyway)
+and there are spare cores, but for the shared-policy reflector case it
+multiplies encode work and is a net loss. It is therefore **experimental and
+off by default**; leave it off unless you are specifically measuring the
+per-peer model.
+
+```yaml
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    shards: 4
+    peer-task: true
+```
+
+```
+set router bgp peer-task true
+```
+
+Like `shards`, `peer-task` is **startup-only** — the two egress models are
+alternatives that are never interleaved, so the choice is frozen when the
+instance starts. Changing it on a live instance is ignored with a warning;
+clear `router bgp` or restart to switch. It supersedes the
+`ZEBRA_BGP_PEER_TASK` environment variable (the fallback when the leaf is
+unset), and the resolved model is logged at startup:
+
+```
+BGP per-peer egress task: enabled (from config)
+```
+
+(or `disabled (from default)` for the update-group default). As with the
+shard count, this log line is the authoritative confirmation the knob took
+effect.

@@ -1417,6 +1417,42 @@ mod yang_load_tests {
         }
     }
 
+    /// `router bgp peer-task <true|false>` — the per-peer egress-task model
+    /// knob (`zebra-bgp-sharding.yang`), the shipping form of
+    /// `ZEBRA_BGP_PEER_TASK`. Pinned for the same reason as `shards`:
+    /// `configured_peer_task` reads this leaf at spawn, and a broken path
+    /// would silently fall back to the env/default.
+    #[test]
+    fn bgp_peer_task_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        // Both boolean forms must be settable paths directly under `router
+        // bgp` — the exact text `configured_peer_task` scans for.
+        for cmd in [
+            "set router bgp peer-task true",
+            "set router bgp peer-task false",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
     /// compute-mode <serial|conservative|aggressive|sharding>` plus
     /// `compute-shards <1..256>`. Pinned because vtyctl apply is
