@@ -270,6 +270,9 @@ fn show_stamp_statistics(stamp: &Stamp, _args: Args, json: bool) -> Result<Strin
     let mut buf = String::new();
     writeln!(buf, "STAMP statistics:")?;
     writeln!(buf, "    Reflector socket: {}", stamp.local_addr)?;
+    if let Some(addr6) = stamp.local_addr_v6 {
+        writeln!(buf, "    Reflector socket (v6): {}", addr6)?;
+    }
     writeln!(buf, "    Sessions: {}", stamp.sessions.len())?;
     writeln!(buf, "    Sender:")?;
     writeln!(buf, "        Probes sent: {}", tx)?;
@@ -316,6 +319,7 @@ mod tests {
         Stamp::new_with(
             ProtoContext::default_table_no_rib(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            None,
         )
         .expect("bind loopback")
     }

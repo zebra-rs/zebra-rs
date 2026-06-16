@@ -1,0 +1,26 @@
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8:0:ff61::1/128
+- if-name: st1-st2
+  ipv6:
+    address: 2001:db8:61::1/64
+
+router:
+  isis:
+    net: 49.0061.0000.0000.0001.00
+    hostname: st1
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: st1-st2
+      network-type: point-to-point
+      ipv6:
+        enable: true
+      te-metric:
+        measurement:
+          enable: true
+          interval: 100
+          damping-period: 2

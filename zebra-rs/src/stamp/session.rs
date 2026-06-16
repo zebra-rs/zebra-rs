@@ -230,13 +230,23 @@ impl SessionTable {
     /// Returns the matching key so the per-session reflected counter
     /// can tick. Kept as plain per-session data so a future XDP
     /// offload can mirror it into a BPF map (offload notes §9b R2).
-    pub fn reflect_allowed(&self, src: IpAddr) -> Option<SessionKey> {
-        self.sessions.keys().find(|k| k.remote == src).copied()
+    ///
+    /// `ifindex` is the probe's ingress interface. A session keyed with
+    /// a non-zero ifindex (IPv6 link-local — `fe80::…` collides across
+    /// interfaces) must also match it; a zero-ifindex session (every v4
+    /// session today) matches on address alone.
+    pub fn reflect_allowed(&self, src: IpAddr, ifindex: u32) -> Option<SessionKey> {
+        self.sessions
+            .keys()
+            .find(|k| k.remote == src && (k.ifindex == 0 || k.ifindex == ifindex))
+            .copied()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use super::*;
 
     #[test]
@@ -269,5 +279,80 @@ mod tests {
         // Without intervening inserts the allocator just advances; the
         // collision scan only matters once sessions hold SSIDs.
         assert_ne!(a, b);
+    }
+
+    /// An inert session entry: `reflect_allowed` reads only the key, so
+    /// a bound-less nonblocking socket and a no-op task put a real
+    /// [`Session`] in the table without any network setup. (Link-local
+    /// keys can't go through `add_session` on a test host — there are no
+    /// interfaces with those scopes — so we build the table directly.)
+    fn dummy_session(key: SessionKey, ssid: u16) -> Session {
+        let sock = Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let read_task = Task::spawn(async {});
+        Session::new(key, SessionParams::default(), ssid, sock, read_task)
+    }
+
+    /// Step 4: two IPv6 link-local sessions share remote `fe80::1` but
+    /// hang off different interfaces. The allow-list disambiguates by
+    /// ingress ifindex, matching the probe to the session on its own
+    /// link — never the other that merely shares the address.
+    #[tokio::test]
+    async fn reflect_allowed_disambiguates_link_local_by_ifindex() {
+        let ll = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let local = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+        let key2 = SessionKey {
+            local,
+            remote: ll,
+            ifindex: 2,
+        };
+        let key3 = SessionKey {
+            local,
+            remote: ll,
+            ifindex: 3,
+        };
+
+        let mut table = SessionTable::new();
+        let ssid2 = table.alloc_ssid();
+        table.insert(dummy_session(key2, ssid2));
+        let ssid3 = table.alloc_ssid();
+        table.insert(dummy_session(key3, ssid3));
+
+        // A probe from fe80::1 is matched to the session on its own link.
+        assert_eq!(table.reflect_allowed(ll, 2), Some(key2));
+        assert_eq!(table.reflect_allowed(ll, 3), Some(key3));
+        // An ingress ifindex with no scoped session there: not reflected.
+        assert_eq!(table.reflect_allowed(ll, 9), None);
+        // Without an ingress ifindex (0) the scoped sessions can't be
+        // told apart, so the probe is not reflected.
+        assert_eq!(table.reflect_allowed(ll, 0), None);
+    }
+
+    /// A zero-ifindex (v4) session matches on address alone; the ingress
+    /// ifindex is ignored for it, so existing v4 behaviour is preserved.
+    #[tokio::test]
+    async fn reflect_allowed_zero_ifindex_matches_address_only() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let key = SessionKey {
+            local: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            remote: v4,
+            ifindex: 0,
+        };
+        let mut table = SessionTable::new();
+        let ssid = table.alloc_ssid();
+        table.insert(dummy_session(key, ssid));
+
+        assert_eq!(table.reflect_allowed(v4, 0), Some(key));
+        assert_eq!(
+            table.reflect_allowed(v4, 7),
+            Some(key),
+            "ifindex ignored for a zero-ifindex session"
+        );
     }
 }

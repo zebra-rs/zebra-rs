@@ -6,10 +6,12 @@
 //! `stamp_client_tx` at their own spawn time — the same lifecycle as
 //! BFD. The instance owns:
 //!
-//!   * the wildcard reflector socket (`0.0.0.0:862`) with its
-//!     read/write tasks — the **implicit reflector**: a probe is
-//!     answered iff its source is the remote of a registered session
-//!     (measurement enabled on both ends of the link, plan §2);
+//!   * the wildcard reflector sockets (`0.0.0.0:862` and, when it
+//!     binds, `[::]:862`) with their read/write tasks — the **implicit
+//!     reflector**: a probe is answered iff its source is the remote of
+//!     a registered session (measurement enabled on both ends of the
+//!     link, plan §2); the reply is routed back over the write loop of
+//!     the probe's address family;
 //!   * one connected sender socket + reply-read task + prober task per
 //!     session;
 //!   * the per-session subscriber registry fanning damped
@@ -22,7 +24,7 @@
 //! step mid-probe) are discarded and counted.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
 use stamp_packet::{ErrorEstimate, ReflectorPacket, SenderPacket, StampTimestamp};
@@ -35,11 +37,16 @@ use crate::config::{
 use crate::context::{ProtoContext, Task};
 
 use super::client::{ClientId, ClientReq, ClientReqChannel, StampEvent};
-use super::network::{ReflectRequest, reflector_read, reflector_write, sender_read};
+use super::network::{
+    ReflectRequest, reflector_read, reflector_read_v6, reflector_write, reflector_write_v6,
+    sender_read,
+};
 use super::reflector::build_reply;
 use super::sender::{ProberCmd, ProberHandle, session_prober};
 use super::session::{Session, SessionKey, SessionParams, SessionTable};
-use super::socket::{stamp_reflector_socket, stamp_sender_socket};
+use super::socket::{
+    stamp_reflector_socket, stamp_reflector_socket_v6, stamp_sender_socket, stamp_sender_socket_v6,
+};
 use super::timestamp::{delta_micros, now_ntp};
 
 /// `show <path>` dispatch handler — mirrors [`crate::bfd::inst::ShowCallback`].
@@ -124,6 +131,10 @@ pub struct Stamp {
     /// Local address the reflector socket was bound to — tests bind
     /// ephemeral ports and need to learn the kernel's choice.
     pub local_addr: SocketAddrV4,
+    /// Local address the IPv6 reflector socket bound to, when one was
+    /// requested and the bind succeeded (the `[::]:862` listener is
+    /// non-fatal — `None` means v6 sessions can't be reflected).
+    pub local_addr_v6: Option<SocketAddrV6>,
     /// Config-manager subscription endpoints. STAMP has no own config
     /// in Phase 1; every commit broadcast is drained (registering as a
     /// config client also lets the manager see the task is running).
@@ -137,23 +148,40 @@ pub struct Stamp {
     subscribers: HashMap<SessionKey, BTreeMap<ClientId, UnboundedSender<StampEvent>>>,
     main_tx: UnboundedSender<Message>,
     reflect_tx: UnboundedSender<ReflectRequest>,
+    /// Reply queue for the IPv6 reflector write loop; `None` when no
+    /// `[::]:862` listener bound (so v6 probes can't be answered).
+    reflect_tx_v6: Option<UnboundedSender<ReflectRequest>>,
     probers: HashMap<SessionKey, ProberHandle>,
     pub reflector_stats: ReflectorStats,
 }
 
 impl Stamp {
-    /// Production constructor — binds the reflector to `0.0.0.0:862`.
+    /// Production constructor — binds the reflectors to `0.0.0.0:862`
+    /// and `[::]:862` (the latter non-fatal).
     pub fn new(ctx: ProtoContext) -> std::io::Result<Self> {
         Self::new_with(
             ctx,
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, stamp_packet::STAMP_UDP_PORT),
+            Some(SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                stamp_packet::STAMP_UDP_PORT,
+                0,
+                0,
+            )),
         )
     }
 
     /// Explicit constructor letting the caller pick the reflector bind
-    /// address (the integration test runs on a loopback ephemeral
-    /// port and aims a session's `dst_port` at it).
-    pub fn new_with(ctx: ProtoContext, bind: SocketAddrV4) -> std::io::Result<Self> {
+    /// addresses (the integration test runs on loopback ephemeral
+    /// ports and aims a session's `dst_port` at one). `bind_v6` is
+    /// `None` to skip the IPv6 listener entirely (the v4-only unit
+    /// tests); when `Some`, a bind failure is logged and swallowed —
+    /// v4 measurement must not depend on v6 being available.
+    pub fn new_with(
+        ctx: ProtoContext,
+        bind: SocketAddrV4,
+        bind_v6: Option<SocketAddrV6>,
+    ) -> std::io::Result<Self> {
         let sock = stamp_reflector_socket(&ctx, bind)?;
         let local_addr = sock
             .local_addr()?
@@ -173,11 +201,26 @@ impl Stamp {
             reflector_write(sock, reflect_rx).await;
         });
 
+        // IPv6 reflector: non-fatal. Any failure (bind denied, no v6 in
+        // the namespace) just disables v6 reflection; `reflect_tx_v6`
+        // stays `None` and v4 keeps working.
+        let (reflect_tx_v6, local_addr_v6) = match bind_v6 {
+            Some(b6) => match Self::spawn_v6_reflector(&ctx, b6, &main_tx) {
+                Ok((tx6, addr6)) => (Some(tx6), Some(addr6)),
+                Err(e) => {
+                    tracing::warn!(bind = %b6, error = %e, "stamp: IPv6 reflector unavailable; v6 sessions disabled");
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+
         let mut stamp = Self {
             rx,
             ctx,
             sessions: SessionTable::new(),
             local_addr,
+            local_addr_v6,
             cm: ConfigChannel::new(),
             show: ShowChannel::new(),
             show_cb: HashMap::new(),
@@ -185,11 +228,40 @@ impl Stamp {
             subscribers: HashMap::new(),
             main_tx,
             reflect_tx,
+            reflect_tx_v6,
             probers: HashMap::new(),
             reflector_stats: ReflectorStats::default(),
         };
         stamp.show_build();
         Ok(stamp)
+    }
+
+    /// Build the IPv6 reflector socket, spawn its read/write loops, and
+    /// return the reply queue plus the bound address. Split out so the
+    /// whole v6 setup is one fallible unit `new_with` can treat as
+    /// non-fatal.
+    fn spawn_v6_reflector(
+        ctx: &ProtoContext,
+        bind: SocketAddrV6,
+        main_tx: &UnboundedSender<Message>,
+    ) -> std::io::Result<(UnboundedSender<ReflectRequest>, SocketAddrV6)> {
+        let sock = stamp_reflector_socket_v6(ctx, bind)?;
+        let local_addr = sock
+            .local_addr()?
+            .as_socket_ipv6()
+            .ok_or_else(|| std::io::Error::other("bound socket has no IPv6 local address"))?;
+        let sock = Arc::new(AsyncFd::new(sock)?);
+
+        let (reflect_tx, reflect_rx) = mpsc::unbounded_channel::<ReflectRequest>();
+        let read_sock = sock.clone();
+        let read_tx = main_tx.clone();
+        tokio::spawn(async move {
+            reflector_read_v6(read_sock, read_tx).await;
+        });
+        tokio::spawn(async move {
+            reflector_write_v6(sock, reflect_rx).await;
+        });
+        Ok((reflect_tx, local_addr))
     }
 
     /// Clone the inbound client-request sender for distribution to the
@@ -265,16 +337,26 @@ impl Stamp {
     /// Create the session: connected sender socket, reply-read task,
     /// prober task.
     fn add_session(&mut self, key: SessionKey, params: SessionParams) -> std::io::Result<()> {
-        let (IpAddr::V4(local), IpAddr::V4(remote)) = (key.local, key.remote) else {
-            return Err(std::io::Error::other(
-                "stamp: IPv6 sessions are not supported yet",
-            ));
+        // One connected sender socket, v4 or v6 by the key's family. For
+        // v6 the scope id (`key.ifindex`) rides on both endpoints so a
+        // link-local 4-tuple is unambiguous across interfaces.
+        let sock = match (key.local, key.remote) {
+            (IpAddr::V4(local), IpAddr::V4(remote)) => stamp_sender_socket(
+                &self.ctx,
+                SocketAddrV4::new(local, 0),
+                SocketAddrV4::new(remote, params.dst_port),
+            )?,
+            (IpAddr::V6(local), IpAddr::V6(remote)) => stamp_sender_socket_v6(
+                &self.ctx,
+                SocketAddrV6::new(local, 0, 0, key.ifindex),
+                SocketAddrV6::new(remote, params.dst_port, 0, key.ifindex),
+            )?,
+            _ => {
+                return Err(std::io::Error::other(
+                    "stamp: session key mixes IPv4 and IPv6 addresses",
+                ));
+            }
         };
-        let sock = stamp_sender_socket(
-            &self.ctx,
-            SocketAddrV4::new(local, 0),
-            SocketAddrV4::new(remote, params.dst_port),
-        )?;
         let sock = Arc::new(AsyncFd::new(sock)?);
 
         let read_sock = sock.clone();
@@ -454,18 +536,34 @@ impl Stamp {
         len: usize,
     ) {
         self.reflector_stats.rx += 1;
-        let Some(session_key) = self.sessions.reflect_allowed(src.ip()) else {
+        let Some(session_key) = self.sessions.reflect_allowed(src.ip(), ifindex) else {
             self.reflector_stats.unauthorized += 1;
             tracing::debug!(?src, "stamp: probe from unregistered source dropped");
             return;
         };
         let reply = build_reply(&probe, rx_ts, ttl, len);
-        let _ = self.reflect_tx.send(ReflectRequest {
+        let req = ReflectRequest {
             reply,
             dst: src,
             src: dst,
             ifindex: (ifindex != 0).then_some(ifindex),
-        });
+        };
+        // Route the reply to the write loop of the probe's family. A v6
+        // probe with no `[::]:862` listener (bind failed) can't be
+        // answered — drop it without counting a reflection.
+        let queued = match src {
+            SocketAddr::V4(_) => self.reflect_tx.send(req).is_ok(),
+            SocketAddr::V6(_) => match &self.reflect_tx_v6 {
+                Some(tx) => tx.send(req).is_ok(),
+                None => {
+                    tracing::debug!(?src, "stamp: v6 probe but no v6 reflector socket; dropped");
+                    false
+                }
+            },
+        };
+        if !queued {
+            return;
+        }
         self.reflector_stats.reflected += 1;
         // The T2 we just echoed is only as good as its source; track it
         // for `show stamp statistics` (helps the peer's numbers).
@@ -529,9 +627,11 @@ mod tests {
     use super::*;
 
     fn fresh_stamp() -> Stamp {
+        // v4-only: these tests don't exercise the v6 reflector.
         Stamp::new_with(
             ProtoContext::default_table_no_rib(),
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            None,
         )
         .expect("bind loopback")
     }
@@ -752,5 +852,101 @@ mod tests {
         assert!(updates[0].is_some());
         assert!(updates[1].is_none());
         assert!(stamp.sessions.get(&key).unwrap().last_export.is_none());
+    }
+
+    /// Build a Stamp with both reflectors on loopback ephemeral ports.
+    fn fresh_stamp_dualstack() -> Stamp {
+        Stamp::new_with(
+            ProtoContext::default_table_no_rib(),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            Some(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0)),
+        )
+        .expect("bind loopback reflectors")
+    }
+
+    // `::1` is the only loopback v6 address (unlike `127.0.0.0/8`), so a
+    // v6 self-loop key is local == remote == `::1` — mirrors how the v4
+    // integration test loops back through LOCALHOST.
+    fn v6_loopback_key() -> SessionKey {
+        SessionKey {
+            local: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            remote: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ifindex: 0,
+        }
+    }
+
+    /// Step 3: with a v6 reflector bound, a v6 session key takes the
+    /// `add_session` v6 branch — a v6 connected sender socket and a
+    /// live session with a real ssid.
+    #[tokio::test]
+    async fn v6_session_creates_over_loopback() {
+        let mut stamp = fresh_stamp_dualstack();
+        assert!(stamp.local_addr_v6.is_some(), "v6 reflector bound");
+
+        let key = v6_loopback_key();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert_eq!(stamp.sessions.len(), 1);
+        assert_ne!(stamp.sessions.get(&key).unwrap().ssid, 0);
+    }
+
+    /// Step 3: a probe from a registered v6 remote is reflected over the
+    /// v6 write loop; the same probe is dropped (no reflection counted)
+    /// when no v6 reflector bound — the family-routing in `on_probe_recv`.
+    #[tokio::test]
+    async fn v6_probe_routes_to_v6_loop_else_drops() {
+        let src = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 5000, 0, 0));
+
+        // With a v6 reflector: the probe is reflected.
+        let mut stamp = fresh_stamp_dualstack();
+        let key = v6_loopback_key();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+
+        stamp.on_probe_recv(
+            SenderPacket::default(),
+            src,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            0,
+            255,
+            StampTimestamp::default(),
+            false,
+            stamp_packet::BASE_LEN,
+        );
+        assert_eq!(stamp.reflector_stats.reflected, 1);
+        assert_eq!(stamp.sessions.get(&key).unwrap().reflected_count, 1);
+
+        // Without a v6 reflector (`bind_v6` = None): the v6 session still
+        // creates (the sender socket is independent), but an inbound v6
+        // probe can't be answered, so it's dropped — allowed, not
+        // reflected, not unauthorized.
+        let mut stamp = fresh_stamp(); // v4-only reflector
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert_eq!(
+            stamp.sessions.len(),
+            1,
+            "v6 session creates without a v6 reflector"
+        );
+
+        stamp.on_probe_recv(
+            SenderPacket::default(),
+            src,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            0,
+            255,
+            StampTimestamp::default(),
+            false,
+            stamp_packet::BASE_LEN,
+        );
+        assert_eq!(stamp.reflector_stats.rx, 1);
+        assert_eq!(
+            stamp.reflector_stats.reflected, 0,
+            "no v6 reflector → dropped"
+        );
+        assert_eq!(
+            stamp.reflector_stats.unauthorized, 0,
+            "source was registered"
+        );
     }
 }
