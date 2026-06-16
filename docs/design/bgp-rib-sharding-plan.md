@@ -5,17 +5,26 @@ policy-parallelism C.1/C.2 built; N-shard dedicated-thread pool +
 RouteBatch + mimalloc built; per-shard inbound-policy replication
 (`PolicyReplace`) built; Phase E.1 (parallel advertise-outcome
 precompute) + E.2 (bounded egress worker pool) built; Adj-RIB-Out
-unified across all families (BatchAfi/LabeledAfi)** — Phase 0 + A merged
-2026-06-12 (PRs #1402/#1406/#1408/#1416). Everything after Phase A lives
-**unmerged** on branch `bgp-nshard-policy-shard` (55 commits ahead of
-`main` as of 2026-06-14, no PR yet). Three deliberate divergences from
-the §5–8 plan: **B.3 became a synchronous dispatch, not a spawned task**;
-**the re-scoped Phase C parallelizes the pure policy walk (rayon)**; and
-**the multi-shard fan-out runs on dedicated OS threads, not tokio tasks**.
-Shard count is now **runtime env-driven** — `ZEBRA_BGP_SHARDS` (clamp
-1–64, default 1), with the egress pool sized by `ZEBRA_BGP_UPDATE_WORKERS`
-(default `max(1, cores − shards)`) — the compile-time `SHARDS` constant
-is gone; a YANG knob is still the future shipping form.
+unified across all families (BatchAfi/LabeledAfi); YANG knobs (`shards`,
+`peer-task`); two opt-in off-main egress models (per-peer + per-update-group
+task); N>1 read paths (show / summary / sync) + N>1 `network` origination
+complete** — Phase 0 + A merged 2026-06-12 (PRs #1402/#1406/#1408/#1416). The full sharding branch then
+**merged to `main` 2026-06-16 (PR #1442)**; everything below is now on
+`main`, not a WIP branch. Follow-on work since — the YANG knobs, two opt-in
+egress-task models (per-peer + per-update-group), the N>1 read paths
+(`show` / `summary` / sync), and N>1 `network` origination — landed in PRs
+#1444–#1458. Three deliberate divergences from the §5–8 plan: **B.3 became
+a synchronous dispatch, not a spawned task**; **the re-scoped Phase C
+parallelizes the pure policy walk (rayon)**; and **the multi-shard fan-out
+runs on dedicated OS threads, not tokio tasks**.
+Shard count is **config- or env-driven** — the YANG knob `router bgp shards
+<1-64>` (PR #1444) or `ZEBRA_BGP_SHARDS` (clamp 1–64, default 1), with the
+egress pool sized by `ZEBRA_BGP_UPDATE_WORKERS` (default
+`max(1, cores − shards)`); the compile-time `SHARDS` constant is gone. The
+egress model is selected the same way: default (update-group flush),
+`router bgp peer-task true` / `ZEBRA_BGP_PEER_TASK` (per-peer task, the
+GoBGP model), or `ZEBRA_BGP_EGRESS_GROUP_TASK` (per-update-group task, the
+Juniper update-worker form) — see "Egress models" below.
 The "Implementation status" section below is the current architecture of
 record; §1–10 remain the original applicability analysis and design
 rationale. Open decisions §8: D1 (in-repo `bgp-bench`) and D3
@@ -29,7 +38,7 @@ Source: "BGP RIB Sharding" — Ravindran Thangarajah, Juniper Networks,
 2022-10-24.
 <https://community.juniper.net/blogs/ravindran-thangarajah/2022/10/24/bgp-rib-sharding>
 
-## Implementation status (as built — 2026-06-14)
+## Implementation status (as built — 2026-06-16)
 
 What actually shipped diverges from the §5–8 plan in three deliberate
 ways: B.3 became a **synchronous dispatch** rather than a spawned task;
@@ -38,8 +47,10 @@ and the multi-shard fan-out (original C.1) runs on **dedicated OS
 threads** owning a slice end-to-end, not tokio shard-tasks. On top of
 sharding, the egress path was **unified** — every family (v4/v6 unicast,
 VPNv4/6, labeled-unicast v4/v6) now has a functional Adj-RIB-Out behind
-two generic traits, which is the substrate Phase E.2+ (group-affinity
-update-workers) will build on. §5–10 remain the original design
+two generic traits — and on that substrate two **opt-in off-main egress
+models** were built: a per-peer task (PET, the GoBGP form) and a
+per-update-group task (the Juniper update-worker form, §12 P1's first
+cut). See "Egress models" below. §5–10 remain the original design
 rationale; §11 is the BIRD/GoBGP prior-art comparison and §12 is the
 current improvement roadmap.
 
@@ -292,6 +303,48 @@ The update-group cache (`cache_ipv4` …) and `UpdateGroupSig` are
 unchanged — the signature is per-session, not per-family, so unification
 needed no new variants.
 
+### Egress models — three selectable forms (built, two opt-in)
+
+The advertise path now has three forms, selected at startup (the egress
+model is fixed for the instance lifetime, read once). All three sit on the
+unified Adj-RIB-Out above; they differ in **where** the per-peer adj-out +
+encode live.
+
+- **Default — update-group flush (main task).** The reduce buckets
+  `BestPathV4` deltas into the per-group cache keyed by `Arc<BgpAttr>`,
+  debounces, and `spawn_blocking`-encodes one UPDATE per bucket replicated
+  to members (the "Egress flush" diagram below). Encode is off-thread;
+  bucketing / cache / adj-out run on main. Every default run and all
+  BDD-except-the-egress-task-features use this.
+- **Per-peer egress task (PET) — `router bgp peer-task true` /
+  `ZEBRA_BGP_PEER_TASK`** (`bgp/peer_egress.rs`). The GoBGP per-peer model:
+  one task per Established peer owns that peer's v4 `adj_out` + a private
+  attr interner + its `SyncCtx`, and does build + out-policy + encode +
+  send itself — **no update-group coalescing** (each peer encodes its own
+  bytes). The reduce's advertise sink (`apply_ipv4_advertise_job`) and the
+  origination / direct-withdraw sink (`route_advertise_to_peers`) both gate
+  to `fan_advertise_to_pets` at gate-on, so the per-peer egress runs off the
+  main task. v4-unicast only; default off. Locked by `@bgp_peer_egress_v4`.
+- **Per-update-group egress task — `ZEBRA_BGP_EGRESS_GROUP_TASK`**
+  (`bgp/group_egress.rs`). The Juniper update-worker form, and the first
+  cut of §12 P1: **M tasks, one per `UpdateGroup`** (not N per peer). Each
+  task owns the group's shared `adj_out`, encodes each best path **once**,
+  and **fans** the bytes to its member peers, excluding the path's source
+  (split-horizon at fan time). A PET is the M=1 degenerate case. Built
+  across phases 0–5 + AddPath (PRs #1453/#1454/#1456): lifecycle
+  (attach/detach spawn/retire the task), event-driven advertise/withdraw
+  (`fan_advertise_to_groups` + `fan_addpath_to_groups` — AddPath peers get
+  every candidate), peer-down, late-peer session-up sync (`RecordAdjOut`),
+  soft-out re-fan, and the show/summary reads (below). Default off; gate-off
+  is byte-identical. Locked by `@bgp_egress_group_task` (N=1) +
+  `@bgp_egress_group_sharded` (N>1) + `@bgp_addpath_group`.
+
+The **default flip** (making a task model the shipping egress) is still
+future — it needs gate precedence (explicit env vs the group default), a
+full BGP BDD re-validation at the new default, and PET retirement once the
+group task subsumes it. **v6/VPN egress** in the task models is also still
+future (v4-unicast only today).
+
 ### Still future (immediate sharding gaps)
 
 - **VPNv4 / v6 / VPNv6 / LU pool dispatch.** At N>1 only plain v4-unicast
@@ -302,20 +355,34 @@ needed no new variants.
   activated.
 - **N>1 barriers** (planned C.3): EoR / route-refresh / GR-LLGR sweeps
   must become broadcast-and-ack across shards.
-- **N>1 v4-unicast read paths** (B.4) — **critical**: `show bgp ipv4`,
-  session-up `route_sync_ipv4`, and `clear`/soft-in all read the
-  synchronous `bgp.shard.v4`, which is empty at N>1 (v4-unicast is the only
-  pooled family and the reduce never mirrors best-paths back). The operator
-  can't see the v4 RIB and a peer establishing after routes exist gets
-  nothing; forwarding is unaffected. (The earlier "`Show` is wired" note was
-  wrong — disproved by `@bgp_shard_v4_sync`.) Fix plan + recommended design
-  below.
-- **YANG knob** `router bgp shards <1-64>` to replace `ZEBRA_BGP_SHARDS`
-  as the shipping form (planned C.4), plus the perf matrix + default.
 - **`PolicyReplace` correctness sweep.** Inbound policy snapshots are now
   replicated to shards (`BgpShard.in_policy`, broadcast `PolicyReplace`);
   remaining work is the live-reconfig re-evaluation path (re-running
   best-path against the new snapshot, not just storing it).
+- **Egress task default flip + v6/VPN egress** — see "Egress models" above:
+  the PET / group-task models are v4-unicast only and default off; making
+  one the shipping egress and extending it to v6/VPN are both future.
+
+**Closed this cycle (were "immediate gaps").**
+
+- **N>1 v4-unicast read paths (B.4) — DONE.** `show bgp ipv4`,
+  session-up `route_sync_ipv4`, `clear`/soft-in, *and* `show bgp [ipv4]
+  summary` now read the authoritative off-main owners — the read-replica
+  mirror + the `DumpV4` shard sync + the show scatter-gathers
+  (received-routes, advertised-routes, summary counts, PRs #1455/#1457).
+  See the (updated) B.4 section below.
+- **YANG knobs — DONE.** `router bgp shards <1-64>` (PR #1444) replaces
+  `ZEBRA_BGP_SHARDS` as the shipping form; `router bgp peer-task <bool>`
+  (PR #1450) selects the egress model. Remaining C.4: the perf matrix + a
+  justified shipping default.
+- **N>1 `network` origination — DONE (PR #1458).** `route_add` /
+  `route_del` wrote the originated row straight into main's shard, which
+  the pool's session-up `DumpV4` never sees, so a peer establishing after
+  origination never learned the network. Fixed by injecting through the
+  pool (`ShardMsg::OriginateV4`) so the row is pool-owned exactly like a
+  peer route. **Any other main-side v4 injection at N>1 (redistribute,
+  aggregate, default-originate) must follow the same inject-through-pool
+  pattern**, not write `bgp.shard.v4` directly.
 
 The larger architectural improvements — drawn from the BIRD/GoBGP study
 (§11) — are collected in §12.
@@ -404,9 +471,26 @@ its slice and builds + sends per `SyncCtx` (Tier-1b park); main records the
 N>1 — superseding the cursor there, reading the *authoritative* shard
 slices instead of the B.4 mirror (cursor kept at N=1). AddPath-send covered
 by `@bgp_shard_addpath_v4`; full N>1 shard BDD matrix green (88 scenarios).
-Remaining: wire `show bgp ipv4` through `DumpV4` (flips the z2 assertion
-green; pair with the streamed-`show` follow-up) → retrofit `clear`/soft-in
-onto the same `DumpV4`.
+
+The per-peer **show** reads at N>1 also landed, each intercepted in
+`inst.rs::process_show_msg` (async) ahead of the sync `show_cb` and
+scatter-gathered from the off-main owner over oneshots — the sync render
+would read the empty main-side copy and print empty/0:
+
+- **`show bgp neighbors <peer> received-routes`** — Adj-RIB-In lives in the
+  pool shards at N>1; gathered via `ShardMsg::DumpAdjInV4` (A2 ⑤).
+- **`show bgp neighbors <peer> advertised-routes`** — Adj-RIB-Out lives in
+  the PET / group task at gate-on; requested via `request_adj_out`.
+- **`show bgp [ipv4] summary`** PfxRcd / PfxSnt — PfxRcd from the shards,
+  PfxSnt from the PET or group task; **count-only** messages
+  (`CountAdjInV4All`, `EgressDeltaV4::CountAdjOut`,
+  `GroupEgressDeltaV4::CountAdjOut`) rather than full dumps (PRs
+  #1455/#1457).
+
+Discipline: any new per-peer show that reads an Adj-RIB at gate-on / N>1
+must async-gather the same way, or it silently prints empty. Remaining: a
+streamed/paginated `show` (the `show` RPC's 4 MB sorted-table ceiling) and
+retrofitting `clear`/soft-in onto the same `DumpV4`.
 
 ### Shard sync matrix — every AFI/SAFI × AddPath validated (B.4 complete, 2026-06-15)
 
@@ -701,7 +785,7 @@ middle. One core is the convergence ceiling regardless of machine size.
 |---|---|---|
 | Shard thread owning a RIB slice | `BgpShard` owning `LocalRibTable<P>` partitions + adj-in slices (a plain field at N=1, a dedicated OS thread per shard at N>1 — *not* a tokio task) | ✅ built — only plain v4-unicast fans out across the pool; VPNv4 (transit label needs main's central allocator), v6, VPNv6 and LU best-path still run on the single sync shard. The per-VRF task (`process_vrf_global_msg`) was the precedent, sharded by table instead of by hash |
 | RTO (prefix + attr shorthand) | `(Arc<BgpAttr>, Nlri, source_ident)` — the *existing* update-group cache entry (`bgp/update_group.rs:181`) | exists — zebra-rs invented the RTO without naming it |
-| Update thread packing RTOs | update-worker task owning `UpdateGroup` caches + debounce timers + canonical encode | 🔶 partial — encode is off-thread (A.2 `FlushJob` → `spawn_blocking`) and the out-policy precompute parallelizes (E.1/E.2 bounded egress pool); the dedicated group-affinity worker fed `AdvDelta` is still future (E.2+, §12) |
+| Update thread packing RTOs | update-worker task owning `UpdateGroup` caches + debounce timers + canonical encode | 🔶 partial — encode is off-thread (A.2 `FlushJob` → `spawn_blocking`) and the out-policy precompute parallelizes (E.1/E.2 bounded egress pool); the dedicated group-affinity worker is **built as the opt-in egress-group-task** (#1453/#1454, default off, fed via the main reduce not yet a per-shard journal) — see "Egress models" + §12 P1 |
 | Resolver-as-a-service in main | already a service: RIB daemon NHT over `RibRx::NexthopUpdate` channel | exists |
 | Non-BGP routes hashed into shards | **not needed** — cross-protocol active-route selection lives in the central RIB daemon, not in BGP | simpler than Junos |
 | KRT/FIB download from main | `rib_client` channel sends — handle is cloneable into shards | exists |
@@ -749,9 +833,11 @@ peer writer tasks ◀──bytes── │ (coordina-   │  listeners, VRF regi
 
 Each PR is a separate branch off `main` (repo convention), lands only
 CI-green, and must leave the daemon fully functional — sharding ships
-off by default (`ZEBRA_BGP_SHARDS` unset → N=1) until C.4 flips a YANG
-knob. Status column reflects the `bgp-nshard-policy-shard` branch (all
-post-A rows unmerged as of 2026-06-14).
+off by default (`router bgp shards` / `ZEBRA_BGP_SHARDS` unset → N=1).
+The whole series is now **merged to `main`** (the `bgp-nshard-policy-shard`
+branch landed as PR #1442, 2026-06-16; the YANG knobs and the egress-task
+models followed in #1444–#1458); the status column reflects `main` as of
+2026-06-16.
 
 | Step | Title | Depends on | Status |
 |---|---|---|---|
@@ -761,12 +847,12 @@ post-A rows unmerged as of 2026-06-14).
 | B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ✅ built (WIP branch) |
 | B.2 | Shard message protocol + label sub-blocks | B.1 | ✅ built (WIP branch) |
 | B.3 | ~~Spawn shard task~~ → **sync dispatch** at N=1 | B.2 | ✅ built — pivoted to sync, see "Implementation status" |
-| B.4 | Show / clear / sync scatter-gather | B.3 | ❌ not built — `show` / `sync` / `clear` all read the empty `bgp.shard.v4` at N>1 (`@bgp_shard_v4_sync` red); recommended A2 fix plan in Implementation status |
+| B.4 | Show / clear / sync scatter-gather | B.3 | ✅ built — read-replica mirror + `DumpV4` session-up sync + the per-peer show scatter-gathers (`show bgp ipv4`, received-/advertised-routes, `summary` counts, PRs #1442/#1455/#1457); `@bgp_shard_v4_sync` + the full sync matrix green. Remaining: `clear`/soft-in onto `DumpV4`, streamed `show` |
 | B.5 | BDD + lifecycle hardening at N=1 | B.4 | ⏳ |
-| C.1 | Prefix-hash fan-out to N shards (+ YANG knob) | B.5 | ✅ built — dedicated-thread `ShardPool`, env-gated `ZEBRA_BGP_SHARDS` (plain v4-unicast only; VPNv4/v6/VPNv6/LU still sync); YANG knob still future |
-| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | 🔶 partial — E.1/E.2 parallel egress (bounded pool) built; dedicated group-affinity workers = E.2+ (§12) |
+| C.1 | Prefix-hash fan-out to N shards (+ YANG knob) | B.5 | ✅ built — dedicated-thread `ShardPool`, `router bgp shards <1-64>` (#1444) or `ZEBRA_BGP_SHARDS` (plain v4-unicast only; VPNv4/v6/VPNv6/LU still sync) |
+| C.2 | Update-worker tasks (group affinity) | A.2, C.1 | 🔶 partial — E.1/E.2 parallel egress (bounded pool) built; the dedicated group-affinity worker is built as the **opt-in egress-group-task** (#1453/#1454, default off) — the first cut of §12 P1; default flip + v6/VPN still future |
 | C.3 | Barriers: EoR, refresh, GR/LLGR sweeps, clear | C.1 | ⏳ |
-| C.4 | Perf matrix, defaults, docs | C.2, C.3 | ⏳ |
+| C.4 | Perf matrix, defaults, docs | C.2, C.3 | 🔶 partial — YANG knobs landed (`shards` #1444, `peer-task` #1450); perf matrix + a justified shipping default still TODO |
 
 > **Phase C label note**: "C.1/C.2" name two different axes. The
 > *re-scoped* C.1/C.2 (rayon-parallel inbound/outbound **policy** at N=1)
@@ -1201,6 +1287,20 @@ unification (above) is the enabler — every family now has the per-peer
 `adj_out` a worker diffs against. Ordering still holds: one prefix → one
 shard → one worker. This is the single highest-value remaining item and
 the one §11 explicitly points at.
+
+**First cut built (opt-in, `ZEBRA_BGP_EGRESS_GROUP_TASK`).** The
+**egress-group-task** (`bgp/group_egress.rs`, "Egress models" above) is this
+worker, minus the journal: M tasks with static group→task affinity, each
+owning its group's `adj_out` + encode and fanning bytes to members
+(split-horizon at fan time), spawned/retired by the update-group lifecycle.
+The shards still feed it *via the main reduce* (`fan_advertise_to_groups`),
+not a per-shard `lfjour` the workers pull — so the reduce hop and the
+unbounded fan-out (P2) remain. Remaining for the full P1: the per-shard
+journal (workers pull, main no longer fans), then make a task model the
+default egress (it is v4-unicast-only + default-off today) and retire the
+PET. The per-peer (PET) and per-group tasks already validate the
+off-main-egress machinery end to end (lifecycle, sync, soft-out,
+show/summary reads, AddPath).
 
 **P2 — Backpressure.** Every inter-thread channel is currently unbounded
 (shard inbox `std::sync::mpsc`, the tokio result channel, the egress
