@@ -276,6 +276,11 @@ impl UpdateGroupAf {
     pub fn group_by_id_mut(&mut self, id: &UpdateGroupId) -> Option<&mut UpdateGroup> {
         self.groups.values_mut().find(|g| &g.id == id)
     }
+
+    /// Shared-reference twin of [`group_by_id_mut`](Self::group_by_id_mut).
+    pub fn group_by_id(&self, id: &UpdateGroupId) -> Option<&UpdateGroup> {
+        self.groups.values().find(|g| &g.id == id)
+    }
 }
 
 /// Top-level container on `Bgp`.

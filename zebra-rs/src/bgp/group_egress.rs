@@ -62,16 +62,14 @@ pub enum GroupEgressDeltaV4 {
     RemoveMember {
         ident: usize,
     },
-    // Advertise / Withdraw are routed by the reduce in Phase 1b; until then
-    // they are constructed only by the engine unit tests, so the bin build
-    // sees them as unconstructed.
-    #[allow(dead_code)]
+    /// The new best path for `prefix`. The split-horizon source is the path's
+    /// own origin (`rib.ident`), derived in the engine — no separate field.
     Advertise {
         prefix: Ipv4Net,
         rib: BgpRib,
-        source_ident: usize,
     },
-    #[allow(dead_code)]
+    /// `prefix` is gone; `source_ident` is the withdrawing peer (excluded from
+    /// the fan — it never received the advertisement under split-horizon).
     Withdraw {
         prefix: Ipv4Net,
         id: u32,
@@ -147,11 +145,7 @@ impl Engine {
             GroupEgressDeltaV4::RemoveMember { ident } => {
                 self.members.remove(&ident);
             }
-            GroupEgressDeltaV4::Advertise {
-                prefix,
-                rib,
-                source_ident,
-            } => self.advertise(prefix, rib, source_ident),
+            GroupEgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
             GroupEgressDeltaV4::Withdraw {
                 prefix,
                 id,
@@ -165,11 +159,22 @@ impl Engine {
     /// once, and fan to every member except `source_ident`. A build / policy
     /// filter (split-horizon at the source, policy-deny) becomes a withdraw,
     /// exactly as the PET / gate-off `Withdraw` outcome.
-    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib, source_ident: usize) {
-        // Any member's ctx yields the canonical bytes (shared transform).
-        let Some(ctx) = self.members.values().next().cloned() else {
-            // No members yet — still record the group's RIB state so a future
-            // member is caught up; nothing to send.
+    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib) {
+        // Split-horizon target is the path's own source peer.
+        let source = rib.ident;
+        // Build with a NON-source member's ctx: `route_update_ipv4` drops the
+        // advertise when `ctx.ident == rib.ident`, so the source member's ctx
+        // would wrongly collapse the whole group advertise into a withdraw.
+        // The transform is otherwise group-shared, so any non-source member
+        // yields the canonical bytes.
+        let Some(ctx) = self
+            .members
+            .iter()
+            .find(|(id, _)| **id != source)
+            .map(|(_, c)| c.clone())
+        else {
+            // No non-source member to advertise to — still record the group's
+            // RIB state so a future member is caught up; nothing to send.
             let arc = self.attr_store.intern((*rib.attr).clone());
             rib.attr = arc;
             self.adj_out.add(prefix, rib);
@@ -182,7 +187,7 @@ impl Engine {
             },
         );
         let Some((nlri, decision)) = built else {
-            self.withdraw(prefix, rib.remote_id, source_ident);
+            self.withdraw(prefix, rib.remote_id, source);
             return;
         };
         let arc = self.attr_store.intern(decision.attr);
@@ -191,7 +196,7 @@ impl Engine {
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
             let bytes_list = encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), None);
-            self.fan(&bytes_list, source_ident);
+            self.fan(&bytes_list, source);
         }
     }
 
@@ -267,11 +272,12 @@ mod tests {
         rx
     }
 
-    fn advertise(engine: &mut Engine, prefix: &str, source_ident: usize) {
+    /// `src` becomes the path's source (`rib.ident`) — the split-horizon
+    /// target the engine derives.
+    fn advertise(engine: &mut Engine, prefix: &str, src: usize) {
         engine.handle(GroupEgressDeltaV4::Advertise {
             prefix: prefix.parse().unwrap(),
-            rib: rib(5, "192.0.2.1"),
-            source_ident,
+            rib: rib(src, "192.0.2.1"),
         });
     }
 

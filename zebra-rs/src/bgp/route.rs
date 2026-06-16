@@ -2708,6 +2708,15 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
+    // Group-task migration Phase 1b (gate-on): the v4-unicast event-driven
+    // advertise/withdraw runs in the per-update-group egress tasks — fan one
+    // delta per group and bypass the update-group flush. Takes precedence over
+    // the per-peer PET below (they are alternative egress models). VPNv4
+    // (`rd = Some`) stays on the update-group path.
+    if rd.is_none() && super::group_egress::egress_group_task_enabled() {
+        fan_advertise_to_groups(prefix, &selected, source_ident, bgp.update_groups, peers);
+        return;
+    }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
     // PETs — fan the best path there and bypass the update-group path. This
     // is the reduce's advertise sink (`route_apply_bestpath_v4_batch` →
@@ -3062,6 +3071,57 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
             None => super::peer_egress::EgressDeltaV4::Withdraw { prefix, id: 0 },
         };
         let _ = pet.delta_tx.send(delta);
+    }
+}
+
+/// Group-task migration Phase 1b — fan the reduce's best-path delta to the
+/// per-update-group egress tasks: **one** delta per group (deduped across the
+/// established members), keyed by `peer.update_group_id`. An empty `selected`
+/// is a withdraw (the path is gone). The per-member split-horizon is the
+/// engine's job (it excludes `rib.ident` from the fan), so the source need
+/// only ride the withdraw — the advertise carries its source in `rib`.
+fn fan_advertise_to_groups(
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+    source_ident: usize,
+    update_groups: &super::update_group::UpdateGroupMap,
+    peers: &PeerMap,
+) {
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let new_best = selected.last();
+    let mut seen: std::collections::BTreeSet<super::update_group::UpdateGroupId> =
+        std::collections::BTreeSet::new();
+    for ident in peers.established_plain_idents(Afi::Ip, Safi::Unicast) {
+        let Some(peer) = peers.get_by_idx(ident) else {
+            continue;
+        };
+        let Some(gid) = peer.update_group_id.get(&afi_safi).cloned() else {
+            continue;
+        };
+        // One delta per group, not per member.
+        if !seen.insert(gid.clone()) {
+            continue;
+        }
+        let Some(af) = update_groups.get(&afi_safi) else {
+            continue;
+        };
+        let Some(group) = af.group_by_id(&gid) else {
+            continue;
+        };
+        let Some(task) = group.task.as_ref() else {
+            continue;
+        };
+        match new_best {
+            Some(best) => task.send(super::group_egress::GroupEgressDeltaV4::Advertise {
+                prefix,
+                rib: best.clone(),
+            }),
+            None => task.send(super::group_egress::GroupEgressDeltaV4::Withdraw {
+                prefix,
+                id: 0,
+                source_ident,
+            }),
+        }
     }
 }
 

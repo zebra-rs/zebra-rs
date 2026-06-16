@@ -43,6 +43,32 @@ Feature: BGP per-update-group egress task lifecycle (migration Phase 0)
     And BGP session in "z2" to "10.0.0.1" should be "Established"
     And BGP session in "z2" to "10.0.0.3" should be "Established"
 
+  Scenario: routes propagate through the group task (Phase 1b event-driven advertise)
+    Given the test topology exists
+    # All speakers are up before any route exists, so z1's origination is an
+    # event-driven advertise: z2's reduce fans one delta to the (single) update
+    # group serving z3, whose task encodes once and sends to z3 (split-horizon
+    # excludes z1, the source). z2's own `show bgp ipv4` reads its Loc-RIB.
+    When I apply config "z1-routes.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then show command "show bgp ipv4" in namespace "z2" should contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z2" should contain "10.10.11.0/24"
+    And show command "show bgp ipv4" in namespace "z3" should contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
+
+  Scenario: an event-driven withdraw propagates through the group task (Phase 1b)
+    Given the test topology exists
+    # z1 re-originates only 10.10.11.0/24 (dropping .10). The reduce's
+    # apply_ipv4_advertise_job handles BOTH the advertise and the withdraw, so
+    # the group task must withdraw .10 from z3 while .11 stays — proving the
+    # gate-on event path is coherent (advertise + withdraw both through the
+    # task, the update-group flush bypassed). .11 staying is the positive
+    # control so the negative assertion isn't vacuous.
+    When I apply config "z1-withdraw.yaml" to namespace "z1"
+    And I wait 10 seconds for BGP to operate
+    Then show command "show bgp ipv4" in namespace "z3" should not contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
