@@ -821,6 +821,13 @@ pub struct Peer {
     /// `ZEBRA_BGP_SYNC_CHUNK` (legacy one-shot `route_sync_ipv4` when
     /// the flag is off, so this stays `None`).
     pub sync_v4: Option<super::route::Ipv4SyncCursor>,
+    /// Per-peer egress task (A2 ⑥ / (a′)). `Some` only at gate-on
+    /// (`ZEBRA_BGP_PEER_TASK`) while Established: it owns the v4-unicast
+    /// egress off the main loop. `None` at gate-off (egress on main via
+    /// update-groups, today's default) and between sessions. Phase 0: the
+    /// task is spawned/torn down here but idle; Phase 1 routes the egress
+    /// through it.
+    pub pet: Option<super::peer_egress::PeerEgressTask>,
     /// Egress backlog gauge (Tier 1b backpressure): the per-peer writer
     /// task publishes `packet_rx.len()` (pending UPDATE messages) here
     /// after each write; the sync cursor reads it and parks itself when
@@ -986,6 +993,7 @@ impl Peer {
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
             sync_v4: None,
+            pet: None,
             egress_depth: Arc::new(AtomicUsize::new(0)),
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
@@ -1557,6 +1565,11 @@ pub fn fsm(
         }
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
+            // A2 ⑥ (gate-on): spawn the per-peer egress task. Phase 0 — it
+            // is idle (lifecycle only); Phase 1 routes the v4 egress to it.
+            if super::peer_egress::peer_egress_task_enabled() {
+                peer.pet = Some(super::peer_egress::PeerEgressTask::spawn());
+            }
             route_sync(peer, bgp_ref, shards.is_some());
         }
         timer::update_timers(peer);
@@ -1570,6 +1583,9 @@ pub fn fsm(
         // clear it so the keys snapshot isn't held past the session.
         if let Some(peer) = peer_map.get_mut_by_idx(id) {
             peer.sync_v4 = None;
+            // A2 ⑥: drop the per-peer egress task (abort-on-drop) so it
+            // doesn't outlive the session.
+            peer.pet = None;
         }
     }
 
