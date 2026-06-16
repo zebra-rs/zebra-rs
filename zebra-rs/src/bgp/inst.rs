@@ -2016,6 +2016,15 @@ impl Bgp {
             let _ = msg.resp.send(output).await;
             return;
         }
+        // A2 ⑥: at gate-on a peer's v4 Adj-RIB-Out lives in its PET, not on
+        // the peer — request it from the PET for advertised-routes.
+        if super::peer_egress::peer_egress_task_enabled()
+            && path == "/show/bgp/neighbors/advertised-routes"
+        {
+            let output = self.show_advertised_v4_from_pet(&mut args, msg.json).await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
@@ -2023,6 +2032,35 @@ impl Bgp {
             };
             msg.resp.send(output).await.unwrap();
         }
+    }
+
+    /// A2 ⑥ — `show … advertised-routes` at gate-on: request the peer's v4
+    /// Adj-RIB-Out from its egress task (it owns `adj_out`) over a oneshot,
+    /// then render. Empty when the peer has no task (not established).
+    async fn show_advertised_v4_from_pet(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let delta_tx = match self.peers.get(&addr) {
+            None => return format!("% No such neighbor: {}", addr),
+            Some(peer) => peer.pet.as_ref().map(|pet| pet.delta_tx.clone()),
+        };
+        let table: std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> =
+            match delta_tx {
+                Some(tx) => {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let _ =
+                        tx.send(super::peer_egress::EgressDeltaV4::DumpAdjOut { reply: reply_tx });
+                    reply_rx.await.unwrap_or_default().into_iter().collect()
+                }
+                None => std::collections::BTreeMap::new(),
+            };
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
     }
 
     /// A2 ⑤ — `show … received-routes` at N>1: gather the peer's

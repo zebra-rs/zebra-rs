@@ -65,6 +65,12 @@ pub enum EgressDeltaV4 {
     /// re-fanning the Loc-RIB on soft-out, so the re-evaluation uses the new
     /// policy. `Box`ed to keep the enum small.
     Refresh { ctx: Box<SyncCtx>, add_path: bool },
+    /// A `show … advertised-routes` request at gate-on: reply with the PET's
+    /// v4 Adj-RIB-Out (one `(prefix, paths)` per prefix) on the oneshot,
+    /// since `adj_out` lives here, not on the peer.
+    DumpAdjOut {
+        reply: tokio::sync::oneshot::Sender<Vec<(Ipv4Net, Vec<BgpRib>)>>,
+    },
 }
 
 /// Handle main keeps for a peer's egress task: the delta channel plus the
@@ -126,6 +132,15 @@ impl Engine {
             EgressDeltaV4::Refresh { ctx, add_path } => {
                 self.ctx = *ctx;
                 self.add_path = add_path;
+            }
+            EgressDeltaV4::DumpAdjOut { reply } => {
+                let entries = self
+                    .adj_out
+                    .0
+                    .iter()
+                    .map(|(prefix, ribs)| (*prefix, ribs.clone()))
+                    .collect();
+                let _ = reply.send(entries);
             }
         }
     }
@@ -353,6 +368,28 @@ mod tests {
             rx2.try_recv().is_ok(),
             "egress now goes to the refreshed snapshot's writer"
         );
+    }
+
+    #[test]
+    fn engine_dump_adj_out_returns_advertised() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
+
+        // The show gather: DumpAdjOut replies with the PET's adj_out.
+        let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        engine.handle(EgressDeltaV4::DumpAdjOut { reply: reply_tx });
+        let entries = reply_rx.try_recv().expect("DumpAdjOut replied");
+        assert_eq!(entries.len(), 1, "the advertised prefix is in the dump");
+        assert_eq!(entries[0].0, prefix);
     }
 
     #[tokio::test]
