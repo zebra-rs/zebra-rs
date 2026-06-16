@@ -9504,6 +9504,7 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    let v4_afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
 
     // Collect all routes first to avoid borrow checker issues
     let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
@@ -9545,6 +9546,21 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         // Register to AdjOut.
         rib.attr = bgp.attr_store.intern(decision.attr);
         let arc_attr = rib.attr.clone();
+        // Group-task migration Phase 3: also record the synced route into the
+        // group adj_out (without re-sending — the direct dump below delivers
+        // the bytes) so a late member that is the first of its group stays
+        // withdrawable by the group's later withdraws.
+        if super::group_egress::egress_group_task_enabled()
+            && let Some(gid) = peer.update_group_id.get(&v4_afi_safi).cloned()
+            && let Some(af) = bgp.update_groups.get(&v4_afi_safi)
+            && let Some(group) = af.group_by_id(&gid)
+            && let Some(task) = group.task.as_ref()
+        {
+            task.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+                prefix: nlri.prefix,
+                rib: rib.clone(),
+            });
+        }
         peer.adj_out.add(None, nlri.prefix, rib);
 
         entries.push((arc_attr, nlri));

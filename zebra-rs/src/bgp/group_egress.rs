@@ -68,6 +68,15 @@ pub enum GroupEgressDeltaV4 {
         prefix: Ipv4Net,
         rib: BgpRib,
     },
+    /// A route the session-up sync (`route_sync_ipv4`) already sent to a NEW
+    /// member directly — record it in the group `adj_out` *without* re-sending,
+    /// so the group's later withdraws reach that member (a late peer that is
+    /// the first of a new group would otherwise be invisible to the group).
+    /// Mirrors the PET's DumpV4 ③ `RecordAdjOut`.
+    RecordAdjOut {
+        prefix: Ipv4Net,
+        rib: BgpRib,
+    },
     /// `prefix` is gone; `source_ident` is the withdrawing peer (excluded from
     /// the fan — it never received the advertisement under split-horizon).
     Withdraw {
@@ -146,6 +155,7 @@ impl Engine {
                 self.members.remove(&ident);
             }
             GroupEgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
+            GroupEgressDeltaV4::RecordAdjOut { prefix, rib } => self.record_adj_out(prefix, rib),
             GroupEgressDeltaV4::Withdraw {
                 prefix,
                 id,
@@ -198,6 +208,16 @@ impl Engine {
             let bytes_list = encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), None);
             self.fan(&bytes_list, source);
         }
+    }
+
+    /// Record a session-up-sync row in `adj_out` **without** sending — sync
+    /// already delivered the bytes to the new member directly. Re-intern the
+    /// (already post-policy) attr in the group's store so the dedup against
+    /// the event-driven path stays pointer-consistent. The PET's `record_adj_out`
+    /// twin.
+    fn record_adj_out(&mut self, prefix: Ipv4Net, mut rib: BgpRib) {
+        rib.attr = self.attr_store.intern((*rib.attr).clone());
+        self.adj_out.add(prefix, rib);
     }
 
     /// Drop `prefix` from `adj_out` and, if it had been advertised, fan one
@@ -339,5 +359,28 @@ mod tests {
         });
         assert!(rx1.try_recv().is_ok(), "member 1 receives the withdraw");
         assert!(rx2.try_recv().is_ok(), "member 2 receives the withdraw");
+    }
+
+    #[test]
+    fn record_adj_out_makes_a_synced_route_withdrawable() {
+        // The first member of a new group is sync'd directly by route_sync_ipv4
+        // (no send via the task); RecordAdjOut puts the route in the group
+        // adj_out so a later group withdraw still reaches that member.
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        engine.handle(GroupEgressDeltaV4::RecordAdjOut {
+            prefix: "10.10.10.0/24".parse().unwrap(),
+            rib: rib(5, "192.0.2.1"),
+        });
+        assert!(rx1.try_recv().is_err(), "record_adj_out sends nothing");
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: "10.10.10.0/24".parse().unwrap(),
+            id: 0,
+            source_ident: 99,
+        });
+        assert!(
+            rx1.try_recv().is_ok(),
+            "the withdraw reaches the sync-recorded member"
+        );
     }
 }
