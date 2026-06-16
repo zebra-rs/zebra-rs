@@ -3514,7 +3514,30 @@ impl Bgp {
                     sent,
                     advertised,
                 } => {
-                    if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                    // A2 ⑥ — at gate-on `adj_out` lives in the PET, so
+                    // forward the dump rows there as record-only advertises
+                    // (`send: false`: the shard already put the bytes on the
+                    // wire). The PET rebuilds + records, keeping its adj_out
+                    // and interner consistent with its event-driven path.
+                    // Gate-off records main's adj_out as before.
+                    let to_pet = super::peer_egress::peer_egress_task_enabled()
+                        && self
+                            .peers
+                            .get_by_idx(ident)
+                            .is_some_and(|p| p.pet.is_some());
+                    if to_pet {
+                        if let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
+                        {
+                            for (nlri, rib) in advertised {
+                                let _ = pet.delta_tx.send(
+                                    super::peer_egress::EgressDeltaV4::RecordAdjOut {
+                                        prefix: nlri.prefix,
+                                        rib,
+                                    },
+                                );
+                            }
+                        }
+                    } else if let Some(peer) = self.peers.get_mut_by_idx(ident) {
                         for (nlri, rib) in advertised {
                             peer.adj_out.add(None, nlri.prefix, rib);
                         }

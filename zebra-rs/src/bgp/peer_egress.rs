@@ -47,16 +47,16 @@ pub fn peer_egress_task_enabled() -> bool {
 /// does the work). Phase 0 defines the protocol; Phase 1 sends + handles it.
 #[derive(Debug)]
 pub enum EgressDeltaV4 {
-    /// A best path won for `prefix` (the event-driven advertise, or a
-    /// session-up dump row): build + out-policy + `adj_out.add` + encode +
-    /// send — or skip on split-horizon / policy-deny. `send` is `false` for
-    /// a DumpV4 ③ record, where the shard already put the bytes on the wire
-    /// and only `adj_out` needs the row.
-    Advertise {
-        prefix: Ipv4Net,
-        rib: BgpRib,
-        send: bool,
-    },
+    /// A best path won for `prefix` (the event-driven advertise): build +
+    /// out-policy + `adj_out.add` + encode + send — or, on split-horizon /
+    /// policy-deny, withdraw any prior advertisement. The carried `rib` is
+    /// the *Loc-RIB* row (pre-egress-attr); the PET builds the egress attr.
+    Advertise { prefix: Ipv4Net, rib: BgpRib },
+    /// A DumpV4 ③ record: the shard already built the egress attr and put
+    /// the bytes on the wire, so just record the row in `adj_out` (no
+    /// rebuild — `rib.attr` is already post-policy). Keeps a dump-learned
+    /// prefix in `adj_out` so a later withdraw reaches the peer.
+    RecordAdjOut { prefix: Ipv4Net, rib: BgpRib },
     /// `prefix` / path `id` is gone: `adj_out.remove`, and if it had been
     /// advertised, encode a withdraw + send.
     Withdraw { prefix: Ipv4Net, id: u32 },
@@ -120,7 +120,8 @@ struct Engine {
 impl Engine {
     fn handle(&mut self, delta: EgressDeltaV4) {
         match delta {
-            EgressDeltaV4::Advertise { prefix, rib, send } => self.advertise(prefix, rib, send),
+            EgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
+            EgressDeltaV4::RecordAdjOut { prefix, rib } => self.record_adj_out(prefix, rib),
             EgressDeltaV4::Withdraw { prefix, id } => self.withdraw(prefix, id),
             EgressDeltaV4::Refresh { ctx, add_path } => {
                 self.ctx = *ctx;
@@ -133,9 +134,8 @@ impl Engine {
     /// record `adj_out` (dedup'd) + send. If the build / out-policy filters
     /// it out — split-horizon (the best is from this peer) or policy-deny —
     /// it becomes a **withdraw** of any prior advertisement, exactly as the
-    /// gate-off `Withdraw` outcome. `send` is false for a dump-③ record (the
-    /// shard already sent the bytes; only `adj_out` needs the row).
-    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib, send: bool) {
+    /// gate-off `Withdraw` outcome.
+    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib) {
         let built = super::route::route_update_ipv4(&self.ctx, &prefix, &rib, self.add_path)
             .and_then(|(nlri, attr)| {
                 super::route::route_apply_policy_out(&self.ctx, &nlri, attr, rib.weight)
@@ -153,9 +153,19 @@ impl Engine {
         // a re-advertise of the same attr records but does not re-send.
         let prev = self.adj_out.add(prefix, rib);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
-        if send && !already_sent {
+        if !already_sent {
             super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], None);
         }
+    }
+
+    /// Record a DumpV4 ③ row in `adj_out` **without rebuilding** — `rib.attr`
+    /// is already the post-policy egress attr the shard built + sent, so a
+    /// rebuild would double-apply next-hop-self / AS_PATH. Re-intern it in
+    /// the PET's own store so the dedup against the event-driven path
+    /// (interned there too) stays pointer-consistent.
+    fn record_adj_out(&mut self, prefix: Ipv4Net, mut rib: BgpRib) {
+        rib.attr = self.attr_store.intern((*rib.attr).clone());
+        self.adj_out.add(prefix, rib);
     }
 
     /// Remove `prefix` / path `id` from `adj_out` and, if it had actually
@@ -214,13 +224,13 @@ mod tests {
 
         // A best path from a different peer (ident 5 ≠ the ctx's ident 0, so
         // split-horizon keeps it) is built, recorded, and sent.
-        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
         let first = std::iter::from_fn(|| rx.try_recv().ok()).count();
         assert!(first >= 1, "the advertise builds + sends an UPDATE");
 
         // The same path again: the attr interns to the same Arc, so the
         // adj_out dedup suppresses the resend (records, doesn't re-send).
-        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
         assert!(
             rx.try_recv().is_err(),
             "a re-advertise of the same attr is deduped (no resend)"
@@ -241,13 +251,13 @@ mod tests {
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
         // Advertise a path from peer 5 → built + sent + recorded.
-        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
         let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
 
         // The best is now from peer 0 (== the ctx's own ident) →
         // `route_update_ipv4` returns None (split-horizon), so the prior
         // advertisement is withdrawn (gate-off's `Withdraw` outcome).
-        engine.advertise(prefix, rib(0, "192.0.2.2"), true);
+        engine.advertise(prefix, rib(0, "192.0.2.2"));
         assert!(
             rx.try_recv().is_ok(),
             "split-horizon withdraws the prior advertisement"
@@ -275,12 +285,42 @@ mod tests {
         );
 
         // Advertise, then withdraw → the withdraw is sent.
-        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
         let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
         engine.withdraw(prefix, 0);
         assert!(
             rx.try_recv().is_ok(),
             "withdraw of an advertised prefix sends an UPDATE"
+        );
+    }
+
+    #[test]
+    fn engine_record_adj_out_keeps_dump_row_withdrawable() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+
+        // A DumpV4 ③ record (post-policy rib) puts the row in adj_out
+        // WITHOUT sending — the shard already sent the bytes.
+        engine.record_adj_out(prefix, rib(5, "192.0.2.1"));
+        assert!(
+            rx.try_recv().is_err(),
+            "record_adj_out sends nothing (the shard already did)"
+        );
+
+        // A later withdraw of the dump-learned prefix now reaches the peer —
+        // the property 1d exists to guarantee.
+        engine.withdraw(prefix, 0);
+        assert!(
+            rx.try_recv().is_ok(),
+            "a dump-learned prefix can be withdrawn"
         );
     }
 
@@ -307,7 +347,7 @@ mod tests {
 
         // Subsequent egress uses the refreshed snapshot's writer.
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
-        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
         assert!(rx1.try_recv().is_err(), "the old snapshot's writer is idle");
         assert!(
             rx2.try_recv().is_ok(),

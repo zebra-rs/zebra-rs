@@ -3044,7 +3044,6 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
             Some(best) => super::peer_egress::EgressDeltaV4::Advertise {
                 prefix,
                 rib: best.clone(),
-                send: true,
             },
             None => super::peer_egress::EgressDeltaV4::Withdraw { prefix, id: 0 },
         };
@@ -3091,11 +3090,7 @@ fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
     for (prefix, rib) in routes {
         let _ = pet
             .delta_tx
-            .send(super::peer_egress::EgressDeltaV4::Advertise {
-                prefix,
-                rib,
-                send: true,
-            });
+            .send(super::peer_egress::EgressDeltaV4::Advertise { prefix, rib });
     }
 }
 
