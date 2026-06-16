@@ -178,6 +178,31 @@ pub struct SyncCtx {
     pub vpnv4_next_hop_self: bool,
     pub egress_as: EgressAs,
     pub out_policy: Arc<super::policy::OutPolicy>,
+    /// Egress sink (Tier 1b): the peer's writer channel, the shared
+    /// in-flight gauge, and the negotiated extended-message flag. Lets the
+    /// build enqueue its own UPDATEs (`SyncCtx::send_packet`) without a
+    /// `&Peer` — `send_ipv4_direct` on the main task today, a `DumpV4`
+    /// shard worker later. `packet_tx` is `None` until the writer starts.
+    pub packet_tx: Option<tokio::sync::mpsc::UnboundedSender<BytesMut>>,
+    pub egress_depth: Arc<std::sync::atomic::AtomicUsize>,
+    pub extended_message: bool,
+}
+
+impl SyncCtx {
+    /// Enqueue one UPDATE on the peer's writer with the Tier-1b in-flight
+    /// accounting — the `&Peer`-free twin of [`Peer::send_packet`].
+    pub fn send_packet(&self, bytes: BytesMut) {
+        enqueue_update(&self.packet_tx, &self.egress_depth, self.ident, bytes);
+    }
+
+    /// Max on-wire UPDATE size for this session (RFC 8654 extended).
+    pub fn max_packet_size(&self) -> usize {
+        if self.extended_message {
+            bgp_packet::BGP_EXTENDED_PACKET_LEN
+        } else {
+            bgp_packet::BGP_PACKET_LEN
+        }
+    }
 }
 
 /// Apply the egress AS_PATH transformation for an eBGP announcement.
@@ -3896,7 +3921,11 @@ fn route_soft_out_peer_table(
             .is_enhe_v4_negotiated()
             .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
             .flatten();
-        super::update_group::send_ipv4_direct(peer, ipv4_entries, enhe_v6);
+        super::update_group::send_ipv4_direct(
+            &peer.sync_ctx(*bgp.router_id),
+            ipv4_entries,
+            enhe_v6,
+        );
     }
 
     let to_withdraw: Vec<Ipv4Net> = was_advertised
@@ -8413,22 +8442,32 @@ pub(super) fn route_advertise_to_peers_labelv6(
     route_advertise_labeled::<LabeledV6>(prefix, selected, bgp, peers);
 }
 
+/// Enqueue one UPDATE PDU on a peer's writer channel with the Tier-1b
+/// in-flight accounting: bump the gauge the instant the UPDATE is queued
+/// (real-time, so a slow writer registers immediately, not only on the
+/// writer's next drain), and undo the bump if the channel is gone. Shared
+/// by [`Peer::send_packet`] (main, full `Peer`) and [`SyncCtx::send_packet`]
+/// (the `&Peer`-free egress snapshot a shard worker holds) so the gauge
+/// semantics live in exactly one place.
+fn enqueue_update(
+    packet_tx: &Option<tokio::sync::mpsc::UnboundedSender<BytesMut>>,
+    egress_depth: &std::sync::atomic::AtomicUsize,
+    who: impl std::fmt::Display,
+    bytes: BytesMut,
+) {
+    use std::sync::atomic::Ordering;
+    if let Some(packet_tx) = packet_tx {
+        egress_depth.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = packet_tx.send(bytes) {
+            egress_depth.fetch_sub(1, Ordering::Relaxed);
+            eprintln!("Failed to send BGP packet to {}: {}", who, e);
+        }
+    }
+}
+
 impl Peer {
     pub fn send_packet(&self, bytes: BytesMut) {
-        if let Some(ref packet_tx) = self.packet_tx {
-            // Tier 1b: count this UPDATE as in-flight the moment it's
-            // queued (real-time), so the sync cursor's egress gauge
-            // reflects a slow writer immediately — not only after the
-            // writer's next, possibly-delayed, drain. The writer
-            // decrements on write; a failed send undoes the count.
-            self.egress_depth
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Err(e) = packet_tx.send(bytes) {
-                self.egress_depth
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("Failed to send BGP packet to {}: {}", self.address, e);
-            }
-        }
+        enqueue_update(&self.packet_tx, &self.egress_depth, self.address, bytes);
     }
 
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
@@ -9203,7 +9242,7 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
         .is_enhe_v4_negotiated()
         .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
         .flatten();
-    super::update_group::send_ipv4_direct(peer, entries, enhe_v6);
+    super::update_group::send_ipv4_direct(&peer.sync_ctx(*bgp.router_id), entries, enhe_v6);
 
     if done {
         send_eor_ipv4_unicast(peer);
@@ -9264,7 +9303,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         .is_enhe_v4_negotiated()
         .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
         .flatten();
-    super::update_group::send_ipv4_direct(peer, entries, enhe_v6);
+    super::update_group::send_ipv4_direct(&peer.sync_ctx(*bgp.router_id), entries, enhe_v6);
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);

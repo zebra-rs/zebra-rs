@@ -937,7 +937,7 @@ pub fn flush_done_ipv4(
 /// the egress interface also has a global v6, else the 16-octet
 /// link-local-only form.
 pub(super) fn send_ipv4_direct(
-    peer: &Peer,
+    ctx: &super::route::SyncCtx,
     entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)>,
     extended_next_hop_v6: Option<Ipv4MpReachNextHop>,
 ) {
@@ -948,15 +948,11 @@ pub(super) fn send_ipv4_direct(
     for (attr, nlri) in entries {
         buckets.entry(attr).or_default().push(nlri);
     }
-    let max_packet_size = if peer.opt.extended_message {
-        bgp_packet::BGP_EXTENDED_PACKET_LEN
-    } else {
-        bgp_packet::BGP_PACKET_LEN
-    };
+    let max_packet_size = ctx.max_packet_size();
     for (attr, nlris) in buckets {
         let bytes_list = encode_ipv4_update(&attr, &nlris, max_packet_size, extended_next_hop_v6);
         for buf in bytes_list {
-            peer.send_packet(buf);
+            ctx.send_packet(buf);
         }
     }
 }

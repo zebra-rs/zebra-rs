@@ -1227,6 +1227,9 @@ impl Peer {
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
             egress_as: self.egress_as(),
             out_policy: self.out_policy.clone(),
+            packet_tx: self.packet_tx.clone(),
+            egress_depth: self.egress_depth.clone(),
+            extended_message: self.opt.extended_message,
         }
     }
 
