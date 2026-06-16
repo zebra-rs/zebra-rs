@@ -3052,6 +3052,53 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
     }
 }
 
+/// A2 ⑥ — soft-out (a v4 out-policy change) at gate-on: Refresh the peer's
+/// egress task with the new `SyncCtx`, then re-fan the whole v4 Loc-RIB so
+/// the PET re-evaluates every route against the new policy — advertising the
+/// now-permitted, withdrawing the now-denied (the engine's filter-withdraw),
+/// deduping the unchanged. Ordered: the Refresh precedes the re-fan on the
+/// one channel, so the re-evaluation sees the new policy.
+fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
+    let Some(peer) = peers.get_by_idx(peer_idx) else {
+        return;
+    };
+    let Some(pet) = peer.pet.as_ref() else {
+        return;
+    };
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    let ctx = peer.sync_ctx(*bgp.router_id);
+    let _ = pet
+        .delta_tx
+        .send(super::peer_egress::EgressDeltaV4::Refresh {
+            ctx: Box::new(ctx),
+            add_path,
+        });
+    let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v4
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard
+            .v4
+            .1
+            .iter()
+            .map(|(prefix, rib)| (prefix, rib.clone()))
+            .collect()
+    };
+    for (prefix, rib) in routes {
+        let _ = pet
+            .delta_tx
+            .send(super::peer_egress::EgressDeltaV4::Advertise {
+                prefix,
+                rib,
+                send: true,
+            });
+    }
+}
+
 /// Per-AF hooks for the generic update-group/memo advertise path
 /// ([`route_advertise_batch`]). Phase 2 of the Adj-RIB-Out unification:
 /// v4-unicast/VPNv4 (`V4Batch`) and v6-unicast/VPNv6 (`V6Batch`) share the
@@ -3875,7 +3922,11 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     };
 
     if do_v4 {
-        route_soft_out_peer_table(peer_idx, None, bgp, peers);
+        if super::peer_egress::peer_egress_task_enabled() {
+            soft_out_v4_to_pet(peer_idx, bgp, peers);
+        } else {
+            route_soft_out_peer_table(peer_idx, None, bgp, peers);
+        }
     }
     for rd in vpn_rds {
         route_soft_out_peer_table(peer_idx, Some(rd), bgp, peers);

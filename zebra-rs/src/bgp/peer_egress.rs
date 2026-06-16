@@ -60,6 +60,11 @@ pub enum EgressDeltaV4 {
     /// `prefix` / path `id` is gone: `adj_out.remove`, and if it had been
     /// advertised, encode a withdraw + send.
     Withdraw { prefix: Ipv4Net, id: u32 },
+    /// Replace the PET's egress snapshot (out-policy / caps / next-hop /
+    /// AddPath) after a policy or config change. Main sends this before
+    /// re-fanning the Loc-RIB on soft-out, so the re-evaluation uses the new
+    /// policy. `Box`ed to keep the enum small.
+    Refresh { ctx: Box<SyncCtx>, add_path: bool },
 }
 
 /// Handle main keeps for a peer's egress task: the delta channel plus the
@@ -117,6 +122,10 @@ impl Engine {
         match delta {
             EgressDeltaV4::Advertise { prefix, rib, send } => self.advertise(prefix, rib, send),
             EgressDeltaV4::Withdraw { prefix, id } => self.withdraw(prefix, id),
+            EgressDeltaV4::Refresh { ctx, add_path } => {
+                self.ctx = *ctx;
+                self.add_path = add_path;
+            }
         }
     }
 
@@ -272,6 +281,37 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "withdraw of an advertised prefix sends an UPDATE"
+        );
+    }
+
+    #[test]
+    fn engine_refresh_swaps_the_ctx() {
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let mut ctx1 = SyncCtx::for_test();
+        ctx1.packet_tx = Some(tx1);
+        let mut engine = Engine {
+            ctx: ctx1,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+
+        // Refresh to a new snapshot whose writer is a different channel.
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let mut ctx2 = SyncCtx::for_test();
+        ctx2.packet_tx = Some(tx2);
+        engine.handle(EgressDeltaV4::Refresh {
+            ctx: Box::new(ctx2),
+            add_path: false,
+        });
+
+        // Subsequent egress uses the refreshed snapshot's writer.
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        assert!(rx1.try_recv().is_err(), "the old snapshot's writer is idle");
+        assert!(
+            rx2.try_recv().is_ok(),
+            "egress now goes to the refreshed snapshot's writer"
         );
     }
 
