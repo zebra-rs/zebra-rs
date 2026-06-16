@@ -2088,14 +2088,12 @@ impl Bgp {
         }
         // `show [ipv4] summary` at gate-on / N>1: the v4 PfxRcd/PfxSnt live
         // off-main — Adj-RIB-In in the pool shards (N>1), Adj-RIB-Out in the
-        // PET (peer-task) — so the synchronous renderer reads the empty main
-        // copies and prints 0/0. Gather the v4 counts first, then render. The
-        // other AFI sections stay main-owned and read correctly. (`show bgp
-        // ipv4 summary` arrives as `/show/bgp/ipv4` + a "summary" token, peeked
-        // non-destructively so a non-summary command falls through untouched.)
-        // The egress-group-task egress model is not covered here yet — its
-        // adj_out is the group task's, and its split-horizon per-peer count is
-        // a follow-up; it is gate-off by default so the summary is unaffected.
+        // PET (peer-task) or the per-update-group egress task (group-task) — so
+        // the synchronous renderer reads the empty main copies and prints 0/0.
+        // Gather the v4 counts first, then render. The other AFI sections stay
+        // main-owned and read correctly. (`show bgp ipv4 summary` arrives as
+        // `/show/bgp/ipv4` + a "summary" token, peeked non-destructively so a
+        // non-summary command falls through untouched.)
         let v4_summary: Option<Option<bgp_packet::AfiSafi>> = match path.as_str() {
             "/show/bgp/summary" | "/show/ip/bgp/summary" => Some(None),
             "/show/bgp/ipv4" if args.0.front().is_some_and(|t| t == "summary") => Some(Some(
@@ -2104,7 +2102,9 @@ impl Bgp {
             _ => None,
         };
         if let Some(afi_safi_opt) = v4_summary
-            && (self.shards.is_some() || super::peer_egress::peer_egress_task_enabled())
+            && (self.shards.is_some()
+                || super::peer_egress::peer_egress_task_enabled()
+                || super::group_egress::egress_group_task_enabled())
         {
             let counts = self.gather_v4_summary_counts().await;
             let output =
@@ -2249,12 +2249,13 @@ impl Bgp {
     /// Gather per-peer v4-unicast summary prefix counts — `(PfxRcd, PfxSnt)` —
     /// from their off-main owners for `show … summary` at gate-on: PfxRcd from
     /// the pool shards' Adj-RIB-In (N>1), PfxSnt from the PET's Adj-RIB-Out
-    /// (peer-task). **Counts only** — no prefixes or attributes cross the
-    /// channel (lighter than the received/advertised dumps, which the summary
-    /// row doesn't need). Keyed by peer ident, Established v4 peers only; each
-    /// value is the COMPLETE count, falling back to the main-side read for the
-    /// half that is not off-main (N=1 PfxRcd, gate-off PfxSnt), so the render
-    /// uses it verbatim.
+    /// (peer-task) or the per-update-group egress task's shared Adj-RIB-Out
+    /// (group-task, minus the member's split-horizoned own paths). **Counts
+    /// only** — no prefixes or attributes cross the channel (lighter than the
+    /// received/advertised dumps, which the summary row doesn't need). Keyed by
+    /// peer ident, Established v4 peers only; each value is the COMPLETE count,
+    /// falling back to the main-side read for the half that is not off-main
+    /// (N=1 PfxRcd, gate-off PfxSnt), so the render uses it verbatim.
     async fn gather_v4_summary_counts(&self) -> std::collections::BTreeMap<usize, (u64, u64)> {
         use bgp_packet::{Afi, Safi};
         let v4 = bgp_packet::AfiSafi::new(Afi::Ip, Safi::Unicast);
@@ -2277,6 +2278,47 @@ impl Bgp {
             }
         }
 
+        // PfxSnt at group-gate-on: the v4 Adj-RIB-Out lives in each update
+        // group's egress task (shared across members), so query each group's
+        // counts ONCE — `(total, {ident → solely-sourced prefixes})` — and
+        // derive every member's split-horizoned sent count below. Collect the
+        // group reply receivers first so no borrow is held across await.
+        let group_on = super::group_egress::egress_group_task_enabled();
+        let mut group_counts: std::collections::BTreeMap<
+            super::update_group::UpdateGroupId,
+            (u64, std::collections::BTreeMap<usize, u64>),
+        > = std::collections::BTreeMap::new();
+        if group_on {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut rxs = Vec::new();
+            for (_, peer) in self.peers.iter_all() {
+                if peer.state != super::peer::State::Established || !peer.config.mp.has(&v4) {
+                    continue;
+                }
+                let Some(gid) = peer.update_group_id.get(&v4).cloned() else {
+                    continue;
+                };
+                if !seen.insert(gid.clone()) {
+                    continue;
+                }
+                if let Some(rx) = self
+                    .update_groups
+                    .get(&v4)
+                    .and_then(|af| af.group_by_id(&gid))
+                    .and_then(|g| g.task.as_ref())
+                    .map(|t| t.request_count())
+                {
+                    rxs.push((gid, rx));
+                }
+            }
+            for (gid, rx) in rxs {
+                if let Ok((total, sole)) = rx.await {
+                    let sole = sole.into_iter().map(|(k, v)| (k, v as u64)).collect();
+                    group_counts.insert(gid, (total as u64, sole));
+                }
+            }
+        }
+
         // Per-peer (rcvd, sent); query the PET for sent when present. Collect
         // the PET reply receivers first so no peer borrow is held across await.
         let mut out: std::collections::BTreeMap<usize, (u64, u64)> =
@@ -2292,19 +2334,29 @@ impl Bgp {
                 (self.shard.adj_in_count(peer.ident, Afi::Ip, Safi::Unicast)
                     + peer.adj_in.count(Afi::Ip, Safi::Unicast)) as u64
             };
-            match peer.pet.as_ref() {
-                Some(pet) => {
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = pet
-                        .delta_tx
-                        .send(super::peer_egress::EgressDeltaV4::CountAdjOut { reply: tx });
-                    sent_rxs.push((peer.ident, rx));
-                    out.insert(peer.ident, (rcvd_count, 0));
-                }
-                None => {
-                    let sent = peer.adj_out.count(Afi::Ip, Safi::Unicast) as u64;
-                    out.insert(peer.ident, (rcvd_count, sent));
-                }
+            // Sent precedence mirrors the egress gate (group → PET → flush).
+            if group_on {
+                // PfxSnt(member) = group total − the member's solely-sourced
+                // prefixes (the ones split-horizon drops from its fan).
+                let sent = peer
+                    .update_group_id
+                    .get(&v4)
+                    .and_then(|gid| group_counts.get(gid))
+                    .map(|(total, sole)| {
+                        total.saturating_sub(sole.get(&peer.ident).copied().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                out.insert(peer.ident, (rcvd_count, sent));
+            } else if let Some(pet) = peer.pet.as_ref() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = pet
+                    .delta_tx
+                    .send(super::peer_egress::EgressDeltaV4::CountAdjOut { reply: tx });
+                sent_rxs.push((peer.ident, rx));
+                out.insert(peer.ident, (rcvd_count, 0));
+            } else {
+                let sent = peer.adj_out.count(Afi::Ip, Safi::Unicast) as u64;
+                out.insert(peer.ident, (rcvd_count, sent));
             }
         }
         for (ident, rx) in sent_rxs {

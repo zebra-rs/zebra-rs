@@ -90,6 +90,18 @@ pub enum GroupEgressDeltaV4 {
     DumpAdjOut {
         reply: tokio::sync::oneshot::Sender<Vec<(Ipv4Net, Vec<BgpRib>)>>,
     },
+    /// A `show … summary` PfxSnt request at gate-on: the group `adj_out` is
+    /// shared and split-horizon is applied at fan time (not stored), so reply
+    /// with the COUNTS needed to derive each member's sent count —
+    /// `(total prefix count, {ident → prefixes solely-sourced-by-that-ident})`.
+    /// A member M never receives a prefix whose paths it ALL sourced, so
+    /// `PfxSnt(M) = total − sole_source[M]`; in the usual case (the path
+    /// sources are non-members) the map is empty and every member's PfxSnt is
+    /// `total`. Counts only — no prefixes or attributes cross the channel
+    /// (unlike [`Self::DumpAdjOut`]).
+    CountAdjOut {
+        reply: tokio::sync::oneshot::Sender<(usize, BTreeMap<usize, usize>)>,
+    },
 }
 
 /// Handle main keeps on each [`UpdateGroup`](super::update_group::UpdateGroup)
@@ -135,6 +147,17 @@ impl GroupEgressTask {
     pub fn request_adj_out(&self) -> tokio::sync::oneshot::Receiver<Vec<(Ipv4Net, Vec<BgpRib>)>> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.send(GroupEgressDeltaV4::DumpAdjOut { reply });
+        rx
+    }
+
+    /// Request the group's adj-out COUNTS over a oneshot (for `show … summary`
+    /// PfxSnt at gate-on): `(total, {ident → solely-sourced prefix count})`,
+    /// from which the caller derives each member's split-horizoned sent count.
+    /// Returns the receiver so the caller can drop the task borrow before
+    /// awaiting.
+    pub fn request_count(&self) -> tokio::sync::oneshot::Receiver<(usize, BTreeMap<usize, usize>)> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.send(GroupEgressDeltaV4::CountAdjOut { reply });
         rx
     }
 
@@ -190,6 +213,25 @@ impl Engine {
                     .map(|(prefix, ribs)| (*prefix, ribs.clone()))
                     .collect();
                 let _ = reply.send(entries);
+            }
+            GroupEgressDeltaV4::CountAdjOut { reply } => {
+                // Counts for the summary's PfxSnt. `adj_out.0` is keyed by
+                // prefix, so its len is the total prefix count. A prefix is
+                // excluded from member M only when EVERY path is from M (fan
+                // time drops just the member's own paths, split-horizon), so
+                // tally the single-source prefixes per ident — the caller does
+                // PfxSnt(M) = total − sole_source[M].
+                let total = self.adj_out.0.len();
+                let mut sole_source: BTreeMap<usize, usize> = BTreeMap::new();
+                for ribs in self.adj_out.0.values() {
+                    let mut idents = ribs.iter().map(|r| r.ident);
+                    if let Some(first) = idents.next()
+                        && idents.all(|id| id == first)
+                    {
+                        *sole_source.entry(first).or_default() += 1;
+                    }
+                }
+                let _ = reply.send((total, sole_source));
             }
         }
     }
@@ -419,5 +461,56 @@ mod tests {
             rx1.try_recv().is_ok(),
             "the withdraw reaches the sync-recorded member"
         );
+    }
+
+    #[test]
+    fn count_adj_out_tallies_total_and_solely_sourced_prefixes() {
+        // The summary's PfxSnt at group-gate-on: the engine reports the total
+        // prefix count and, per ident, how many prefixes that ident SOLELY
+        // sources — the ones split-horizon drops from that member's fan. The
+        // caller derives PfxSnt(member) = total − sole_source[member].
+        let mut engine = Engine::default();
+        // Two prefixes solely from peer 5, one solely from peer 7.
+        for p in ["10.0.0.0/24", "10.0.1.0/24"] {
+            engine.handle(GroupEgressDeltaV4::RecordAdjOut {
+                prefix: p.parse().unwrap(),
+                rib: rib(5, "192.0.2.1"),
+            });
+        }
+        engine.handle(GroupEgressDeltaV4::RecordAdjOut {
+            prefix: "10.0.2.0/24".parse().unwrap(),
+            rib: rib(7, "192.0.2.1"),
+        });
+        // A fourth prefix with paths from BOTH 5 and 7 (distinct local-ids so
+        // they accumulate) — mixed-source, so it is NOT solely-sourced by
+        // either: both members still receive the other's path.
+        let mut a = rib(5, "192.0.2.1");
+        a.local_id = 1;
+        let mut b = rib(7, "192.0.2.1");
+        b.local_id = 2;
+        for r in [a, b] {
+            engine.handle(GroupEgressDeltaV4::RecordAdjOut {
+                prefix: "10.0.3.0/24".parse().unwrap(),
+                rib: r,
+            });
+        }
+
+        let (reply, mut reply_rx) = tokio::sync::oneshot::channel();
+        engine.handle(GroupEgressDeltaV4::CountAdjOut { reply });
+        let (total, sole) = reply_rx.try_recv().expect("CountAdjOut replied");
+
+        assert_eq!(total, 4, "four prefixes in the group adj_out");
+        assert_eq!(sole.get(&5), Some(&2), "peer 5 solely sources two prefixes");
+        assert_eq!(
+            sole.get(&7),
+            Some(&1),
+            "peer 7 solely sources one — the mixed prefix is excluded"
+        );
+        // Derived PfxSnt: source-5 member gets 4−2=2, source-7 gets 4−1=3, a
+        // non-sourcing member gets all 4.
+        let pfx_snt = |ident: usize| total - sole.get(&ident).copied().unwrap_or(0);
+        assert_eq!(pfx_snt(5), 2);
+        assert_eq!(pfx_snt(7), 3);
+        assert_eq!(pfx_snt(9), 4);
     }
 }

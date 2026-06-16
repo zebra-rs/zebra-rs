@@ -93,6 +93,20 @@ Feature: BGP per-update-group egress task (migration Phases 0-3)
     And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
     And show command "show bgp ipv4" in namespace "z4" should contain "10.10.10.0/24"
 
+  Scenario: z2's `show bgp ipv4 summary` PfxSnt comes from the group task (N=1, group gate only)
+    Given the test topology exists
+    # At gate-on the v4 Adj-RIB-Out lives in the update group's egress task, not
+    # on the peer, so the summary's PfxSnt read main-side printed 0. N=1 here
+    # (no shards), so this exercises the group branch ALONE — the summary
+    # intercept must fire on the egress-group-task gate, query the group's
+    # CountAdjOut, and subtract each member's split-horizoned own paths. z3 and
+    # z4 were each advertised z1's two routes (PfxSnt 2 -> "0/2"); z1, the
+    # source, got none back (PfxSnt 0) while z2 received its two (PfxRcd 2 read
+    # from the main shard at N=1 -> "2/0"). Under the bug PfxSnt is 0, so "0/2"
+    # never appears.
+    Then show command "show bgp ipv4 summary" in namespace "z2" should contain "0/2"
+    And show command "show bgp ipv4 summary" in namespace "z2" should contain "2/0"
+
   Scenario: an event-driven withdraw reaches BOTH the early and the late member (Phase 3 coherence)
     Given the test topology exists
     # z1 re-originates only .11. The group task must withdraw .10 from z3 AND
