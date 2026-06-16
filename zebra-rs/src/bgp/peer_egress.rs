@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use bgp_packet::{Ipv4Nlri, UpdatePacket};
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -45,7 +46,6 @@ pub fn peer_egress_task_enabled() -> bool {
 /// ordered delta stream (main sequences for per-prefix ordering; the PET
 /// does the work). Phase 0 defines the protocol; Phase 1 sends + handles it.
 #[derive(Debug)]
-#[allow(dead_code)] // constructed (main) + matched (PET) in Phase 1
 pub enum EgressDeltaV4 {
     /// A best path won for `prefix` (the event-driven advertise, or a
     /// session-up dump row): build + out-policy + `adj_out.add` + encode +
@@ -67,8 +67,7 @@ pub enum EgressDeltaV4 {
 /// task (abort-on-drop) and closes the channel — either ends the task.
 #[derive(Debug)]
 pub struct PeerEgressTask {
-    /// Main forwards v4 egress deltas here in Phase 1; unused at Phase 0.
-    #[allow(dead_code)]
+    /// Main forwards v4 egress deltas here (the reduce / withdraw paths).
     pub delta_tx: UnboundedSender<EgressDeltaV4>,
     // Held only for its abort-on-drop teardown; the task is driven entirely
     // by the channel, so the handle is never read after spawn.
@@ -117,25 +116,25 @@ impl Engine {
     fn handle(&mut self, delta: EgressDeltaV4) {
         match delta {
             EgressDeltaV4::Advertise { prefix, rib, send } => self.advertise(prefix, rib, send),
-            // Withdraw lands in Phase 1c.
-            EgressDeltaV4::Withdraw { .. } => {}
+            EgressDeltaV4::Withdraw { prefix, id } => self.withdraw(prefix, id),
         }
     }
 
-    /// Build + out-policy + intern + record `adj_out` (dedup'd) + send —
-    /// the per-peer egress for one best path. `send` is false for a dump-③
-    /// record (the shard already sent the bytes; only `adj_out` needs the
-    /// row). Split-horizon / policy-deny are handled inside the build /
-    /// `route_apply_policy_out` (`None` ⇒ skip).
+    /// The per-peer egress for one best path: build + out-policy + intern +
+    /// record `adj_out` (dedup'd) + send. If the build / out-policy filters
+    /// it out — split-horizon (the best is from this peer) or policy-deny —
+    /// it becomes a **withdraw** of any prior advertisement, exactly as the
+    /// gate-off `Withdraw` outcome. `send` is false for a dump-③ record (the
+    /// shard already sent the bytes; only `adj_out` needs the row).
     fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib, send: bool) {
-        let Some((nlri, attr)) =
-            super::route::route_update_ipv4(&self.ctx, &prefix, &rib, self.add_path)
-        else {
-            return;
-        };
-        let Some(decision) =
-            super::route::route_apply_policy_out(&self.ctx, &nlri, attr, rib.weight)
-        else {
+        let built = super::route::route_update_ipv4(&self.ctx, &prefix, &rib, self.add_path)
+            .and_then(|(nlri, attr)| {
+                super::route::route_apply_policy_out(&self.ctx, &nlri, attr, rib.weight)
+                    .map(|d| (nlri, d))
+            });
+        let Some((nlri, decision)) = built else {
+            // Filtered: withdraw any prior advertisement of this path.
+            self.withdraw(prefix, rib.remote_id);
             return;
         };
         let arc = self.attr_store.intern(decision.attr);
@@ -147,6 +146,17 @@ impl Engine {
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if send && !already_sent {
             super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], None);
+        }
+    }
+
+    /// Remove `prefix` / path `id` from `adj_out` and, if it had actually
+    /// been advertised, send a withdraw — the per-peer twin of
+    /// `route_withdraw_ipv4`.
+    fn withdraw(&mut self, prefix: Ipv4Net, id: u32) {
+        if self.adj_out.remove(prefix, id).is_some() {
+            let mut update = UpdatePacket::with_max_packet_size(self.ctx.max_packet_size());
+            update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
+            self.ctx.send_packet(update.into());
         }
     }
 }
@@ -205,6 +215,63 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a re-advertise of the same attr is deduped (no resend)"
+        );
+    }
+
+    #[test]
+    fn engine_split_horizon_advertise_withdraws_prior() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test(); // ctx ident = 0
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+
+        // Advertise a path from peer 5 → built + sent + recorded.
+        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // The best is now from peer 0 (== the ctx's own ident) →
+        // `route_update_ipv4` returns None (split-horizon), so the prior
+        // advertisement is withdrawn (gate-off's `Withdraw` outcome).
+        engine.advertise(prefix, rib(0, "192.0.2.2"), true);
+        assert!(
+            rx.try_recv().is_ok(),
+            "split-horizon withdraws the prior advertisement"
+        );
+    }
+
+    #[test]
+    fn engine_withdraw_only_sends_if_advertised() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+
+        // Withdraw of a never-advertised prefix → nothing on the wire.
+        engine.withdraw(prefix, 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "withdraw of an unadvertised prefix sends nothing"
+        );
+
+        // Advertise, then withdraw → the withdraw is sent.
+        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        engine.withdraw(prefix, 0);
+        assert!(
+            rx.try_recv().is_ok(),
+            "withdraw of an advertised prefix sends an UPDATE"
         );
     }
 

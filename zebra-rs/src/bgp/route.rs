@@ -3006,6 +3006,14 @@ pub(super) fn route_advertise_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
+    // per-peer egress tasks. Fan the best path to each PET — which builds +
+    // out-policy + records adj_out + sends/withdraws off the main loop —
+    // and bypass the update-group path. VPNv4 (`rd = Some`) stays on main.
+    if rd.is_none() && super::peer_egress::peer_egress_task_enabled() {
+        fan_advertise_to_pets(prefix, selected, peers);
+        return;
+    }
     // Non-batch callers run the out-policy inline (empty pre-seeded memo).
     route_advertise_batch::<V4Batch>(
         rd,
@@ -3016,6 +3024,32 @@ pub(super) fn route_advertise_to_peers(
         peers,
         BTreeMap::new(),
     );
+}
+
+/// A2 ⑥ — fan one prefix's best path to every established v4-unicast peer's
+/// egress task. The PET enforces split-horizon / out-policy / dedup itself
+/// (`route_update_ipv4` + the engine), so this just forwards: the best path
+/// as an `Advertise`, or a `Withdraw` when the prefix is gone. Non-best
+/// AddPath candidates (`route_advertise_batch_addpath`) are a follow-on.
+fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) {
+    let new_best = selected.last();
+    for ident in peers.established_plain_idents(Afi::Ip, Safi::Unicast) {
+        let Some(peer) = peers.get_by_idx(ident) else {
+            continue;
+        };
+        let Some(pet) = peer.pet.as_ref() else {
+            continue;
+        };
+        let delta = match new_best {
+            Some(best) => super::peer_egress::EgressDeltaV4::Advertise {
+                prefix,
+                rib: best.clone(),
+                send: true,
+            },
+            None => super::peer_egress::EgressDeltaV4::Withdraw { prefix, id: 0 },
+        };
+        let _ = pet.delta_tx.send(delta);
+    }
 }
 
 /// Per-AF hooks for the generic update-group/memo advertise path
