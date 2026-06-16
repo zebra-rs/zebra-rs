@@ -18,9 +18,14 @@ The three forks (§5) are settled:
    main; the withdraw gate migrates there too; env-gated, default (a)),
    with sharded `adj_out` **(b)** as the deeper Phase-E.2 end-state.
 
-Delivery: **Phase 0** (the `Arc<OutPolicy>` + `&SyncCtx` build refactor —
-a pure, no-behaviour-change refactor under existing test coverage) lands
-first, then ①–④ (§6).
+Delivery: **Phase 0 — DONE (2026-06-16).** The `&SyncCtx` build refactor
+landed in two folds: the out-policy fold (`Arc<OutPolicy>` cached on the
+peer, rebuilt on resolve) and the egress-sink fold (`packet_tx` +
+`egress_depth` + `extended_message`, with `send_ipv4_direct(&SyncCtx)`).
+`SyncCtx` is now fully `&Peer`-free — a shard worker can do
+build → out-policy → encode → send → Tier-1b-park from an `Arc<SyncCtx>`
+alone. Pure refactor; validated by workspace clippy + 1254 unit tests +
+the out-policy/sync BDDs. Next: ①–④ (§6), starting with ①.
 
 ## 1. Goal & relationship to Tier 1a/1b
 
@@ -210,13 +215,18 @@ end-state.
 
 ## 6. Phased PR breakdown
 
-- **Phase 0 — prerequisites.** ① wrap the peer out-policy in
-  `Arc<OutPolicy>` (the SyncCtx unit). ② refactor the build trio to take
-  `&SyncCtx` (called from the existing main path first — pure refactor, no
-  behaviour change, fully covered by today's BDDs).
-- **① `DumpV4` message + barrier.** `ShardMsg::DumpV4 { req_id, Arc<SyncCtx> }`
+- **Phase 0 — prerequisites. ✅ DONE (2026-06-16).** Wrapped the peer
+  out-policy in `Arc<OutPolicy>` (cached on the peer, rebuilt on resolve)
+  and folded the egress sink (`packet_tx` + `egress_depth` +
+  `extended_message`) into `SyncCtx`; the build trio +
+  `route_apply_policy_out` + `send_ipv4_direct` all take `&SyncCtx`. Pure
+  refactor, fully covered by today's tests/BDDs.
+- **① `DumpV4` message + barrier. ⬅ IN PROGRESS.** `ShardMsg::DumpV4 { req_id, Arc<SyncCtx> }`
   + `ShardOut::DumpDoneV4` + the per-`req_id` ack counter in
-  `process_shard_result`. N=1 falls back to the cursor.
+  `process_shard_result`. N=1 falls back to the cursor. The shard handler
+  is a stub ack at ① (② fills the build+send); the broadcast trigger is
+  wired live in ④, so the message round-trip + barrier are unit-tested
+  until then.
 - **② shard `handle_dump_v4`.** Walk the slice, build (§5.1) + intern
   local + enqueue on `ctx.packet_tx` with Tier-1b park, accumulate
   `adj_out` deltas, ack.
