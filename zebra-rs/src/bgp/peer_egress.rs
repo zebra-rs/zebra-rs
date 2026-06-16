@@ -16,12 +16,16 @@
 //! Gate-off (the default) is untouched — the egress stays on the main task
 //! via update-groups.
 
+use std::sync::Arc;
+
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::context::task::Task;
 
-use super::route::BgpRib;
+use super::adj_rib::{AdjRibTable, Out};
+use super::route::{BgpRib, SyncCtx};
+use super::store::BgpAttrStore;
 
 /// `ZEBRA_BGP_PEER_TASK=1` opts peers into the per-peer egress task at
 /// Established. Default off: the v4 egress stays on the main task
@@ -73,30 +77,142 @@ pub struct PeerEgressTask {
 }
 
 impl PeerEgressTask {
-    /// Spawn a peer's egress task. **Phase 0: idle** — it drains the delta
-    /// channel without acting (Phase 1 fills in `adj_out` + build + send).
+    /// Spawn a peer's egress task with its initial egress snapshot. **Phase
+    /// 1a: the advertise engine** — owns `adj_out` + a per-peer attr
+    /// interner and processes [`EgressDeltaV4::Advertise`] (build +
+    /// out-policy + intern + `adj_out` dedup + send). Withdraw / dump /
+    /// reads land in 1c–1e; the live wiring from main's reduce is 1b, so
+    /// until then the engine is exercised only by the unit test. `ctx` will
+    /// be refreshed by a `Refresh` delta on policy / connection change.
     /// Exits when `delta_tx` is dropped at teardown.
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: SyncCtx, add_path: bool) -> Self {
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<EgressDeltaV4>();
         let task = Task::spawn(async move {
-            while let Some(_delta) = delta_rx.recv().await {
-                // Phase 0: no-op. Phase 1 processes the delta here.
+            let mut engine = Engine {
+                ctx,
+                add_path,
+                adj_out: AdjRibTable::new(),
+                attr_store: BgpAttrStore::new(),
+            };
+            while let Some(delta) = delta_rx.recv().await {
+                engine.handle(delta);
             }
         });
         PeerEgressTask { delta_tx, task }
     }
 }
 
+/// A peer's owned v4-unicast egress state + per-delta logic, run inside the
+/// task. Build / policy / send reuse the `&SyncCtx` primitives (A2 Phase 0),
+/// so this is the per-peer, off-main twin of `compute_advertise_outcome` +
+/// `send_ipv4_direct` — no update-groups (gate-on is the GoBGP model).
+struct Engine {
+    ctx: SyncCtx,
+    add_path: bool,
+    adj_out: AdjRibTable<Out>,
+    attr_store: BgpAttrStore,
+}
+
+impl Engine {
+    fn handle(&mut self, delta: EgressDeltaV4) {
+        match delta {
+            EgressDeltaV4::Advertise { prefix, rib, send } => self.advertise(prefix, rib, send),
+            // Withdraw lands in Phase 1c.
+            EgressDeltaV4::Withdraw { .. } => {}
+        }
+    }
+
+    /// Build + out-policy + intern + record `adj_out` (dedup'd) + send —
+    /// the per-peer egress for one best path. `send` is false for a dump-③
+    /// record (the shard already sent the bytes; only `adj_out` needs the
+    /// row). Split-horizon / policy-deny are handled inside the build /
+    /// `route_apply_policy_out` (`None` ⇒ skip).
+    fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib, send: bool) {
+        let Some((nlri, attr)) =
+            super::route::route_update_ipv4(&self.ctx, &prefix, &rib, self.add_path)
+        else {
+            return;
+        };
+        let Some(decision) =
+            super::route::route_apply_policy_out(&self.ctx, &nlri, attr, rib.weight)
+        else {
+            return;
+        };
+        let arc = self.attr_store.intern(decision.attr);
+        rib.attr = arc.clone();
+        // Record in adj_out and dedup against the prior interned attr
+        // (pointer identity) exactly as the cursor / event-driven path does:
+        // a re-advertise of the same attr records but does not re-send.
+        let prev = self.adj_out.add(prefix, rib);
+        let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
+        if send && !already_sent {
+            super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::route::BgpRibType;
     use super::*;
+    use bgp_packet::{BgpAttr, BgpNexthop};
+
+    /// A best-path row from peer `ident`, next-hop `nh`.
+    fn rib(ident: usize, nh: &str) -> BgpRib {
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv4(nh.parse().unwrap())),
+            ..Default::default()
+        };
+        BgpRib::new_arc(
+            ident,
+            "10.0.0.1".parse().unwrap(),
+            BgpRibType::EBGP,
+            0,
+            100,
+            Arc::new(attr),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Drive the engine synchronously (it is a plain `&mut self` method —
+    /// no async needed) so the send + dedup are observed without task
+    /// scheduling races. `for_test`'s `packet_tx` is swapped for a readable
+    /// channel.
+    #[test]
+    fn engine_advertise_sends_then_dedups() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+
+        // A best path from a different peer (ident 5 ≠ the ctx's ident 0, so
+        // split-horizon keeps it) is built, recorded, and sent.
+        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        let first = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        assert!(first >= 1, "the advertise builds + sends an UPDATE");
+
+        // The same path again: the attr interns to the same Arc, so the
+        // adj_out dedup suppresses the resend (records, doesn't re-send).
+        engine.advertise(prefix, rib(5, "192.0.2.1"), true);
+        assert!(
+            rx.try_recv().is_err(),
+            "a re-advertise of the same attr is deduped (no resend)"
+        );
+    }
 
     #[tokio::test]
     async fn pet_lifecycle_spawn_send_teardown() {
-        // Phase 0 lifecycle: the idle task drains deltas without acting.
-        // Confirm spawn + send (the channel is live) + drop (abort-on-drop
-        // / channel close ends the task) don't panic.
-        let pet = PeerEgressTask::spawn();
+        // The task spawns, accepts a delta on the live channel, and exits on
+        // drop (abort-on-drop / channel close) without panicking.
+        let pet = PeerEgressTask::spawn(SyncCtx::for_test(), false);
         pet.delta_tx
             .send(EgressDeltaV4::Withdraw {
                 prefix: "10.0.0.0/24".parse().unwrap(),
@@ -104,7 +220,6 @@ mod tests {
             })
             .expect("delta channel is open while the task lives");
         drop(pet);
-        // Let the runtime reap the aborted/closed task.
         tokio::task::yield_now().await;
     }
 }

@@ -1568,7 +1568,9 @@ pub fn fsm(
             // A2 ⑥ (gate-on): spawn the per-peer egress task. Phase 0 — it
             // is idle (lifecycle only); Phase 1 routes the v4 egress to it.
             if super::peer_egress::peer_egress_task_enabled() {
-                peer.pet = Some(super::peer_egress::PeerEgressTask::spawn());
+                let ctx = peer.sync_ctx(*bgp_ref.router_id);
+                let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+                peer.pet = Some(super::peer_egress::PeerEgressTask::spawn(ctx, add_path));
             }
             route_sync(peer, bgp_ref, shards.is_some());
         }
