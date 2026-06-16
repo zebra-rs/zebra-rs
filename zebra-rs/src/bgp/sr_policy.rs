@@ -765,6 +765,9 @@ pub fn config_srp_segment_srv6_sid(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
 /// - On an iBGP→iBGP reflection the ORIGINATOR_ID is stamped (with the
 ///   original advertiser's router-id if absent) and the local router-id
 ///   is prepended to the CLUSTER_LIST.
+/// - On an eBGP egress the iBGP-only attributes are stripped: ORIGINATOR_ID
+///   and CLUSTER_LIST (RFC 4456: non-transitive, intra-AS-only) and LOCAL_PREF
+///   (RFC 4271 §5.1.5: never sent to external peers).
 pub fn reflect_attr(
     attr: &BgpAttr,
     source_ibgp: bool,
@@ -796,6 +799,15 @@ pub fn reflect_attr(
                 out.cluster_list = Some(cl);
             }
         }
+    } else if !dest_ibgp {
+        // Strip the iBGP-only attributes before reflecting to an eBGP peer (an
+        // iBGP-learned policy carries them through the cloned attr):
+        // ORIGINATOR_ID / CLUSTER_LIST are non-transitive intra-AS attributes
+        // (RFC 4456) and LOCAL_PREF must not cross an AS boundary (RFC 4271
+        // §5.1.5).
+        out.originator_id = None;
+        out.cluster_list = None;
+        out.local_pref = None;
     }
     Some(out)
 }
@@ -1343,6 +1355,27 @@ mod tests {
         let out = reflect_attr(&attr, false, v4("2.2.2.2"), true, false, v4("1.1.1.1")).unwrap();
         assert!(out.originator_id.is_none());
         assert!(out.cluster_list.is_none());
+    }
+
+    #[test]
+    fn reflect_attr_strips_ibgp_only_attrs_to_ebgp() {
+        // An iBGP-learned policy carries the iBGP-only attributes; when it is
+        // advertised to an eBGP peer they MUST be stripped: ORIGINATOR_ID /
+        // CLUSTER_LIST (RFC 4456, non-transitive intra-AS) and LOCAL_PREF
+        // (RFC 4271 §5.1.5, never sent to external peers).
+        let attr = BgpAttr {
+            originator_id: Some(OriginatorId::new(v4("9.9.9.9"))),
+            cluster_list: Some(ClusterList {
+                list: vec![v4("3.3.3.3")],
+            }),
+            local_pref: Some(bgp_packet::LocalPref::new(200)),
+            ..Default::default()
+        };
+        // source iBGP, dest eBGP (dest_ibgp = false).
+        let out = reflect_attr(&attr, true, v4("2.2.2.2"), false, false, v4("1.1.1.1")).unwrap();
+        assert!(out.originator_id.is_none());
+        assert!(out.cluster_list.is_none());
+        assert!(out.local_pref.is_none());
     }
 
     #[test]
