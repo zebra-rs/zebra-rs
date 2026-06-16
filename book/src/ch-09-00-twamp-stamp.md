@@ -28,21 +28,34 @@ the live prober.
 
 ## Current status
 
-The **distribution and consumption planes are implemented** for both
-IGPs, end to end:
+**All three planes are implemented** — measurement, distribution, and
+consumption — end to end:
 
-| | Origination | Flex-Algo consumption (metric-type 1) |
-|---|---|---|
-| IS-IS | RFC 8570 sub-TLVs, inline + ASLA | yes |
-| OSPFv2 | RFC 7471 attributes in ASLA | yes |
+| | Measurement (STAMP) | Origination | Flex-Algo consumption (metric-type 1) |
+|---|---|---|---|
+| IS-IS | yes — IPv4 and IPv6 link-local | RFC 8570 sub-TLVs, inline + ASLA | yes |
+| OSPFv2 | yes — IPv4 | RFC 7471 attributes in ASLA | yes |
 
-Today the metric values come from **static per-interface configuration**
-(the `te-metric` block below). The **STAMP measurement runtime that
-populates them dynamically is the next step** — see
-[The measurement plane](#the-measurement-plane). Because both sides
-share the `te-metric` fields, static configuration is a faithful
-stand-in: a topology configured by hand behaves exactly as it will once
-the prober feeds the same fields live.
+The per-interface `te-metric` fields can be **driven two ways**, and the
+two are interchangeable because they write the same struct:
+
+- **Statically**, from per-interface configuration (the `te-metric`
+  block below) — useful for lab topologies and for pinning a value.
+- **Dynamically**, from the live STAMP prober (the `te-metric
+  measurement` block) — the active measurement plane probes each link
+  and feeds the damped result into the same fields.
+
+A statically configured value and a measured one are indistinguishable
+downstream: origination, the ASLA, and Flex-Algorithm SPF neither know
+nor care which writer produced the number. When both are present on a
+link the configured value wins **per field** — a hand-set bound is
+authoritative and the measured stream backfills only the fields left
+unset.
+
+> **OSPFv3** has no TE-metric origination, so there is nowhere to publish
+> an IPv6 delay on the OSPF side; IPv6 measurement is therefore an IS-IS
+> feature, riding the link's IPv6 link-local adjacency. OSPFv2 is
+> IPv4-only on the wire. See [The measurement plane](#the-measurement-plane).
 
 ## Configuration
 
@@ -98,8 +111,54 @@ router ospf {
 `min-delay` and `max-delay` are advertised together as a single Min/Max
 attribute and are emitted only when **both** are set — a half-populated
 bound would be a meaningless wire artifact. Statically configured values
-carry a clear Anomalous flag; the measurement plane will raise it on a
-threshold crossing.
+carry a clear Anomalous flag.
+
+### Measured delay (`te-metric measurement`)
+
+To measure a link instead of pinning its values, enable the prober on
+the interface. The measured min/max/avg/variation then populate the same
+`te-metric` fields and are re-originated each time the damped value
+moves:
+
+```
+router isis {
+  interface eth1 {
+    network-type point-to-point;
+    te-metric {
+      measurement {
+        enable true;
+        interval 100;        # probe TX interval, ms  (100..60000, default 1000)
+        damping-period 2;    # export window, seconds  (1..3600, default 30)
+      }
+    }
+  }
+}
+```
+
+OSPFv2 takes the identical block, one level deeper under `area / interface`
+(and, as with static `te-metric`, only originates the result when SR-MPLS
+is enabled — see the note under [Wire encoding](#ospfv2-rfc-7471)).
+
+How the session is formed:
+
+- **One session per link.** Both ends must enable `measurement` — a node
+  reflects a probe only from a link on which it too is measuring (the
+  implicit Session-Reflector, no separate reflector config). The session
+  is created when the adjacency comes **Up** and torn down when it drops;
+  a torn-down session clears its measured fields so a stale delay is
+  never left advertised.
+- **Point-to-point only**, and the address pair is chosen the way BFD
+  chooses one: **prefer the IPv4 pair; fall back to the IPv6 link-local
+  pair** when the link has no shared IPv4. So a dual-stack link is
+  measured over IPv4, and a **v6-only IS-IS link is measured over its
+  `fe80::` link-locals** (scoped by the interface) — either way it is one
+  session feeding the same `te-metric`.
+- **Probe TTL/Hop-Limit is 255** and the admission gate is the
+  reflector's implicit allow-list, not a hop check.
+
+Defaults (`interval` 1000 ms, `damping-period` 30 s) match the
+periodic-advertisement cadence of IOS-XR / SR-OS; the lab values above
+(100 ms / 2 s) converge in seconds.
 
 ## Wire encoding
 
@@ -194,33 +253,63 @@ delay-weighted shortest paths — is shown by:
 - `show isis flex-algo`
 - `show ospf flex-algo`
 
+The measurement plane has its own show commands:
+
+- `show stamp` — one line per session: the link, the remote address
+  (an `fe80::` link-local on a v6-only link), sender state, and the
+  latest damped delay.
+- `show stamp session` — per-session detail (SSID, timing parameters,
+  the min/max/avg/variation window, packet counts).
+- `show stamp statistics` — sender and reflector packet counters,
+  including how many receive timestamps came from the kernel
+  (`SO_TIMESTAMPING`) versus a userspace read.
+
 ## The measurement plane
 
-The active prober is a **separate task**, spawned like BFD and Neighbor
-Discovery rather than living inside the IGP tasks — performance
+The active prober runs as a **separate task**, spawned like BFD and
+Neighbor Discovery rather than living inside the IGP tasks — performance
 measurement is its own subsystem that hands results to the IGP, never
-the reverse.
+the reverse. The IGPs (un)subscribe a per-link session as adjacencies
+come and go; the prober owns the sockets, the timing, and the damping.
 
 Its building blocks:
 
 - **Protocol** — STAMP (RFC 8762): a 44-octet Session-Sender packet and
-  a Session-Reflector that timestamps and returns it, from which one-way
-  or round-trip delay is derived. STAMP is wire-compatible with
-  unauthenticated TWAMP Light peers (RFC 8762 §4.6), so a zebra-rs
-  reflector interoperates with an IOS-XR TWAMP-Light sender and a Nokia
-  STAMP sender alike. The optional TLVs (RFC 8972) and the SR return-path
-  TLVs (RFC 9503 — Destination Node Address, Return Path) extend it for
-  segment-routed measurement.
-- **Codec** — the `stamp-packet` crate already implements the packet and
-  TLV encode/decode (sender/reflector base, error-estimate, the RFC 8972
-  TLV framework, and the RFC 9503 return-path sub-TLVs).
+  a Session-Reflector that timestamps and returns it. zebra-rs runs an
+  unauthenticated Session-Sender per measured link and an *implicit*
+  Session-Reflector on UDP 862 (both `0.0.0.0` and `[::]`) that answers
+  a probe only from a link it is itself measuring. STAMP is
+  wire-compatible with unauthenticated TWAMP Light peers (RFC 8762 §4.6),
+  so a zebra-rs reflector interoperates with an IOS-XR TWAMP-Light sender
+  and a Nokia STAMP sender alike. The optional TLVs (RFC 8972) and the SR
+  return-path TLVs (RFC 9503) extend it for segment-routed measurement.
+- **Delay math** — each reflected packet carries four timestamps, and
+  the one-way delay is `((T4 − T1) − (T3 − T2)) / 2`. Because the two
+  same-clock differences (`T4 − T1` on the sender, `T3 − T2` on the
+  reflector) are subtracted, the clock offset between the two systems
+  cancels — no time synchronization is required. Samples that compute
+  negative or implausibly large (a wall-clock step mid-probe) are
+  discarded and counted.
+- **Timestamping** — the receive timestamps T2 (reflector) and T4
+  (sender) are taken by the kernel via `SO_TIMESTAMPING` (software RX),
+  not a post-wakeup userspace read, so the reported delay excludes the
+  daemon's own scheduling latency. Software stamps are stack-level and
+  so work on every interface including veth/loopback; `show stamp
+  statistics` reports how often the kernel stamp was used. (Software *TX*
+  timestamps are not available on virtual interfaces, so T1 is stamped in
+  userspace at build time.)
+- **Codec** — the `stamp-packet` crate implements the packet and TLV
+  encode/decode (sender/reflector base, error-estimate, the RFC 8972 TLV
+  framework, and the RFC 9503 return-path sub-TLVs).
 - **Damping** — the measured value feeds the IGP only after rolling
   averaging plus threshold/periodic suppression, so a noisy probe stream
-  does not re-originate an LSP/LSA on every packet. This mirrors the
+  does not re-originate an LSP/LSA on every packet. Each export window
+  re-advertises only if a field moved beyond a small threshold; an empty
+  window clears the measured values. This mirrors the
   periodic-plus-accelerated advertisement model of IOS-XR and SR-OS and
   is essential: without it, delay measurement would thrash the flooding
   domain.
 
-When that task lands, it becomes a second writer of the per-interface
-`te-metric` fields documented above; everything downstream — origination,
-the ASLA, Flex-Algorithm SPF — is already in place and unchanged.
+The prober is the second writer of the per-interface `te-metric` fields
+documented above; everything downstream — origination, the ASLA,
+Flex-Algorithm SPF — is the same code the static path uses, unchanged.
