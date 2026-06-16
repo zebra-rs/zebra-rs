@@ -32,6 +32,10 @@ module config {
     prefix zba;
   }
 
+  import zebra-bgp-sharding {
+    prefix zbsh;
+  }
+
   import zebra-bgp-vrf {
     prefix zbv;
   }

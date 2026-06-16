@@ -1,0 +1,84 @@
+module zebra-bgp-sharding {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-sharding";
+  prefix "zbsh";
+
+  import config {
+    prefix config;
+  }
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP RIB sharding degree (RIB sharding Phase C / C.4) — the shipping
+     form of the ZEBRA_BGP_SHARDS environment variable. Sets the number of
+     parallel worker shards the BGP speaker fans plain IPv4-unicast ingest /
+     best-path / egress across, hashed by prefix. `1` (default) keeps the
+     synchronous single-shard path; `> 1` spawns that many dedicated worker
+     threads.
+
+     Startup-only: the shard pool is created when the BGP instance spawns
+     (the first `router bgp` commit), so the value is read once and fixed for
+     the instance's lifetime — the pool cannot be resized without re-hashing
+     the whole RIB. Changing it on a live instance is ignored with a warning;
+     clear `router bgp` (which tears the instance down) or restart the daemon
+     to re-shard. When this leaf is unset the daemon falls back to the
+     `ZEBRA_BGP_SHARDS` environment variable, then to `1`.
+
+     Resulting config shape:
+
+       router bgp {
+         shards 4;
+       }";
+
+  grouping bgp-sharding-extension {
+    description
+      "Sharding degree leaf hung off `router bgp`.";
+    leaf shards {
+      ext:help "Number of parallel RIB shards (1-64, default 1)";
+      type uint8 {
+        range "1..64";
+      }
+      description
+        "Number of parallel BGP RIB worker shards. 1 = synchronous
+         single-shard path (default when unset). Read once at instance
+         spawn and immutable thereafter (live resharding is out of scope).
+         No YANG default is declared on purpose: an unset leaf must stay
+         absent so it does not shadow the ZEBRA_BGP_SHARDS fallback.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the shards leaf in the candidate-set subtree.";
+    uses bgp-sharding-extension;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp shards` is path-valid.";
+    uses bgp-sharding-extension;
+  }
+}
