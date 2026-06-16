@@ -69,6 +69,17 @@ Feature: BGP per-update-group egress task lifecycle (migration Phase 0)
     Then show command "show bgp ipv4" in namespace "z3" should not contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
 
+  Scenario: a peer-down withdraw propagates through the group task (Phase 2)
+    Given the test topology exists
+    # z3 still holds .11 (positive control). Stopping z1 makes z2 clean z1's
+    # routes; the group task must withdraw .11 from z3. This is the peer-down
+    # path (route_clean), distinct from the event-driven withdraw above.
+    Then show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
+    When I stop zebra-rs in namespace "z1"
+    And I wait 20 seconds for BGP to operate
+    Then BGP session in "z2" to "10.0.0.1" should not be "Established"
+    And show command "show bgp ipv4" in namespace "z3" should not contain "10.10.11.0/24"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

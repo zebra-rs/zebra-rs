@@ -3029,6 +3029,15 @@ pub(super) fn route_advertise_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // Group-task migration (gate-on): the v4-unicast direct-withdraw / re-
+    // advertise egress (route_ipv4_withdraw, peer-down route_clean) runs in
+    // the per-update-group egress tasks — fan one delta per group. This is the
+    // peer-down path's sink; gating it (not only `apply_ipv4_advertise_job`)
+    // is what makes peer-down coherent at gate-on. Precedes the PET gate.
+    if rd.is_none() && super::group_egress::egress_group_task_enabled() {
+        fan_advertise_to_groups(prefix, selected, source_peer, bgp.update_groups, peers);
+        return;
+    }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
     // per-peer egress tasks. Fan the best path to each PET — which builds +
     // out-policy + records adj_out + sends/withdraws off the main loop —
