@@ -1,0 +1,49 @@
+interface:
+- if-name: z2-z1
+  ipv4:
+    address: 192.168.0.2/30
+  ipv6:
+    address: 2001:db8:12::2/64
+prefix-set:
+- name: IN-DENY6
+  prefixes:
+  - prefix: 2001:db8:100::/48
+- name: IN-MED6
+  prefixes:
+  - prefix: 2001:db8:200::/48
+policy:
+- name: IN6
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix: IN-DENY6
+  - number: 20
+    action: permit
+    match:
+      prefix: IN-MED6
+    set:
+      med:
+        set: 50
+  - number: 30
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+      policy:
+        in: IN6
+    afi-safi:
+    - name: ipv6
+      redistribute:
+        connected: {}

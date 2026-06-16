@@ -1,0 +1,15 @@
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002

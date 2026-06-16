@@ -33,6 +33,7 @@ use crate::bgp_vrf_trace;
 use crate::config::{Args, ConfigOp};
 
 use super::Bgp;
+use super::vrf::msg::BgpVrfMsg;
 
 /// MPLS label allocation strategy for VPN routes originated from a
 /// VRF — mirrors `label-mode` in zebra-bgp-vrf.yang. Default is
@@ -316,12 +317,33 @@ pub fn config_vrf_neighbor_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
 /// `set router bgp vrf <NAME> afi-safi ipv4` — presence container.
 pub fn config_vrf_afi_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
     match op {
         ConfigOp::Set => {
-            cfg.ipv4_unicast.get_or_insert_with(Default::default);
+            vrf_entry(bgp, name)
+                .ipv4_unicast
+                .get_or_insert_with(Default::default);
         }
-        ConfigOp::Delete => cfg.ipv4_unicast = None,
+        ConfigOp::Delete => {
+            // Dropping the whole `afi-safi ipv4` container collapses to
+            // this container delete — the per-network deletes are not
+            // re-emitted — so withdraw every self-originated network
+            // from the running VRF before clearing, else the routes
+            // outlive the config. Idempotent with
+            // `config_vrf_afi_ipv4_network`: a repeat WithdrawNetwork
+            // on an already-gone prefix is a no-op in the VRF task.
+            let nets: Vec<Ipv4Net> = bgp
+                .vrfs
+                .get(&name)
+                .and_then(|c| c.ipv4_unicast.as_ref())
+                .map(|af| af.networks.iter().copied().collect())
+                .unwrap_or_default();
+            if let Some(handle) = bgp.vrf_registry.get(&name) {
+                for prefix in nets {
+                    let _ = handle.inbox.send(BgpVrfMsg::WithdrawNetwork { prefix });
+                }
+            }
+            vrf_entry(bgp, name).ipv4_unicast = None;
+        }
         _ => {}
     }
     Some(())
@@ -330,17 +352,35 @@ pub fn config_vrf_afi_ipv4(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 /// `set router bgp vrf <NAME> afi-safi ipv4 network <PREFIX>`.
 pub fn config_vrf_afi_ipv4_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
-    let af = cfg.ipv4_unicast.get_or_insert_with(Default::default);
     let prefix = args.v4net()?;
-    match op {
-        ConfigOp::Set => {
+    let set = match op {
+        ConfigOp::Set => true,
+        ConfigOp::Delete => false,
+        _ => return Some(()),
+    };
+    {
+        let af = vrf_entry(bgp, name.clone())
+            .ipv4_unicast
+            .get_or_insert_with(Default::default);
+        if set {
             af.networks.insert(prefix);
-        }
-        ConfigOp::Delete => {
+        } else {
             af.networks.remove(&prefix);
         }
-        _ => {}
+    }
+    // `compute_vrf_diff` only spawns / despawns on the VRF *name*
+    // set, so a `network` add/remove on an already-running VRF
+    // reaches the task only through a message — drive the
+    // originate / withdraw on the live instance. When the VRF isn't
+    // spawned yet (initial config), the spawn-time materialize reads
+    // the same `networks` set, so the message is simply skipped.
+    if let Some(handle) = bgp.vrf_registry.get(&name) {
+        let msg = if set {
+            BgpVrfMsg::OriginateNetwork { prefix }
+        } else {
+            BgpVrfMsg::WithdrawNetwork { prefix }
+        };
+        let _ = handle.inbox.send(msg);
     }
     Some(())
 }
@@ -348,12 +388,30 @@ pub fn config_vrf_afi_ipv4_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) 
 /// `set router bgp vrf <NAME> afi-safi ipv6` — presence container.
 pub fn config_vrf_afi_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
     match op {
         ConfigOp::Set => {
-            cfg.ipv6_unicast.get_or_insert_with(Default::default);
+            vrf_entry(bgp, name)
+                .ipv6_unicast
+                .get_or_insert_with(Default::default);
         }
-        ConfigOp::Delete => cfg.ipv6_unicast = None,
+        ConfigOp::Delete => {
+            // See `config_vrf_afi_ipv4`: withdraw every self-originated
+            // network from the running VRF before dropping the
+            // container, since the container delete is all the diff
+            // emits when the whole `afi-safi ipv6` block is removed.
+            let nets: Vec<Ipv6Net> = bgp
+                .vrfs
+                .get(&name)
+                .and_then(|c| c.ipv6_unicast.as_ref())
+                .map(|af| af.networks.iter().copied().collect())
+                .unwrap_or_default();
+            if let Some(handle) = bgp.vrf_registry.get(&name) {
+                for prefix in nets {
+                    let _ = handle.inbox.send(BgpVrfMsg::WithdrawNetworkV6 { prefix });
+                }
+            }
+            vrf_entry(bgp, name).ipv6_unicast = None;
+        }
         _ => {}
     }
     Some(())
@@ -362,17 +420,32 @@ pub fn config_vrf_afi_ipv6(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 /// `set router bgp vrf <NAME> afi-safi ipv6 network <PREFIX>`.
 pub fn config_vrf_afi_ipv6_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
-    let cfg = vrf_entry(bgp, name);
-    let af = cfg.ipv6_unicast.get_or_insert_with(Default::default);
     let prefix = args.v6net()?;
-    match op {
-        ConfigOp::Set => {
+    let set = match op {
+        ConfigOp::Set => true,
+        ConfigOp::Delete => false,
+        _ => return Some(()),
+    };
+    {
+        let af = vrf_entry(bgp, name.clone())
+            .ipv6_unicast
+            .get_or_insert_with(Default::default);
+        if set {
             af.networks.insert(prefix);
-        }
-        ConfigOp::Delete => {
+        } else {
             af.networks.remove(&prefix);
         }
-        _ => {}
+    }
+    // See `config_vrf_afi_ipv4_network`: drive the originate /
+    // withdraw on the running VRF task, since `compute_vrf_diff`
+    // never re-spawns it for a network-only change.
+    if let Some(handle) = bgp.vrf_registry.get(&name) {
+        let msg = if set {
+            BgpVrfMsg::OriginateNetworkV6 { prefix }
+        } else {
+            BgpVrfMsg::WithdrawNetworkV6 { prefix }
+        };
+        let _ = handle.inbox.send(msg);
     }
     Some(())
 }

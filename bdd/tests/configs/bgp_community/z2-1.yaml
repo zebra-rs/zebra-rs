@@ -3,6 +3,9 @@ router:
     global:
       as: 65002
       router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ebgp: 3
     neighbor:
     - remote-address: 192.168.0.1
       afi-safi:

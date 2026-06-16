@@ -26,6 +26,12 @@ use super::route::{BgpRib, LocalRibTable};
 use super::store::BgpAttrStore;
 use super::vrf::VrfLabelAllocator;
 
+pub mod msg;
+pub use msg::{ShardMsg, ShardOut};
+
+pub mod dispatch;
+pub mod pool;
+
 /// Labels a shard carves from the central allocator per refill (RIB
 /// sharding B.2). A shard mints local labels in the per-route hot
 /// path, so it can't ask the main task per label; it draws a chunk
@@ -151,6 +157,17 @@ impl ShardLabelPool {
     }
 }
 
+/// A peer's inbound policy snapshot, replicated from the main task into
+/// the shard(s) via [`ShardMsg::PolicyReplace`] so the shard applies the
+/// operator's real route-map / prefix-list in `compute_policy` rather
+/// than default-permit. Built on the main task from the peer's resolved
+/// inbound policy whenever the policy actor pushes a fresh `PolicyRx`.
+#[derive(Debug, Default, Clone)]
+pub struct InPolicy {
+    pub prefix_set: super::policy::PrefixSetValue,
+    pub policy_list: super::policy::PolicyListValue,
+}
+
 #[derive(Debug, Default)]
 pub struct BgpShard {
     pub v4: LocalRibTable<Ipv4Net>,
@@ -190,9 +207,29 @@ pub struct BgpShard {
     /// [`VrfLabelAllocator`] on `Bgp`. Empty on per-VRF shards — the
     /// LU/VPN label path is global-instance-only today.
     pub labels: ShardLabelPool,
+
+    /// Per-peer inbound policy snapshots, replicated from the main task
+    /// via [`ShardMsg::PolicyReplace`]. Looked up by source `ident` in
+    /// `compute_policy`; absent ⇒ default-permit. Closes the Phase C
+    /// default-permit placeholder so the shard applies real inbound
+    /// route-maps / prefix-lists at N>1.
+    pub in_policy: BTreeMap<usize, Arc<InPolicy>>,
 }
 
 impl BgpShard {
+    /// Install or clear a peer's replicated inbound policy snapshot
+    /// ([`ShardMsg::PolicyReplace`]). `None` removes it (policy unset or
+    /// peer gone) so the shard falls back to default-permit.
+    pub fn set_in_policy(&mut self, ident: usize, policy: Option<Arc<InPolicy>>) {
+        match policy {
+            Some(p) => {
+                self.in_policy.insert(ident, p);
+            }
+            None => {
+                self.in_policy.remove(&ident);
+            }
+        }
+    }
     /// Intern a sharded-family RIB attribute. Delegates to the
     /// shard's own [`BgpAttrStore`] — see the field doc for why
     /// sharded RIB storage interns here rather than in the main store.

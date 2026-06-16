@@ -13,6 +13,7 @@ pub mod interface_neighbor;
 pub mod membership;
 pub mod neighbor_group;
 pub mod peer;
+pub mod peer_egress;
 pub mod peer_key;
 pub mod peer_map;
 pub mod show;

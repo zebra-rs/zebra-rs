@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::BytesMut;
@@ -815,9 +816,34 @@ pub struct Peer {
     /// plan B.1 / D3).
     pub adj_in: MainAdjIn,
     pub adj_out: AdjRib<Out>,
+    /// Resumable IPv4-unicast session-up sync cursor (Tier 1a).
+    /// `Some` only while a chunked dump is in flight; gated on
+    /// `ZEBRA_BGP_SYNC_CHUNK` (legacy one-shot `route_sync_ipv4` when
+    /// the flag is off, so this stays `None`).
+    pub sync_v4: Option<super::route::Ipv4SyncCursor>,
+    /// Per-peer egress task (A2 ⑥ / (a′)). `Some` only at gate-on
+    /// (`ZEBRA_BGP_PEER_TASK`) while Established: it owns the v4-unicast
+    /// egress off the main loop. `None` at gate-off (egress on main via
+    /// update-groups, today's default) and between sessions. Phase 0: the
+    /// task is spawned/torn down here but idle; Phase 1 routes the egress
+    /// through it.
+    pub pet: Option<super::peer_egress::PeerEgressTask>,
+    /// Egress backlog gauge (Tier 1b backpressure): the per-peer writer
+    /// task publishes `packet_rx.len()` (pending UPDATE messages) here
+    /// after each write; the sync cursor reads it and parks itself when
+    /// a slow socket lets the queue exceed the watermark, so a large
+    /// dump can't outrun the peer and grow memory unboundedly. Shared
+    /// (the writer holds a clone).
+    pub egress_depth: Arc<AtomicUsize>,
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
+    /// Cached owned snapshot of the *outbound* policy (Output direction of
+    /// `prefix_set` / `policy_list`), rebuilt by `rebuild_out_policy` only
+    /// when that policy resolves (`process_policy_msg`). `sync_ctx` clones
+    /// the `Arc` into every `SyncCtx`, so the per-route egress evaluation
+    /// (and later a shard worker) reads the policy without a deep clone.
+    pub out_policy: Arc<super::policy::OutPolicy>,
     pub rtcv4: BTreeSet<ExtCommunityValue>,
     pub rtcv6: BTreeSet<ExtCommunityValue>,
     pub eor: BTreeMap<AfiSafi, bool>,
@@ -966,9 +992,13 @@ impl Peer {
             cap_map: CapAfiMap::new(),
             adj_in: MainAdjIn::new(),
             adj_out: AdjRib::new(),
+            sync_v4: None,
+            pet: None,
+            egress_depth: Arc::new(AtomicUsize::new(0)),
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
+            out_policy: Arc::new(super::policy::OutPolicy::default()),
             rtcv4: BTreeSet::default(),
             rtcv6: BTreeSet::default(),
             eor: BTreeMap::default(),
@@ -1170,6 +1200,60 @@ impl Peer {
 
     pub fn is_reflector_client(&self) -> bool {
         self.reflector_client
+    }
+
+    /// Borrowed view of this peer's outbound policy (A2 Phase 0). The
+    /// egress build takes this instead of `&Peer` so the same evaluation
+    /// can run in a shard worker (which holds a `SyncCtx`, not a `Peer`).
+    /// Rebuild the cached outbound-policy snapshot from the current
+    /// Output-direction `prefix_set` / `policy_list`. Called whenever that
+    /// policy resolves (`process_policy_msg`) so the `Arc` every `SyncCtx`
+    /// clones stays current; the deep clone of the route-map / prefix-list
+    /// happens here — once per resolve, never per advertised route.
+    pub fn rebuild_out_policy(&mut self) {
+        self.out_policy = Arc::new(super::policy::OutPolicy {
+            prefix_set: self.prefix_set.get(&super::policy::InOut::Output).clone(),
+            policy_list: self.policy_list.get(&super::policy::InOut::Output).clone(),
+        });
+    }
+
+    /// Snapshot this peer's IPv4-unicast egress context (A2). `router_id`
+    /// is the local/global router-id (`*bgp.router_id`), used for the
+    /// next-hop fallback and the cluster-id. Cheap (all-`Copy`); the
+    /// egress build (`route_update_ipv4`) takes this instead of `&Peer`
+    /// so the same build can run in a shard worker that has no `Peer`.
+    pub fn sync_ctx(&self, router_id: Ipv4Addr) -> super::route::SyncCtx {
+        super::route::SyncCtx {
+            ident: self.ident,
+            peer_type: self.peer_type,
+            reflector_client: self.reflector_client,
+            local_addr_v4: self.param.local_addr.and_then(|sa| match sa.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            }),
+            router_id,
+            vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
+            egress_as: self.egress_as(),
+            out_policy: self.out_policy.clone(),
+            packet_tx: self.packet_tx.clone(),
+            egress_depth: self.egress_depth.clone(),
+            extended_message: self.opt.extended_message,
+        }
+    }
+
+    /// The eBGP AS_PATH egress transform inputs for this peer (A2). Shared
+    /// across address families — the v6 / LU / VPN advertise builders call
+    /// `ebgp_egress_aspath` with this too.
+    pub fn egress_as(&self) -> super::route::EgressAs {
+        super::route::EgressAs {
+            is_ebgp: self.is_ebgp(),
+            local_as: self.local_as,
+            remote_as: self.remote_as,
+            as_override: self.config.as_override,
+            remove_private_as: self.config.remove_private_as,
+            local_as_substitute: self.change_local_as(),
+            local_as_replace: self.config.local_as.is_some_and(|la| la.replace_as),
+        }
     }
 
     /// Whether `afi-safi <name> next-hop-self` is set for this neighbor in
@@ -1412,11 +1496,17 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
     }
 }
 
-fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMap) {
+fn fsm_effect(
+    id: usize,
+    effect: FsmEffect,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     match effect {
         FsmEffect::None => {}
         FsmEffect::RouteUpdate(packet) => {
-            route_from_peer(id, packet, bgp, peers);
+            route_from_peer(id, packet, bgp, peers, shards);
         }
         FsmEffect::StaleExpire(_afi_safi) => {
             stale_route_withdraw(id, bgp, peers);
@@ -1427,7 +1517,13 @@ fn fsm_effect(id: usize, effect: FsmEffect, bgp: &mut BgpTop, peers: &mut PeerMa
     }
 }
 
-pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event) {
+pub fn fsm(
+    bgp_ref: &mut BgpTop,
+    peer_map: &mut PeerMap,
+    id: usize,
+    event: Event,
+    shards: Option<&super::shard::pool::ShardPool>,
+) {
     // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
         let peer = peer_map.get_mut_by_idx(id).unwrap();
@@ -1456,7 +1552,7 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
     }
 
     // Execute side effects that need peer_map.
-    fsm_effect(id, effect, bgp_ref, peer_map);
+    fsm_effect(id, effect, bgp_ref, peer_map, shards);
 
     // Handle state-transition consequences.
     {
@@ -1469,14 +1565,30 @@ pub fn fsm(bgp_ref: &mut BgpTop, peer_map: &mut PeerMap, id: usize, event: Event
         }
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            route_sync(peer, bgp_ref);
+            // A2 ⑥ (gate-on): spawn the per-peer egress task. Phase 0 — it
+            // is idle (lifecycle only); Phase 1 routes the v4 egress to it.
+            if super::peer_egress::peer_egress_task_enabled() {
+                let ctx = peer.sync_ctx(*bgp_ref.router_id);
+                let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+                peer.pet = Some(super::peer_egress::PeerEgressTask::spawn(ctx, add_path));
+            }
+            route_sync(peer, bgp_ref, shards.is_some());
         }
         timer::update_timers(peer);
     }
 
     // route_clean if leaving Established (needs peer_map).
     if prev_state.is_established() && !peer_map.get_by_idx(id).unwrap().state.is_established() {
-        route_clean(id, bgp_ref, peer_map);
+        route_clean(id, bgp_ref, peer_map, shards);
+        // Drop any in-flight resumable sync cursor (Tier 1a) — a
+        // pending tick for this peer no-ops in `drive_sync_v4`, but
+        // clear it so the keys snapshot isn't held past the session.
+        if let Some(peer) = peer_map.get_mut_by_idx(id) {
+            peer.sync_v4 = None;
+            // A2 ⑥: drop the per-peer egress task (abort-on-drop) so it
+            // doesn't outlive the session.
+            peer.pet = None;
+        }
     }
 
     // Maintain update-group membership across the Established
@@ -1908,7 +2020,11 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     peer.primary_conn_id = Some(conn_id);
     let (read_half, write_half) = stream.into_split();
     peer.task.reader = Some(peer_start_reader(peer, conn_id, read_half));
-    peer.task.writer = Some(peer_start_writer(write_half, packet_rx));
+    peer.task.writer = Some(peer_start_writer(
+        write_half,
+        packet_rx,
+        peer.egress_depth.clone(),
+    ));
     peer_send_open(peer);
     State::OpenSent
 }
@@ -2079,7 +2195,15 @@ pub async fn peer_read(
         match read_half.read_buf(&mut buf).await {
             Ok(read_len) => {
                 if read_len == 0 {
-                    let _ = tx.try_send(Message::Event(ident, Event::ConnFail(conn)));
+                    // EOF: the peer closed the connection (graceful close,
+                    // or its process died). Deliver ConnFail with an
+                    // awaiting send rather than `try_send` — a momentarily
+                    // full message channel must not drop the one event that
+                    // drives peer-down detection, or detection falls back
+                    // to the ~90s hold timer. Mirrors the read-error arm
+                    // below; a dying connection has nothing left to read,
+                    // so parking this task on backpressure is harmless.
+                    let _ = tx.send(Message::Event(ident, Event::ConnFail(conn))).await;
                     return;
                 }
                 while buf.len() >= BGP_HEADER_LEN as usize && buf.len() >= peek_bgp_length(&buf) {
@@ -2124,13 +2248,49 @@ pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) ->
     })
 }
 
+/// Test/debug knob: artificially slow the egress writer by N ms per
+/// UPDATE (`ZEBRA_BGP_WRITER_DELAY_MS`, default 0 = off). Simulates a
+/// slow peer at the application layer so the pending-UPDATE queue backs
+/// up deterministically — used to exercise the Tier-1b sync-cursor park
+/// without depending on kernel send-buffer / `tc` behaviour. Read once.
+fn writer_delay_ms() -> u64 {
+    use std::sync::OnceLock;
+    static D: OnceLock<u64> = OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("ZEBRA_BGP_WRITER_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    })
+}
+
 pub fn peer_start_writer(
     mut write_half: OwnedWriteHalf,
     mut rx: UnboundedReceiver<BytesMut>,
+    egress_depth: Arc<AtomicUsize>,
 ) -> Task<()> {
+    // Fresh connection ⇒ fresh queue: reset the in-flight gauge
+    // synchronously (before any `send_packet` on the new channel) so it
+    // doesn't carry a stale count across reconnects.
+    egress_depth.store(0, Ordering::Relaxed);
+    let delay = writer_delay_ms();
     Task::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let _ = write_half.write_all(&msg).await;
+            // Tier 1b: decrement the in-flight gauge that `send_packet`
+            // incremented on queue. Saturating because control frames
+            // (keepalive/OPEN) bypass `send_packet` so weren't counted,
+            // yet the writer drains them too — clamp at 0 rather than
+            // wrap. The pair (send +1 / write −1) keeps the gauge a
+            // real-time count of queued route UPDATEs.
+            egress_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                })
+                .ok();
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
         }
     })
 }
@@ -2549,7 +2709,7 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     let (read_half, write_half) = stream.into_split();
     let reader = peer_start_reader(peer, conn_id, read_half);
-    let writer = peer_start_writer(write_half, packet_rx);
+    let writer = peer_start_writer(write_half, packet_rx, peer.egress_depth.clone());
     // Stash before sending OPEN so peer_send_open_on_tx has the tx to
     // write into.
     peer.collision = Some(CollisionConn {
@@ -2799,7 +2959,12 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             vrf_transport_v6: None,
             central_label_alloc: None,
         };
-        super::route::route_soft_in_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        super::route::route_soft_in_peer(
+            peer_idx,
+            &mut bgp_ref,
+            &mut bgp.peers,
+            bgp.shards.as_ref(),
+        );
     } else if supports_refresh {
         let peer = bgp.peers.get_mut_by_idx(peer_idx).expect("peer exists");
         for (afi, safi) in &mp_pairs {
@@ -3405,7 +3570,7 @@ mod fsm_idle_hold_tests {
 
         let (_read_half, write_half) = client.into_split();
         let (tx, rx) = mpsc::unbounded_channel::<BytesMut>();
-        let writer = peer_start_writer(write_half, rx);
+        let writer = peer_start_writer(write_half, rx, Arc::new(AtomicUsize::new(0)));
 
         // Queue a frame, close the channel, detach — mirroring
         // `close_primary` / the Idle-entry teardown ordering.

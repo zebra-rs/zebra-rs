@@ -156,7 +156,7 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             vrf_transport_v6: None,
             central_label_alloc: None,
         };
-        route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers);
+        route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
         // Update-groups live outside `PeerMap`: removal below purges
         // the membership index by construction, but the group member
         // sets must be detached explicitly or the freed ident lingers

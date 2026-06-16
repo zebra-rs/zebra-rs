@@ -67,6 +67,25 @@ fn parse_clear_bgp_path(
     Some((afi_safi, op))
 }
 
+/// Tier 1b sync backpressure: park the IPv4 sync cursor once this many
+/// UPDATE messages are queued (not yet written) toward a peer, so a slow
+/// socket can't let a large session-up dump outrun it and grow memory
+/// unboundedly. At ~max-packet UPDATEs this caps in-flight bytes at a
+/// few hundred KB. Re-polled every `SYNC_PARK_MS` while parked.
+/// Overridable via `ZEBRA_BGP_SYNC_EGRESS_HIGH` (default 64).
+fn sync_egress_high_water() -> usize {
+    use std::sync::OnceLock;
+    static W: OnceLock<usize> = OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("ZEBRA_BGP_SYNC_EGRESS_HIGH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(64)
+    })
+}
+const SYNC_PARK_MS: u64 = 20;
+
 #[derive(Debug)]
 pub enum Message {
     Event(usize, Event),
@@ -364,6 +383,83 @@ pub struct RibKnownVrf {
     pub inter_as_hybrid: bool,
 }
 
+/// Number of parallel RIB shards (RIB sharding Phase C), read once from
+/// the `ZEBRA_BGP_SHARDS` environment variable at instance construction.
+/// `1` (default, and when unset/invalid) keeps the synchronous
+/// single-shard path (BDD-safe); `> 1` spawns that many worker threads and
+/// fans ingest out by prefix hash. Startup-only — live resharding is out
+/// of scope (the pool spawns in [`Bgp::new`] before any route state). The
+/// value is clamped to `1..=64`.
+pub fn shard_count() -> usize {
+    std::env::var("ZEBRA_BGP_SHARDS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or(1)
+}
+
+/// A2 step ① — per-`req_id` barrier for in-flight `DumpV4` dumps. Each
+/// session-up dump is fanned to the N pool shards (`broadcast_dump_v4`);
+/// every `ShardOut::DumpDoneV4` decrements that request's outstanding-ack
+/// count, and the last ack returns a [`DumpDoneSummaryV4`] so main can
+/// record the dump's `adj_out` deltas + emit EoR (step ③/④). `req_id`s are
+/// a monotonic counter (no wall-clock), so the sequence is deterministic.
+#[derive(Default)]
+struct DumpBarrierV4 {
+    next_req_id: u64,
+    inflight: std::collections::HashMap<u64, DumpStateV4>,
+}
+
+struct DumpStateV4 {
+    /// The peer this dump targets (`Peer::ident`).
+    ident: usize,
+    /// Shard acks still outstanding — starts at N, hits 0 on completion.
+    remaining: usize,
+    /// UPDATEs enqueued so far, summed across shards (for the EoR log).
+    sent: usize,
+}
+
+/// Returned by [`DumpBarrierV4::ack`] on the final ack of a `req_id`.
+struct DumpDoneSummaryV4 {
+    ident: usize,
+    sent: usize,
+}
+
+impl DumpBarrierV4 {
+    /// Register a dump fanned to `n` shards for `ident`; returns its
+    /// `req_id`. Called from `Bgp::broadcast_dump_v4` at session-up (N>1).
+    fn start(&mut self, ident: usize, n: usize) -> u64 {
+        let req_id = self.next_req_id;
+        self.next_req_id += 1;
+        self.inflight.insert(
+            req_id,
+            DumpStateV4 {
+                ident,
+                remaining: n,
+                sent: 0,
+            },
+        );
+        req_id
+    }
+
+    /// Record one shard's ack (`sent` UPDATEs). Returns `Some` summary on
+    /// the last outstanding ack of `req_id`, else `None`. An ack for an
+    /// unknown `req_id` (already completed, or never started) is ignored.
+    fn ack(&mut self, req_id: u64, sent: usize) -> Option<DumpDoneSummaryV4> {
+        let state = self.inflight.get_mut(&req_id)?;
+        state.sent += sent;
+        state.remaining = state.remaining.saturating_sub(1);
+        if state.remaining > 0 {
+            return None;
+        }
+        let state = self.inflight.remove(&req_id)?;
+        Some(DumpDoneSummaryV4 {
+            ident: state.ident,
+            sent: state.sent,
+        })
+    }
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -438,6 +534,12 @@ pub struct Bgp {
     /// Bounded channel for BGP events (capacity: 8192)
     pub tx: mpsc::Sender<Message>,
     pub rx: mpsc::Receiver<Message>,
+    /// Unbounded self-signal for the resumable IPv4 sync cursor (Tier
+    /// 1a). Dedicated + unbounded so a continuation tick can never be
+    /// dropped on a full `tx`; carries the peer `ident`. Idle (never
+    /// fed) when `ZEBRA_BGP_SYNC_CHUNK` is unset.
+    pub sync_tick_tx: mpsc::UnboundedSender<usize>,
+    pub sync_tick_rx: mpsc::UnboundedReceiver<usize>,
     pub cm: ConfigChannel,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
@@ -460,9 +562,30 @@ pub struct Bgp {
     pub pcallbacks: HashMap<String, PCallback>,
     /// BGP Local RIB (Loc-RIB) for best path selection
     pub local_rib: LocalRib,
-    /// Shard-scope Loc-RIB tables (unicast/LU/VPN) — see
-    /// [`super::shard::BgpShard`] for the sharding-plan partition.
+    /// Shard-scope Loc-RIB tables (unicast/LU/VPN). The route pipeline
+    /// applies ingest to these through [`BgpShard::handle`] — building a
+    /// `ShardMsg`, dispatching it synchronously, and acting on the
+    /// returned `ShardOut` delta (RIB sharding B.3, sync-dispatch). The
+    /// same `handle` becomes the body of the shard *task* when C.1
+    /// introduces real parallelism. See [`super::shard::BgpShard`] for
+    /// the partition.
+    ///
+    /// [`BgpShard::handle`]: super::shard::BgpShard::handle
     pub shard: BgpShard,
+    /// Parallel shard worker pool (RIB sharding Phase C). `None` when
+    /// [`shard_count`]` == 1` — the synchronous `shard` field above is used
+    /// and nothing is spawned. `Some` when `> 1`: N worker threads, each
+    /// owning a `BgpShard`, with the ingest fanned out by prefix hash and
+    /// their best-path deltas drained on `shard_results_rx`.
+    pub shards: Option<super::shard::pool::ShardPool>,
+    /// Merged best-path deltas from every shard worker, drained by the
+    /// event loop's `select!`. Closed and idle when `shard_count() == 1`.
+    pub shard_results_rx: UnboundedReceiver<super::shard::pool::ShardResult>,
+    /// A2 step ① — per-`req_id` barrier for in-flight `DumpV4` dumps: counts
+    /// the `ShardOut::DumpDoneV4` acks still outstanding for each session-up
+    /// dump, so main records the dump's `adj_out` deltas + emits EoR once
+    /// every shard has finished its slice (step ③/④).
+    pending_dumps_v4: DumpBarrierV4,
     /// `router bgp port <0-65535>`: TCP port the BGP listener binds
     /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
     /// listening entirely — no server socket is open, so every session
@@ -739,6 +862,7 @@ impl Bgp {
         let _ = policy_tx.send(msg);
 
         let (tx, rx) = mpsc::channel(8192);
+        let (sync_tick_tx, sync_tick_rx) = mpsc::unbounded_channel();
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         // Fan-in channel: every per-VRF task gets a clone of
         // `vrf_global_tx_init` at spawn time, so all VRF→global
@@ -760,6 +884,17 @@ impl Bgp {
         // expressed later via `SrLocatorWatch` when the operator sets
         // `router bgp segment-routing srv6 locator <name>`.
         let (srv6_sr_tx, srv6_locator_rx) = mpsc::unbounded_channel();
+        // Parallel shard pool (RIB sharding Phase C). With `shard_count()`
+        // == 1 (default) the synchronous `shard` field is used and no pool
+        // is spawned — dropping `shard_results_tx` here closes the channel
+        // so the event loop's drain arm stays idle. With `> 1` the pool
+        // spawns N worker threads and owns the sender clones.
+        let (shard_results_tx, shard_results_rx) = mpsc::unbounded_channel();
+        let n_shards = shard_count();
+        let shards = (n_shards > 1).then(move || {
+            let workers = (0..n_shards).map(|_| BgpShard::default()).collect();
+            super::shard::pool::ShardPool::spawn(workers, shard_results_tx)
+        });
         let mut bgp = Self {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
@@ -774,8 +909,13 @@ impl Bgp {
             bfd: PeerBfdConfig::default(),
             tx,
             rx,
+            sync_tick_tx,
+            sync_tick_rx,
             local_rib: LocalRib::default(),
             shard: BgpShard::default(),
+            shards,
+            shard_results_rx,
+            pending_dumps_v4: DumpBarrierV4::default(),
             ctx,
             rib_rx,
             nexthop_cache: super::nht::NexthopCache::default(),
@@ -1288,6 +1428,82 @@ impl Bgp {
         self.pcallbacks.insert(path.to_string(), cb);
     }
 
+    /// Drive one chunk of a peer's resumable IPv4 sync cursor (Tier
+    /// 1a), re-arming the next tick until the dump completes. Fired by
+    /// the `sync_tick_rx` arm of the event loop. A tick for a peer that
+    /// has dropped Established or already finished its cursor is a
+    /// no-op (the cursor is cleared on leaving Established).
+    fn drive_sync_v4(&mut self, ident: usize) {
+        // Active + Tier 1b backpressure in one mutable borrow: a tick
+        // for a dropped/finished peer is a no-op; a peer whose egress is
+        // backed up (a slow socket letting UPDATEs pile up) parks the
+        // cursor and re-polls shortly — the writer drains during the
+        // delay, bounding in-flight memory instead of letting a large
+        // dump outrun the peer. The gauge is published by
+        // `peer_start_writer`; park/resume is logged once per transition.
+        let backed_up = {
+            let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                return;
+            };
+            if !(peer.state.is_established() && peer.sync_v4.is_some()) {
+                return;
+            }
+            let depth = peer.egress_depth.load(std::sync::atomic::Ordering::Relaxed);
+            let over = depth >= sync_egress_high_water();
+            if let Some(cursor) = peer.sync_v4.as_mut() {
+                if over && !cursor.parked {
+                    cursor.parked = true;
+                    tracing::info!(ident, depth, "bgp: v4 sync parked (egress backpressure)");
+                } else if !over && cursor.parked {
+                    cursor.parked = false;
+                    tracing::info!(ident, depth, "bgp: v4 sync resumed");
+                }
+            }
+            over
+        };
+        if backed_up {
+            let tx = self.sync_tick_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(SYNC_PARK_MS)).await;
+                let _ = tx.send(ident);
+            });
+            return;
+        }
+        let chunk = super::route::sync_chunk_size().unwrap_or(1000);
+
+        let import_dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: Some(&import_dispatcher),
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: self.vrf_label_alloc.as_mut(),
+        };
+        let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+            return;
+        };
+        let done = super::route::route_sync_v4_chunk(peer, &mut bgp_ref, chunk);
+        if !done {
+            // Re-arm; unbounded channel, so this never drops.
+            let _ = self.sync_tick_tx.send(ident);
+        }
+    }
+
     pub fn process_msg(&mut self, msg: Message) {
         match msg {
             Message::Event(ident, event) => {
@@ -1369,7 +1585,13 @@ impl Bgp {
                     central_label_alloc: self.vrf_label_alloc.as_mut(),
                 };
 
-                fsm(&mut bgp_ref, &mut self.peers, ident, event);
+                fsm(
+                    &mut bgp_ref,
+                    &mut self.peers,
+                    ident,
+                    event,
+                    self.shards.as_ref(),
+                );
 
                 // FSM-transition tracing: compare the captured pre-FSM
                 // state with the state the FSM left the peer in.
@@ -1382,6 +1604,37 @@ impl Bgp {
                         to = peer.state.to_str(),
                         "FSM transition"
                     );
+                }
+
+                // Tier 1a: a peer that just got a fresh resumable v4
+                // sync cursor (set by `route_sync` inside the FSM) is
+                // enqueued here exactly once — the kick needs full
+                // `self` for `sync_tick_tx`; the continuation re-arms
+                // from `drive_sync_v4`.
+                let kick = self
+                    .peers
+                    .get_mut_by_idx(ident)
+                    .and_then(|p| p.sync_v4.as_mut())
+                    .filter(|c| c.fresh)
+                    .map(|c| c.fresh = false)
+                    .is_some();
+                if kick {
+                    let _ = self.sync_tick_tx.send(ident);
+                }
+
+                // A2 step ④: at N>1 the v4-unicast session-up dump runs
+                // shard-parallel (`DumpV4`) instead of the main-loop cursor.
+                // `route_sync` skipped its v4 block above, so broadcast the
+                // dump to the pool here — it needs full `self` for the
+                // per-req_id barrier. No-op at N=1 (no pool), where the
+                // cursor / legacy `route_sync_ipv4` already ran the dump.
+                let became_established = prev_state.is_some_and(|s| !s.is_established())
+                    && self
+                        .peers
+                        .get_by_idx(ident)
+                        .is_some_and(|p| p.state.is_established());
+                if became_established {
+                    self.broadcast_dump_v4(ident);
                 }
 
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
@@ -1754,7 +2007,24 @@ impl Bgp {
     }
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
-        let (path, args) = path_from_command(&msg.paths);
+        let (path, mut args) = path_from_command(&msg.paths);
+        // A2 ⑤: at N>1 a peer's v4-unicast Adj-RIB-In lives in the pool
+        // shards, not main's Loc-RIB mirror — gather it for received-routes
+        // (the sync render callback would read the empty main-side copy).
+        if self.shards.is_some() && path == "/show/bgp/neighbors/received-routes" {
+            let output = self.show_received_v4_gathered(&mut args, msg.json).await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
+        // A2 ⑥: at gate-on a peer's v4 Adj-RIB-Out lives in its PET, not on
+        // the peer — request it from the PET for advertised-routes.
+        if super::peer_egress::peer_egress_task_enabled()
+            && path == "/show/bgp/neighbors/advertised-routes"
+        {
+            let output = self.show_advertised_v4_from_pet(&mut args, msg.json).await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
@@ -1762,6 +2032,86 @@ impl Bgp {
             };
             msg.resp.send(output).await.unwrap();
         }
+    }
+
+    /// A2 ⑥ — `show … advertised-routes` at gate-on: request the peer's v4
+    /// Adj-RIB-Out from its egress task (it owns `adj_out`) over a oneshot,
+    /// then render. Empty when the peer has no task (not established).
+    async fn show_advertised_v4_from_pet(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let delta_tx = match self.peers.get(&addr) {
+            None => return format!("% No such neighbor: {}", addr),
+            Some(peer) => peer.pet.as_ref().map(|pet| pet.delta_tx.clone()),
+        };
+        let table: std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> =
+            match delta_tx {
+                Some(tx) => {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let _ =
+                        tx.send(super::peer_egress::EgressDeltaV4::DumpAdjOut { reply: reply_tx });
+                    reply_rx.await.unwrap_or_default().into_iter().collect()
+                }
+                None => std::collections::BTreeMap::new(),
+            };
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
+    }
+
+    /// A2 ⑤ — `show … received-routes` at N>1: gather the peer's
+    /// IPv4-unicast Adj-RIB-In from every pool shard and render it. The
+    /// N=1 sync callback reads `bgp.shard.adj_in` directly, so this is only
+    /// the N>1 path.
+    async fn show_received_v4_gathered(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let Some(ident) = self.peers.get(&addr).map(|p| p.ident) else {
+            return format!("% No such neighbor: {}", addr);
+        };
+        let table = self.gather_adj_in_v4(ident).await;
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
+    }
+
+    /// Scatter a `DumpAdjInV4` to every pool shard and merge the per-shard
+    /// slices of peer `ident`'s v4-unicast Adj-RIB-In. Each prefix lives on
+    /// exactly one shard (prefix hash), so the merge is a disjoint union.
+    /// Empty at N=1 (no pool).
+    async fn gather_adj_in_v4(
+        &self,
+        ident: usize,
+    ) -> std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> {
+        let mut merged = std::collections::BTreeMap::new();
+        let Some(pool) = self.shards.as_ref() else {
+            return merged;
+        };
+        let mut rxs = Vec::with_capacity(pool.n());
+        for idx in 0..pool.n() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pool.dispatch(
+                idx,
+                super::shard::ShardMsg::DumpAdjInV4 { ident, reply: tx },
+            );
+            rxs.push(rx);
+        }
+        for rx in rxs {
+            if let Ok(slice) = rx.await {
+                for (prefix, ribs) in slice {
+                    merged.entry(prefix).or_insert_with(Vec::new).extend(ribs);
+                }
+            }
+        }
+        merged
     }
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {
@@ -2327,7 +2677,41 @@ impl Bgp {
             CacheChange::Unchanged => {}
             // Gate flipped → full re-eval: best-path, advertise, install.
             CacheChange::Reachability(deps) => {
-                for dep in deps {
+                // At N>1, batch the v4-unicast re-evals per shard — every
+                // one of this next-hop's dependent prefixes hashing to a
+                // shard rides a single message instead of one dispatch
+                // each (RouteBatch for the release path; a first-seen
+                // next-hop can release a whole table's worth of held
+                // routes at once). Non-v4 deps (v6 / LU / VPN / EVPN /
+                // SR-Policy) stay on the inline sync-shard path.
+                let mut inline: Vec<super::nht::NhtDep> = Vec::new();
+                if let Some(pool) = self.shards.as_ref() {
+                    let mut per_shard: Vec<Vec<bgp_packet::Ipv4Nlri>> = vec![Vec::new(); pool.n()];
+                    for dep in deps {
+                        match dep {
+                            super::nht::NhtDep::V4(p) => {
+                                let idx = pool.shard_of(std::net::IpAddr::V4(p.addr()));
+                                per_shard[idx].push(bgp_packet::Ipv4Nlri { id: 0, prefix: p });
+                            }
+                            other => inline.push(other),
+                        }
+                    }
+                    for (idx, nlris) in per_shard.into_iter().enumerate() {
+                        if !nlris.is_empty() {
+                            pool.dispatch(
+                                idx,
+                                super::shard::ShardMsg::NexthopReachableBatchV4 {
+                                    nlris,
+                                    nh,
+                                    reachable,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    inline.extend(deps);
+                }
+                for dep in inline {
                     self.nht_reeval_dep(nh, reachable, dep);
                 }
             }
@@ -2470,7 +2854,10 @@ impl Bgp {
     /// VRF dataplane install is triggered.
     fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
         use super::nht::NhtDep;
-        // Refresh gate flags + re-select (mutates `local_rib`).
+        // Refresh gate flags + re-select (mutates `local_rib`). At N>1 the
+        // v4-unicast deps are batched per shard by the caller
+        // (`nht_handle_update`), so here `dep` is always sync-shard-owned
+        // (v6 / LU / VPN / EVPN / SR-Policy) at N>1, or any dep at N=1.
         let selected = match &dep {
             NhtDep::V4(p) => {
                 self.shard.v4.set_nexthop_reachable(*p, nh, reachable);
@@ -2853,6 +3240,31 @@ impl Bgp {
             .and_then(|c| c.metric)
     }
 
+    /// Replicate a peer's resolved **inbound** policy into the shard(s)
+    /// so the shard applies the operator's real route-map / prefix-list in
+    /// `compute_policy` (RIB sharding — closes the Phase C default-permit
+    /// placeholder). Broadcast to every pool shard (a peer's prefixes hash
+    /// across all of them) at N>1, or applied to the synchronous shard at
+    /// N=1. Called on every inbound `PolicyRx` resolve, before the soft-in
+    /// replay so replayed Adj-RIB-In routes see the new policy.
+    pub(super) fn shard_replace_in_policy(&mut self, ident: usize) {
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        let snap = std::sync::Arc::new(super::shard::InPolicy {
+            prefix_set: peer.prefix_set.input.clone(),
+            policy_list: peer.policy_list.input.clone(),
+        });
+        if let Some(pool) = self.shards.as_ref() {
+            pool.broadcast(|| super::shard::ShardMsg::PolicyReplace {
+                ident,
+                policy: Some(snap.clone()),
+            });
+            return;
+        }
+        self.shard.set_in_policy(ident, Some(snap));
+    }
+
     pub async fn process_policy_msg(&mut self, msg: policy::PolicyRx) {
         // Two responsibilities per message: refresh the per-peer policy
         // snapshot, then trigger a soft-reconfiguration so already-
@@ -2877,9 +3289,22 @@ impl Bgp {
                 };
                 let config = peer.prefix_set.get_mut(&direction);
                 config.prefix_set = prefix_set;
+                // Keep the cached outbound-policy snapshot (carried by
+                // every `SyncCtx`) current before the soft-out re-advertise
+                // reads it. Inbound resolves replicate via PolicyReplace.
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
 
                 match direction {
-                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Input => {
+                        // Push the new inbound policy into the shard(s)
+                        // before replaying Adj-RIB-In, so the replay
+                        // re-evaluates against it (single-relay FIFO keeps
+                        // PolicyReplace ahead of the replayed routes).
+                        self.shard_replace_in_policy(ident);
+                        super::peer::apply_soft_in_peer(self, ident);
+                    }
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
@@ -2920,9 +3345,22 @@ impl Bgp {
                 };
                 let config = peer.policy_list.get_mut(&direction);
                 config.policy_list = policy_list;
+                // Keep the cached outbound-policy snapshot current before
+                // the soft-out re-advertise reads it (see the prefix-set
+                // arm above).
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
 
                 match direction {
-                    InOut::Input => super::peer::apply_soft_in_peer(self, ident),
+                    InOut::Input => {
+                        // Push the new inbound policy into the shard(s)
+                        // before replaying Adj-RIB-In, so the replay
+                        // re-evaluates against it (single-relay FIFO keeps
+                        // PolicyReplace ahead of the replayed routes).
+                        self.shard_replace_in_policy(ident);
+                        super::peer::apply_soft_in_peer(self, ident);
+                    }
                     InOut::Output => super::peer::apply_soft_out_peer(self, ident),
                 }
             }
@@ -3052,6 +3490,14 @@ impl Bgp {
                         self.process_msg(msg);
                     }
                 }
+                Some(ident) = self.sync_tick_rx.recv() => {
+                    // Tier 1a: one chunk of a peer's resumable IPv4
+                    // sync dump, then it re-arms itself. Interleaves
+                    // fairly with real events so a large dump never
+                    // head-of-line-blocks ingest. Idle when the flag
+                    // is off (nothing ever feeds `sync_tick_tx`).
+                    self.drive_sync_v4(ident);
+                }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg);
                 }
@@ -3076,8 +3522,151 @@ impl Bgp {
                     // SRv6 locator resolution from the RIB SR manager.
                     self.process_sr_rx(msg);
                 }
+                Some(result) = self.shard_results_rx.recv() => {
+                    // Best-path deltas from the parallel shard pool (the
+                    // map-reduce "reduce" side). Idle at N=1 (the
+                    // channel is closed). The ingest "map" side that feeds
+                    // it lands in the next slice.
+                    self.process_shard_result(result);
+                }
             }
         }
+    }
+
+    /// Reduce side of the shard pool: act on one worker's best-path
+    /// deltas — NHT untrack + FIB install per delta, then the advertise
+    /// out-policy + attribute transform precomputed in parallel across the
+    /// batch (Phase E.1), then serial bucketing — via the same post-work
+    /// the synchronous path runs. Reachable only at N>1, where
+    /// v4-unicast ingest fanned out to the pool.
+    fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
+        // A2 step ③ — peel the DumpV4 barrier acks off the delta stream.
+        // For each shard's `DumpDoneV4`: record what it advertised into the
+        // peer's Adj-RIB-Out (so a later withdraw reaches the peer),
+        // spreading the inserts across the N acks to keep the main-loop
+        // stall low; then decrement the `req_id`'s outstanding-ack count
+        // and, on the last ack, emit EoR — every dump UPDATE is queued by
+        // then (each shard enqueues its slice before acking). Everything
+        // else is a best-path delta for the reduce below.
+        let mut deltas = Vec::with_capacity(result.out.len());
+        for out in result.out {
+            match out {
+                super::shard::ShardOut::DumpDoneV4 {
+                    req_id,
+                    ident,
+                    sent,
+                    advertised,
+                } => {
+                    // A2 ⑥ — at gate-on `adj_out` lives in the PET, so
+                    // forward the dump rows there as record-only advertises
+                    // (`send: false`: the shard already put the bytes on the
+                    // wire). The PET rebuilds + records, keeping its adj_out
+                    // and interner consistent with its event-driven path.
+                    // Gate-off records main's adj_out as before.
+                    let to_pet = super::peer_egress::peer_egress_task_enabled()
+                        && self
+                            .peers
+                            .get_by_idx(ident)
+                            .is_some_and(|p| p.pet.is_some());
+                    if to_pet {
+                        if let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
+                        {
+                            for (nlri, rib) in advertised {
+                                let _ = pet.delta_tx.send(
+                                    super::peer_egress::EgressDeltaV4::RecordAdjOut {
+                                        prefix: nlri.prefix,
+                                        rib,
+                                    },
+                                );
+                            }
+                        }
+                    } else if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                        for (nlri, rib) in advertised {
+                            peer.adj_out.add(None, nlri.prefix, rib);
+                        }
+                    }
+                    if let Some(done) = self.pending_dumps_v4.ack(req_id, sent) {
+                        if let Some(peer) = self.peers.get_mut_by_idx(done.ident) {
+                            super::route::send_eor_ipv4_unicast(peer);
+                        }
+                        tracing::debug!(
+                            req_id,
+                            ident = done.ident,
+                            sent = done.sent,
+                            "DumpV4 complete"
+                        );
+                    }
+                }
+                other => deltas.push(other),
+            }
+        }
+        if deltas.is_empty() {
+            return;
+        }
+        let import_dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            vrf_import: Some(&import_dispatcher),
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: self.vrf_label_alloc.as_mut(),
+        };
+        super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
+    }
+
+    /// A2 — fan a `DumpV4` to every pool shard for `ident`'s session-up
+    /// IPv4-unicast dump, returning the `req_id` its per-shard `DumpDoneV4`
+    /// acks carry. `None` when there is no pool (N=1, where the resumable
+    /// cursor handles the dump). Each shard builds + sends its own slice
+    /// from the shared `Arc<SyncCtx>` (the `&Peer`-free egress snapshot);
+    /// main records the adj_out deltas + counts the N acks via
+    /// [`DumpBarrierV4`], emitting EoR on the last. Called at session-up
+    /// from the FSM-event handler once the peer reaches Established.
+    fn broadcast_dump_v4(&mut self, ident: usize) -> Option<u64> {
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let n = self.shards.as_ref()?.n();
+        let high_water = sync_egress_high_water();
+        let peer = self.peers.get_by_idx(ident)?;
+        // The peer-derived egress params the shards can't reconstruct.
+        let params = super::shard::msg::DumpParamsV4 {
+            add_path: peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
+            llgr_v4: peer
+                .cap_recv
+                .llgr
+                .contains_key(&AfiSafi::new(Afi::Ip, Safi::Unicast)),
+            enhe_v6: peer
+                .is_enhe_v4_negotiated()
+                .then(|| super::update_group::compose_enhe_next_hop(peer, &self.interface_addrs))
+                .flatten(),
+            egress_high_water: high_water,
+        };
+        let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id));
+        let req_id = self.pending_dumps_v4.start(ident, n);
+        self.shards
+            .as_ref()
+            .expect("pool present (checked above)")
+            .broadcast(|| super::shard::ShardMsg::DumpV4 {
+                req_id,
+                ctx: ctx.clone(),
+                params,
+            });
+        Some(req_id)
     }
 
     /// If `vrf` is an `encapsulation srv6` VRF with an allocated
@@ -3741,10 +4330,45 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::IpAddr;
 
+    use super::DumpBarrierV4;
     use super::peer_index_register;
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn dump_barrier_completes_on_last_ack() {
+        // A2 step ① — the per-req_id barrier: N acks complete one dump,
+        // summing the per-shard `sent` counts.
+        let mut b = DumpBarrierV4::default();
+        let req = b.start(7, 3); // peer ident 7, fanned to 3 shards
+        assert!(b.ack(req, 10).is_none(), "1/3");
+        assert!(b.ack(req, 5).is_none(), "2/3");
+        let done = b.ack(req, 2).expect("3/3 completes");
+        assert_eq!(done.ident, 7);
+        assert_eq!(done.sent, 17); // 10 + 5 + 2 summed across shards
+        assert!(b.ack(req, 1).is_none(), "ack after completion is ignored");
+    }
+
+    #[test]
+    fn dump_barrier_tracks_concurrent_dumps_independently() {
+        let mut b = DumpBarrierV4::default();
+        let a = b.start(1, 2);
+        let c = b.start(2, 2);
+        assert_ne!(a, c, "req_ids are distinct");
+        assert!(b.ack(a, 1).is_none());
+        assert!(b.ack(c, 4).is_none());
+        let done_c = b.ack(c, 6).expect("c completes");
+        assert_eq!((done_c.ident, done_c.sent), (2, 10));
+        let done_a = b.ack(a, 3).expect("a completes");
+        assert_eq!((done_a.ident, done_a.sent), (1, 4));
+    }
+
+    #[test]
+    fn dump_barrier_ignores_unknown_req_id() {
+        let mut b = DumpBarrierV4::default();
+        assert!(b.ack(999, 5).is_none());
     }
 
     /// `/clear/bgp/...` path → (AFI/SAFI filter, op) mapping, both the

@@ -1,0 +1,43 @@
+prefix-set:
+- name: ALLOW-1
+  prefixes:
+  - prefix: 10.0.0.1/32
+- name: ALLOW-2
+  prefixes:
+  - prefix: 10.0.0.2/32
+policy:
+- name: IN-POL
+  entry:
+  - number: 10
+    action: permit
+    match:
+      prefix: ALLOW-1
+  - number: 20
+    action: permit
+    match:
+      prefix: ALLOW-2
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      policy:
+        in: IN-POL
+      soft-reconfiguration:
+        inbound: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.0.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65003

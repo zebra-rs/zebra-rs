@@ -42,16 +42,17 @@ Feature: BGP well-known community handling (no-export, no-advertise)
   - z4-1.yaml: D — eBGP to B only.
 
   Convergence wait-time rationale:
-  - eBGP MinRouteAdvertisementInterval = 30 s
-    (ADV_TIMER_EBGP_SECS in zebra-rs/src/bgp/update_group.rs)
-  - iBGP MinRouteAdvertisementInterval =  5 s
-    (ADV_TIMER_IBGP_SECS in zebra-rs/src/bgp/update_group.rs)
-  - End-to-end A → B → C propagation: up to 30 + 5 = 35 s.
-  - End-to-end A → B → D propagation: up to 30 + 30 = 60 s.
+  - Every router sets `timer adv-interval ebgp: 3`, overriding the
+    30 s default eBGP MinRouteAdvertisementInterval so the two-hop eBGP
+    path does not dominate the run. (iBGP keeps its 5 s default.)
+  - End-to-end A → B → C propagation: up to 3 + 5 =  8 s.
+  - End-to-end A → B → D propagation: up to 3 + 3 =  6 s.
   - Each scenario that triggers a fresh advertisement on A waits
-    65 seconds (the slowest path plus margin); a session clear before
-    the wait forces an immediate re-flood instead of relying on
-    incremental triggers.
+    20 seconds (the slowest path plus a wide margin); a session clear
+    before the wait forces an immediate re-flood instead of relying on
+    incremental triggers. The previous 30 s timer / 65 s wait left only
+    a 5 s margin on the 60 s eBGP path, which made the D-receives
+    assertions flaky under load.
 
   Scenario: Setup topology and establish BGP sessions
     Given a clean test environment
@@ -79,7 +80,7 @@ Feature: BGP well-known community handling (no-export, no-advertise)
   Scenario: A advertises 1.1.1.1/32 with no community — C and D receive it
     Given the test topology exists
     When I apply config "z1-2.yaml" to namespace "z1"
-    And I wait 65 seconds for BGP to operate
+    And I wait 20 seconds for BGP to operate
     Then BGP route in "z2" has "1.1.1.1/32"
     And BGP route in "z3" has "1.1.1.1/32"
     And BGP route in "z4" has "1.1.1.1/32"
@@ -88,7 +89,7 @@ Feature: BGP well-known community handling (no-export, no-advertise)
     Given the test topology exists
     When I apply config "z1-3.yaml" to namespace "z1"
     And I clear namespace "z1" neighbor "192.168.0.2"
-    And I wait 65 seconds for BGP to operate
+    And I wait 20 seconds for BGP to operate
     Then BGP route in "z2" has "1.1.1.1/32"
     And BGP route in "z3" has "1.1.1.1/32"
     And BGP route in "z4" does not have "1.1.1.1/32"
@@ -97,7 +98,7 @@ Feature: BGP well-known community handling (no-export, no-advertise)
     Given the test topology exists
     When I apply config "z1-4.yaml" to namespace "z1"
     And I clear namespace "z1" neighbor "192.168.0.2"
-    And I wait 65 seconds for BGP to operate
+    And I wait 20 seconds for BGP to operate
     Then BGP route in "z2" has "1.1.1.1/32"
     And BGP route in "z3" does not have "1.1.1.1/32"
     And BGP route in "z4" does not have "1.1.1.1/32"
@@ -106,7 +107,7 @@ Feature: BGP well-known community handling (no-export, no-advertise)
     Given the test topology exists
     When I apply config "z1-5.yaml" to namespace "z1"
     And I clear namespace "z1" neighbor "192.168.0.2"
-    And I wait 65 seconds for BGP to operate
+    And I wait 20 seconds for BGP to operate
     Then BGP route in "z2" has "1.1.1.1/32"
     And BGP route in "z3" has "1.1.1.1/32"
     And BGP route in "z4" has "1.1.1.1/32"

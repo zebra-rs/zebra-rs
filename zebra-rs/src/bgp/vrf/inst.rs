@@ -469,7 +469,9 @@ impl BgpVrf {
                     vrf_transport_v6: Some(&self.transport_v6),
                     central_label_alloc: None,
                 };
-                fsm(&mut top, &mut self.peers, ident, event);
+                // Per-VRF tasks don't drive the global shard pool (their
+                // RIB is the VRF's own); ingest stays synchronous.
+                fsm(&mut top, &mut self.peers, ident, event, None);
             }
             Message::Accept(_, _) => {
                 // Active-connect path is driven by `Event(...)` from
@@ -958,6 +960,123 @@ impl BgpVrf {
         );
     }
 
+    /// Originate one `network <p>` self-route into this VRF's
+    /// Loc-RIB as an `Originated` row and emit `Export` so the
+    /// global instance promotes it to a VPNv4 advertisement. Shared
+    /// by the spawn-time `materialize_self_originated_networks` and
+    /// the dynamic [`BgpVrfMsg::OriginateNetwork`] path (a `network`
+    /// added to an already-running VRF).
+    pub fn originate_self_network_v4(&mut self, prefix: ipnet::Ipv4Net) {
+        use bgp_packet::{BgpAttr, BgpNexthop, Origin};
+
+        // Build a self-originated attr: IGP origin, next-hop-self.
+        // Local-pref / weight default to the same values
+        // `BgpAttr::new` uses for the global `network` path.
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.nexthop = Some(BgpNexthop::Ipv4(self.router_id));
+        let interned = self.shard.intern(attr);
+
+        let rib = self.self_originated_rib(interned);
+        let (_, selected, _) = self.shard.update(None, prefix, rib);
+        // A freshly-inserted self-originated row always wins when
+        // it's the only candidate; emit Export for whoever won.
+        if let Some(winner) = selected.first() {
+            let exporter = self.exporter();
+            vrf_emit_export(&exporter, prefix, &winner.attr);
+        }
+    }
+
+    /// Inverse of [`Self::originate_self_network_v4`]: drop the
+    /// self-originated row (ident 0 / remote 0) for `prefix`,
+    /// re-run best-path, and either re-export the surviving winner
+    /// or emit `WithdrawExport` when nothing else carries the
+    /// prefix. Driven by [`BgpVrfMsg::WithdrawNetwork`] when a
+    /// `network` is removed from a running VRF.
+    pub fn withdraw_self_network_v4(&mut self, prefix: ipnet::Ipv4Net) {
+        let removed = self.shard.remove(None, prefix, 0, 0);
+        if removed.is_empty() {
+            return;
+        }
+        let exporter = self.exporter();
+        // `remove` does not re-run best-path; do it explicitly so a
+        // surviving candidate (e.g. an imported route on the same
+        // prefix) is re-advertised instead of withdrawn.
+        match self.shard.select_best_path(prefix).first() {
+            Some(winner) => vrf_emit_export(&exporter, prefix, &winner.attr),
+            None => vrf_emit_withdraw(&exporter, prefix),
+        }
+    }
+
+    /// IPv6 counterpart of [`Self::originate_self_network_v4`]. The
+    /// next-hop is a placeholder — the global re-advertise rewrites
+    /// it to next-hop-self in `route_update_ipv6`.
+    pub fn originate_self_network_v6(&mut self, prefix: ipnet::Ipv6Net) {
+        use bgp_packet::{BgpAttr, BgpNexthop, Origin};
+
+        let mut attr = BgpAttr::new();
+        attr.origin = Some(Origin::Igp);
+        attr.nexthop = Some(BgpNexthop::Ipv6(std::net::Ipv6Addr::UNSPECIFIED));
+        let interned = self.shard.intern(attr);
+
+        let rib = self.self_originated_rib(interned);
+        let (_, selected, _) = self.shard.update_v6(prefix, rib);
+        if let Some(winner) = selected.first() {
+            let exporter = self.exporter();
+            vrf_emit_export_v6(&exporter, prefix, &winner.attr);
+        }
+    }
+
+    /// IPv6 counterpart of [`Self::withdraw_self_network_v4`].
+    pub fn withdraw_self_network_v6(&mut self, prefix: ipnet::Ipv6Net) {
+        let removed = self.shard.remove_v6(prefix, 0, 0);
+        if removed.is_empty() {
+            return;
+        }
+        let exporter = self.exporter();
+        match self.shard.select_best_path_v6(prefix).first() {
+            Some(winner) => vrf_emit_export_v6(&exporter, prefix, &winner.attr),
+            None => vrf_emit_withdraw_v6(&exporter, prefix),
+        }
+    }
+
+    /// Build a fresh [`VrfExporter`] pointing at the global task.
+    fn exporter(&self) -> VrfExporter {
+        VrfExporter {
+            name: self.name.clone(),
+            tx: self.global_tx.clone(),
+            label: self.label,
+        }
+    }
+
+    /// A self-originated `BgpRib` (ident 0 / remote 0) carrying the
+    /// interned `attr`. Identical shape for v4 and v6 — only the
+    /// shard table the caller inserts into differs.
+    fn self_originated_rib(
+        &self,
+        attr: std::sync::Arc<bgp_packet::BgpAttr>,
+    ) -> super::super::route::BgpRib {
+        super::super::route::BgpRib {
+            remote_id: 0,
+            local_id: 0,
+            attr,
+            ident: 0,
+            router_id: self.router_id,
+            weight: 32768,
+            typ: super::super::route::BgpRibType::Originated,
+            best_path: false,
+            best_reason: super::super::route::Reason::Default,
+            label: None,
+            local_label: None,
+            nexthop: None,
+            nexthop_reachable: true,
+            enhe_egress: None,
+            stale: false,
+            esi: None,
+            vrf_transit_only: false,
+        }
+    }
+
     /// Per-task handling of cross-task messages that aren't
     /// `Shutdown`.
     fn process_global_msg(&mut self, msg: BgpVrfMsg) {
@@ -1016,6 +1135,18 @@ impl BgpVrf {
             }
             BgpVrfMsg::WithdrawImportV6 { rd, prefix } => {
                 self.handle_withdraw_import_v6(rd, prefix);
+            }
+            BgpVrfMsg::OriginateNetwork { prefix } => {
+                self.originate_self_network_v4(prefix);
+            }
+            BgpVrfMsg::WithdrawNetwork { prefix } => {
+                self.withdraw_self_network_v4(prefix);
+            }
+            BgpVrfMsg::OriginateNetworkV6 { prefix } => {
+                self.originate_self_network_v6(prefix);
+            }
+            BgpVrfMsg::WithdrawNetworkV6 { prefix } => {
+                self.withdraw_self_network_v6(prefix);
             }
             BgpVrfMsg::Shutdown => unreachable!("handled in event_loop"),
         }

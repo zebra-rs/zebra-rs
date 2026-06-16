@@ -1,0 +1,37 @@
+interface:
+- if-name: z1-z2
+  ipv4:
+    address: 192.168.0.1/30
+prefix-set:
+- name: OUT-DENY-LU
+  prefixes:
+  - prefix: 3.3.3.3/32
+policy:
+- name: OUT-LU
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix: OUT-DENY-LU
+  - number: 20
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65002
+      enabled: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      policy:
+        out: OUT-LU
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 1.1.1.1/32
+      - prefix: 2.2.2.2/32
+      - prefix: 3.3.3.3/32
