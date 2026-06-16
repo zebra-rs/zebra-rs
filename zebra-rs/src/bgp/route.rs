@@ -3177,6 +3177,63 @@ fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
     }
 }
 
+/// Group-task migration Phase 4 — soft-out for a v4-unicast peer at gate-on.
+/// Refresh every member of the peer's update group with a fresh `SyncCtx` (the
+/// out-policy snapshot changed) by re-sending `AddMember` (which overwrites the
+/// member's ctx), then re-fan the whole v4 Loc-RIB so the group re-evaluates
+/// each route against it — advertising changes, withdrawing newly-denied. The
+/// per-peer soft-out collapses to the group: members share the egress identity,
+/// so a policy-content change is the group's, and the engine's per-prefix
+/// dedup keeps the re-send cheap for the unchanged routes.
+fn soft_out_v4_to_group(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let Some(peer) = peers.get_by_idx(peer_idx) else {
+        return;
+    };
+    let Some(gid) = peer.update_group_id.get(&v4).cloned() else {
+        return;
+    };
+    let Some(af) = bgp.update_groups.get(&v4) else {
+        return;
+    };
+    let Some(group) = af.group_by_id(&gid) else {
+        return;
+    };
+    let Some(task) = group.task.as_ref() else {
+        return;
+    };
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    // Refresh every member's ctx so the re-fan builds against the new policy.
+    for &ident in &group.members {
+        if let Some(m) = peers.get_by_idx(ident) {
+            task.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(m.sync_ctx(*bgp.router_id)),
+                add_path: m.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
+            });
+        }
+    }
+    // Re-fan the v4 Loc-RIB so the group re-evaluates every route.
+    let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v4
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard
+            .v4
+            .1
+            .iter()
+            .map(|(prefix, rib)| (prefix, rib.clone()))
+            .collect()
+    };
+    for (prefix, rib) in routes {
+        task.send(super::group_egress::GroupEgressDeltaV4::Advertise { prefix, rib });
+    }
+}
+
 /// Per-AF hooks for the generic update-group/memo advertise path
 /// ([`route_advertise_batch`]). Phase 2 of the Adj-RIB-Out unification:
 /// v4-unicast/VPNv4 (`V4Batch`) and v6-unicast/VPNv6 (`V6Batch`) share the
@@ -4007,7 +4064,9 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     };
 
     if do_v4 {
-        if super::peer_egress::peer_egress_task_enabled() {
+        if super::group_egress::egress_group_task_enabled() {
+            soft_out_v4_to_group(peer_idx, bgp, peers);
+        } else if super::peer_egress::peer_egress_task_enabled() {
             soft_out_v4_to_pet(peer_idx, bgp, peers);
         } else {
             route_soft_out_peer_table(peer_idx, None, bgp, peers);

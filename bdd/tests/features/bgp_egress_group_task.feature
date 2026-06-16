@@ -70,6 +70,19 @@ Feature: BGP per-update-group egress task (migration Phases 0-3)
     And show command "show bgp ipv4" in namespace "z4" should contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z4" should contain "10.10.11.0/24"
 
+  Scenario: a clear soft-out re-fans the group through the task (Phase 4)
+    Given the test topology exists
+    # `clear ... soft out` on z2 for z3 triggers route_soft_out_peer, which at
+    # gate-on refreshes the group's member ctxs and re-fans the v4 Loc-RIB
+    # through the task. With no policy change the routes are unchanged, so z3
+    # (and z4, its group-mate) keep them — proving the soft-out re-fan
+    # re-advertises rather than dropping or going through the old flush.
+    When I run "clear bgp ipv4 neighbor 10.0.0.3 soft out" in namespace "z2"
+    And I wait 5 seconds for BGP to operate
+    Then show command "show bgp ipv4" in namespace "z3" should contain "10.10.10.0/24"
+    And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
+    And show command "show bgp ipv4" in namespace "z4" should contain "10.10.10.0/24"
+
   Scenario: an event-driven withdraw reaches BOTH the early and the late member (Phase 3 coherence)
     Given the test topology exists
     # z1 re-originates only .11. The group task must withdraw .10 from z3 AND
