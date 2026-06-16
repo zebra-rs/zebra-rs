@@ -418,7 +418,20 @@ fn resolve_shard_count(config_shards: Option<usize>, env_shards: Option<usize>) 
 pub fn init_shard_count(config_shards: Option<usize>) -> usize {
     let n = resolve_shard_count(config_shards, shard_count_env());
     let _ = SHARD_COUNT.set(n);
-    shard_count()
+    let n = shard_count();
+    let source = if config_shards.is_some() {
+        "config"
+    } else if shard_count_env().is_some() {
+        "ZEBRA_BGP_SHARDS"
+    } else {
+        "default"
+    };
+    if n > 1 {
+        tracing::info!("BGP RIB sharding: {n} shards (from {source})");
+    } else {
+        tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
+    }
+    n
 }
 
 /// Number of parallel RIB shards (RIB sharding Phase C). Returns the value
