@@ -831,6 +831,12 @@ pub struct Peer {
     pub opt: ParseOption,
     pub policy_list: InOuts<PolicyListValue>,
     pub prefix_set: InOuts<PrefixSetValue>,
+    /// Cached owned snapshot of the *outbound* policy (Output direction of
+    /// `prefix_set` / `policy_list`), rebuilt by `rebuild_out_policy` only
+    /// when that policy resolves (`process_policy_msg`). `sync_ctx` clones
+    /// the `Arc` into every `SyncCtx`, so the per-route egress evaluation
+    /// (and later a shard worker) reads the policy without a deep clone.
+    pub out_policy: Arc<super::policy::OutPolicy>,
     pub rtcv4: BTreeSet<ExtCommunityValue>,
     pub rtcv6: BTreeSet<ExtCommunityValue>,
     pub eor: BTreeMap<AfiSafi, bool>,
@@ -984,6 +990,7 @@ impl Peer {
             opt: ParseOption::default(),
             policy_list: InOuts::<PolicyListValue>::default(),
             prefix_set: InOuts::<PrefixSetValue>::default(),
+            out_policy: Arc::new(super::policy::OutPolicy::default()),
             rtcv4: BTreeSet::default(),
             rtcv6: BTreeSet::default(),
             eor: BTreeMap::default(),
@@ -1190,12 +1197,16 @@ impl Peer {
     /// Borrowed view of this peer's outbound policy (A2 Phase 0). The
     /// egress build takes this instead of `&Peer` so the same evaluation
     /// can run in a shard worker (which holds a `SyncCtx`, not a `Peer`).
-    pub fn out_policy(&self) -> super::policy::OutPolicyRef<'_> {
-        super::policy::OutPolicyRef {
-            prefix_set: self.prefix_set.get(&super::policy::InOut::Output),
-            policy_list: self.policy_list.get(&super::policy::InOut::Output),
-            router_id: self.router_id,
-        }
+    /// Rebuild the cached outbound-policy snapshot from the current
+    /// Output-direction `prefix_set` / `policy_list`. Called whenever that
+    /// policy resolves (`process_policy_msg`) so the `Arc` every `SyncCtx`
+    /// clones stays current; the deep clone of the route-map / prefix-list
+    /// happens here — once per resolve, never per advertised route.
+    pub fn rebuild_out_policy(&mut self) {
+        self.out_policy = Arc::new(super::policy::OutPolicy {
+            prefix_set: self.prefix_set.get(&super::policy::InOut::Output).clone(),
+            policy_list: self.policy_list.get(&super::policy::InOut::Output).clone(),
+        });
     }
 
     /// Snapshot this peer's IPv4-unicast egress context (A2). `router_id`
@@ -1215,6 +1226,7 @@ impl Peer {
             router_id,
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
             egress_as: self.egress_as(),
+            out_policy: self.out_policy.clone(),
         }
     }
 

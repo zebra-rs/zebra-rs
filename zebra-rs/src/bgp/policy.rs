@@ -40,15 +40,17 @@ pub struct PolicyListValue {
     pub policy_list: Option<PolicyList>,
 }
 
-/// A borrowed view of a peer's *outbound* policy — the prefix-set,
-/// policy-list, and the router-id anchor (`set next-hop self`). Lets the
-/// egress policy evaluation run without the full `Peer`: built cheaply
-/// (no clones) from a `Peer` on the main task today (A2 Phase 0), and
-/// from a per-session `SyncCtx` snapshot inside a shard worker later, so
-/// one `route_apply_policy_out` serves both.
-#[derive(Clone, Copy)]
-pub struct OutPolicyRef<'a> {
-    pub prefix_set: &'a PrefixSetValue,
-    pub policy_list: &'a PolicyListValue,
-    pub router_id: std::net::Ipv4Addr,
+/// A peer's *outbound* policy as an owned, thread-crossable snapshot —
+/// the resolved prefix-set + policy-list for the Output direction. Cached
+/// on the `Peer` (rebuilt only when the out-policy resolves, in
+/// `process_policy_msg`) and carried behind an `Arc` in
+/// [`super::route::SyncCtx`], so the egress policy evaluation
+/// (`route_apply_policy_out`) runs without the full `Peer`: from a
+/// `SyncCtx` on the main task today, and from the same `SyncCtx` broadcast
+/// into a shard worker later (A2 DumpV4). The `next-hop self` router-id
+/// anchor isn't duplicated here — `SyncCtx` already carries it.
+#[derive(Default, Debug, Clone)]
+pub struct OutPolicy {
+    pub prefix_set: PrefixSetValue,
+    pub policy_list: PolicyListValue,
 }

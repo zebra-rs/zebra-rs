@@ -161,14 +161,14 @@ pub struct EgressAs {
 }
 
 /// Per-session egress snapshot for the IPv4-unicast advertise build (A2).
-/// Carries everything `route_update_ipv4` reads from a `Peer`/`BgpTop`,
-/// so the build can run where there is no `Peer`: on the main task today
-/// (built via `Peer::sync_ctx`) and inside a shard worker for `DumpV4`
-/// later. All fields are `Copy`, so building one per advertise is cheap.
-/// (Out-policy is evaluated separately via `OutPolicyRef`; it joins this
-/// snapshot when `DumpV4` lands, since a shard has no `Peer` to source it
-/// from either.)
-#[derive(Clone, Copy)]
+/// Carries everything `route_update_ipv4` **and** `route_apply_policy_out`
+/// read from a `Peer`/`BgpTop`, so build + out-policy can run where there
+/// is no `Peer`: on the main task today (built via `Peer::sync_ctx`) and
+/// inside a shard worker for `DumpV4` later. Every field except
+/// `out_policy` is `Copy`; the out-policy rides behind an `Arc` cached on
+/// the `Peer` (`Peer::out_policy`, rebuilt only when it resolves), so
+/// cloning one per advertise is a cheap `Arc` bump, not a route-map clone.
+#[derive(Clone)]
 pub struct SyncCtx {
     pub ident: usize,
     pub peer_type: PeerType,
@@ -177,6 +177,7 @@ pub struct SyncCtx {
     pub router_id: Ipv4Addr,
     pub vpnv4_next_hop_self: bool,
     pub egress_as: EgressAs,
+    pub out_policy: Arc<super::policy::OutPolicy>,
 }
 
 /// Apply the egress AS_PATH transformation for an eBGP announcement.
@@ -1962,15 +1963,15 @@ pub fn route_apply_policy_out_evpn(
 /// projection of [`apply_policy_net`]. `set next-hop self` anchors on
 /// the session's local router-id (`peer.router_id`).
 pub fn route_apply_policy_out(
-    out: super::policy::OutPolicyRef,
+    ctx: &SyncCtx,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        out.prefix_set,
-        out.policy_list,
-        out.router_id,
+        &ctx.out_policy.prefix_set,
+        &ctx.out_policy.policy_list,
+        ctx.router_id,
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
@@ -2908,11 +2909,9 @@ fn compute_advertise_outcome(
     bgp: &BgpTop,
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv4Nlri> {
-    if let Some((nlri, attr)) =
-        route_update_ipv4(&peer.sync_ctx(*bgp.router_id), prefix, best, add_path)
-    {
-        if let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, best.weight)
-        {
+    let ctx = peer.sync_ctx(*bgp.router_id);
+    if let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, best, add_path) {
+        if let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, best.weight) {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
@@ -3120,13 +3119,11 @@ impl BatchAfi for V4Batch {
         rib: &BgpRib,
         bgp: &mut BgpTop,
     ) {
-        let Some((nlri, attr)) =
-            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, rib, true)
-        else {
+        let ctx = peer.sync_ctx(*bgp.router_id);
+        let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, rib, true) else {
             return;
         };
-        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
-        else {
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
             return;
         };
         let attr = decision.attr;
@@ -3855,13 +3852,11 @@ fn route_soft_out_peer_table(
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
             continue;
         }
-        let Some((nlri, attr)) =
-            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), prefix, rib, add_path)
-        else {
+        let ctx = peer.sync_ctx(*bgp.router_id);
+        let Some((nlri, attr)) = route_update_ipv4(&ctx, prefix, rib, add_path) else {
             continue;
         };
-        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
-        else {
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
             continue;
         };
         let attr = decision.attr;
@@ -8216,7 +8211,7 @@ impl LabeledAfi for LabeledV4 {
         attr: BgpAttr,
         weight: u32,
     ) -> Option<PolicyDecision> {
-        route_apply_policy_out(peer.out_policy(), nlri, attr, weight)
+        route_apply_policy_out(&peer.sync_ctx(peer.router_id), nlri, attr, weight)
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
         MpReachAttr::Labelv4 {
@@ -9183,13 +9178,11 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
                 continue;
             }
-            let Some((nlri, attr)) =
-                route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
-            else {
+            let ctx = peer.sync_ctx(*bgp.router_id);
+            let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
-            else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
                 continue;
             };
             rib.attr = bgp.attr_store.intern(decision.attr);
@@ -9250,14 +9243,12 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
             continue;
         }
-        let Some((nlri, attr)) =
-            route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
-        else {
+        let ctx = peer.sync_ctx(*bgp.router_id);
+        let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
             continue;
         };
 
-        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
-        else {
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
             continue;
         };
 
@@ -9379,14 +9370,12 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::MplsVpn) {
                 continue;
             }
-            let Some((nlri, attr)) =
-                route_update_ipv4(&peer.sync_ctx(*bgp.router_id), &prefix, &rib, add_path)
-            else {
+            let ctx = peer.sync_ctx(*bgp.router_id);
+            let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
 
-            let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, rib.weight)
-            else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
                 continue;
             };
             let attr = decision.attr;
@@ -9706,8 +9695,8 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         };
         // Outbound policy on the establish-time dump (parity with the
         // event-driven advertise and the unicast sync paths).
-        let Some(decision) = route_apply_policy_out(peer.out_policy(), &nlri, attr, best.weight)
-        else {
+        let ctx = peer.sync_ctx(*bgp.router_id);
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, best.weight) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());

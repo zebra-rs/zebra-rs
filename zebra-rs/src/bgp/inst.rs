@@ -3109,6 +3109,12 @@ impl Bgp {
                 };
                 let config = peer.prefix_set.get_mut(&direction);
                 config.prefix_set = prefix_set;
+                // Keep the cached outbound-policy snapshot (carried by
+                // every `SyncCtx`) current before the soft-out re-advertise
+                // reads it. Inbound resolves replicate via PolicyReplace.
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
 
                 match direction {
                     InOut::Input => {
@@ -3159,6 +3165,12 @@ impl Bgp {
                 };
                 let config = peer.policy_list.get_mut(&direction);
                 config.policy_list = policy_list;
+                // Keep the cached outbound-policy snapshot current before
+                // the soft-out re-advertise reads it (see the prefix-set
+                // arm above).
+                if direction == InOut::Output {
+                    peer.rebuild_out_policy();
+                }
 
                 match direction {
                     InOut::Input => {
