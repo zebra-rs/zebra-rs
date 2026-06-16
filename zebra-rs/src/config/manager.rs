@@ -1378,6 +1378,45 @@ mod yang_load_tests {
         }
     }
 
+    /// C.4 `router bgp shards <1-64>` — the shipping form of the
+    /// `ZEBRA_BGP_SHARDS` env var (`zebra-bgp-sharding.yang`). Pinned
+    /// because vtyctl apply is garbage-tolerant — an unwired grammar
+    /// silently no-ops, and `configured_shards` reads this leaf at spawn,
+    /// so a broken path would just fall back to the env/default with no
+    /// visible error.
+    #[test]
+    fn bgp_shards_grammar() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        // The shards leaf must be a settable path directly under `router
+        // bgp` across the valid range — this is the exact text
+        // `configured_shards` scans for (`router bgp shards <n>`).
+        for cmd in [
+            "set router bgp shards 1",
+            "set router bgp shards 4",
+            "set router bgp shards 64",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
     /// compute-mode <serial|conservative|aggressive|sharding>` plus
     /// `compute-shards <1..256>`. Pinned because vtyctl apply is

@@ -383,19 +383,69 @@ pub struct RibKnownVrf {
     pub inter_as_hybrid: bool,
 }
 
-/// Number of parallel RIB shards (RIB sharding Phase C), read once from
-/// the `ZEBRA_BGP_SHARDS` environment variable at instance construction.
-/// `1` (default, and when unset/invalid) keeps the synchronous
-/// single-shard path (BDD-safe); `> 1` spawns that many worker threads and
-/// fans ingest out by prefix hash. Startup-only — live resharding is out
-/// of scope (the pool spawns in [`Bgp::new`] before any route state). The
-/// value is clamped to `1..=64`.
-pub fn shard_count() -> usize {
+/// Process-global shard count, frozen once at BGP instance spawn by
+/// [`init_shard_count`]. A `OnceLock` (not a per-call env read) so the value
+/// the shard pool spawns with is the exact same one `egress_pool()`
+/// (route.rs) reads when sizing itself — they must agree or shards + egress
+/// workers oversubscribe the cores (the Phase E.2 invariant).
+static SHARD_COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// The `ZEBRA_BGP_SHARDS` environment variable (the pre-C.4 form, now the
+/// fallback when the YANG `shards` leaf is unset). `None` if unset/invalid.
+fn shard_count_env() -> Option<usize> {
     std::env::var("ZEBRA_BGP_SHARDS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
+}
+
+/// Pure resolution policy (unit-tested): the YANG `router bgp shards <n>`
+/// leaf (C.4) wins over the env var, which wins over the default `1`. The
+/// chosen value is clamped to `1..=64` (so `0` and out-of-range fold to the
+/// nearest valid degree).
+fn resolve_shard_count(config_shards: Option<usize>, env_shards: Option<usize>) -> usize {
+    config_shards
+        .or(env_shards)
         .map(|n| n.clamp(1, 64))
         .unwrap_or(1)
+}
+
+/// Freeze the shard count at instance spawn from the YANG `shards` leaf
+/// (else `ZEBRA_BGP_SHARDS`, else `1`). Called once from `spawn_bgp` before
+/// [`Bgp::new`] constructs the pool; the result is stored process-globally
+/// so [`shard_count`] returns it everywhere (the shard pool and the egress
+/// pool alike). Idempotent — `spawn_bgp` short-circuits a re-spawn, and the
+/// first frozen value wins regardless.
+pub fn init_shard_count(config_shards: Option<usize>) -> usize {
+    let n = resolve_shard_count(config_shards, shard_count_env());
+    let _ = SHARD_COUNT.set(n);
+    let n = shard_count();
+    let source = if config_shards.is_some() {
+        "config"
+    } else if shard_count_env().is_some() {
+        "ZEBRA_BGP_SHARDS"
+    } else {
+        "default"
+    };
+    if n > 1 {
+        tracing::info!("BGP RIB sharding: {n} shards (from {source})");
+    } else {
+        tracing::info!("BGP RIB sharding: 1 shard, synchronous (from {source})");
+    }
+    n
+}
+
+/// Number of parallel RIB shards (RIB sharding Phase C). Returns the value
+/// frozen at spawn by [`init_shard_count`]; before any instance spawns
+/// (unit tests / env-only paths) it falls back to `ZEBRA_BGP_SHARDS`, then
+/// `1`. `1` keeps the synchronous single-shard path (BDD-safe); `> 1` fans
+/// ingest out by prefix hash across that many worker threads. Startup-only —
+/// live resharding is out of scope (the pool spawns in [`Bgp::new`] before
+/// any route state). Always in `1..=64`.
+pub fn shard_count() -> usize {
+    SHARD_COUNT
+        .get()
+        .copied()
+        .unwrap_or_else(|| resolve_shard_count(None, shard_count_env()))
 }
 
 /// A2 step ① — per-`req_id` barrier for in-flight `DumpV4` dumps. Each
@@ -4335,6 +4385,22 @@ mod tests {
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn shard_count_resolution_policy() {
+        use super::resolve_shard_count;
+        // C.4: the YANG `shards` leaf wins over the env var...
+        assert_eq!(resolve_shard_count(Some(4), Some(8)), 4);
+        // ...the env var is the fallback when the leaf is unset...
+        assert_eq!(resolve_shard_count(None, Some(8)), 8);
+        // ...and `1` (synchronous) is the default when neither is set.
+        assert_eq!(resolve_shard_count(None, None), 1);
+        // The chosen value is clamped to 1..=64 from either source.
+        assert_eq!(resolve_shard_count(Some(100), None), 64);
+        assert_eq!(resolve_shard_count(Some(0), None), 1);
+        assert_eq!(resolve_shard_count(None, Some(0)), 1);
+        assert_eq!(resolve_shard_count(None, Some(999)), 64);
     }
 
     #[test]

@@ -581,6 +581,22 @@ async fn stop_zebra_rs(world: &mut World, namespace: String) {
     );
 }
 
+#[then(expr = "the zebra-rs log in namespace {string} should contain {string}")]
+async fn log_should_contain(world: &mut World, namespace: String, needle: String) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    let contents = std::fs::read_to_string(&log_file)
+        .unwrap_or_else(|e| panic!("failed to read zebra-rs log {log_file}: {e}"));
+    assert!(
+        contents.contains(&needle),
+        "zebra-rs log {} for namespace {} does not contain {:?}",
+        log_file,
+        scoped,
+        needle
+    );
+    println!("✓ log {} contains {:?}", log_file, needle);
+}
+
 #[when(expr = "I apply config {string} to namespace {string}")]
 async fn apply_config(world: &mut World, config_file: String, namespace: String) {
     let config_path = format!("tests/configs/{}/{}", world.feature_tag, config_file);
