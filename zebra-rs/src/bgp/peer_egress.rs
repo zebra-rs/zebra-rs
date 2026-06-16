@@ -116,6 +116,12 @@ pub enum EgressDeltaV4 {
     DumpAdjOut {
         reply: tokio::sync::oneshot::Sender<Vec<(Ipv4Net, Vec<BgpRib>)>>,
     },
+    /// A `show … summary` PfxSnt request at gate-on: reply with the PET's v4
+    /// Adj-RIB-Out prefix count. Counts only — the summary row prints the
+    /// number, not the routes (unlike [`Self::DumpAdjOut`]).
+    CountAdjOut {
+        reply: tokio::sync::oneshot::Sender<usize>,
+    },
 }
 
 /// Handle main keeps for a peer's egress task: the delta channel plus the
@@ -186,6 +192,12 @@ impl Engine {
                     .map(|(prefix, ribs)| (*prefix, ribs.clone()))
                     .collect();
                 let _ = reply.send(entries);
+            }
+            EgressDeltaV4::CountAdjOut { reply } => {
+                // Count-only twin of `DumpAdjOut`: the v4 Adj-RIB-Out prefix
+                // count for the summary's PfxSnt. `adj_out.0` is keyed by
+                // prefix, so `len` matches `peer.adj_out.count` semantics.
+                let _ = reply.send(self.adj_out.0.len());
             }
         }
     }

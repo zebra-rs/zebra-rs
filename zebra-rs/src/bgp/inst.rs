@@ -2086,6 +2086,32 @@ impl Bgp {
             let _ = msg.resp.send(output).await;
             return;
         }
+        // `show [ipv4] summary` at gate-on / N>1: the v4 PfxRcd/PfxSnt live
+        // off-main — Adj-RIB-In in the pool shards (N>1), Adj-RIB-Out in the
+        // PET (peer-task) — so the synchronous renderer reads the empty main
+        // copies and prints 0/0. Gather the v4 counts first, then render. The
+        // other AFI sections stay main-owned and read correctly. (`show bgp
+        // ipv4 summary` arrives as `/show/bgp/ipv4` + a "summary" token, peeked
+        // non-destructively so a non-summary command falls through untouched.)
+        // The egress-group-task egress model is not covered here yet — its
+        // adj_out is the group task's, and its split-horizon per-peer count is
+        // a follow-up; it is gate-off by default so the summary is unaffected.
+        let v4_summary: Option<Option<bgp_packet::AfiSafi>> = match path.as_str() {
+            "/show/bgp/summary" | "/show/ip/bgp/summary" => Some(None),
+            "/show/bgp/ipv4" if args.0.front().is_some_and(|t| t == "summary") => Some(Some(
+                bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast),
+            )),
+            _ => None,
+        };
+        if let Some(afi_safi_opt) = v4_summary
+            && (self.shards.is_some() || super::peer_egress::peer_egress_task_enabled())
+        {
+            let counts = self.gather_v4_summary_counts().await;
+            let output =
+                super::show::render_summary_with_counts(self, afi_safi_opt, msg.json, &counts);
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
@@ -2218,6 +2244,76 @@ impl Bgp {
             }
         }
         merged
+    }
+
+    /// Gather per-peer v4-unicast summary prefix counts — `(PfxRcd, PfxSnt)` —
+    /// from their off-main owners for `show … summary` at gate-on: PfxRcd from
+    /// the pool shards' Adj-RIB-In (N>1), PfxSnt from the PET's Adj-RIB-Out
+    /// (peer-task). **Counts only** — no prefixes or attributes cross the
+    /// channel (lighter than the received/advertised dumps, which the summary
+    /// row doesn't need). Keyed by peer ident, Established v4 peers only; each
+    /// value is the COMPLETE count, falling back to the main-side read for the
+    /// half that is not off-main (N=1 PfxRcd, gate-off PfxSnt), so the render
+    /// uses it verbatim.
+    async fn gather_v4_summary_counts(&self) -> std::collections::BTreeMap<usize, (u64, u64)> {
+        use bgp_packet::{Afi, Safi};
+        let v4 = bgp_packet::AfiSafi::new(Afi::Ip, Safi::Unicast);
+
+        // PfxRcd: one count scatter per shard, summed per peer (N>1 only).
+        let mut rcvd: std::collections::BTreeMap<usize, u64> = std::collections::BTreeMap::new();
+        if let Some(pool) = self.shards.as_ref() {
+            let mut rxs = Vec::with_capacity(pool.n());
+            for idx in 0..pool.n() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                pool.dispatch(idx, super::shard::ShardMsg::CountAdjInV4All { reply: tx });
+                rxs.push(rx);
+            }
+            for rx in rxs {
+                if let Ok(map) = rx.await {
+                    for (ident, n) in map {
+                        *rcvd.entry(ident).or_default() += n as u64;
+                    }
+                }
+            }
+        }
+
+        // Per-peer (rcvd, sent); query the PET for sent when present. Collect
+        // the PET reply receivers first so no peer borrow is held across await.
+        let mut out: std::collections::BTreeMap<usize, (u64, u64)> =
+            std::collections::BTreeMap::new();
+        let mut sent_rxs: Vec<(usize, tokio::sync::oneshot::Receiver<usize>)> = Vec::new();
+        for (_, peer) in self.peers.iter_all() {
+            if peer.state != super::peer::State::Established || !peer.config.mp.has(&v4) {
+                continue;
+            }
+            let rcvd_count = if self.shards.is_some() {
+                rcvd.get(&peer.ident).copied().unwrap_or(0)
+            } else {
+                (self.shard.adj_in_count(peer.ident, Afi::Ip, Safi::Unicast)
+                    + peer.adj_in.count(Afi::Ip, Safi::Unicast)) as u64
+            };
+            match peer.pet.as_ref() {
+                Some(pet) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = pet
+                        .delta_tx
+                        .send(super::peer_egress::EgressDeltaV4::CountAdjOut { reply: tx });
+                    sent_rxs.push((peer.ident, rx));
+                    out.insert(peer.ident, (rcvd_count, 0));
+                }
+                None => {
+                    let sent = peer.adj_out.count(Afi::Ip, Safi::Unicast) as u64;
+                    out.insert(peer.ident, (rcvd_count, sent));
+                }
+            }
+        }
+        for (ident, rx) in sent_rxs {
+            let sent = rx.await.unwrap_or(0) as u64;
+            if let Some(slot) = out.get_mut(&ident) {
+                slot.1 = sent;
+            }
+        }
+        out
     }
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {

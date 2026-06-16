@@ -106,6 +106,24 @@ impl BgpShard {
                 let _ = reply.send(slice);
                 Vec::new()
             }
+            ShardMsg::CountAdjInV4All { reply } => {
+                // Count-only twin of `DumpAdjInV4`: reply with this shard's
+                // per-peer IPv4-unicast Adj-RIB-In prefix counts (the prefixes
+                // that hash here); main sums across shards for `show … summary`
+                // PfxRcd. `v4.0` is the per-prefix candidate map, so its `len`
+                // is the prefix count — matching `MainAdjIn::count`. Skip empties
+                // so the reply stays small.
+                let counts = self
+                    .adj_in
+                    .iter()
+                    .filter_map(|(ident, a)| {
+                        let n = a.v4.0.len();
+                        (n > 0).then_some((*ident, n))
+                    })
+                    .collect();
+                let _ = reply.send(counts);
+                Vec::new()
+            }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }

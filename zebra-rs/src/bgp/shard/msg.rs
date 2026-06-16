@@ -190,6 +190,16 @@ pub enum ShardMsg {
         reply: tokio::sync::oneshot::Sender<Vec<(ipnet::Ipv4Net, Vec<BgpRib>)>>,
     },
 
+    /// Count-only scatter for `show bgp [ipv4] summary` at N>1: each shard
+    /// replies with `{peer ident → its IPv4-unicast Adj-RIB-In prefix count}`
+    /// over the prefixes it owns; main sums across shards for each peer's
+    /// PfxRcd column. Counts only — no prefixes or attributes cross the
+    /// channel (unlike [`Self::DumpAdjInV4`]), since the summary prints just
+    /// the number. Read-only, returns no [`ShardOut`].
+    CountAdjInV4All {
+        reply: tokio::sync::oneshot::Sender<std::collections::BTreeMap<usize, usize>>,
+    },
+
     /// Tear the shard task down; its event loop exits on the next
     /// iteration. Used at daemon shutdown.
     Shutdown,

@@ -41,6 +41,13 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
   scatter-gathers it from every shard (A2 ⑤, `ShardMsg::DumpAdjInV4`). The
   received-routes scenario below guards that.
 
+  A FOURTH — `show bgp ipv4 summary`'s per-neighbor PfxRcd/Snt — reads BOTH
+  off-main owners: PfxRcd from the pool shards' Adj-RIB-In (N>1), PfxSnt
+  from the PET's Adj-RIB-Out (peer-task). The synchronous row read finds
+  both main-side copies empty, so it gathers the COUNTS (count-only
+  messages — no prefixes/attributes) before rendering. The summary scenario
+  below guards that.
+
   Test Topology:
   ```
                          ┌── z3 (AS65003)  early peer  → event-driven (control)
@@ -106,6 +113,21 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     # (.10 and .11 hash to possibly-different shards).
     Then show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.10.0/24"
     And show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.11.0/24"
+
+  Scenario: z2's `show bgp ipv4 summary` per-neighbor counts come from the off-main owners
+    Given the test topology exists
+    # The FOURTH N>1 read path: the summary's PfxRcd/Snt column. At N>1 +
+    # peer-task both counts live off the main task — PfxRcd in the pool
+    # shards' Adj-RIB-In, PfxSnt in the PET's Adj-RIB-Out — so the row's
+    # main-side reads come back empty and every neighbor printed "0/0".
+    # The count-gather fixes it: z2 received z1's two routes (PfxRcd 2) and
+    # advertised both to z3 and z4 (PfxSnt 2), never back to their source z1
+    # (split-horizon, PfxSnt 0). So z1's row is "2/0" (proves the shard
+    # PfxRcd gather) and z3's / z4's are "0/2" (proves the PET PfxSnt query).
+    # The slash makes each substring specific to the PfxRcd/Snt column, and
+    # under the bug every row is "0/0", so neither appears.
+    Then show command "show bgp ipv4 summary" in namespace "z2" should contain "2/0"
+    And show command "show bgp ipv4 summary" in namespace "z2" should contain "0/2"
 
   Scenario: z1 withdraws one route; the sharded reduce removes it from z2's mirror
     Given the test topology exists
