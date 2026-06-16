@@ -2715,6 +2715,14 @@ fn apply_ipv4_advertise_job(
     // (`rd = Some`) stays on the update-group path.
     if rd.is_none() && super::group_egress::egress_group_task_enabled() {
         fan_advertise_to_groups(prefix, &selected, source_ident, bgp.update_groups, peers);
+        fan_addpath_to_groups(
+            prefix,
+            &added,
+            &replaced,
+            source_ident,
+            bgp.update_groups,
+            peers,
+        );
         return;
     }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
@@ -3130,6 +3138,77 @@ fn fan_advertise_to_groups(
                 id: 0,
                 source_ident,
             }),
+        }
+    }
+}
+
+/// Group-task migration — fan the AddPath per-candidate stream to the
+/// per-update-group egress tasks, in step with `route_advertise_to_addpath` /
+/// `route_withdraw_from_addpath`. AddPath peers receive *every* path (RFC 7911),
+/// not the best, so for an AddPath group this — not `fan_advertise_to_groups`,
+/// which serves only the plain (best-path) groups — carries the routes: each
+/// received path arrives as an `added` candidate (the current best included),
+/// each gone path as a `replaced` one. The engine keys `adj_out` by the Out
+/// local-id, so an added candidate accumulates as a distinct path and a removed
+/// one withdraws by its `local_id`. The `sig.addpath_send` check is a defensive
+/// redundancy: the `established_addpath_idents` audience is already AddPath-only.
+fn fan_addpath_to_groups(
+    prefix: Ipv4Net,
+    added: &Option<BgpRib>,
+    replaced: &[BgpRib],
+    source_ident: usize,
+    update_groups: &super::update_group::UpdateGroupMap,
+    peers: &PeerMap,
+) {
+    if added.is_none() && replaced.is_empty() {
+        return;
+    }
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let mut seen: std::collections::BTreeSet<super::update_group::UpdateGroupId> =
+        std::collections::BTreeSet::new();
+    // AddPath peers are the per-candidate audience: `plain` and `addpath_tx`
+    // are disjoint partitions (a peer that negotiated AddPath Send is only in
+    // `addpath_tx`), so iterating `plain` here — as `fan_advertise_to_groups`
+    // correctly does for the best path — would reach zero AddPath groups. This
+    // is the group twin of `route_advertise_to_addpath`'s
+    // `established_addpath_idents` audience.
+    for ident in peers.established_addpath_idents(Afi::Ip, Safi::Unicast) {
+        let Some(peer) = peers.get_by_idx(ident) else {
+            continue;
+        };
+        let Some(gid) = peer.update_group_id.get(&afi_safi).cloned() else {
+            continue;
+        };
+        if !seen.insert(gid.clone()) {
+            continue;
+        }
+        let Some(group) = update_groups
+            .get(&afi_safi)
+            .and_then(|af| af.group_by_id(&gid))
+        else {
+            continue;
+        };
+        // Extra paths only matter to AddPath groups.
+        if !group.sig.addpath_send {
+            continue;
+        }
+        let Some(task) = group.task.as_ref() else {
+            continue;
+        };
+        match added {
+            Some(added) => task.send(super::group_egress::GroupEgressDeltaV4::Advertise {
+                prefix,
+                rib: added.clone(),
+            }),
+            None => {
+                for removed in replaced {
+                    task.send(super::group_egress::GroupEgressDeltaV4::Withdraw {
+                        prefix,
+                        id: removed.local_id,
+                        source_ident,
+                    });
+                }
+            }
         }
     }
 }
