@@ -277,7 +277,11 @@ end-state.
   writer + the Tier-1b gauge; point the ③ delta channel at it instead of
   main; migrate the event-driven withdraw gate there (main dispatches
   route changes to the relevant peer tasks). Takes the last per-peer work
-  off the main loop. Incremental on ③; precedes (b).
+  off the main loop. Incremental on ③; precedes (b). **Scoped in its own
+  design memo — `bgp-peer-egress-task.md` (2026-06-16)** — which resolves
+  the `adj_out`-vs-`update_groups` fork (PET drops `update_groups`, reuses
+  `SyncCtx` + `send_ipv4_direct`, GoBGP model) and phases the migration. No
+  code yet; A2 ①–⑤ stand on their own.
 
 ## 7. Risks & open questions
 
