@@ -392,17 +392,20 @@ dump. Caveat (E.2's lesson): at N ≈ cores a sync burst building in the
 shards competes with steady-state ingest; if it starves ingest, route A2's
 build through the bounded `egress_pool()` rather than rayon's global pool.
 
-**PR breakdown (A2):** **Phase 0 (the `&SyncCtx` build + egress refactor)
-is DONE (2026-06-16)** — `SyncCtx` is fully `&Peer`-free: the out-policy
-(`Arc<OutPolicy>`, cached) plus the egress sink
+**PR breakdown (A2):** **Phase 0 + the session-up `DumpV4` sync path are
+DONE and LIVE (2026-06-16).** `SyncCtx` is fully `&Peer`-free — out-policy
+(`Arc<OutPolicy>`, cached) + the egress sink
 (`packet_tx`/`egress_depth`/`extended_message`), with `route_update_ipv4`,
-`route_apply_policy_out`, and `send_ipv4_direct` all on `&SyncCtx`. Now:
-① `ShardMsg::DumpV4 { req_id, Arc<SyncCtx> }` + `DumpDoneV4` ack + a
-per-request barrier (N=1 keeps today's direct read; shard handler is a stub
-ack at ①, trigger wired live at ④) → ② shard `handle_dump_v4`: walk the
-slice, build + send per `SyncCtx` → ③ wire `show bgp ipv4` through it
-(flips the z2 assertion green) → ④ wire `route_sync_ipv4` through it (flips
-z4 green; add an AddPath-send BDD variant) → ⑤ retrofit `clear`/soft-in
+`route_apply_policy_out`, and `send_ipv4_direct` all on `&SyncCtx`. On top:
+`ShardMsg::DumpV4 { req_id, Arc<SyncCtx>, params }` + `DumpDoneV4` ack +
+the `DumpBarrierV4` per-request barrier; the shard `handle_dump_v4` walks
+its slice and builds + sends per `SyncCtx` (Tier-1b park); main records the
+`adj_out` deltas + emits EoR; and `route_sync_ipv4` is wired through it at
+N>1 — superseding the cursor there, reading the *authoritative* shard
+slices instead of the B.4 mirror (cursor kept at N=1). AddPath-send covered
+by `@bgp_shard_addpath_v4`; full N>1 shard BDD matrix green (88 scenarios).
+Remaining: wire `show bgp ipv4` through `DumpV4` (flips the z2 assertion
+green; pair with the streamed-`show` follow-up) → retrofit `clear`/soft-in
 onto the same `DumpV4`.
 
 ### Shard sync matrix — every AFI/SAFI × AddPath validated (B.4 complete, 2026-06-15)

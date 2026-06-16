@@ -25,7 +25,15 @@ peer, rebuilt on resolve) and the egress-sink fold (`packet_tx` +
 `SyncCtx` is now fully `&Peer`-free — a shard worker can do
 build → out-policy → encode → send → Tier-1b-park from an `Arc<SyncCtx>`
 alone. Pure refactor; validated by workspace clippy + 1254 unit tests +
-the out-policy/sync BDDs. Next: ①–④ (§6), starting with ①.
+the out-policy/sync BDDs.
+
+**The `DumpV4` path (①–④, §6) is DONE and LIVE (2026-06-16).** At N>1 the
+v4-unicast session-up dump runs shard-parallel — each shard builds + sends
+its own authoritative slice and reports `adj_out` deltas; main barriers
+the N acks, records adj_out, and emits EoR. Supersedes the main-loop
+cursor (kept at N=1). Validated by the full N>1 shard BDD matrix (88
+scenarios). Remaining: ⑤ (`show`/`clear`/soft-out via `DumpV4`) and ⑥
+(the (a′) per-peer egress task, §5.3).
 
 ## 1. Goal & relationship to Tier 1a/1b
 
@@ -221,20 +229,34 @@ end-state.
   `extended_message`) into `SyncCtx`; the build trio +
   `route_apply_policy_out` + `send_ipv4_direct` all take `&SyncCtx`. Pure
   refactor, fully covered by today's tests/BDDs.
-- **① `DumpV4` message + barrier. ⬅ IN PROGRESS.** `ShardMsg::DumpV4 { req_id, Arc<SyncCtx> }`
-  + `ShardOut::DumpDoneV4` + the per-`req_id` ack counter in
-  `process_shard_result`. N=1 falls back to the cursor. The shard handler
-  is a stub ack at ① (② fills the build+send); the broadcast trigger is
-  wired live in ④, so the message round-trip + barrier are unit-tested
-  until then.
-- **② shard `handle_dump_v4`.** Walk the slice, build (§5.1) + intern
-  local + enqueue on `ctx.packet_tx` with Tier-1b park, accumulate
-  `adj_out` deltas, ack.
-- **③ `adj_out` record-back.** Barrier records deltas (chunked, §5.3a),
-  then EoR.
-- **④ wire `route_sync_ipv4` through `DumpV4` at N>1** (supersedes the
-  cursor there; keep the cursor at N=1). Retire the B.4 mirror for sync.
-  Add an AddPath-send BDD variant (cands slice).
+- **① `DumpV4` message + barrier. ✅ DONE (2026-06-16).**
+  `ShardMsg::DumpV4 { req_id, Arc<SyncCtx>, params }` +
+  `ShardOut::DumpDoneV4` + `DumpBarrierV4` (per-`req_id` ack counter) in
+  `process_shard_result`. Shard handler was a stub ack at ①; barrier
+  unit-tested.
+- **② shard `handle_dump_v4`. ✅ DONE (2026-06-16).** Walks the slice,
+  builds (§5.1) + interns locally + buckets by attr + encodes + enqueues
+  on `ctx.packet_tx` with the Tier-1b park (the shard is a dedicated
+  thread, so it *blocks* rather than yielding like the cursor). Real
+  per-shard `sent` count. `DumpParamsV4` carries the peer-derived inputs
+  (AddPath, LLGR-capable, ENHE next-hop, watermark).
+- **③ `adj_out` record-back. ✅ DONE (2026-06-16).** Each `DumpDoneV4`
+  carries the `(nlri, rib)` rows; main records them per-shard (spread
+  across the N acks to keep the stall low) and emits EoR on the barrier's
+  last ack — every dump UPDATE is queued by then (each shard enqueues its
+  slice before acking; the writer channel is FIFO). Rows record as-is (no
+  re-intern); the presence-keyed withdraw gate makes the shard-vs-main Arc
+  identity at most a duplicate-UPDATE cost, never correctness. *(Finer
+  sub-message chunking deferred — per-shard spreading already bounds the
+  per-message stall to ~total/N.)*
+- **④ wire `route_sync_ipv4` through `DumpV4` at N>1. ✅ DONE (2026-06-16),
+  LIVE.** `route_sync` skips its v4-unicast block when `v4_via_pool`; the
+  FSM-event handler broadcasts `DumpV4` once the peer reaches Established
+  (supersedes the cursor at N>1 — the sync now reads the *authoritative*
+  shard slices, not the B.4 mirror). Cursor/legacy kept at N=1. AddPath
+  send covered by `@bgp_shard_addpath_v4` (cands slice). First production
+  behaviour change; validated by the full N>1 shard BDD matrix (88
+  scenarios). The DumpV4 path (①–④) is now live.
 - **⑤ wire `show` + `clear`/soft-out** through `DumpV4` (show via the
   gather/oneshot; pair with the streamed-`show` follow-up).
 - **⑥ (a′) per-peer egress task** (inter-peer parallelism, §5.3, env-gated
