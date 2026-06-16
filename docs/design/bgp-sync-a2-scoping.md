@@ -12,8 +12,11 @@ The three forks (§5) are settled:
    from both main and shard (§5.1).
 2. **Out-policy** — **(A)**: carry `Arc<OutPolicy>` in `SyncCtx` (§5.2).
    The outbound `PolicyReplace` twin is deferred to Phase E.2.
-3. **`adj_out`** — **(a) report-back + chunked recording** first (§5.3a);
-   sharded `adj_out` is the Phase-E.2 end-state.
+3. **`adj_out`** — **(a) report-back + chunked recording** first (§5.3),
+   then **(a′) per-peer task** as the chosen path to inter-peer
+   parallelism (delta channel points at a per-peer egress task instead of
+   main; the withdraw gate migrates there too; env-gated, default (a)),
+   with sharded `adj_out` **(b)** as the deeper Phase-E.2 end-state.
 
 Delivery: **Phase 0** (the `Arc<OutPolicy>` + `&SyncCtx` build refactor —
 a pure, no-behaviour-change refactor under existing test coverage) lands
@@ -169,14 +172,41 @@ dedup against the concurrent event-driven send. A shard can't touch it.
   ~N×. Mitigation: record the deltas **chunked** off the main loop (reuse
   the Tier-1a cursor machinery) so the *stall* stays low even though total
   recording is serial.
+- **(a′) report-back to a per-peer task** — the inter-peer-parallelism
+  upgrade of (a). Each established peer owns a task holding its egress
+  state: `adj_out`, the `packet_tx`/writer, the Tier-1b gauge, and the
+  withdraw gate. The shards still build + out-policy + encode + send their
+  slice in parallel, but the `(interned_attr, nlri)` deltas flow to that
+  *peer task* instead of back to main; the peer task reflects them into
+  `adj_out` **off the main loop**, and multiple peers' dumps record
+  concurrently. This removes the main-loop block that (a)'s report-back
+  reintroduces — for a single peer the record is still serial (one task),
+  but no longer on main. The **withdraw gate migrates to the peer task**
+  too: a route change on main dispatches to the relevant peer tasks, each
+  consults its own `adj_out` and emits the withdraw. This is the
+  *inter-peer* axis the prior-art memo flags zebra-rs as missing (BIRD's
+  per-protocol birdloop, GoBGP's per-peer goroutine), and it composes with
+  A2: the shards parallelize the *build* (intra-peer), the peer task
+  parallelizes *record + egress + withdraws* (inter-peer) — both axes, the
+  BIRD/GoBGP-plus-sharding convergence. Cost: per-peer egress state
+  migrates off the main loop (the same restructuring GoBGP's per-peer
+  goroutine embodies), but (a′) is *incremental on (a)* — "point the delta
+  channel at the peer task, migrate the withdraw gate." Env-gate it (like
+  `ZEBRA_BGP_SHARDS`): default (a), opt-in (a′), so the first `DumpV4`
+  stays simple and the per-peer model is A/B-able. The peer task is also
+  the natural home for the Tier-1b backpressure gauge (it lives with the
+  writer).
 - **(b) sharded `adj_out`**: each shard owns `adj_out` for its slice; the
   event-driven withdraw gate runs in the shard too. Full ~N× and the
   principled end-state (state lives with the data), but it couples with
   moving steady-state egress into shards (Phase E.2) — a big change.
 
 Recommend **(a) + chunked recording first** (keeps the stall low, build is
-~N× parallel, the cheap insert is the only serial tail), **(b) as the
-Phase-E.2 end-state**.
+~N× parallel, the cheap insert is the only serial tail), then **(a′) the
+per-peer task** as the chosen path to inter-peer parallelism (takes the
+last per-peer work off the main loop; the natural home for Tier-1b
+backpressure), with **(b) sharded `adj_out`** as the deeper Phase-E.2
+end-state.
 
 ## 6. Phased PR breakdown
 
@@ -197,6 +227,12 @@ Phase-E.2 end-state**.
   Add an AddPath-send BDD variant (cands slice).
 - **⑤ wire `show` + `clear`/soft-out** through `DumpV4` (show via the
   gather/oneshot; pair with the streamed-`show` follow-up).
+- **⑥ (a′) per-peer egress task** (inter-peer parallelism, §5.3, env-gated
+  — default (a)). Spawn a per-peer task owning `adj_out` + `packet_tx`/
+  writer + the Tier-1b gauge; point the ③ delta channel at it instead of
+  main; migrate the event-driven withdraw gate there (main dispatches
+  route changes to the relevant peer tasks). Takes the last per-peer work
+  off the main loop. Incremental on ③; precedes (b).
 
 ## 7. Risks & open questions
 
