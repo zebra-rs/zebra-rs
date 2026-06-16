@@ -3640,6 +3640,13 @@ pub fn route_update_evpn(
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
+    // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
+    // egress path — AFI/SAFI-agnostic: an iBGP-learned EVPN route reflected by
+    // an upstream RR carries them through the cloned attrs. See
+    // `strip_ibgp_only_attrs`.
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
+    }
 
     Some((route, attrs))
 }
@@ -6298,6 +6305,11 @@ pub fn route_update_flowspec(
     if peer.is_ibgp() && attrs.local_pref.is_none() {
         attrs.local_pref = Some(LocalPref::default());
     }
+    // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
+    // egress path (AFI/SAFI-agnostic — see `strip_ibgp_only_attrs`).
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
+    }
     // Flow specs have no next-hop in MP_REACH; don't emit a NEXT_HOP.
     attrs.nexthop = None;
 
@@ -7610,6 +7622,30 @@ fn llgr_blocks_advertisement(
     rib_stale && !cap_recv.llgr.contains_key(&AfiSafi::new(afi, safi))
 }
 
+/// Strip the iBGP-only path attributes that MUST NOT cross an AS boundary,
+/// for use on the eBGP egress path. An iBGP-learned route re-advertised to an
+/// eBGP peer carries these through the cloned `rib.attr`, so they have to be
+/// removed here:
+///
+/// - ORIGINATOR_ID / CLUSTER_LIST (RFC 4456 §8): optional *non-transitive*
+///   attributes that only carry meaning within the local AS — the route's
+///   originator router-id and the intra-AS reflection path used for loop
+///   prevention. Leaking them risks spurious loop drops at a remote AS that
+///   happens to share a router-id (ORIGINATOR_ID match) or cluster-id
+///   (CLUSTER_LIST match).
+/// - LOCAL_PREF (RFC 4271 §5.1.5): a well-known attribute a BGP speaker "MUST
+///   NOT include … in UPDATE messages it sends to external peers" (the
+///   confederation exception does not apply — zebra-rs has no confederation
+///   peering, so every `PeerType::EBGP` is a true AS boundary).
+///
+/// Mirrors BIRD (UNSET when `!is_internal`) and GoBGP (delPathAttr for
+/// non-internal peers).
+fn strip_ibgp_only_attrs(attrs: &mut BgpAttr) {
+    attrs.originator_id = None;
+    attrs.cluster_list = None;
+    attrs.local_pref = None;
+}
+
 pub fn route_update_ipv4(
     ctx: &SyncCtx,
     prefix: &Ipv4Net,
@@ -7744,6 +7780,13 @@ pub fn route_update_ipv4(
         }
     }
 
+    // 8. Strip the iBGP-only attributes (ORIGINATOR_ID / CLUSTER_LIST /
+    // LOCAL_PREF) before they cross the AS boundary. Mutually exclusive with
+    // the iBGP stamping/local-pref-default above; see `strip_ibgp_only_attrs`.
+    if ctx.peer_type.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
+    }
+
     Some((nlri, attrs))
 }
 
@@ -7870,6 +7913,11 @@ pub fn route_update_ipv6(
             cluster_list.list.push(*bgp.router_id);
             attrs.cluster_list = Some(cluster_list);
         }
+    }
+    // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
+    // egress path; see `strip_ibgp_only_attrs`.
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
     }
 
     // The two SRv6 hooks below apply only to plain IPv6 unicast rows.
@@ -8197,6 +8245,11 @@ fn route_update_labelv4(
             attrs.cluster_list = Some(cluster_list);
         }
     }
+    // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
+    // egress path; see `strip_ibgp_only_attrs`.
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
+    }
 
     attrs.nexthop = None;
     // Next-hop-self makes us the forwarding hop: advertise our per-prefix
@@ -8270,6 +8323,11 @@ fn route_update_labelv6(
             cluster_list.list.push(*bgp.router_id);
             attrs.cluster_list = Some(cluster_list);
         }
+    }
+    // Strip the iBGP-only attributes (RR attrs + LOCAL_PREF) on the eBGP
+    // egress path; see `strip_ibgp_only_attrs`.
+    if peer.is_ebgp() {
+        strip_ibgp_only_attrs(&mut attrs);
     }
 
     attrs.nexthop = None;
