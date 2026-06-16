@@ -149,7 +149,7 @@ fn aspath_first_as_mismatch(aspath: Option<&As4Path>, expected_as: u32) -> bool 
 /// The eBGP AS_PATH egress transform inputs. AF-agnostic — shared by the
 /// v4 / v6 / LU / VPN advertise builders via `ebgp_egress_aspath` — so
 /// split out of the v4-specific [`SyncCtx`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct EgressAs {
     pub is_ebgp: bool,
     pub local_as: u32,
@@ -168,7 +168,7 @@ pub struct EgressAs {
 /// `out_policy` is `Copy`; the out-policy rides behind an `Arc` cached on
 /// the `Peer` (`Peer::out_policy`, rebuilt only when it resolves), so
 /// cloning one per advertise is a cheap `Arc` bump, not a route-map clone.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SyncCtx {
     pub ident: usize,
     pub peer_type: PeerType,
@@ -201,6 +201,36 @@ impl SyncCtx {
             bgp_packet::BGP_EXTENDED_PACKET_LEN
         } else {
             bgp_packet::BGP_PACKET_LEN
+        }
+    }
+}
+
+#[cfg(test)]
+impl SyncCtx {
+    /// Minimal `SyncCtx` for shard-dispatch tests — no peer, no writer
+    /// (`packet_tx: None`, so `send_packet` is a no-op), permit-all
+    /// out-policy. Reused by the A2 `DumpV4` tests.
+    pub(crate) fn for_test() -> Self {
+        SyncCtx {
+            ident: 0,
+            peer_type: super::peer::PeerType::EBGP,
+            reflector_client: false,
+            local_addr_v4: None,
+            router_id: Ipv4Addr::UNSPECIFIED,
+            vpnv4_next_hop_self: false,
+            egress_as: EgressAs {
+                is_ebgp: true,
+                local_as: 65000,
+                remote_as: 65001,
+                as_override: false,
+                remove_private_as: None,
+                local_as_substitute: None,
+                local_as_replace: false,
+            },
+            out_policy: Arc::new(super::policy::OutPolicy::default()),
+            packet_tx: None,
+            egress_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            extended_message: false,
         }
     }
 }

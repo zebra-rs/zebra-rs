@@ -39,7 +39,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use bgp_packet::{Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher};
 
-use super::super::route::{BgpRib, BgpRibType, PolicyDecision, VpnNexthop};
+use super::super::route::{BgpRib, BgpRibType, PolicyDecision, SyncCtx, VpnNexthop};
 
 /// Main → shard. Each variant is one unit of work the shard applies to
 /// its owned state; route-bearing variants reply with a [`ShardOut`].
@@ -161,6 +161,20 @@ pub enum ShardMsg {
         nlris: Vec<Ipv4Nlri>,
         nh: IpAddr,
         reachable: bool,
+    },
+
+    /// A2 step ① — fan a session-up IPv4-unicast dump across the pool.
+    /// Broadcast to every shard for one peer; `req_id` correlates the
+    /// per-shard acks. Each shard builds + filters + encodes + sends its
+    /// own v4-unicast slice directly to the peer from the shared
+    /// `Arc<SyncCtx>` (the `&Peer`-free egress snapshot — step ②), parking
+    /// on the Tier-1b gauge, then replies with [`ShardOut::DumpDoneV4`].
+    /// Main counts the N acks (a per-`req_id` barrier) and emits EoR on the
+    /// last (step ③/④). The shard handler is a stub ack at step ①.
+    /// v4-unicast only; N=1 uses the resumable cursor, not this.
+    DumpV4 {
+        req_id: u64,
+        ctx: std::sync::Arc<SyncCtx>,
     },
 
     /// Tear the shard task down; its event loop exits on the next
@@ -341,6 +355,13 @@ pub enum ShardOut {
         replaced: Vec<BgpRib>,
         survivor_nexthops: BTreeSet<IpAddr>,
     },
+
+    /// A2 step ① — one shard's acknowledgement that it finished its slice
+    /// of a [`ShardMsg::DumpV4`]. `sent` is the number of UPDATEs that
+    /// shard enqueued (0 at step ①; the build + send lands in step ②).
+    /// Main decrements the `req_id`'s outstanding-ack count and, on the
+    /// last ack, records the dump's `adj_out` deltas + emits EoR (③/④).
+    DumpDoneV4 { req_id: u64, sent: usize },
 }
 
 #[cfg(test)]

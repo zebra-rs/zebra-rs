@@ -398,6 +398,71 @@ pub fn shard_count() -> usize {
         .unwrap_or(1)
 }
 
+/// A2 step ① — per-`req_id` barrier for in-flight `DumpV4` dumps. Each
+/// session-up dump is fanned to the N pool shards (`broadcast_dump_v4`);
+/// every `ShardOut::DumpDoneV4` decrements that request's outstanding-ack
+/// count, and the last ack returns a [`DumpDoneSummaryV4`] so main can
+/// record the dump's `adj_out` deltas + emit EoR (step ③/④). `req_id`s are
+/// a monotonic counter (no wall-clock), so the sequence is deterministic.
+#[derive(Default)]
+struct DumpBarrierV4 {
+    next_req_id: u64,
+    inflight: std::collections::HashMap<u64, DumpStateV4>,
+}
+
+struct DumpStateV4 {
+    /// The peer this dump targets (`Peer::ident`).
+    ident: usize,
+    /// Shard acks still outstanding — starts at N, hits 0 on completion.
+    remaining: usize,
+    /// UPDATEs enqueued so far, summed across shards (for the EoR log).
+    sent: usize,
+}
+
+/// Returned by [`DumpBarrierV4::ack`] on the final ack of a `req_id`.
+struct DumpDoneSummaryV4 {
+    ident: usize,
+    sent: usize,
+}
+
+impl DumpBarrierV4 {
+    /// Register a dump fanned to `n` shards for `ident`; returns its
+    /// `req_id`. Wired into the session-up path in step ④ (via
+    /// `Bgp::broadcast_dump_v4`); until then exercised only by the unit
+    /// tests below.
+    #[allow(dead_code)]
+    fn start(&mut self, ident: usize, n: usize) -> u64 {
+        let req_id = self.next_req_id;
+        self.next_req_id += 1;
+        self.inflight.insert(
+            req_id,
+            DumpStateV4 {
+                ident,
+                remaining: n,
+                sent: 0,
+            },
+        );
+        req_id
+    }
+
+    /// Record one shard's ack (`sent` UPDATEs). Returns `Some` summary on
+    /// the last outstanding ack of `req_id`, else `None`. An ack for an
+    /// unknown `req_id` (already completed, or never started) is ignored.
+    fn ack(&mut self, req_id: u64, sent: usize) -> Option<DumpDoneSummaryV4> {
+        let state = self.inflight.get_mut(&req_id)?;
+        state.sent += sent;
+        state.remaining = state.remaining.saturating_sub(1);
+        if state.remaining > 0 {
+            return None;
+        }
+        let state = self.inflight.remove(&req_id)?;
+        Some(DumpDoneSummaryV4 {
+            ident: state.ident,
+            sent: state.sent,
+        })
+    }
+}
+
 pub struct Bgp {
     pub asn: u32,
     /// Effective BGP Identifier — what OPENs, EVPN RDs and the show
@@ -519,6 +584,11 @@ pub struct Bgp {
     /// Merged best-path deltas from every shard worker, drained by the
     /// event loop's `select!`. Closed and idle when `shard_count() == 1`.
     pub shard_results_rx: UnboundedReceiver<super::shard::pool::ShardResult>,
+    /// A2 step ① — per-`req_id` barrier for in-flight `DumpV4` dumps: counts
+    /// the `ShardOut::DumpDoneV4` acks still outstanding for each session-up
+    /// dump, so main records the dump's `adj_out` deltas + emits EoR once
+    /// every shard has finished its slice (step ③/④).
+    pending_dumps_v4: DumpBarrierV4,
     /// `router bgp port <0-65535>`: TCP port the BGP listener binds
     /// (IPv4 and IPv6 both), default [`BGP_PORT`] (179). 0 disables
     /// listening entirely — no server socket is open, so every session
@@ -848,6 +918,7 @@ impl Bgp {
             shard: BgpShard::default(),
             shards,
             shard_results_rx,
+            pending_dumps_v4: DumpBarrierV4::default(),
             ctx,
             rib_rx,
             nexthop_cache: super::nht::NexthopCache::default(),
@@ -3355,6 +3426,30 @@ impl Bgp {
     /// the synchronous path runs. Reachable only at N>1, where
     /// v4-unicast ingest fanned out to the pool.
     fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
+        // A2 step ① — peel the DumpV4 barrier acks off the delta stream:
+        // each `DumpDoneV4` decrements its request's outstanding-ack count,
+        // and the last ack completes the dump (recording the adj_out deltas
+        // + emitting EoR lands in step ③/④). Everything else is a best-path
+        // delta for the reduce below.
+        let mut deltas = Vec::with_capacity(result.out.len());
+        for out in result.out {
+            match out {
+                super::shard::ShardOut::DumpDoneV4 { req_id, sent } => {
+                    if let Some(done) = self.pending_dumps_v4.ack(req_id, sent) {
+                        tracing::debug!(
+                            req_id,
+                            ident = done.ident,
+                            sent = done.sent,
+                            "DumpV4 complete"
+                        );
+                    }
+                }
+                other => deltas.push(other),
+            }
+        }
+        if deltas.is_empty() {
+            return;
+        }
         let import_dispatcher = super::vrf::VrfImportDispatcher {
             rib_known_vrfs: &self.rib_known_vrfs,
             vrf_registry: &self.vrf_registry,
@@ -3378,7 +3473,30 @@ impl Bgp {
             vrf_transport_v6: None,
             central_label_alloc: self.vrf_label_alloc.as_mut(),
         };
-        super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, result.out);
+        super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
+    }
+
+    /// A2 step ① — fan a `DumpV4` to every pool shard for `ident`'s
+    /// session-up IPv4-unicast dump, returning the `req_id` its per-shard
+    /// `DumpDoneV4` acks carry. `None` when there is no pool (N=1, where the
+    /// resumable cursor handles the dump). Each shard builds + sends its own
+    /// slice from the shared `Arc<SyncCtx>` (step ②); main counts the N acks
+    /// via [`DumpBarrierV4`] and emits EoR on the last (step ③/④). Wired
+    /// into the session-up path in step ④; until then exercised by tests.
+    #[allow(dead_code)]
+    fn broadcast_dump_v4(&mut self, ident: usize) -> Option<u64> {
+        let n = self.shards.as_ref()?.n();
+        let peer = self.peers.get_by_idx(ident)?;
+        let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id));
+        let req_id = self.pending_dumps_v4.start(ident, n);
+        self.shards
+            .as_ref()
+            .expect("pool present (checked above)")
+            .broadcast(|| super::shard::ShardMsg::DumpV4 {
+                req_id,
+                ctx: ctx.clone(),
+            });
+        Some(req_id)
     }
 
     /// If `vrf` is an `encapsulation srv6` VRF with an allocated
@@ -4042,10 +4160,45 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::IpAddr;
 
+    use super::DumpBarrierV4;
     use super::peer_index_register;
 
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn dump_barrier_completes_on_last_ack() {
+        // A2 step ① — the per-req_id barrier: N acks complete one dump,
+        // summing the per-shard `sent` counts.
+        let mut b = DumpBarrierV4::default();
+        let req = b.start(7, 3); // peer ident 7, fanned to 3 shards
+        assert!(b.ack(req, 10).is_none(), "1/3");
+        assert!(b.ack(req, 5).is_none(), "2/3");
+        let done = b.ack(req, 2).expect("3/3 completes");
+        assert_eq!(done.ident, 7);
+        assert_eq!(done.sent, 17); // 10 + 5 + 2 summed across shards
+        assert!(b.ack(req, 1).is_none(), "ack after completion is ignored");
+    }
+
+    #[test]
+    fn dump_barrier_tracks_concurrent_dumps_independently() {
+        let mut b = DumpBarrierV4::default();
+        let a = b.start(1, 2);
+        let c = b.start(2, 2);
+        assert_ne!(a, c, "req_ids are distinct");
+        assert!(b.ack(a, 1).is_none());
+        assert!(b.ack(c, 4).is_none());
+        let done_c = b.ack(c, 6).expect("c completes");
+        assert_eq!((done_c.ident, done_c.sent), (2, 10));
+        let done_a = b.ack(a, 3).expect("a completes");
+        assert_eq!((done_a.ident, done_a.sent), (1, 4));
+    }
+
+    #[test]
+    fn dump_barrier_ignores_unknown_req_id() {
+        let mut b = DumpBarrierV4::default();
+        assert!(b.ack(999, 5).is_none());
     }
 
     /// `/clear/bgp/...` path → (AFI/SAFI filter, op) mapping, both the

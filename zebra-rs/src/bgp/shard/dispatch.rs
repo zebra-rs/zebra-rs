@@ -80,8 +80,24 @@ impl BgpShard {
                 }
                 outs
             }
+            ShardMsg::DumpV4 { req_id, ctx } => self.handle_dump_v4(req_id, ctx),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
+    }
+
+    /// A2 step ① stub for [`ShardMsg::DumpV4`]: acknowledge the request so
+    /// main's per-`req_id` barrier can count this shard. The real work —
+    /// walk this shard's v4-unicast Loc-RIB slice, build each row via the
+    /// shared `SyncCtx` (the `&Peer`-free egress snapshot), intern locally,
+    /// encode, and enqueue on `ctx.packet_tx` with the Tier-1b park while
+    /// accumulating `adj_out` deltas — lands in step ②, where `sent`
+    /// becomes the per-shard UPDATE count.
+    fn handle_dump_v4(
+        &mut self,
+        req_id: u64,
+        _ctx: std::sync::Arc<super::super::route::SyncCtx>,
+    ) -> Vec<ShardOut> {
+        vec![ShardOut::DumpDoneV4 { req_id, sent: 0 }]
     }
 
     /// Mirror one pool best-path delta into THIS shard's v4-unicast
@@ -980,5 +996,21 @@ mod tests {
             matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.len() == 1),
             "cleared snapshot ⇒ default-permit again"
         );
+    }
+
+    #[test]
+    fn dump_v4_stub_acks_with_req_id() {
+        // A2 step ① — the shard acks a DumpV4 so main's barrier can count
+        // it; the per-slice build + send is step ②, so `sent` is 0 here.
+        let mut shard = BgpShard::default();
+        let ctx = std::sync::Arc::new(super::super::super::route::SyncCtx::for_test());
+        let out = shard.handle(ShardMsg::DumpV4 { req_id: 42, ctx }, None);
+        assert!(matches!(
+            out.as_slice(),
+            [ShardOut::DumpDoneV4 {
+                req_id: 42,
+                sent: 0
+            }]
+        ));
     }
 }
