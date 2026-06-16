@@ -372,12 +372,23 @@ pub enum ShardOut {
         survivor_nexthops: BTreeSet<IpAddr>,
     },
 
-    /// A2 step ① — one shard's acknowledgement that it finished its slice
-    /// of a [`ShardMsg::DumpV4`]. `sent` is the number of UPDATEs that
-    /// shard enqueued (0 at step ①; the build + send lands in step ②).
-    /// Main decrements the `req_id`'s outstanding-ack count and, on the
-    /// last ack, records the dump's `adj_out` deltas + emits EoR (③/④).
-    DumpDoneV4 { req_id: u64, sent: usize },
+    /// One shard's acknowledgement that it finished its slice of a
+    /// [`ShardMsg::DumpV4`] for peer `ident`. `sent` is the number of
+    /// UPDATEs this shard enqueued; `advertised` are the `(nlri, rib)`
+    /// rows it sent — main records them into the peer's Adj-RIB-Out (step
+    /// ③) so a later withdraw reaches a peer that learned the prefix via
+    /// this dump. Main also decrements the `req_id`'s outstanding-ack
+    /// count and, on the last ack, emits EoR (step ③/④). The rows carry
+    /// the post-policy attr interned in the *shard's* store; main records
+    /// them as-is (adj_out's withdraw gate is presence-keyed, so the Arc
+    /// identity only costs an occasional duplicate UPDATE if the
+    /// event-driven path races the dump — never correctness).
+    DumpDoneV4 {
+        req_id: u64,
+        ident: usize,
+        sent: usize,
+        advertised: Vec<(Ipv4Nlri, BgpRib)>,
+    },
 }
 
 #[cfg(test)]

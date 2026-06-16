@@ -9547,7 +9547,7 @@ fn send_eor_vpnv6_vpn(peer: &mut Peer) {
 }
 
 // Send End-of-RIB marker for IPv4 Unicast.
-fn send_eor_ipv4_unicast(peer: &mut Peer) {
+pub(super) fn send_eor_ipv4_unicast(peer: &mut Peer) {
     let update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
     peer.send_packet(update.into());
 }

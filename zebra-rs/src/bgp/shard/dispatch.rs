@@ -136,7 +136,8 @@ impl BgpShard {
         // interned post-policy attr so one MP_REACH UPDATE carries every
         // NLRI sharing an attr-set (matching `send_ipv4_direct`).
         let mut buckets: HashMap<Arc<bgp_packet::BgpAttr>, Vec<Ipv4Nlri>> = HashMap::new();
-        for (prefix, rib) in routes {
+        let mut advertised: Vec<(Ipv4Nlri, BgpRib)> = Vec::new();
+        for (prefix, mut rib) in routes {
             // RFC 9494 §4.3: stale routes only go to LLGR peers.
             if rib.stale && !params.llgr_v4 {
                 continue;
@@ -148,7 +149,11 @@ impl BgpShard {
                 continue;
             };
             let arc = self.intern(decision.attr);
-            buckets.entry(arc).or_default().push(nlri);
+            buckets.entry(arc.clone()).or_default().push(nlri.clone());
+            // The Adj-RIB-Out delta main records (step ③): the Loc-RIB row
+            // with the post-policy attr it was advertised under.
+            rib.attr = arc;
+            advertised.push((nlri, rib));
         }
 
         // Encode + enqueue, parking on the Tier-1b gauge between buckets so
@@ -168,7 +173,12 @@ impl BgpShard {
                 sent += 1;
             }
         }
-        vec![ShardOut::DumpDoneV4 { req_id, sent }]
+        vec![ShardOut::DumpDoneV4 {
+            req_id,
+            ident: ctx.ident,
+            sent,
+            advertised,
+        }]
     }
 
     /// Mirror one pool best-path delta into THIS shard's v4-unicast
@@ -1096,18 +1106,21 @@ mod tests {
             out.as_slice(),
             [ShardOut::DumpDoneV4 {
                 req_id: 42,
-                sent: 0
-            }]
+                sent: 0,
+                advertised,
+                ..
+            }] if advertised.is_empty()
         ));
     }
 
     #[test]
     fn dump_v4_sends_its_slice() {
-        // A2 step ② — the shard builds + encodes its Loc-RIB slice and
-        // reports the UPDATE count. `for_test` has no writer (`packet_tx`
-        // None) so nothing actually leaves, but the build + encode path
-        // still runs and counts. The route is from a different peer
-        // (ident 5 ≠ the ctx's ident 0), so split-horizon keeps it.
+        // A2 step ②/③ — the shard builds + encodes its Loc-RIB slice,
+        // reports the UPDATE count, and returns the Adj-RIB-Out delta main
+        // records. `for_test` has no writer (`packet_tx` None) so nothing
+        // actually leaves, but the build + encode path still runs and
+        // counts. The route is from a different peer (ident 5 ≠ the ctx's
+        // ident 0), so split-horizon keeps it.
         let mut shard = BgpShard::default();
         shard.handle(update_v4_compute(5, "10.0.0.0/24", "192.0.2.1"), None);
         let ctx = std::sync::Arc::new(super::super::super::route::SyncCtx::for_test());
@@ -1120,8 +1133,13 @@ mod tests {
             None,
         );
         assert!(
-            matches!(out.as_slice(), [ShardOut::DumpDoneV4 { req_id: 7, sent }] if *sent >= 1),
-            "the shard's one route is built + encoded into >=1 UPDATE: {out:?}"
+            matches!(
+                out.as_slice(),
+                [ShardOut::DumpDoneV4 { req_id: 7, ident: 0, sent, advertised }]
+                    if *sent >= 1 && advertised.len() == 1
+            ),
+            "the shard's one route is built + encoded into >=1 UPDATE and reported \
+             as one adj_out delta: {out:?}"
         );
     }
 }

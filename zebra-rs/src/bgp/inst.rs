@@ -3426,16 +3426,32 @@ impl Bgp {
     /// the synchronous path runs. Reachable only at N>1, where
     /// v4-unicast ingest fanned out to the pool.
     fn process_shard_result(&mut self, result: super::shard::pool::ShardResult) {
-        // A2 step ① — peel the DumpV4 barrier acks off the delta stream:
-        // each `DumpDoneV4` decrements its request's outstanding-ack count,
-        // and the last ack completes the dump (recording the adj_out deltas
-        // + emitting EoR lands in step ③/④). Everything else is a best-path
-        // delta for the reduce below.
+        // A2 step ③ — peel the DumpV4 barrier acks off the delta stream.
+        // For each shard's `DumpDoneV4`: record what it advertised into the
+        // peer's Adj-RIB-Out (so a later withdraw reaches the peer),
+        // spreading the inserts across the N acks to keep the main-loop
+        // stall low; then decrement the `req_id`'s outstanding-ack count
+        // and, on the last ack, emit EoR — every dump UPDATE is queued by
+        // then (each shard enqueues its slice before acking). Everything
+        // else is a best-path delta for the reduce below.
         let mut deltas = Vec::with_capacity(result.out.len());
         for out in result.out {
             match out {
-                super::shard::ShardOut::DumpDoneV4 { req_id, sent } => {
+                super::shard::ShardOut::DumpDoneV4 {
+                    req_id,
+                    ident,
+                    sent,
+                    advertised,
+                } => {
+                    if let Some(peer) = self.peers.get_mut_by_idx(ident) {
+                        for (nlri, rib) in advertised {
+                            peer.adj_out.add(None, nlri.prefix, rib);
+                        }
+                    }
                     if let Some(done) = self.pending_dumps_v4.ack(req_id, sent) {
+                        if let Some(peer) = self.peers.get_mut_by_idx(done.ident) {
+                            super::route::send_eor_ipv4_unicast(peer);
+                        }
                         tracing::debug!(
                             req_id,
                             ident = done.ident,
