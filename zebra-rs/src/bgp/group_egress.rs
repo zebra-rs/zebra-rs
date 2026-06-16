@@ -250,11 +250,18 @@ impl Engine {
         self.adj_out.add(prefix, rib);
     }
 
-    /// Drop `prefix` from `adj_out` and, if it had been advertised, fan one
-    /// MP_UNREACH to every member except `source_ident`. Matches by prefix
-    /// (not exact `id`), as the PET withdraw does.
+    /// Drop a path from `adj_out` and, if it had been advertised, fan one
+    /// MP_UNREACH to every member except `source_ident`. `id == 0` is the
+    /// non-AddPath / whole-prefix withdraw (the wire carries id 0); `id != 0`
+    /// is an AddPath per-path withdraw — remove just that path (`adj_out` keys
+    /// by the Out local-id), leaving the prefix's other paths advertised.
     fn withdraw(&mut self, prefix: Ipv4Net, id: u32, source_ident: usize) {
-        if self.adj_out.0.remove(&prefix).is_some() {
+        let removed = if id == 0 {
+            self.adj_out.0.remove(&prefix).is_some()
+        } else {
+            self.adj_out.remove(prefix, id).is_some()
+        };
+        if removed {
             let max = self
                 .members
                 .values()

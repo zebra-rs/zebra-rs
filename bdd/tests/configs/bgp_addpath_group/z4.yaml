@@ -1,0 +1,21 @@
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.4/24
+router:
+  bgp:
+    global:
+      as: 65004
+      router-id: 192.168.0.4
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65003
