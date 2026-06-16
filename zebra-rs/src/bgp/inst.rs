@@ -2007,7 +2007,15 @@ impl Bgp {
     }
 
     async fn process_show_msg(&self, msg: DisplayRequest) {
-        let (path, args) = path_from_command(&msg.paths);
+        let (path, mut args) = path_from_command(&msg.paths);
+        // A2 ⑤: at N>1 a peer's v4-unicast Adj-RIB-In lives in the pool
+        // shards, not main's Loc-RIB mirror — gather it for received-routes
+        // (the sync render callback would read the empty main-side copy).
+        if self.shards.is_some() && path == "/show/bgp/neighbors/received-routes" {
+            let output = self.show_received_v4_gathered(&mut args, msg.json).await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         if let Some(f) = self.show_cb.get(&path) {
             let output = match f(self, args, msg.json) {
                 Ok(result) => result,
@@ -2015,6 +2023,57 @@ impl Bgp {
             };
             msg.resp.send(output).await.unwrap();
         }
+    }
+
+    /// A2 ⑤ — `show … received-routes` at N>1: gather the peer's
+    /// IPv4-unicast Adj-RIB-In from every pool shard and render it. The
+    /// N=1 sync callback reads `bgp.shard.adj_in` directly, so this is only
+    /// the N>1 path.
+    async fn show_received_v4_gathered(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let Some(ident) = self.peers.get(&addr).map(|p| p.ident) else {
+            return format!("% No such neighbor: {}", addr);
+        };
+        let table = self.gather_adj_in_v4(ident).await;
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
+    }
+
+    /// Scatter a `DumpAdjInV4` to every pool shard and merge the per-shard
+    /// slices of peer `ident`'s v4-unicast Adj-RIB-In. Each prefix lives on
+    /// exactly one shard (prefix hash), so the merge is a disjoint union.
+    /// Empty at N=1 (no pool).
+    async fn gather_adj_in_v4(
+        &self,
+        ident: usize,
+    ) -> std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> {
+        let mut merged = std::collections::BTreeMap::new();
+        let Some(pool) = self.shards.as_ref() else {
+            return merged;
+        };
+        let mut rxs = Vec::with_capacity(pool.n());
+        for idx in 0..pool.n() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            pool.dispatch(
+                idx,
+                super::shard::ShardMsg::DumpAdjInV4 { ident, reply: tx },
+            );
+            rxs.push(rx);
+        }
+        for rx in rxs {
+            if let Ok(slice) = rx.await {
+                for (prefix, ribs) in slice {
+                    merged.entry(prefix).or_insert_with(Vec::new).extend(ribs);
+                }
+            }
+        }
+        merged
     }
 
     pub async fn listen(&mut self) -> anyhow::Result<()> {

@@ -35,6 +35,12 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
   main task; parallelizing its egress is a separate optimization, see
   docs/design/bgp-rib-sharding-plan.md §B.4.)
 
+  A THIRD read path — `show bgp neighbors <peer> received-routes` (the
+  peer's Adj-RIB-In) — is NOT covered by the Loc-RIB mirror: the
+  authoritative adj_in lives in the pool shards, so at N>1 this read
+  scatter-gathers it from every shard (A2 ⑤, `ShardMsg::DumpAdjInV4`). The
+  received-routes scenario below guards that.
+
   Test Topology:
   ```
                          ┌── z3 (AS65003)  early peer  → event-driven (control)
@@ -88,6 +94,18 @@ Feature: BGP IPv4-unicast read paths at N>1 (show / session-up sync read the emp
     And show command "show bgp ipv4" in namespace "z4" should contain "10.10.11.0/24"
     And show command "show bgp ipv4" in namespace "z2" should contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z2" should contain "10.10.11.0/24"
+
+  Scenario: z2's received-routes from z1 are gathered from the pool shards (N>1 Adj-RIB-In)
+    Given the test topology exists
+    # The v4-unicast Adj-RIB-In lives ONLY in the pool shards at N>1 (the
+    # mirror replicates the Loc-RIB, not adj_in), so `show bgp neighbors
+    # <z1> received-routes` must scatter-gather it from every shard (A2 ⑤,
+    # ShardMsg::DumpAdjInV4). Before the gather this read hit the empty
+    # main-side adj_in copy and showed nothing — a silent N>1 gap, untested
+    # until now. Both prefixes present ⇒ the merge across shards is complete
+    # (.10 and .11 hash to possibly-different shards).
+    Then show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.10.0/24"
+    And show command "show bgp neighbors 10.0.0.1 received-routes" in namespace "z2" should contain "10.10.11.0/24"
 
   Scenario: z1 withdraws one route; the sharded reduce removes it from z2's mirror
     Given the test topology exists

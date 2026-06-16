@@ -178,6 +178,18 @@ pub enum ShardMsg {
         params: DumpParamsV4,
     },
 
+    /// A2 ⑤ — scatter-gather one peer's IPv4-unicast Adj-RIB-In for a
+    /// `show … received-routes` at N>1, where the authoritative adj_in
+    /// lives in the pool shards (not main's Loc-RIB mirror). Each shard
+    /// replies on the request's own oneshot with its slice of peer
+    /// `ident`'s received v4 routes (one `(prefix, paths)` per prefix it
+    /// owns); main merges the N replies and renders. Read-only, so it
+    /// returns no [`ShardOut`].
+    DumpAdjInV4 {
+        ident: usize,
+        reply: tokio::sync::oneshot::Sender<Vec<(ipnet::Ipv4Net, Vec<BgpRib>)>>,
+    },
+
     /// Tear the shard task down; its event loop exits on the next
     /// iteration. Used at daemon shutdown.
     Shutdown,

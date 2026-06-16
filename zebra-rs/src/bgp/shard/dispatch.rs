@@ -90,6 +90,22 @@ impl BgpShard {
                 ctx,
                 params,
             } => self.handle_dump_v4(req_id, ctx, params),
+            ShardMsg::DumpAdjInV4 { ident, reply } => {
+                // A2 ⑤ — reply with this shard's slice of peer `ident`'s
+                // IPv4-unicast Adj-RIB-In (the prefixes that hash here);
+                // main merges the N replies for `show … received-routes`.
+                let slice = self
+                    .adj_in(ident)
+                    .map(|a| {
+                        a.v4.0
+                            .iter()
+                            .map(|(prefix, ribs)| (*prefix, ribs.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = reply.send(slice);
+                Vec::new()
+            }
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }

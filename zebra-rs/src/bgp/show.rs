@@ -1608,7 +1608,7 @@ fn show_bgp_ipv6_longer<V: BgpShowView>(
 }
 
 // Common helper function for displaying Adj-RIB routes
-fn show_adj_rib_routes(
+pub(super) fn show_adj_rib_routes(
     routes: &std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
     router_id: Ipv4Addr,
     json: bool,
