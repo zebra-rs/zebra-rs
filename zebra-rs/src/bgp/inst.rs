@@ -3663,28 +3663,47 @@ impl Bgp {
                     sent,
                     advertised,
                 } => {
-                    // A2 ⑥ — at gate-on `adj_out` lives in the PET, so
-                    // forward the dump rows there as record-only advertises
-                    // (`send: false`: the shard already put the bytes on the
-                    // wire). The PET rebuilds + records, keeping its adj_out
-                    // and interner consistent with its event-driven path.
-                    // Gate-off records main's adj_out as before.
-                    let to_pet = super::peer_egress::peer_egress_task_enabled()
-                        && self
-                            .peers
-                            .get_by_idx(ident)
-                            .is_some_and(|p| p.pet.is_some());
-                    if to_pet {
-                        if let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
-                        {
-                            for (nlri, rib) in advertised {
-                                let _ = pet.delta_tx.send(
-                                    super::peer_egress::EgressDeltaV4::RecordAdjOut {
-                                        prefix: nlri.prefix,
-                                        rib,
-                                    },
-                                );
-                            }
+                    // At gate-on `adj_out` lives in the egress task (group or
+                    // PET), so forward the dump rows there as record-only — the
+                    // shard already put the bytes on the wire. Group-task first
+                    // (the N>1 twin of route_sync_ipv4's RecordAdjOut, Phase 3),
+                    // then the per-peer PET, then main's adj_out at gate-off.
+                    let v4 =
+                        bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+                    let group_tx = super::group_egress::egress_group_task_enabled()
+                        .then(|| {
+                            let gid = self
+                                .peers
+                                .get_by_idx(ident)?
+                                .update_group_id
+                                .get(&v4)?
+                                .clone();
+                            self.update_groups
+                                .get(&v4)?
+                                .group_by_id(&gid)?
+                                .task
+                                .as_ref()
+                                .map(|t| t.delta_tx())
+                        })
+                        .flatten();
+                    if let Some(tx) = group_tx {
+                        for (nlri, rib) in advertised {
+                            let _ =
+                                tx.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+                                    prefix: nlri.prefix,
+                                    rib,
+                                });
+                        }
+                    } else if super::peer_egress::peer_egress_task_enabled()
+                        && let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
+                    {
+                        for (nlri, rib) in advertised {
+                            let _ = pet.delta_tx.send(
+                                super::peer_egress::EgressDeltaV4::RecordAdjOut {
+                                    prefix: nlri.prefix,
+                                    rib,
+                                },
+                            );
                         }
                     } else if let Some(peer) = self.peers.get_mut_by_idx(ident) {
                         for (nlri, rib) in advertised {

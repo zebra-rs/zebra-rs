@@ -137,6 +137,12 @@ impl GroupEgressTask {
         self.send(GroupEgressDeltaV4::DumpAdjOut { reply });
         rx
     }
+
+    /// Clone of the delta channel — lets a caller hand the sender off (e.g.
+    /// record DumpV4 ③ rows in a loop) without holding a borrow of the task.
+    pub fn delta_tx(&self) -> UnboundedSender<GroupEgressDeltaV4> {
+        self.delta_tx.clone()
+    }
 }
 
 /// A group's owned v4-unicast egress state + per-delta logic, run inside the
