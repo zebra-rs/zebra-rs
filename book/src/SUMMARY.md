@@ -43,6 +43,7 @@
     - [Option AB (hybrid)](ch-02-22-bgp-interas-option-ab.md)
   - [BFD](ch-02-08-bgp-bfd.md)
   - [Route Reflector](ch-02-09-bgp-route-reflector.md)
+  - [RIB Sharding (Parallel Route Processing)](ch-02-31-bgp-rib-sharding.md)
   - [Clearing BGP Sessions](ch-02-25-bgp-clear.md)
   - [Conditional Tracing](ch-02-10-bgp-tracing.md)
 - [IS-IS](ch-07-00-isis.md)
