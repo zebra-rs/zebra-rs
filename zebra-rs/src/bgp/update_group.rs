@@ -253,6 +253,12 @@ pub struct UpdateGroup {
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
     pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
+    /// Per-update-group egress task (migration Phase 0,
+    /// `docs/design/bgp-egress-group-task-migration.md`). `Some` only at
+    /// gate-on (`ZEBRA_BGP_EGRESS_GROUP_TASK`); spawned when the group is
+    /// created, dropped (abort-on-drop) when it empties. Phase 0 is idle —
+    /// it tracks the member set and routes no egress yet.
+    pub task: Option<super::group_egress::GroupEgressTask>,
 }
 
 /// Per-AFI/SAFI bookkeeping: the active groups plus a monotonic seq
@@ -405,6 +411,10 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
         let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
             let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
             af.next_seq += 1;
+            // Phase 0: spawn the per-group egress task at gate-on; dropped
+            // (abort-on-drop) when this group is removed in `detach`.
+            let task = super::group_egress::egress_group_task_enabled()
+                .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
             UpdateGroup {
                 id,
                 sig: sig.clone(),
@@ -424,9 +434,14 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                task,
             }
         });
         entry.members.insert(peer_idx);
+        // Phase 0: mirror the membership into the group's egress task (gate-on).
+        if let Some(t) = &entry.task {
+            t.member_delta(super::group_egress::GroupMemberDelta::Add(peer_idx));
+        }
 
         let id = entry.id.clone();
         if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
@@ -467,6 +482,12 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             let drop_group = {
                 let group = af.groups.get_mut(&key).expect("just located");
                 group.members.remove(&peer_idx);
+                // Phase 0: mirror the removal into the group's egress task
+                // (the task itself is dropped + aborted below if the group
+                // becomes empty).
+                if let Some(t) = &group.task {
+                    t.member_delta(super::group_egress::GroupMemberDelta::Remove(peer_idx));
+                }
                 group.members.is_empty()
             };
             if drop_group {
@@ -1511,6 +1532,7 @@ mod tests {
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                task: None,
             },
         );
         af.next_seq = 1;
@@ -1850,6 +1872,7 @@ mod tests {
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
             deferred_withdraw_ipv6: Vec::new(),
+            task: None,
         };
         (id, group)
     }
