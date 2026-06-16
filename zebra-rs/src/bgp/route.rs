@@ -2708,6 +2708,15 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
+    // Group-task migration Phase 1b (gate-on): the v4-unicast event-driven
+    // advertise/withdraw runs in the per-update-group egress tasks — fan one
+    // delta per group and bypass the update-group flush. Takes precedence over
+    // the per-peer PET below (they are alternative egress models). VPNv4
+    // (`rd = Some`) stays on the update-group path.
+    if rd.is_none() && super::group_egress::egress_group_task_enabled() {
+        fan_advertise_to_groups(prefix, &selected, source_ident, bgp.update_groups, peers);
+        return;
+    }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
     // PETs — fan the best path there and bypass the update-group path. This
     // is the reduce's advertise sink (`route_apply_bestpath_v4_batch` →
@@ -3020,6 +3029,15 @@ pub(super) fn route_advertise_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // Group-task migration (gate-on): the v4-unicast direct-withdraw / re-
+    // advertise egress (route_ipv4_withdraw, peer-down route_clean) runs in
+    // the per-update-group egress tasks — fan one delta per group. This is the
+    // peer-down path's sink; gating it (not only `apply_ipv4_advertise_job`)
+    // is what makes peer-down coherent at gate-on. Precedes the PET gate.
+    if rd.is_none() && super::group_egress::egress_group_task_enabled() {
+        fan_advertise_to_groups(prefix, selected, source_peer, bgp.update_groups, peers);
+        return;
+    }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
     // per-peer egress tasks. Fan the best path to each PET — which builds +
     // out-policy + records adj_out + sends/withdraws off the main loop —
@@ -3065,6 +3083,57 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
     }
 }
 
+/// Group-task migration Phase 1b — fan the reduce's best-path delta to the
+/// per-update-group egress tasks: **one** delta per group (deduped across the
+/// established members), keyed by `peer.update_group_id`. An empty `selected`
+/// is a withdraw (the path is gone). The per-member split-horizon is the
+/// engine's job (it excludes `rib.ident` from the fan), so the source need
+/// only ride the withdraw — the advertise carries its source in `rib`.
+fn fan_advertise_to_groups(
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+    source_ident: usize,
+    update_groups: &super::update_group::UpdateGroupMap,
+    peers: &PeerMap,
+) {
+    let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let new_best = selected.last();
+    let mut seen: std::collections::BTreeSet<super::update_group::UpdateGroupId> =
+        std::collections::BTreeSet::new();
+    for ident in peers.established_plain_idents(Afi::Ip, Safi::Unicast) {
+        let Some(peer) = peers.get_by_idx(ident) else {
+            continue;
+        };
+        let Some(gid) = peer.update_group_id.get(&afi_safi).cloned() else {
+            continue;
+        };
+        // One delta per group, not per member.
+        if !seen.insert(gid.clone()) {
+            continue;
+        }
+        let Some(af) = update_groups.get(&afi_safi) else {
+            continue;
+        };
+        let Some(group) = af.group_by_id(&gid) else {
+            continue;
+        };
+        let Some(task) = group.task.as_ref() else {
+            continue;
+        };
+        match new_best {
+            Some(best) => task.send(super::group_egress::GroupEgressDeltaV4::Advertise {
+                prefix,
+                rib: best.clone(),
+            }),
+            None => task.send(super::group_egress::GroupEgressDeltaV4::Withdraw {
+                prefix,
+                id: 0,
+                source_ident,
+            }),
+        }
+    }
+}
+
 /// A2 ⑥ — soft-out (a v4 out-policy change) at gate-on: Refresh the peer's
 /// egress task with the new `SyncCtx`, then re-fan the whole v4 Loc-RIB so
 /// the PET re-evaluates every route against the new policy — advertising the
@@ -3105,6 +3174,63 @@ fn soft_out_v4_to_pet(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
         let _ = pet
             .delta_tx
             .send(super::peer_egress::EgressDeltaV4::Advertise { prefix, rib });
+    }
+}
+
+/// Group-task migration Phase 4 — soft-out for a v4-unicast peer at gate-on.
+/// Refresh every member of the peer's update group with a fresh `SyncCtx` (the
+/// out-policy snapshot changed) by re-sending `AddMember` (which overwrites the
+/// member's ctx), then re-fan the whole v4 Loc-RIB so the group re-evaluates
+/// each route against it — advertising changes, withdrawing newly-denied. The
+/// per-peer soft-out collapses to the group: members share the egress identity,
+/// so a policy-content change is the group's, and the engine's per-prefix
+/// dedup keeps the re-send cheap for the unchanged routes.
+fn soft_out_v4_to_group(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let Some(peer) = peers.get_by_idx(peer_idx) else {
+        return;
+    };
+    let Some(gid) = peer.update_group_id.get(&v4).cloned() else {
+        return;
+    };
+    let Some(af) = bgp.update_groups.get(&v4) else {
+        return;
+    };
+    let Some(group) = af.group_by_id(&gid) else {
+        return;
+    };
+    let Some(task) = group.task.as_ref() else {
+        return;
+    };
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    // Refresh every member's ctx so the re-fan builds against the new policy.
+    for &ident in &group.members {
+        if let Some(m) = peers.get_by_idx(ident) {
+            task.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(m.sync_ctx(*bgp.router_id)),
+                add_path: m.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
+            });
+        }
+    }
+    // Re-fan the v4 Loc-RIB so the group re-evaluates every route.
+    let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v4
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard
+            .v4
+            .1
+            .iter()
+            .map(|(prefix, rib)| (prefix, rib.clone()))
+            .collect()
+    };
+    for (prefix, rib) in routes {
+        task.send(super::group_egress::GroupEgressDeltaV4::Advertise { prefix, rib });
     }
 }
 
@@ -3938,7 +4064,9 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     };
 
     if do_v4 {
-        if super::peer_egress::peer_egress_task_enabled() {
+        if super::group_egress::egress_group_task_enabled() {
+            soft_out_v4_to_group(peer_idx, bgp, peers);
+        } else if super::peer_egress::peer_egress_task_enabled() {
             soft_out_v4_to_pet(peer_idx, bgp, peers);
         } else {
             route_soft_out_peer_table(peer_idx, None, bgp, peers);
@@ -9435,6 +9563,7 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
 
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    let v4_afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
 
     // Collect all routes first to avoid borrow checker issues
     let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
@@ -9476,6 +9605,21 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         // Register to AdjOut.
         rib.attr = bgp.attr_store.intern(decision.attr);
         let arc_attr = rib.attr.clone();
+        // Group-task migration Phase 3: also record the synced route into the
+        // group adj_out (without re-sending — the direct dump below delivers
+        // the bytes) so a late member that is the first of its group stays
+        // withdrawable by the group's later withdraws.
+        if super::group_egress::egress_group_task_enabled()
+            && let Some(gid) = peer.update_group_id.get(&v4_afi_safi).cloned()
+            && let Some(af) = bgp.update_groups.get(&v4_afi_safi)
+            && let Some(group) = af.group_by_id(&gid)
+            && let Some(task) = group.task.as_ref()
+        {
+            task.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+                prefix: nlri.prefix,
+                rib: rib.clone(),
+            });
+        }
         peer.adj_out.add(None, nlri.prefix, rib);
 
         entries.push((arc_attr, nlri));

@@ -469,6 +469,41 @@ async fn start_zebra_rs_sharded_peer_task(world: &mut World, namespace: String, 
     );
 }
 
+#[when(expr = "I start zebra-rs in namespace {string} with egress group task")]
+async fn start_zebra_rs_egress_group_task(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    let pid_file = world.pid_file(&namespace);
+
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        // Group-task migration Phase 0: ZEBRA_BGP_EGRESS_GROUP_TASK spawns one
+        // egress task per update-group. Phase 0 is idle (it tracks members and
+        // routes no egress yet), so this exercises the spawn/teardown lifecycle
+        // without changing egress.
+        &[
+            ("ZEBRA_XDP_BFD_ECHO_MODE", "skb"),
+            ("ZEBRA_BGP_EGRESS_GROUP_TASK", "1"),
+        ],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    println!(
+        "✓ zebra-rs started in namespace {} with egress group task (pid file {})",
+        scoped, pid_file
+    );
+}
+
 #[when(expr = "I start zebra-rs in namespace {string} with sync chunk {int}")]
 async fn start_zebra_rs_sync_chunk(world: &mut World, namespace: String, chunk: usize) {
     let scoped = world.ns(&namespace);

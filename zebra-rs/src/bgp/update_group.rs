@@ -21,7 +21,7 @@
 //! handles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -253,6 +253,12 @@ pub struct UpdateGroup {
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
     pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
+    /// Per-update-group egress task (migration Phase 0,
+    /// `docs/design/bgp-egress-group-task-migration.md`). `Some` only at
+    /// gate-on (`ZEBRA_BGP_EGRESS_GROUP_TASK`); spawned when the group is
+    /// created, dropped (abort-on-drop) when it empties. Phase 0 is idle —
+    /// it tracks the member set and routes no egress yet.
+    pub task: Option<super::group_egress::GroupEgressTask>,
 }
 
 /// Per-AFI/SAFI bookkeeping: the active groups plus a monotonic seq
@@ -269,6 +275,11 @@ impl UpdateGroupAf {
     /// Linear search; group counts per AFI/SAFI are bounded.
     pub fn group_by_id_mut(&mut self, id: &UpdateGroupId) -> Option<&mut UpdateGroup> {
         self.groups.values_mut().find(|g| &g.id == id)
+    }
+
+    /// Shared-reference twin of [`group_by_id_mut`](Self::group_by_id_mut).
+    pub fn group_by_id(&self, id: &UpdateGroupId) -> Option<&UpdateGroup> {
+        self.groups.values().find(|g| &g.id == id)
     }
 }
 
@@ -383,7 +394,12 @@ fn enhe_negotiated_for(
 /// Takes split borrows on `update_groups` and `peers` so the caller
 /// can be the FSM (which holds a `BgpTop` separately from the
 /// `PeerMap`).
-pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx: usize) {
+pub fn attach(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    router_id: Ipv4Addr,
+) {
     let Some(peer) = peers.get_by_idx(peer_idx) else {
         return;
     };
@@ -405,6 +421,13 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
         let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
             let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
             af.next_seq += 1;
+            // Phase 0/1a: spawn the per-group egress task at gate-on for
+            // v4-unicast (the family being migrated); dropped (abort-on-drop)
+            // when this group is removed in `detach`.
+            let task = (afi_safi.afi == Afi::Ip
+                && afi_safi.safi == Safi::Unicast
+                && super::group_egress::egress_group_task_enabled())
+            .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
             UpdateGroup {
                 id,
                 sig: sig.clone(),
@@ -424,9 +447,23 @@ pub fn attach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                task,
             }
         });
         entry.members.insert(peer_idx);
+        // Phase 1a: mirror the membership into the group's egress task with the
+        // member's SyncCtx (its packet sink + the shared egress identity) so the
+        // engine can build + fan once advertises are routed there (Phase 1b).
+        if let Some(t) = &entry.task
+            && let Some(peer) = peers.get_by_idx(peer_idx)
+        {
+            let add_path = peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi);
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident: peer_idx,
+                ctx: Box::new(peer.sync_ctx(router_id)),
+                add_path,
+            });
+        }
 
         let id = entry.id.clone();
         if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
@@ -467,6 +504,13 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             let drop_group = {
                 let group = af.groups.get_mut(&key).expect("just located");
                 group.members.remove(&peer_idx);
+                // Mirror the removal into the group's egress task (the task
+                // itself is dropped + aborted below if the group empties).
+                if let Some(t) = &group.task {
+                    t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
+                        ident: peer_idx,
+                    });
+                }
                 group.members.is_empty()
             };
             if drop_group {
@@ -1440,8 +1484,9 @@ mod tests {
         let v4only_idx = peers.get(&v4only).unwrap().ident;
 
         let mut groups = empty_map();
-        attach(&mut groups, &mut peers, dual_idx);
-        attach(&mut groups, &mut peers, v4only_idx);
+        let rid = "1.1.1.1".parse().unwrap();
+        attach(&mut groups, &mut peers, dual_idx, rid);
+        attach(&mut groups, &mut peers, v4only_idx, rid);
 
         let v4_key = AfiSafi::new(Afi::Ip, Safi::Unicast);
         let v6_key = AfiSafi::new(Afi::Ip6, Safi::Unicast);
@@ -1511,6 +1556,7 @@ mod tests {
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                task: None,
             },
         );
         af.next_seq = 1;
@@ -1850,6 +1896,7 @@ mod tests {
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
             deferred_withdraw_ipv6: Vec::new(),
+            task: None,
         };
         (id, group)
     }
