@@ -528,6 +528,100 @@ sorted-trie-resumable follow-up; and **A2** — the *intra*-peer
 shard-parallel dump (the orthogonal axis neither BIRD nor GoBGP
 attempts, §11).
 
+### Egress: update-group flush ↔ shard deltas at N>1
+
+The ingress pool fans *out* by prefix; egress fans *in* by attribute. They
+meet at the main event loop, where the per-group cache (`cache_ipv4`,
+keyed by `Arc<BgpAttr>`) is the buffer that re-converges the N shards'
+parallel, async `BestPathV4` deltas into one coalesced UPDATE flush:
+
+```
+ N>1 · IPv4 unicast · shard deltas ──► update-group flush
+ ═══════════════════════════════════════════════════════════════════════════
+
+ shard-0 ─┐  BestPathV4 deltas — ASYNC, interleaved, one ShardResult/msg
+ shard-1 ─┤  (each shard finishes its slice independently →
+   ...    │   arrival order ≠ dispatch order)
+ shard-N-1┘
+            │
+            ▼  main event loop : shard_results_rx
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ process_shard_result → route_apply_bestpath_v4_batch  (per delta):      │
+  │    mirror_v4 + FIB install                                              │
+  │    advertise: compute_advertise_outcome (OUT-POLICY)                    │
+  │              peer.adj_out.add                                           │
+  │              send_ipv4 → GROUP.cache_ipv4[Arc<attr>] += nlri  ◄─COALESCE │
+  │              arm adv-interval debounce timer (first send)               │
+  └──────────────────────────────────────────────────────────────────────┘
+            │   deltas from ALL shards bucket into the SAME per-group cache,
+            │   keyed by attr  →  one flush can carry NLRI from many shards
+            ▼   timer fires → Message::FlushUpdateGroupIpv4
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ flush_ipv4:  cache.DRAIN() → FlushJob (snapshot);  flush_inflight=true   │
+  │              tokio::spawn_blocking( job.run() )  format 1 UPDATE/bucket   │
+  └──────────────────────────────────────────────────────────────────────┘
+            │                                         ▲
+   IN FLIGHT — more shard deltas keep arriving:       │ FlushDoneIpv4(counters)
+     • ANNOUNCE → fresh (drained) cache ──────────────┼──► carried by NEXT flush
+     • timer refires      → flush_pending = true       │
+     • WITHDRAW of a prefix in the in-flight snapshot: │
+         withdraw_ipv4_deferrable sees flush_inflight  │
+         → PARK in deferred_withdraw_ipv4 (NOT sent)   │
+            │                                          │
+            ▼                                          │
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ flush_done_ipv4:                                                        │
+  │   replicate formatted bytes → each member peer's packet_tx              │
+  │       (split-horizon prunes the source member via source_ident)        │
+  │   flush_inflight = false                                                │
+  │   replay deferred_withdraw  — AFTER announces enqueued ⇒ ordered        │
+  │       skip if peer.adj_out re-acquired the prefix (newer announce won)  │
+  │   if flush_pending → flush_ipv4 again  (drains the new deltas)          │
+  └──────────────────────────────────────────────────────────────────────┘
+```
+
+Invariants this preserves:
+
+- **The cache re-merges the shard fan-out.** One peer's prefixes hash
+  across *all* shards, so a single flushed UPDATE routinely carries NLRI
+  that came back from several different shards; the per-group cache keyed
+  by `Arc<BgpAttr>` is exactly where they re-converge.
+- **The flush is N-agnostic.** It consumes a *stream of best-path deltas*
+  and never learns whether they came from the inline shard (N=1,
+  `reduce_bestpath_v4_nht_fib`) or the pool (N>1, `shard_results_rx`).
+  Sharding only makes arrivals burstier/interleaved; the adv-interval
+  debounce + `cache.drain()` (`update_group.rs:787`) absorb the burst into
+  one flush exactly as at N=1. Egress coalescing semantics are unchanged
+  by N.
+- **Drained snapshot, single in-flight job.** `build_flush_job_ipv4`
+  drains the cache, so the `FlushJob` owns a snapshot and the cache is free
+  to accept new deltas immediately. At most one job per group runs
+  (`flush_inflight_ipv4`); a timer refiring mid-flight latches
+  `flush_pending_ipv4` and `flush_done` re-runs — concurrent shard deltas
+  never spawn a second job that could interleave bytes on a member's
+  writer.
+- **Cross-shard withdraw race — handled.** A withdraw delta (from *any*
+  shard) for a prefix an in-flight job is announcing must not overtake that
+  announce on the wire. `withdraw_ipv4_deferrable` (`route.rs:3741`) sees
+  `flush_inflight` and parks the withdraw in `deferred_withdraw_ipv4`;
+  `flush_done_ipv4` replays it only after every announce byte is enqueued,
+  skipping it if `adj_out` shows a newer announce re-acquired the prefix.
+  Announce-before-withdraw ordering holds even though the two originated
+  from different shard messages at different times.
+- **Per-prefix order preserved.** Each prefix lives on exactly one shard,
+  so its add→withdraw sequence traverses that shard's queue in order and
+  reaches main in order; the deferred-withdraw machinery preserves it on
+  the wire. Cross-prefix order is irrelevant to BGP correctness.
+- **Flush touches no shard state.** It reads only main-side structures —
+  the group cache and each member's `packet_tx`/`adj_out` captured at build
+  time. The shards' sole egress role is feeding the cache via the
+  delta→advertise step; format + replicate run on main + the blocking pool.
+
+So ingest fans out across shards by prefix; egress fans in across peers by
+attribute; they meet at the main event loop, where the per-group cache is
+the shock-absorber that turns an interleaved multi-shard delta burst into
+one coalesced, correctly-ordered UPDATE flush.
+
 ## 1. Verdict
 
 Juniper's BGP RIB sharding is applicable to zebra-rs — and zebra-rs is
