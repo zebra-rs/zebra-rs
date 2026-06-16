@@ -1210,6 +1210,25 @@ mod tests {
                 "/show/bgp/neighbors",
                 vec!["2001:db8::1"],
             ),
+            // The v6-unicast Adj-RIB views: an `ipv6` leaf under each of
+            // the `advertised-routes` / `received-routes` containers. The
+            // neighbor key keeps the peer (a v6 address or interface name)
+            // as the only arg; `ipv6` is a child path element, not an arg.
+            (
+                "show bgp neighbors 2001:db8::1 advertised-routes ipv6",
+                "/show/bgp/neighbors/advertised-routes/ipv6",
+                vec!["2001:db8::1"],
+            ),
+            (
+                "show bgp neighbors 2001:db8::1 received-routes ipv6",
+                "/show/bgp/neighbors/received-routes/ipv6",
+                vec!["2001:db8::1"],
+            ),
+            (
+                "show bgp neighbors i1 received-routes ipv6",
+                "/show/bgp/neighbors/received-routes/ipv6",
+                vec!["i1"],
+            ),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {

@@ -1,0 +1,42 @@
+# Originator side. Dual-stack point-to-point link, eBGP over the IPv4
+# transport with both ipv4 and ipv6 afi-safi negotiated; both sides
+# redistribute connected so the loopback + link v6 prefixes populate
+# the v6 Loc-RIB and, in turn, each peer's v6 Adj-RIB-Out / In — the
+# subject of the `advertised-routes ipv6` / `received-routes ipv6` show
+# commands. adv-interval is pinned to 1s so the dump flushes promptly.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv4:
+    address: 192.168.0.1/30
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        connected: {}
+    - name: ipv6
+      redistribute:
+        connected: {}

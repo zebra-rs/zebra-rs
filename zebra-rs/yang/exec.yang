@@ -270,6 +270,10 @@ module exec {
         }
         container advertised-routes {
           presence "";
+          leaf ipv6 {
+            ext:help "IPv6 unicast Adj-RIB-Out";
+            type empty;
+          }
           leaf vpnv4 {
             type empty;
           }
@@ -280,6 +284,10 @@ module exec {
         }
         container received-routes {
           presence "";
+          leaf ipv6 {
+            ext:help "IPv6 unicast Adj-RIB-In";
+            type empty;
+          }
           leaf vpnv4 {
             type empty;
           }
