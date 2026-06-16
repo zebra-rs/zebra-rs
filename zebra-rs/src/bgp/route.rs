@@ -2708,6 +2708,16 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
+    // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
+    // PETs — fan the best path there and bypass the update-group path. This
+    // is the reduce's advertise sink (`route_apply_bestpath_v4_batch` →
+    // here), so gating it (not just `route_advertise_to_peers`) is what
+    // routes the N>1 reduce's advertises/withdraws to the PETs. VPNv4
+    // (`rd = Some`) stays on the update-group path.
+    if rd.is_none() && super::peer_egress::peer_egress_task_enabled() {
+        fan_advertise_to_pets(prefix, &selected, peers);
+        return;
+    }
     route_advertise_batch::<V4Batch>(rd, prefix, &selected, source_ident, bgp, peers, memo);
     match &added {
         Some(added) => {
@@ -2758,7 +2768,11 @@ pub(super) fn route_apply_bestpath_v4_batch(
     // (measured 3x slower on a no-policy full-table load). So parallelize
     // egress only when out-policy makes egress the bottleneck (the shards
     // are then mostly idle).
-    let worth_parallel = any_established_out_policy_v4(peers);
+    // A2 ⑥ gate-on: the PETs own the out-policy walk, so the main-side
+    // parallel precompute would be wasted — take the serial path (which
+    // `apply_ipv4_advertise_job` gates to the PET fan-out).
+    let worth_parallel =
+        !super::peer_egress::peer_egress_task_enabled() && any_established_out_policy_v4(peers);
 
     if !worth_parallel {
         // Serial, per delta — byte-identical to the pre-E.1 reduce (no

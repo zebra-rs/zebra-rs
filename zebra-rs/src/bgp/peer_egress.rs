@@ -183,11 +183,15 @@ impl Engine {
         self.adj_out.add(prefix, rib);
     }
 
-    /// Remove `prefix` / path `id` from `adj_out` and, if it had actually
-    /// been advertised, send a withdraw — the per-peer twin of
-    /// `route_withdraw_ipv4`.
+    /// Drop `prefix`'s advertised path(s) from `adj_out` and, if it had
+    /// actually been advertised, send a withdraw — the per-peer twin of
+    /// `route_withdraw_ipv4`. Matches by **prefix**, not exact `id`: the
+    /// withdraw fan-out only knows the prefix (the path is gone), while
+    /// `adj_out` is keyed by the Loc-RIB `local_id`, so an id match would
+    /// miss. Non-AddPath has one entry per prefix; the wire withdraw carries
+    /// `id` (0 for non-AddPath). Per-path AddPath withdraw is a follow-on.
     fn withdraw(&mut self, prefix: Ipv4Net, id: u32) {
-        if self.adj_out.remove(prefix, id).is_some() {
+        if self.adj_out.0.remove(&prefix).is_some() {
             let mut update = UpdatePacket::with_max_packet_size(self.ctx.max_packet_size());
             update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
             self.ctx.send_packet(update.into());
@@ -323,15 +327,19 @@ mod tests {
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
         // A DumpV4 ③ record (post-policy rib) puts the row in adj_out
-        // WITHOUT sending — the shard already sent the bytes.
-        engine.record_adj_out(prefix, rib(5, "192.0.2.1"));
+        // WITHOUT sending — the shard already sent the bytes. The Loc-RIB
+        // assigns a NON-ZERO local_id (adj_out is keyed by it), which the
+        // withdraw fan-out — knowing only the prefix — does not carry.
+        let mut dump_rib = rib(5, "192.0.2.1");
+        dump_rib.local_id = 7;
+        engine.record_adj_out(prefix, dump_rib);
         assert!(
             rx.try_recv().is_err(),
             "record_adj_out sends nothing (the shard already did)"
         );
 
-        // A later withdraw of the dump-learned prefix now reaches the peer —
-        // the property 1d exists to guarantee.
+        // A later withdraw with wire id 0 must still reach the peer — it
+        // matches by prefix, not the local_id (the gate-on bug 1f caught).
         engine.withdraw(prefix, 0);
         assert!(
             rx.try_recv().is_ok(),
