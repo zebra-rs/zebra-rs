@@ -9824,7 +9824,11 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
     }
 }
 
-pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
+/// `v4_via_pool` is true at N>1 (RIB sharding): the v4-unicast session-up
+/// dump runs shard-parallel via `DumpV4` (the caller broadcasts it after
+/// the FSM), so this skips its v4-unicast block. At N=1 it's false and the
+/// v4 dump runs here via the resumable cursor or legacy `route_sync_ipv4`.
+pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     // RFC 4684: advertise our Route Target Constraint membership BEFORE
     // any other AFI/SAFI, so the peer can apply RTC filtering to every
     // route it sends us from the start of the session. The membership
@@ -9846,8 +9850,9 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop) {
         send_rtcv6_membership(peer, bgp);
         send_eor_rtcv6_unicast(peer);
     }
-    // Advertize.
-    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) {
+    // Advertize. At N>1 the v4-unicast dump is shard-parallel (`DumpV4`,
+    // broadcast by the caller after the FSM), so skip it here.
+    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) && !v4_via_pool {
         if sync_chunk_size().is_some() {
             // Tier 1a: snapshot the v4 keys and hand them to the
             // resumable cursor; the event loop kicks (`process_msg`)

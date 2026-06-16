@@ -1557,7 +1557,7 @@ pub fn fsm(
         }
         if !prev_state.is_established() && peer.state.is_established() {
             peer.instant = Some(Instant::now());
-            route_sync(peer, bgp_ref);
+            route_sync(peer, bgp_ref, shards.is_some());
         }
         timer::update_timers(peer);
     }

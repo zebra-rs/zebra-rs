@@ -427,10 +427,7 @@ struct DumpDoneSummaryV4 {
 
 impl DumpBarrierV4 {
     /// Register a dump fanned to `n` shards for `ident`; returns its
-    /// `req_id`. Wired into the session-up path in step ④ (via
-    /// `Bgp::broadcast_dump_v4`); until then exercised only by the unit
-    /// tests below.
-    #[allow(dead_code)]
+    /// `req_id`. Called from `Bgp::broadcast_dump_v4` at session-up (N>1).
     fn start(&mut self, ident: usize, n: usize) -> u64 {
         let req_id = self.next_req_id;
         self.next_req_id += 1;
@@ -1623,6 +1620,21 @@ impl Bgp {
                     .is_some();
                 if kick {
                     let _ = self.sync_tick_tx.send(ident);
+                }
+
+                // A2 step ④: at N>1 the v4-unicast session-up dump runs
+                // shard-parallel (`DumpV4`) instead of the main-loop cursor.
+                // `route_sync` skipped its v4 block above, so broadcast the
+                // dump to the pool here — it needs full `self` for the
+                // per-req_id barrier. No-op at N=1 (no pool), where the
+                // cursor / legacy `route_sync_ipv4` already ran the dump.
+                let became_established = prev_state.is_some_and(|s| !s.is_established())
+                    && self
+                        .peers
+                        .get_by_idx(ident)
+                        .is_some_and(|p| p.state.is_established());
+                if became_established {
+                    self.broadcast_dump_v4(ident);
                 }
 
                 self.gc_dynamic_peer_if_session_ended(ident, prev_state);
@@ -3492,14 +3504,14 @@ impl Bgp {
         super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
     }
 
-    /// A2 step ① — fan a `DumpV4` to every pool shard for `ident`'s
-    /// session-up IPv4-unicast dump, returning the `req_id` its per-shard
-    /// `DumpDoneV4` acks carry. `None` when there is no pool (N=1, where the
-    /// resumable cursor handles the dump). Each shard builds + sends its own
-    /// slice from the shared `Arc<SyncCtx>` (step ②); main counts the N acks
-    /// via [`DumpBarrierV4`] and emits EoR on the last (step ③/④). Wired
-    /// into the session-up path in step ④; until then exercised by tests.
-    #[allow(dead_code)]
+    /// A2 — fan a `DumpV4` to every pool shard for `ident`'s session-up
+    /// IPv4-unicast dump, returning the `req_id` its per-shard `DumpDoneV4`
+    /// acks carry. `None` when there is no pool (N=1, where the resumable
+    /// cursor handles the dump). Each shard builds + sends its own slice
+    /// from the shared `Arc<SyncCtx>` (the `&Peer`-free egress snapshot);
+    /// main records the adj_out deltas + counts the N acks via
+    /// [`DumpBarrierV4`], emitting EoR on the last. Called at session-up
+    /// from the FSM-event handler once the peer reaches Established.
     fn broadcast_dump_v4(&mut self, ident: usize) -> Option<u64> {
         use bgp_packet::{Afi, AfiSafi, Safi};
 
