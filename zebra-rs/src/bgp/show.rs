@@ -1608,8 +1608,8 @@ fn show_bgp_ipv6_longer<V: BgpShowView>(
 }
 
 // Common helper function for displaying Adj-RIB routes
-pub(super) fn show_adj_rib_routes(
-    routes: &std::collections::BTreeMap<ipnet::Ipv4Net, Vec<crate::bgp::route::BgpRib>>,
+pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
+    routes: &std::collections::BTreeMap<P, Vec<crate::bgp::route::BgpRib>>,
     router_id: Ipv4Addr,
     json: bool,
 ) -> std::result::Result<String, std::fmt::Error> {
@@ -1755,6 +1755,57 @@ fn show_bgp_received(
         .shard
         .adj_in(peer.ident)
         .map(|a| &a.v4.0)
+        .unwrap_or(&empty);
+    show_adj_rib_routes(table, bgp.router_id, json)
+}
+
+/// `show bgp neighbors <X> advertised-routes ipv6` — the v6-unicast twin
+/// of [`show_bgp_advertised`]. The IPv6 Adj-RIB-Out always lives on the
+/// peer (`adj_out.v6`); unlike the v4 path, v6 egress is never moved to
+/// the per-peer egress task (PET is v4-only), so this reads the peer copy
+/// directly at any shard count.
+fn show_bgp_advertised_ipv6(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    show_adj_rib_routes(&peer.adj_out.v6.0, bgp.router_id, json)
+}
+
+/// `show bgp neighbors <X> received-routes ipv6` — the v6-unicast twin of
+/// [`show_bgp_received`]. The IPv6 Adj-RIB-In lives in main's `bgp.shard`
+/// (`route_ipv6_update` runs on `bgp.shard`, not the pool), so it is read
+/// directly with no scatter-gather — the v4 N>1 pool path has no v6 twin.
+fn show_bgp_received_ipv6(
+    bgp: &Bgp,
+    mut args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let addr = match args.addr() {
+        Some(addr) => addr,
+        None => return Ok(String::from("% No neighbor address specified")),
+    };
+
+    let peer = match bgp.peers.get(&addr) {
+        Some(peer) => peer,
+        None => return Ok(format!("% No such neighbor: {}", addr)),
+    };
+
+    let empty = BTreeMap::new();
+    let table = bgp
+        .shard
+        .adj_in(peer.ident)
+        .map(|a| &a.v6.0)
         .unwrap_or(&empty);
     show_adj_rib_routes(table, bgp.router_id, json)
 }
@@ -4622,12 +4673,16 @@ impl Bgp {
             .set(show_bgp_neighbor::<Bgp>)
             .path("/show/bgp/neighbors/advertised-routes")
             .set(show_bgp_advertised)
+            .path("/show/bgp/neighbors/advertised-routes/ipv6")
+            .set(show_bgp_advertised_ipv6)
             .path("/show/bgp/neighbors/advertised-routes/vpnv4")
             .set(show_bgp_advertised_vpnv4)
             .path("/show/bgp/neighbors/advertised-routes/evpn")
             .set(show_bgp_advertised_evpn)
             .path("/show/bgp/neighbors/received-routes")
             .set(show_bgp_received)
+            .path("/show/bgp/neighbors/received-routes/ipv6")
+            .set(show_bgp_received_ipv6)
             .path("/show/bgp/neighbors/received-routes/vpnv4")
             .set(show_bgp_received_vpnv4)
             .path("/show/bgp/neighbors/received-routes/evpn")
