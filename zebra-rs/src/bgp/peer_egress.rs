@@ -28,18 +28,63 @@ use super::adj_rib::{AdjRibTable, Out};
 use super::route::{BgpRib, SyncCtx};
 use super::store::BgpAttrStore;
 
-/// `ZEBRA_BGP_PEER_TASK=1` opts peers into the per-peer egress task at
-/// Established. Default off: the v4 egress stays on the main task
-/// (update-groups), exactly as today. Read once (the pool is sized at
-/// startup), like `ZEBRA_BGP_SHARDS` / `ZEBRA_BGP_SYNC_CHUNK`.
+/// Process-global per-peer-egress-task flag, frozen once at BGP instance
+/// spawn by [`init_peer_task`]. A `OnceLock` (not a per-call env read) so the
+/// egress model chosen at startup is consistent across the ~8 gate sites for
+/// the instance's lifetime — the PET and update-group models are
+/// alternatives, never interleaved.
+static PEER_TASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The `ZEBRA_BGP_PEER_TASK` environment variable (the pre-knob form, now the
+/// fallback when the YANG `peer-task` leaf is unset). `None` if unset;
+/// `Some(true)` for `1` / `true` (case-insensitive), `Some(false)` otherwise.
+fn peer_task_env() -> Option<bool> {
+    std::env::var("ZEBRA_BGP_PEER_TASK")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Pure resolution policy (unit-tested): the YANG `router bgp peer-task` leaf
+/// wins over the env var, which wins over the default `false` (update-group
+/// egress, unchanged).
+fn resolve_peer_task(config: Option<bool>, env: Option<bool>) -> bool {
+    config.or(env).unwrap_or(false)
+}
+
+/// Freeze the per-peer-egress-task model at instance spawn from the YANG
+/// `peer-task` leaf (else `ZEBRA_BGP_PEER_TASK`, else off). Called once from
+/// `spawn_bgp` before the instance processes any peer; the result is stored
+/// process-globally so [`peer_egress_task_enabled`] returns it at every gate
+/// site. Idempotent — `spawn_bgp` short-circuits a re-spawn, first value wins.
+pub fn init_peer_task(config: Option<bool>) -> bool {
+    let _ = PEER_TASK.set(resolve_peer_task(config, peer_task_env()));
+    let on = peer_egress_task_enabled();
+    let source = if config.is_some() {
+        "config"
+    } else if peer_task_env().is_some() {
+        "ZEBRA_BGP_PEER_TASK"
+    } else {
+        "default"
+    };
+    if on {
+        tracing::info!("BGP per-peer egress task: enabled (from {source})");
+    } else {
+        tracing::info!("BGP per-peer egress task: disabled (from {source})");
+    }
+    on
+}
+
+/// `true` opts peers into the per-peer egress task (the GoBGP per-peer model)
+/// at Established; `false` (default) keeps the v4 egress on the main task
+/// (update-groups). Returns the value frozen at spawn by [`init_peer_task`]
+/// (YANG `peer-task` leaf or `ZEBRA_BGP_PEER_TASK`); before any instance
+/// spawns (unit tests) it falls back to the env var, then `false`. The two
+/// egress models are alternatives, fixed for the instance lifetime.
 pub fn peer_egress_task_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("ZEBRA_BGP_PEER_TASK")
-            .ok()
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    })
+    PEER_TASK
+        .get()
+        .copied()
+        .unwrap_or_else(|| resolve_peer_task(None, peer_task_env()))
 }
 
 /// One v4-unicast egress operation main forwards to a peer's task — the
@@ -222,6 +267,19 @@ mod tests {
             None,
             false,
         )
+    }
+
+    #[test]
+    fn peer_task_resolution_policy() {
+        use super::resolve_peer_task;
+        // The YANG `peer-task` leaf wins over the env var...
+        assert!(resolve_peer_task(Some(true), Some(false)));
+        assert!(!resolve_peer_task(Some(false), Some(true)));
+        // ...the env var is the fallback when the leaf is unset...
+        assert!(resolve_peer_task(None, Some(true)));
+        assert!(!resolve_peer_task(None, Some(false)));
+        // ...and off (update-group egress) is the default when neither is set.
+        assert!(!resolve_peer_task(None, None));
     }
 
     /// Drive the engine synchronously (it is a plain `&mut self` method —
