@@ -27,6 +27,11 @@ use super::msg::{
     LuNlri, ShardMsg, ShardOut, ShardRouteBatchV4, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6,
 };
 
+/// Re-poll interval while a `DumpV4` parks on the Tier-1b egress gauge
+/// (mirrors the main-loop cursor's `SYNC_PARK_MS`). The shard blocks the
+/// thread here; the writer drains the queue meanwhile.
+const DUMP_PARK_MS: u64 = 20;
+
 impl BgpShard {
     /// Apply one message to the shard's owned state, returning the
     /// deltas main must act on. `central` is the central MPLS label
@@ -80,24 +85,90 @@ impl BgpShard {
                 }
                 outs
             }
-            ShardMsg::DumpV4 { req_id, ctx } => self.handle_dump_v4(req_id, ctx),
+            ShardMsg::DumpV4 {
+                req_id,
+                ctx,
+                params,
+            } => self.handle_dump_v4(req_id, ctx, params),
             ShardMsg::Show(_) | ShardMsg::Shutdown => Vec::new(),
         }
     }
 
-    /// A2 step ① stub for [`ShardMsg::DumpV4`]: acknowledge the request so
-    /// main's per-`req_id` barrier can count this shard. The real work —
-    /// walk this shard's v4-unicast Loc-RIB slice, build each row via the
-    /// shared `SyncCtx` (the `&Peer`-free egress snapshot), intern locally,
-    /// encode, and enqueue on `ctx.packet_tx` with the Tier-1b park while
-    /// accumulating `adj_out` deltas — lands in step ②, where `sent`
-    /// becomes the per-shard UPDATE count.
+    /// A2 step ② — this shard's slice of a session-up IPv4-unicast dump.
+    /// Walk the shard-owned Loc-RIB slice (best paths, or every path under
+    /// AddPath-send), build each egress route via the shared `&SyncCtx`
+    /// (the `&Peer`-free snapshot) + out-policy, intern locally, bucket by
+    /// the post-policy attr, encode, and enqueue on `ctx.packet_tx` —
+    /// parking against the shared Tier-1b gauge between buckets so a slow
+    /// peer can't let the dump outrun the writer (the shard is a dedicated
+    /// thread, so it blocks rather than yielding the way the main-loop
+    /// cursor does). Returns [`ShardOut::DumpDoneV4`] with this shard's
+    /// UPDATE count for main's barrier. Recording the dump in the peer's
+    /// Adj-RIB-Out (so a later withdraw reaches the peer) is step ③.
     fn handle_dump_v4(
         &mut self,
         req_id: u64,
-        _ctx: std::sync::Arc<super::super::route::SyncCtx>,
+        ctx: std::sync::Arc<super::super::route::SyncCtx>,
+        params: super::msg::DumpParamsV4,
     ) -> Vec<ShardOut> {
-        vec![ShardOut::DumpDoneV4 { req_id, sent: 0 }]
+        use super::super::route::{route_apply_policy_out, route_update_ipv4};
+        use std::collections::HashMap;
+        use std::sync::atomic::Ordering;
+
+        // Snapshot this shard's slice first, releasing the Loc-RIB borrow
+        // before the interning loop (`self.intern` needs `&mut self`) and
+        // the parking send loop.
+        let routes: Vec<(Ipv4Net, BgpRib)> = if params.add_path {
+            self.v4
+                .0
+                .iter()
+                .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                .collect()
+        } else {
+            self.v4
+                .1
+                .iter()
+                .map(|(prefix, rib)| (prefix, rib.clone()))
+                .collect()
+        };
+
+        // Build + out-policy each route via the SyncCtx; bucket by the
+        // interned post-policy attr so one MP_REACH UPDATE carries every
+        // NLRI sharing an attr-set (matching `send_ipv4_direct`).
+        let mut buckets: HashMap<Arc<bgp_packet::BgpAttr>, Vec<Ipv4Nlri>> = HashMap::new();
+        for (prefix, rib) in routes {
+            // RFC 9494 §4.3: stale routes only go to LLGR peers.
+            if rib.stale && !params.llgr_v4 {
+                continue;
+            }
+            let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, params.add_path) else {
+                continue;
+            };
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+                continue;
+            };
+            let arc = self.intern(decision.attr);
+            buckets.entry(arc).or_default().push(nlri);
+        }
+
+        // Encode + enqueue, parking on the Tier-1b gauge between buckets so
+        // a slow writer bounds the in-flight queue. The writer (a separate
+        // task) drains `ctx.packet_tx` and decrements the gauge while this
+        // thread sleeps.
+        let max = ctx.max_packet_size();
+        let mut sent = 0usize;
+        for (attr, nlris) in buckets {
+            while ctx.egress_depth.load(Ordering::Relaxed) > params.egress_high_water {
+                std::thread::sleep(std::time::Duration::from_millis(DUMP_PARK_MS));
+            }
+            for buf in
+                super::super::update_group::encode_ipv4_update(&attr, &nlris, max, params.enhe_v6)
+            {
+                ctx.send_packet(buf);
+                sent += 1;
+            }
+        }
+        vec![ShardOut::DumpDoneV4 { req_id, sent }]
     }
 
     /// Mirror one pool best-path delta into THIS shard's v4-unicast
@@ -998,13 +1069,29 @@ mod tests {
         );
     }
 
+    fn dump_params() -> super::super::msg::DumpParamsV4 {
+        super::super::msg::DumpParamsV4 {
+            add_path: false,
+            llgr_v4: true,
+            enhe_v6: None,
+            egress_high_water: 64,
+        }
+    }
+
     #[test]
-    fn dump_v4_stub_acks_with_req_id() {
-        // A2 step ① — the shard acks a DumpV4 so main's barrier can count
-        // it; the per-slice build + send is step ②, so `sent` is 0 here.
+    fn dump_v4_empty_slice_acks_zero() {
+        // A2 step ② — an empty shard slice still acks so main's barrier can
+        // count this shard.
         let mut shard = BgpShard::default();
         let ctx = std::sync::Arc::new(super::super::super::route::SyncCtx::for_test());
-        let out = shard.handle(ShardMsg::DumpV4 { req_id: 42, ctx }, None);
+        let out = shard.handle(
+            ShardMsg::DumpV4 {
+                req_id: 42,
+                ctx,
+                params: dump_params(),
+            },
+            None,
+        );
         assert!(matches!(
             out.as_slice(),
             [ShardOut::DumpDoneV4 {
@@ -1012,5 +1099,29 @@ mod tests {
                 sent: 0
             }]
         ));
+    }
+
+    #[test]
+    fn dump_v4_sends_its_slice() {
+        // A2 step ② — the shard builds + encodes its Loc-RIB slice and
+        // reports the UPDATE count. `for_test` has no writer (`packet_tx`
+        // None) so nothing actually leaves, but the build + encode path
+        // still runs and counts. The route is from a different peer
+        // (ident 5 ≠ the ctx's ident 0), so split-horizon keeps it.
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4_compute(5, "10.0.0.0/24", "192.0.2.1"), None);
+        let ctx = std::sync::Arc::new(super::super::super::route::SyncCtx::for_test());
+        let out = shard.handle(
+            ShardMsg::DumpV4 {
+                req_id: 7,
+                ctx,
+                params: dump_params(),
+            },
+            None,
+        );
+        assert!(
+            matches!(out.as_slice(), [ShardOut::DumpDoneV4 { req_id: 7, sent }] if *sent >= 1),
+            "the shard's one route is built + encoded into >=1 UPDATE: {out:?}"
+        );
     }
 }

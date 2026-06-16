@@ -965,7 +965,7 @@ pub(super) fn send_ipv4_direct(
 /// selects the 16-octet link-local-only form or the 32-octet
 /// `global || link-local` form. `None` keeps the legacy `pop_ipv4`
 /// path (NLRI inline, NEXT_HOP attribute carries the v4 next-hop).
-fn encode_ipv4_update(
+pub(super) fn encode_ipv4_update(
     attr: &Arc<BgpAttr>,
     nlris: &[Ipv4Nlri],
     max_packet_size: usize,

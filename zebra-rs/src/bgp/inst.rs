@@ -3485,8 +3485,24 @@ impl Bgp {
     /// into the session-up path in step ④; until then exercised by tests.
     #[allow(dead_code)]
     fn broadcast_dump_v4(&mut self, ident: usize) -> Option<u64> {
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
         let n = self.shards.as_ref()?.n();
+        let high_water = sync_egress_high_water();
         let peer = self.peers.get_by_idx(ident)?;
+        // The peer-derived egress params the shards can't reconstruct.
+        let params = super::shard::msg::DumpParamsV4 {
+            add_path: peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
+            llgr_v4: peer
+                .cap_recv
+                .llgr
+                .contains_key(&AfiSafi::new(Afi::Ip, Safi::Unicast)),
+            enhe_v6: peer
+                .is_enhe_v4_negotiated()
+                .then(|| super::update_group::compose_enhe_next_hop(peer, &self.interface_addrs))
+                .flatten(),
+            egress_high_water: high_water,
+        };
         let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id));
         let req_id = self.pending_dumps_v4.start(ident, n);
         self.shards
@@ -3495,6 +3511,7 @@ impl Bgp {
             .broadcast(|| super::shard::ShardMsg::DumpV4 {
                 req_id,
                 ctx: ctx.clone(),
+                params,
             });
         Some(req_id)
     }
