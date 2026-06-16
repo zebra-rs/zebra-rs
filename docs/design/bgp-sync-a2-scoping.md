@@ -32,8 +32,10 @@ v4-unicast session-up dump runs shard-parallel — each shard builds + sends
 its own authoritative slice and reports `adj_out` deltas; main barriers
 the N acks, records adj_out, and emits EoR. Supersedes the main-loop
 cursor (kept at N=1). Validated by the full N>1 shard BDD matrix (88
-scenarios). Remaining: ⑤ (`show`/`clear`/soft-out via `DumpV4`) and ⑥
-(the (a′) per-peer egress task, §5.3).
+scenarios). **⑤ (received-routes Adj-RIB-In gather) is also DONE** — the
+last N>1 read-correctness gap. Remaining: only ⑥ (the (a′) per-peer egress
+task, §5.3) — inter-peer parallelism, an opt-in enhancement, no
+correctness gap behind it.
 
 ## 1. Goal & relationship to Tier 1a/1b
 
@@ -257,8 +259,19 @@ end-state.
   send covered by `@bgp_shard_addpath_v4` (cands slice). First production
   behaviour change; validated by the full N>1 shard BDD matrix (88
   scenarios). The DumpV4 path (①–④) is now live.
-- **⑤ wire `show` + `clear`/soft-out** through `DumpV4` (show via the
-  gather/oneshot; pair with the streamed-`show` follow-up).
+- **⑤ received-routes Adj-RIB-In gather. ✅ DONE (2026-06-16), scoped.**
+  `show bgp neighbors <peer> received-routes` read main's `bgp.shard.adj_in`
+  (empty at N>1 — the mirror replicates the Loc-RIB, not adj_in). Added
+  `ShardMsg::DumpAdjInV4 { ident, reply }` (oneshot): `process_show_msg`
+  scatters it to every shard, awaits the N replies, merges the disjoint
+  per-prefix slices, and renders via `show_adj_rib_routes`. N=1 unchanged.
+  **Scoped to the received-routes correctness gap** — the Loc-RIB `show` +
+  soft-out keep reading the (correct) mirror, so retiring the mirror /
+  routing Loc-RIB-show through `DumpV4` is *not* in this step (no gap
+  behind it). Deferred: the summary PfxRcd count at N>1 (a batch count
+  gather) and the streamed-`show` / 4 MB RPC ceiling for large gathered
+  responses (a separate general effort). Guarded by a new
+  `@bgp_shard_v4_sync` scenario.
 - **⑥ (a′) per-peer egress task** (inter-peer parallelism, §5.3, env-gated
   — default (a)). Spawn a per-peer task owning `adj_out` + `packet_tx`/
   writer + the Tier-1b gauge; point the ③ delta channel at it instead of
