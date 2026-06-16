@@ -58,6 +58,16 @@ Feature: BGP per-update-group egress task (migration Phases 0-3)
     And show command "show bgp ipv4" in namespace "z3" should contain "10.10.10.0/24"
     And show command "show bgp ipv4" in namespace "z3" should contain "10.10.11.0/24"
 
+  Scenario: advertised-routes reads the group adj_out, split-horizon filtered (Phase 5)
+    Given the test topology exists
+    # z2's v4 Adj-RIB-Out to a peer lives in its update group's task at gate-on,
+    # not on the peer. `show ... advertised-routes` must request it from the
+    # group task: z3 was advertised .10/.11, and — split-horizon — z1 (the
+    # source) was advertised neither.
+    Then show command "show bgp neighbors 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.10.0/24"
+    And show command "show bgp neighbors 10.0.0.3 advertised-routes" in namespace "z2" should contain "10.10.11.0/24"
+    And show command "show bgp neighbors 10.0.0.1 advertised-routes" in namespace "z2" should not contain "10.10.10.0/24"
+
   Scenario: a late peer z4 gets the routes on session-up sync (Phase 3)
     Given the test topology exists
     # z4's daemon starts now — AFTER z2 already holds z1's routes — so z4

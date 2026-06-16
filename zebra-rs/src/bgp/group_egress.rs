@@ -84,6 +84,12 @@ pub enum GroupEgressDeltaV4 {
         id: u32,
         source_ident: usize,
     },
+    /// A `show … advertised-routes` request at gate-on: reply with the group's
+    /// whole `adj_out` (the caller filters split-horizon per queried peer and
+    /// renders). The group adj-out lives here, not on the peer.
+    DumpAdjOut {
+        reply: tokio::sync::oneshot::Sender<Vec<(Ipv4Net, Vec<BgpRib>)>>,
+    },
 }
 
 /// Handle main keeps on each [`UpdateGroup`](super::update_group::UpdateGroup)
@@ -121,6 +127,15 @@ impl GroupEgressTask {
     /// gone (the group is tearing down), which is harmless here.
     pub fn send(&self, delta: GroupEgressDeltaV4) {
         let _ = self.delta_tx.send(delta);
+    }
+
+    /// Request the group's adj-out over a oneshot (for `show advertised-routes`
+    /// at gate-on). Returns the receiver so the caller can drop any borrow of
+    /// the task before awaiting.
+    pub fn request_adj_out(&self) -> tokio::sync::oneshot::Receiver<Vec<(Ipv4Net, Vec<BgpRib>)>> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.send(GroupEgressDeltaV4::DumpAdjOut { reply });
+        rx
     }
 }
 
@@ -161,6 +176,15 @@ impl Engine {
                 id,
                 source_ident,
             } => self.withdraw(prefix, id, source_ident),
+            GroupEgressDeltaV4::DumpAdjOut { reply } => {
+                let entries = self
+                    .adj_out
+                    .0
+                    .iter()
+                    .map(|(prefix, ribs)| (*prefix, ribs.clone()))
+                    .collect();
+                let _ = reply.send(entries);
+            }
         }
     }
 

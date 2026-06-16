@@ -2066,6 +2066,17 @@ impl Bgp {
             let _ = msg.resp.send(output).await;
             return;
         }
+        // Group-task: at gate-on a peer's v4 Adj-RIB-Out lives in its update
+        // group's egress task — request it for advertised-routes.
+        if super::group_egress::egress_group_task_enabled()
+            && path == "/show/bgp/neighbors/advertised-routes"
+        {
+            let output = self
+                .show_advertised_v4_from_group(&mut args, msg.json)
+                .await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         // A2 ⑥: at gate-on a peer's v4 Adj-RIB-Out lives in its PET, not on
         // the peer — request it from the PET for advertised-routes.
         if super::peer_egress::peer_egress_task_enabled()
@@ -2109,6 +2120,51 @@ impl Bgp {
                 }
                 None => std::collections::BTreeMap::new(),
             };
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
+    }
+
+    /// Group-task — `show … advertised-routes` at gate-on: the peer's v4
+    /// Adj-RIB-Out is the adj-out of its update group's egress task. Request
+    /// the group adj-out over a oneshot, then filter split-horizon — a route
+    /// sourced from THIS peer (`rib.ident`) was never advertised to it — and
+    /// render. Empty when the peer is in no group (not established).
+    async fn show_advertised_v4_from_group(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let v4 = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+        let (peer_ident, gid) = match self.peers.get(&addr) {
+            None => return format!("% No such neighbor: {}", addr),
+            Some(peer) => (peer.ident, peer.update_group_id.get(&v4).cloned()),
+        };
+        // Request the group adj-out; drop the task borrow before awaiting.
+        let rx = gid
+            .and_then(|gid| {
+                self.update_groups
+                    .get(&v4)
+                    .and_then(|af| af.group_by_id(&gid))
+            })
+            .and_then(|group| group.task.as_ref())
+            .map(|task| task.request_adj_out());
+        let table: std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> = match rx
+        {
+            Some(rx) => rx
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(prefix, ribs)| {
+                    // Split-horizon: exclude paths sourced from this peer.
+                    let kept: Vec<_> = ribs.into_iter().filter(|r| r.ident != peer_ident).collect();
+                    (!kept.is_empty()).then_some((prefix, kept))
+                })
+                .collect(),
+            None => std::collections::BTreeMap::new(),
+        };
         super::show::show_adj_rib_routes(&table, self.router_id, json)
             .unwrap_or_else(|e| format!("Error formatting output: {}", e))
     }
