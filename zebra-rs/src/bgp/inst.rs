@@ -2066,6 +2066,17 @@ impl Bgp {
             let _ = msg.resp.send(output).await;
             return;
         }
+        // Group-task: at gate-on a peer's v4 Adj-RIB-Out lives in its update
+        // group's egress task — request it for advertised-routes.
+        if super::group_egress::egress_group_task_enabled()
+            && path == "/show/bgp/neighbors/advertised-routes"
+        {
+            let output = self
+                .show_advertised_v4_from_group(&mut args, msg.json)
+                .await;
+            let _ = msg.resp.send(output).await;
+            return;
+        }
         // A2 ⑥: at gate-on a peer's v4 Adj-RIB-Out lives in its PET, not on
         // the peer — request it from the PET for advertised-routes.
         if super::peer_egress::peer_egress_task_enabled()
@@ -2109,6 +2120,51 @@ impl Bgp {
                 }
                 None => std::collections::BTreeMap::new(),
             };
+        super::show::show_adj_rib_routes(&table, self.router_id, json)
+            .unwrap_or_else(|e| format!("Error formatting output: {}", e))
+    }
+
+    /// Group-task — `show … advertised-routes` at gate-on: the peer's v4
+    /// Adj-RIB-Out is the adj-out of its update group's egress task. Request
+    /// the group adj-out over a oneshot, then filter split-horizon — a route
+    /// sourced from THIS peer (`rib.ident`) was never advertised to it — and
+    /// render. Empty when the peer is in no group (not established).
+    async fn show_advertised_v4_from_group(
+        &self,
+        args: &mut crate::config::Args,
+        json: bool,
+    ) -> String {
+        let Some(addr) = args.addr() else {
+            return "% No neighbor address specified".to_string();
+        };
+        let v4 = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+        let (peer_ident, gid) = match self.peers.get(&addr) {
+            None => return format!("% No such neighbor: {}", addr),
+            Some(peer) => (peer.ident, peer.update_group_id.get(&v4).cloned()),
+        };
+        // Request the group adj-out; drop the task borrow before awaiting.
+        let rx = gid
+            .and_then(|gid| {
+                self.update_groups
+                    .get(&v4)
+                    .and_then(|af| af.group_by_id(&gid))
+            })
+            .and_then(|group| group.task.as_ref())
+            .map(|task| task.request_adj_out());
+        let table: std::collections::BTreeMap<ipnet::Ipv4Net, Vec<super::route::BgpRib>> = match rx
+        {
+            Some(rx) => rx
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(prefix, ribs)| {
+                    // Split-horizon: exclude paths sourced from this peer.
+                    let kept: Vec<_> = ribs.into_iter().filter(|r| r.ident != peer_ident).collect();
+                    (!kept.is_empty()).then_some((prefix, kept))
+                })
+                .collect(),
+            None => std::collections::BTreeMap::new(),
+        };
         super::show::show_adj_rib_routes(&table, self.router_id, json)
             .unwrap_or_else(|e| format!("Error formatting output: {}", e))
     }
@@ -3607,28 +3663,47 @@ impl Bgp {
                     sent,
                     advertised,
                 } => {
-                    // A2 ⑥ — at gate-on `adj_out` lives in the PET, so
-                    // forward the dump rows there as record-only advertises
-                    // (`send: false`: the shard already put the bytes on the
-                    // wire). The PET rebuilds + records, keeping its adj_out
-                    // and interner consistent with its event-driven path.
-                    // Gate-off records main's adj_out as before.
-                    let to_pet = super::peer_egress::peer_egress_task_enabled()
-                        && self
-                            .peers
-                            .get_by_idx(ident)
-                            .is_some_and(|p| p.pet.is_some());
-                    if to_pet {
-                        if let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
-                        {
-                            for (nlri, rib) in advertised {
-                                let _ = pet.delta_tx.send(
-                                    super::peer_egress::EgressDeltaV4::RecordAdjOut {
-                                        prefix: nlri.prefix,
-                                        rib,
-                                    },
-                                );
-                            }
+                    // At gate-on `adj_out` lives in the egress task (group or
+                    // PET), so forward the dump rows there as record-only — the
+                    // shard already put the bytes on the wire. Group-task first
+                    // (the N>1 twin of route_sync_ipv4's RecordAdjOut, Phase 3),
+                    // then the per-peer PET, then main's adj_out at gate-off.
+                    let v4 =
+                        bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+                    let group_tx = super::group_egress::egress_group_task_enabled()
+                        .then(|| {
+                            let gid = self
+                                .peers
+                                .get_by_idx(ident)?
+                                .update_group_id
+                                .get(&v4)?
+                                .clone();
+                            self.update_groups
+                                .get(&v4)?
+                                .group_by_id(&gid)?
+                                .task
+                                .as_ref()
+                                .map(|t| t.delta_tx())
+                        })
+                        .flatten();
+                    if let Some(tx) = group_tx {
+                        for (nlri, rib) in advertised {
+                            let _ =
+                                tx.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+                                    prefix: nlri.prefix,
+                                    rib,
+                                });
+                        }
+                    } else if super::peer_egress::peer_egress_task_enabled()
+                        && let Some(pet) = self.peers.get_by_idx(ident).and_then(|p| p.pet.as_ref())
+                    {
+                        for (nlri, rib) in advertised {
+                            let _ = pet.delta_tx.send(
+                                super::peer_egress::EgressDeltaV4::RecordAdjOut {
+                                    prefix: nlri.prefix,
+                                    rib,
+                                },
+                            );
                         }
                     } else if let Some(peer) = self.peers.get_mut_by_idx(ident) {
                         for (nlri, rib) in advertised {
