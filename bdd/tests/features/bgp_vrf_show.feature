@@ -4,7 +4,7 @@ Feature: BGP per-VRF show command
   As a network operator
   I want to inspect the per-VRF state of a running zebra-rs
   Using a single-namespace topology that drives the local config
-  callbacks end-to-end so `show ip bgp vrf` reports the committed
+  callbacks end-to-end so `show bgp vrf` reports the committed
   Route Distinguisher / MPLS label / task state, and the named forms
   redirect into the spawned per-VRF task.
 
@@ -29,26 +29,26 @@ Feature: BGP per-VRF show command
     And I start zebra-rs in namespace "z1"
     And I apply config "z1-1.yaml" to namespace "z1"
     And I wait 2 seconds for BGP to operate
-    Then show command "show ip bgp vrf" in namespace "z1" should contain "(no VRFs configured)"
+    Then show command "show bgp vrf" in namespace "z1" should contain "(no VRFs configured)"
 
   Scenario: Configure vrf-blue and observe via show
     # The top-level vrf block spawns a per-VRF BGP task, so the bare
-    # `show ip bgp vrf` summary lists the row (name, RD, state) and the
+    # `show bgp vrf` summary lists the row (name, RD, state) and the
     # named form is redirected into the task, rendering that VRF's IPv4
-    # unicast RIB (same layout as `show ip bgp`).
+    # unicast RIB (same layout as `show bgp`).
     Given the test topology exists
     When I apply config "z1-2.yaml" to namespace "z1"
     And I wait 5 seconds for BGP to operate
-    Then show command "show ip bgp vrf" in namespace "z1" should contain "vrf-blue"
-    And show command "show ip bgp vrf" in namespace "z1" should contain "65001:100"
-    And show command "show ip bgp vrf" in namespace "z1" should contain "running"
-    And show command "show ip bgp vrf vrf-blue" in namespace "z1" should contain "Network"
+    Then show command "show bgp vrf" in namespace "z1" should contain "vrf-blue"
+    And show command "show bgp vrf" in namespace "z1" should contain "65001:100"
+    And show command "show bgp vrf" in namespace "z1" should contain "running"
+    And show command "show bgp vrf vrf-blue" in namespace "z1" should contain "Network"
 
-  Scenario: Inspect vrf-blue via the `show bgp vrf` tree
-    # The `show bgp vrf <name> [ipv4|ipv6] …` tree shares the manager
-    # redirect plumbing with the legacy `show ip bgp vrf` tree: with the
-    # per-VRF task running, the bare-name form renders the VRF's IPv4
-    # unicast RIB and the explicit AFI forms select the per-AFI tables.
+  Scenario: Inspect vrf-blue via the `show bgp vrf` AFI forms
+    # The `show bgp vrf <name> [ipv4|ipv6] …` tree drives the manager
+    # redirect plumbing: with the per-VRF task running, the bare-name
+    # form renders the VRF's IPv4 unicast RIB and the explicit AFI forms
+    # select the per-AFI tables.
     Given the test topology exists
     Then show command "show bgp vrf" in namespace "z1" should contain "vrf-blue"
     And show command "show bgp vrf vrf-blue" in namespace "z1" should contain "Network"
@@ -63,8 +63,8 @@ Feature: BGP per-VRF show command
     Given the test topology exists
     When I apply config "z1-1.yaml" to namespace "z1"
     And I wait 2 seconds for BGP to operate
-    Then show command "show ip bgp vrf" in namespace "z1" should not contain "65001:100"
-    And show command "show ip bgp vrf" in namespace "z1" should contain "vrf-blue"
+    Then show command "show bgp vrf" in namespace "z1" should not contain "65001:100"
+    And show command "show bgp vrf" in namespace "z1" should contain "vrf-blue"
 
   Scenario: Teardown topology
     Given the test topology exists

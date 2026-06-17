@@ -7,7 +7,7 @@ Feature: BGP labeled-unicast (v4) AddPath session-up sync at N>1 (all paths sync
   both to the late peer z4. Pins that `route_sync_labelv4` dumps every
   candidate from `bgp.shard.v4lu.0` and registers each path-id in
   `adj_out.v4lu`, so a per-path withdraw + peer-down remove only the right
-  path-id from a synced AddPath LU peer. `show ip bgp labeled-unicast`
+  path-id from a synced AddPath LU peer. `show bgp labeled-unicast`
   carries the AS_PATH column.
 
   Test Topology (z3 is the sharded device under test, 4 shards):
@@ -41,23 +41,23 @@ Feature: BGP labeled-unicast (v4) AddPath session-up sync at N>1 (all paths sync
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 15 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.0.4" should be "Established"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "65003 65001"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "65003 65001"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
 
   Scenario: z1 withdraws; only z1's path-id is withdrawn from the synced z4
     Given the test topology exists
     When I apply config "z1-withdraw.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp labeled-unicast" in namespace "z4" should not contain "65003 65001"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
+    Then show command "show bgp labeled-unicast" in namespace "z4" should not contain "65003 65001"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
 
   Scenario: z2's session drops; the surviving path is withdrawn from z4 too
     Given the test topology exists
-    Then show command "show ip bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
+    Then show command "show bgp labeled-unicast" in namespace "z4" should contain "65003 65002"
     When I stop zebra-rs in namespace "z2"
     And I wait 20 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.0.2" should not be "Established"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should not contain "65003 65002"
+    And show command "show bgp labeled-unicast" in namespace "z4" should not contain "65003 65002"
 
   Scenario: Teardown topology
     Given the test topology exists

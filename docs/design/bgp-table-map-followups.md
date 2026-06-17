@@ -93,7 +93,7 @@ section documents the limitation — update it when this lands.
 Nothing in `show` reveals whether a bound table-map's policy
 resolved. Because unresolved = deny-all, a typo in the policy name
 silently blackholes every install for the family until the operator
-diffs the kernel against `show ip bgp`. A small show surface — e.g.
+diffs the kernel against `show bgp`. A small show surface — e.g.
 a line in `show bgp ipv4 summary` or a `show bgp table-map` — could
 render `LocalRib.table_map`'s `name` vs `policy.is_some()`
 ("TMAP (resolved)" / "NOSUCH (unresolved — filtering all

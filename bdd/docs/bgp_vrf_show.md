@@ -5,7 +5,7 @@
 As a network operator
 I want to inspect the per-VRF state of a running zebra-rs
 Using a single-namespace topology that drives the local config
-callbacks end-to-end so `show ip bgp vrf` reports the committed
+callbacks end-to-end so `show bgp vrf` reports the committed
 Route Distinguisher / MPLS label / task state, and the named forms
 redirect into the spawned per-VRF task.
 

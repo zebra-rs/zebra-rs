@@ -24,8 +24,8 @@ and a few validation refinements remain — see **Leftover work**.
 | Slice            | PR    | What landed                                                                                  |
 | ---------------- | ----- | -------------------------------------------------------------------------------------------- |
 | 0 — codec        | #1046 | `FlowspecNlri` (v4+v6 components), action ext-comms, §5.1 `Ord`, round-trip tests            |
-| 1a — capability  | #1048 | `flowspec-ipv4`/`flowspec-ipv6` family, MP capability negotiation, `show ip bgp summary` label |
-| 1b — receive     | #1050 | `AdjRibFlowspecTable`, `route_flowspec_update/withdraw`, `show ip bgp flowspec [ipv6]`        |
+| 1a — capability  | #1048 | `flowspec-ipv4`/`flowspec-ipv6` family, MP capability negotiation, `show bgp summary` label |
+| 1b — receive     | #1050 | `AdjRibFlowspecTable`, `route_flowspec_update/withdraw`, `show bgp flowspec [ipv6]`        |
 | 2 — validation   | #1052 | RFC 9117 `flowspec_validate` (b.1 originator-match + b.2 AS_PATH-local), surfaced in `show`   |
 | (rename)         | #1053 | `ipv4-flowspec`→`flowspec-ipv4` (+ v6) for type-first consistency with `label-v4`            |
 | 3a — Loc-RIB     | #1056 | `LocalRibFlowspecTable` (cands+selected) + best-path; `show` reads the Loc-RIB                |
@@ -48,7 +48,7 @@ and a few validation refinements remain — see **Leftover work**.
   `config/configs.rs::Args::afi_safi`,
   `bgp/config.rs::config_flowspec_validation`.
 - **Show:** `zebra-rs/src/bgp/show.rs` (`show_bgp_flowspec`),
-  `exec.yang` (`show ip bgp flowspec`).
+  `exec.yang` (`show bgp flowspec`).
 
 ## Locked decisions (2026-05-30)
 
@@ -311,7 +311,7 @@ pattern (`config.rs:1622`, `vrf_config.rs:358`) — one callback per leaf into a
 | Phase     | Scope                                                              | Status                                           |
 | --------- | ------------------------------------------------------------------ | ------------------------------------------------ |
 | 0         | Codec: `FlowspecNlri` (v4+v6) + action ext-comms + `Ord` + tests   | ✅ merged (#1046)                                |
-| 1a / 1b   | Capability + receive → Adj-RIB-In + `show ip bgp flowspec`         | ✅ merged (#1048, #1050)                         |
+| 1a / 1b   | Capability + receive → Adj-RIB-In + `show bgp flowspec`         | ✅ merged (#1048, #1050)                         |
 | 2         | RFC 9117 validation vs unicast Loc-RIB                             | ✅ merged (#1052) — computed live, see leftovers |
 | 3a/3b/3c  | Loc-RIB best-path + re-advertise + per-neighbor validation knob    | ✅ merged (#1056, #1057, #1058)                  |
 | 4         | Dataplane: `tc`-flower netlink southbound                          | ⬜ not started (the large, isolated build)       |
@@ -376,5 +376,5 @@ today, and the `netlink-packet-route` fork lacks `RTM_NEW{T,Q}FILTER` /
   action) — planned extension to `zebra-bgp-flowspec.yang`.
 - **Add-path / update-group batching** for flowspec advertise (current
   send is one NLRI per UPDATE, direct via `send_flowspec_one`).
-- **JSON** output for `show ip bgp flowspec` (returns `[]` today).
+- **JSON** output for `show bgp flowspec` (returns `[]` today).
 - VPP classifier/ACL southbound.

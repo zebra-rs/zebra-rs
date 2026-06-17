@@ -46,7 +46,7 @@ order:
 | 5d: import pipeline  | step 18b | Per-VRF LocRIB write + CE advertise               | Step 18 (sliced — completes import side)                      |
 | 5e: MPLS label       | step 19a | `VrfLabelAllocator` + Export uses real label     | Step 19 (sliced)                                              |
 | 5e: MPLS label       | step 19b | `IlmType::DecapVrf` + ILM install at spawn        | Step 19 (sliced — completes data plane)                       |
-| 6: observability     | step 20a | `show ip bgp vrf` (list + detail, global state)  | Step 20 (sliced)                                              |
+| 6: observability     | step 20a | `show bgp vrf` (list + detail, global state)  | Step 20 (sliced)                                              |
 | 6: observability     | step 21a | `bgp_vrf_show` BDD scenario                       | Step 21 (sliced)                                              |
 | 6: docs              | step 22 | This refresh                                      | Step 22                                                       |
 
@@ -229,7 +229,7 @@ Land in any order; none block each other.
   and BFD client hand-off live on the global `Bgp`. Per-VRF
   unnumbered peering and per-VRF BFD subscriptions would need
   the per-VRF task to hold its own ND / BFD client handles.
-- **Per-VRF snapshot mirroring (step 20b).** `show ip bgp vrf
+- **Per-VRF snapshot mirroring (step 20b).** `show bgp vrf
   NAME` currently doesn't show per-peer FSM state. A snapshot
   via `BgpGlobalMsg::VrfStatus` would unlock that.
 - **`clear bgp vrf` action.** Not yet wired. Operator currently

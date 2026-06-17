@@ -74,9 +74,8 @@ impl BgpShowView for BgpVrf {
 pub async fn process_vrf_show(vrf: &BgpVrf, msg: DisplayRequest) {
     let (path, args) = path_from_command(&msg.paths);
     let out = match path.as_str() {
-        "/show/ip/bgp" => show_bgp(vrf, args, msg.json),
-        "/show/ip/bgp/summary" | "/show/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
-        "/show/ip/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
+        "/show/bgp/summary" => show_bgp_summary(vrf, args, msg.json),
+        "/show/bgp/neighbors" => show_bgp_neighbor(vrf, args, msg.json),
         // `show bgp vrf <name> [ipv4|ipv6] [<addr>|<prefix> [longer-prefix]]`
         // — the manager strips the `vrf <name>` selector, so a per-VRF
         // task sees the same `/show/bgp/…` paths as the default VRF and
@@ -586,19 +585,8 @@ where
     Ok(buf)
 }
 
-/// `show ip bgp` — IPv4 unicast Loc-RIB (legacy tree). The new
-/// `show bgp [ipv4]` tree shares the same renderer via
-/// [`render_unicast_table`].
-fn show_bgp<V: BgpShowView>(
-    bgp: &V,
-    _args: Args,
-    json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
-    render_unicast_table(&bgp.shard().v4.0, json)
-}
-
-/// `show ip bgp labeled-unicast` — render the IPv4 and IPv6
-/// Labeled-Unicast (SAFI 4) Loc-RIBs. Same columns as `show ip bgp`
+/// `show bgp labeled-unicast` — render the IPv4 and IPv6
+/// Labeled-Unicast (SAFI 4) Loc-RIBs. Same columns as `show bgp`
 /// plus a Label column carrying the per-prefix MPLS label. JSON output
 /// is not yet defined (mirrors `show_bgp_evpn`); returns an empty array.
 fn show_bgp_labeled(
@@ -628,7 +616,7 @@ fn show_bgp_labeled(
     Ok(buf)
 }
 
-/// One labeled-unicast row: the unicast columns from `show ip bgp` plus
+/// One labeled-unicast row: the unicast columns from `show bgp` plus
 /// the per-prefix label (or `-` when absent).
 fn show_labeled_row(
     buf: &mut String,
@@ -1227,7 +1215,7 @@ fn show_bgp_vpnv4_entry(bgp: &Bgp, tok: &str) -> std::result::Result<String, std
 }
 
 /// One RD's detail block — header lines plus the per-path breakdown.
-/// Layout carried over from the legacy `show ip bgp vpnv4 route`.
+/// Layout carried over from the legacy `show bgp vpnv4 route`.
 fn write_vpnv4_entry_detail(
     out: &mut String,
     bgp: &Bgp,
@@ -1490,25 +1478,6 @@ fn write_bgp_entry_detail<V: BgpShowView>(
         writeln!(out)?;
     }
     Ok(())
-}
-
-/// `show ip bgp <A.B.C.D>` (legacy tree) — longest-match detail for one
-/// IPv4 address. The new `show bgp [ipv4] …` tree reuses
-/// [`write_bgp_entry_detail`] via [`show_bgp_ipv4`].
-fn show_bgp_route_entry(
-    bgp: &Bgp,
-    mut args: Args,
-    _json: bool,
-) -> std::result::Result<String, std::fmt::Error> {
-    let mut out = String::new();
-    let addr = match args.v4addr() {
-        Some(addr) => addr,
-        None => return Ok(String::from("% No BGP route exists")),
-    };
-    if let Some((prefix, ribs)) = bgp.shard.v4.0.get_lpm(&addr.to_host_prefix()) {
-        write_bgp_entry_detail(&mut out, bgp, &prefix.to_string(), ribs)?;
-    }
-    Ok(out)
 }
 
 /// `show bgp` / `show bgp ipv4 [A.B.C.D | A.B.C.D/M]` — IPv4 unicast.
@@ -2591,7 +2560,7 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
     // Configured `tcp-mss` plus the MSS the kernel actually negotiated on
     // the live socket. The two can differ — a config change only takes
     // effect on the next connect — and the synced value is 0 until the
-    // session is up. Mirrors FRR's `show ip bgp neighbor` line.
+    // session is up. Mirrors FRR's `show bgp neighbor` line.
     if let Some(mss) = neighbor.tcp_mss {
         writeln!(
             out,
@@ -3240,7 +3209,7 @@ fn show_flowspec_actions(attr: &BgpAttr) -> String {
     }
 }
 
-/// `show ip bgp flowspec [ipv6]` — list the Flow Specification rules in
+/// `show bgp flowspec [ipv6]` — list the Flow Specification rules in
 /// Adj-RIB-In across all peers for the given AFI, each with its decoded
 /// traffic-filtering actions and the advertising neighbor. Phase 1 is
 /// receive-only: there is no Loc-RIB / best-path for flow specs yet, so
@@ -3430,7 +3399,7 @@ fn show_bgp_sr_policy_v6(
     show_bgp_sr_policy(bgp, Afi::Ip6, json)
 }
 
-/// `show ip bgp link-state` — the BGP-LS Loc-RIB (RFC 9552, AFI 16388 /
+/// `show bgp link-state` — the BGP-LS Loc-RIB (RFC 9552, AFI 16388 /
 /// SAFI 71). One line per selected Node/Link/Prefix object with the
 /// advertising neighbor. BGP-LS is a single exact-match family (the v4/v6
 /// distinction is inside the NLRI), so there is no per-AFI split. The
@@ -3763,7 +3732,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
         assert!(addr.get("interface").is_none());
     }
 
-    /// `show ip bgp neighbors <name>` resolves an `interface-neighbor`
+    /// `show bgp neighbors <name>` resolves an `interface-neighbor`
     /// name (the completion offers them) and renders the FRR-style
     /// `BGP neighbor on <ifname>: <link-local>` identity; address
     /// lookups and the no-match error keep their existing forms.
@@ -4128,8 +4097,8 @@ fn show_bgp_attributes(
     Ok(buf)
 }
 
-/// `show ip bgp vrf` — without args lists every committed
-/// per-VRF block as a single table; with one arg (`show ip bgp
+/// `show bgp vrf` — without args lists every committed
+/// per-VRF block as a single table; with one arg (`show bgp
 /// vrf NAME`) renders the same row plus the kernel-known
 /// `table_id`, `ifindex`, RT sets, and the materialized peer
 /// addresses.
@@ -4155,7 +4124,7 @@ fn show_bgp_vrf(
     }
 }
 
-/// Handler for `show ip bgp vrf <name> {summary,neighbors}` reached
+/// Handler for `show bgp vrf <name> {summary,neighbors}` reached
 /// only when the manager did *not* redirect — i.e. no per-VRF BGP task
 /// is registered for `<name>`. Running VRFs are intercepted by the
 /// manager and dispatched into their own task; this just reports the
@@ -4361,7 +4330,7 @@ fn show_bgp_vrf_detail(
 }
 
 // ---------------------------------------------------------------------
-// `show ip bgp neighbor-group [NAME]`
+// `show bgp neighbor-group [NAME]`
 // ---------------------------------------------------------------------
 
 /// Map an [`AfiSafi`] to the zebra-rs config-layer token name used in
@@ -4386,7 +4355,7 @@ fn afi_safi_config_name(afi_safi: &AfiSafi) -> &'static str {
     }
 }
 
-/// One row of `show ip bgp neighbor-group` (list form). Captures the
+/// One row of `show bgp neighbor-group` (list form). Captures the
 /// configured fields plus a member-peer count to make the list useful
 /// at a glance.
 ///
@@ -4755,12 +4724,8 @@ fn show_bgp_neighbor_group_detail(
 impl Bgp {
     pub fn show_build(&mut self) {
         self.show_cb = Builder::<ShowCallback>::default()
-            .path("/show/ip/bgp")
-            .set(show_bgp::<Bgp>)
-            .path("/show/ip/bgp/labeled-unicast")
+            .path("/show/bgp/labeled-unicast")
             .set(show_bgp_labeled)
-            .path("/show/ip/bgp/route")
-            .set(show_bgp_route_entry)
             .path("/show/bgp/neighbors")
             .set(show_bgp_neighbor::<Bgp>)
             .path("/show/bgp/neighbors/advertised-routes")
@@ -4781,25 +4746,19 @@ impl Bgp {
             .set(show_bgp_received_evpn)
             .path("/show/bgp/neighbors/rtcv4")
             .set(show_bgp_rtcv4)
-            .path("/show/ip/bgp/flowspec")
+            .path("/show/bgp/flowspec")
             .set(show_bgp_flowspec_v4)
-            .path("/show/ip/bgp/flowspec/ipv6")
+            .path("/show/bgp/flowspec/ipv6")
             .set(show_bgp_flowspec_v6)
-            .path("/show/ip/bgp/sr-policy")
+            .path("/show/bgp/sr-policy")
             .set(show_bgp_sr_policy_v4)
-            .path("/show/ip/bgp/sr-policy/ipv6")
+            .path("/show/bgp/sr-policy/ipv6")
             .set(show_bgp_sr_policy_v6)
-            .path("/show/ip/bgp/link-state")
+            .path("/show/bgp/link-state")
             .set(show_bgp_link_state)
-            .path("/show/ip/bgp/attributes")
+            .path("/show/bgp/attributes")
             .set(show_bgp_attributes)
-            .path("/show/ip/bgp/vrf")
-            .set(show_bgp_vrf)
-            .path("/show/ip/bgp/vrf/summary")
-            .set(show_bgp_vrf_not_running)
-            .path("/show/ip/bgp/vrf/neighbors")
-            .set(show_bgp_vrf_not_running)
-            .path("/show/ip/bgp/neighbor-group")
+            .path("/show/bgp/neighbor-group")
             .set(show_bgp_neighbor_group)
             .path("/show/evpn/vni/all")
             .set(show_evpn_vni_all)
@@ -4828,6 +4787,8 @@ impl Bgp {
             .path("/show/bgp/vrf")
             .set(show_bgp_vrf)
             .path("/show/bgp/vrf/summary")
+            .set(show_bgp_vrf_not_running)
+            .path("/show/bgp/vrf/neighbors")
             .set(show_bgp_vrf_not_running)
             .path("/show/bgp/vrf/ipv4")
             .set(show_bgp_vrf_not_running)

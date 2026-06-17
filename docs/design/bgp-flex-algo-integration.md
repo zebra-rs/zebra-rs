@@ -47,7 +47,7 @@ the inner label is whatever the service AFI/SAFI requires.
 | Route-map `match/set color`, `set prefix-sid label-index` | ✅ | PR #690 |
 | Color → flex-algorithm binding (`Bgp::color_policy`) | ✅ | PR #687 |
 | Color/algo-aware next-hop resolution + outer label push | ✅ | PRs #697 / #701 (`bgp_color_aware_nht_consumer`) |
-| `show ip bgp <prefix>` surfaces Prefix-SID / Color | ✅ | PR #692 |
+| `show bgp <prefix>` surfaces Prefix-SID / Color | ✅ | PR #692 |
 
 ---
 
@@ -177,7 +177,7 @@ Wires the Phase-1 codec into BGP semantics.
 2. Add an integration fixture under `tests/` that brings up a minimal 3-node
    IS-IS topology with two FADs and verifies kernel LFIB + IP-MPLS encap
    entries for a BGP route with a Color community.
-3. Per-route observability: `show ip bgp <prefix>` should expose
+3. Per-route observability: `show bgp <prefix>` should expose
    `Color: 100 -> Algo: 128 -> Outer label: 16128`.
 
 ## Phase 5 — CLI, YANG, observability
@@ -185,8 +185,8 @@ Wires the Phase-1 codec into BGP semantics.
 1. YANG additions under `/router/bgp/`:
    - `color-policy/color/flex-algorithm` (see Phase 2.4)
    - `neighbor/.../send-prefix-sid`, `send-tunnel-encap`
-2. CLI verbs: `set color`, `match color`, `show ip bgp color N`,
-   `show ip bgp policy`.
+2. CLI verbs: `set color`, `match color`, `show bgp color N`,
+   `show bgp policy`.
 3. Tracing spans (`tracing::debug_span!("bgp.nht.color")`) for resolver
    misses — Color resolution failures are otherwise silent.
 

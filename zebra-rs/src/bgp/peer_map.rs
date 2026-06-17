@@ -251,7 +251,7 @@ impl PeerMap {
     // lookups go through [`Self::get`] / [`Self::keys`].
 
     /// Iterate every peer regardless of key variant, including
-    /// `PeerKey::Interface` (IPv6 unnumbered) peers — `show ip bgp
+    /// `PeerKey::Interface` (IPv6 unnumbered) peers — `show bgp
     /// neighbors` needs them so an operator can observe an
     /// interface-keyed session whose remote link-local address isn't
     /// something they can name.

@@ -17,7 +17,7 @@ Feature: BGP labeled-unicast (v6) session-up sync at N>1 (sync + withdraw reach 
     * z3 establishes BEFORE the routes exist → event-driven (control);
     * z4 establishes AFTER the routes exist → session-up `route_sync_labelv6`.
 
-  `show ip bgp labeled-unicast` renders both the v4lu and v6lu Loc-RIBs, so
+  `show bgp labeled-unicast` renders both the v4lu and v6lu Loc-RIBs, so
   the v6 LU prefixes appear there.
 
   Test Topology:
@@ -50,8 +50,8 @@ Feature: BGP labeled-unicast (v6) session-up sync at N>1 (sync + withdraw reach 
     Given the test topology exists
     When I apply config "z1-routes.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp labeled-unicast" in namespace "z3" should contain "2001:db8:a::1/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z3" should contain "2001:db8:a::2/128"
+    Then show command "show bgp labeled-unicast" in namespace "z3" should contain "2001:db8:a::1/128"
+    And show command "show bgp labeled-unicast" in namespace "z3" should contain "2001:db8:a::2/128"
 
   Scenario: the late peer z4 gets the routes on sync, and z2 can show its own RIB
     Given the test topology exists
@@ -61,10 +61,10 @@ Feature: BGP labeled-unicast (v6) session-up sync at N>1 (sync + withdraw reach 
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 15 seconds for BGP to operate
     Then BGP session in "z2" to "2001:db8::4" should be "Established"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::1/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::1/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::2/128"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::1/128"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::1/128"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::2/128"
 
   Scenario: z1 withdraws one route; the withdraw reaches the synced peer z4
     Given the test topology exists
@@ -74,21 +74,21 @@ Feature: BGP labeled-unicast (v6) session-up sync at N>1 (sync + withdraw reach 
     # z4 and ::1 stays stuck (the bug this feature guards).
     When I apply config "z1-withdraw.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "2001:db8:a::1/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::2/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should not contain "2001:db8:a::1/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
+    Then show command "show bgp labeled-unicast" in namespace "z2" should not contain "2001:db8:a::1/128"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "2001:db8:a::2/128"
+    And show command "show bgp labeled-unicast" in namespace "z4" should not contain "2001:db8:a::1/128"
+    And show command "show bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
 
   Scenario: z1's session drops; the peer-down sweep clears its routes from z4
     Given the test topology exists
     # z4 still holds ::2 (positive control). Stop z1 — z2's route_clean sweep
     # withdraws ::2, which must also reach the synced peer z4.
-    Then show command "show ip bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
+    Then show command "show bgp labeled-unicast" in namespace "z4" should contain "2001:db8:a::2/128"
     When I stop zebra-rs in namespace "z1"
     And I wait 20 seconds for BGP to operate
     Then BGP session in "z2" to "2001:db8::1" should not be "Established"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "2001:db8:a::2/128"
-    And show command "show ip bgp labeled-unicast" in namespace "z4" should not contain "2001:db8:a::2/128"
+    And show command "show bgp labeled-unicast" in namespace "z2" should not contain "2001:db8:a::2/128"
+    And show command "show bgp labeled-unicast" in namespace "z4" should not contain "2001:db8:a::2/128"
 
   Scenario: Teardown topology
     Given the test topology exists

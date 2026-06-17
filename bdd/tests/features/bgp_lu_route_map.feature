@@ -41,15 +41,15 @@ Feature: BGP per-peer route-map for IPv4 labeled-unicast (inbound + outbound)
     Then show command "show bgp summary" in namespace "z2" should contain "Established"
     # z1 originates all three — the outbound policy gates advertisement,
     # not origination, so 3.3.3.3/32 stays in z1's own LU RIB.
-    And show command "show ip bgp labeled-unicast" in namespace "z1" should contain "1.1.1.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "z1" should contain "3.3.3.3/32"
+    And show command "show bgp labeled-unicast" in namespace "z1" should contain "1.1.1.1/32"
+    And show command "show bgp labeled-unicast" in namespace "z1" should contain "3.3.3.3/32"
     # The permitted prefix flows end to end.
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "2.2.2.2/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "2.2.2.2/32"
     # Inbound deny: z1 advertised 1.1.1.1/32 but z2's IN-LU drops it.
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "1.1.1.1/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should not contain "1.1.1.1/32"
     # Outbound deny: z1's OUT-LU never advertises 3.3.3.3/32 (z2 has no
     # matching inbound deny, so its absence isolates the outbound hook).
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "3.3.3.3/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should not contain "3.3.3.3/32"
 
   Scenario: Teardown topology
     Given the test topology exists

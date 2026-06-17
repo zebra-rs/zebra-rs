@@ -2121,7 +2121,7 @@ impl Bgp {
         // `/show/bgp/ipv4` + a "summary" token, peeked non-destructively so a
         // non-summary command falls through untouched.)
         let v4_summary: Option<Option<bgp_packet::AfiSafi>> = match path.as_str() {
-            "/show/bgp/summary" | "/show/ip/bgp/summary" => Some(None),
+            "/show/bgp/summary" => Some(None),
             "/show/bgp/ipv4" if args.0.front().is_some_and(|t| t == "summary") => Some(Some(
                 bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast),
             )),

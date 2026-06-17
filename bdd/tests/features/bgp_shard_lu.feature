@@ -40,8 +40,8 @@ Feature: BGP IPv4 Labeled-Unicast (SAFI 4) withdraw/peer-down through a sharded 
     Given the test topology exists
     When I apply config "z1-routes.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp labeled-unicast" in namespace "z2" should contain "10.10.10.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
+    Then show command "show bgp labeled-unicast" in namespace "z2" should contain "10.10.10.1/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
 
   Scenario: z1 withdraws one LU route; the sharded withdraw drops only it
     Given the test topology exists
@@ -51,18 +51,18 @@ Feature: BGP IPv4 Labeled-Unicast (SAFI 4) withdraw/peer-down through a sharded 
     # positive control, so the negative assertion is not vacuous.
     When I apply config "z1-withdraw1.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "10.10.10.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
+    Then show command "show bgp labeled-unicast" in namespace "z2" should not contain "10.10.10.1/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
 
   Scenario: z1's session drops; sharded peer-down sweeps its LU routes
     Given the test topology exists
     # z2 still holds .2 from the previous scenario (positive control). Kill
     # z1 — z2's route_clean must withdraw 10.10.10.2/32 from its LU Loc-RIB.
-    Then show command "show ip bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
+    Then show command "show bgp labeled-unicast" in namespace "z2" should contain "10.10.10.2/32"
     When I stop zebra-rs in namespace "z1"
     And I wait 20 seconds for BGP to operate
     Then BGP session in "z2" to "192.168.0.1" should not be "Established"
-    And show command "show ip bgp labeled-unicast" in namespace "z2" should not contain "10.10.10.2/32"
+    And show command "show bgp labeled-unicast" in namespace "z2" should not contain "10.10.10.2/32"
 
   Scenario: Teardown topology
     Given the test topology exists
