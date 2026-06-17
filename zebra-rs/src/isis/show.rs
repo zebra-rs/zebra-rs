@@ -3018,11 +3018,39 @@ fn show_isis_flex_algo(
         }
     }
 
+    // Local per-algo SRv6 locator bindings (RFC 9352 §7.1). Shows the
+    // configured locator name, whether it resolved against the global
+    // /segment-routing/locator table, and the allocated node (End) SID.
+    if !isis.config.sr_srv6_flex_algo_locators.is_empty() {
+        writeln!(buf)?;
+        writeln!(buf, "Local SRv6 Flex-Algo Locators:")?;
+        writeln!(
+            buf,
+            "  {:<5} {:<16} {:<24} End-SID",
+            "Algo", "Locator", "Prefix"
+        )?;
+        for (algo, name) in &isis.config.sr_srv6_flex_algo_locators {
+            let prefix = isis
+                .sr_flex_algo_locators
+                .get(algo)
+                .and_then(|l| l.prefix)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "(unresolved)".to_string());
+            let end = isis
+                .sr_flex_algo_end_sid
+                .get(algo)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            writeln!(buf, "  {algo:<5} {name:<16} {prefix:<24} {end}")?;
+        }
+    }
+
     // Per-level peer state.
     for level in &[Level::L1, Level::L2] {
         let peer_fad = isis.peer_fad.get(level);
         let peer_algos = isis.peer_algos.get(level);
-        if peer_fad.is_empty() && peer_algos.is_empty() {
+        let peer_algo_srv6 = isis.peer_algo_srv6.get(level);
+        if peer_fad.is_empty() && peer_algos.is_empty() && peer_algo_srv6.is_empty() {
             continue;
         }
         let level_long = match level {
@@ -3058,6 +3086,20 @@ fn show_isis_flex_algo(
                     .collect::<Vec<_>>()
                     .join(", ");
                 writeln!(buf, "    {name} ({sys_id}): [{list}]")?;
+            }
+        }
+
+        if !peer_algo_srv6.is_empty() {
+            writeln!(buf, "  Peer SRv6 Flex-Algo Locators:")?;
+            for (sys_id, locs) in peer_algo_srv6.iter() {
+                let name = hostname_for(isis, level, sys_id);
+                for (algo, loc) in locs {
+                    writeln!(
+                        buf,
+                        "    {name} ({sys_id}): algo {algo} locator {} end-sid {}",
+                        loc.locator, loc.end.sid,
+                    )?;
+                }
             }
         }
     }
@@ -3156,6 +3198,61 @@ fn write_flex_algo_routes(
                         addr.to_string(),
                         ifname,
                         label
+                    )?;
+                }
+            }
+        }
+    }
+
+    // SRv6 dataplane: per-algo locator routes (IPv6). No per-prefix
+    // label — the destination is the per-algo locator and transit is
+    // plain IPv6, so the SID column is omitted.
+    for level in &[Level::L1, Level::L2] {
+        let per_algo = isis.rib6_flex_algo.get(level);
+        if per_algo.is_empty() {
+            continue;
+        }
+        let level_long = match level {
+            Level::L1 => "Level-1",
+            Level::L2 => "Level-2",
+        };
+        for (algo, rib) in per_algo {
+            if let Some(f) = filter
+                && *algo != f
+            {
+                continue;
+            }
+            if rib.iter().next().is_none() {
+                continue;
+            }
+            wrote_any = true;
+            writeln!(buf)?;
+            writeln!(buf, "{level_long} Algorithm {algo} (SRv6):")?;
+            writeln!(
+                buf,
+                "  {:<40} {:<8} {:<28} Interface",
+                "Locator", "Metric", "Nexthop"
+            )?;
+            for (prefix, route) in rib.iter() {
+                if route.nhops.is_empty() {
+                    writeln!(
+                        buf,
+                        "  {:<40} {:<8} {:<28} -",
+                        prefix.to_string(),
+                        route.metric,
+                        "(unreachable)",
+                    )?;
+                    continue;
+                }
+                for (addr, nhop) in route.nhops.iter() {
+                    let ifname = isis.ifname(nhop.ifindex);
+                    writeln!(
+                        buf,
+                        "  {:<40} {:<8} {:<28} {}",
+                        prefix.to_string(),
+                        route.metric,
+                        addr.to_string(),
+                        ifname,
                     )?;
                 }
             }

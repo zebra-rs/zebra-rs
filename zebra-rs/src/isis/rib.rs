@@ -599,6 +599,31 @@ fn make_flex_algo_route(
 /// different / only_next` split the IPv4 and IPv6 diff helpers use,
 /// so the semantics of "route changed under the hood but same
 /// prefix" match what RIB already sees from algo-0.
+/// Diff per-algo IPv6 RIB snapshots (SRv6 dataplane) and install the
+/// per-algo locator routes into the kernel FIB as real IPv6 routes.
+///
+/// Unlike `diff_apply_flex_algo` (SR-MPLS), which feeds the colour-aware
+/// nexthop resolver an outer-label-per-(algo, prefix) shadow, SRv6
+/// per-algo reachability is plain longest-prefix IPv6 to each node's
+/// distinct per-algo locator. So we reuse the ordinary IPv6 install path
+/// (`diff_apply::<V6>` → `Ipv6Add` / `Ipv6Del`) per algorithm; the
+/// per-algo locator prefixes never collide with algo-0 reachability.
+fn diff_apply_flex_algo6(
+    rib_client: &crate::rib::client::RibClient,
+    level: Level,
+    prev: &BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+    next: &BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+) {
+    let all_algos: BTreeSet<u8> = prev.keys().chain(next.keys()).copied().collect();
+    let empty: PrefixMap<Ipv6Net, SpfRoute<V6>> = PrefixMap::new();
+    for algo in all_algos {
+        let prev_table = prev.get(&algo).unwrap_or(&empty);
+        let next_table = next.get(&algo).unwrap_or(&empty);
+        let diff = spf::table_diff(prev_table.iter(), next_table.iter());
+        diff_apply::<V6>(rib_client, &diff, level);
+    }
+}
+
 pub fn diff_apply_flex_algo(
     rib_client: &crate::rib::client::RibClient,
     prev: &BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>,
@@ -1427,6 +1452,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let mut new_flex_algo_graphs: BTreeMap<u8, Option<spf::Graph>> = BTreeMap::new();
     let mut new_flex_algo_spfs: BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>> = BTreeMap::new();
     let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
+    let mut new_flex_algo_rib6: BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>> = BTreeMap::new();
     for FlexAlgoOutput {
         algo,
         graph: algo_graph,
@@ -1434,41 +1460,75 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         spf: algo_spf,
     } in flex_algos
     {
-        // Build the per-algo IPv4 RIB iff we have both a source and
-        // an SPF result. Empty PrefixMap for the algo otherwise so
-        // the show command and downstream consumers still see a
-        // well-formed (if empty) snapshot.
-        let algo_rib = match (algo_source, algo_spf.as_ref()) {
-            (Some(src), Some(spf_res)) => {
+        // Per-algo dataplane participation (RFC 9350 §6). Build the
+        // SR-MPLS IPv4 RIB when the algo enables sr-mpls, and the SRv6
+        // IPv6 RIB when it enables srv6. The flag block is scoped so the
+        // immutable `top.flex_algo` borrow ends before the `&mut top`
+        // RIB builders run. Default (no dataplane flag, or only `ip`)
+        // keeps the historical SR-MPLS behavior; an algo that enables
+        // *only* srv6 skips the SR-MPLS build.
+        let (mpls_on, srv6_on) = {
+            let entry = top.flex_algo.config.get(&algo);
+            let srv6_on = entry
+                .map(|e| e.dataplane_srv6 == Some(true))
+                .unwrap_or(false);
+            let mpls_on = entry
+                .map(|e| e.dataplane_sr_mpls == Some(true) || e.dataplane_srv6 != Some(true))
+                .unwrap_or(true);
+            (mpls_on, srv6_on)
+        };
+
+        // The per-algo SPF graph is address-family-independent, so both
+        // dataplanes reuse the same `spf_res`. Empty PrefixMaps when the
+        // algo lacks a source/SPF or doesn't enable that dataplane, so
+        // the show command and the route diff still see a well-formed
+        // (if empty) snapshot.
+        let algo_rib = match (mpls_on, algo_source, algo_spf.as_ref()) {
+            (true, Some(src), Some(spf_res)) => {
                 let r = build_rib_from_flex_algo(top, level, algo, src, spf_res);
                 mpls_route(&r, &mut ilm, srgb);
                 r
             }
             _ => PrefixMap::<Ipv4Net, SpfRoute<V4>>::new(),
         };
+        let algo_rib6 = match (srv6_on, algo_source, algo_spf.as_ref()) {
+            (true, Some(src), Some(spf_res)) => {
+                build_rib6_from_flex_algo(top, level, algo, src, spf_res)
+            }
+            _ => PrefixMap::<Ipv6Net, SpfRoute<V6>>::new(),
+        };
 
         new_flex_algo_graphs.insert(algo, Some(algo_graph));
         new_flex_algo_spfs.insert(algo, algo_spf);
         new_flex_algo_rib.insert(algo, algo_rib);
+        new_flex_algo_rib6.insert(algo, algo_rib6);
     }
-    // Per-algo route diff → RIB publish. The shadow on
-    // `Rib::flex_algo_routes` is the colour-aware nexthop resolver's
-    // source of truth for the outer MPLS label per (algo, prefix).
+    // Per-algo route diff → RIB publish. SR-MPLS feeds the colour-aware
+    // nexthop resolver (shadow on `Rib::flex_algo_routes`, outer MPLS
+    // label per (algo, prefix)); SRv6 installs per-algo locator routes
+    // straight into the kernel FIB as plain IPv6 routes.
     if top.config.distribute.rib {
         diff_apply_flex_algo(
             top.rib_client,
             top.rib_flex_algo.get(&level),
             &new_flex_algo_rib,
         );
+        diff_apply_flex_algo6(
+            top.rib_client,
+            level,
+            top.rib6_flex_algo.get(&level),
+            &new_flex_algo_rib6,
+        );
     }
 
     // Swap the new state in. The retain that used to live above is
     // implicit: any algo present in the old map but absent from the
-    // new one yielded `FlexAlgoRouteDel` messages above; the swap
-    // drops the old entry entirely.
+    // new one yielded route Del messages above; the swap drops the old
+    // entry entirely.
     *top.graph_flex_algo.get_mut(&level) = new_flex_algo_graphs;
     *top.spf_flex_algo.get_mut(&level) = new_flex_algo_spfs;
     *top.rib_flex_algo.get_mut(&level) = new_flex_algo_rib;
+    *top.rib6_flex_algo.get_mut(&level) = new_flex_algo_rib6;
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
@@ -1501,6 +1561,103 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
 /// are silently skipped — algo-N SR-MPLS forwarding requires a label
 /// at every step. The algo-0 (legacy) RIB still installs the prefix
 /// via `build_rib_from_spf`, so reachability is not lost.
+/// Build the per-algorithm IPv6 RIB (SRv6 dataplane) from a Flex-Algo
+/// SPF result. Unlike the SR-MPLS path, SRv6 Flex-Algo does not push a
+/// per-prefix SID: each node advertises a *distinct* per-algo SRv6
+/// locator (RFC 9352 §7.1, Algorithm = N), so reaching that node "in
+/// algo N" is plain longest-prefix IPv6 to its locator over the algo-N
+/// constrained topology. This routes each participating origin's
+/// per-algo locator prefix (`peer_algo_srv6[origin][algo]`) with the
+/// algo-N SPF nexthop(s) — no SID push for transit, no TI-LFA backup
+/// (per-algo fast-reroute over SRv6 is deferred).
+///
+/// Nodes that did not advertise a per-algo locator are skipped: they do
+/// not participate in algo-N SRv6 forwarding. The algo-0 IPv6 RIB still
+/// covers ordinary reachability, so nothing is lost.
+fn build_rib6_from_flex_algo(
+    top: &mut IsisTop,
+    level: Level,
+    algo: u8,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> PrefixMap<Ipv6Net, SpfRoute<V6>> {
+    let mut rib = PrefixMap::<Ipv6Net, SpfRoute<V6>>::new();
+
+    for (node, nhops) in spf_result {
+        if *node == source {
+            continue;
+        }
+        if top.lsp_map.get(&level).is_pseudo(*node) {
+            continue;
+        }
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node).copied() else {
+            continue;
+        };
+        // The per-algo SRv6 locator this origin advertised. Absent → the
+        // node doesn't participate in algo-N SRv6; skip it.
+        let Some(locator) = top
+            .peer_algo_srv6
+            .get(&level)
+            .get(&sys_id)
+            .and_then(|m| m.get(&algo))
+            .map(|l| l.locator)
+        else {
+            continue;
+        };
+
+        // First-router-hop walk, identical to the IPv4 builder, but the
+        // nexthop addresses are the neighbor's link-local IPv6 (SRv6
+        // transit is plain IPv6 forwarding over the egress link).
+        let mut spf_nhops = BTreeMap::new();
+        for p in &nhops.paths {
+            let Some(nhop_id) = first_router_hop_id(top.lsp_map.get(&level), p) else {
+                continue;
+            };
+            let Some(nhop_sys_id) = top.lsp_map.get(&level).resolve(nhop_id).copied() else {
+                continue;
+            };
+            for (_, link_id) in nhops.first_hop_links.iter().filter(|(v, _)| *v == p[0]) {
+                if *link_id == 0 {
+                    continue;
+                }
+                let Some(link) = top.links.get(link_id) else {
+                    continue;
+                };
+                let Some(nbr) = link.state.nbrs.get(&level).get(&nhop_sys_id) else {
+                    continue;
+                };
+                for addr in nbr.addr6l.iter() {
+                    spf_nhops.insert(
+                        *addr,
+                        SpfNexthop::<V6> {
+                            ifindex: *link_id,
+                            adjacency: *node == nhop_id,
+                            sys_id: Some(nhop_sys_id),
+                            backup: None,
+                        },
+                    );
+                }
+            }
+        }
+        if spf_nhops.is_empty() {
+            continue;
+        }
+
+        let route = SpfRoute::<V6> {
+            metric: nhops.cost,
+            nhops: spf_nhops,
+            sid: None,
+            prefix_sid: None,
+            no_php: false,
+            dest_vertex: Some(*node),
+            backup_as_primary: top.config.fast_reroute_backup_as_primary,
+        };
+        rib.insert(locator.trunc(), route);
+    }
+
+    rib
+}
+
 fn build_rib_from_flex_algo(
     top: &mut IsisTop,
     level: Level,

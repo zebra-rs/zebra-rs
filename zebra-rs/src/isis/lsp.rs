@@ -13,7 +13,7 @@ use crate::isis::config::{
 };
 use crate::isis_event_trace;
 use crate::rib::util::IpNetExt;
-use crate::rib::{DEFAULT_BLOCK_NAME, LocatorBehavior, MacAddr};
+use crate::rib::{DEFAULT_BLOCK_NAME, Locator, LocatorBehavior, MacAddr};
 
 /// Per ISO 10589 §7.3.16.4, the additional grace beyond MaxAge a
 /// purged LSP needs before any surviving copy is fully evicted from
@@ -460,6 +460,41 @@ pub fn dis_generate(
     fragments
 }
 
+/// SRv6 End-SID endpoint behavior + SID Structure sub-sub-TLV
+/// (RFC 9352 §9) for one locator, keyed off the locator's behavior.
+/// Classic locators advertise the `End` codepoint (LB caps at 40);
+/// uSID locators advertise `EndCSID` / uN (LB caps at 32). Mirrors the
+/// per-LSP computation done for the base locator, but as a reusable
+/// helper so each per-Flex-Algorithm locator gets its own structure.
+fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
+    let Some(prefix) = locator.prefix else {
+        return (Behavior::End, Vec::new());
+    };
+    let plen = prefix.prefix_len();
+    match &locator.behavior {
+        Some(LocatorBehavior::Usid) => {
+            let lb_len = plen.min(32);
+            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+                lb_len,
+                ln_len: plen.saturating_sub(lb_len),
+                fun_len: 16,
+                arg_len: 0,
+            });
+            (Behavior::EndCSID, vec![structure])
+        }
+        None => {
+            let lb_len = plen.min(40);
+            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+                lb_len,
+                ln_len: plen.saturating_sub(lb_len),
+                fun_len: 16,
+                arg_len: 0,
+            });
+            (Behavior::End, vec![structure])
+        }
+    }
+}
+
 pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Vec<IsisLsp> {
     // Fragment 0 is the anchor for the originator's per-node attributes
     // (hostname, area, capability, OL/ATT) and the only LSP whose seq is
@@ -656,11 +691,16 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             }
         }
 
-        // SRv6 Capability sub-TLV. Only advertise when the configured
-        // locator actually resolved in the RIB; an `srv6` container with
-        // no usable locator means we have nothing to derive a SID from,
-        // so we don't claim SRv6 capability.
-        if top.config.sr_srv6_enabled && top.sr_locator.is_some() {
+        // SRv6 Capability sub-TLV. Only advertise when at least one
+        // locator (the algo-0 base or any per-Flex-Algorithm locator)
+        // actually resolved in the RIB; an `srv6` container with no
+        // usable locator means we have nothing to derive a SID from, so
+        // we don't claim SRv6 capability. Including the per-algo
+        // locators here lets an SRv6-only Flex-Algo config advertise its
+        // SR-Algorithm participation even without a base locator.
+        if top.config.sr_srv6_enabled
+            && (top.sr_locator.is_some() || !top.sr_flex_algo_locators.is_empty())
+        {
             let srv6 = IsisSubSrv6::default();
             cap.subs.push(srv6.into());
 
@@ -733,34 +773,57 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         None => (Behavior::End, Behavior::EndX, Vec::new()),
     };
 
-    // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator per
-    // active locator; today we only carry one. The contained End SID
-    // sub-TLV (RFC 9352 §7.2) advertises the Node SID we registered
-    // with the RIB. Both `sr_locator` and `sr_end_sid` must be set —
-    // sr_end_sid is only populated when the locator's prefix produced
-    // a usable address.
+    // SRv6 Locators TLV (RFC 9352 §7.1, type 27). One sub-locator for
+    // the base (algo-0) locator plus one per Flexible-Algorithm locator
+    // binding, each carrying its node End SID (RFC 9352 §7.2). Per-algo
+    // locators are advertised ONLY here (Algorithm field = N) — never as
+    // plain IPv6 Reachability TLVs — so receivers route each one in its
+    // own algorithm's constrained topology rather than over the
+    // unconstrained algo-0 SPF.
+    let mut srv6_locators: Vec<Srv6Locator> = Vec::new();
     if let Some(locator) = top.sr_locator.as_ref()
         && let Some(end_sid) = *top.sr_end_sid
         && let Some(prefix) = locator.prefix
     {
-        let end_sub = IsisSubSrv6EndSid {
-            flags: 0,
-            behavior: end_behavior,
-            sid: end_sid,
-            sub2s: sid_structure_subs.clone(),
-        };
-        let sub_locator = Srv6Locator {
+        srv6_locators.push(Srv6Locator {
             metric: 0,
             flags: 0,
             algo: Algo::Spf,
             locator: prefix,
-            subs: vec![prefix::IsisSubTlv::Srv6EndSid(end_sub)],
+            subs: vec![prefix::IsisSubTlv::Srv6EndSid(IsisSubSrv6EndSid {
+                flags: 0,
+                behavior: end_behavior,
+                sid: end_sid,
+                sub2s: sid_structure_subs.clone(),
+            })],
+        });
+    }
+    for (&algo, locator) in top.sr_flex_algo_locators.iter() {
+        let Some(end_sid) = top.sr_flex_algo_end_sid.get(&algo).copied() else {
+            continue;
         };
-        let srv6_tlv = IsisTlvSrv6 {
+        let Some(prefix) = locator.prefix else {
+            continue;
+        };
+        let (behavior, sub2s) = srv6_end_structure(locator);
+        srv6_locators.push(Srv6Locator {
+            metric: 0,
+            flags: 0,
+            algo: Algo::FlexAlgo(algo),
+            locator: prefix,
+            subs: vec![prefix::IsisSubTlv::Srv6EndSid(IsisSubSrv6EndSid {
+                flags: 0,
+                behavior,
+                sid: end_sid,
+                sub2s,
+            })],
+        });
+    }
+    if !srv6_locators.is_empty() {
+        distributable.push(IsisTlv::Srv6(IsisTlvSrv6 {
             flags: Default::default(),
-            locators: vec![sub_locator],
-        };
-        distributable.push(IsisTlv::Srv6(srv6_tlv));
+            locators: srv6_locators,
+        }));
     }
 
     // Multi-Topology TLV (229) — RFC 5120 §7.1. Lists the MT IDs

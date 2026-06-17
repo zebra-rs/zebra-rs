@@ -163,6 +163,12 @@ pub struct LinkTop<'a> {
     >,
     pub peer_algos:
         &'a mut Levels<std::collections::BTreeMap<IsisSysId, std::collections::BTreeSet<u8>>>,
+    pub peer_algo_srv6: &'a mut Levels<
+        std::collections::BTreeMap<
+            IsisSysId,
+            std::collections::BTreeMap<u8, super::srv6::Srv6AlgoLoc>,
+        >,
+    >,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
     pub spf_throttle: &'a mut Levels<super::throttle::Throttle>,
 

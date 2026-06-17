@@ -1,0 +1,100 @@
+# ch — backbone hub, FAD originator (advertise-definition: true for both
+# algos). SRv6 sibling of configs/isis_flexalgo/ch.yaml.
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+segment-routing:
+  locator:
+  - name: BASE
+    prefix: 2001:db8:b000::/48
+  - name: A128
+    prefix: 2001:db8:b128::/48
+  - name: A129
+    prefix: 2001:db8:b129::/48
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+  ipv6:
+    address: 2001:db8:f::2/128
+- if-name: ch-se
+  ipv4:
+    address: 192.168.1.2/30
+  ipv6:
+    address: 2001:db8:11::2/64
+- if-name: ch-va
+  ipv4:
+    address: 192.168.1.5/30
+  ipv6:
+    address: 2001:db8:12::1/64
+- if-name: ch-ln
+  ipv4:
+    address: 192.168.1.9/30
+  ipv6:
+    address: 2001:db8:13::1/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    hostname: ch
+    is-type: level-2-only
+    te-router-id: 10.0.0.2
+    segment-routing:
+      srv6:
+        locator: BASE
+        flex-algo-locator:
+        - algo: 128
+          locator: A128
+        - algo: 129
+          locator: A129
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: ch-se
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - us
+    - if-name: ch-va
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - us
+    - if-name: ch-ln
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - transatlantic
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us

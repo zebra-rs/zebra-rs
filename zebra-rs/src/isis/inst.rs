@@ -238,6 +238,15 @@ pub struct Isis {
     /// not contain the algo being computed (RFC 9350 §5.2
     /// participation requirement). Cleared on peer purge.
     pub peer_algos: Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
+
+    /// Per-peer per-Flexible-Algorithm SRv6 locators. Outer key is peer
+    /// sys-id; inner key is the algorithm (128..=255). Populated from
+    /// SRv6 Locator TLV 27 sub-locators whose Algorithm field is a
+    /// Flex-Algo id (RFC 9352 §7.1). Each value is the per-algo locator
+    /// prefix plus its node End SID; the per-algo IPv6 RIB build routes
+    /// the prefix over the algo-N constrained topology. Cleared on peer
+    /// purge.
+    pub peer_algo_srv6: Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
     pub ilm: Levels<BTreeMap<u32, SpfIlm>>,
@@ -317,6 +326,13 @@ pub struct Isis {
     /// alongside the algo-0 entries).
     pub rib_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>,
 
+    /// Per-algorithm IPv6 RIB (SRv6 dataplane). Outer key is the
+    /// algorithm (128..=255); each value routes that algo's per-node
+    /// SRv6 locator prefixes over the algo-N constrained topology. Held
+    /// in-memory for `show isis ipv6 route algorithm N`; the routes are
+    /// also installed into the kernel FIB as plain IPv6 routes.
+    pub rib6_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>,
+
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
     pub sr_rx: UnboundedReceiver<RibSrRx>,
@@ -342,6 +358,19 @@ pub struct Isis {
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
     pub elib: super::srv6::ElibPool,
+
+    /// Per-Flexible-Algorithm SRv6 locator subscriptions. Mirrors the
+    /// single-locator `watched_locator` / `sr_locator` / `sr_end_sid`
+    /// trio but keyed by algorithm (128..=255). Populated from
+    /// `IsisConfig::sr_srv6_flex_algo_locators` via
+    /// `reconcile_locator_watch`; the resolved snapshot and node (End)
+    /// SID arrive on the same `sr_rx` channel as the base locator and
+    /// land here in `process_sr_rx`. Each algorithm advertises its own
+    /// locator (RFC 9352 §7.1, Algorithm field = N) so reaching a node
+    /// "in algo N" is plain longest-prefix IPv6 to its algo-N locator.
+    pub watched_flex_algo_locators: BTreeMap<u8, String>,
+    pub sr_flex_algo_locators: BTreeMap<u8, Locator>,
+    pub sr_flex_algo_end_sid: BTreeMap<u8, std::net::Ipv6Addr>,
 
     /// Per-fragment seq-number-wrap wait. Keyed by fragment id
     /// (LSPID byte 7). Armed when a fragment's next emission would
@@ -531,6 +560,12 @@ pub struct IsisTop<'a> {
     /// rebuild path can populate it from peer Router Capability
     /// SR-Algorithms sub-TLVs.
     pub peer_algos: &'a mut Levels<BTreeMap<IsisSysId, BTreeSet<u8>>>,
+
+    /// Per-peer per-algo SRv6 locators (see `Isis::peer_algo_srv6`).
+    /// Threaded through IsisTop so the LSDB rebuild path can populate it
+    /// from peer SRv6 Locator TLVs and the per-algo IPv6 RIB build can
+    /// read it.
+    pub peer_algo_srv6: &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -566,12 +601,25 @@ pub struct IsisTop<'a> {
     /// after each SPF cycle.
     pub rib_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>,
 
+    /// Per-algorithm IPv6 RIB (see `Isis::rib6_flex_algo`). Threaded so
+    /// `apply_spf_result` can install + snapshot the per-algo SRv6
+    /// locator routes after each SPF cycle.
+    pub rib6_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>,
+
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
     /// Capability / SRv6 sub-TLVs.
     pub sr_block: &'a Option<Block>,
     pub sr_locator: &'a Option<Locator>,
     pub sr_end_sid: &'a Option<std::net::Ipv6Addr>,
+
+    /// Per-Flex-Algorithm SRv6 locator snapshots + node (End) SIDs
+    /// (see `Isis::sr_flex_algo_locators` / `sr_flex_algo_end_sid`).
+    /// `lsp_generate` emits one SRv6 Locator TLV sub-locator per
+    /// resolved entry with Algorithm=N; the per-algo IPv6 RIB build
+    /// exports the local End SID for colour steering.
+    pub sr_flex_algo_locators: &'a BTreeMap<u8, Locator>,
+    pub sr_flex_algo_end_sid: &'a BTreeMap<u8, std::net::Ipv6Addr>,
 
     /// Read-only access to the cached SRLG table (see
     /// `Isis::srlg_groups`). lsp_generate resolves per-link SRLG group
@@ -681,6 +729,8 @@ impl Isis {
                     BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
                 >::default(),
                 peer_algos: Levels::<BTreeMap<IsisSysId, BTreeSet<u8>>>::default(),
+                peer_algo_srv6:
+                    Levels::<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
@@ -711,9 +761,13 @@ impl Isis {
                 spf_flex_algo: Levels::<BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>>>::default(
                 ),
                 rib_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>::default(),
+                rib6_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>::default(),
                 sr_rx,
                 watched_block: None,
                 watched_locator: None,
+                watched_flex_algo_locators: BTreeMap::new(),
+                sr_flex_algo_locators: BTreeMap::new(),
+                sr_flex_algo_end_sid: BTreeMap::new(),
                 sr_block: None,
                 sr_locator: None,
                 sr_end_sid: None,
@@ -2762,6 +2816,7 @@ impl Isis {
             peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
+            peer_algo_srv6: &mut self.peer_algo_srv6,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
             ilm: &mut self.ilm,
@@ -2782,9 +2837,12 @@ impl Isis {
             graph_flex_algo: &mut self.graph_flex_algo,
             spf_flex_algo: &mut self.spf_flex_algo,
             rib_flex_algo: &mut self.rib_flex_algo,
+            rib6_flex_algo: &mut self.rib6_flex_algo,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
+            sr_flex_algo_locators: &self.sr_flex_algo_locators,
+            sr_flex_algo_end_sid: &self.sr_flex_algo_end_sid,
             srlg_groups: &self.srlg_groups,
             flex_algo: &self.flex_algo,
             affinity_map: &self.affinity_map,
@@ -2821,6 +2879,7 @@ impl Isis {
             peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
+            peer_algo_srv6: &mut self.peer_algo_srv6,
             spf_timer: &mut self.spf_timer,
             spf_throttle: &mut self.spf_throttle,
             rib_client: &self.ctx.rib,
@@ -2900,30 +2959,107 @@ impl Isis {
         }
     }
 
-    /// Mirror of `reconcile_block_watch` for the SRv6 locator name.
+    /// Mirror of `reconcile_block_watch` for the SRv6 locator name(s).
+    ///
+    /// Reconciles BOTH the base (algorithm 0) locator and every
+    /// per-Flex-Algorithm locator binding
+    /// (`IsisConfig::sr_srv6_flex_algo_locators`, gated on SRv6 being
+    /// enabled). Watch / Unwatch is computed against the *union* of all
+    /// subscribed names so a name shared by the base and a flex-algo (or
+    /// by two flex-algos) is never double-unwatched while another algo
+    /// still needs it.
     pub fn reconcile_locator_watch(&mut self) {
-        let desired = target_locator_name(&self.config);
-        if desired == self.watched_locator {
-            return;
-        }
-        if let Some(prev) = self.watched_locator.take() {
+        let desired_base = target_locator_name(&self.config);
+        let desired_flex: BTreeMap<u8, String> = if self.config.sr_srv6_enabled {
+            self.config.sr_srv6_flex_algo_locators.clone()
+        } else {
+            BTreeMap::new()
+        };
+
+        // Union of names we currently watch vs. the union we want.
+        let mut current_names: BTreeSet<String> = BTreeSet::new();
+        current_names.extend(self.watched_locator.clone());
+        current_names.extend(self.watched_flex_algo_locators.values().cloned());
+        let mut desired_names: BTreeSet<String> = BTreeSet::new();
+        desired_names.extend(desired_base.clone());
+        desired_names.extend(desired_flex.values().cloned());
+
+        for name in current_names.difference(&desired_names) {
             let _ = self.ctx.rib.send(rib::Message::SrLocatorUnwatch {
                 proto: "isis".into(),
-                name: prev,
+                name: name.clone(),
             });
-            self.sr_locator = None;
-            // Locator gone -> Node SID has nothing to attach to. Drop
-            // the registration before we leave the helper so the show
-            // table doesn't keep advertising a SID with no locator.
-            self.update_end_sid();
-            self.clear_all_endx_sids();
         }
-        if let Some(next) = desired {
+        for name in desired_names.difference(&current_names) {
             let _ = self.ctx.rib.send(rib::Message::SrLocatorWatch {
                 proto: "isis".into(),
-                name: next.clone(),
+                name: name.clone(),
             });
-            self.watched_locator = Some(next);
+        }
+
+        // Base (algo-0) snapshot / Node SID / End.X reconcile, unchanged
+        // in spirit from the single-locator version.
+        if desired_base != self.watched_locator {
+            if self.watched_locator.is_some() {
+                self.sr_locator = None;
+                self.update_end_sid();
+                self.clear_all_endx_sids();
+            }
+            self.watched_locator = desired_base;
+        }
+
+        // Per-algo: drop snapshots + Node SIDs for algos that were
+        // removed or repointed at a different locator name. The fresh
+        // snapshot for any (re)added name arrives on `sr_rx` and is
+        // applied in `process_sr_rx`.
+        let stale: Vec<u8> = self
+            .watched_flex_algo_locators
+            .iter()
+            .filter(|(algo, name)| desired_flex.get(algo) != Some(name))
+            .map(|(algo, _)| *algo)
+            .collect();
+        for algo in stale {
+            self.sr_flex_algo_locators.remove(&algo);
+            self.update_flex_algo_end_sid(algo);
+            self.watched_flex_algo_locators.remove(&algo);
+        }
+        for (algo, name) in desired_flex {
+            self.watched_flex_algo_locators.insert(algo, name);
+        }
+    }
+
+    /// Per-algo twin of `update_end_sid`: reconcile the algorithm-N
+    /// node (End / uN) SID registration against the current per-algo
+    /// locator snapshot. Distinct per-algo locator prefixes mean each
+    /// SID has a distinct address, so the RIB registry (keyed by addr)
+    /// never collides across algorithms.
+    fn update_flex_algo_end_sid(&mut self, algo: u8) {
+        if let Some(prev) = self.sr_flex_algo_end_sid.remove(&algo) {
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr: prev });
+        }
+        if let Some(locator) = self.sr_flex_algo_locators.get(&algo)
+            && let Some(addr) = locator.node_sid_addr()
+            && let Some(loc_name) = self.watched_flex_algo_locators.get(&algo).cloned()
+        {
+            let (behavior, structure) = match locator.behavior {
+                Some(LocatorBehavior::Usid) => (SidBehavior::UN, locator.sid_structure()),
+                None => (SidBehavior::End, None),
+            };
+            let sid = Sid {
+                addr,
+                behavior,
+                context: SidContext::None,
+                owner: SidOwner::new("isis", 0),
+                locator: loc_name,
+                allocation_type: SidAllocationType::Dynamic,
+                ifindex: 0,
+                nh6: None,
+                structure,
+                table_id: 0,
+                segs: Vec::new(),
+            };
+            let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
+            self.sr_flex_algo_end_sid.insert(algo, addr);
         }
     }
 
@@ -3026,19 +3162,44 @@ impl Isis {
                 self.reconcile_local_pool();
             }
             RibSrRx::Locator { name, locator } => {
-                if self.watched_locator.as_deref() != Some(name.as_str()) {
+                // A single locator name may back the base (algo-0)
+                // subscription and/or one or more flex-algo bindings.
+                // Apply the snapshot to every subscriber of this name.
+                let mut touched = false;
+                if self.watched_locator.as_deref() == Some(name.as_str()) {
+                    self.sr_locator = locator.clone();
+                    // Locator snapshot churned — every End.X address
+                    // computed against the previous prefix is now stale.
+                    // Drop them all and let the next Hellos re-allocate
+                    // from a fresh ELIB pool.
+                    self.clear_all_endx_sids();
+                    // Allocate / withdraw the Node SID against the new
+                    // snapshot before flooding so the LSP carries the
+                    // correct value on the very first emission.
+                    self.update_end_sid();
+                    touched = true;
+                }
+                let algos: Vec<u8> = self
+                    .watched_flex_algo_locators
+                    .iter()
+                    .filter(|(_, n)| n.as_str() == name.as_str())
+                    .map(|(algo, _)| *algo)
+                    .collect();
+                for algo in algos {
+                    match &locator {
+                        Some(l) => {
+                            self.sr_flex_algo_locators.insert(algo, l.clone());
+                        }
+                        None => {
+                            self.sr_flex_algo_locators.remove(&algo);
+                        }
+                    }
+                    self.update_flex_algo_end_sid(algo);
+                    touched = true;
+                }
+                if !touched {
                     return;
                 }
-                self.sr_locator = locator;
-                // Locator snapshot churned — every End.X address
-                // computed against the previous prefix is now stale.
-                // Drop them all and let the next Hellos re-allocate
-                // from a fresh ELIB pool.
-                self.clear_all_endx_sids();
-                // Allocate / withdraw the Node SID against the new
-                // snapshot before flooding so the LSP carries the
-                // correct value on the very first emission.
-                self.update_end_sid();
             }
         }
         // Re-originate both levels so the new SR snapshot is reflected in
