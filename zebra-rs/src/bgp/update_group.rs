@@ -290,6 +290,19 @@ pub fn empty_map() -> UpdateGroupMap {
     BTreeMap::new()
 }
 
+/// IOS-XR-style IDs ("ipv4-unicast.0", "ipv6-unicast.0", …) of every
+/// live update-group across all AFI/SAFIs. Backs the `bgp:update-group`
+/// dynamic completion (`show bgp update-group <id>`) and matches the IDs
+/// `show bgp update-group` renders. Iteration order follows the
+/// `BTreeMap` keys: AFI/SAFI, then signature.
+pub fn id_comps(update_groups: &UpdateGroupMap) -> Vec<String> {
+    update_groups
+        .values()
+        .flat_map(|af| af.groups.values())
+        .map(|group| group.id.to_string())
+        .collect()
+}
+
 /// Compute the signature for `peer` in `(afi, safi)`. Returns `None`
 /// if the peer is not active in this AFI/SAFI (capability not
 /// negotiated by both sides). Established-state is **not** checked
@@ -1423,6 +1436,40 @@ mod tests {
         assert_eq!(id.to_string(), "vpnv4.7");
         let id = UpdateGroupId::new(Afi::L2vpn, Safi::Evpn, 2);
         assert_eq!(id.to_string(), "evpn.2");
+    }
+
+    /// `id_comps` lists every live group's IOS-XR ID across all
+    /// AFI/SAFIs — the candidate set behind the `bgp:update-group`
+    /// dynamic completion, matching what `show bgp update-group`
+    /// renders (e.g. "ipv4-unicast.0", "ipv6-unicast.0").
+    #[test]
+    fn id_comps_lists_all_group_ids() {
+        let mut groups = empty_map();
+
+        let (_, g4) = test_group(0);
+        groups
+            .entry(AfiSafi::new(Afi::Ip, Safi::Unicast))
+            .or_default()
+            .groups
+            .insert(g4.sig.clone(), g4);
+
+        // Same base signature, but a distinct AFI/SAFI bucket and an
+        // IPv6-tagged ID.
+        let (_, mut g6) = test_group(0);
+        g6.id = UpdateGroupId::new(Afi::Ip6, Safi::Unicast, 0);
+        groups
+            .entry(AfiSafi::new(Afi::Ip6, Safi::Unicast))
+            .or_default()
+            .groups
+            .insert(g6.sig.clone(), g6);
+
+        let mut got = id_comps(&groups);
+        got.sort();
+        assert_eq!(got, vec!["ipv4-unicast.0", "ipv6-unicast.0"]);
+
+        // No groups ⇒ no candidates (the dynamic key contributes
+        // nothing rather than a placeholder).
+        assert!(id_comps(&empty_map()).is_empty());
     }
 
     fn attach_test_peer(addr: std::net::IpAddr) -> Peer {
