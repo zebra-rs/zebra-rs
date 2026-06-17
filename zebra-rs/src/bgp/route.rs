@@ -567,6 +567,16 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
                     }
                 } else if let Some(label) = resolve_flex_algo_label(bgp, &best.attr, *nh) {
                     uni.mpls.push(rib::Label::Explicit(label));
+                } else if uni.segs.is_empty()
+                    && let Some(sid) = resolve_flex_algo_srv6(bgp, &best.attr, IpAddr::V4(*nh))
+                {
+                    // SRv6 Flex-Algo steering: H.Encap toward the
+                    // destination node's algo-N End SID (the SRv6 twin of
+                    // the outer-label push above). `uni.segs.is_empty()`
+                    // leaves any route that already carries a service SID
+                    // untouched — VPN/service prepend is a follow-up.
+                    uni.segs = vec![sid];
+                    uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
                 }
             }
             let _ = bgp.rib_client.send(rib::Message::Ipv4Add {
@@ -711,11 +721,24 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
         IpNet::V6(prefix),
         selected.first(),
     );
-    match best
-        .as_deref()
-        .and_then(|b| select_fib_entry_v6(b, transport))
-    {
-        Some(rib_entry) => {
+    let best = best.as_deref();
+    let entry = best.and_then(|b| select_fib_entry_v6(b, transport));
+    match entry {
+        Some(mut rib_entry) => {
+            // Colour-aware SRv6 steering — plain-path only. A VPN tunnel
+            // entry already carries its own seg6 encap / label stack, and
+            // a plain route already carrying a service SID (segs non-empty)
+            // is left untouched (prepend is a follow-up).
+            if let Some(best) = best
+                && !is_vpn_fib_winner(best, transport)
+                && let Some(BgpNexthop::Ipv6(nh)) = best.attr.nexthop.as_ref()
+                && let rib::Nexthop::Uni(ref mut uni) = rib_entry.nexthop
+                && uni.segs.is_empty()
+                && let Some(sid) = resolve_flex_algo_srv6(bgp, &best.attr, IpAddr::V6(*nh))
+            {
+                uni.segs = vec![sid];
+                uni.encap_type = Some(isis_packet::srv6::EncapType::HEncap);
+            }
             let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
                 prefix,
                 rib: rib_entry,
@@ -958,6 +981,39 @@ fn resolve_flex_algo_label_inner(
             && let Some((_, entry)) = table.get_lpm(&host)
         {
             return Some(entry.label);
+        }
+    }
+    None
+}
+
+/// SRv6 twin of [`resolve_flex_algo_label`]: walk the route's Color
+/// extcomms (ascending color order), look each up in `color_policy`,
+/// and on the first algo whose SRv6 shadow has a covering route for
+/// `nh`, return the destination node's algo-N End SID. The caller
+/// imposes an H.Encap toward it instead of pushing an MPLS label.
+fn resolve_flex_algo_srv6(
+    bgp: &super::peer::BgpTop,
+    attr: &BgpAttr,
+    nh: IpAddr,
+) -> Option<std::net::Ipv6Addr> {
+    resolve_flex_algo_srv6_inner(bgp.color_policy?, bgp.flex_algo_srv6_routes?, attr, nh)
+}
+
+/// Pure-function inner for `resolve_flex_algo_srv6` — testable without a
+/// full `BgpTop`.
+fn resolve_flex_algo_srv6_inner(
+    color_policy: &super::color_policy::ColorPolicy,
+    shadow: &super::color_policy::FlexAlgoSrv6Shadow,
+    attr: &BgpAttr,
+    nh: IpAddr,
+) -> Option<std::net::Ipv6Addr> {
+    for color in attr.colors() {
+        // Unbound colour — try the next, mirroring the SR-MPLS path.
+        let Some(algo) = color_policy.flex_algo_for(color.color) else {
+            continue;
+        };
+        if let Some(sid) = shadow.end_sid_for(algo, nh) {
+            return Some(sid);
         }
     }
     None
@@ -10322,6 +10378,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10379,6 +10436,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10445,6 +10503,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10477,6 +10536,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10528,6 +10588,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10565,6 +10626,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10621,6 +10683,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10656,6 +10719,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10744,6 +10808,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10787,6 +10852,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10862,6 +10928,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10902,6 +10969,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10960,6 +11028,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -10998,6 +11067,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -11058,6 +11128,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -11094,6 +11165,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -11231,6 +11303,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -11350,6 +11423,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -11456,6 +11530,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -12414,6 +12489,89 @@ mod color_aware_nht_tests {
         assert_eq!(
             resolve_flex_algo_label_inner(&cp, &shadow, &attr, "10.0.0.5".parse().unwrap()),
             Some(17128)
+        );
+    }
+
+    // ---- SRv6 colour steering (resolve_flex_algo_srv6_inner) --------
+
+    use crate::bgp::color_policy::FlexAlgoSrv6Shadow;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    #[test]
+    fn srv6_no_color_returns_none() {
+        let cp = ColorPolicy::new();
+        let shadow = FlexAlgoSrv6Shadow::default();
+        let attr = BgpAttr::default();
+        assert!(
+            super::resolve_flex_algo_srv6_inner(
+                &cp,
+                &shadow,
+                &attr,
+                IpAddr::V6("2001:db8:1::5".parse().unwrap())
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn srv6_bound_v6_nexthop_returns_end_sid() {
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let end_sid: Ipv6Addr = "2001:db8:b128::".parse().unwrap();
+        let mut shadow = FlexAlgoSrv6Shadow::default();
+        shadow.insert(128, "2001:db8:1::/64".parse().unwrap(), end_sid);
+        let attr = attr_with_colors(&[100]);
+        assert_eq!(
+            super::resolve_flex_algo_srv6_inner(
+                &cp,
+                &shadow,
+                &attr,
+                IpAddr::V6("2001:db8:1::5".parse().unwrap())
+            ),
+            Some(end_sid)
+        );
+    }
+
+    #[test]
+    fn srv6_bound_v4_nexthop_returns_end_sid() {
+        // IPv4 unicast over SRv6: a v4 next-hop resolves in the v4 trie
+        // to a v6 End SID.
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let end_sid: Ipv6Addr = "2001:db8:b128::".parse().unwrap();
+        let mut shadow = FlexAlgoSrv6Shadow::default();
+        shadow.insert(128, "10.0.0.0/24".parse().unwrap(), end_sid);
+        let attr = attr_with_colors(&[100]);
+        assert_eq!(
+            super::resolve_flex_algo_srv6_inner(
+                &cp,
+                &shadow,
+                &attr,
+                IpAddr::V4("10.0.0.5".parse().unwrap())
+            ),
+            Some(end_sid)
+        );
+    }
+
+    #[test]
+    fn srv6_bound_color_without_route_returns_none() {
+        let mut cp = ColorPolicy::new();
+        cp.bindings.insert(100, 128);
+        let mut shadow = FlexAlgoSrv6Shadow::default();
+        shadow.insert(
+            128,
+            "2001:db8:99::/64".parse().unwrap(),
+            "2001:db8:b128::".parse().unwrap(),
+        );
+        let attr = attr_with_colors(&[100]);
+        assert!(
+            super::resolve_flex_algo_srv6_inner(
+                &cp,
+                &shadow,
+                &attr,
+                IpAddr::V6("2001:db8:1::5".parse().unwrap())
+            )
+            .is_none()
         );
     }
 }

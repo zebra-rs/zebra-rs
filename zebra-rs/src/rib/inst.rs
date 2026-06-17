@@ -74,6 +74,19 @@ pub enum Message {
         algo: u8,
         prefix: Ipv4Net,
     },
+    /// SRv6 twin of `FlexAlgoRouteAdd`: IS-IS publishes a per-algo
+    /// (prefix → node End SID) snapshot. RIB re-broadcasts it via
+    /// `RibRx::FlexAlgoSrv6RouteAdd` for the colour-aware resolver. No
+    /// FIB install here — the per-algo locator routes are installed by
+    /// IS-IS; this is the steering metadata BGP needs to H.Encap a
+    /// coloured service route toward the destination node's End SID.
+    FlexAlgoSrv6RouteAdd {
+        route: crate::rib::api::FlexAlgoSrv6Route,
+    },
+    FlexAlgoSrv6RouteDel {
+        algo: u8,
+        prefix: ipnet::IpNet,
+    },
     BridgeAdd {
         name: String,
         config: BridgeConfig,
@@ -1636,6 +1649,17 @@ impl Rib {
                     self.flex_algo_routes.remove(&algo);
                 }
                 self.api_flex_algo_route_del(algo, prefix);
+            }
+            Message::FlexAlgoSrv6RouteAdd { route } => {
+                // No RIB-side shadow: the per-algo locator routes already
+                // live in the FIB (installed by IS-IS) and this metadata
+                // is only consumed live by the colour-aware resolver, so
+                // we fan it out without persisting (same delivery model
+                // as the SR-MPLS path's re-broadcast).
+                self.api_flex_algo_srv6_route_add(&route);
+            }
+            Message::FlexAlgoSrv6RouteDel { algo, prefix } => {
+                self.api_flex_algo_srv6_route_del(algo, prefix);
             }
             Message::BridgeAdd { name, config } => {
                 let bridge = Bridge {

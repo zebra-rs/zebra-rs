@@ -1,6 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::{BulkPhase, Link, MacAddr, Rib, RibType, RouteBatch, link::LinkAddr};
@@ -34,6 +34,21 @@ pub struct FlexAlgoRoute {
     pub prefix: Ipv4Net,
     pub metric: u32,
     pub nexthops: Vec<FlexAlgoNexthop>,
+}
+
+/// Per-algorithm SRv6 colour-steering snapshot published from IS-IS to
+/// RIB (the SRv6 twin of `FlexAlgoRoute`). Maps a destination `prefix`
+/// (IPv4 or IPv6) reachable in algo-N to the *advertising node's* algo-N
+/// SRv6 End SID. Unlike SR-MPLS there is no per-prefix SID — every
+/// prefix a node advertises maps to that one node End SID — so the
+/// colour-aware resolver imposes an H.Encap toward `end_sid` rather than
+/// pushing an outer label. The same `(algo, prefix)` may arrive across
+/// SPF cycles; each arrival replaces the previous snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlexAlgoSrv6Route {
+    pub algo: u8,
+    pub prefix: IpNet,
+    pub end_sid: Ipv6Addr,
 }
 
 /// One bridge-FDB row, distilled from the larger `FibNeighbor` so
@@ -190,6 +205,16 @@ pub enum RibRx {
     FlexAlgoRouteDel {
         algo: u8,
         prefix: Ipv4Net,
+    },
+    /// SRv6 twin of `FlexAlgoRouteAdd/Del`: per-algo (prefix → node End
+    /// SID) snapshots the colour-aware resolver LPMs to impose an
+    /// H.Encap toward the destination node's algo-N End SID.
+    FlexAlgoSrv6RouteAdd {
+        route: FlexAlgoSrv6Route,
+    },
+    FlexAlgoSrv6RouteDel {
+        algo: u8,
+        prefix: IpNet,
     },
 
     // ---- Next-Hop Tracking ----------------------------------------
@@ -425,6 +450,24 @@ impl Rib {
     pub fn api_flex_algo_route_del(&self, algo: u8, prefix: Ipv4Net) {
         for (_, sub) in self.client_registry.iter_vrf(0) {
             let _ = sub.rib_rx_tx.send(RibRx::FlexAlgoRouteDel { algo, prefix });
+        }
+    }
+
+    /// SRv6 twin of `api_flex_algo_route_add` — fan-out a per-algo
+    /// (prefix → node End SID) add to every default-VRF subscriber.
+    pub fn api_flex_algo_srv6_route_add(&self, route: &FlexAlgoSrv6Route) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub.rib_rx_tx.send(RibRx::FlexAlgoSrv6RouteAdd {
+                route: route.clone(),
+            });
+        }
+    }
+
+    pub fn api_flex_algo_srv6_route_del(&self, algo: u8, prefix: IpNet) {
+        for (_, sub) in self.client_registry.iter_vrf(0) {
+            let _ = sub
+                .rib_rx_tx
+                .send(RibRx::FlexAlgoSrv6RouteDel { algo, prefix });
         }
     }
 }

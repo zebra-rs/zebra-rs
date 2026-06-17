@@ -10,10 +10,79 @@
 //! map work in a subsequent PR.
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv6Addr};
+
+use ipnet::{Ipv4Net, Ipv6Net};
+use prefix_trie::PrefixMap;
 
 use crate::config::{Args, ConfigOp};
 
 use super::Bgp;
+
+/// Per-algorithm SRv6 colour-steering shadow, populated from
+/// `RibRx::FlexAlgoSrv6RouteAdd/Del`. Maps a destination prefix
+/// reachable in algo-N to the advertising node's algo-N SRv6 End SID.
+/// The colour-aware resolver LPMs a service route's next-hop here and,
+/// on a hit, imposes an H.Encap toward the End SID (the SRv6 twin of the
+/// SR-MPLS outer-label push). v4 and v6 next-hops resolve in separate
+/// tries.
+#[derive(Debug, Default, Clone)]
+pub struct FlexAlgoSrv6Shadow {
+    pub v4: BTreeMap<u8, PrefixMap<Ipv4Net, Ipv6Addr>>,
+    pub v6: BTreeMap<u8, PrefixMap<Ipv6Net, Ipv6Addr>>,
+}
+
+impl FlexAlgoSrv6Shadow {
+    /// LPM `nh` against algo-N's table, returning the node End SID to
+    /// encap toward. `None` when the algo or a covering prefix is absent.
+    pub fn end_sid_for(&self, algo: u8, nh: IpAddr) -> Option<Ipv6Addr> {
+        match nh {
+            IpAddr::V4(a) => {
+                let host = Ipv4Net::new(a, 32).ok()?;
+                self.v4.get(&algo)?.get_lpm(&host).map(|(_, sid)| *sid)
+            }
+            IpAddr::V6(a) => {
+                let host = Ipv6Net::new(a, 128).ok()?;
+                self.v6.get(&algo)?.get_lpm(&host).map(|(_, sid)| *sid)
+            }
+        }
+    }
+
+    /// Insert / overwrite a (prefix → End SID) binding for `algo`.
+    pub fn insert(&mut self, algo: u8, prefix: ipnet::IpNet, end_sid: Ipv6Addr) {
+        match prefix {
+            ipnet::IpNet::V4(p) => {
+                self.v4.entry(algo).or_default().insert(p, end_sid);
+            }
+            ipnet::IpNet::V6(p) => {
+                self.v6.entry(algo).or_default().insert(p, end_sid);
+            }
+        }
+    }
+
+    /// Remove a (prefix) binding for `algo`, dropping the algo's table
+    /// when it empties so a stale algo key never lingers.
+    pub fn remove(&mut self, algo: u8, prefix: ipnet::IpNet) {
+        match prefix {
+            ipnet::IpNet::V4(p) => {
+                if let Some(t) = self.v4.get_mut(&algo) {
+                    t.remove(&p);
+                    if t.iter().next().is_none() {
+                        self.v4.remove(&algo);
+                    }
+                }
+            }
+            ipnet::IpNet::V6(p) => {
+                if let Some(t) = self.v6.get_mut(&algo) {
+                    t.remove(&p);
+                    if t.iter().next().is_none() {
+                        self.v6.remove(&algo);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Live color → flex-algorithm binding table. Wrapped in a struct so
 /// future fields (per-entry strict / fallback knobs, source attribution
