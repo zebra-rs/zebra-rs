@@ -844,8 +844,8 @@ models followed in #1444–#1458); the status column reflects `main` as of
 | 0.1 | Bench harness + baseline profile | — | merged (PR #1406) |
 | A.1 | Flush job extraction (pure function) | — | merged (PR #1408) |
 | A.2 | Flush offload to worker | A.1 | merged (PR #1416) |
-| B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ✅ built (WIP branch) |
-| B.2 | Shard message protocol + label sub-blocks | B.1 | ✅ built (WIP branch) |
+| B.1 | State partition: `BgpShard` struct, adj-in re-keying | — | ✅ merged (#1442, bgp-shard-* series) |
+| B.2 | Shard message protocol + label sub-blocks | B.1 | ✅ merged (#1442) — shipped `ShardMsg`/`ShardOut` set diverged from the B.2 sketch; see Implementation status |
 | B.3 | ~~Spawn shard task~~ → **sync dispatch** at N=1 | B.2 | ✅ built — pivoted to sync, see "Implementation status" |
 | B.4 | Show / clear / sync scatter-gather | B.3 | ✅ built — read-replica mirror + `DumpV4` session-up sync + the per-peer show scatter-gathers (`show bgp ipv4`, received-/advertised-routes, `summary` counts, PRs #1442/#1455/#1457); `@bgp_shard_v4_sync` + the full sync matrix green. Remaining: `clear`/soft-in onto `DumpV4`, streamed `show` |
 | B.5 | BDD + lifecycle hardening at N=1 | B.4 | ⏳ |
@@ -862,6 +862,11 @@ models followed in #1444–#1458); the status column reflects `main` as of
 > the dedicated group-affinity form deferred to E.2+ (§12). The rows
 > above track the original-plan axis.
 
+The phase prose below is the **original plan** (kept as the design rationale,
+like the rest of §1–10); each block now carries an ***As built*** line stating
+what actually shipped and where it diverged. The authoritative as-built
+architecture is the "Implementation status" section at the top of this doc.
+
 ### Phase 0 — Baseline measurement (before touching anything)
 
 **0.1 — Bench harness + baseline profile.**
@@ -876,6 +881,8 @@ expectations, picks Phase C defaults, and is the regression gate every
 later step must pass.
 *Exit*: baseline table in §9; harness runnable by CI on demand (not in
 the default suite).
+***As built***: merged (PR #1406) as `tools/bgp-bench`; baseline + the
+12-core sharded sweep recorded in §9 and "Implementation status".
 
 ### Phase A — Update-flush offload (independent of sharding)
 
@@ -889,6 +896,7 @@ runs it inline. Same for `flush_ipv6`.
 *Tests*: golden byte tests pinning canonical + pruned UPDATE encodings
 (per attr-bucket, with/without split-horizon sources, LLGR exclusion,
 ENHE per-member next-hops). No behavior change.
+***As built***: merged (PR #1408) as planned — `FlushJob` + a pure `run`.
 
 **A.2 — Flush offload.**
 Execute `FlushJob::run` on `tokio::task::spawn_blocking` (the IS-IS
@@ -899,6 +907,8 @@ in-flight flush per group** — a `flush_inflight` flag on `UpdateGroup`;
 routes queued during flight re-arm the debounce timer on `FlushDone`.
 *Tests*: A.1 goldens unchanged; BDD suite green; bench shows main-loop
 headroom on a fan-out workload (many members, large table).
+***As built***: merged (PR #1416) as planned — `FlushJob::run` on
+`spawn_blocking`, `FlushDone` counters, one-in-flight-flush per group.
 
 ### Phase B — Shard extraction at N=1 (the real refactor, race-free)
 
@@ -918,6 +928,10 @@ EVPN/flowspec/SR-Policy/BGP-LS/table-map explicitly stay outside
 *Likely splits during review*: adj-in re-keying (B.1a) vs `ShardCtx`
 extraction (B.1b). Largest mechanical PR of the series.
 *Tests*: full suite + A.1 goldens; zero functional delta.
+***As built***: merged (#1442, the `bgp-shard-adj-in` / `bgp-shard-attr-store`
+PRs). `BgpShard` (`bgp/shard/mod.rs`) owns the sharded Loc-RIB tables + the
+per-peer `adj_in` slices + a shard `BgpAttrStore`; EVPN/flowspec/SR-Policy/
+BGP-LS/RTC stayed main-owned as planned (§8 D3).
 
 **B.2 — Shard message protocol + per-shard label sub-blocks.**
 Model on `bgp/vrf/msg.rs` (the documented precedent):
@@ -941,6 +955,14 @@ Model on `bgp/vrf/msg.rs` (the documented precedent):
   shards allocate locally and request refills via `LabelBlockLow`.
 *Tests*: unit tests on the protocol types + sub-block allocator;
 doc-comment the ordering contract (§7).
+***As built***: merged (#1442), but the **message set diverged** from this
+sketch. The live `ShardMsg` is `UpdateV4` / `RouteBatchV4` / `WithdrawV4` /
+`UpdateV6` / `OriginateV4` (#1458) / `PeerDown` / `SoftInV4` / `PolicyReplace` /
+`NexthopReachableBatchV4` / `DumpV4` / `DumpAdjInV4` / `CountAdjInV4All`;
+`ShardOut` is `BestPathV4` / `BestPathV6` (the `FibDelta`/`AdvDelta`/`NhtTrack`
+split above did not ship — FIB + NHT stayed main-side off the best-path delta).
+Per-shard label sub-blocks landed (`ShardLabelPool`, `bgp-shard-label-block`).
+See Implementation status ("Live `ShardMsg` set").
 
 **B.3 — Spawn the shard task (N=1).**
 Mirror `spawn_bgp_vrf` (`bgp/vrf/spawn.rs:115`): `BgpShardHandle
@@ -956,6 +978,11 @@ sharded AFI/SAFI — this structurally closes the "new SAFI must
 remember to add a route_clean block" bug-class (#1329).
 *Tests*: full BDD suite (the real gate — every BGP feature traverses
 the split); targeted unit tests for the relay path.
+***As built***: merged (#1442), **pivoted to synchronous dispatch** — no
+spawned task at N=1; `route.rs` calls `BgpShard::handle(msg) -> Vec<ShardOut>`
+inline and `shard` is a plain field on `Bgp`. The `BgpShardHandle { inbox,
+show_tx, task }` form above is the original plan; the pivot's rationale is in
+Implementation status (B.3). `route_clean(ident)` centralization shipped.
 
 **B.4 — Show / clear / sync scatter-gather.**
 Route-table show commands move to the shard show channel, reusing the
@@ -965,6 +992,12 @@ the shard; soft-out re-runs `SyncPeer`; hard clear = `PeerDown` +
 session reset.
 *Tests*: BDD show/clear features; `parse()` pin tests for any show
 spelling that moves.
+***As built***: merged (#1442/#1455/#1457), **different mechanism** than the
+`SubscribeShowVrf` redirect above. `show`/`sync` use the read-replica mirror +
+the `DumpV4` shard sync; the per-peer shows (received-/advertised-routes,
+`summary` counts) async scatter-gather from the off-main owners in
+`process_show_msg`. See the (updated) "Read-path scatter-gather (B.4)" section.
+Remaining: `clear`/soft-in onto `DumpV4`, streamed `show`.
 
 **B.5 — Lifecycle hardening + BDD at N=1.**
 A dedicated BDD feature: peer flap under continuous route churn,
@@ -973,6 +1006,11 @@ no leaked routes after teardown (the §7 ordering contract in action).
 *Exit for Phase B*: full BDD green at N=1; bench parity with baseline
 (no regression beyond noise); this doc updated with measured relay
 overhead.
+***As built***: ⏳ partial. Much of the lifecycle hardening is covered at
+**N>1** instead — the shard sync matrix (88 scenarios, every AFI/SAFI ×
+AddPath, sync → per-path withdraw → peer-down) + the cursor/backpressure
+features (`@bgp_sync_cursor_v4`, `@bgp_sync_backpressure`). A dedicated N=1
+churn / mid-stream-refresh / GR-stale chaos feature is still future.
 
 ### Phase C — N shards + M update-workers (the Juniper form)
 
@@ -988,6 +1026,10 @@ live resharding is out of scope. NHT: main refcounts `NhtTrack`/
 broadcasts `NexthopUpdate` replicas.
 *Tests*: BDD variants of an existing multi-peer feature at shards=2
 and 4; unit test: hash stability + co-location property.
+***As built***: merged (#1442 + the YANG knob #1444). `ShardPool` (dedicated
+OS threads, not tokio tasks — see Implementation status), `shard_of` = FNV-1a
+% N, `router bgp shards <1-64>` (or `ZEBRA_BGP_SHARDS`). Plain v4-unicast only;
+VPNv4/v6/VPNv6/LU still ingest on the synchronous shard.
 
 **C.2 — Update-worker tasks.**
 Move `UpdateGroupMap` ownership + the Phase A `FlushJob` machinery
@@ -1003,6 +1045,21 @@ a main → worker broadcast; land #4 first or fold it in here — decide
 at review time.
 *Tests*: A.1 goldens re-pinned at the worker boundary; BDD soft-out /
 advertised-routes features.
+***As built***: 🔶 partial, and **split into several follow-on streams** —
+none of which is the *static* group→worker affinity above:
+- **Parallel out-policy egress** (E.1/E.2): the per-`(prefix, group)` walk runs
+  on a bounded rayon pool (`egress_pool()`, `cores − shards`) — built.
+- **Off-main egress-task models** (built, opt-in): per-peer
+  ([`bgp-peer-egress-task.md`](bgp-peer-egress-task.md)) and per-`UpdateGroupSig`
+  ([`bgp-egress-group-task-migration.md`](bgp-egress-group-task-migration.md))
+  tasks that own adj-out + encode + fan.
+- **Work-stealing pool** (design): the engines on a *fixed* pool — supersedes
+  static affinity — [`bgp-egress-worker-pool.md`](bgp-egress-worker-pool.md)
+  (§12 P3). Its feed is the journal
+  ([`bgp-egress-journal.md`](bgp-egress-journal.md), §12 P1/P2).
+
+Shards still feed egress *via the main reduce* (not `AdvDelta` direct to a
+worker). Default flip + v6/VPN egress still future.
 
 **C.3 — Barriers and lifecycle at N>1.**
 EoR emission waits on all shards' sync completion (broadcast-and-ack);
@@ -1010,6 +1067,10 @@ route-refresh and GR/LLGR stale sweeps likewise ack-gated; hard clear
 drains per-shard queues before session restart. Chaos test in the
 bench harness: peer churn under full-table load at shards=4, asserting
 Loc-RIB/adj-out consistency afterward.
+***As built***: ⏳ future — the N>1 broadcast-and-ack barriers for
+EoR / refresh / GR-LLGR sweeps are not yet built. (Peer-down + per-path
+withdraw at N>1 are covered by the sync matrix; the EoR/refresh barriers are
+the remaining gap.)
 
 **C.4 — Perf matrix + defaults.**
 Re-run the Phase 0 matrix across shards × update-workers × peers ×
@@ -1018,6 +1079,11 @@ the shipping default (stay 1 unless the numbers argue otherwise —
 Juniper's data says gains need RIB-FIB ratio and fan-out we should
 prove on our own workloads). Update `docs/` + book page; only then
 consider flipping the default.
+***As built***: 🔶 partial — the YANG knobs shipped (`router bgp shards`
+#1444, `router bgp peer-task` #1450) and the no-policy + policy-heavy 12-core
+sweeps are in §9 / "Implementation status" (knee at N=4). Still TODO: the full
+`shards × egress-workers × peers × routes` cross-product, a justified shipping
+default, and flipping it on.
 
 ## 7. Correctness invariants
 
