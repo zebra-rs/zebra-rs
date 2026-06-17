@@ -119,12 +119,12 @@ keep their own default-port listeners.
 
 ## Verification
 
-`show ip bgp neighbors` reports the actual TCP endpoints of the live
+`show bgp neighbors` reports the actual TCP endpoints of the live
 session, FRR-style. On the router that dialed a custom port, the
 **foreign** port is the configured one:
 
 ```
-> show ip bgp neighbors
+> show bgp neighbors
 BGP neighbor is 192.168.0.2, remote AS 65002, local AS 65001, external link
   Local host: 192.168.0.1, Local port: 38766
   Foreign host: 192.168.0.2, Foreign port: 1790
@@ -136,7 +136,7 @@ On the router that accepted it, the **local** port is its listen port
 and the foreign port is the peer's ephemeral source port:
 
 ```
-> show ip bgp neighbors
+> show bgp neighbors
 BGP neighbor is 192.168.0.1, remote AS 65001, local AS 65002, external link
   Local host: 192.168.0.2, Local port: 1790
   Foreign host: 192.168.0.1, Foreign port: 38766

@@ -143,7 +143,7 @@ every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show ip bgp neighbor <addr>` reports the configured form:
+`show bgp neighbors <addr>` reports the configured form:
 
 ```
   Private AS removal: remove-private-AS (outbound)
@@ -155,7 +155,7 @@ On the neighbor, confirm the stripped path arrived. `z3` should now hold
 `10.0.0.1/32` with an AS_PATH of `100` rather than `100 65001`:
 
 ```
-show ip bgp 10.0.0.1/32
+show bgp 10.0.0.1/32
 ```
 
 ### Interaction with update-groups

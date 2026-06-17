@@ -117,7 +117,7 @@ by every member; a statement on the neighbor itself wins.
 
 ## Verification
 
-`show ip bgp neighbor <addr>` reports the active policy:
+`show bgp neighbors <addr>` reports the active policy:
 
 ```
   Connected-network check disabled (eBGP peer may be unconnected at TTL 1)

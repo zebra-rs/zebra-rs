@@ -239,7 +239,7 @@ BGP-LU swap label for `2.2.2.1`.
 **The ASBRs carry only labeled IPv4 — no VPN.** On `asbr1`:
 
 ```
-$ show ip bgp labeled-unicast
+$ show bgp labeled-unicast
     Network            Next Hop            ...  Path
  *>i 1.1.1.1/32         1.1.1.1             ...  i        # local PE, from PE1
  *>  2.2.2.1/32         172.16.0.2          ...  65001 i  # remote PE, from ASBR2
@@ -248,7 +248,7 @@ $ show ip bgp labeled-unicast
 The `label-v4` capability is negotiated on each BGP-LU session:
 
 ```
-$ show ip bgp neighbor 172.16.0.2
+$ show bgp neighbors 172.16.0.2
   ...
     IPv4 Labeled Unicast: advertised and received
 ```
@@ -262,7 +262,7 @@ $ show bgp vpnv4
 Route Distinguisher: 65001:1
  *>  10.2.0.0/30        2.2.2.1   ...   # rt:65000:100
 
-$ show ip bgp neighbor 2.2.2.1
+$ show bgp neighbors 2.2.2.1
   BGP state = Established
 ```
 

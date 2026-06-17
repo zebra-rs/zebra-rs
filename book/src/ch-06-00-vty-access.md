@@ -120,7 +120,7 @@ vtyctl show 'show ip route'
 ip netns exec vrf-red vtyctl show 'show ip route'
 
 # Remote TCP
-vtyctl show --host tcp://router.example.com:2666 'show ip bgp'
+vtyctl show --host tcp://router.example.com:2666 'show bgp'
 
 # Legacy bare hostname (back-compat)
 vtyctl show --host 127.0.0.1 'show ip route'

@@ -84,8 +84,8 @@ group (and its `remote-as`) lands.
 ## Verification
 
 A spoke that has connected shows up like any other peer —
-`show bgp summary`, `show ip bgp neighbors` — identified by its source
-address, and `show ip bgp neighbors <addr>` reports the binding:
+`show bgp summary`, `show bgp neighbors` — identified by its source
+address, and `show bgp neighbors <addr>` reports the binding:
 
 ```
   Neighbor-group: SPOKES (remote-as inherited)
@@ -95,7 +95,7 @@ The group detail view counts the spokes that are currently
 materialized:
 
 ```
-show ip bgp neighbor-group SPOKES
+show bgp neighbor-group SPOKES
 BGP neighbor-group: SPOKES
   Remote-AS: 65002
   Afi-Safi:  ipv4 enabled, ipv6 enabled

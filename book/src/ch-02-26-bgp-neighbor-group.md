@@ -162,18 +162,18 @@ until the group definition lands.
 
 ## Verification
 
-`show ip bgp neighbor-group` lists every group with a member count;
+`show bgp neighbor-group` lists every group with a member count;
 the detail form shows every configured knob and which peers reference
 it:
 
 ```
-show ip bgp neighbor-group
+show bgp neighbor-group
 Name                      Remote-AS  Members
 RR                            65001        2
 ```
 
 ```
-show ip bgp neighbor-group RR
+show bgp neighbor-group RR
 BGP neighbor-group: RR
   Remote-AS: 65001
   Afi-Safi:  ipv4 enabled nhs, ipv6 enabled
@@ -188,7 +188,7 @@ BGP neighbor-group: RR
 per-neighbor `remote-as`. Both commands also have `--json` forms; the
 JSON carries the same `afi_safi` map keyed by family name.
 
-On the member side, `show ip bgp neighbors` reports the binding:
+On the member side, `show bgp neighbors` reports the binding:
 
 ```
   Neighbor-group: RR (remote-as inherited)
@@ -203,7 +203,7 @@ On the member side, `show ip bgp neighbors` reports the binding:
 - **An afi-safi flip "did nothing".** Capability changes wait for the
   next OPEN exchange by design. `clear bgp ipv4 neighbor <X>` the
   member and re-check the `Neighbor Capabilities:` section of
-  `show ip bgp neighbors`.
+  `show bgp neighbors`.
 - **One member ignores the group's family setting.** That member has
   its own `afi-safi <family> enabled` statement, which outranks the
   group. Delete the per-neighbor leaf to fall back to inheritance.

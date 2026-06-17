@@ -17,7 +17,7 @@ installed. `table-map` inserts a policy at exactly that boundary:
 
 A **deny** keeps the route out of the kernel; permit-side **set**
 clauses rewrite the installed entry. Either way the Loc-RIB and what
-peers receive are completely untouched — `show ip bgp` still shows the
+peers receive are completely untouched — `show bgp` still shows the
 route as best, and downstream neighbors still learn it. This is the
 same separation of reachability information from forwarding decision
 described in
@@ -149,7 +149,7 @@ $ ip -6 route show 2001:db8:200::/48
 
 **Install-time only.** The policy runs on a transient copy of the best
 path each time it is (re)installed. The Loc-RIB original is never
-modified, so best-path selection, `show ip bgp` output, and
+modified, so best-path selection, `show bgp` output, and
 advertisements to peers are identical with and without the table-map.
 
 **Useful set clauses.** At the install boundary only attributes that
@@ -186,7 +186,7 @@ The signature of a working table-map is the *disagreement* between the
 BGP table and the kernel:
 
 ```
-show ip bgp
+show bgp
 ```
 
 still lists `1.1.1.1/32` as a valid best path (`*>`), while the kernel

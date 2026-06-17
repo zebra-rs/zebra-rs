@@ -81,7 +81,7 @@ delete router bgp neighbor 2001:db8::8 afi-safi ipv6 encapsulation-type
 
 ## Verification
 
-`show ip bgp neighbor <addr>` echoes the configured mode for the IPv6
+`show bgp neighbors <addr>` echoes the configured mode for the IPv6
 unicast family:
 
 ```
