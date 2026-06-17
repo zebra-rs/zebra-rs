@@ -1,0 +1,78 @@
+# se — US-region edge. SRv6 sibling of configs/isis_flexalgo/se.yaml:
+# the Flex-Algo dataplane is SRv6 (per-algo Locator TLVs) instead of
+# SR-MPLS prefix-SIDs. Each algo binds its own /48 locator so reaching a
+# node "in algo N" is plain IPv6 to that node's algo-N locator.
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+segment-routing:
+  locator:
+  - name: BASE
+    prefix: 2001:db8:a000::/48
+  - name: A128
+    prefix: 2001:db8:a128::/48
+  - name: A129
+    prefix: 2001:db8:a129::/48
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8:f::1/128
+- if-name: se-ch
+  ipv4:
+    address: 192.168.1.1/30
+  ipv6:
+    address: 2001:db8:11::1/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0001.00
+    hostname: se
+    is-type: level-2-only
+    te-router-id: 10.0.0.1
+    segment-routing:
+      srv6:
+        locator: BASE
+        flex-algo-locator:
+        - algo: 128
+          locator: A128
+        - algo: 129
+          locator: A129
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: se-ch
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - us
+    flex-algo:
+    - algo: 128
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us

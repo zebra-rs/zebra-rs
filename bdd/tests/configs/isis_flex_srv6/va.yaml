@@ -1,0 +1,88 @@
+# va — US-region node also touching the transatlantic link to fr.
+# SRv6 sibling of configs/isis_flexalgo/va.yaml.
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+segment-routing:
+  locator:
+  - name: BASE
+    prefix: 2001:db8:c000::/48
+  - name: A128
+    prefix: 2001:db8:c128::/48
+  - name: A129
+    prefix: 2001:db8:c129::/48
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8:f::3/128
+- if-name: va-ch
+  ipv4:
+    address: 192.168.1.6/30
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: va-fr
+  ipv4:
+    address: 192.168.1.13/30
+  ipv6:
+    address: 2001:db8:14::1/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    hostname: va
+    is-type: level-2-only
+    te-router-id: 10.0.0.3
+    segment-routing:
+      srv6:
+        locator: BASE
+        flex-algo-locator:
+        - algo: 128
+          locator: A128
+        - algo: 129
+          locator: A129
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: va-ch
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - us
+    - if-name: va-fr
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - transatlantic
+    flex-algo:
+    - algo: 128
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us

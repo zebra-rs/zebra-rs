@@ -1,0 +1,88 @@
+# ln — EU-region node reachable from ch only over the transatlantic
+# link. SRv6 sibling of configs/isis_flexalgo/ln.yaml.
+affinity-map:
+  affinity:
+  - name: us
+    bit-position: 0
+  - name: transatlantic
+    bit-position: 1
+  - name: eu
+    bit-position: 2
+
+segment-routing:
+  locator:
+  - name: BASE
+    prefix: 2001:db8:d000::/48
+  - name: A128
+    prefix: 2001:db8:d128::/48
+  - name: A129
+    prefix: 2001:db8:d129::/48
+
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+  ipv6:
+    address: 2001:db8:f::4/128
+- if-name: ln-ch
+  ipv4:
+    address: 192.168.1.10/30
+  ipv6:
+    address: 2001:db8:13::2/64
+- if-name: ln-fr
+  ipv4:
+    address: 192.168.1.17/30
+  ipv6:
+    address: 2001:db8:15::1/64
+
+router:
+  isis:
+    net: 49.0001.0000.0000.0004.00
+    hostname: ln
+    is-type: level-2-only
+    te-router-id: 10.0.0.4
+    segment-routing:
+      srv6:
+        locator: BASE
+        flex-algo-locator:
+        - algo: 128
+          locator: A128
+        - algo: 129
+          locator: A129
+    interface:
+    - if-name: lo
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+    - if-name: ln-ch
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - transatlantic
+    - if-name: ln-fr
+      ipv4:
+        enable: true
+      ipv6:
+        enable: true
+      affinity:
+      - eu
+    flex-algo:
+    - algo: 128
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - eu
+        - transatlantic
+    - algo: 129
+      advertise-definition: false
+      dataplane:
+        srv6: true
+      affinity:
+        exclude-any:
+        - transatlantic
+        - us

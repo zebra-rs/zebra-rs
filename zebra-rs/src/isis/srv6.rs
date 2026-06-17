@@ -121,6 +121,17 @@ pub struct Srv6EndSidInfo {
     pub structure: Option<isis_packet::IsisSub2SidStructure>,
 }
 
+/// A peer's per-Flexible-Algorithm SRv6 locator as learned from its
+/// SRv6 Locator TLV (RFC 9352 §7.1) with Algorithm in 128..=255: the
+/// locator prefix (the destination the per-algo IPv6 RIB routes to over
+/// the algo-N constrained topology) plus the node End SID under it (for
+/// colour / SR-policy headend encapsulation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Srv6AlgoLoc {
+    pub locator: Ipv6Net,
+    pub end: Srv6EndSidInfo,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

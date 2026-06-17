@@ -1358,12 +1358,11 @@ fn config_sr_srv6_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opti
 
 // `/router/isis/segment-routing/srv6/flex-algo-locator[algo=N]/locator`
 // — bind a /segment-routing/locator name to algorithm N for SRv6
-// origination. Storage-only here; the LSP emit follow-up will turn
-// each entry into an SRv6 Locator TLV 27 with Algorithm=N (RFC 9352
-// §7.1). The locator-watch reconciliation that fires for the algo-0
-// `sr_srv6_locator` is not invoked here — per-algo locators live in
-// the same /segment-routing/locator namespace and will be folded into
-// the watch set in the same PR that consumes the map.
+// origination. `reconcile_locator_watch` folds the per-algo names into
+// the SR-watch set (alongside the algo-0 `sr_srv6_locator`) and
+// allocates the per-algo node (End) SID; the LSP emit turns each
+// resolved entry into an SRv6 Locator TLV 27 with Algorithm=N
+// (RFC 9352 §7.1).
 fn config_sr_srv6_flex_algo_locator(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let algo = args.u8()?;
     if !(128..=255).contains(&algo) {
@@ -1375,6 +1374,11 @@ fn config_sr_srv6_flex_algo_locator(isis: &mut Isis, mut args: Args, op: ConfigO
     } else {
         isis.config.sr_srv6_flex_algo_locators.remove(&algo);
     }
+    // Subscribe to / drop the per-algo locator on the RIB SR channel and
+    // (de)allocate its node SID. The resolved snapshot arrives on
+    // `sr_rx` and re-originates the LSP carrying the per-algo Locator
+    // TLV with Algorithm=N.
+    isis.reconcile_locator_watch();
     Some(())
 }
 
