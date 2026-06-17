@@ -1843,6 +1843,15 @@ impl Bgp {
             .collect()
     }
 
+    /// Candidates for the `bgp:update-group` dynamic completion (`show
+    /// bgp update-group <id>`): the stable IOS-XR-style identifier
+    /// ("ipv4-unicast.0", "ipv6-unicast.0", …) of every live
+    /// update-group across all AFI/SAFIs — the same IDs the summary
+    /// table lists in `show bgp update-group`.
+    pub fn update_group_comps(&self) -> Vec<String> {
+        super::update_group::id_comps(&self.update_groups)
+    }
+
     /// Reconcile [`Self::vrfs`] (desired set, populated by per-VRF
     /// config callbacks) against [`Self::vrf_registry`] (running
     /// set): spawn the additions, despawn the removals. Called from
@@ -2050,7 +2059,15 @@ impl Bgp {
                 self.apply_vrf_commit_diff();
             }
             ConfigOp::Completion => {
-                msg.resp.unwrap().send(self.peer_comps()).unwrap();
+                // `comps_dynamic` carries the dynamic handler name
+                // (`bgp:<handler>`) as the first path segment, so dispatch
+                // on it: `update-group` wants the group IDs, everything
+                // else (`neighbor`, `neighbor-group`) wants peer names.
+                let comps = match msg.paths.first().map(|p| p.name.as_str()) {
+                    Some("update-group") => self.update_group_comps(),
+                    _ => self.peer_comps(),
+                };
+                msg.resp.unwrap().send(comps).unwrap();
             }
             ConfigOp::Clear => {
                 // FRR-style `clear bgp [<afi>] <peer-or-all> [soft [in|out]]`
