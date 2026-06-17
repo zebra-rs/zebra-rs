@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use isis_packet::*;
 use prefix_trie::PrefixMap;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1453,6 +1453,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let mut new_flex_algo_spfs: BTreeMap<u8, Option<BTreeMap<usize, spf::Path>>> = BTreeMap::new();
     let mut new_flex_algo_rib: BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>> = BTreeMap::new();
     let mut new_flex_algo_rib6: BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>> = BTreeMap::new();
+    let mut new_flex_algo_srv6_export: BTreeMap<u8, BTreeMap<IpNet, Ipv6Addr>> = BTreeMap::new();
     for FlexAlgoOutput {
         algo,
         graph: algo_graph,
@@ -1493,6 +1494,12 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         };
         let algo_rib6 = match (srv6_on, algo_source, algo_spf.as_ref()) {
             (true, Some(src), Some(spf_res)) => {
+                // Colour-steering export: (prefix → node End SID) for the
+                // BGP resolver. Built only when this algo runs SRv6.
+                let export = build_flex_algo_srv6_export(top, level, algo, src, spf_res);
+                if !export.is_empty() {
+                    new_flex_algo_srv6_export.insert(algo, export);
+                }
                 build_rib6_from_flex_algo(top, level, algo, src, spf_res)
             }
             _ => PrefixMap::<Ipv6Net, SpfRoute<V6>>::new(),
@@ -1519,6 +1526,12 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
             top.rib6_flex_algo.get(&level),
             &new_flex_algo_rib6,
         );
+        // SRv6 colour-steering export → RIB → BGP colour-aware resolver.
+        diff_apply_flex_algo_srv6(
+            top.rib_client,
+            top.flex_algo_srv6_export.get(&level),
+            &new_flex_algo_srv6_export,
+        );
     }
 
     // Swap the new state in. The retain that used to live above is
@@ -1529,6 +1542,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     *top.spf_flex_algo.get_mut(&level) = new_flex_algo_spfs;
     *top.rib_flex_algo.get_mut(&level) = new_flex_algo_rib;
     *top.rib6_flex_algo.get_mut(&level) = new_flex_algo_rib6;
+    *top.flex_algo_srv6_export.get_mut(&level) = new_flex_algo_srv6_export;
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
@@ -1656,6 +1670,95 @@ fn build_rib6_from_flex_algo(
     }
 
     rib
+}
+
+/// Build the per-algorithm SRv6 colour-steering export for one algo: for
+/// every node reachable in algo-N that advertises an algo-N End SID, map
+/// each of that node's advertised IPv4 / IPv6 prefixes to that node's End
+/// SID. The BGP colour-aware resolver LPMs a coloured service route's
+/// next-hop against this and H.Encaps toward the End SID. Mirrors the
+/// reach-entry walk in `build_rib_from_flex_algo`, but the value is the
+/// node End SID (one per node, since SRv6 has no per-prefix SID) rather
+/// than a per-prefix label.
+fn build_flex_algo_srv6_export(
+    top: &IsisTop,
+    level: Level,
+    algo: u8,
+    source: usize,
+    spf_result: &BTreeMap<usize, spf::Path>,
+) -> BTreeMap<IpNet, Ipv6Addr> {
+    let mut out = BTreeMap::new();
+    for node in spf_result.keys() {
+        if *node == source {
+            continue;
+        }
+        if top.lsp_map.get(&level).is_pseudo(*node) {
+            continue;
+        }
+        let Some(sys_id) = top.lsp_map.get(&level).resolve(*node).copied() else {
+            continue;
+        };
+        let Some(end_sid) = top
+            .peer_algo_srv6
+            .get(&level)
+            .get(&sys_id)
+            .and_then(|m| m.get(&algo))
+            .map(|l| l.end.sid)
+        else {
+            continue;
+        };
+        if let Some(entries) = top.reach_map.get(&level).get(&Afi::Ip).get(&sys_id) {
+            for e in entries.iter() {
+                out.insert(IpNet::V4(e.prefix.trunc()), end_sid);
+            }
+        }
+        if let Some(entries) = top.reach_map_v6.get(&level).get(&sys_id) {
+            for e in entries.iter() {
+                out.insert(IpNet::V6(e.prefix.trunc()), end_sid);
+            }
+        }
+    }
+    out
+}
+
+/// Diff per-algo SRv6 colour-steering exports and emit
+/// `Message::FlexAlgoSrv6RouteAdd/Del` so RIB (→ BGP colour resolver)
+/// tracks the live (prefix → node End SID) state. An add is emitted for
+/// a new or changed End SID; a del when a prefix leaves algo-N.
+fn diff_apply_flex_algo_srv6(
+    rib_client: &crate::rib::client::RibClient,
+    prev: &BTreeMap<u8, BTreeMap<IpNet, Ipv6Addr>>,
+    next: &BTreeMap<u8, BTreeMap<IpNet, Ipv6Addr>>,
+) {
+    let all_algos: BTreeSet<u8> = prev.keys().chain(next.keys()).copied().collect();
+    let empty: BTreeMap<IpNet, Ipv6Addr> = BTreeMap::new();
+    for algo in all_algos {
+        let prev_t = prev.get(&algo).unwrap_or(&empty);
+        let next_t = next.get(&algo).unwrap_or(&empty);
+        for prefix in prev_t.keys() {
+            if !next_t.contains_key(prefix) {
+                rib_client
+                    .send(rib::Message::FlexAlgoSrv6RouteDel {
+                        algo,
+                        prefix: *prefix,
+                    })
+                    .unwrap();
+            }
+        }
+        for (prefix, end_sid) in next_t {
+            if prev_t.get(prefix) != Some(end_sid) {
+                rib_client
+                    .send(rib::Message::FlexAlgoSrv6RouteAdd {
+                        route: crate::rib::api::FlexAlgoSrv6Route {
+                            algo,
+                            prefix: *prefix,
+                            end_sid: *end_sid,
+                        },
+                    })
+                    .unwrap();
+            }
+        }
+    }
 }
 
 fn build_rib_from_flex_algo(

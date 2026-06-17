@@ -42,8 +42,29 @@ unit test). Summary of what landed:
   SRv6-only Flex-Algo config (no base locator) still advertises
   participation.
 
-Not done (deferred per scope): PR 7 (BGP colour → SRv6 steering) and
-PR 8 (per-algo TI-LFA over SRv6). The BDD feature was authored but not
+**PR 7 — BGP colour → SRv6 service steering: implemented** (branch
+`isis-flexalgo-srv6-steering`, build/fmt/clippy/non-bdd tests green; 4
+new resolver unit tests). The SRv6 twin of the SR-MPLS colour resolver:
+
+- IS-IS exports, per (algo, prefix reachable in algo-N), the advertising
+  node's algo-N End SID (`build_flex_algo_srv6_export` +
+  `diff_apply_flex_algo_srv6` → `Message::FlexAlgoSrv6RouteAdd/Del`;
+  diff state in `Isis::flex_algo_srv6_export`). Full mirror of the
+  SR-MPLS shadow keying, value = node End SID (SRv6 has no per-prefix
+  SID).
+- RIB fans it out (`RibRx::FlexAlgoSrv6RouteAdd/Del`, no persistent
+  shadow — same delivery model as SR-MPLS re-broadcast).
+- BGP shadows it in `flex_algo_srv6_routes` (`FlexAlgoSrv6Shadow`, v4 +
+  v6 tries) and, in `fib_install_v4`/`fib_install_v6`, LPMs a coloured
+  plain-unicast route's next-hop and imposes `segs=[End SID]` + H.Encap
+  (`resolve_flex_algo_srv6`). Gated `uni.segs.is_empty()` so a route
+  already carrying a service SID is left untouched.
+- Also broadened the SRv6 SR-Algorithm advertise gate so SRv6-only
+  flex-algo participates without a base locator (already in PR 6).
+
+Scope: plain IPv4 + IPv6 unicast steering. **Deferred:** SRv6 L3VPN
+steering (prepend End SID before the End.DT4/DT6 service SID) and PR 8
+(per-algo TI-LFA over SRv6). The PR-6 BDD feature was authored but not
 executed here (needs root/netns; CI runs the bdd suite).
 
 ## Decisions (locked 2026-06-16)

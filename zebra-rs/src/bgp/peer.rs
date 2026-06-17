@@ -1409,6 +1409,10 @@ pub struct BgpTop<'a> {
             prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>,
         >,
     >,
+    /// SRv6 twin of `flex_algo_routes` (borrowed `Bgp::flex_algo_srv6_routes`):
+    /// per-algo (prefix → node End SID) for colour-aware SRv6 H.Encap
+    /// steering. `None` in contexts without colour steering (per-VRF).
+    pub flex_algo_srv6_routes: Option<&'a super::color_policy::FlexAlgoSrv6Shadow>,
     /// Central MPLS label allocator (`Bgp::vrf_label_alloc`), borrowed
     /// for the receive `BgpTop` so the shard can refill its per-route
     /// label sub-block by [carving][super::vrf::VrfLabelAllocator::carve]
@@ -2953,6 +2957,7 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             vrf_export: None,
             color_policy: Some(&bgp.color_policy),
             flex_algo_routes: Some(&bgp.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
             vrf_import: None,
             nexthop_cache: None,
             vrf_transport_v4: None,
@@ -2997,6 +3002,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         vrf_export: None,
         color_policy: Some(&bgp.color_policy),
         flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
         vrf_import: None,
         nexthop_cache: None,
         vrf_transport_v4: None,

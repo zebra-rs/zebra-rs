@@ -279,6 +279,7 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
                         vrf_export: None,
                         color_policy: Some(&bgp.color_policy),
                         flex_algo_routes: Some(&bgp.flex_algo_routes),
+                        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
                         vrf_import: None,
                         nexthop_cache: None,
                         vrf_transport_v4: None,

@@ -687,6 +687,12 @@ pub struct Bgp {
     /// install.
     pub flex_algo_routes:
         BTreeMap<u8, prefix_trie::PrefixMap<ipnet::Ipv4Net, crate::rib::api::FlexAlgoNexthop>>,
+    /// SRv6 twin of `flex_algo_routes`, populated by
+    /// `RibRx::FlexAlgoSrv6RouteAdd/Del`. Maps a destination prefix
+    /// reachable in algo-N to the advertising node's algo-N End SID; the
+    /// colour-aware resolver LPMs the BGP next-hop here and imposes an
+    /// H.Encap toward the End SID instead of pushing an MPLS label.
+    pub flex_algo_srv6_routes: super::color_policy::FlexAlgoSrv6Shadow,
     /// `dynamic-neighbors` runtime (zebra-bgp-dynamic-neighbors.yang).
     /// Holds the configured listen-ranges and the soft cap on
     /// materialized passive peers. `dynamic_peer_count` is bumped on
@@ -985,6 +991,7 @@ impl Bgp {
             neighbor_groups: super::neighbor_group::empty_map(),
             color_policy: super::color_policy::ColorPolicy::new(),
             flex_algo_routes: BTreeMap::new(),
+            flex_algo_srv6_routes: Default::default(),
             dynamic_neighbors: super::dynamic_neighbors::DynamicNeighbors::default(),
             dynamic_peer_count: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
@@ -1538,6 +1545,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: Some(&import_dispatcher),
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
@@ -1628,6 +1636,7 @@ impl Bgp {
                     vrf_export: None,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     vrf_import: Some(&import_dispatcher),
                     nexthop_cache: Some(&mut self.nexthop_cache),
                     vrf_transport_v4: None,
@@ -2595,6 +2604,7 @@ impl Bgp {
                 interface_addrs: &self.interface_addrs,
                 color_policy: Some(&self.color_policy),
                 flex_algo_routes: Some(&self.flex_algo_routes),
+                flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                 vrf_export: None,
                 vrf_import: None,
                 nexthop_cache: None,
@@ -2802,6 +2812,13 @@ impl Bgp {
                 if became_empty {
                     self.flex_algo_routes.remove(&algo);
                 }
+            }
+            RibRx::FlexAlgoSrv6RouteAdd { route } => {
+                self.flex_algo_srv6_routes
+                    .insert(route.algo, route.prefix, route.end_sid);
+            }
+            RibRx::FlexAlgoSrv6RouteDel { algo, prefix } => {
+                self.flex_algo_srv6_routes.remove(algo, prefix);
             }
             RibRx::NexthopUpdate { nh, resolution } => {
                 self.nht_handle_update(nh, &resolution);
@@ -3166,6 +3183,7 @@ impl Bgp {
             interface_addrs: &self.interface_addrs,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_export: None,
             vrf_import: None,
             nexthop_cache: None,
@@ -3690,6 +3708,7 @@ impl Bgp {
             interface_addrs: &self.interface_addrs,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_export: None,
             vrf_import: None,
             nexthop_cache: None,
@@ -3893,6 +3912,7 @@ impl Bgp {
             vrf_export: None,
             color_policy: Some(&self.color_policy),
             flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
             vrf_import: Some(&import_dispatcher),
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
@@ -4115,6 +4135,7 @@ impl Bgp {
                     interface_addrs: &self.interface_addrs,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
@@ -4225,6 +4246,7 @@ impl Bgp {
                     interface_addrs: &self.interface_addrs,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
@@ -4382,6 +4404,7 @@ impl Bgp {
                     interface_addrs: &self.interface_addrs,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,
@@ -4470,6 +4493,7 @@ impl Bgp {
                     interface_addrs: &self.interface_addrs,
                     color_policy: Some(&self.color_policy),
                     flex_algo_routes: Some(&self.flex_algo_routes),
+                    flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
                     vrf_export: None,
                     vrf_import: None,
                     nexthop_cache: None,

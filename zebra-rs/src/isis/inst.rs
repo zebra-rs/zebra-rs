@@ -333,6 +333,14 @@ pub struct Isis {
     /// also installed into the kernel FIB as plain IPv6 routes.
     pub rib6_flex_algo: Levels<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>,
 
+    /// Per-algorithm SRv6 colour-steering export, the prior snapshot
+    /// against which each SPF cycle diffs `Message::FlexAlgoSrv6Route
+    /// Add/Del` to RIB (→ BGP colour-aware resolver). Outer key is the
+    /// algorithm; inner map is (destination prefix reachable in algo-N →
+    /// the advertising node's algo-N End SID). Held only to compute the
+    /// diff; the live state lives in BGP's `flex_algo_srv6_routes`.
+    pub flex_algo_srv6_export: Levels<BTreeMap<u8, BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>>>,
+
     /// SR-update return channel from the RIB. Carries the current value of
     /// the watched block / locator and any subsequent updates.
     pub sr_rx: UnboundedReceiver<RibSrRx>,
@@ -606,6 +614,11 @@ pub struct IsisTop<'a> {
     /// locator routes after each SPF cycle.
     pub rib6_flex_algo: &'a mut Levels<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>,
 
+    /// Per-algorithm SRv6 colour-steering export diff state (see
+    /// `Isis::flex_algo_srv6_export`).
+    pub flex_algo_srv6_export:
+        &'a mut Levels<BTreeMap<u8, BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>>>,
+
     /// Read-only access to the SR snapshot the IS-IS instance is caching
     /// from RIB::SrSubscribe. lsp_generate uses these to populate the SR
     /// Capability / SRv6 sub-TLVs.
@@ -762,6 +775,9 @@ impl Isis {
                 ),
                 rib_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv4Net, SpfRoute<V4>>>>::default(),
                 rib6_flex_algo: Levels::<BTreeMap<u8, PrefixMap<Ipv6Net, SpfRoute<V6>>>>::default(),
+                flex_algo_srv6_export: Levels::<
+                    BTreeMap<u8, BTreeMap<ipnet::IpNet, std::net::Ipv6Addr>>,
+                >::default(),
                 sr_rx,
                 watched_block: None,
                 watched_locator: None,
@@ -2838,6 +2854,7 @@ impl Isis {
             spf_flex_algo: &mut self.spf_flex_algo,
             rib_flex_algo: &mut self.rib_flex_algo,
             rib6_flex_algo: &mut self.rib6_flex_algo,
+            flex_algo_srv6_export: &mut self.flex_algo_srv6_export,
             sr_block: &self.sr_block,
             sr_locator: &self.sr_locator,
             sr_end_sid: &self.sr_end_sid,
