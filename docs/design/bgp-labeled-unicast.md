@@ -100,7 +100,7 @@ per-prefix **received** label rides each `BgpRib.label`.
 
 `route_labelv4/v6_update` / `_withdraw` ingest received routes (mirror
 the v6-unicast path), `route_clean` sweeps the LU tables on peer-down
-(no LLGR yet), and `show ip bgp labeled-unicast` lists both Loc-RIBs
+(no LLGR yet), and `show bgp labeled-unicast` lists both Loc-RIBs
 with a Label column.
 
 ### Advertise and origination

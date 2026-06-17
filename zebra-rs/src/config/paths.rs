@@ -74,12 +74,11 @@ mod tests {
         }
     }
 
-    // `show ip bgp vrf vrf1 summary` -> ("vrf1", `show ip bgp summary`).
+    // `show bgp vrf vrf1 summary` -> ("vrf1", `show bgp summary`).
     #[test]
     fn vrf_redirect_split_strips_vrf_and_name() {
         let paths = vec![
             cp("show", 0),
-            cp("ip", 0),
             cp("bgp", 0),
             cp("vrf", 2),     // Key
             cp("vrf1", 3),    // KeyMatched
@@ -88,37 +87,31 @@ mod tests {
         let (name, rewritten) = vrf_redirect_split(&paths).expect("should split");
         assert_eq!(name, "vrf1");
         let names: Vec<&str> = rewritten.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["show", "ip", "bgp", "summary"]);
+        assert_eq!(names, ["show", "bgp", "summary"]);
     }
 
-    // `show ip bgp vrf vrf1` (no trailing keyword) -> ("vrf1", `show ip bgp`).
+    // `show bgp vrf vrf1` (no trailing keyword) -> ("vrf1", `show bgp`).
     #[test]
     fn vrf_redirect_split_handles_bare_name() {
-        let paths = vec![
-            cp("show", 0),
-            cp("ip", 0),
-            cp("bgp", 0),
-            cp("vrf", 2),
-            cp("vrf1", 3),
-        ];
+        let paths = vec![cp("show", 0), cp("bgp", 0), cp("vrf", 2), cp("vrf1", 3)];
         let (name, rewritten) = vrf_redirect_split(&paths).expect("should split");
         assert_eq!(name, "vrf1");
         let names: Vec<&str> = rewritten.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["show", "ip", "bgp"]);
+        assert_eq!(names, ["show", "bgp"]);
     }
 
-    // Bare `show ip bgp vrf` (presence, no key) is the all-VRFs list, not a
+    // Bare `show bgp vrf` (presence, no key) is the all-VRFs list, not a
     // redirect.
     #[test]
     fn vrf_redirect_split_none_without_key() {
-        let paths = vec![cp("show", 0), cp("ip", 0), cp("bgp", 0), cp("vrf", 2)];
+        let paths = vec![cp("show", 0), cp("bgp", 0), cp("vrf", 2)];
         assert!(vrf_redirect_split(&paths).is_none());
     }
 
     // A command with no `vrf` segment is never a redirect.
     #[test]
     fn vrf_redirect_split_none_without_vrf() {
-        let paths = vec![cp("show", 0), cp("ip", 0), cp("bgp", 0), cp("summary", 4)];
+        let paths = vec![cp("show", 0), cp("bgp", 0), cp("summary", 4)];
         assert!(vrf_redirect_split(&paths).is_none());
     }
 }

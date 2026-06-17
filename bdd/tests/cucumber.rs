@@ -1052,7 +1052,7 @@ async fn verify_unnumbered_session_eventually_not(
 #[then(expr = "BGP route in {string} has {string}")]
 async fn verify_bgp_route(world: &mut World, namespace: String, expected_prefix: String) {
     let scoped = world.ns(&namespace);
-    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
         .await
         .expect("Failed to get BGP routes");
 
@@ -1081,7 +1081,7 @@ async fn verify_bgp_route(world: &mut World, namespace: String, expected_prefix:
 #[then(expr = "BGP route in {string} does not have {string}")]
 async fn verify_bgp_route_not(world: &mut World, namespace: String, unexpected_prefix: String) {
     let scoped = world.ns(&namespace);
-    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
         .await
         .expect("Failed to get BGP routes");
 
@@ -1117,7 +1117,7 @@ async fn verify_bgp_route_field(
     expected_value: String,
 ) {
     let scoped = world.ns(&namespace);
-    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show ip bgp"])
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
         .await
         .expect("Failed to get BGP routes");
 

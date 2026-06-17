@@ -287,7 +287,7 @@ which we explicitly skipped.
 ### 16. `show bgp flex-algo` command
 
 **What:** Operators can see per-route Color + Label-Index via
-`show ip bgp <prefix>` (PR #692). There's no aggregate view:
+`show bgp <prefix>` (PR #692). There's no aggregate view:
 "what colors does this router currently bind, and how many routes
 match each?"
 

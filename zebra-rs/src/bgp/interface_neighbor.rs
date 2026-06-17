@@ -161,7 +161,7 @@ fn materialize(
     };
     peer.origin = PeerOrigin::Interface { ifindex };
     // The operator-facing identity for show/clear output and lookups
-    // (`show bgp summary`, `show ip bgp neighbors i1`, …) — the
+    // (`show bgp summary`, `show bgp neighbors i1`, …) — the
     // link-local in `address` is not something the operator can name.
     peer.ifname = Some(name.to_string());
     // Required for the kernel connect(2) to a fe80:: target —

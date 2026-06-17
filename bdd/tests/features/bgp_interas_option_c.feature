@@ -102,15 +102,15 @@ Feature: Inter-AS MPLS/VPN Option C over SR-MPLS (RFC 4364 §10c)
     # ASBR1 originates nothing itself; it relays the local-AS PE loopback
     # (1.1.1.1/32, from PE1) and the remote-AS PE loopback (2.2.2.1/32,
     # from ASBR2) — both as labeled IPv4, no VPNv4.
-    Then show command "show ip bgp labeled-unicast" in namespace "asbr1" should contain "1.1.1.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "asbr1" should contain "2.2.2.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "asbr2" should contain "1.1.1.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "asbr2" should contain "2.2.2.1/32"
+    Then show command "show bgp labeled-unicast" in namespace "asbr1" should contain "1.1.1.1/32"
+    And show command "show bgp labeled-unicast" in namespace "asbr1" should contain "2.2.2.1/32"
+    And show command "show bgp labeled-unicast" in namespace "asbr2" should contain "1.1.1.1/32"
+    And show command "show bgp labeled-unicast" in namespace "asbr2" should contain "2.2.2.1/32"
 
   Scenario: Each PE learns the remote PE loopback through the BGP-LU chain
     Given the test topology exists
-    Then show command "show ip bgp labeled-unicast" in namespace "pe1" should contain "2.2.2.1/32"
-    And show command "show ip bgp labeled-unicast" in namespace "pe2" should contain "1.1.1.1/32"
+    Then show command "show bgp labeled-unicast" in namespace "pe1" should contain "2.2.2.1/32"
+    And show command "show bgp labeled-unicast" in namespace "pe2" should contain "1.1.1.1/32"
 
   Scenario: VPNv4 customer routes are exchanged directly between the PEs
     Given the test topology exists

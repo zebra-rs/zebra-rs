@@ -352,6 +352,42 @@ module exec {
           type string;
         }
       }
+      leaf labeled-unicast {
+        ext:help "BGP Labeled-Unicast (SAFI 4) RIB";
+        type empty;
+      }
+      container flowspec {
+        ext:help "BGP IPv4 Flow Specification RIB";
+        presence "BGP IPv4 Flowspec RIB";
+        leaf ipv6 {
+          ext:help "BGP IPv6 Flow Specification RIB";
+          type empty;
+        }
+      }
+      container sr-policy {
+        ext:help "BGP IPv4 SR Policy (SAFI 73) RIB";
+        presence "BGP IPv4 SR Policy RIB";
+        leaf ipv6 {
+          ext:help "BGP IPv6 SR Policy (SAFI 73) RIB";
+          type empty;
+        }
+      }
+      leaf link-state {
+        ext:help "BGP Link-State (SAFI 71) RIB";
+        type empty;
+      }
+      leaf attributes {
+        type empty;
+      }
+      list neighbor-group {
+        ext:help "BGP neighbor-group inheritance state";
+        ext:presence "Show every configured neighbor-group";
+        key name;
+        leaf name {
+          ext:dynamic "bgp:neighbor-group";
+          type string;
+        }
+      }
       list vrf {
         ext:help "Per-VRF BGP RIB";
         ext:presence "BGP per-VRF summary table";
@@ -369,6 +405,10 @@ module exec {
         }
         leaf summary {
           ext:help "Summary of this VRF's BGP neighbor status";
+          type empty;
+        }
+        leaf neighbors {
+          ext:help "Detailed information on this VRF's BGP neighbors";
           type empty;
         }
         uses bgp-show-afi-rib;
@@ -407,63 +447,6 @@ module exec {
           leaf detail {
             ext:help "Show this VRF's routes in detail format";
             type empty;
-          }
-        }
-      }
-      container bgp {
-        ext:help "BGP commands";
-        presence "BGP RIB";
-        leaf route {
-          ext:help "BGP RIB";
-          type inet:ipv4-address;
-        }
-        leaf labeled-unicast {
-          ext:help "BGP Labeled-Unicast (SAFI 4) RIB";
-          type empty;
-        }
-        container flowspec {
-          ext:help "BGP IPv4 Flow Specification RIB";
-          presence "BGP IPv4 Flowspec RIB";
-          leaf ipv6 {
-            ext:help "BGP IPv6 Flow Specification RIB";
-            type empty;
-          }
-        }
-        container sr-policy {
-          ext:help "BGP IPv4 SR Policy (SAFI 73) RIB";
-          presence "BGP IPv4 SR Policy RIB";
-          leaf ipv6 {
-            ext:help "BGP IPv6 SR Policy (SAFI 73) RIB";
-            type empty;
-          }
-        }
-        leaf attributes {
-          type empty;
-        }
-        list vrf {
-          ext:help "Per-VRF BGP runtime";
-          ext:presence "BGP per-VRF summary table";
-          key name;
-          leaf name {
-            ext:dynamic "rib:vrf";
-            type string;
-          }
-          leaf summary {
-            ext:help "Summary of this VRF's BGP neighbor status";
-            type empty;
-          }
-          leaf neighbors {
-            ext:help "Detailed information on this VRF's BGP neighbors";
-            type empty;
-          }
-        }
-        list neighbor-group {
-          ext:help "BGP neighbor-group inheritance state";
-          ext:presence "Show every configured neighbor-group";
-          key name;
-          leaf name {
-            ext:dynamic "bgp:neighbor-group";
-            type string;
           }
         }
       }

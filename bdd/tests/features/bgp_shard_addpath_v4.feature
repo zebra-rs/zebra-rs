@@ -43,8 +43,8 @@ Feature: BGP IPv4-unicast AddPath session-up sync at N>1 (all paths sync; per-pa
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 15 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.0.4" should be "Established"
-    And show command "show ip bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65001"
-    And show command "show ip bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
+    And show command "show bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65001"
+    And show command "show bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
 
   Scenario: z1 withdraws; only z1's path-id is withdrawn from the synced z4
     Given the test topology exists
@@ -52,18 +52,18 @@ Feature: BGP IPv4-unicast AddPath session-up sync at N>1 (all paths sync; per-pa
     # — must lose only "65003 65001"; z2's "65003 65002" survives.
     When I apply config "z1-withdraw.yaml" to namespace "z1"
     And I wait 10 seconds for BGP to operate
-    Then show command "show ip bgp 10.10.10.0/24" in namespace "z4" should not contain "65003 65001"
-    And show command "show ip bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
+    Then show command "show bgp 10.10.10.0/24" in namespace "z4" should not contain "65003 65001"
+    And show command "show bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
 
   Scenario: z2's session drops; the surviving path is withdrawn from z4 too
     Given the test topology exists
     # z2 still feeds the only path now (positive control). Kill z2 — z3's
     # peer-down sweep must withdraw "65003 65002" from the synced z4.
-    Then show command "show ip bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
+    Then show command "show bgp 10.10.10.0/24" in namespace "z4" should contain "65003 65002"
     When I stop zebra-rs in namespace "z2"
     And I wait 20 seconds for BGP to operate
     Then BGP session in "z3" to "192.168.0.2" should not be "Established"
-    And show command "show ip bgp 10.10.10.0/24" in namespace "z4" should not contain "65003 65002"
+    And show command "show bgp 10.10.10.0/24" in namespace "z4" should not contain "65003 65002"
 
   Scenario: Teardown topology
     Given the test topology exists

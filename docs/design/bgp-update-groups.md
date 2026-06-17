@@ -744,7 +744,7 @@ OpenConfig augment if we ever add one.
 
 ## 9. Resolved decisions
 
-1. **No `show ip bgp update-group` form.** The command stays under
+1. **No `show bgp update-group` form.** The command stays under
    `show bgp ...` only, with explicit AFI/SAFI filter args (e.g.
    `show bgp update-group ipv4 unicast`). Decided 2026-05-07.
 2. **VPNv4 / EVPN grouping is per (AFI, SAFI), not per (AFI, SAFI,

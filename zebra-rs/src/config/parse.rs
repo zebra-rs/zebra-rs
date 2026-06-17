@@ -1149,19 +1149,32 @@ mod tests {
         }
     }
 
-    /// The VPNv4 / EVPN RIB views moved from the legacy `show ip bgp`
-    /// tree to `show bgp …`; the old spellings must no longer parse.
-    /// The per-neighbor views (and their `vpnv4` / `evpn` Adj-RIB
-    /// filters) moved the same way: `show bgp neighbors …`.
+    /// The BGP RIB views moved off the legacy `show ip bgp` tree onto
+    /// `show bgp …`; the whole `show ip bgp` subtree is gone, so every
+    /// old spelling must no longer parse and each `show bgp …` twin must.
+    /// Covers the earlier VPNv4/EVPN/neighbor move plus the final cutover
+    /// (labeled-unicast, flowspec, sr-policy, attributes, link-state,
+    /// neighbor-group, vrf, and the bare `show ip bgp`).
     #[test]
     fn show_ip_bgp_vpnv4_evpn_moved() {
         let entry = exec_entry();
         for cmd in [
+            "show ip bgp",
             "show ip bgp vpnv4",
             "show ip bgp vpnv4 route 10.0.0.1",
             "show ip bgp evpn",
             "show ip bgp neighbors 10.0.0.1",
             "show ip bgp neighbors 10.0.0.1 advertised-routes vpnv4",
+            "show ip bgp labeled-unicast",
+            "show ip bgp flowspec",
+            "show ip bgp flowspec ipv6",
+            "show ip bgp sr-policy",
+            "show ip bgp attributes",
+            "show ip bgp link-state",
+            "show ip bgp route 10.0.0.1",
+            "show ip bgp vrf",
+            "show ip bgp vrf blue neighbors",
+            "show ip bgp neighbor-group g1",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
@@ -1169,6 +1182,15 @@ mod tests {
         for cmd in [
             "show bgp neighbors 10.0.0.1 advertised-routes vpnv4",
             "show bgp neighbors 10.0.0.1 received-routes evpn",
+            "show bgp labeled-unicast",
+            "show bgp flowspec",
+            "show bgp flowspec ipv6",
+            "show bgp sr-policy",
+            "show bgp sr-policy ipv6",
+            "show bgp attributes",
+            "show bgp link-state",
+            "show bgp vrf blue neighbors",
+            "show bgp neighbor-group g1",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
@@ -1281,25 +1303,12 @@ mod tests {
             assert_eq!(&got, want_args, "args for `{cmd}`");
         }
 
-        // The legacy spelling is gone; the legacy per-VRF leaf stays.
-        let (code, _comps, _state) =
-            parse("show ip bgp summary", entry.clone(), None, State::new());
-        assert_ne!(
-            code,
-            ExecCode::Success,
-            "`show ip bgp summary` must not be a command"
-        );
-        let (code, _comps, _state) = parse(
-            "show ip bgp vrf v1 summary",
-            entry.clone(),
-            None,
-            State::new(),
-        );
-        assert_eq!(
-            code,
-            ExecCode::Success,
-            "`show ip bgp vrf v1 summary` must parse"
-        );
+        // The whole legacy `show ip bgp` subtree is gone, including the
+        // per-VRF leaf — both spellings must no longer parse.
+        for cmd in ["show ip bgp summary", "show ip bgp vrf v1 summary"] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
     }
 
     /// The OSPFv2 show tree moved from `show ip ospf …` to a

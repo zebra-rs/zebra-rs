@@ -59,10 +59,10 @@ Feature: Routes appearing after establishment reach an IPv6-unnumbered peer
     Given the test topology exists
     When I apply command "delete router bgp afi-safi ipv4 network 10.99.1.0/24" in namespace "z1"
     And I wait 8 seconds
-    Then show command "show ip bgp" in namespace "z2" should not contain "10.99.1.0/24"
+    Then show command "show bgp" in namespace "z2" should not contain "10.99.1.0/24"
     # Guard against a vacuous pass of the negative assertion above: the
     # same table must still carry z1's initial network.
-    And show command "show ip bgp" in namespace "z2" should contain "10.0.0.1/32"
+    And show command "show bgp" in namespace "z2" should contain "10.0.0.1/32"
 
   Scenario: Teardown topology
     Given the test topology exists
