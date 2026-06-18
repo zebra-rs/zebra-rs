@@ -62,10 +62,36 @@ new resolver unit tests). The SRv6 twin of the SR-MPLS colour resolver:
 - Also broadened the SRv6 SR-Algorithm advertise gate so SRv6-only
   flex-algo participates without a base locator (already in PR 6).
 
-Scope: plain IPv4 + IPv6 unicast steering. **Deferred:** SRv6 L3VPN
-steering (prepend End SID before the End.DT4/DT6 service SID) and PR 8
-(per-algo TI-LFA over SRv6). The PR-6 BDD feature was authored but not
-executed here (needs root/netns; CI runs the bdd suite).
+Scope: plain IPv4 + IPv6 unicast steering. Deferred from PR 7: SRv6
+L3VPN steering (prepend End SID before the End.DT4/DT6 service SID).
+
+**PR 8 — per-algo TI-LFA over SRv6: implemented** (branch
+`isis-flexalgo-srv6-tilfa`, build/fmt/clippy/non-bdd tests green).
+Per-algo fast-reroute for the SRv6 dataplane:
+
+- `compute_spf` runs TI-LFA in each algo's *constrained* graph
+  (`FlexAlgoInput.ti_lfa` / `FlexAlgoOutput.tilfa`), gated on the
+  per-algo `fast-reroute ti-lfa` toggle AND `dataplane srv6` (set in
+  `build_spf_input`). Per-algo TI-LFA stats are not merged into the
+  `show isis spf` figures.
+- `build_repair_path_srv6` gained an `algo: Option<u8>` param; node
+  (End) segments resolve to the algo-N End SID via `node_sid_info`
+  (`peer_algo_srv6`) so the repair stays in the algo-N topology, while
+  adjacency (End.X) segments reuse the algo-0 End.X — the final
+  single-hop into the repair link, processed at the node the prior
+  algo-N node segment already delivered to (correct, and avoids a
+  produce-side change).
+- `build_rib6_from_flex_algo` stamps the backup on each single-nexthop
+  per-algo locator route; ECMP routes are self-protecting; a repair
+  whose segments can't all resolve is dropped (no partial install).
+
+Deferred follow-ups: per-algo End.X SID origination (emit
+`Srv6EndXSid`/`Srv6LanEndXSid` with Algorithm=N, so adj segments use
+algo-N End.X too — a refinement, not a correctness fix); SRv6 L3VPN
+colour steering; and a TI-LFA BDD (the PR-6 `isis_flex_srv6` topology
+has no intra-algo redundancy to exercise a repair). The PR-6 BDD
+feature was authored but not executed here (needs root/netns; CI runs
+the bdd suite).
 
 ## Decisions (locked 2026-06-16)
 
