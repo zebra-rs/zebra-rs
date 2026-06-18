@@ -90,6 +90,32 @@ module zebra-bgp-evpn {
          of flooding BUM for snooped groups. Per-protocol granularity
          (IGMP-only / MLD-only) is a follow-up.";
     }
+    leaf bum-tunnel-type {
+      type enumeration {
+        enum ingress-replication {
+          description
+            "Ingress Replication (the default) — BUM is head-end
+             replicated to each remote PE, optionally optimized by
+             Assisted Replication per the `assisted-replication` role.";
+        }
+        enum sr-mpls-p2mp {
+          description
+            "SR-MPLS P2MP tree (PMSI tunnel type 0x0C) — BUM delivery is
+             bound to an RFC 9524 replication tree rooted at this node.";
+        }
+        enum srv6-p2mp {
+          description
+            "SRv6 P2MP tree (PMSI tunnel type 0x0D) — the SRv6 form of
+             the RFC 9524 replication tree.";
+        }
+      }
+      default ingress-replication;
+      description
+        "Inclusive BUM P-tunnel advertised in the Type-3 IMET PMSI Tunnel
+         attribute. The SR P2MP modes (draft-ietf-bess-mvpn-evpn-sr-p2mp)
+         advertise a Tree-ID + Root identifier with the local node as the
+         tree Root; they bypass Assisted Replication.";
+    }
     container assisted-replication {
       description
         "RFC 9574 Optimized Ingress Replication (Assisted Replication)

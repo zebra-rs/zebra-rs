@@ -1,5 +1,5 @@
 pub mod inst;
-pub use inst::{AssistedReplicationRole, Bgp, Message};
+pub use inst::{AssistedReplicationRole, Bgp, EvpnBumTunnel, Message};
 
 pub mod constant;
 pub use constant::*;
