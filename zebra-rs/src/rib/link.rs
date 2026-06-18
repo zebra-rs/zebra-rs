@@ -675,6 +675,9 @@ impl Rib {
         if let Some(bridge) = now_evpn_bridge
             && prev_evpn_bridge != Some(bridge)
         {
+            // The VXLAN just joined a bridge: apply the EVPN bridge-slave
+            // defaults on its port (`neigh_suppress on`, `learning off`).
+            self.fib_handle.vxlan_bridge_port_defaults(ifindex).await;
             self.rescan_fdb_for_bridge(bridge);
         }
 

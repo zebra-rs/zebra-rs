@@ -4,6 +4,7 @@
 - [Separation of Reachability Information and Forwarding Decision](ch-00-01-reachability-information.md)
 - [Router ID Selection](ch-00-02-router-id.md)
 - [Interface Configuration](ch-00-03-interface-configuration.md)
+- [VXLAN Configuration](ch-00-04-vxlan-configuration.md)
 
 ## Static Route
 

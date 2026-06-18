@@ -11,8 +11,8 @@ use netlink_packet_route::address::{
     AddressAttribute, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, InfoData, InfoKind, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags,
-    LinkInfo, LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoPortKind,
+    InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
 };
 use netlink_packet_route::neighbour::{NeighbourAddress, NeighbourAttribute, NeighbourMessage};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
@@ -1623,8 +1623,12 @@ impl FibHandle {
             return;
         };
 
-        // First create the vxlan interface
+        // First create the vxlan interface. Bring it up at creation
+        // (`ip link add ... up`) so the device is operational without a
+        // separate operator step.
         let mut msg = LinkMessage::default();
+        msg.header.flags = LinkFlags::Up;
+        msg.header.change_mask = LinkFlags::Up;
 
         let name = LinkAttribute::IfName(vxlan.name.clone());
         msg.attributes.push(name);
@@ -1637,11 +1641,11 @@ impl FibHandle {
         let vni = InfoVxlan::Id(vni);
         let mut vxlan_info = vec![vni];
 
-        // Destination port.
-        if let Some(dport) = vxlan.dport {
-            let port = InfoVxlan::Port(dport);
-            vxlan_info.push(port);
-        }
+        // Destination port. Defaults to the IANA-assigned VXLAN port
+        // (4789) when the operator hasn't configured one — Linux would
+        // otherwise fall back to the legacy 8472.
+        let dport = vxlan.dport.unwrap_or(4789);
+        vxlan_info.push(InfoVxlan::Port(dport));
 
         // Local address.
         if let Some(local_addr) = vxlan.local_addr {
@@ -1651,6 +1655,12 @@ impl FibHandle {
             };
             vxlan_info.push(info);
         }
+
+        // Disable data-plane MAC learning by default (`nolearning`).
+        // EVPN populates the FDB from the BGP control plane, so kernel
+        // flood-and-learn must be off.
+        vxlan_info.push(InfoVxlan::Learning(false));
+
         let link_info = LinkInfo::Data(InfoData::Vxlan(vxlan_info));
 
         let attr = LinkAttribute::LinkInfo(vec![link_kind, link_info]);
@@ -1667,11 +1677,12 @@ impl FibHandle {
             }
         }
 
-        // If we have addr_gen_mode, set it as a second operation
-        if let Some(addr_gen_mode) = &vxlan.addr_gen_mode {
-            self.vxlan_set_addr_gen_mode(&vxlan.name, addr_gen_mode)
-                .await;
-        }
+        // Set the IPv6 address generation mode as a second operation.
+        // Defaults to `none` (no kernel-generated link-local on the
+        // VXLAN device) when the operator hasn't configured one.
+        let addr_gen_mode = vxlan.addr_gen_mode.clone().unwrap_or(AddrGenMode::None);
+        self.vxlan_set_addr_gen_mode(&vxlan.name, &addr_gen_mode)
+            .await;
     }
 
     pub async fn vxlan_set_addr_gen_mode(&self, name: &str, addr_gen_mode: &AddrGenMode) {
@@ -1693,6 +1704,38 @@ impl FibHandle {
         while let Some(msg) = response.next().await {
             if let NetlinkPayload::Error(e) = msg.payload {
                 tracing::info!("SetLink addr-gen-mode error: {e}");
+            }
+        }
+    }
+
+    /// Apply the VXLAN bridge-slave defaults to the port at `ifindex`:
+    /// neighbour suppression on (ARP/ND answered locally from the FDB
+    /// instead of flooded) and bridge-port MAC learning off (EVPN's BGP
+    /// control plane owns the FDB). Equivalent to:
+    ///   ip link set <dev> type bridge_slave neigh_suppress on learning off
+    /// Called when the RIB observes a VXLAN device gaining a bridge
+    /// master; a no-op error is logged if the master is not a bridge.
+    pub async fn vxlan_bridge_port_defaults(&self, ifindex: u32) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+
+        let port_data = InfoPortData::BridgePort(vec![
+            InfoBridgePort::NeighSupress(true),
+            InfoBridgePort::Learning(false),
+        ]);
+        let link_info = LinkAttribute::LinkInfo(vec![
+            LinkInfo::PortKind(InfoPortKind::Bridge),
+            LinkInfo::PortData(port_data),
+        ]);
+        msg.attributes.push(link_info);
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload {
+                tracing::info!("SetLink bridge-port defaults error: {e}");
             }
         }
     }
