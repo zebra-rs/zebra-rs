@@ -268,12 +268,13 @@ fn sid_route_target(
                 mask_v6(addr, plen),
             )
         }
-        // End.DT4 / End.DT6 / End.DT46 are terminal decap+lookup
+        // End.DT4 / End.DT6 / End.DT46 / End.M are terminal decap+lookup
         // actions. Same FIB shape as End.X — a /128 host route in
         // table=main with kind=Unicast, pointed at sr0 by the static
-        // route's ifindex_origin. (The inner decap lookup table for
-        // End.DT* rides inside the seg6local encap, not here.)
-        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndDT46 => {
+        // route's ifindex_origin. (The inner decap lookup table — a VRF
+        // for End.DT*, the mirror context for End.M — rides inside the
+        // seg6local encap, not here.)
+        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndDT46 | SidBehavior::EndM => {
             (RouteHeader::RT_TABLE_MAIN, RouteType::Unicast, 128, addr)
         }
         // End.B6.Encaps (SR Policy Binding SID): a /128 host route in

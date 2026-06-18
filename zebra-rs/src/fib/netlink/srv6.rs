@@ -121,7 +121,10 @@ fn seg6local_action(behavior: SidBehavior) -> Seg6LocalAction {
         SidBehavior::End | SidBehavior::UN => Seg6LocalAction::End,
         SidBehavior::EndX | SidBehavior::UA | SidBehavior::UALib => Seg6LocalAction::EndX,
         SidBehavior::EndDT4 => Seg6LocalAction::EndDt4,
-        SidBehavior::EndDT6 => Seg6LocalAction::EndDt6,
+        // End.M reuses the End.DT6 kernel action: decapsulate and look the
+        // inner IPv6 packet up in a table — for End.M that is the
+        // mirror-context table (`Sid::table_id`) rather than a VRF.
+        SidBehavior::EndDT6 | SidBehavior::EndM => Seg6LocalAction::EndDt6,
         SidBehavior::EndDT46 => Seg6LocalAction::EndDt46,
         SidBehavior::EndB6Encap => Seg6LocalAction::EndB6Encap,
     }
@@ -213,9 +216,13 @@ fn build_seg6local_lwtunnel(
         }
         attrs.push(RouteSeg6LocalIpTunnel::Srh(build_srh(segs)));
     }
-    if matches!(behavior, SidBehavior::EndDT4 | SidBehavior::EndDT6) {
+    if matches!(
+        behavior,
+        SidBehavior::EndDT4 | SidBehavior::EndDT6 | SidBehavior::EndM
+    ) {
         // `SEG6_LOCAL_TABLE`: 0 maps to RT_TABLE_MAIN to preserve the
-        // existing static / IS-IS terminal behavior.
+        // existing static / IS-IS terminal behavior. End.M passes the
+        // mirror-context table id, which is always non-zero.
         let table = if table_id == 0 {
             RouteHeader::RT_TABLE_MAIN as u32
         } else {
@@ -313,6 +320,26 @@ mod tests {
         let encaps = build_seg6local_lwtunnel(SidBehavior::EndDT4, None, None, 42, &[])
             .expect("encap built");
         assert_eq!(table_attr(&encaps), Some(42));
+    }
+
+    #[test]
+    fn end_m_decaps_via_mirror_context_table() {
+        // End.M (egress protection): reuses the End.DT6 kernel action and
+        // looks the inner packet up in the mirror-context table via a
+        // plain SEG6_LOCAL_TABLE — never a VRF table.
+        let encaps = build_seg6local_lwtunnel(SidBehavior::EndM, None, None, 0x4D00_0000, &[])
+            .expect("encap built");
+        assert!(
+            encaps.iter().any(|e| matches!(
+                e,
+                RouteLwTunnelEncap::Seg6Local(RouteSeg6LocalIpTunnel::Action(
+                    Seg6LocalAction::EndDt6
+                ))
+            )),
+            "End.M uses the End.DT6 kernel action"
+        );
+        assert_eq!(table_attr(&encaps), Some(0x4D00_0000));
+        assert_eq!(vrftable_attr(&encaps), None, "no VRF table for End.M");
     }
 
     #[test]
