@@ -501,6 +501,47 @@ fn srv6_endx_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
     }
 }
 
+/// SRv6 Mirror SID sub-TLVs to advertise inside the base SRv6 Locator
+/// TLV (draft-ietf-rtgwg-srv6-egress-protection). For each configured
+/// egress-protection entry on the SRv6 dataplane whose Mirror SID is
+/// explicitly set and falls within `local_prefix` (this node's own
+/// locator — the End.M SID is hosted here and inherits the locator's
+/// topology/algorithm), emit one End.M sub-TLV carrying the protected
+/// egress's locator in a Protected Locators sub-sub-TLV.
+///
+/// Entries without an explicit `mirror-sid`, or whose SID falls outside
+/// the local locator, are skipped: auto-allocation is a follow-up, and a
+/// SID outside the locator can't be instantiated here.
+fn mirror_sid_subs(
+    entries: &super::egress_protection::MirrorProtectMap,
+    local_prefix: Ipv6Net,
+) -> Vec<prefix::IsisSubTlv> {
+    use super::egress_protection::MirrorDataplane;
+    let mut subs = Vec::new();
+    for entry in entries.values() {
+        if entry.dataplane != MirrorDataplane::Srv6 {
+            continue;
+        }
+        let Some(sid) = entry.mirror_sid else {
+            continue;
+        };
+        if !local_prefix.contains(&sid) {
+            continue;
+        }
+        subs.push(prefix::IsisSubTlv::Srv6MirrorSid(IsisSubSrv6MirrorSid {
+            flags: 0,
+            behavior: Behavior::EndM,
+            sid,
+            sub2s: vec![IsisMirrorSub2Tlv::ProtectedLocators(
+                IsisSub2ProtectedLocators {
+                    locator: entry.protected_locator,
+                },
+            )],
+        }));
+    }
+    subs
+}
+
 /// Per-Flexible-Algorithm SRv6 End.X (adjacency) sub-TLVs for one
 /// neighbor (RFC 9352 §8, Algorithm = N). One per entry in
 /// `nbr.algo_endx_sids` whose per-algo locator is still resolved; the
@@ -830,17 +871,24 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         && let Some(end_sid) = *top.sr_end_sid
         && let Some(prefix) = locator.prefix
     {
+        let mut subs = vec![prefix::IsisSubTlv::Srv6EndSid(IsisSubSrv6EndSid {
+            flags: 0,
+            behavior: end_behavior,
+            sid: end_sid,
+            sub2s: sid_structure_subs.clone(),
+        })];
+        // Mirror SID sub-TLVs (draft-ietf-rtgwg-srv6-egress-protection):
+        // one End.M per configured SRv6 egress-protection entry whose
+        // Mirror SID falls within this (the protector's) locator. The SID
+        // inherits the locator's topology/algorithm; the protected
+        // egress's locator rides in a Protected Locators sub-sub-TLV.
+        subs.extend(mirror_sid_subs(&top.config.egress_protections, prefix));
         srv6_locators.push(Srv6Locator {
             metric: 0,
             flags: 0,
             algo: Algo::Spf,
             locator: prefix,
-            subs: vec![prefix::IsisSubTlv::Srv6EndSid(IsisSubSrv6EndSid {
-                flags: 0,
-                behavior: end_behavior,
-                sid: end_sid,
-                sub2s: sid_structure_subs.clone(),
-            })],
+            subs,
         });
     }
     for (&algo, locator) in top.sr_flex_algo_locators.iter() {
@@ -1781,6 +1829,53 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(target_locator_name(&cfg), None);
+    }
+
+    #[test]
+    fn mirror_sid_subs_emits_only_in_locator_srv6_entries() {
+        use crate::isis::egress_protection::{MirrorDataplane, MirrorProtect, MirrorProtectMap};
+
+        let local: Ipv6Net = "2001:db8:a4:1::/64".parse().unwrap();
+        let mut map = MirrorProtectMap::new();
+
+        // In-locator SRv6 entry with an explicit Mirror SID → emitted.
+        let mut ok = MirrorProtect::new("2001:db8:a3:1::/64".parse().unwrap());
+        ok.mirror_sid = Some("2001:db8:a4:1::3".parse().unwrap());
+        map.insert(ok.protected_locator, ok);
+
+        // No explicit Mirror SID → skipped (auto-alloc is a follow-up).
+        map.insert(
+            "2001:db8:b3:1::/64".parse().unwrap(),
+            MirrorProtect::new("2001:db8:b3:1::/64".parse().unwrap()),
+        );
+
+        // Mirror SID outside the local locator → skipped.
+        let mut outside = MirrorProtect::new("2001:db8:c3:1::/64".parse().unwrap());
+        outside.mirror_sid = Some("2001:db8:ffff::9".parse().unwrap());
+        map.insert(outside.protected_locator, outside);
+
+        // MPLS dataplane → skipped (SRv6 emit only).
+        let mut mpls = MirrorProtect::new("2001:db8:d3:1::/64".parse().unwrap());
+        mpls.mirror_sid = Some("2001:db8:a4:1::4".parse().unwrap());
+        mpls.dataplane = MirrorDataplane::Mpls;
+        map.insert(mpls.protected_locator, mpls);
+
+        let subs = mirror_sid_subs(&map, local);
+        assert_eq!(subs.len(), 1, "only the in-locator SRv6 entry emits");
+
+        let prefix::IsisSubTlv::Srv6MirrorSid(m) = &subs[0] else {
+            panic!("expected Srv6MirrorSid, got {:?}", subs[0]);
+        };
+        assert_eq!(m.behavior, Behavior::EndM);
+        assert_eq!(
+            m.sid,
+            "2001:db8:a4:1::3".parse::<std::net::Ipv6Addr>().unwrap()
+        );
+        assert_eq!(m.sub2s.len(), 1);
+        let IsisMirrorSub2Tlv::ProtectedLocators(pl) = &m.sub2s[0] else {
+            panic!("expected ProtectedLocators sub-sub-TLV");
+        };
+        assert_eq!(pl.locator, "2001:db8:a3:1::/64".parse::<Ipv6Net>().unwrap());
     }
 
     #[test]
