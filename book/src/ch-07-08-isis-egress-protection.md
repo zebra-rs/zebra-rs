@@ -100,13 +100,40 @@ egress (PEA). It is *not* meant for large VPN cardinality or arbitrary
 multi-homing — the IGP only ever carries the locator-level
 `<PEB, PEA, Mirror SID>` binding, never per-service state.
 
+## Verification
+
+`show isis egress-protection` lists the configured entries and, per
+entry, whether it is currently advertised. An entry is advertised when it
+is on the SRv6 dataplane, has an explicit `mirror-sid`, and that SID falls
+inside this node's own SRv6 locator:
+
+```text
+> show isis egress-protection
+Protected-Locator      Mirror-SID               DP    Via-VRF    Advertised
+2001:db8:a3:1::/64     2001:db8:a4:1::3         srv6  cust       yes
+```
+
+When advertised, the Mirror SID rides in the SRv6 Locator TLV of this
+node's LSP, alongside the node's own End SID, and is visible in the
+database on the protector and on every peer:
+
+```text
+> show isis database detail
+...
+  SRv6 Locator: 2001:db8:a4:1::/64 (Metric: 0)
+    SRv6 End SID: Behavior: uN, SID value: 2001:db8:a4:1::, ...
+    SRv6 Mirror SID: Behavior: End.M, SID value: 2001:db8:a4:1::3, Flags: 0
+      Protected Locator: 2001:db8:a3:1::/64
+```
+
 ## Current status
 
-This release accepts and stores the `egress-protection` configuration
-described above; it is validated against the schema and surfaced in the
-running configuration. The on-the-wire advertisement of the Mirror SID,
-the protector-side End.M dataplane, and the PLR-side repair are being
-implemented in stages — so configuring `egress-protection` today defines
-the intent without yet redirecting traffic. This chapter documents the
-configuration surface; the verification and dataplane sections will grow
-as those stages land.
+The configuration, the IS-IS **advertisement** of the Mirror SID
+(SRv6 End.M sub-TLV with the Protected Locators sub-sub-TLV), and the
+`show isis egress-protection` view above are implemented. Still landing
+in later stages: auto-allocation of the Mirror SID when `mirror-sid` is
+omitted, the protector-side **End.M dataplane** (decapsulate into the
+mirror-context FIB), and the **PLR-side repair** (push the Mirror SID on
+egress failure). So today a configured, advertised entry is visible to
+the network but does not yet redirect traffic; SR-MPLS (`dataplane mpls`)
+is also a later stage.
