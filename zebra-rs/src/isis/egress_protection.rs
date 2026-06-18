@@ -85,6 +85,28 @@ fn ensure(map: &mut MirrorProtectMap, key: Ipv6Net) -> &mut MirrorProtect {
     map.entry(key).or_insert_with(|| MirrorProtect::new(key))
 }
 
+/// The `(protected-locator, via-vrf)` pairs that should have a
+/// mirror-context route installed, given the config and the resolved
+/// local SRv6 locator. Gated identically to the End.M emit (SRv6
+/// dataplane, explicit Mirror SID inside the local locator) plus a
+/// configured `via-vrf` — so a context route exists exactly when its
+/// End.M decap is active and there is a local VRF to resolve into.
+pub(crate) fn desired_context_routes(
+    entries: &MirrorProtectMap,
+    local_prefix: Ipv6Net,
+) -> Vec<(Ipv6Net, String)> {
+    entries
+        .values()
+        .filter(|e| e.dataplane == MirrorDataplane::Srv6)
+        .filter(|e| {
+            e.mirror_sid
+                .map(|s| local_prefix.contains(&s))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.via_vrf.clone().map(|vrf| (e.protected_locator, vrf)))
+        .collect()
+}
+
 // ── YANG callback wiring ──────────────────────────────────────────────
 //
 // Each shim parses the list key (`protected-locator`) and, for leaf
@@ -152,6 +174,7 @@ fn config_egress_protect_dataplane(isis: &mut Isis, mut args: Args, op: ConfigOp
 /// instances, so sending both is safe.
 fn reoriginate(isis: &mut Isis) {
     isis.update_mirror_sids();
+    isis.update_mirror_context_routes();
     let _ = isis.tx.send(Message::LspOriginate(Level::L1, None));
     let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
 }
@@ -228,6 +251,36 @@ mod tests {
         assert_eq!(
             map[&net("2001:db8:b3:1::/64")].dataplane,
             MirrorDataplane::Srv6
+        );
+    }
+
+    #[test]
+    fn desired_context_routes_requires_in_locator_sid_and_via_vrf() {
+        let local = net("2001:db8:a4:1::/64");
+        let mut map = MirrorProtectMap::new();
+
+        // Fully eligible: SRv6, in-locator Mirror SID, via-vrf set.
+        let mut ok = MirrorProtect::new(net("2001:db8:a3:1::/64"));
+        ok.mirror_sid = Some("2001:db8:a4:1::3".parse().unwrap());
+        ok.via_vrf = Some("cust".to_string());
+        map.insert(ok.protected_locator, ok);
+
+        // In-locator SID but no via-vrf → no context route.
+        let mut no_vrf = MirrorProtect::new(net("2001:db8:b3:1::/64"));
+        no_vrf.mirror_sid = Some("2001:db8:a4:1::4".parse().unwrap());
+        map.insert(no_vrf.protected_locator, no_vrf);
+
+        // via-vrf set but Mirror SID outside the local locator → skipped.
+        let mut outside = MirrorProtect::new(net("2001:db8:c3:1::/64"));
+        outside.mirror_sid = Some("2001:db8:ffff::9".parse().unwrap());
+        outside.via_vrf = Some("cust".to_string());
+        map.insert(outside.protected_locator, outside);
+
+        let routes = desired_context_routes(&map, local);
+        assert_eq!(
+            routes,
+            vec![(net("2001:db8:a3:1::/64"), "cust".to_string())],
+            "only the fully-eligible entry yields a context route"
         );
     }
 }

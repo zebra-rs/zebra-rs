@@ -189,6 +189,21 @@ pub enum Message {
     SidDel {
         addr: std::net::Ipv6Addr,
     },
+    /// Install a mirror-context route for IS-IS egress protection: in
+    /// `context_table`, route the protected egress's locator `prefix` to
+    /// a seg6local End.DT46 that decaps into the local VRF named
+    /// `vrf_name`. The RIB resolves `vrf_name` to its kernel table id and
+    /// the seg6 device before pushing to the FIB; a not-yet-known VRF is
+    /// skipped (a later reconcile re-sends it).
+    MirrorRouteAdd {
+        prefix: ipnet::Ipv6Net,
+        context_table: u32,
+        vrf_name: String,
+    },
+    MirrorRouteDel {
+        prefix: ipnet::Ipv6Net,
+        context_table: u32,
+    },
     VxlanAdd {
         name: String,
         config: VxlanConfig,
@@ -1125,6 +1140,37 @@ impl Rib {
         }
     }
 
+    /// Resolve a mirror-context route's VRF name to its kernel table id
+    /// and the seg6 device, then install it. A VRF the RIB doesn't know
+    /// yet is skipped — IS-IS re-sends on its next reconcile (config /
+    /// locator change), by which point the VRF master has usually
+    /// appeared.
+    async fn mirror_route_install(
+        &mut self,
+        prefix: ipnet::Ipv6Net,
+        context_table: u32,
+        vrf_name: String,
+    ) {
+        let Some(vrf_table) = self.vrfs.get(&vrf_name).map(|v| v.table_id) else {
+            tracing::warn!(
+                "[mirror_route] vrf {} not known — skipping mirror-context install of {}",
+                vrf_name,
+                prefix
+            );
+            return;
+        };
+        let Some(ifindex) = self.resolve_sr0_ifindex() else {
+            tracing::warn!(
+                "[mirror_route] no seg6 device — skipping mirror-context install of {}",
+                prefix
+            );
+            return;
+        };
+        self.fib_handle
+            .route_mirror_context_install(&prefix, context_table, vrf_table, ifindex)
+            .await;
+    }
+
     /// Register a subscriber. `proto_id` is allocated by
     /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
     /// runs; we record the row in `client_registry`, which is the
@@ -1992,6 +2038,22 @@ impl Rib {
             }
             Message::SidDel { addr } => {
                 self.sid_uninstall(addr).await;
+            }
+            Message::MirrorRouteAdd {
+                prefix,
+                context_table,
+                vrf_name,
+            } => {
+                self.mirror_route_install(prefix, context_table, vrf_name)
+                    .await;
+            }
+            Message::MirrorRouteDel {
+                prefix,
+                context_table,
+            } => {
+                self.fib_handle
+                    .route_mirror_context_uninstall(&prefix, context_table)
+                    .await;
             }
             Message::Shutdown { tx } => {
                 self.nmap.shutdown(&self.fib_handle).await;
