@@ -7,6 +7,10 @@ pub enum ExtCommunityType {
     // TransIpv4Addr = 0x01,
     // TransFourOctetAS = 0x03,
     TransOpaque = 0x03,
+    /// RFC 7153 / RFC 9251 — EVPN Extended Community high-type byte.
+    /// Sub-type 0x09 is the Multicast Flags EC (IGMP/MLD proxy
+    /// capability); see `ExtCommunityValue::as_evpn_mcast_flags`.
+    Evpn = 0x06,
     /// RFC 9833 — BGP MUP Extended Community high-type byte. Sub-type
     /// decode is deferred to a later phase; raw 8-byte value passes
     /// through the generic ExtCommunity path for now.

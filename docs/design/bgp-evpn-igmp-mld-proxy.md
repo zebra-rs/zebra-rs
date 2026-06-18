@@ -28,7 +28,7 @@ before citing.
 | ----- | --------------------------------------- | -------- |
 | 0     | Design doc (this file)                  | **done** |
 | 1     | Codec — Type 6 SMET NLRI                | **done** |
-| 2     | Multicast Flags Extended Community      | planned  |
+| 2     | Multicast Flags Extended Community      | **done** |
 | 3     | IMET (Type 3) capability signaling      | planned  |
 | 4     | SMET origination from kernel MDB snoop  | planned  |
 | 5     | SMET reception → selective dataplane    | planned  |
@@ -207,13 +207,18 @@ RIB key, and `BgpRib` does not yet carry them, so a *re-advertised*
 parsed, stored in the Loc-RIB, and renderable; no SMET origination or
 dataplane action happens yet.
 
-### Phase 2 — Multicast Flags Extended Community
+### Phase 2 — Multicast Flags Extended Community — **done**
 `crates/bgp-packet/src/attrs/ext_com_type.rs`, `ext_com.rs`
-- Add `ExtCommunityType::Evpn = 0x06` and sub-type `0x09`.
-- `EvpnMcastFlags { igmp_proxy: bool, mld_proxy: bool }` ↔
-  `ExtCommunityValue` (2-octet flags: bit15=IGMP, bit14=MLD; 4-octet
-  reserved). Parse / emit / `Display`; both-zero ⇒ ignore. Wire-layout
-  unit test.
+- Added `ExtCommunityType::Evpn = 0x06`; the Multicast Flags sub-type
+  is the module const `EVPN_MCAST_FLAGS_SUB_TYPE = 0x09`.
+- `EvpnMcastFlags { igmp_proxy, mld_proxy }` with `From<…> for
+  ExtCommunityValue` (2-octet flags: bit15=IGMP `0x0001`, bit14=MLD
+  `0x0002`; 4-octet reserved), `ExtCommunityValue::is_evpn_mcast_flags`
+  / `as_evpn_mcast_flags` (the latter returns `None` when both bits
+  clear, per §6 "ignore"), and a `Display` branch rendering
+  `mcast-flags:IM`. Both types re-exported via `pub use ext_com::*`.
+- 6 unit tests: wire layout, IGMP-only round-trip, both-zero ignored,
+  `Display`, not-matching-for-RT, emit→parse round-trip.
 
 ### Phase 3 — IMET (Type 3) capability signaling
 `zebra-rs/src/bgp/route.rs` (`evpn_originate_imet` + IMET import),
