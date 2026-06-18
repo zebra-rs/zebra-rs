@@ -1464,6 +1464,25 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// `router bgp afi-safi evpn igmp-mld-proxy <bool>` (RFC 9251 §6).
+/// When enabled, the Multicast Flags Extended Community (IGMP + MLD
+/// proxy capability) is attached to every originated Type-3 IMET
+/// route. Toggling re-originates all IMET so the EC is added/removed;
+/// `evpn_originate_imet` replaces the Originated path in place.
+fn config_igmp_mld_proxy(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let enabled = if op.is_set() { args.boolean()? } else { false };
+    if bgp.igmp_mld_proxy == enabled {
+        return Some(());
+    }
+    bgp.igmp_mld_proxy = enabled;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
 /// Re-originate every per-VNI Type-3 IMET route so a changed Assisted
 /// Replication role / AR-IP is reflected in the PMSI Tunnel attribute and
 /// next hop. `evpn_originate_imet` replaces the existing Originated path
@@ -3640,6 +3659,11 @@ impl Bgp {
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
         );
+
+        // EVPN IGMP/MLD proxy capability (RFC 9251 §6) under
+        // `router bgp afi-safi evpn igmp-mld-proxy`. When set, the
+        // Multicast Flags EC rides the originated Type-3 IMET route.
+        self.callback_add("/router/bgp/afi-safi/igmp-mld-proxy", config_igmp_mld_proxy);
 
         // EVPN Assisted Replication role + AR-IP (RFC 9574), under
         // `router bgp afi-safi evpn assisted-replication`. Augmented in by
