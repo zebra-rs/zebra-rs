@@ -16,7 +16,7 @@ use super::auth::AoConfig;
 use super::peer::{AfiSafiEncapType, BgpTop};
 use super::route_clean;
 use super::{
-    BGP_PORT, Bgp,
+    AssistedReplicationRole, BGP_PORT, Bgp,
     inst::Callback,
     peer::{
         ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType,
@@ -1372,6 +1372,65 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
             bgp.evpn_withdraw_imet(vni, vtep_local);
         }
     }
+    Some(())
+}
+
+/// Re-originate every per-VNI Type-3 IMET route so a changed Assisted
+/// Replication role / AR-IP is reflected in the PMSI Tunnel attribute and
+/// next hop. `evpn_originate_imet` replaces the existing Originated path
+/// in place (the prefix key is the local VTEP, which does not change) and
+/// re-advertises to peers. No-op unless `advertise-all-vni` is on.
+fn reoriginate_all_imet(bgp: &mut Bgp) {
+    if !bgp.advertise_all_vni {
+        return;
+    }
+    let vxlans: Vec<(u32, IpAddr)> = bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+    for (vni, vtep_local) in vxlans {
+        bgp.evpn_originate_imet(vni, vtep_local);
+    }
+}
+
+/// `router bgp afi-safi evpn assisted-replication role {none|replicator|leaf}`
+/// (RFC 9574). Stored on `Bgp` and consumed by `evpn_originate_imet`.
+fn config_assisted_replication_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let role = if op.is_set() {
+        match args.string()?.as_str() {
+            "replicator" => AssistedReplicationRole::Replicator,
+            "leaf" => AssistedReplicationRole::Leaf,
+            _ => AssistedReplicationRole::None,
+        }
+    } else {
+        AssistedReplicationRole::None
+    };
+    if bgp.assisted_replication_role == role {
+        return Some(());
+    }
+    bgp.assisted_replication_role = role;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn assisted-replication replicator-ip <ip>` —
+/// the AR-IP advertised in the Replicator-AR route's next hop (RFC 9574).
+fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let ip = if op.is_set() {
+        Some(args.addr()?)
+    } else {
+        None
+    };
+    if bgp.assisted_replication_ip == ip {
+        return Some(());
+    }
+    bgp.assisted_replication_ip = ip;
+    reoriginate_all_imet(bgp);
     Some(())
 }
 
@@ -3451,6 +3510,18 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
+        );
+
+        // EVPN Assisted Replication role + AR-IP (RFC 9574), under
+        // `router bgp afi-safi evpn assisted-replication`. Augmented in by
+        // zebra-bgp-evpn.yang.
+        self.callback_add(
+            "/router/bgp/afi-safi/assisted-replication/role",
+            config_assisted_replication_role,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/assisted-replication/replicator-ip",
+            config_assisted_replication_ip,
         );
 
         // Per-AFI redistribution (zebra-bgp-redistribute.yang).
