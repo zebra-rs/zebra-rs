@@ -1,8 +1,9 @@
 use std::fmt::{Display, Formatter, Result};
 
 use super::prefix::{
-    IsisSub2SidStructure, IsisSub2Tlv, IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId,
-    IsisSubSrv6EndSid, IsisSubTlv, PrefixSidFlags,
+    IsisMirrorSub2Tlv, IsisSub2ProtectedLocators, IsisSub2SidStructure, IsisSub2Tlv,
+    IsisSubIpv4SourceRouterId, IsisSubIpv6SourceRouterId, IsisSubSrv6EndSid, IsisSubSrv6MirrorSid,
+    IsisSubTlv, PrefixSidFlags,
 };
 use super::{
     IsisSubPrefixSid, IsisTlvExtIpReach, IsisTlvExtIpReachEntry, IsisTlvIpv6Reach,
@@ -68,6 +69,7 @@ impl Display for IsisSubTlv {
         match self {
             PrefixSid(v) => write!(f, "{}", v),
             Srv6EndSid(v) => write!(f, "{}", v),
+            Srv6MirrorSid(v) => write!(f, "{}", v),
             Ipv4SourceRouterId(v) => write!(f, "{}", v),
             Ipv6SourceRouterId(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "Unknown: Code {}, Length {}", v.code, v.len),
@@ -123,6 +125,36 @@ impl Display for IsisSubSrv6EndSid {
             write!(f, "\n    {}", sub2)?;
         }
         Ok(())
+    }
+}
+
+impl Display for IsisSubSrv6MirrorSid {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            r#"   SRv6 Mirror SID: Behavior: {}, SID value: {}, Flags: {}"#,
+            self.behavior, self.sid, self.flags,
+        )?;
+        for sub2 in &self.sub2s {
+            write!(f, "\n    {}", sub2)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for IsisMirrorSub2Tlv {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        use IsisMirrorSub2Tlv::*;
+        match self {
+            ProtectedLocators(v) => write!(f, "{}", v),
+            Unknown(v) => write!(f, "Unknown: Code {}, Length {}", v.code, v.len),
+        }
+    }
+}
+
+impl Display for IsisSub2ProtectedLocators {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "Protected Locator: {}", self.locator)
     }
 }
 
