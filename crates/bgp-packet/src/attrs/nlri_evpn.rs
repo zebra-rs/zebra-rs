@@ -18,9 +18,10 @@ pub enum EvpnRouteType {
     IncMulticast,  // 3
     EthernetSr,    // 4
     IpPrefix,      // 5
-    PerRegionImet, // 9  (RFC 9572 §3.1)
-    SPmsiAd,       // 10 (RFC 9572 §3.2)
-    LeafAd,        // 11 (RFC 9572 §3.3)
+    SmetRoute,     // 6 — Selective Multicast Ethernet Tag (RFC 9251)
+    PerRegionImet, // 9  — Per-Region I-PMSI A-D (RFC 9572 §3.1)
+    SPmsiAd,       // 10 — S-PMSI A-D (RFC 9572 §3.2)
+    LeafAd,        // 11 — Leaf A-D (RFC 9572 §3.3)
     Unknown(u8),
 }
 
@@ -33,6 +34,7 @@ impl From<EvpnRouteType> for u8 {
             IncMulticast => 3,
             EthernetSr => 4,
             IpPrefix => 5,
+            SmetRoute => 6,
             PerRegionImet => 9,
             SPmsiAd => 10,
             LeafAd => 11,
@@ -50,6 +52,7 @@ impl From<u8> for EvpnRouteType {
             3 => IncMulticast,
             4 => EthernetSr,
             5 => IpPrefix,
+            6 => SmetRoute,
             9 => PerRegionImet,
             10 => SPmsiAd,
             11 => LeafAd,
@@ -70,6 +73,7 @@ pub enum EvpnRoute {
     Mac(EvpnMac),
     Multicast(EvpnMulticast),
     Prefix(EvpnIpPrefix),
+    Smet(EvpnSmet),
     PerRegionImet(EvpnPerRegionImet),
     SPmsi(EvpnSPmsi),
     LeafAd(EvpnLeafAd),
@@ -114,6 +118,35 @@ pub struct EvpnIpPrefix {
     pub label: u32,
 }
 
+/// Route Type 6 — Selective Multicast Ethernet Tag (SMET) Route
+/// (RFC 9251 §9.1). A PE originates one SMET per locally-snooped
+/// `(*,G)` / `(S,G)` membership so ingress PEs replicate the group
+/// selectively instead of flooding it over the Type-3 BUM tree.
+///
+/// Wire layout (RFC 9251 §9.1): RD(8) EthTag(4) McastSrcLen(1)
+/// McastSrc(0|4|16) McastGrpLen(1) McastGrp(4|16) OrigLen(1)
+/// Orig(4|16) Flags(1). Source length 0 means `(*,G)`; the source
+/// address is then absent. The 1-octet Flags field (IGMP/MLD
+/// version + include/exclude mode) is **not** part of the BGP route
+/// key (it rides on the path, like a path attribute would), so it is
+/// excluded from `EvpnPrefix::Smet`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EvpnSmet {
+    pub id: u32,
+    pub rd: RouteDistinguisher,
+    pub ether_tag: u32,
+    /// Multicast source. `None` is the `(*,G)` wildcard (source
+    /// length 0 on the wire); `Some` is a specific `(S,G)` source.
+    pub src: Option<IpAddr>,
+    /// Multicast group address (always present).
+    pub grp: IpAddr,
+    /// Originating router's IP address.
+    pub orig: IpAddr,
+    /// IGMP/MLD version + include/exclude flags (RFC 9251 §9.1).
+    /// Not part of the route key.
+    pub flags: u8,
+}
+
 /// Route Type 9 — Per-Region I-PMSI A-D Route (RFC 9572 §3.1).
 ///
 /// Wire layout (fixed, 20 octets): RD(8) EthTag(4) RegionID(8). The Region
@@ -135,8 +168,8 @@ pub struct EvpnPerRegionImet {
 /// Wire layout: RD(8) EthTag(4) SrcLen(1) Src(0/4/16) GrpLen(1) Grp(0/4/16)
 /// OrigLen(1) Orig(4/16). The Source/Group/Originator length octets are in
 /// BITS (0 = wildcard `*`, 32 = IPv4, 128 = IPv6), matching RFC 6514/7117
-/// and the Type-3 IMET parser. `src`/`grp` are `None` for the wildcard `*`
-/// (so a (\*,G) route has `src == None`).
+/// and the SMET parser. Unlike SMET (Type 6), both `src` and `grp` may be the
+/// wildcard `*` (a (\*,\*) S-PMSI A-D), so both are `Option`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EvpnSPmsi {
     pub id: u32,
@@ -197,6 +230,20 @@ pub enum EvpnPrefix {
     /// are per-path forwarding properties carried on the `EvpnIpPrefix`
     /// route, not part of the RIB key.
     IpPrefix { eth_tag: u32, prefix: IpNet },
+    /// Route Type 6 — Selective Multicast Ethernet Tag (SMET) Route
+    /// (RFC 9251).
+    ///
+    /// Wire format: `[6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
+    /// `src = None` is the `(*,G)` wildcard. The 1-octet Flags field is a
+    /// per-path property (IGMP/MLD version + IE mode), **not** part of the
+    /// route key, so it is omitted here. Declared last so the derived
+    /// `Ord` keeps Type 2 → Type 3 → Type 5 → Type 6 ordering.
+    Smet {
+        eth_tag: u32,
+        src: Option<IpAddr>,
+        grp: IpAddr,
+        orig: IpAddr,
+    },
     /// Route Type 9 — Per-Region I-PMSI A-D Route (RFC 9572 §3.1).
     PerRegionImet { eth_tag: u32, region_id: [u8; 8] },
     /// Route Type 10 — S-PMSI A-D Route (RFC 9572 §3.2). `src`/`grp` are
@@ -209,17 +256,18 @@ pub enum EvpnPrefix {
     },
     /// Route Type 11 — Leaf A-D Route (RFC 9572 §3.3). The Route Key is the
     /// opaque embedded NLRI of the triggering route. Declared last so the
-    /// derived `Ord` keeps Type 2 → 3 → 5 → 9 → 10 → 11 ordering.
+    /// derived `Ord` keeps Type 2 → 3 → 5 → 6 → 9 → 10 → 11 ordering.
     LeafAd { route_key: Vec<u8>, orig: IpAddr },
 }
 
 impl EvpnPrefix {
-    /// EVPN route type number (2, 3, 5, 9, 10, or 11).
+    /// EVPN route type number (2, 3, 5, or 6).
     pub fn route_type(&self) -> u8 {
         match self {
             EvpnPrefix::MacIp { .. } => 2,
             EvpnPrefix::InclusiveMulticast { .. } => 3,
             EvpnPrefix::IpPrefix { .. } => 5,
+            EvpnPrefix::Smet { .. } => 6,
             EvpnPrefix::PerRegionImet { .. } => 9,
             EvpnPrefix::SPmsi { .. } => 10,
             EvpnPrefix::LeafAd { .. } => 11,
@@ -253,6 +301,15 @@ impl EvpnPrefix {
                 EvpnPrefix::IpPrefix {
                     eth_tag: p.ether_tag,
                     prefix: p.prefix,
+                },
+            ),
+            EvpnRoute::Smet(s) => (
+                s.rd,
+                EvpnPrefix::Smet {
+                    eth_tag: s.ether_tag,
+                    src: s.src,
+                    grp: s.grp,
+                    orig: s.orig,
                 },
             ),
             EvpnRoute::PerRegionImet(r) => (
@@ -328,6 +385,25 @@ impl fmt::Display for EvpnPrefix {
                     prefix.addr()
                 )
             }
+            EvpnPrefix::Smet {
+                eth_tag,
+                src,
+                grp,
+                orig,
+            } => {
+                // `[6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.
+                // A `(*,G)` route renders the source as `[0]:[*]`.
+                match src {
+                    Some(s) => write!(f, "[6]:[{eth_tag}]:[{}]:[{s}]", ip_bits(s))?,
+                    None => write!(f, "[6]:[{eth_tag}]:[0]:[*]")?,
+                }
+                write!(
+                    f,
+                    ":[{}]:[{grp}]:[{}]:[{orig}]",
+                    ip_bits(grp),
+                    ip_bits(orig)
+                )
+            }
             EvpnPrefix::PerRegionImet { eth_tag, region_id } => {
                 write!(f, "[9]:[{eth_tag}]:[")?;
                 for (i, b) in region_id.iter().enumerate() {
@@ -358,49 +434,12 @@ impl fmt::Display for EvpnPrefix {
     }
 }
 
-/// Parse an EVPN "length(BITS) + address" field used by the S-PMSI and
-/// Leaf A-D routes (RFC 9572 §3.2/§3.3). Length 0 → wildcard (`None`); 32 →
-/// IPv4; 128 → IPv6. Any other length fails the parse.
-fn parse_evpn_opt_addr(input: &[u8]) -> IResult<&[u8], Option<IpAddr>> {
-    let (input, len_bits) = be_u8(input)?;
-    match len_bits {
-        0 => Ok((input, None)),
-        32 => {
-            let (input, val) = be_u32(input)?;
-            Ok((input, Some(IpAddr::V4(Ipv4Addr::from(val)))))
-        }
-        128 => {
-            let (input, raw) = take(16usize).parse(input)?;
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(raw);
-            Ok((input, Some(IpAddr::V6(Ipv6Addr::from(octets)))))
-        }
-        _ => Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
-    }
-}
-
-/// Like [`parse_evpn_opt_addr`] but the address must be present (used for the
-/// Originator's Address, which is never a wildcard).
-fn parse_evpn_addr(input: &[u8]) -> IResult<&[u8], IpAddr> {
-    match parse_evpn_opt_addr(input)? {
-        (rest, Some(addr)) => Ok((rest, addr)),
-        (rest, None) => Err(nom::Err::Error(make_error(rest, ErrorKind::LengthValue))),
-    }
-}
-
-/// Emit an EVPN "length(BITS) + address" field. `None` → a single 0 length
-/// octet (wildcard); IPv4 → 32 + 4 octets; IPv6 → 128 + 16 octets.
-fn emit_evpn_opt_addr(buf: &mut BytesMut, addr: Option<IpAddr>) {
-    match addr {
-        None => buf.put_u8(0),
-        Some(IpAddr::V4(v4)) => {
-            buf.put_u8(32);
-            buf.put(&v4.octets()[..]);
-        }
-        Some(IpAddr::V6(v6)) => {
-            buf.put_u8(128);
-            buf.put(&v6.octets()[..]);
-        }
+/// Address length in bits for the EVPN NLRI length-prefixed IP fields
+/// (32 for IPv4, 128 for IPv6).
+fn ip_bits(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
     }
 }
 
@@ -519,6 +558,32 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 };
                 Ok((input, EvpnRoute::Prefix(evpn)))
             }
+            SmetRoute => {
+                // RFC 9251 §9.1: RD(8) EthTag(4) SrcLen(1) Src(0|4|16)
+                // GrpLen(1) Grp(4|16) OrigLen(1) Orig(4|16) Flags(1).
+                let (input, rd) = RouteDistinguisher::parse_be(input)?;
+                let (input, ether_tag) = be_u32(input)?;
+                // Multicast Source: length 0 is the `(*,G)` wildcard.
+                let (input, src) = parse_len_prefixed_ip(input)?;
+                // Multicast Group and Originator must be present.
+                let (input, grp) = parse_len_prefixed_ip(input)?;
+                let grp =
+                    grp.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let orig =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
+                let (input, flags) = be_u8(input)?;
+                let evpn = EvpnSmet {
+                    id,
+                    rd,
+                    ether_tag,
+                    src,
+                    grp,
+                    orig,
+                    flags,
+                };
+                Ok((input, EvpnRoute::Smet(evpn)))
+            }
             PerRegionImet => {
                 // RFC 9572 §3.1: RD(8) EthTag(4) RegionID(8).
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
@@ -538,12 +603,14 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
             }
             SPmsiAd => {
                 // RFC 9572 §3.2: RD(8) EthTag(4) SrcLen(1) Src GrpLen(1) Grp
-                // OrigLen(1) Orig. Lengths in bits (0 = wildcard).
+                // OrigLen(1) Orig. Lengths in bits (0 = wildcard `*`).
                 let (input, rd) = RouteDistinguisher::parse_be(input)?;
                 let (input, ether_tag) = be_u32(input)?;
-                let (input, src) = parse_evpn_opt_addr(input)?;
-                let (input, grp) = parse_evpn_opt_addr(input)?;
-                let (input, originator) = parse_evpn_addr(input)?;
+                let (input, src) = parse_len_prefixed_ip(input)?;
+                let (input, grp) = parse_len_prefixed_ip(input)?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let originator =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
                 Ok((
                     input,
                     EvpnRoute::SPmsi(EvpnSPmsi {
@@ -567,7 +634,9 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                 let key_len = 2 + input[1] as usize;
                 let (input, key_raw) = take(key_len).parse(input)?;
                 let route_key = key_raw.to_vec();
-                let (input, originator) = parse_evpn_addr(input)?;
+                let (input, orig) = parse_len_prefixed_ip(input)?;
+                let originator =
+                    orig.ok_or_else(|| nom::Err::Error(make_error(input, ErrorKind::LengthValue)))?;
                 Ok((
                     input,
                     EvpnRoute::LeafAd(EvpnLeafAd {
@@ -579,6 +648,30 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
             }
             _ => Err(nom::Err::Error(make_error(input, ErrorKind::NoneOf))),
         }
+    }
+}
+
+/// Parse one length-prefixed IP address from an EVPN NLRI: a 1-octet
+/// length-in-bits followed by the address. Length 0 yields `None`
+/// (the `(*,G)` wildcard source); 32 → IPv4, 128 → IPv6; any other
+/// length fails the parse (RFC 7606 treat-as-withdraw at the caller).
+fn parse_len_prefixed_ip(input: &[u8]) -> IResult<&[u8], Option<IpAddr>> {
+    let (input, len) = be_u8(input)?;
+    match nlri_psize(len) {
+        0 => Ok((input, None)),
+        4 => {
+            let (input, v) = take(4usize).parse(input)?;
+            let mut o = [0u8; 4];
+            o.copy_from_slice(v);
+            Ok((input, Some(IpAddr::V4(Ipv4Addr::from(o)))))
+        }
+        16 => {
+            let (input, v) = take(16usize).parse(input)?;
+            let mut o = [0u8; 16];
+            o.copy_from_slice(v);
+            Ok((input, Some(IpAddr::V6(Ipv6Addr::from(o)))))
+        }
+        _ => Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
     }
 }
 
@@ -699,6 +792,29 @@ impl EvpnRoute {
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
             }
+            EvpnRoute::Smet(s) => {
+                if s.id != 0 {
+                    buf.put_u32(s.id);
+                }
+                let mut payload = BytesMut::new();
+                // RD (8 octets).
+                payload.put_u16(s.rd.typ as u16);
+                payload.put(&s.rd.val[..]);
+                // Ethernet Tag (4 octets).
+                payload.put_u32(s.ether_tag);
+                // Multicast Source (len + addr) — len 0 for the
+                // `(*,G)` wildcard, with no address following.
+                emit_len_prefixed_ip(&mut payload, s.src);
+                // Multicast Group (len + addr).
+                emit_len_prefixed_ip(&mut payload, Some(s.grp));
+                // Originator Router (len + addr).
+                emit_len_prefixed_ip(&mut payload, Some(s.orig));
+                // Flags (1 octet) — IGMP/MLD version + IE mode. RFC 9251 §9.1.
+                payload.put_u8(s.flags);
+                buf.put_u8(6); // Route Type 6 — Selective Multicast Ethernet Tag.
+                buf.put_u8(payload.len() as u8);
+                buf.put(&payload[..]);
+            }
             EvpnRoute::PerRegionImet(r) => {
                 if r.id != 0 {
                     buf.put_u32(r.id);
@@ -727,9 +843,9 @@ impl EvpnRoute {
                 payload.put_u32(r.ether_tag);
                 // Source / Group / Originator, each <len-in-bits><addr>.
                 // RFC 9572 §3.2.
-                emit_evpn_opt_addr(&mut payload, r.src);
-                emit_evpn_opt_addr(&mut payload, r.grp);
-                emit_evpn_opt_addr(&mut payload, Some(r.originator));
+                emit_len_prefixed_ip(&mut payload, r.src);
+                emit_len_prefixed_ip(&mut payload, r.grp);
+                emit_len_prefixed_ip(&mut payload, Some(r.originator));
                 buf.put_u8(10); // Route Type 10 — S-PMSI A-D.
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
@@ -743,11 +859,29 @@ impl EvpnRoute {
                 // §3.3.
                 payload.put(&r.route_key[..]);
                 // Originator's Addr (<len-in-bits><addr>).
-                emit_evpn_opt_addr(&mut payload, Some(r.originator));
+                emit_len_prefixed_ip(&mut payload, Some(r.originator));
                 buf.put_u8(11); // Route Type 11 — Leaf A-D.
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
             }
+        }
+    }
+}
+
+/// Emit one length-prefixed IP into an EVPN NLRI payload: the 1-octet
+/// length-in-bits then the address. `None` emits length 0 with no
+/// address (the `(*,G)` wildcard source). Mirror of
+/// `parse_len_prefixed_ip`.
+fn emit_len_prefixed_ip(payload: &mut BytesMut, ip: Option<IpAddr>) {
+    match ip {
+        None => payload.put_u8(0),
+        Some(IpAddr::V4(v4)) => {
+            payload.put_u8(32);
+            payload.put(&v4.octets()[..]);
+        }
+        Some(IpAddr::V6(v6)) => {
+            payload.put_u8(128);
+            payload.put(&v6.octets()[..]);
         }
     }
 }
@@ -830,6 +964,51 @@ mod evpn_prefix_tests {
     }
 
     #[test]
+    fn display_smet_star_g_v4() {
+        let p = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[6]:[0]:[0]:[*]:[32]:[239.1.1.1]:[32]:[10.0.0.1]"
+        );
+    }
+
+    #[test]
+    fn display_smet_s_g_v4() {
+        let p = EvpnPrefix::Smet {
+            eth_tag: 10,
+            src: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
+            grp: IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        };
+        assert_eq!(
+            p.to_string(),
+            "[6]:[10]:[32]:[192.0.2.9]:[32]:[232.1.1.1]:[32]:[10.0.0.2]"
+        );
+    }
+
+    #[test]
+    fn smet_route_type_and_ordering() {
+        let p = EvpnPrefix::IpPrefix {
+            eth_tag: 0,
+            prefix: "10.0.0.0/8".parse().unwrap(),
+        };
+        let s = EvpnPrefix::Smet {
+            eth_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 0, 0, 1)),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
+        assert_eq!(s.route_type(), 6);
+        // Variant order keeps Type 5 < Type 6.
+        assert!(p < s);
+    }
+
+    #[test]
     fn route_type_numbers_segmentation() {
         let t9 = EvpnPrefix::PerRegionImet {
             eth_tag: 0,
@@ -848,12 +1027,14 @@ mod evpn_prefix_tests {
         assert_eq!(t9.route_type(), 9);
         assert_eq!(t10.route_type(), 10);
         assert_eq!(t11.route_type(), 11);
-        // Variant order preserves Type 5 < 9 < 10 < 11.
-        let t5 = EvpnPrefix::IpPrefix {
+        // Variant order preserves Type 6 < 9 < 10 < 11.
+        let t6 = EvpnPrefix::Smet {
             eth_tag: 0,
-            prefix: "10.0.0.0/8".parse().unwrap(),
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            orig: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         };
-        assert!(t5 < t9);
+        assert!(t6 < t9);
         assert!(t9 < t10);
         assert!(t10 < t11);
     }
@@ -966,6 +1147,114 @@ mod evpn_emit_tests {
         assert_eq!(buf[14], 32, "IPv4 origin = 32 bits");
         assert_eq!(&buf[15..19], &[10, 0, 0, 5]);
         assert_eq!(buf.len(), 19);
+    }
+
+    /// Type-6 SMET `(*,G)` IPv4. Payload = 8 (RD) + 4 (eth-tag) + 1
+    /// (src-len=0) + 1 (grp-len=32) + 4 (grp) + 1 (orig-len=32) + 4
+    /// (orig) + 1 (flags) = 24.
+    #[test]
+    fn smet_nlri_emit_star_g_v4() {
+        let s = EvpnSmet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            ether_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            flags: 0x04, // IGMPv3, include mode (v3 bit set)
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Smet(s).nlri_emit(&mut buf);
+        assert_eq!(buf[0], 6, "route type 6");
+        assert_eq!(buf[1], 24, "length");
+        assert_eq!(&buf[2..4], &[0x00, 0x01], "RD type 1");
+        assert_eq!(&buf[4..10], &[10, 0, 0, 1, 0x00, 0x64], "RD IP:num");
+        assert_eq!(&buf[10..14], &[0, 0, 0, 0], "eth-tag = 0");
+        assert_eq!(buf[14], 0, "src len 0 — (*,G)");
+        assert_eq!(buf[15], 32, "grp len = 32");
+        assert_eq!(&buf[16..20], &[239, 1, 1, 1], "group");
+        assert_eq!(buf[20], 32, "orig len = 32");
+        assert_eq!(&buf[21..25], &[10, 0, 0, 1], "originator");
+        assert_eq!(buf[25], 0x04, "flags");
+        assert_eq!(buf.len(), 26, "1 + 1 + 24");
+    }
+
+    /// Add-Path: a non-zero `id` prepends the 4-byte path identifier.
+    #[test]
+    fn smet_nlri_emit_addpath() {
+        let s = EvpnSmet {
+            id: 9,
+            rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 100),
+            ether_tag: 0,
+            src: None,
+            grp: IpAddr::V4(Ipv4Addr::new(239, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            flags: 0,
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Smet(s).nlri_emit(&mut buf);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 9], "path id 9 prepended");
+        assert_eq!(buf[4], 6, "route type follows id");
+    }
+
+    /// Round-trip an `(S,G)` IPv4 SMET: emit, parse back, fields match.
+    #[test]
+    fn smet_emit_then_parse_roundtrip_s_g_v4() {
+        let original = EvpnSmet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
+            ether_tag: 5,
+            src: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9))),
+            grp: IpAddr::V4(Ipv4Addr::new(232, 1, 1, 1)),
+            orig: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            flags: 0x0c, // v3 + exclude (IE) mode
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Smet(original.clone()).nlri_emit(&mut buf);
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        assert_eq!(parsed, EvpnRoute::Smet(original));
+    }
+
+    /// Round-trip a `(*,G)` IPv6/MLD SMET (source absent, 16-octet
+    /// group + originator).
+    #[test]
+    fn smet_emit_then_parse_roundtrip_star_g_v6() {
+        let original = EvpnSmet {
+            id: 0,
+            rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 300),
+            ether_tag: 0,
+            src: None,
+            grp: "ff05::1:3".parse::<IpAddr>().unwrap(),
+            orig: "2001:db8::2".parse::<IpAddr>().unwrap(),
+            flags: 0x02, // MLDv2 (v2 bit)
+        };
+        let mut buf = BytesMut::new();
+        EvpnRoute::Smet(original.clone()).nlri_emit(&mut buf);
+        // 8 + 4 + 1 + 0 + 1 + 16 + 1 + 16 + 1 = 48.
+        assert_eq!(buf[1], 48, "IPv6 (*,G) payload length");
+        let (_, parsed) =
+            EvpnRoute::parse_nlri(&buf, false).expect("parse_nlri must accept what we emit");
+        assert_eq!(parsed, EvpnRoute::Smet(original));
+    }
+
+    /// RFC 7606 treat-as-withdraw at the caller: an illegal group
+    /// length (here 8 bits) must fail the parse rather than panic.
+    #[test]
+    fn smet_parse_rejects_bad_group_length() {
+        let mut buf = BytesMut::new();
+        // RD (8) + eth-tag (4).
+        buf.put_u16(0x0001);
+        buf.put_slice(&[10, 0, 0, 1, 0x00, 0x64]);
+        buf.put_u32(0);
+        buf.put_u8(0); // src len 0
+        buf.put_u8(8); // grp len 8 bits — illegal
+        buf.put_u8(0xaa);
+        let mut nlri = BytesMut::new();
+        nlri.put_u8(6); // route type
+        nlri.put_u8(buf.len() as u8);
+        nlri.put_slice(&buf);
+        assert!(EvpnRoute::parse_nlri(&nlri, false).is_err());
     }
 
     /// Round-trip: emit a Type-2 route, then parse the bytes back as

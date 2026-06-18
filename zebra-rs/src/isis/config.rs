@@ -141,11 +141,23 @@ impl Isis {
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
         self.callback_add(
-            "/router/isis/fast-reroute/ti-lfa/compute-mode",
-            config_ti_lfa_compute_mode,
+            "/router/isis/fast-reroute/ti-lfa/compute-mode/serial",
+            config_ti_lfa_compute_mode_serial,
         );
         self.callback_add(
-            "/router/isis/fast-reroute/ti-lfa/compute-shards",
+            "/router/isis/fast-reroute/ti-lfa/compute-mode/conservative",
+            config_ti_lfa_compute_mode_conservative,
+        );
+        self.callback_add(
+            "/router/isis/fast-reroute/ti-lfa/compute-mode/aggressive",
+            config_ti_lfa_compute_mode_aggressive,
+        );
+        self.callback_add(
+            "/router/isis/fast-reroute/ti-lfa/compute-mode/sharding",
+            config_ti_lfa_compute_mode_sharding,
+        );
+        self.callback_add(
+            "/router/isis/fast-reroute/ti-lfa/compute-mode/sharding/shards",
             config_ti_lfa_compute_shards,
         );
         self.callback_add(
@@ -413,6 +425,7 @@ impl Isis {
 
         super::flex_algo::callback_register(self);
         super::affinity_map::callback_register(self);
+        super::egress_protection::callback_register(self);
     }
 }
 
@@ -510,17 +523,25 @@ pub struct IsisConfig {
     /// /router/isis/fast-reroute/ti-lfa/compute-mode — how the
     /// per-destination TI-LFA computation is scheduled (serial
     /// default; conservative/aggressive/sharding fan out on the rayon
-    /// pool). Kept as the payload-free YANG mirror; the
-    /// `compute-shards` count joins in [`Self::tilfa_compute_mode`].
-    /// Results are identical across modes — only CPU scheduling
-    /// differs.
+    /// pool). Selected by one keyword per mode under the `mode` choice.
+    /// Kept as the payload-free YANG mirror; the shard count joins in
+    /// [`Self::tilfa_compute_mode`]. Results are identical across modes
+    /// — only CPU scheduling differs.
     pub ti_lfa_compute_mode: TilfaComputeModeConfig,
 
-    /// /router/isis/fast-reroute/ti-lfa/compute-shards — the
-    /// operator's hard upper bound on TI-LFA parallelism, consulted
+    /// /router/isis/fast-reroute/ti-lfa/compute-mode/sharding/shards —
+    /// the operator's hard upper bound on TI-LFA parallelism, consulted
     /// only when `compute-mode sharding` is set. Default 8, matching
     /// the YANG default.
     pub ti_lfa_compute_shards: u16,
+
+    /// Mirror SID egress node/link protection entries, from the YANG
+    /// list at /router/isis/egress-protection/protect[protected-locator].
+    /// Each entry names a protected egress (PEA) this node backs up
+    /// (draft-ietf-rtgwg-srv6-egress-protection). Config + state only
+    /// in this phase; origination / dataplane / PLR repair consume it
+    /// later. See [`super::egress_protection`].
+    pub egress_protections: super::egress_protection::MirrorProtectMap,
 
     /// Instance-level BFD defaults (`router isis { bfd {} }`), inherited by
     /// every interface and overridden per interface (see
@@ -767,8 +788,9 @@ impl Default for IsisConfig {
             ti_lfa_enabled: Default::default(),
             fast_reroute_backup_as_primary: Default::default(),
             ti_lfa_compute_mode: Default::default(),
-            // Matches the YANG `default 8` on compute-shards.
+            // Matches the YANG `default 8` on the sharding `shards` leaf.
             ti_lfa_compute_shards: 8,
+            egress_protections: Default::default(),
             mt_enabled: Default::default(),
             mt_topologies: Default::default(),
             networks_v4: Default::default(),
@@ -811,9 +833,10 @@ impl IsisConfig {
         self.is_type.unwrap_or(IsLevel::L1L2)
     }
 
-    /// Combine the `compute-mode` and `compute-shards` leaves into the
+    /// Combine the selected `compute-mode` and the shard count into the
     /// scheduler-facing [`spf::TilfaComputeMode`], snapshotted into
-    /// `SpfInput` at graph-build time.
+    /// `SpfInput` at graph-build time (the count only matters for
+    /// sharding).
     pub fn tilfa_compute_mode(&self) -> spf::TilfaComputeMode {
         self.ti_lfa_compute_mode
             .with_shards(self.ti_lfa_compute_shards)
@@ -1402,38 +1425,97 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-/// `/router/isis/fast-reroute/ti-lfa/compute-mode`. Picks how the
-/// TI-LFA computation is scheduled across cores (see
-/// `spf::TilfaComputeMode`). Results are identical across modes, so
-/// nothing advertised changes — no LSP re-origination. The SPF re-run
-/// makes the change observable immediately in `show isis spf` stats.
-fn config_ti_lfa_compute_mode(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
-    let prev = isis.config.tilfa_compute_mode();
-    isis.config.ti_lfa_compute_mode = if op.is_set() {
-        args.string()?.parse().ok()?
-    } else {
-        TilfaComputeModeConfig::default()
-    };
+/// Re-run SPF on both levels iff the *effective* TI-LFA scheduling
+/// mode (mode + shard count, [`IsisConfig::tilfa_compute_mode`])
+/// changed from `prev`. Results are identical across modes, so nothing
+/// advertised changes — no LSP re-origination; the SPF re-run only
+/// makes the new schedule observable in `show isis spf` stats.
+fn ti_lfa_recompute_if_changed(isis: &mut Isis, prev: spf::TilfaComputeMode) {
     if isis.config.tilfa_compute_mode() == prev {
-        return Some(());
+        return;
     }
     let _ = isis.tx.send(Message::SpfCalc(Level::L1));
     let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+}
+
+/// Set the payload-free `compute-mode` selector and re-run SPF on an
+/// effective-mode change. Shared by the per-case callbacks below.
+fn apply_ti_lfa_compute_mode(isis: &mut Isis, mode: TilfaComputeModeConfig) {
+    let prev = isis.config.tilfa_compute_mode();
+    isis.config.ti_lfa_compute_mode = mode;
+    ti_lfa_recompute_if_changed(isis, prev);
+}
+
+/// Body shared by the `serial` / `conservative` / `aggressive`
+/// `compute-mode` cases (each an empty leaf under the `mode` choice).
+/// Setting the case selects `mode`; deleting it reverts to the default
+/// mode — but only when *this* case is the active one, so a stale
+/// delete of a non-active case node (the candidate store does not
+/// auto-clear sibling choice cases) is a no-op rather than clobbering a
+/// newer selection.
+fn config_ti_lfa_compute_mode_case(
+    isis: &mut Isis,
+    op: ConfigOp,
+    mode: TilfaComputeModeConfig,
+) -> Option<()> {
+    if op.is_set() {
+        apply_ti_lfa_compute_mode(isis, mode);
+    } else if isis.config.ti_lfa_compute_mode == mode {
+        apply_ti_lfa_compute_mode(isis, TilfaComputeModeConfig::default());
+    }
     Some(())
 }
 
-/// `/router/isis/fast-reroute/ti-lfa/compute-shards`. Upper bound on
-/// TI-LFA parallelism; consulted only when `compute-mode sharding`
-/// is configured (the effective-mode comparison below keeps the SPF
-/// re-run suppressed otherwise).
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode/serial`.
+fn config_ti_lfa_compute_mode_serial(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    config_ti_lfa_compute_mode_case(isis, op, TilfaComputeModeConfig::Serial)
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode/conservative`.
+fn config_ti_lfa_compute_mode_conservative(
+    isis: &mut Isis,
+    _args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ti_lfa_compute_mode_case(isis, op, TilfaComputeModeConfig::Conservative)
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode/aggressive`.
+fn config_ti_lfa_compute_mode_aggressive(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    config_ti_lfa_compute_mode_case(isis, op, TilfaComputeModeConfig::Aggressive)
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode/sharding` — the
+/// presence container for the sharding case. Bare `sharding` selects
+/// the mode with the default shard count; the `shards` child overrides
+/// the count. Deleting the container drops the whole sharding subtree,
+/// so reset the count here too (regardless of whether the child
+/// `shards` delete also fires) and revert the mode when sharding is the
+/// active case.
+fn config_ti_lfa_compute_mode_sharding(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    if op.is_set() {
+        apply_ti_lfa_compute_mode(isis, TilfaComputeModeConfig::Sharding);
+    } else {
+        let prev = isis.config.tilfa_compute_mode();
+        // Matches the YANG `default 8` on the `shards` leaf.
+        isis.config.ti_lfa_compute_shards = 8;
+        if isis.config.ti_lfa_compute_mode == TilfaComputeModeConfig::Sharding {
+            isis.config.ti_lfa_compute_mode = TilfaComputeModeConfig::default();
+        }
+        ti_lfa_recompute_if_changed(isis, prev);
+    }
+    Some(())
+}
+
+/// `/router/isis/fast-reroute/ti-lfa/compute-mode/sharding/shards`.
+/// Upper bound on TI-LFA parallelism; consulted only when sharding is
+/// the active mode (the effective-mode comparison keeps the SPF re-run
+/// suppressed otherwise). A bare-`sharding` reset of the count lands on
+/// the YANG default 8.
 fn config_ti_lfa_compute_shards(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let prev = isis.config.tilfa_compute_mode();
     isis.config.ti_lfa_compute_shards = if op.is_set() { args.u16()? } else { 8 };
-    if isis.config.tilfa_compute_mode() == prev {
-        return Some(());
-    }
-    let _ = isis.tx.send(Message::SpfCalc(Level::L1));
-    let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    ti_lfa_recompute_if_changed(isis, prev);
     Some(())
 }
 

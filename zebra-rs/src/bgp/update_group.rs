@@ -312,8 +312,12 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         return None;
     }
 
-    let policy_out_name = peer.policy_list.get(&InOut::Output).name.clone();
-    let prefix_set_out_name = peer.prefix_set.get(&InOut::Output).name.clone();
+    // The update-group is per-(afi,safi), so its egress policy is that
+    // family's effective outbound binding (per-AFI override, else the
+    // legacy peer-wide fallback).
+    let afi_safi = AfiSafi::new(afi, safi);
+    let policy_out_name = peer.policy_list_at(afi_safi, InOut::Output).name.clone();
+    let prefix_set_out_name = peer.prefix_set_at(afi_safi, InOut::Output).name.clone();
 
     Some(UpdateGroupSig {
         peer_type: match peer.peer_type {

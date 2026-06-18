@@ -1,0 +1,69 @@
+# n1 — the primary-path midpoint s protects against (s-n1 link / n1 node).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: n1-s
+  ipv6:
+    address: 2001:db8:0:1::2/64
+- if-name: n1-r1
+  ipv6:
+    address: 2001:db8:0:4::1/64
+- if-name: n1-r2
+  ipv6:
+    address: 2001:db8:0:7::1/64
+- if-name: n1-d
+  ipv6:
+    address: 2001:db8:0:10::1/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+  - name: LOC2_A128
+    prefix: fcbb:bbbb:12::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: n1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+        flex-algo-locator:
+        - algo: 128
+          locator: LOC2_A128
+    fast-reroute:
+      ti-lfa: {}
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      fast-reroute:
+        ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: n1-s
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: n1-r1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: n1-r2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: n1-d
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true

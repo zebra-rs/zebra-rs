@@ -850,30 +850,51 @@ module config {
             // dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Execution scheduling for the per-destination TI-LFA
               // computation; same modes and semantics as
               // `router isis fast-reroute ti-lfa compute-mode` (see
               // docs/design/isis-tilfa-parallel-spf.md, §13 for the
-              // OSPF specifics).
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // OSPF specifics). One keyword per mode under a `choice`;
+              // the shard count nests under `sharding`. The default
+              // mode (serial) is applied by the Rust handler.
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism, consulted
+                    // only in this mode. Bare `sharding` uses 8
+                    // (applied by the handler).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
@@ -1296,27 +1317,49 @@ module config {
             // RFC 9490). Post-convergence repair over the v3 LSDB.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Same modes and semantics as `router ospf
-              // fast-reroute ti-lfa compute-mode`.
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // fast-reroute ti-lfa compute-mode`. One keyword per
+              // mode under a `choice`; the shard count nests under
+              // `sharding`. The default mode (serial) is applied by
+              // the Rust handler.
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism, consulted
+                    // only in this mode. Bare `sharding` uses 8
+                    // (applied by the handler).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
@@ -1614,36 +1657,64 @@ module config {
             // enabled for the repair to install in the dataplane.
             presence "Enable Topology-Independent LFA (TI-LFA)";
 
-            leaf compute-mode {
+            container compute-mode {
               ext:help "How the TI-LFA computation is scheduled";
               // Execution scheduling for the per-destination TI-LFA
               // computation (design: docs/design/isis-tilfa-parallel-
-              // spf.md). Results are identical across modes — only
-              // CPU usage and wall-clock differ. `serial` runs on the
-              // SPF worker thread; `conservative` fans out one task
-              // per destination; `aggressive` additionally shares the
+              // spf.md). Results are identical across modes — only CPU
+              // usage and wall-clock differ. `serial` runs on the SPF
+              // worker thread; `conservative` fans out one task per
+              // destination; `aggressive` additionally shares the
               // PC-path SPF across destinations behind the same
               // protected node; `sharding` is the aggressive work
-              // split into at most `compute-shards` parallel shards.
-              type enumeration {
-                enum serial;
-                enum conservative;
-                enum aggressive;
-                enum sharding;
+              // split into at most `shards` parallel shards.
+              //
+              // Modelled as a `choice` of one keyword per mode (the
+              // shard count nests under `sharding`, the only mode it
+              // applies to). The cases are mutually exclusive. The
+              // default mode (serial) is applied by the Rust handler —
+              // a choice/case carries no YANG default, and switching
+              // cases does not auto-clear the previous case node from
+              // the candidate store (same cosmetic as
+              // `allowas-in {count|origin}`).
+              choice mode {
+                case serial {
+                  leaf serial {
+                    ext:help "Run on the SPF worker thread";
+                    type empty;
+                  }
+                }
+                case conservative {
+                  leaf conservative {
+                    ext:help "Fan out one task per destination";
+                    type empty;
+                  }
+                }
+                case aggressive {
+                  leaf aggressive {
+                    ext:help "Also share the PC-path SPF per protected node";
+                    type empty;
+                  }
+                }
+                case sharding {
+                  container sharding {
+                    ext:help "Aggressive work split into parallel shards";
+                    presence "Shard the aggressive computation (default 8 shards)";
+                    // Hard upper bound on TI-LFA parallelism — lets an
+                    // operator reserve cores for other daemons on a
+                    // shared box. Bare `sharding` uses 8 (applied by
+                    // the handler; libyang does not carry the leaf
+                    // `default` into the entry tree).
+                    leaf shards {
+                      ext:help "Max parallel TI-LFA shards";
+                      type uint16 {
+                        range "1..256";
+                      }
+                      default "8";
+                    }
+                  }
+                }
               }
-              default "serial";
-            }
-
-            leaf compute-shards {
-              ext:help "Max parallel TI-LFA shards (sharding mode)";
-              // Hard upper bound on TI-LFA parallelism, consulted
-              // only when `compute-mode sharding` is set. Lets an
-              // operator reserve cores for other daemons on a shared
-              // box.
-              type uint16 {
-                range "1..256";
-              }
-              default "8";
             }
           }
           container backup-as-primary {
@@ -1654,6 +1725,58 @@ module config {
             // pin traffic onto the TI-LFA path for protection
             // testing without rewiring the topology.
             presence "Install TI-LFA backup as the primary nexthop";
+          }
+        }
+
+        container egress-protection {
+          ext:help "Mirror SID egress node/link protection (SRv6/SR-MPLS)";
+          // draft-ietf-rtgwg-srv6-egress-protection / RFC 8679. This
+          // node (the protector, PEB) advertises a Mirror SID (End.M
+          // for SRv6) plus the protected egress's locator(s) so a PLR
+          // can redirect traffic past a failed egress PE or PE-CE link
+          // — the gap TI-LFA cannot cover. Each `protect` entry
+          // declares one egress this node backs up. Phase 2 scope:
+          // config + state only; nothing is advertised or installed
+          // until later phases.
+          list protect {
+            ext:help "Protect one egress node, keyed by its SRv6 locator";
+            key "protected-locator";
+            leaf protected-locator {
+              type inet:ipv6-prefix;
+              description
+                "SRv6 locator of the protected egress PE (PEA), e.g.
+                 2001:db8:a3:1::/64. Emitted in the Protected Locators
+                 sub-sub-TLV of the advertised Mirror SID sub-TLV and
+                 used by the PLR to match traffic destined to PEA.";
+            }
+            leaf mirror-sid {
+              type inet:ipv6-address;
+              description
+                "Mirror SID (End.M) to advertise for the protected
+                 egress. Must lie within this node's own SRv6 locator.
+                 When omitted, a SID is auto-allocated from the local
+                 locator at origination time.";
+            }
+            leaf via-vrf {
+              type string;
+              description
+                "Name of the local VRF whose forwarding reaches the
+                 dual-homed CE. The mirror-context FIB resolves the
+                 protected egress's service SIDs in this VRF (static
+                 path; the BGP-learned path lands in a later phase).";
+            }
+            leaf dataplane {
+              type enumeration {
+                enum srv6;
+                enum mpls;
+              }
+              default "srv6";
+              description
+                "Dataplane this entry protects. srv6 advertises the
+                 End.M Mirror SID sub-TLV in the SRv6 Locator TLV; mpls
+                 advertises the SID/Label Binding TLV (149) M-flag
+                 (SR-MPLS, wired in a later phase).";
+            }
           }
         }
 
@@ -2834,7 +2957,7 @@ module config {
         }
         container "match" {
           ext:sort "7";
-          leaf "prefix" {
+          leaf "prefix-set" {
             type string;
             description
               "Reference to a `prefix-set` by name.";
@@ -3050,6 +3173,10 @@ module config {
                 enum prefix {
                   description
                     "Prefix (Type-5) route";
+                }
+                enum smet {
+                  description
+                    "Selective Multicast Ethernet Tag (Type-6) route";
                 }
               }
               description

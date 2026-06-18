@@ -117,14 +117,38 @@ every mode** — the same repairs install bit-for-bit; only CPU usage and
 wall-clock time differ:
 
 ```
-router isis {                       // same under router ospf / ospfv3
+router isis {
   fast-reroute {
     ti-lfa {
-      compute-mode aggressive;      // serial | conservative | aggressive | sharding
-      compute-shards 4;             // sharding mode only, 1..256 (default 8)
+      // serial | conservative | aggressive | sharding
+      compute-mode sharding shards 4;   // shard count nests under sharding,
+                                        // 1..256 (default 8); bare `sharding` = 8
     }
   }
 }
+```
+
+OSPFv2 (OSPFv3 is identical under `router ospfv3`):
+
+```
+router ospf {
+  fast-reroute {
+    ti-lfa {
+      compute-mode aggressive;          // serial | conservative | aggressive | sharding
+      // or bound the parallelism explicitly:
+      // compute-mode sharding shards 4;
+    }
+  }
+}
+```
+
+The shard count nests under the `sharding` mode
+(`compute-mode sharding [shards <1..256>]`) — identical syntax for
+IS-IS, OSPFv2 and OSPFv3. Equivalent flat CLI:
+
+```
+set router ospf    fast-reroute ti-lfa compute-mode sharding shards 4
+set router ospfv3  fast-reroute ti-lfa compute-mode sharding shards 4
 ```
 
 | mode | scheduling | when to use |
@@ -132,7 +156,7 @@ router isis {                       // same under router ospf / ospfv3
 | `serial` (default) | sequential on the SPF worker thread | small topologies; the conservative default |
 | `conservative` | one parallel task per destination, no shared state between tasks | simple parallelism without shared SPF trees |
 | `aggressive` | shares each first-hop's excluded-graph SPF across its destinations, all jobs fanned out | fastest wall clock and lowest total CPU |
-| `sharding` | the same shared-SPF work, packed into at most `compute-shards` parallel shards | hard cap on TI-LFA's core usage — reserve CPU for other daemons on a shared box |
+| `sharding` | the same shared-SPF work, packed into at most `shards` parallel shards (`compute-mode sharding shards N`) | hard cap on TI-LFA's core usage — reserve CPU for other daemons on a shared box |
 
 Parallel modes run on a process-wide worker pool sized to the machine's
 core count, so concurrent SPF runs (L1+L2, multiple areas, VRF

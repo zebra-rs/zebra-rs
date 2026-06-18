@@ -12,7 +12,7 @@ policy:
   - number: 10
     action: deny
     match:
-      prefix: OUT-DENY-LU
+      prefix-set: OUT-DENY-LU
   - number: 20
     action: permit
 router:

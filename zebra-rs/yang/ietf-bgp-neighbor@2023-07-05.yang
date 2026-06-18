@@ -238,6 +238,35 @@ submodule ietf-bgp-neighbor {
            next-hop carried across the inter-AS eBGP link. Honored on the
            Labeled-Unicast (SAFI 4) and VPNv4 (SAFI 128) advertise paths.";
       }
+      container policy {
+        ext:sort "40";
+        ext:help "Per-family route-policy references";
+        description
+          "Per-direction route-policy references applied to routes of
+           THIS address family. Takes priority over the legacy
+           peer-wide `neighbor X policy {in,out}`; when a family has no
+           per-family binding it falls back to that peer-wide policy.";
+        leaf in {
+          type string;
+        }
+        leaf out {
+          type string;
+        }
+      }
+      container prefix-set {
+        ext:sort "50";
+        ext:help "Per-family prefix-set references";
+        description
+          "Per-direction prefix-set references applied to routes of THIS
+           address family. The per-family successor of the (removed)
+           peer-wide `neighbor X prefix-set {in,out}`.";
+        leaf in {
+          type string;
+        }
+        leaf out {
+          type string;
+        }
+      }
     }
   }
 }

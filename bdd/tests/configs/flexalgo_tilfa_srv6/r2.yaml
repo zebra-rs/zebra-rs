@@ -1,0 +1,61 @@
+# r2 — r-plane transit between r1 and r3.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::6/128
+- if-name: r2-n1
+  ipv6:
+    address: 2001:db8:0:7::2/64
+- if-name: r2-r1
+  ipv6:
+    address: 2001:db8:0:8::2/64
+- if-name: r2-r3
+  ipv6:
+    address: 2001:db8:0:9::1/64
+segment-routing:
+  locator:
+  - name: LOC6
+    prefix: fcbb:bbbb:6::/48
+    behavior: usid
+  - name: LOC6_A128
+    prefix: fcbb:bbbb:16::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: r2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC6
+        flex-algo-locator:
+        - algo: 128
+          locator: LOC6_A128
+    fast-reroute:
+      ti-lfa: {}
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      dataplane:
+        srv6: true
+      fast-reroute:
+        ti-lfa: {}
+    interface:
+    - if-name: lo
+      ipv6:
+        enable: true
+    - if-name: r2-n1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enable: true
+    - if-name: r2-r1
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enable: true
+    - if-name: r2-r3
+      network-type: point-to-point
+      metric: 1000
+      ipv6:
+        enable: true

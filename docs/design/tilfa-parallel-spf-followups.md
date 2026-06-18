@@ -78,7 +78,7 @@ IS-IS and OSPF.
 - `Sharding(K)` with `K >` (distinct first-hop count) silently runs at
   group-count width (groups are never split; `width` reports the
   effective value). A debug log on the clamp could help operators
-  tuning `compute-shards`.
+  tuning the `compute-mode sharding shards` count.
 - Conservative mode has no BDD scenario (aggressive + sharding are
   exercised live; conservative is pinned by the unit equivalence
   suite). Add one if a regression ever slips through that gap.

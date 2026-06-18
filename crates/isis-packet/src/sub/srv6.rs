@@ -76,6 +76,11 @@ pub enum Behavior {
     EndBMCSID,
     EndLBSCSID,
     EndXLBSCSID,
+    // draft-ietf-rtgwg-srv6-egress-protection — End.M (Mirroring
+    // Context segment). Egress-protection variant of End.DT6: the
+    // protector decapsulates and submits the inner packet to the
+    // mirror-context FIB table of the protected egress.
+    EndM,
     Resv(u16),
 }
 
@@ -186,6 +191,7 @@ impl From<Behavior> for u16 {
             EndBMCSID => 95,
             EndLBSCSID => 96,
             EndXLBSCSID => 97,
+            EndM => 74,
             Resv(v) => v,
         }
     }
@@ -247,6 +253,7 @@ impl From<u16> for Behavior {
             57 => EndXCSIDPSPUSD,
             58 => EndXCSIDUSPUSD,
             59 => EndXCSIDPSPUSPUSD,
+            74 => EndM,
             85 => EndTCSID,
             86 => EndTCSIDPSP,
             87 => EndTCSIDUSP,
@@ -334,6 +341,7 @@ impl Display for Behavior {
             EndBMCSID => write!(f, "uBM"),
             EndLBSCSID => write!(f, "uLBS"),
             EndXLBSCSID => write!(f, "uXLBS"),
+            EndM => write!(f, "End.M"),
             Resv(v) => write!(f, "Resv({})", v),
         }
     }

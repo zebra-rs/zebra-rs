@@ -16,7 +16,7 @@ use super::auth::AoConfig;
 use super::peer::{AfiSafiEncapType, BgpTop};
 use super::route_clean;
 use super::{
-    BGP_PORT, Bgp,
+    AssistedReplicationRole, BGP_PORT, Bgp,
     inst::Callback,
     peer::{
         ALLOWAS_IN_DEFAULT_COUNT, AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType,
@@ -419,15 +419,51 @@ pub(super) fn apply_peer_policy_ref(
     policy_type: policy::PolicyType,
     want: Option<String>,
 ) {
-    let ident = peer.ident;
+    // The legacy peer-wide binding registers with a family-less ident.
+    let ident = peer_policy_ident(peer.ident, None);
     let slot = match policy_type {
-        policy::PolicyType::PolicyListIn => &mut peer.policy_list.get_mut(&InOut::Input).name,
-        policy::PolicyType::PolicyListOut => &mut peer.policy_list.get_mut(&InOut::Output).name,
-        policy::PolicyType::PrefixSetIn => &mut peer.prefix_set.get_mut(&InOut::Input).name,
-        policy::PolicyType::PrefixSetOut => &mut peer.prefix_set.get_mut(&InOut::Output).name,
+        policy::PolicyType::PolicyListIn => {
+            &mut peer.policy_list_legacy.get_mut(&InOut::Input).name
+        }
+        policy::PolicyType::PolicyListOut => {
+            &mut peer.policy_list_legacy.get_mut(&InOut::Output).name
+        }
+        policy::PolicyType::PrefixSetIn => &mut peer.prefix_set_legacy.get_mut(&InOut::Input).name,
+        policy::PolicyType::PrefixSetOut => {
+            &mut peer.prefix_set_legacy.get_mut(&InOut::Output).name
+        }
         // Key-chain subscriptions ride a different registry, and
         // table-map subscriptions are AFI-scoped rather than
         // peer-scoped; neither reaches this helper.
+        policy::PolicyType::KeyChain(_) | policy::PolicyType::TableMap => return,
+    };
+    let prior = match &want {
+        Some(n) => slot.replace(n.clone()),
+        None => slot.take(),
+    };
+    policy_attach_msgs(policy_tx, ident, policy_type, prior, want);
+}
+
+/// Per-AFI sibling of [`apply_peer_policy_ref`]: bind a resolved policy
+/// / prefix-set name to one direction slot of one address family and
+/// (un)register it with the policy actor under a family-tagged ident so
+/// the resolve reply lands back on the same per-AFI slot. Used by the
+/// `neighbor X afi-safi <name> {policy,prefix-set} {in,out}` callbacks.
+pub(super) fn apply_peer_afi_policy_ref(
+    policy_tx: &tokio::sync::mpsc::UnboundedSender<policy::Message>,
+    peer: &mut Peer,
+    afi_safi: AfiSafi,
+    policy_type: policy::PolicyType,
+    want: Option<String>,
+) {
+    let ident = peer_policy_ident(peer.ident, Some(afi_safi));
+    let slot = match policy_type {
+        policy::PolicyType::PolicyListIn => &mut peer.policy_list_slot(afi_safi, InOut::Input).name,
+        policy::PolicyType::PolicyListOut => {
+            &mut peer.policy_list_slot(afi_safi, InOut::Output).name
+        }
+        policy::PolicyType::PrefixSetIn => &mut peer.prefix_set_slot(afi_safi, InOut::Input).name,
+        policy::PolicyType::PrefixSetOut => &mut peer.prefix_set_slot(afi_safi, InOut::Output).name,
         policy::PolicyType::KeyChain(_) | policy::PolicyType::TableMap => return,
     };
     let prior = match &want {
@@ -474,35 +510,88 @@ fn config_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     Some(())
 }
 
-fn config_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+/// `neighbor X afi-safi <name> policy {in,out} <ref>` — the per-family
+/// route-policy binding. Wins over the legacy top-level `policy {in,out}`
+/// for routes of this family ([`Peer::policy_list_at`]). No neighbor-group
+/// inheritance layer (the group has no per-AFI policy knob), so the
+/// explicit name is bound directly.
+fn config_afi_safi_policy_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
     let new_name = if op.is_set() {
         Some(args.string()?)
     } else {
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.knobs_explicit.prefix_set_in = new_name;
-    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
-        k.prefix_set_in.clone()
-    });
-    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PrefixSetIn, want);
+    apply_peer_afi_policy_ref(
+        &bgp.policy_tx,
+        peer,
+        afi_safi,
+        policy::PolicyType::PolicyListIn,
+        new_name,
+    );
     Some(())
 }
 
-fn config_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_afi_safi_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
     let new_name = if op.is_set() {
         Some(args.string()?)
     } else {
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
-    peer.config.knobs_explicit.prefix_set_out = new_name;
-    let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
-        k.prefix_set_out.clone()
-    });
-    apply_peer_policy_ref(&bgp.policy_tx, peer, policy::PolicyType::PrefixSetOut, want);
+    apply_peer_afi_policy_ref(
+        &bgp.policy_tx,
+        peer,
+        afi_safi,
+        policy::PolicyType::PolicyListOut,
+        new_name,
+    );
+    Some(())
+}
+
+/// `neighbor X afi-safi <name> prefix-set {in,out} <ref>` — the per-family
+/// prefix-set binding. There is no legacy top-level neighbor `prefix-set`
+/// (it was removed when this moved under afi-safi); inheritance through a
+/// neighbor-group still feeds the per-family fallback.
+fn config_afi_safi_prefix_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let new_name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    apply_peer_afi_policy_ref(
+        &bgp.policy_tx,
+        peer,
+        afi_safi,
+        policy::PolicyType::PrefixSetIn,
+        new_name,
+    );
+    Some(())
+}
+
+fn config_afi_safi_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let new_name = if op.is_set() {
+        Some(args.string()?)
+    } else {
+        None
+    };
+    let peer = bgp.peers.get_mut(&addr)?;
+    apply_peer_afi_policy_ref(
+        &bgp.policy_tx,
+        peer,
+        afi_safi,
+        policy::PolicyType::PrefixSetOut,
+        new_name,
+    );
     Some(())
 }
 
@@ -1375,6 +1464,67 @@ fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opti
     Some(())
 }
 
+/// Re-originate every per-VNI Type-3 IMET route so a changed Assisted
+/// Replication role / AR-IP is reflected in the PMSI Tunnel attribute and
+/// next hop. `evpn_originate_imet` replaces the existing Originated path
+/// in place (the prefix key is the local VTEP, which does not change) and
+/// re-advertises to peers. No-op unless `advertise-all-vni` is on.
+fn reoriginate_all_imet(bgp: &mut Bgp) {
+    if !bgp.advertise_all_vni {
+        return;
+    }
+    let vxlans: Vec<(u32, IpAddr)> = bgp.local_vxlans.iter().map(|(k, v)| (*k, *v)).collect();
+    for (vni, vtep_local) in vxlans {
+        bgp.evpn_originate_imet(vni, vtep_local);
+    }
+}
+
+/// `router bgp afi-safi evpn assisted-replication role {none|replicator|leaf}`
+/// (RFC 9574). Stored on `LocalRib.evpn_flood`; drives both IMET origination
+/// (`evpn_originate_imet`) and the BUM flood-list reconcile.
+fn config_assisted_replication_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let role = if op.is_set() {
+        match args.string()?.as_str() {
+            "replicator" => AssistedReplicationRole::Replicator,
+            "leaf" => AssistedReplicationRole::Leaf,
+            _ => AssistedReplicationRole::None,
+        }
+    } else {
+        AssistedReplicationRole::None
+    };
+    if bgp.local_rib.evpn_flood.role == role {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.role = role;
+    reoriginate_all_imet(bgp);
+    bgp.evpn_reconcile_all_flood();
+    Some(())
+}
+
+/// `router bgp afi-safi evpn assisted-replication replicator-ip <ip>` —
+/// the AR-IP advertised in the Replicator-AR route's next hop (RFC 9574).
+fn config_assisted_replication_ip(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let ip = if op.is_set() {
+        Some(args.addr()?)
+    } else {
+        None
+    };
+    if bgp.local_rib.evpn_flood.ar_ip == ip {
+        return Some(());
+    }
+    bgp.local_rib.evpn_flood.ar_ip = ip;
+    reoriginate_all_imet(bgp);
+    Some(())
+}
+
 // ---- redistribute -----------------------------------------------------
 //
 // Per-AFI redistribution sources (zebra-bgp-redistribute.yang). Each
@@ -1855,6 +2005,44 @@ pub(super) fn table_map_ident_decode(ident: usize) -> Option<AfiSafi> {
         1 => Some(AfiSafi::new(Afi::Ip6, Safi::Unicast)),
         _ => None,
     }
+}
+
+/// Low bits of a per-neighbor policy `ident` carry the AFI/SAFI the
+/// binding belongs to; the high bits carry the peer index. The policy
+/// watch registry treats `ident` as an opaque token and echoes it back
+/// on resolve, so [`process_policy_msg`](super::Bgp::process_policy_msg)
+/// recovers both halves. Tag `0` means the legacy peer-wide binding
+/// (top-level `policy {in,out}` / neighbor-group inheritance), which has
+/// no family of its own. A real family's code is `(afi << 8) | safi`,
+/// always ≥ 257, so it never collides with the legacy tag.
+const POLICY_AFI_BITS: u32 = 24;
+const POLICY_AFI_MASK: usize = (1 << POLICY_AFI_BITS) - 1;
+
+fn policy_afi_code(afi_safi: AfiSafi) -> usize {
+    ((u16::from(afi_safi.afi) as usize) << 8) | (u8::from(afi_safi.safi) as usize)
+}
+
+/// Encode `(peer_idx, family)` into a policy-watch `ident`. `family ==
+/// None` ⇒ the legacy peer-wide slot.
+pub(super) fn peer_policy_ident(peer_idx: usize, afi_safi: Option<AfiSafi>) -> usize {
+    debug_assert!(peer_idx < (1 << (usize::BITS - POLICY_AFI_BITS)));
+    (peer_idx << POLICY_AFI_BITS) | afi_safi.map(policy_afi_code).unwrap_or(0)
+}
+
+/// Inverse of [`peer_policy_ident`]. Returns the peer index and the
+/// family the binding targets (`None` ⇒ the legacy peer-wide slot).
+pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>) {
+    let code = ident & POLICY_AFI_MASK;
+    let peer_idx = ident >> POLICY_AFI_BITS;
+    let afi_safi = if code == 0 {
+        None
+    } else {
+        Some(AfiSafi::new(
+            Afi::from((code >> 8) as u16),
+            Safi::from((code & 0xff) as u8),
+        ))
+    };
+    (peer_idx, afi_safi)
 }
 
 /// `router bgp afi-safi <af> table-map <policy>`
@@ -3453,6 +3641,18 @@ impl Bgp {
             config_advertise_all_vni,
         );
 
+        // EVPN Assisted Replication role + AR-IP (RFC 9574), under
+        // `router bgp afi-safi evpn assisted-replication`. Augmented in by
+        // zebra-bgp-evpn.yang.
+        self.callback_add(
+            "/router/bgp/afi-safi/assisted-replication/role",
+            config_assisted_replication_role,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/assisted-replication/replicator-ip",
+            config_assisted_replication_ip,
+        );
+
         // Per-AFI redistribution (zebra-bgp-redistribute.yang).
         // One presence-container callback per source plus one per
         // modifier leaf, dispatched through `bgp_redist_set_presence`
@@ -3535,10 +3735,16 @@ impl Bgp {
         self.callback_add("/router/bgp/afi-safi/table-map", config_table_map);
 
         // Applying policy.
+        // Legacy peer-wide policy (kept for backward compatibility): a
+        // per-family `afi-safi <name> policy …` binding overrides it.
         self.callback_peer("/policy/in", config_policy_in);
         self.callback_peer("/policy/out", config_policy_out);
-        self.callback_peer("/prefix-set/in", config_prefix_in);
-        self.callback_peer("/prefix-set/out", config_prefix_out);
+        // Per-AFI policy / prefix-set (the canonical location). The old
+        // top-level `prefix-set` node was removed; only these remain.
+        self.callback_peer("/afi-safi/policy/in", config_afi_safi_policy_in);
+        self.callback_peer("/afi-safi/policy/out", config_afi_safi_policy_out);
+        self.callback_peer("/afi-safi/prefix-set/in", config_afi_safi_prefix_in);
+        self.callback_peer("/afi-safi/prefix-set/out", config_afi_safi_prefix_out);
 
         // Route Reflector.
         self.callback_peer("/route-reflector/client", config_route_reflector);
@@ -6199,11 +6405,13 @@ mod neighbor_group_wiring_tests {
         config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
         config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
 
+        // The group/top-level (legacy) bindings land in the peer-wide
+        // fallback slots, not the per-AFI map.
         let pol_out = |bgp: &Bgp| {
             bgp.peers
                 .get(&peer_addr())
                 .unwrap()
-                .policy_list
+                .policy_list_legacy
                 .get(&InOut::Output)
                 .name
                 .clone()
@@ -6212,7 +6420,7 @@ mod neighbor_group_wiring_tests {
             bgp.peers
                 .get(&peer_addr())
                 .unwrap()
-                .prefix_set
+                .prefix_set_legacy
                 .get(&InOut::Input)
                 .name
                 .clone()
@@ -6241,6 +6449,83 @@ mod neighbor_group_wiring_tests {
         config_neighbor_group_policy_out(&mut bgp, arg_words(&["G", "EGRESS"]), ConfigOp::Delete)
             .unwrap();
         assert_eq!(pol_out(&bgp), None, "group delete unbinds");
+    }
+
+    /// A per-AFI `afi-safi <name> policy/prefix-set` binding wins for its
+    /// own family; other families fall back to the legacy peer-wide
+    /// `policy {in,out}` (Task B/C priority). Deleting the per-AFI binding
+    /// restores the fallback.
+    #[tokio::test]
+    async fn afi_safi_policy_overrides_legacy_per_family() {
+        use crate::bgp::InOut;
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+        let pol_in = |bgp: &Bgp, af: AfiSafi| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .policy_list_at(af, InOut::Input)
+                .name
+                .clone()
+        };
+        let pfx_in = |bgp: &Bgp, af: AfiSafi| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .prefix_set_at(af, InOut::Input)
+                .name
+                .clone()
+        };
+
+        // Legacy top-level policy (kept for backward compatibility)
+        // applies to every family as the fallback.
+        config_policy_in(&mut bgp, arg_words(&["10.0.0.1", "LEGACY"]), ConfigOp::Set).unwrap();
+        assert_eq!(pol_in(&bgp, v4).as_deref(), Some("LEGACY"));
+        assert_eq!(pol_in(&bgp, evpn).as_deref(), Some("LEGACY"));
+
+        // A per-AFI ipv4 binding overrides the legacy one — but only for
+        // ipv4; evpn still sees the legacy fallback.
+        super::config_afi_safi_policy_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "PERAFI"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(pol_in(&bgp, v4).as_deref(), Some("PERAFI"), "per-AFI wins");
+        assert_eq!(
+            pol_in(&bgp, evpn).as_deref(),
+            Some("LEGACY"),
+            "other family keeps the legacy fallback",
+        );
+
+        // prefix-set has no legacy peer-wide slot (Task C removed it), so
+        // it is per-AFI only.
+        super::config_afi_safi_prefix_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "PFX4"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(pfx_in(&bgp, v4).as_deref(), Some("PFX4"));
+        assert_eq!(pfx_in(&bgp, evpn), None, "no prefix-set fallback");
+
+        // Deleting the per-AFI policy restores the legacy fallback for ipv4.
+        super::config_afi_safi_policy_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            pol_in(&bgp, v4).as_deref(),
+            Some("LEGACY"),
+            "per-AFI delete falls back to legacy",
+        );
     }
 }
 

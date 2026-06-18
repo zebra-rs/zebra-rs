@@ -11,11 +11,11 @@ policy:
   - number: 10
     action: permit
     match:
-      prefix: ALLOW-1
+      prefix-set: ALLOW-1
   - number: 20
     action: permit
     match:
-      prefix: ALLOW-2
+      prefix-set: ALLOW-2
 router:
   bgp:
     global:

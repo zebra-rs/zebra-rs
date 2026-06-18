@@ -121,8 +121,9 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
 
   Scenario: TI-LFA compute-mode sharding bounds parallelism and still protects
     Given the test topology exists
-    When I apply command "set router isis fast-reroute ti-lfa compute-shards 2" in namespace "s"
-    And I apply command "set router isis fast-reroute ti-lfa compute-mode sharding" in namespace "s"
+    # The shard count now nests under the `sharding` mode: one command
+    # selects sharding and bounds parallelism to 2 shards.
+    When I apply command "set router isis fast-reroute ti-lfa compute-mode sharding shards 2" in namespace "s"
     And I wait 5 seconds
     Then show command "show isis route detail" in namespace "s" should contain "Backup path: TI-LFA"
     And show command "show isis spf" in namespace "s" should contain "mode=sharding(2)"
@@ -134,12 +135,11 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     When I make namespace "s" interface "s-n1" up
     And I wait 10 seconds
     Then ping from "s" to "10.0.0.8" should succeed
-    # Surgical runtime deletes exercise the handlers' reset-to-default
-    # path; the next full-file apply would wipe these leaves anyway
-    # (file applies are whole-config replaces). Leaf deletes carry the
-    # current value, like `delete … bfd echo-mode transmit`.
+    # A surgical runtime delete of the `sharding` presence container
+    # exercises the handler's reset-to-default path (mode → serial,
+    # shards → 8); the next full-file apply would wipe these leaves
+    # anyway (file applies are whole-config replaces).
     When I apply command "delete router isis fast-reroute ti-lfa compute-mode sharding" in namespace "s"
-    And I apply command "delete router isis fast-reroute ti-lfa compute-shards 2" in namespace "s"
     And I wait 5 seconds
     Then show command "show isis spf" in namespace "s" should contain "mode=serial"
 

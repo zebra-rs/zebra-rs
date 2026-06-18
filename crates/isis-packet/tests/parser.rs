@@ -330,6 +330,69 @@ pub fn parse_srv6() {
     parse_emit(PACKET);
 }
 
+/// draft-ietf-rtgwg-srv6-egress-protection — build an SRv6 Locator TLV
+/// carrying a Mirror SID sub-TLV (End.M / behavior 74) with one
+/// Protected Locators sub-sub-TLV, emit it through the top-level
+/// `IsisTlv`, re-parse, and assert the structure survives byte-for-byte.
+#[test]
+fn srv6_mirror_sid_round_trips_through_isis_tlv() {
+    use std::net::Ipv6Addr;
+    // The crate-root `IsisSubTlv` glob-resolves to the Router Capability
+    // variant; the SRv6 Locator TLV uses the prefix-scoped one.
+    use isis_packet::prefix::IsisSubTlv as PrefixSubTlv;
+
+    let mirror = IsisSubSrv6MirrorSid {
+        flags: 0,
+        behavior: Behavior::EndM,
+        sid: "2001:db8:a4:1::3".parse::<Ipv6Addr>().unwrap(),
+        sub2s: vec![IsisMirrorSub2Tlv::ProtectedLocators(
+            IsisSub2ProtectedLocators {
+                locator: "2001:db8:a3:1::/64".parse().unwrap(),
+            },
+        )],
+    };
+
+    let locator = Srv6Locator {
+        metric: 0,
+        flags: 0,
+        algo: Algo::Spf,
+        locator: "2001:db8:a4:1::/64".parse().unwrap(),
+        subs: vec![PrefixSubTlv::Srv6MirrorSid(mirror)],
+    };
+
+    let original = IsisTlv::Srv6(IsisTlvSrv6 {
+        flags: 0u16.into(),
+        locators: vec![locator],
+    });
+
+    let mut buf = BytesMut::new();
+    original.emit(&mut buf);
+
+    let (rest, tlvs) = IsisTlv::parse_tlvs(&buf).expect("parse must succeed");
+    assert!(rest.is_empty());
+    assert_eq!(tlvs.len(), 1);
+    assert_eq!(tlvs[0], original, "round-trip must preserve the TLV");
+
+    let IsisTlv::Srv6(srv6) = &tlvs[0] else {
+        panic!("expected Srv6 TLV, got {:?}", tlvs[0]);
+    };
+    let sub = &srv6.locators[0].subs[0];
+    let PrefixSubTlv::Srv6MirrorSid(m) = sub else {
+        panic!("expected Srv6MirrorSid sub-TLV, got {:?}", sub);
+    };
+    assert_eq!(m.behavior, Behavior::EndM);
+    assert_eq!(u16::from(m.behavior), 74);
+    assert_eq!(m.sid, "2001:db8:a4:1::3".parse::<Ipv6Addr>().unwrap());
+    assert_eq!(m.sub2s.len(), 1);
+    let IsisMirrorSub2Tlv::ProtectedLocators(pl) = &m.sub2s[0] else {
+        panic!(
+            "expected ProtectedLocators sub-sub-TLV, got {:?}",
+            m.sub2s[0]
+        );
+    };
+    assert_eq!(pl.locator, "2001:db8:a3:1::/64".parse().unwrap());
+}
+
 #[test]
 pub fn parse_p2p_hello() {
     const PACKET: &[u8] = &hex!(

@@ -75,6 +75,8 @@ pub enum EvpnRouteType {
     Multicast,
     #[strum(serialize = "prefix")]
     Prefix,
+    #[strum(serialize = "smet")]
+    Smet,
 }
 
 fn parse_evpn_route_type(s: &str) -> Result<EvpnRouteType> {
@@ -455,7 +457,7 @@ impl ConfigBuilder {
                 list.entry.remove(&seq).context(ARG_ERR)?;
                 Ok(())
             })
-            .path("/entry/match/prefix")
+            .path("/entry/match/prefix-set")
             .set(|policy, cache, name, seq, args| {
                 let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
                 let entry = list.entry(seq);
@@ -1395,6 +1397,7 @@ mod tests {
             ("macip", EvpnRouteType::MacIp),
             ("multicast", EvpnRouteType::Multicast),
             ("prefix", EvpnRouteType::Prefix),
+            ("smet", EvpnRouteType::Smet),
         ];
         for (s, want) in cases {
             assert_eq!(parse_evpn_route_type(s).unwrap(), want);

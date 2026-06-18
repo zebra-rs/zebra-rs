@@ -223,7 +223,7 @@ policy ADD-INTERNAL-TAG {
     entry 10 {
         action permit;
         match {
-            prefix INTERNAL-NETS;
+            prefix-set INTERNAL-NETS;
         }
         set {
             community {
@@ -347,7 +347,7 @@ policy IN-CUSTOMER-A {
     entry 10 {
         action permit;
         match {
-            prefix CUSTOMER-A;
+            prefix-set CUSTOMER-A;
         }
         set {
             local-preference {
@@ -379,5 +379,5 @@ For a route 10.10.5.0/24 from this peer with `LOCAL_PREF=100`,
 
 For a route 192.168.0.0/24 (not in `CUSTOMER-A`):
 
-1. Entry 10's `match prefix` fails. Entry skipped.
+1. Entry 10's `match prefix-set` fails. Entry skipped.
 2. Entry 20: unconditional `permit`. Accepted unchanged.

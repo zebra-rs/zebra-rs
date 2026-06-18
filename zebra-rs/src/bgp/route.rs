@@ -19,7 +19,7 @@ use super::peer_map::PeerMap;
 use super::shard::msg::{ShardUpdateV4, ShardUpdateV6};
 use super::shard::{ShardMsg, ShardOut};
 use super::timer::{start_adv_timer_vpnv4, start_adv_timer_vpnv6};
-use super::{Bgp, InOut, Message};
+use super::{AssistedReplicationRole, Bgp, InOut, Message};
 
 pub const ORIGINATED_PEER: usize = usize::MAX;
 
@@ -1896,6 +1896,117 @@ pub struct BgpTableMap {
     pub policy: Option<PolicyList>,
 }
 
+/// RFC 9574 Assisted Replication flood-list state for the EVPN BUM path.
+///
+/// Holds the local node's AR role/AR-IP (config) plus, per VNI, the set of
+/// remote PEs that advertised a Type-3 IMET and the flood targets currently
+/// programmed into the kernel FDB. Lives on [`LocalRib`] — like
+/// `sr_policy_local` / `table_map` — so both the config callbacks
+/// (`&mut Bgp`) and the received-route export path (`BgpTop`) reach it
+/// without threading a new `BgpTop` field.
+#[derive(Debug, Default)]
+pub struct EvpnFloodState {
+    /// Local Assisted Replication role (`... assisted-replication role`).
+    /// Drives both IMET origination (`imet_pmsi_tunnel`) and how this node's
+    /// BUM flood list is built (`desired`).
+    pub role: AssistedReplicationRole,
+    /// Local AR-IP (`... assisted-replication replicator-ip`), advertised in
+    /// the Replicator-AR route's next hop when `role` is `Replicator`.
+    pub ar_ip: Option<IpAddr>,
+    /// Per-VNI flood model.
+    vnis: BTreeMap<u32, VniFlood>,
+}
+
+/// Per-VNI flood state: which remotes advertised a Type-3 IMET, and what
+/// flood targets we have programmed for them.
+#[derive(Debug, Default)]
+struct VniFlood {
+    /// Remote PEs that advertised a Type-3 IMET for this VNI, keyed by the
+    /// NLRI Originating Router IP (the remote's IR-IP). The value is the
+    /// remote's AR-IP when it advertised a Replicator-AR route (PMSI tunnel
+    /// type 0x0A), else `None` for a Regular-IR route.
+    remotes: BTreeMap<IpAddr, Option<IpAddr>>,
+    /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
+    /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
+    installed: BTreeSet<IpAddr>,
+}
+
+impl EvpnFloodState {
+    /// Record a remote's Type-3 IMET for `vni`. `ar_ip` is `Some` when the
+    /// remote is an AR-REPLICATOR (Replicator-AR route).
+    pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>) {
+        self.vnis
+            .entry(vni)
+            .or_default()
+            .remotes
+            .insert(orig, ar_ip);
+    }
+
+    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn).
+    pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
+        if let Some(v) = self.vnis.get_mut(&vni) {
+            v.remotes.remove(&orig);
+        }
+    }
+
+    /// VNIs that currently have flood state (so a role/AR-IP change can
+    /// reconcile every one of them).
+    pub fn vnis(&self) -> Vec<u32> {
+        self.vnis.keys().copied().collect()
+    }
+
+    /// The flood-target set this node should program for `vni`, given its
+    /// Assisted Replication role (RFC 9574 §5):
+    ///
+    /// - **AR-LEAF**: a single AR-REPLICATOR's AR-IP (lowest, for
+    ///   determinism) — the BUM-to-one-replicator collapse. With no
+    ///   replicator available, fall back to full ingress replication (every
+    ///   remote IR-IP).
+    /// - **RNVE / Replicator**: plain ingress replication to every remote
+    ///   PE's IR-IP. (A stock-kernel Replicator can't re-flood, so for
+    ///   traffic it *originates* it behaves like an RNVE.)
+    fn desired(&self, vni: u32) -> BTreeSet<IpAddr> {
+        let Some(v) = self.vnis.get(&vni) else {
+            return BTreeSet::new();
+        };
+        match self.role {
+            AssistedReplicationRole::Leaf => match v.remotes.values().flatten().min().copied() {
+                Some(ar_ip) => BTreeSet::from([ar_ip]),
+                None => v.remotes.keys().copied().collect(),
+            },
+            _ => v.remotes.keys().copied().collect(),
+        }
+    }
+
+    /// Reconcile the kernel BUM flood list for `vni` against [`desired`],
+    /// emitting only the MdbAdd/MdbDel delta and updating the installed
+    /// shadow. The zero-MAC FDB `dst` is the flood target IP.
+    ///
+    /// [`desired`]: Self::desired
+    pub fn reconcile(&mut self, vni: u32, rib: &crate::rib::client::RibClient) {
+        let desired = self.desired(vni);
+        let entry = self.vnis.entry(vni).or_default();
+        for &group in desired.difference(&entry.installed) {
+            let _ = rib.send(rib::Message::MdbAdd {
+                vni,
+                group,
+                source: None,
+                ifindex: 0,
+                seq: 0,
+            });
+        }
+        for &group in entry.installed.difference(&desired) {
+            let _ = rib.send(rib::Message::MdbDel {
+                vni,
+                group,
+                source: None,
+                ifindex: 0,
+            });
+        }
+        entry.installed = desired;
+    }
+}
+
 /// Main-task-owned Loc-RIB tables. The prefix-hashable tables
 /// (v4/v6 unicast, LU, VPNv4/v6) live in [`super::shard::BgpShard`]
 /// instead — see the RIB sharding plan (B.1 / D3) for the partition.
@@ -1931,6 +2042,10 @@ pub struct LocalRib {
     /// tasks own a separate `LocalRib` whose map stays empty, so
     /// VRF installs are unaffected until table-map grows VRF config.
     pub table_map: BTreeMap<AfiSafi, BgpTableMap>,
+
+    /// RFC 9574 EVPN Assisted Replication flood-list state (role/AR-IP +
+    /// per-VNI flood model). See [`EvpnFloodState`].
+    pub evpn_flood: EvpnFloodState,
 }
 
 impl LocalRib {
@@ -2017,13 +2132,14 @@ impl LocalRib {
 // RIB update from peer.
 pub fn route_apply_policy_in(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_in_pure(
-        peer.prefix_set.get(&InOut::Input),
-        peer.policy_list.get(&InOut::Input),
+        peer.prefix_set_at(afi_safi, InOut::Input),
+        peer.policy_list_at(afi_safi, InOut::Input),
         peer.router_id,
         nlri,
         bgp_attr,
@@ -2100,7 +2216,8 @@ pub fn route_apply_policy_in_evpn(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.policy_list.get(&InOut::Input);
+    let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+    let config = peer.policy_list_at(evpn, InOut::Input);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -2124,7 +2241,8 @@ pub fn route_apply_policy_out_evpn(
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
-    let config = peer.policy_list.get(&InOut::Output);
+    let evpn = AfiSafi::new(Afi::L2vpn, Safi::Evpn);
+    let config = peer.policy_list_at(evpn, InOut::Output);
     if config.name.is_some() {
         let Some(policy_list) = &config.policy_list else {
             return None;
@@ -2162,13 +2280,14 @@ pub fn route_apply_policy_out(
 /// silently ignored.
 pub fn route_apply_policy_in_v6(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        peer.prefix_set.get(&InOut::Input),
-        peer.policy_list.get(&InOut::Input),
+        peer.prefix_set_at(afi_safi, InOut::Input),
+        peer.policy_list_at(afi_safi, InOut::Input),
         peer.router_id,
         IpNet::V6(nlri.prefix),
         bgp_attr,
@@ -2180,13 +2299,14 @@ pub fn route_apply_policy_in_v6(
 /// projection of [`apply_policy_net`].
 pub fn route_apply_policy_out_v6(
     peer: &Peer,
+    afi_safi: AfiSafi,
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
-        peer.prefix_set.get(&InOut::Output),
-        peer.policy_list.get(&InOut::Output),
+        peer.prefix_set_at(afi_safi, InOut::Output),
+        peer.policy_list_at(afi_safi, InOut::Output),
         peer.router_id,
         IpNet::V6(nlri.prefix),
         bgp_attr,
@@ -2330,7 +2450,13 @@ pub fn route_ipv4_update(
     let stale = stale || attr_has_llgr_stale(attr);
     let decision = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in(peer, nlri, attr.clone(), 0)
+        route_apply_policy_in(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::Unicast),
+            nlri,
+            attr.clone(),
+            0,
+        )
     };
     let jobs = route_ipv4_update_decided(
         peer_ident,
@@ -2516,8 +2642,9 @@ fn any_established_out_policy_v4(peers: &PeerMap) -> bool {
         .into_iter()
         .filter_map(|id| peers.get_by_idx(id))
         .any(|p| {
-            p.policy_list.get(&InOut::Output).name.is_some()
-                || p.prefix_set.get(&InOut::Output).name.is_some()
+            let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+            p.policy_list_at(v4u, InOut::Output).name.is_some()
+                || p.prefix_set_at(v4u, InOut::Output).name.is_some()
         })
 }
 
@@ -3646,7 +3773,13 @@ fn compute_advertise_outcome_v6(
     add_path: bool,
 ) -> AdvertiseOutcome<Ipv6Nlri> {
     if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
-        if let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) {
+        if let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            &nlri,
+            attr,
+            best.weight,
+        ) {
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
             AdvertiseOutcome::Withdraw
@@ -3976,6 +4109,24 @@ pub fn route_update_evpn(
             route_key: route_key.clone(),
             originator: *orig,
         }),
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::Smet(EvpnSmet {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // TODO(phase4): SMET Flags (IGMP/MLD version + IE mode) are
+            // not part of the RIB key; carry them on `BgpRib` so a
+            // reflected SMET preserves them. Until then a re-advertised
+            // SMET emits flags = 0.
+            flags: 0,
+        }),
     };
 
     let mut attrs = (*rib.attr).clone();
@@ -4146,6 +4297,22 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
             id,
             route_key: route_key.clone(),
             originator: *orig,
+        }),
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => EvpnRoute::Smet(EvpnSmet {
+            id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // Withdraw is matched on the NLRI key (flags are not part of
+            // it), so flags = 0 here is correct. See TODO(phase4).
+            flags: 0,
         }),
     }
 }
@@ -4658,7 +4825,13 @@ fn route_soft_in_peer_table(
             let pre_weight = stored.weight;
             let post_attr_opt = {
                 let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-                route_apply_policy_in(peer, &nlri, pre_attr, pre_weight)
+                route_apply_policy_in(
+                    peer,
+                    AfiSafi::new(Afi::Ip, Safi::Unicast),
+                    &nlri,
+                    pre_attr,
+                    pre_weight,
+                )
             };
 
             match post_attr_opt {
@@ -4900,7 +5073,13 @@ pub fn route_ipv6_update(
     // inbound policy.)
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     let dep = match rd {
@@ -5192,7 +5371,13 @@ pub fn route_labelv4_update(
     // unicast ingest — LU previously applied no per-neighbor policy.
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in(peer, &lu.nlri, attr.clone(), 0)
+        route_apply_policy_in(
+            peer,
+            AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+            &lu.nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
@@ -5310,7 +5495,13 @@ pub fn route_labelv6_update(
     // `route_labelv4_update`). `None` drops the route.
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, &lu.nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            &lu.nlri,
+            attr.clone(),
+            0,
+        )
     };
 
     // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
@@ -5540,6 +5731,7 @@ fn evpn_route_type_of(route: &EvpnRoute) -> crate::policy::EvpnRouteType {
         EvpnRoute::Mac(_) => EvpnRouteType::MacIp,
         EvpnRoute::Multicast(_) => EvpnRouteType::Multicast,
         EvpnRoute::Prefix(_) => EvpnRouteType::Prefix,
+        EvpnRoute::Smet(_) => EvpnRouteType::Smet,
         // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D are BUM tunnel A-D
         // routes; the closest existing policy discriminator is Multicast.
         // (They are dropped before policy in the current codec-only phase.)
@@ -5562,6 +5754,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
         // Type-5 (IP Prefix) is an L3VPN-style route: forwarding rides
         // the per-route MPLS label / SRv6 SID, not a bridge VNI. No VNI.
         EvpnRoute::Prefix(_) => None,
+        // Type-6 (SMET) carries the EVI Route Target like Type-3; the
+        // VNI comes from the RT extended community (RFC 8365 §5.1.2.4).
+        EvpnRoute::Smet(_) => extract_vni_from_attr(attr),
         // RFC 9572 A-D routes carry no bridge VNI in the NLRI (any VNI rides
         // the PMSI Tunnel attribute, consumed in a later phase).
         EvpnRoute::PerRegionImet(_) | EvpnRoute::SPmsi(_) | EvpnRoute::LeafAd(_) => None,
@@ -5673,13 +5868,8 @@ fn route_evpn_export_selected(
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
-                    let msg = rib::Message::MdbDel {
-                        vni,
-                        group: *orig,
-                        source: None,
-                        ifindex: 0,
-                    };
-                    let _ = bgp.rib_client.send(msg);
+                    bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
+                    bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
                 } else {
                     eprintln!(
                         "[ERROR] EVPN Type 3 withdraw: removed path has no Route Target. \
@@ -5701,6 +5891,12 @@ fn route_evpn_export_selected(
                         ),
                     }
                 }
+            }
+            EvpnPrefix::Smet { .. } => {
+                // TODO(phase5): withdraw the selective kernel MDB entry
+                // (`bridge mdb del grp G dst <originator-VTEP>`). The
+                // selective-forwarding dataplane is not wired yet, so a
+                // received SMET withdraw is a no-op beyond Loc-RIB removal.
             }
             // RFC 9572 A-D routes have no VXLAN dataplane action — withdraw
             // is a control-plane no-op.
@@ -5746,19 +5942,20 @@ fn route_evpn_export_selected(
             }
         }
         EvpnPrefix::InclusiveMulticast { orig, .. } => {
-            // Type 3 Inclusive Multicast route installation.
-            // This route indicates that a multicast group (*,G) should be replicated to
-            // all VTEPs that have advertised this route.
-            // RFC 8365: VNI must come from Route Target extended community.
+            // Type-3 Inclusive Multicast: a remote PE joining this VNI's BUM
+            // flood. RFC 8365: the VNI comes from the Route Target. RFC 9574:
+            // classify the remote as Regular-IR vs Replicator-AR (PMSI tunnel
+            // type 0x0A carries the AR-IP) and reconcile the role-aware flood
+            // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
-                let msg = rib::Message::MdbAdd {
-                    vni,
-                    group: *orig,
-                    source: None,
-                    ifindex: 0,
-                    seq: extract_mac_mobility_seq(&best.attr),
-                };
-                let _ = bgp.rib_client.send(msg);
+                let ar_ip = best
+                    .attr
+                    .pmsi_tunnel
+                    .as_ref()
+                    .filter(|p| p.is_assisted_replication())
+                    .map(|p| p.endpoint);
+                bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
                 eprintln!(
                     "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
@@ -5785,6 +5982,13 @@ fn route_evpn_export_selected(
                     ),
                 }
             }
+        }
+        EvpnPrefix::Smet { .. } => {
+            // TODO(phase5): install the selective kernel MDB entry
+            // (`bridge mdb add grp G [src S] dst <originator-VTEP>`) so
+            // the ingress PE replicates (x,G) only toward PEs that asked.
+            // The received SMET is already in the Loc-RIB and `show bgp
+            // evpn`; the selective-forwarding dataplane lands in Phase 5.
         }
         // RFC 9572 Per-Region I-PMSI / S-PMSI / Leaf A-D have no VXLAN
         // dataplane action in the current codec-only phase — install is a
@@ -5829,6 +6033,7 @@ pub fn route_evpn_update(
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
+        EvpnRoute::Smet(s) => s.id,
         EvpnRoute::PerRegionImet(r) => r.id,
         EvpnRoute::SPmsi(r) => r.id,
         EvpnRoute::LeafAd(r) => r.id,
@@ -5945,6 +6150,7 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
         EvpnRoute::Mac(m) => m.id,
         EvpnRoute::Multicast(m) => m.id,
         EvpnRoute::Prefix(p) => p.id,
+        EvpnRoute::Smet(s) => s.id,
         EvpnRoute::PerRegionImet(r) => r.id,
         EvpnRoute::SPmsi(r) => r.id,
         EvpnRoute::LeafAd(r) => r.id,
@@ -7912,6 +8118,23 @@ fn build_evpn_route(
                 label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             }))
         }
+        EvpnPrefix::Smet {
+            eth_tag,
+            src,
+            grp,
+            orig,
+        } => Some(EvpnRoute::Smet(EvpnSmet {
+            id: rib.remote_id,
+            rd: *rd,
+            ether_tag: *eth_tag,
+            src: *src,
+            grp: *grp,
+            orig: *orig,
+            // TODO(phase4): carry SMET flags on `BgpRib` (see the
+            // advertise path). Peer-down withdraw is key-matched, so
+            // flags = 0 is correct here.
+            flags: 0,
+        })),
         // RFC 9572 A-D routes are not stored in the Loc-RIB in the current
         // codec-only phase (dropped at receive), so this is unreachable in
         // practice; reconstruct faithfully from the key for forward
@@ -8929,7 +9152,13 @@ impl LabeledAfi for LabeledV6 {
         attr: BgpAttr,
         weight: u32,
     ) -> Option<PolicyDecision> {
-        route_apply_policy_out_v6(peer, nlri, attr, weight)
+        route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            nlri,
+            attr,
+            weight,
+        )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv6Nlri) -> MpReachAttr {
         MpReachAttr::Labelv6 {
@@ -10003,7 +10232,13 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
         // event-driven advertise does, mirroring the v4 sync path —
         // otherwise an out-policy-denied prefix leaks on the initial
         // sync and is only suppressed on a later update.
-        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::Unicast),
+            &nlri,
+            attr,
+            rib.weight,
+        ) else {
             continue;
         };
         rib.attr = bgp.attr_store.intern(decision.attr);
@@ -10135,7 +10370,13 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, &rib, bgp, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out_v6(
+                peer,
+                AfiSafi::new(Afi::Ip6, Safi::MplsVpn),
+                &nlri,
+                attr,
+                rib.weight,
+            ) else {
                 continue;
             };
             let attr = decision.attr;
@@ -10424,7 +10665,13 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
         // Outbound policy on the establish-time dump (see route_sync_labelv4).
-        let Some(decision) = route_apply_policy_out_v6(peer, &nlri, attr, best.weight) else {
+        let Some(decision) = route_apply_policy_out_v6(
+            peer,
+            AfiSafi::new(Afi::Ip6, Safi::MplsLabel),
+            &nlri,
+            attr,
+            best.weight,
+        ) else {
             continue;
         };
         let mut update = UpdatePacket::with_max_packet_size(peer.max_packet_size());
@@ -11678,14 +11925,16 @@ impl Bgp {
             evpn_route_target(self.asn, vni),
             evpn_encap_vxlan(),
         ]));
-        attr.pmsi_tunnel = Some(PmsiTunnel {
-            // Flags = 0 (no leaf info required, per RFC 6514 §5).
-            flags: 0,
-            tunnel_type: PmsiTunnelType::IngressReplication,
-            vni,
-            endpoint: vtep_local,
-        });
-        attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
+        // RFC 9574: the PMSI Tunnel attribute and next hop depend on the
+        // local Assisted Replication role. RNVE keeps the plain Ingress
+        // Replication encoding (tunnel type 6); a Replicator emits a
+        // Replicator-AR route (tunnel type 0x0A, next hop = AR-IP); a Leaf
+        // tags its Regular-IR route as AR-LEAF.
+        let role = self.local_rib.evpn_flood.role;
+        let ar_ip = self.local_rib.evpn_flood.ar_ip;
+        let (pmsi, nexthop) = imet_pmsi_tunnel(role, ar_ip, vtep_local, vni);
+        attr.pmsi_tunnel = Some(pmsi);
+        attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -11746,6 +11995,17 @@ impl Bgp {
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
+
+    /// Reconcile the BUM flood list of every VNI against the current
+    /// Assisted Replication role/AR-IP. Called from the config callbacks
+    /// when `role` or `replicator-ip` changes — e.g. switching to AR-LEAF
+    /// must collapse each VNI's flood list to the chosen replicator's AR-IP,
+    /// and switching back must restore full ingress replication.
+    pub fn evpn_reconcile_all_flood(&mut self) {
+        for vni in self.local_rib.evpn_flood.vnis() {
+            self.local_rib.evpn_flood.reconcile(vni, &self.ctx.rib);
+        }
+    }
 }
 
 /// `NTF_EXT_LEARNED` from `<linux/neighbour.h>` — bit 0x10. Set on
@@ -11765,6 +12025,56 @@ fn rd_from_router_id_vni(router_id: Ipv4Addr, vni: u32) -> Option<RouteDistingui
     rd.val[0..4].copy_from_slice(&router_id.octets());
     rd.val[4..6].copy_from_slice(&vni_short.to_be_bytes());
     Some(rd)
+}
+
+/// RFC 9574 role-aware PMSI Tunnel attribute + BGP next hop for a Type-3
+/// IMET origination. Returns the `(PmsiTunnel, next-hop)` pair the
+/// configured Assisted Replication role dictates:
+///
+/// - **Replicator** (with an AR-IP configured): the Replicator-AR route —
+///   tunnel type `0x0A`, T = AR-REPLICATOR, next hop and tunnel endpoint =
+///   the AR-IP, so AR-LEAF nodes send BUM there.
+/// - **Leaf**: the Regular-IR route flagged T = AR-LEAF — tunnel type 6,
+///   next hop = local VTEP (IR-IP).
+/// - **None**, or Replicator without an AR-IP: plain Ingress Replication
+///   (tunnel type 6, T = RNVE) — byte-for-byte the pre-RFC-9574 encoding.
+fn imet_pmsi_tunnel(
+    role: AssistedReplicationRole,
+    ar_ip: Option<IpAddr>,
+    vtep_local: IpAddr,
+    vni: u32,
+) -> (PmsiTunnel, IpAddr) {
+    match (role, ar_ip) {
+        (AssistedReplicationRole::Replicator, Some(ar)) => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_ASSISTED_REPLICATION,
+                vni,
+                endpoint: ar,
+            }
+            .with_ar_type(AssistedReplicationType::Replicator),
+            ar,
+        ),
+        (AssistedReplicationRole::Leaf, _) => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+                vni,
+                endpoint: vtep_local,
+            }
+            .with_ar_type(AssistedReplicationType::Leaf),
+            vtep_local,
+        ),
+        _ => (
+            PmsiTunnel {
+                flags: 0,
+                tunnel_type: PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+                vni,
+                endpoint: vtep_local,
+            },
+            vtep_local,
+        ),
+    }
 }
 
 /// Build the auto-derived Route Target extended community for an EVPN
@@ -11801,6 +12111,149 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+#[cfg(test)]
+mod evpn_flood_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// RNVE floods to every remote PE's IR-IP (originating IP), ignoring any
+    /// AR-IP a replicator advertised.
+    #[test]
+    fn rnve_floods_all_remote_ir_ips() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.2"), None);
+        f.update_remote(100, ip("10.0.0.3"), Some(ip("10.0.0.254")));
+        assert_eq!(
+            f.desired(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2"), ip("10.0.0.3")])
+        );
+    }
+
+    /// AR-LEAF collapses the flood list to a single replicator's AR-IP
+    /// (lowest, for determinism), no matter how many leaves/replicators exist.
+    #[test]
+    fn leaf_collapses_to_single_replicator_ar_ip() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None); // another leaf
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254"))); // replicator A
+        f.update_remote(100, ip("10.0.0.20"), Some(ip("10.0.0.253"))); // replicator B
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.253")]));
+    }
+
+    /// AR-LEAF with no replicator available falls back to full ingress
+    /// replication (every remote IR-IP).
+    #[test]
+    fn leaf_without_replicator_falls_back_to_full_ir() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.2"), None);
+        assert_eq!(
+            f.desired(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
+        );
+    }
+
+    /// When the only replicator is withdrawn, an AR-LEAF reverts to full
+    /// ingress replication over the remaining remotes.
+    #[test]
+    fn leaf_reverts_to_fallback_when_replicator_withdrawn() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")));
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.254")]));
+        f.remove_remote(100, ip("10.0.0.10"));
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+    }
+
+    /// Flood state is per-VNI: remotes in one VNI don't leak into another.
+    #[test]
+    fn flood_state_is_per_vni() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(200, ip("10.0.0.2"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+        assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
+        assert!(f.desired(300).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod evpn_imet_ar_tests {
+    use super::*;
+
+    fn ir_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+    }
+    fn ar_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 254))
+    }
+
+    /// RNVE (default role) must produce byte-for-byte the pre-RFC-9574
+    /// Ingress Replication encoding: tunnel type 6, flags 0, endpoint and
+    /// next hop = the local VTEP, regardless of any stray AR-IP.
+    #[test]
+    fn rnve_is_plain_ingress_replication() {
+        let (pmsi, nh) =
+            imet_pmsi_tunnel(AssistedReplicationRole::None, Some(ar_ip()), ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(pmsi.flags, 0, "byte-for-byte the legacy encoding");
+        assert_eq!(pmsi.endpoint, ir_ip());
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// Replicator role → Replicator-AR route: tunnel type 0x0A,
+    /// T = AR-REPLICATOR, tunnel endpoint and next hop = the AR-IP.
+    #[test]
+    fn replicator_emits_replicator_ar_route() {
+        let (pmsi, nh) = imet_pmsi_tunnel(
+            AssistedReplicationRole::Replicator,
+            Some(ar_ip()),
+            ir_ip(),
+            100,
+        );
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_ASSISTED_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Replicator);
+        assert_eq!(pmsi.endpoint, ar_ip(), "tunnel endpoint = AR-IP");
+        assert_eq!(nh, ar_ip(), "next hop = AR-IP");
+    }
+
+    /// Leaf role → Regular-IR route flagged T = AR-LEAF, still tunnel type
+    /// 6 with the next hop = local VTEP (IR-IP).
+    #[test]
+    fn leaf_flags_regular_ir_as_ar_leaf() {
+        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Leaf, None, ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Leaf);
+        assert_eq!(pmsi.endpoint, ir_ip());
+        assert_eq!(nh, ir_ip());
+    }
+
+    /// A Replicator misconfigured without an AR-IP degrades safely to plain
+    /// Ingress Replication rather than advertising an AR route with no
+    /// usable tunnel destination.
+    #[test]
+    fn replicator_without_ar_ip_falls_back_to_ir() {
+        let (pmsi, nh) = imet_pmsi_tunnel(AssistedReplicationRole::Replicator, None, ir_ip(), 100);
+        assert_eq!(pmsi.tunnel_type, PmsiTunnel::TUNNEL_INGRESS_REPLICATION);
+        assert_eq!(pmsi.ar_type(), AssistedReplicationType::Rnve);
+        assert_eq!(nh, ir_ip());
+    }
 }
 
 #[cfg(test)]

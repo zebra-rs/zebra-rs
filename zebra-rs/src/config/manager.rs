@@ -1378,6 +1378,42 @@ mod yang_load_tests {
         }
     }
 
+    /// Mirror SID egress-protection config paths
+    /// (`draft-ietf-rtgwg-srv6-egress-protection`, config.yang). vtyctl
+    /// apply is garbage-tolerant, so an unwired list / key / leaf would
+    /// silently no-op at apply time — pin each settable path so the
+    /// `egress-protection/protect` list (ipv6-prefix key, the mirror-sid
+    /// / via-vrf / dataplane leaves and the srv6|mpls enum) stays valid.
+    #[test]
+    fn isis_egress_protection_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router isis egress-protection protect 2001:db8:a3:1::/64",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 mirror-sid 2001:db8:a4:1::3",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 via-vrf cust",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 dataplane srv6",
+            "set router isis egress-protection protect 2001:db8:a3:1::/64 dataplane mpls",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// C.4 `router bgp shards <1-64>` — the shipping form of the
     /// `ZEBRA_BGP_SHARDS` env var (`zebra-bgp-sharding.yang`). Pinned
     /// because vtyctl apply is garbage-tolerant — an unwired grammar
@@ -1454,10 +1490,11 @@ mod yang_load_tests {
     }
 
     /// TI-LFA parallel-computation knobs: `fast-reroute ti-lfa
-    /// compute-mode <serial|conservative|aggressive|sharding>` plus
-    /// `compute-shards <1..256>`. Pinned because vtyctl apply is
-    /// garbage-tolerant — an unwired grammar silently no-ops instead
-    /// of erroring.
+    /// compute-mode <serial|conservative|aggressive|sharding>`. IS-IS,
+    /// OSPFv2 and OSPFv3 all nest the shard count as `compute-mode
+    /// sharding shards <1..256>`. Pinned because vtyctl apply is
+    /// garbage-tolerant — an unwired grammar silently no-ops instead of
+    /// erroring.
     #[test]
     fn isis_tilfa_compute_grammar() {
         use crate::config::ExecCode;
@@ -1474,37 +1511,46 @@ mod yang_load_tests {
             .expect("configure module present");
         let entry = to_entry(&yang, module);
 
-        for cmd in [
-            "set router isis fast-reroute ti-lfa compute-mode serial",
-            "set router isis fast-reroute ti-lfa compute-mode conservative",
-            "set router isis fast-reroute ti-lfa compute-mode aggressive",
-            "set router isis fast-reroute ti-lfa compute-mode sharding",
-            "set router isis fast-reroute ti-lfa compute-shards 4",
-            "set router ospf fast-reroute ti-lfa compute-mode aggressive",
-            "set router ospf fast-reroute ti-lfa compute-shards 4",
-            "set router ospfv3 fast-reroute ti-lfa compute-mode sharding",
-            "set router ospfv3 fast-reroute ti-lfa compute-shards 2",
-        ] {
-            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(
+        // IS-IS, OSPFv2 and OSPFv3 all nest the shard count under the
+        // `sharding` mode: the bare presence form and the explicit
+        // count must both settle for each protocol.
+        for proto in ["isis", "ospf", "ospfv3"] {
+            for tail in [
+                "compute-mode serial",
+                "compute-mode conservative",
+                "compute-mode aggressive",
+                "compute-mode sharding",
+                "compute-mode sharding shards 4",
+            ] {
+                let cmd = format!("set router {proto} fast-reroute ti-lfa {tail}");
+                let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+                assert_eq!(
+                    code,
+                    ExecCode::Success,
+                    "should parse as a settable path: {cmd}"
+                );
+            }
+
+            // An unknown mode keyword must not resolve to a settable path.
+            let cmd = format!("set router {proto} fast-reroute ti-lfa compute-mode turbo");
+            let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+            assert_ne!(
                 code,
                 ExecCode::Success,
-                "should parse as a settable path: {cmd}"
+                "`compute-mode turbo` must not parse"
+            );
+
+            // The flat `compute-shards` leaf moved under `sharding`; the
+            // old spelling must no longer resolve (vtyctl apply is
+            // garbage-tolerant, so an unwired path silently no-ops).
+            let cmd = format!("set router {proto} fast-reroute ti-lfa compute-shards 4");
+            let (code, _comps, _state) = parse(&cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "flat `{proto}` `compute-shards` must not parse after the move"
             );
         }
-
-        // An unknown mode keyword must not resolve to a settable path.
-        let (code, _comps, _state) = parse(
-            "set router isis fast-reroute ti-lfa compute-mode turbo",
-            entry.clone(),
-            None,
-            State::new(),
-        );
-        assert_ne!(
-            code,
-            ExecCode::Success,
-            "`compute-mode turbo` must not parse"
-        );
     }
 
     /// STAMP Phase 1 grammar: the `te-metric measurement` block on
@@ -2027,6 +2073,56 @@ mod yang_load_tests {
         }
     }
 
+    /// Per-AFI neighbor `policy` / `prefix-set` live under `afi-safi
+    /// <name>` (Tasks B & C). The legacy peer-wide `policy {in,out}` is
+    /// kept for backward compatibility; the peer-wide `prefix-set
+    /// {in,out}` is removed (no back-compat). The policy `match`
+    /// reference is `prefix-set`, not `prefix` (Task A). vtyctl apply is
+    /// garbage-tolerant, so these grammar moves are pinned here.
+    #[test]
+    fn bgp_neighbor_afi_safi_policy_and_prefix_set_paths() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        // Settable: per-AFI policy + prefix-set, the kept legacy
+        // peer-wide policy, and `match prefix-set`.
+        for cmd in [
+            "set router bgp neighbor 10.0.0.2 afi-safi ipv4 policy in IN",
+            "set router bgp neighbor 10.0.0.2 afi-safi ipv4 policy out OUT",
+            "set router bgp neighbor 10.0.0.2 afi-safi ipv4 prefix-set in PIN",
+            "set router bgp neighbor 10.0.0.2 afi-safi evpn policy out EOUT",
+            "set router bgp neighbor 10.0.0.2 afi-safi label-v4 prefix-set out POUT",
+            "set router bgp neighbor 10.0.0.2 policy in LEGACY-IN",
+            "set router bgp neighbor 10.0.0.2 policy out LEGACY-OUT",
+            "set policy P entry 10 match prefix-set PS",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must be a settable path");
+        }
+
+        // No longer settable: the removed peer-wide `prefix-set` node.
+        // (The neighbor still has `prefix-limit`, so `prefix-set` is not
+        // an abbreviation of any surviving node and must fail outright.)
+        for cmd in [
+            "set router bgp neighbor 10.0.0.2 prefix-set in PIN",
+            "set router bgp neighbor 10.0.0.2 prefix-set out POUT",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must NOT be settable");
+        }
+    }
+
     /// The IS-IS per-interface `passive` leaf must be a settable path.
     /// It is hand-added to `config.yang` (no YANG generator), so a typo in
     /// the leaf or its placement would otherwise only surface at runtime —
@@ -2170,5 +2266,31 @@ mod yang_load_tests {
             ExecCode::Success,
             "`set router bgp segment-routing srv6 ipv6-unicast` must be a valid settable path",
         );
+    }
+
+    #[test]
+    fn bgp_evpn_assisted_replication_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router bgp afi-safi evpn assisted-replication role replicator",
+            "set router bgp afi-safi evpn assisted-replication role leaf",
+            "set router bgp afi-safi evpn assisted-replication replicator-ip 10.0.0.254",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
     }
 }

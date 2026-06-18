@@ -291,18 +291,25 @@ YANG (`zebra-rs/yang/config.yang`, inside the existing
 ```yang
 container ti-lfa {
   presence "Enable Topology-Independent LFA (TI-LFA)";
-  leaf compute-mode {
-    type enumeration {
-      enum serial;        // current behavior (default)
-      enum conservative;  // task per destination
-      enum aggressive;    // SPF-granularity map-reduce, full dedup
-      enum sharding;      // bounded by compute-shards
+  container compute-mode {
+    // One keyword per mode under a `choice`; the shard count nests
+    // under `sharding`, the only mode it applies to. Mutually
+    // exclusive cases; the default mode (serial) is applied by the
+    // handler (a choice/case carries no YANG default).
+    choice mode {
+      case serial       { leaf serial       { type empty; } }  // current behavior (default)
+      case conservative { leaf conservative { type empty; } }  // task per destination
+      case aggressive   { leaf aggressive   { type empty; } }  // SPF-granularity map-reduce, full dedup
+      case sharding {
+        container sharding {
+          presence "Shard the aggressive computation (default 8 shards)";
+          leaf shards {
+            type uint16 { range "1..256"; }
+            default 8;   // bare `sharding` => 8 (applied by the handler)
+          }
+        }
+      }
     }
-    default serial;
-  }
-  leaf compute-shards {
-    type uint16 { range "1..256"; }
-    default 8;            // consulted only when compute-mode = sharding
   }
 }
 ```
@@ -311,9 +318,12 @@ CLI:
 
 ```
 set router isis fast-reroute ti-lfa compute-mode aggressive
-set router isis fast-reroute ti-lfa compute-mode sharding
-set router isis fast-reroute ti-lfa compute-shards 4
+set router isis fast-reroute ti-lfa compute-mode sharding              # 8 shards
+set router isis fast-reroute ti-lfa compute-mode sharding shards 4
 ```
+
+(OSPFv2 / OSPFv3 carry the same nested shape — `compute-mode <mode>`
+with the shard count under `compute-mode sharding shards <1..256>`.)
 
 Handlers mirror `config_fast_reroute_backup_as_primary`
 (config.rs:1345): store on `IsisConfig`
@@ -359,7 +369,7 @@ Tests:
 - Planner unit: grouping, LPT balance, `K >` group count, single group.
 - BDD: extend `bdd/tests/features/isis_tilfa.feature` (or a sibling
   `@isis_tilfa_parallel` feature reusing its topology) with scenarios
-  that set `compute-mode aggressive` / `sharding` + `compute-shards 2`
+  that set `compute-mode aggressive` / `compute-mode sharding shards 2`
   and assert the same repair output as the serial scenario; mandatory
   `Scenario: Teardown topology` per repo BDD rules.
 - Perf harness: `#[ignore]`d test generating a ~24×24 grid graph and
