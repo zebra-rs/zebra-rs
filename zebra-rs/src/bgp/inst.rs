@@ -577,16 +577,6 @@ pub struct Bgp {
     /// — and replays on `advertise_all_vni` / `router_id` transitions
     /// just like `local_fdb`.
     pub local_vxlans: BTreeMap<u32, std::net::IpAddr>,
-    /// RFC 9574 Assisted Replication role for the local speaker
-    /// (`router bgp afi-safi evpn assisted-replication role`). Drives the
-    /// Type-3 IMET PMSI Tunnel encoding in `evpn_originate_imet`.
-    pub assisted_replication_role: AssistedReplicationRole,
-    /// The AR-IP advertised in the Replicator-AR route's next hop when
-    /// `assisted_replication_role` is `Replicator` (`... assisted-replication
-    /// replicator-ip`). A distinct routable IP that AR-LEAF nodes send BUM
-    /// to; required for the Replicator role, otherwise IMET origination
-    /// falls back to plain ingress replication.
-    pub assisted_replication_ip: Option<std::net::IpAddr>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -986,8 +976,6 @@ impl Bgp {
             advertise_all_vni: false,
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
-            assisted_replication_role: AssistedReplicationRole::None,
-            assisted_replication_ip: None,
             hostname: None,
             no_fib_install: false,
             peers: PeerMap::new(),

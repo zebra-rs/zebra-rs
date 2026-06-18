@@ -1896,6 +1896,117 @@ pub struct BgpTableMap {
     pub policy: Option<PolicyList>,
 }
 
+/// RFC 9574 Assisted Replication flood-list state for the EVPN BUM path.
+///
+/// Holds the local node's AR role/AR-IP (config) plus, per VNI, the set of
+/// remote PEs that advertised a Type-3 IMET and the flood targets currently
+/// programmed into the kernel FDB. Lives on [`LocalRib`] — like
+/// `sr_policy_local` / `table_map` — so both the config callbacks
+/// (`&mut Bgp`) and the received-route export path (`BgpTop`) reach it
+/// without threading a new `BgpTop` field.
+#[derive(Debug, Default)]
+pub struct EvpnFloodState {
+    /// Local Assisted Replication role (`... assisted-replication role`).
+    /// Drives both IMET origination (`imet_pmsi_tunnel`) and how this node's
+    /// BUM flood list is built (`desired`).
+    pub role: AssistedReplicationRole,
+    /// Local AR-IP (`... assisted-replication replicator-ip`), advertised in
+    /// the Replicator-AR route's next hop when `role` is `Replicator`.
+    pub ar_ip: Option<IpAddr>,
+    /// Per-VNI flood model.
+    vnis: BTreeMap<u32, VniFlood>,
+}
+
+/// Per-VNI flood state: which remotes advertised a Type-3 IMET, and what
+/// flood targets we have programmed for them.
+#[derive(Debug, Default)]
+struct VniFlood {
+    /// Remote PEs that advertised a Type-3 IMET for this VNI, keyed by the
+    /// NLRI Originating Router IP (the remote's IR-IP). The value is the
+    /// remote's AR-IP when it advertised a Replicator-AR route (PMSI tunnel
+    /// type 0x0A), else `None` for a Regular-IR route.
+    remotes: BTreeMap<IpAddr, Option<IpAddr>>,
+    /// Flood targets (zero-MAC FDB `dst`s) currently programmed in the
+    /// kernel, so `reconcile` can compute the MdbAdd/MdbDel delta.
+    installed: BTreeSet<IpAddr>,
+}
+
+impl EvpnFloodState {
+    /// Record a remote's Type-3 IMET for `vni`. `ar_ip` is `Some` when the
+    /// remote is an AR-REPLICATOR (Replicator-AR route).
+    pub fn update_remote(&mut self, vni: u32, orig: IpAddr, ar_ip: Option<IpAddr>) {
+        self.vnis
+            .entry(vni)
+            .or_default()
+            .remotes
+            .insert(orig, ar_ip);
+    }
+
+    /// Forget a remote's Type-3 IMET for `vni` (it was withdrawn).
+    pub fn remove_remote(&mut self, vni: u32, orig: IpAddr) {
+        if let Some(v) = self.vnis.get_mut(&vni) {
+            v.remotes.remove(&orig);
+        }
+    }
+
+    /// VNIs that currently have flood state (so a role/AR-IP change can
+    /// reconcile every one of them).
+    pub fn vnis(&self) -> Vec<u32> {
+        self.vnis.keys().copied().collect()
+    }
+
+    /// The flood-target set this node should program for `vni`, given its
+    /// Assisted Replication role (RFC 9574 §5):
+    ///
+    /// - **AR-LEAF**: a single AR-REPLICATOR's AR-IP (lowest, for
+    ///   determinism) — the BUM-to-one-replicator collapse. With no
+    ///   replicator available, fall back to full ingress replication (every
+    ///   remote IR-IP).
+    /// - **RNVE / Replicator**: plain ingress replication to every remote
+    ///   PE's IR-IP. (A stock-kernel Replicator can't re-flood, so for
+    ///   traffic it *originates* it behaves like an RNVE.)
+    fn desired(&self, vni: u32) -> BTreeSet<IpAddr> {
+        let Some(v) = self.vnis.get(&vni) else {
+            return BTreeSet::new();
+        };
+        match self.role {
+            AssistedReplicationRole::Leaf => match v.remotes.values().flatten().min().copied() {
+                Some(ar_ip) => BTreeSet::from([ar_ip]),
+                None => v.remotes.keys().copied().collect(),
+            },
+            _ => v.remotes.keys().copied().collect(),
+        }
+    }
+
+    /// Reconcile the kernel BUM flood list for `vni` against [`desired`],
+    /// emitting only the MdbAdd/MdbDel delta and updating the installed
+    /// shadow. The zero-MAC FDB `dst` is the flood target IP.
+    ///
+    /// [`desired`]: Self::desired
+    pub fn reconcile(&mut self, vni: u32, rib: &crate::rib::client::RibClient) {
+        let desired = self.desired(vni);
+        let entry = self.vnis.entry(vni).or_default();
+        for &group in desired.difference(&entry.installed) {
+            let _ = rib.send(rib::Message::MdbAdd {
+                vni,
+                group,
+                source: None,
+                ifindex: 0,
+                seq: 0,
+            });
+        }
+        for &group in entry.installed.difference(&desired) {
+            let _ = rib.send(rib::Message::MdbDel {
+                vni,
+                group,
+                source: None,
+                ifindex: 0,
+            });
+        }
+        entry.installed = desired;
+    }
+}
+
 /// Main-task-owned Loc-RIB tables. The prefix-hashable tables
 /// (v4/v6 unicast, LU, VPNv4/v6) live in [`super::shard::BgpShard`]
 /// instead — see the RIB sharding plan (B.1 / D3) for the partition.
@@ -1931,6 +2042,10 @@ pub struct LocalRib {
     /// tasks own a separate `LocalRib` whose map stays empty, so
     /// VRF installs are unaffected until table-map grows VRF config.
     pub table_map: BTreeMap<AfiSafi, BgpTableMap>,
+
+    /// RFC 9574 EVPN Assisted Replication flood-list state (role/AR-IP +
+    /// per-VNI flood model). See [`EvpnFloodState`].
+    pub evpn_flood: EvpnFloodState,
 }
 
 impl LocalRib {
@@ -5654,13 +5769,8 @@ fn route_evpn_export_selected(
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
-                    let msg = rib::Message::MdbDel {
-                        vni,
-                        group: *orig,
-                        source: None,
-                        ifindex: 0,
-                    };
-                    let _ = bgp.rib_client.send(msg);
+                    bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
+                    bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
                 } else {
                     eprintln!(
                         "[ERROR] EVPN Type 3 withdraw: removed path has no Route Target. \
@@ -5722,19 +5832,20 @@ fn route_evpn_export_selected(
             }
         }
         EvpnPrefix::InclusiveMulticast { orig, .. } => {
-            // Type 3 Inclusive Multicast route installation.
-            // This route indicates that a multicast group (*,G) should be replicated to
-            // all VTEPs that have advertised this route.
-            // RFC 8365: VNI must come from Route Target extended community.
+            // Type-3 Inclusive Multicast: a remote PE joining this VNI's BUM
+            // flood. RFC 8365: the VNI comes from the Route Target. RFC 9574:
+            // classify the remote as Regular-IR vs Replicator-AR (PMSI tunnel
+            // type 0x0A carries the AR-IP) and reconcile the role-aware flood
+            // list, rather than blindly flooding toward the originating IP.
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
-                let msg = rib::Message::MdbAdd {
-                    vni,
-                    group: *orig,
-                    source: None,
-                    ifindex: 0,
-                    seq: extract_mac_mobility_seq(&best.attr),
-                };
-                let _ = bgp.rib_client.send(msg);
+                let ar_ip = best
+                    .attr
+                    .pmsi_tunnel
+                    .as_ref()
+                    .filter(|p| p.is_assisted_replication())
+                    .map(|p| p.endpoint);
+                bgp.local_rib.evpn_flood.update_remote(vni, *orig, ar_ip);
+                bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
             } else {
                 eprintln!(
                     "[ERROR] EVPN Type 3 route missing Route Target (RFC 8365). \
@@ -11630,12 +11741,9 @@ impl Bgp {
         // Replication encoding (tunnel type 6); a Replicator emits a
         // Replicator-AR route (tunnel type 0x0A, next hop = AR-IP); a Leaf
         // tags its Regular-IR route as AR-LEAF.
-        let (pmsi, nexthop) = imet_pmsi_tunnel(
-            self.assisted_replication_role,
-            self.assisted_replication_ip,
-            vtep_local,
-            vni,
-        );
+        let role = self.local_rib.evpn_flood.role;
+        let ar_ip = self.local_rib.evpn_flood.ar_ip;
+        let (pmsi, nexthop) = imet_pmsi_tunnel(role, ar_ip, vtep_local, vni);
         attr.pmsi_tunnel = Some(pmsi);
         attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
 
@@ -11697,6 +11805,17 @@ impl Bgp {
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+    }
+
+    /// Reconcile the BUM flood list of every VNI against the current
+    /// Assisted Replication role/AR-IP. Called from the config callbacks
+    /// when `role` or `replicator-ip` changes — e.g. switching to AR-LEAF
+    /// must collapse each VNI's flood list to the chosen replicator's AR-IP,
+    /// and switching back must restore full ingress replication.
+    pub fn evpn_reconcile_all_flood(&mut self) {
+        for vni in self.local_rib.evpn_flood.vnis() {
+            self.local_rib.evpn_flood.reconcile(vni, &self.ctx.rib);
+        }
     }
 }
 
@@ -11803,6 +11922,85 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+#[cfg(test)]
+mod evpn_flood_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// RNVE floods to every remote PE's IR-IP (originating IP), ignoring any
+    /// AR-IP a replicator advertised.
+    #[test]
+    fn rnve_floods_all_remote_ir_ips() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.2"), None);
+        f.update_remote(100, ip("10.0.0.3"), Some(ip("10.0.0.254")));
+        assert_eq!(
+            f.desired(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2"), ip("10.0.0.3")])
+        );
+    }
+
+    /// AR-LEAF collapses the flood list to a single replicator's AR-IP
+    /// (lowest, for determinism), no matter how many leaves/replicators exist.
+    #[test]
+    fn leaf_collapses_to_single_replicator_ar_ip() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None); // another leaf
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254"))); // replicator A
+        f.update_remote(100, ip("10.0.0.20"), Some(ip("10.0.0.253"))); // replicator B
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.253")]));
+    }
+
+    /// AR-LEAF with no replicator available falls back to full ingress
+    /// replication (every remote IR-IP).
+    #[test]
+    fn leaf_without_replicator_falls_back_to_full_ir() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.2"), None);
+        assert_eq!(
+            f.desired(100),
+            BTreeSet::from([ip("10.0.0.1"), ip("10.0.0.2")])
+        );
+    }
+
+    /// When the only replicator is withdrawn, an AR-LEAF reverts to full
+    /// ingress replication over the remaining remotes.
+    #[test]
+    fn leaf_reverts_to_fallback_when_replicator_withdrawn() {
+        let mut f = EvpnFloodState {
+            role: AssistedReplicationRole::Leaf,
+            ..Default::default()
+        };
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(100, ip("10.0.0.10"), Some(ip("10.0.0.254")));
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.254")]));
+        f.remove_remote(100, ip("10.0.0.10"));
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+    }
+
+    /// Flood state is per-VNI: remotes in one VNI don't leak into another.
+    #[test]
+    fn flood_state_is_per_vni() {
+        let mut f = EvpnFloodState::default();
+        f.update_remote(100, ip("10.0.0.1"), None);
+        f.update_remote(200, ip("10.0.0.2"), None);
+        assert_eq!(f.desired(100), BTreeSet::from([ip("10.0.0.1")]));
+        assert_eq!(f.desired(200), BTreeSet::from([ip("10.0.0.2")]));
+        assert!(f.desired(300).is_empty());
+    }
 }
 
 #[cfg(test)]
