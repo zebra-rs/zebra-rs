@@ -75,6 +75,8 @@ pub enum EvpnRouteType {
     Multicast,
     #[strum(serialize = "prefix")]
     Prefix,
+    #[strum(serialize = "smet")]
+    Smet,
 }
 
 fn parse_evpn_route_type(s: &str) -> Result<EvpnRouteType> {
@@ -1395,6 +1397,7 @@ mod tests {
             ("macip", EvpnRouteType::MacIp),
             ("multicast", EvpnRouteType::Multicast),
             ("prefix", EvpnRouteType::Prefix),
+            ("smet", EvpnRouteType::Smet),
         ];
         for (s, want) in cases {
             assert_eq!(parse_evpn_route_type(s).unwrap(), want);

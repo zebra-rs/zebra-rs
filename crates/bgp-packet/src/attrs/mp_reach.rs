@@ -667,6 +667,10 @@ impl fmt::Display for MpReachAttr {
                         EvpnRoute::Prefix(v) => {
                             writeln!(f, " [{}] {} label:{}", v.rd, v.prefix, v.label)?;
                         }
+                        EvpnRoute::Smet(v) => {
+                            let src = v.src.map_or_else(|| "*".to_string(), |s| s.to_string());
+                            writeln!(f, " [{}] SMET ({},{}) orig:{}", v.rd, src, v.grp, v.orig)?;
+                        }
                     }
                 }
             }

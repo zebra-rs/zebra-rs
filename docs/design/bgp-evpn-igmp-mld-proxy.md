@@ -27,7 +27,7 @@ before citing.
 | Phase | Slice                                   | State    |
 | ----- | --------------------------------------- | -------- |
 | 0     | Design doc (this file)                  | **done** |
-| 1     | Codec — Type 6 SMET NLRI                | planned  |
+| 1     | Codec — Type 6 SMET NLRI                | **done** |
 | 2     | Multicast Flags Extended Community      | planned  |
 | 3     | IMET (Type 3) capability signaling      | planned  |
 | 4     | SMET origination from kernel MDB snoop  | planned  |
@@ -179,18 +179,33 @@ EVI's RT value but does not control propagation.
 ### Phase 0 — Design doc — **done**
 This file. Branch already created.
 
-### Phase 1 — Codec: Type 6 SMET NLRI
+### Phase 1 — Codec: Type 6 SMET NLRI — **done**
 `crates/bgp-packet/src/attrs/nlri_evpn.rs`
-- Add `EvpnRouteType::SmetRoute => 6` to both `From` impls.
-- New `EvpnSmet { id: u32, rd: RouteDistinguisher, ether_tag: u32,
-  src: Option<IpAddr>, grp: IpAddr, orig: IpAddr, flags: u8 }`; add
-  `EvpnRoute::Smet`. Parse + emit arms reuse the Type-3 length-in-bits IP
-  idiom (src length 0 ⇒ `*`).
-- `EvpnPrefix::Smet { eth_tag, src: Option<IpAddr>, grp: IpAddr,
-  orig: IpAddr }` — **flags excluded from the key** (RFC 9251). Update
-  `route_type()` (→6) and `from_route()`; keep `Ord` ordering 2→3→5→6.
-- Round-trip tests: `(*,G)` v4, `(S,G)` v4, `(*,G)` v6/MLD, add-path.
-  Treat-as-withdraw (RFC 7606) on bad src/grp length or illegal flags.
+- Added `EvpnRouteType::SmetRoute => 6` (both `From` impls).
+- New `EvpnSmet { id, rd, ether_tag, src: Option<IpAddr>, grp, orig,
+  flags: u8 }`; `EvpnRoute::Smet`; parse (`parse_len_prefixed_ip`
+  helper) + emit (`emit_len_prefixed_ip` helper) arms reusing the
+  length-in-bits IP idiom (src length 0 ⇒ `*`).
+- `EvpnPrefix::Smet { eth_tag, src, grp, orig }` — **flags excluded
+  from the key** (RFC 9251); `route_type()`→6, `from_route()`, `Display`
+  (`[6]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`),
+  `Ord` order 2→3→5→6.
+- 8 round-trip / wire-layout tests: `(*,G)` v4, `(S,G)` v4, `(*,G)`
+  v6/MLD, add-path, bad-group-length rejection (RFC 7606 treat-as-
+  withdraw at the caller).
+- Compile-through arms on the shared enums: `MpReach`/`MpUnreach`
+  `Display`; `route.rs` advertise/withdraw reconstruction, peer-down
+  `build_evpn_route`, `evpn_route_type_of`, `evpn_vni_of` (SMET VNI from
+  the EVI RT, like Type-3), `route_evpn_export_selected` (no-op — the
+  selective MDB dataplane is Phase 5), and the id accessors.
+- Policy: `policy::EvpnRouteType::Smet` (+ `smet` YANG enum) so
+  `match evpn route-type smet` parses.
+
+**Phase 1 limitation (resolved in Phase 4):** SMET Flags are not in the
+RIB key, and `BgpRib` does not yet carry them, so a *re-advertised*
+(reflected) SMET emits `flags = 0` (`TODO(phase4)`). Received SMET is
+parsed, stored in the Loc-RIB, and renderable; no SMET origination or
+dataplane action happens yet.
 
 ### Phase 2 — Multicast Flags Extended Community
 `crates/bgp-packet/src/attrs/ext_com_type.rs`, `ext_com.rs`
