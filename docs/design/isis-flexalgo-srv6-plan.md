@@ -85,13 +85,35 @@ Per-algo fast-reroute for the SRv6 dataplane:
   per-algo locator route; ECMP routes are self-protecting; a repair
   whose segments can't all resolve is dropped (no partial install).
 
-Deferred follow-ups: per-algo End.X SID origination (emit
-`Srv6EndXSid`/`Srv6LanEndXSid` with Algorithm=N, so adj segments use
-algo-N End.X too — a refinement, not a correctness fix); SRv6 L3VPN
-colour steering; and a TI-LFA BDD (the PR-6 `isis_flex_srv6` topology
-has no intra-algo redundancy to exercise a repair). The PR-6 BDD
-feature was authored but not executed here (needs root/netns; CI runs
-the bdd suite).
+**Per-algo End.X SID origination: implemented** (branch
+`isis-flexalgo-srv6-endx`, build/fmt/clippy/non-bdd tests green) — the
+refinement deferred from PR 8 so adjacency repair segments use algo-N
+End.X rather than reusing algo-0:
+
+- Each adjacency now derives a per-algo End.X SID from the *same* ELIB
+  function as the algo-0 End.X, placed under each per-algo locator's
+  prefix (`Neighbor::algo_endx_sids`, reconciled in
+  `reconcile_algo_endx_sids`) — no extra function allocation. Registered
+  in the FIB like algo-0 (main seg6local End.X + uSID LIB twin), released
+  with the algo-0 End.X.
+- Emitted as `Srv6EndXSid`/`Srv6LanEndXSid` with Algorithm=N at both the
+  main and MT2 IS-Reach emit sites (`srv6_algo_endx_subs`; behavior from
+  the per-algo locator via the refactored `srv6_{end,endx,sid}_structure`
+  helpers).
+- `srv6_endx_sid_for_link` now selects by algo (prefer Algorithm=N, fall
+  back to algo-0 `Spf`) — required once multiple End.X sub-TLVs are
+  advertised per adjacency; `build_repair_path_srv6` passes the repair's
+  algo through.
+- `LinkTop` carries the per-algo locator snapshots so the per-Hello
+  reconcile can derive the SIDs. Limitation: per-algo End.X requires a
+  base (algo-0) locator (the shared function source); without one, repair
+  adj segments fall back to nothing (node-segment repairs only).
+
+Remaining deferred follow-ups: SRv6 L3VPN colour steering (prepend the
+End SID before the End.DT4/DT6 service SID); and a TI-LFA BDD (the PR-6
+`isis_flex_srv6` topology has no intra-algo redundancy to exercise a
+repair). The PR-6 BDD feature was authored but not executed here (needs
+root/netns; CI runs the bdd suite).
 
 ## Decisions (locked 2026-06-16)
 

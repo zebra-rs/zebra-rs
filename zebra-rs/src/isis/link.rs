@@ -179,6 +179,11 @@ pub struct LinkTop<'a> {
     pub rib_client: &'a crate::rib::client::RibClient,
     pub sr_locator: &'a Option<crate::rib::Locator>,
     pub watched_locator: &'a Option<String>,
+    /// Per-Flex-Algorithm locator snapshots + watched names (mirrors
+    /// `IsisTop`). The End.X reconcile derives a per-algo End.X SID from
+    /// the algo-0 ELIB function under each of these locators' prefixes.
+    pub sr_flex_algo_locators: &'a std::collections::BTreeMap<u8, crate::rib::Locator>,
+    pub watched_flex_algo_locators: &'a std::collections::BTreeMap<u8, String>,
     pub elib: &'a mut crate::isis::srv6::ElibPool,
     /// Read-only snapshot of the policy-driven key-chain registry
     /// (mirrors `IsisTop::key_chains`). Hello / CSNP / PSNP sign +

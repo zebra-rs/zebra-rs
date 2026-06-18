@@ -452,6 +452,8 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         &ifname,
         link.sr_locator,
         link.watched_locator,
+        link.sr_flex_algo_locators,
+        link.watched_flex_algo_locators,
         link.elib,
         link.rib_client,
     );
@@ -710,6 +712,8 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             &ifname,
             link.sr_locator,
             link.watched_locator,
+            link.sr_flex_algo_locators,
+            link.watched_flex_algo_locators,
             link.elib,
             link.rib_client,
         );

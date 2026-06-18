@@ -19,6 +19,15 @@ use super::link::NetworkType;
 use super::nfsm::NfsmState;
 use super::{Isis, Level, Message, NeighborAddr4};
 
+/// One per-Flexible-Algorithm End.X SID held against an adjacency: the
+/// full SID address (under the algo's locator) plus the optional uSID
+/// LIB-twin address. Both are FIB-registered and withdrawn in lockstep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlgoEndxSid {
+    pub addr: Ipv6Addr,
+    pub lib_addr: Option<Ipv6Addr>,
+}
+
 // IS-IS Neighbor
 #[derive(Debug)]
 pub struct Neighbor {
@@ -67,6 +76,17 @@ pub struct Neighbor {
     /// when [`Neighbor::endx_nh6`] stops matching this.
     pub endx_installed_nh6: Option<Ipv6Addr>,
 
+    /// Per-Flexible-Algorithm End.X (adjacency) SIDs, keyed by algo
+    /// (128..=255). Each is derived from the *same* ELIB function as
+    /// `endx_sid` but placed under that algo's own locator prefix, so no
+    /// extra function allocation is needed — a different locator gives a
+    /// different SID address for the same function. Emitted with
+    /// Algorithm=N (RFC 9352 §8) so a peer's per-algo TI-LFA can use
+    /// algo-N adjacency segments, and registered in the FIB exactly like
+    /// the algo-0 End.X. `lib_addr` is the uSID LIB twin (carrier
+    /// resolution), `None` for classic locators.
+    pub algo_endx_sids: BTreeMap<u8, AlgoEndxSid>,
+
     /// Graceful Restart observation (RFC 5306). Records the peer's
     /// most recent Restart TLV and drives helper-side behavior
     /// (refresh hold once, send RA, suppress teardown).
@@ -105,6 +125,7 @@ impl Neighbor {
             endx_sid: None,
             endx_lib_sid: None,
             endx_installed_nh6: None,
+            algo_endx_sids: BTreeMap::new(),
             gr: AdjGrState::default(),
             created: true,
         }
@@ -190,19 +211,23 @@ impl Neighbor {
     /// neighbor's protocols / addresses), so a change in the neighbor's
     /// IPv6 capability is picked up at the next Hello and, if the
     /// adjacency is Up, the LSP re-originated immediately.
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_endx_sid(
         &mut self,
         ifname: &str,
         sr_locator: &Option<Locator>,
         watched_locator: &Option<String>,
+        flex_algo_locators: &BTreeMap<u8, Locator>,
+        watched_flex_algo_locators: &BTreeMap<u8, String>,
         elib: &mut ElibPool,
         rib_client: &crate::rib::client::RibClient,
     ) {
         if !self.endx_eligible() {
             // No IPv6 forwarding path to this neighbor (no IPv6 in its
             // Protocols Supported TLV, or no IPv6 link-local in its
-            // Hello). Drop any SID we previously allocated.
-            if self.endx_sid.is_some() {
+            // Hello). Drop any SID we previously allocated — algo-0 and
+            // every per-algo derivative.
+            if self.endx_sid.is_some() || !self.algo_endx_sids.is_empty() {
                 self.release_endx_sid(elib, rib_client);
                 self.reoriginate_endx_if_up();
             }
@@ -222,43 +247,221 @@ impl Neighbor {
         // nexthop is always present here. See `endx_nh6` for why a
         // global is preferred over the link-local.
         let nh6 = self.endx_nh6();
+        // Whether the preferred nexthop drifted since the last install;
+        // drives a del-then-add of the algo-0 *and* per-algo End.X.
+        let nh6_changed = self.endx_installed_nh6 != nh6;
 
-        if let Some((function, addr)) = self.endx_sid {
+        let mut reoriginate = false;
+
+        // --- algo-0 (base) End.X — unchanged behavior, but we keep the
+        // allocated function to derive the per-algo SIDs below.
+        let function = if let Some((function, addr)) = self.endx_sid {
             // SID already allocated. The SID address never changes for
             // the life of the adjacency, but the preferred nexthop can
             // (the neighbor's first Hello often carries only the
             // link-local; a global learned later must upgrade the FIB
             // entry). Delete-then-add rather than a bare re-add so the
             // RIB walks back the old nexthop-group reference.
-            if self.endx_installed_nh6 == nh6 {
-                return;
+            if nh6_changed {
+                let sid = self.endx_sid_entry(ifname, locator, loc_name.clone(), addr, nh6);
+                let _ = rib_client.send(rib::Message::SidDel { addr });
+                let _ = rib_client.send(rib::Message::SidAdd { sid });
+                self.reconcile_endx_lib_sid(
+                    ifname,
+                    locator,
+                    loc_name.clone(),
+                    prefix,
+                    function,
+                    nh6,
+                    rib_client,
+                );
+                self.endx_installed_nh6 = nh6;
             }
+            function
+        } else {
+            let Some(function) = elib.allocate() else {
+                return;
+            };
+            let Some(addr) = function_addr(prefix, function) else {
+                // Prefix too long for a 16-bit function — release the
+                // function so we don't pin it forever.
+                elib.release(function);
+                return;
+            };
             let sid = self.endx_sid_entry(ifname, locator, loc_name.clone(), addr, nh6);
-            let _ = rib_client.send(rib::Message::SidDel { addr });
             let _ = rib_client.send(rib::Message::SidAdd { sid });
             self.reconcile_endx_lib_sid(
-                ifname, locator, loc_name, prefix, function, nh6, rib_client,
+                ifname,
+                locator,
+                loc_name.clone(),
+                prefix,
+                function,
+                nh6,
+                rib_client,
             );
+            self.endx_sid = Some((function, addr));
             self.endx_installed_nh6 = nh6;
-            // The advertised SID is unchanged — no LSP re-origination.
-            return;
+            reoriginate = true;
+            function
+        };
+
+        // --- per-Flex-Algorithm End.X, sharing the algo-0 `function`
+        // under each per-algo locator's prefix.
+        if self.reconcile_algo_endx_sids(
+            ifname,
+            function,
+            nh6,
+            nh6_changed,
+            flex_algo_locators,
+            watched_flex_algo_locators,
+            rib_client,
+        ) {
+            reoriginate = true;
         }
 
-        let Some(function) = elib.allocate() else {
-            return;
-        };
-        let Some(addr) = function_addr(prefix, function) else {
-            // Prefix too long for a 16-bit function — release the
-            // function so we don't pin it forever.
-            elib.release(function);
-            return;
-        };
-        let sid = self.endx_sid_entry(ifname, locator, loc_name.clone(), addr, nh6);
-        let _ = rib_client.send(rib::Message::SidAdd { sid });
-        self.reconcile_endx_lib_sid(ifname, locator, loc_name, prefix, function, nh6, rib_client);
-        self.endx_sid = Some((function, addr));
-        self.endx_installed_nh6 = nh6;
-        self.reoriginate_endx_if_up();
+        if reoriginate {
+            self.reoriginate_endx_if_up();
+        }
+    }
+
+    /// Reconcile the per-Flex-Algorithm End.X SIDs to the set of
+    /// resolved per-algo locators, all sharing the algo-0 `function`.
+    /// Returns `true` when the *advertised* set changed (an algo SID was
+    /// added/removed or its address moved) so the caller re-originates;
+    /// a nexthop-only re-install returns `false` (the advertised SID is
+    /// unchanged). Mirrors `reconcile_endx_sid` / `reconcile_endx_lib_sid`
+    /// for each per-algo locator.
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_algo_endx_sids(
+        &mut self,
+        ifname: &str,
+        function: u16,
+        nh6: Option<Ipv6Addr>,
+        nh6_changed: bool,
+        flex_algo_locators: &BTreeMap<u8, Locator>,
+        watched_flex_algo_locators: &BTreeMap<u8, String>,
+        rib_client: &crate::rib::client::RibClient,
+    ) -> bool {
+        let mut changed = false;
+
+        // Release per-algo SIDs whose locator is no longer resolved
+        // (algo removed from config, or its locator lost its prefix).
+        let resolvable: BTreeSet<u8> = flex_algo_locators
+            .iter()
+            .filter(|(algo, loc)| {
+                loc.prefix.is_some() && watched_flex_algo_locators.contains_key(algo)
+            })
+            .map(|(algo, _)| *algo)
+            .collect();
+        let stale: Vec<u8> = self
+            .algo_endx_sids
+            .keys()
+            .filter(|algo| !resolvable.contains(algo))
+            .copied()
+            .collect();
+        for algo in stale {
+            if let Some(s) = self.algo_endx_sids.remove(&algo) {
+                let _ = rib_client.send(rib::Message::SidDel { addr: s.addr });
+                if let Some(lib) = s.lib_addr {
+                    let _ = rib_client.send(rib::Message::SidDel { addr: lib });
+                }
+                changed = true;
+            }
+        }
+
+        for (algo, locator) in flex_algo_locators {
+            let Some(prefix) = locator.prefix else {
+                continue;
+            };
+            let Some(loc_name) = watched_flex_algo_locators.get(algo).cloned() else {
+                continue;
+            };
+            let Some(addr) = function_addr(prefix, function) else {
+                continue;
+            };
+
+            let addr_changed = self
+                .algo_endx_sids
+                .get(algo)
+                .map(|s| s.addr != addr)
+                .unwrap_or(true);
+            if !addr_changed && !nh6_changed {
+                continue;
+            }
+
+            // Withdraw the previous SID + LIB twin before re-adding.
+            if let Some(s) = self.algo_endx_sids.remove(algo) {
+                let _ = rib_client.send(rib::Message::SidDel { addr: s.addr });
+                if let Some(lib) = s.lib_addr {
+                    let _ = rib_client.send(rib::Message::SidDel { addr: lib });
+                }
+            }
+
+            // Main End.X registration; behavior from the per-algo
+            // locator (uA for uSID, End.X for classic).
+            let (behavior, structure) = match locator.behavior {
+                Some(crate::rib::LocatorBehavior::Usid) => {
+                    (SidBehavior::UA, locator.sid_structure())
+                }
+                None => (SidBehavior::EndX, None),
+            };
+            let sid = Sid {
+                addr,
+                behavior,
+                context: SidContext::Interface(ifname.to_string()),
+                owner: SidOwner::new("isis", 0),
+                locator: loc_name.clone(),
+                allocation_type: SidAllocationType::Dynamic,
+                ifindex: self.ifindex,
+                nh6,
+                structure,
+                table_id: 0,
+                segs: Vec::new(),
+            };
+            let _ = rib_client.send(rib::Message::SidAdd { sid });
+
+            // uSID LIB twin (carrier resolution), mirroring
+            // `reconcile_endx_lib_sid`. Classic locators have none.
+            let lib_twin = if matches!(locator.behavior, Some(crate::rib::LocatorBehavior::Usid)) {
+                locator
+                    .sid_structure()
+                    .and_then(|st| lib_addr(prefix, st.lb_bits, function).map(|la| (la, st)))
+                    .map(|(la, st)| {
+                        let lib_sid = Sid {
+                            addr: la,
+                            behavior: SidBehavior::UALib,
+                            context: SidContext::Interface(ifname.to_string()),
+                            owner: SidOwner::new("isis", 0),
+                            locator: loc_name.clone(),
+                            allocation_type: SidAllocationType::Dynamic,
+                            ifindex: self.ifindex,
+                            nh6,
+                            structure: Some(st),
+                            table_id: 0,
+                            segs: Vec::new(),
+                        };
+                        let _ = rib_client.send(rib::Message::SidAdd { sid: lib_sid });
+                        la
+                    })
+            } else {
+                None
+            };
+
+            // A newly-added algo or a moved address changes the
+            // advertised set; a nexthop-only re-install does not.
+            if addr_changed {
+                changed = true;
+            }
+            self.algo_endx_sids.insert(
+                *algo,
+                AlgoEndxSid {
+                    addr,
+                    lib_addr: lib_twin,
+                },
+            );
+        }
+
+        changed
     }
 
     /// (Re-)install the LIB twin of this neighbor's uA — the
@@ -351,6 +554,14 @@ impl Neighbor {
         }
         if let Some(addr) = self.endx_lib_sid.take() {
             let _ = rib_client.send(rib::Message::SidDel { addr });
+        }
+        // Per-algo End.X SIDs share the algo-0 function (freed above);
+        // just withdraw their FIB entries + LIB twins.
+        for (_, s) in std::mem::take(&mut self.algo_endx_sids) {
+            let _ = rib_client.send(rib::Message::SidDel { addr: s.addr });
+            if let Some(lib) = s.lib_addr {
+                let _ = rib_client.send(rib::Message::SidDel { addr: lib });
+            }
         }
     }
 }

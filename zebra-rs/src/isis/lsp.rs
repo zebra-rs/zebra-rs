@@ -460,39 +460,84 @@ pub fn dis_generate(
     fragments
 }
 
-/// SRv6 End-SID endpoint behavior + SID Structure sub-sub-TLV
-/// (RFC 9352 §9) for one locator, keyed off the locator's behavior.
-/// Classic locators advertise the `End` codepoint (LB caps at 40);
-/// uSID locators advertise `EndCSID` / uN (LB caps at 32). Mirrors the
-/// per-LSP computation done for the base locator, but as a reusable
-/// helper so each per-Flex-Algorithm locator gets its own structure.
-fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
-    let Some(prefix) = locator.prefix else {
-        return (Behavior::End, Vec::new());
-    };
+/// SID Structure sub-sub-TLV (RFC 9352 §9) for one locator: `Some`
+/// pair `(is_usid, [structure])` when the locator has a prefix, `None`
+/// when it doesn't (no structure to advertise). uSID locators cap LB at
+/// 32, classic at 40; function is 16 bits (what `function_addr` places),
+/// argument 0.
+fn srv6_sid_structure(locator: &Locator) -> Option<(bool, Vec<IsisSub2Tlv>)> {
+    let prefix = locator.prefix?;
     let plen = prefix.prefix_len();
-    match &locator.behavior {
-        Some(LocatorBehavior::Usid) => {
-            let lb_len = plen.min(32);
-            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
-                lb_len,
-                ln_len: plen.saturating_sub(lb_len),
-                fun_len: 16,
-                arg_len: 0,
-            });
-            (Behavior::EndCSID, vec![structure])
-        }
-        None => {
-            let lb_len = plen.min(40);
-            let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
-                lb_len,
-                ln_len: plen.saturating_sub(lb_len),
-                fun_len: 16,
-                arg_len: 0,
-            });
-            (Behavior::End, vec![structure])
+    let is_usid = matches!(locator.behavior, Some(LocatorBehavior::Usid));
+    let lb_len = if is_usid { plen.min(32) } else { plen.min(40) };
+    let structure = IsisSub2Tlv::SidStructure(IsisSub2SidStructure {
+        lb_len,
+        ln_len: plen.saturating_sub(lb_len),
+        fun_len: 16,
+        arg_len: 0,
+    });
+    Some((is_usid, vec![structure]))
+}
+
+/// SRv6 End-SID endpoint behavior + SID Structure for one locator
+/// (RFC 9352 §9). Classic → `End`; uSID → `EndCSID` (uN). Per-locator so
+/// each per-Flex-Algorithm locator gets its own structure.
+fn srv6_end_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
+    match srv6_sid_structure(locator) {
+        Some((true, subs)) => (Behavior::EndCSID, subs),
+        Some((false, subs)) => (Behavior::End, subs),
+        None => (Behavior::End, Vec::new()),
+    }
+}
+
+/// SRv6 End.X SID endpoint behavior + SID Structure for one locator
+/// (RFC 9352 §8/§9). Classic → `EndX`; uSID → `EndXCSID` (uA). The
+/// End.X sibling of `srv6_end_structure`.
+fn srv6_endx_structure(locator: &Locator) -> (Behavior, Vec<IsisSub2Tlv>) {
+    match srv6_sid_structure(locator) {
+        Some((true, subs)) => (Behavior::EndXCSID, subs),
+        Some((false, subs)) => (Behavior::EndX, subs),
+        None => (Behavior::EndX, Vec::new()),
+    }
+}
+
+/// Per-Flexible-Algorithm SRv6 End.X (adjacency) sub-TLVs for one
+/// neighbor (RFC 9352 §8, Algorithm = N). One per entry in
+/// `nbr.algo_endx_sids` whose per-algo locator is still resolved; the
+/// behavior / structure come from that algo's locator. P2P emits
+/// `Srv6EndXSid`, LAN emits `Srv6LanEndXSid`.
+fn srv6_algo_endx_subs(
+    nbr: &super::neigh::Neighbor,
+    flex_algo_locators: &std::collections::BTreeMap<u8, Locator>,
+) -> Vec<neigh::IsisSubTlv> {
+    let mut subs = Vec::new();
+    for (algo, endx) in nbr.algo_endx_sids.iter() {
+        let Some(locator) = flex_algo_locators.get(algo) else {
+            continue;
+        };
+        let (behavior, sub2s) = srv6_endx_structure(locator);
+        if nbr.network_type.is_p2p() {
+            subs.push(neigh::IsisSubTlv::Srv6EndXSid(IsisSubSrv6EndXSid {
+                flags: 0,
+                algo: Algo::FlexAlgo(*algo),
+                weight: 0,
+                behavior,
+                sid: endx.addr,
+                sub2s,
+            }));
+        } else {
+            subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(IsisSubSrv6LanEndXSid {
+                system_id: nbr.sys_id,
+                flags: 0,
+                algo: Algo::FlexAlgo(*algo),
+                weight: 0,
+                behavior,
+                sid: endx.addr,
+                sub2s,
+            }));
         }
     }
+    subs
 }
 
 pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> Vec<IsisLsp> {
@@ -942,6 +987,14 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     is_reach.subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(sub));
                 }
             }
+
+            // Per-Flex-Algorithm End.X (adjacency) SIDs (RFC 9352 §8,
+            // Algorithm = N) — derived from the algo-0 function under
+            // each per-algo locator; lets a peer's per-algo TI-LFA use
+            // algo-N adjacency segments.
+            is_reach
+                .subs
+                .extend(srv6_algo_endx_subs(nbr, top.sr_flex_algo_locators));
         }
 
         ext_is_reach.entries.push(is_reach);
@@ -1102,6 +1155,11 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                         entry.subs.push(neigh::IsisSubTlv::Srv6LanEndXSid(sub));
                     }
                 }
+
+                // Per-Flex-Algorithm End.X (adjacency) SIDs (Algorithm = N).
+                entry
+                    .subs
+                    .extend(srv6_algo_endx_subs(nbr, top.sr_flex_algo_locators));
             }
             mt2_entries.push(entry);
         }

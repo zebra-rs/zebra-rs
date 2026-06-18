@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use isis_packet::neigh;
 use isis_packet::srv6::EncapType;
-use isis_packet::{IsisNeighborId, IsisSysId, IsisTlv, SidLabelValue};
+use isis_packet::{Algo, IsisNeighborId, IsisSysId, IsisTlv, SidLabelValue};
 
 use crate::rib;
 use crate::spf;
@@ -139,7 +139,7 @@ pub(super) fn build_repair_path_srv6(
                 })
             }
             spf::SrSegment::AdjSid(from, to, via) => {
-                srv6_endx_sid_for_link(top, level, *from, *to, *via).map(|endx| RepairSeg {
+                srv6_endx_sid_for_link(top, level, *from, *to, *via, algo).map(|endx| RepairSeg {
                     sid: endx.sid,
                     landing: *to,
                     csid: csid_bits_endx(&endx, *from),
@@ -196,9 +196,9 @@ pub(super) fn build_repair_path_srv6(
 /// inside the algo-N topology: each node-SID hop routes to that node's
 /// algo-N locator (installed by the per-algo IPv6 RIB build), so the
 /// repair traffic follows the algo-N constrained paths rather than the
-/// unconstrained algo-0 ones. Adjacency (End.X) segments stay algo-0:
-/// they are the final single-hop into the repair link, processed at the
-/// node the prior algo-N node-SID already delivered the packet to.
+/// unconstrained algo-0 ones. Adjacency (End.X) segments prefer the
+/// peer's algo-N End.X (see `srv6_endx_sid_for_link`) and fall back to
+/// the algo-0 End.X — the final single hop into the repair link.
 fn node_sid_info(
     top: &IsisTop,
     level: Level,
@@ -243,12 +243,20 @@ fn endx_structure(sub2s: &[isis_packet::IsisSub2Tlv]) -> Option<isis_packet::Isi
 /// `system_id` field identifies the LAN member; for P2P adjacencies
 /// the neighbor_id is `(to_sys, 0)` and any End.X sub-TLV under it
 /// qualifies (RFC 9352 §8.1 / §8.2).
+///
+/// `want` selects the algorithm: `None` (or no per-algo match found)
+/// returns the algo-0 (`Spf`) End.X; `Some(n)` prefers the
+/// Algorithm-`n` End.X and falls back to algo-0 when the advertiser
+/// hasn't originated a per-algo End.X (older peer). The advertiser now
+/// emits one End.X per algo, so this must filter by algo rather than
+/// taking the first.
 fn srv6_endx_sid_for_link(
     top: &IsisTop,
     level: Level,
     from_vertex: usize,
     to_vertex: usize,
     via_pseudonode: Option<usize>,
+    want: Option<u8>,
 ) -> Option<Srv6EndXInfo> {
     let from_sys = *top.lsp_map.get(&level).resolve(from_vertex)?;
     let target_neighbor_id = if let Some(via_v) = via_pseudonode {
@@ -257,6 +265,13 @@ fn srv6_endx_sid_for_link(
         let to_sys = *top.lsp_map.get(&level).resolve(to_vertex)?;
         IsisNeighborId::from_sys_id(&to_sys, 0)
     };
+    let to_sys = top.lsp_map.get(&level).resolve(to_vertex).copied();
+
+    // Preferred (algo-N) and fallback (algo-0) matches, collected over
+    // the whole walk so the order of End.X sub-TLVs doesn't matter.
+    let mut algo_n: Option<Srv6EndXInfo> = None;
+    let mut algo_0: Option<Srv6EndXInfo> = None;
+    let want = want.map(Algo::FlexAlgo);
 
     // Walk every non-pseudonode fragment originated by `from_sys` at
     // this level — with send-side LSP fragmentation the IS-reach
@@ -275,33 +290,41 @@ fn srv6_endx_sid_for_link(
                     continue;
                 }
                 for sub in &entry.subs {
-                    match sub {
-                        neigh::IsisSubTlv::Srv6EndXSid(endx) => {
-                            return Some(Srv6EndXInfo {
+                    let (algo, info) = match sub {
+                        neigh::IsisSubTlv::Srv6EndXSid(endx) => (
+                            endx.algo,
+                            Srv6EndXInfo {
                                 sid: endx.sid,
                                 behavior: endx.behavior,
                                 structure: endx_structure(&endx.sub2s),
-                            });
-                        }
+                            },
+                        ),
                         neigh::IsisSubTlv::Srv6LanEndXSid(lan_endx) => {
-                            let Some(to_sys) = top.lsp_map.get(&level).resolve(to_vertex) else {
+                            // LAN End.X identifies its member by system_id.
+                            if to_sys.as_ref() != Some(&lan_endx.system_id) {
                                 continue;
-                            };
-                            if &lan_endx.system_id == to_sys {
-                                return Some(Srv6EndXInfo {
+                            }
+                            (
+                                lan_endx.algo,
+                                Srv6EndXInfo {
                                     sid: lan_endx.sid,
                                     behavior: lan_endx.behavior,
                                     structure: endx_structure(&lan_endx.sub2s),
-                                });
-                            }
+                                },
+                            )
                         }
-                        _ => {}
+                        _ => continue,
+                    };
+                    if Some(algo) == want && algo_n.is_none() {
+                        algo_n = Some(info);
+                    } else if algo == Algo::Spf && algo_0.is_none() {
+                        algo_0 = Some(info);
                     }
                 }
             }
         }
     }
-    None
+    algo_n.or(algo_0)
 }
 
 /// Resolve a peer-advertised SID to an absolute MPLS label, using

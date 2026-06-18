@@ -1702,11 +1702,10 @@ fn build_rib6_from_flex_algo(
         // Per-algo TI-LFA backup. Single-nexthop only (an ECMP route is
         // already self-protecting), mirroring `build_rib_from_spf`. Node
         // segments resolve to algo-N End SIDs so the repair stays in the
-        // algo-N topology; adjacency segments reuse the algo-0 End.X
-        // (the final single hop into the repair link). A repair whose
-        // segments can't all resolve (e.g. the origin hasn't advertised
-        // an algo-N End SID for a node hop) is dropped rather than
-        // installed partial.
+        // algo-N topology; adjacency segments prefer the peer's algo-N
+        // End.X (falling back to algo-0). A repair whose segments can't
+        // all resolve (e.g. the origin hasn't advertised an algo-N End
+        // SID for a node hop) is dropped rather than installed partial.
         if route.nhops.len() == 1
             && let Some(repair) = tilfa.get(node).and_then(|paths| paths.first())
             && let Some(backup) = build_repair_path_srv6(top, level, Some(algo), repair)
