@@ -60,6 +60,13 @@ pub enum SidBehavior {
     /// (carried in [`Sid::segs`]) and forwarded. BGP SR Policy
     /// (SAFI 73) installs the advertised SRv6 Binding SID this way.
     EndB6Encap,
+    /// End.M — Mirroring Context segment (IANA codepoint 74,
+    /// draft-ietf-rtgwg-srv6-egress-protection). A variant of End.DT6:
+    /// the protector decapsulates the outer IPv6/SRH and looks the inner
+    /// packet up in the *mirror-context* table of the failed egress
+    /// (carried in [`Sid::table_id`]), reproducing that egress's
+    /// forwarding. Installed by IS-IS egress-protection on the protector.
+    EndM,
 }
 
 impl fmt::Display for SidBehavior {
@@ -74,6 +81,7 @@ impl fmt::Display for SidBehavior {
             Self::EndDT6 => write!(f, "End.DT6"),
             Self::EndDT46 => write!(f, "End.DT46"),
             Self::EndB6Encap => write!(f, "End.B6.Encaps"),
+            Self::EndM => write!(f, "End.M"),
         }
     }
 }
@@ -96,6 +104,7 @@ impl FromStr for SidBehavior {
             "End.DT6" => Ok(Self::EndDT6),
             "End.DT46" => Ok(Self::EndDT46),
             "End.B6.Encaps" => Ok(Self::EndB6Encap),
+            "End.M" => Ok(Self::EndM),
             other => Err(SidBehaviorParseError(other.to_string())),
         }
     }
@@ -239,9 +248,8 @@ impl Sid {
             | SidBehavior::EndDT4
             | SidBehavior::EndDT6
             | SidBehavior::EndDT46
-            | SidBehavior::EndB6Encap => {
-                Ipv6Net::new(self.addr, 128).expect("/128 is always valid")
-            }
+            | SidBehavior::EndB6Encap
+            | SidBehavior::EndM => Ipv6Net::new(self.addr, 128).expect("/128 is always valid"),
             SidBehavior::UALib => {
                 let plen = self
                     .structure

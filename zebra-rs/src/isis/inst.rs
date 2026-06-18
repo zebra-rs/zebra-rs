@@ -362,6 +362,13 @@ pub struct Isis {
     /// locator's prefix changes underneath us.
     pub sr_end_sid: Option<std::net::Ipv6Addr>,
 
+    /// End.M (Mirror SID) addresses currently registered with the RIB
+    /// SID registry for egress protection. Tracked so `update_mirror_sids`
+    /// can SidDel the previous set before re-adding the entries that still
+    /// qualify (the protected-locator config or the local locator may have
+    /// changed underneath us).
+    pub installed_mirror_sids: std::collections::BTreeSet<std::net::Ipv6Addr>,
+
     /// ELIB function pool used for End.X (adjacency) SID allocation.
     /// Reset whenever the watched locator changes so stale function
     /// reservations don't leak across prefix swaps.
@@ -787,6 +794,7 @@ impl Isis {
                 sr_block: None,
                 sr_locator: None,
                 sr_end_sid: None,
+                installed_mirror_sids: std::collections::BTreeSet::new(),
                 elib: super::srv6::ElibPool::new(),
                 lsp_seq_wrap_wait: Levels::<BTreeMap<u8, Timer>>::default(),
                 lsp_placement_memory: Levels::<BTreeMap<TlvKey, u8>>::default(),
@@ -3022,6 +3030,7 @@ impl Isis {
             if self.watched_locator.is_some() {
                 self.sr_locator = None;
                 self.update_end_sid();
+                self.update_mirror_sids();
                 self.clear_all_endx_sids();
             }
             self.watched_locator = desired_base;
@@ -3147,6 +3156,66 @@ impl Isis {
         }
     }
 
+    /// Mirror-context routing table id used by every End.M localsid this
+    /// node installs (draft-ietf-rtgwg-srv6-egress-protection). A single
+    /// shared table is correct because the protected egresses' service
+    /// SIDs are globally-unique IPv6 addresses — they never collide — and
+    /// it sidesteps per-node table allocation. Chosen high (0x4D = 'M') to
+    /// stay clear of kernel VRF table ids and the well-known
+    /// main/local/default tables.
+    pub const MIRROR_CONTEXT_TABLE: u32 = 0x4D00_0000;
+
+    /// Reconcile the End.M (Mirror SID) registrations with the current
+    /// egress-protection config and the resolved SRv6 locator. Del-then-add
+    /// the whole set on every call (cheap, and keeps the FIB in lock-step
+    /// with config / locator churn). An entry installs only when it is on
+    /// the SRv6 dataplane, has an explicit `mirror-sid`, and that SID falls
+    /// inside this node's own locator — exactly the gate the LSP emit
+    /// (`lsp::mirror_sid_subs`) uses, so advertisement and dataplane stay
+    /// consistent. The mirror-context table is empty until the context-FIB
+    /// population phase; the localsid still installs so the decap path
+    /// exists.
+    pub(crate) fn update_mirror_sids(&mut self) {
+        for addr in std::mem::take(&mut self.installed_mirror_sids) {
+            let _ = self.ctx.rib.send(rib::Message::SidDel { addr });
+        }
+        let (Some(loc_name), Some(local)) = (
+            self.watched_locator.clone(),
+            self.sr_locator.as_ref().and_then(|l| l.prefix),
+        ) else {
+            return;
+        };
+        let desired: Vec<std::net::Ipv6Addr> = self
+            .config
+            .egress_protections
+            .values()
+            .filter(|e| e.dataplane == super::egress_protection::MirrorDataplane::Srv6)
+            .filter_map(|e| e.mirror_sid)
+            .filter(|sid| local.contains(sid))
+            .collect();
+        for addr in desired {
+            let sid = Sid {
+                addr,
+                behavior: SidBehavior::EndM,
+                context: SidContext::None,
+                owner: SidOwner::new("isis", 0),
+                locator: loc_name.clone(),
+                allocation_type: SidAllocationType::Dynamic,
+                // End.M is local decap processing; ifindex=0 lets the RIB
+                // resolve the loopback oif. nh6 has no meaning.
+                ifindex: 0,
+                nh6: None,
+                structure: None,
+                // Decapsulated inner packet is looked up in the shared
+                // mirror-context table.
+                table_id: Self::MIRROR_CONTEXT_TABLE,
+                segs: Vec::new(),
+            };
+            let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
+            self.installed_mirror_sids.insert(addr);
+        }
+    }
+
     /// Fold the staged `/srlg/group/*` cache into the
     /// applied snapshot at `ConfigOp::CommitEnd`. When the snapshot
     /// actually moved, re-originate both LSP levels so the new
@@ -3196,6 +3265,9 @@ impl Isis {
                     // snapshot before flooding so the LSP carries the
                     // correct value on the very first emission.
                     self.update_end_sid();
+                    // The local locator just resolved, so any configured
+                    // Mirror SID can now be range-checked and installed.
+                    self.update_mirror_sids();
                     touched = true;
                 }
                 let algos: Vec<u8> = self
