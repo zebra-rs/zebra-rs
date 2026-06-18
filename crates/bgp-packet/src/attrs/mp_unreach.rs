@@ -628,6 +628,15 @@ impl fmt::Display for MpUnreachAttr {
                         EvpnRoute::Prefix(v) => {
                             writeln!(f, " [{}]{}", v.rd, v.prefix)?;
                         }
+                        EvpnRoute::PerRegionImet(v) => {
+                            writeln!(f, " [{}] per-region-imet:{}", v.rd, v.ether_tag)?;
+                        }
+                        EvpnRoute::SPmsi(v) => {
+                            writeln!(f, " [{}] s-pmsi:{}", v.rd, v.originator)?;
+                        }
+                        EvpnRoute::LeafAd(v) => {
+                            writeln!(f, " leaf-ad:{}", v.originator)?;
+                        }
                     }
                 }
                 Ok(())
